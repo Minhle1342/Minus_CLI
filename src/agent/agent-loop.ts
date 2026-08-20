@@ -109,7 +109,12 @@ export class AgentLoop {
       // 3. Gửi session hiện tại cho LLM
       const response = await this.llm.generate(session, toolDeclarations);
 
-      // 4. Nếu model muốn gọi tool
+      // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
+      if (response.reasoningContent) {
+        CLI.renderReasoning(response.reasoningContent);
+      }
+
+      // 4. Nếu model muốn gọi tool (System 1: Action)
       if (response.toolCalls && response.toolCalls.length > 0) {
         CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
 

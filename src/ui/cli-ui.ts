@@ -346,11 +346,27 @@ export class CLI {
   }
 
   /**
+   * Hiển thị luồng suy luận nội tâm sâu (System 2 Deep Reasoning / CoT)
+   */
+  static renderReasoning(thoughtText: string): void {
+    if (!thoughtText || !thoughtText.trim()) return;
+    const lines = thoughtText.trim().split('\n');
+    console.log(`${c.blue}${c.bold}│${c.reset}`);
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 INTERNAL MONOLOGUE (System 2 Deep Reasoning):${c.reset}`);
+    for (const line of lines.slice(0, 10)) {
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${c.italic}${line}${c.reset}`);
+    }
+    if (lines.length > 10) {
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.gray}... (+${lines.length - 10} dòng suy luận CoT)${c.reset}`);
+    }
+  }
+
+  /**
    * Thông báo hành động model
    */
   static renderModelAction(action: 'tool_call' | 'final_answer' | 'max_steps', detail?: string): void {
     if (action === 'tool_call') {
-      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.magenta}🧠 Thinking:${c.reset} ${c.italic}${detail || 'Requesting tool execution...'}${c.reset}`);
+      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightCyan}⚙️  Action (System 1):${c.reset} ${c.italic}${detail || 'Requesting tool execution...'}${c.reset}`);
     } else if (action === 'final_answer') {
       console.log(`${c.blue}${c.bold}│${c.reset}  ${c.green}✨ Completed:${c.reset} Ready to provide final response.`);
     } else {

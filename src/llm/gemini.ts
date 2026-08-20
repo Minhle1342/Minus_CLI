@@ -4,15 +4,16 @@ import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 
 export interface LLMResponse {
   text?: string;
+  reasoningContent?: string;
   toolCalls: FunctionCall[];
   rawContent?: import('@google/genai').Content;
 }
 
 /**
- * GeminiLLM chịu trách nhiệm giao tiếp với Google Gemini API.
+ * GeminiLLM chịu trách nhiệm giao tiếp với Google Gemini API (Dual-Loop CoT Separation Ready).
  * 
  * Luồng dữ liệu:
- * System Prompt + Session messages + Tool definitions ──> Gemini API ──> LLMResponse (text hoặc toolCalls)
+ * System Prompt + Session messages + Tool definitions ──> Gemini API ──> LLMResponse (reasoningContent + text/toolCalls)
  */
 export class GeminiLLM {
   private client: GoogleGenAI;
@@ -52,19 +53,35 @@ export class GeminiLLM {
     const rawContent = candidate?.content;
     const toolCalls: FunctionCall[] = response.functionCalls || [];
 
-    // Lấy text trực tiếp từ parts thay vì gọi getter response.text để tránh SDK in warning khi có functionCall
     let text: string | undefined;
+    let reasoningContent: string | undefined;
+
     if (candidate?.content?.parts) {
-      const textParts = candidate.content.parts
-        .filter((part): part is { text: string } => 'text' in part && typeof (part as any).text === 'string')
-        .map((part) => (part as any).text);
-      if (textParts.length > 0) {
-        text = textParts.join('\n');
+      const thoughtParts: string[] = [];
+      const regularTextParts: string[] = [];
+
+      for (const part of candidate.content.parts) {
+        if ('text' in part && typeof (part as any).text === 'string') {
+          // Bóc tách suy nghĩ nội tâm (System 2 CoT) từ Gemini Thinking nếu có flag thought: true
+          if ((part as any).thought) {
+            thoughtParts.push((part as any).text);
+          } else {
+            regularTextParts.push((part as any).text);
+          }
+        }
+      }
+
+      if (thoughtParts.length > 0) {
+        reasoningContent = thoughtParts.join('\n');
+      }
+      if (regularTextParts.length > 0) {
+        text = regularTextParts.join('\n');
       }
     }
 
     return {
       text,
+      reasoningContent,
       toolCalls,
       rawContent,
     };

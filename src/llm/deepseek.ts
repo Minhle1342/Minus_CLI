@@ -203,9 +203,12 @@ export class DeepseekLLM {
     }
 
     const text = message?.content || undefined;
+    // Bóc tách luồng suy luận sâu (System 2 Deep Reasoning) từ DeepSeek R1 / Reasoning models
+    const reasoningContent = message?.reasoning_content || undefined;
 
     return {
       text,
+      reasoningContent,
       toolCalls,
     };
   }
