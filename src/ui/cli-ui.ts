@@ -139,9 +139,10 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, DeepSeek,...)    ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace làm việc (/cd <path>)    ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/memory${c.reset}         ${c.gray}Xem bộ nhớ dài hạn của dự án (.codingagent/ memory)     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 8 công cụ khảo sát, sửa code & lập kế hoạch${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 10 công cụ khảo sát, sửa code, kế hoạch & nhớ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                   ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                    ${c.cyan}${c.bold}│${c.reset}`);
@@ -185,9 +186,10 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (hoặc /cd <path>)  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/memory${c.reset}             Xem bộ nhớ dài hạn của dự án (.codingagent)         ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/undo${c.reset}               Hoàn tác (Rollback) về checkpoint trước khi sửa     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/checkpoints${c.reset}        Xem danh sách các điểm khôi phục snapshot           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 8 công cụ và thông số              ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 10 công cụ và thông số             ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/status${c.reset}             Xem thông tin trạng thái phiên làm việc             ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/clear${c.reset}              Xoá màn hình terminal                               ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/exit${c.reset}, ${c.brightCyan}/quit${c.reset}        Thoát chương trình                                  ${c.cyan}${c.bold}│${c.reset}`);
@@ -296,6 +298,30 @@ export class CLI {
     if (advice) {
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ Hướng dẫn: ${advice}${c.reset}`);
     }
+  }
+
+  /**
+   * Hiển thị Bộ nhớ dài hạn của dự án (Project Knowledge Base)
+   */
+  static renderMemory(data: any): void {
+    console.log(`\n${c.magenta}${c.bold}╭── 🧠 PROJECT KNOWLEDGE BASE (.codingagent/project-memory.json) ───────────╮${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Dự án:${c.reset}       ${c.brightCyan}${data.projectName}${c.reset} (${c.dim}${data.projectType}${c.reset})`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Package Mgr:${c.reset} ${c.yellow}${data.packageManager}${c.reset}`);
+    
+    const scriptKeys = Object.keys(data.scripts || {});
+    if (scriptKeys.length > 0) {
+      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Scripts:${c.reset}     ${c.dim}${scriptKeys.map((k: string) => `${k} (npm run ${k})`).slice(0, 4).join(', ')}${c.reset}`);
+    }
+
+    const insights = data.learnedInsights || [];
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Kinh nghiệm:${c.reset} ${c.brightGreen}${insights.length} quy ước đã ghi nhớ${c.reset}`);
+    if (insights.length > 0) {
+      for (const item of insights.slice(-4)) {
+        console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightYellow}◆ [${item.key}]${c.reset} ${c.dim}${item.insight}${c.reset}`);
+      }
+    }
+
+    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**

@@ -9,6 +9,8 @@ import { writeFileTool } from './write-file.js';
 import { runCommandTool } from './run-command.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
+import { ProjectMemoryManager } from '../memory/project-memory.js';
+import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
@@ -21,7 +23,7 @@ import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
 
-  constructor(planManager?: PlanManager) {
+  constructor(planManager?: PlanManager, memoryManager?: ProjectMemoryManager) {
     // Đăng ký mặc định 6 tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
@@ -34,11 +36,21 @@ export class ToolRegistry {
     if (planManager) {
       this.attachPlanManager(planManager);
     }
+
+    // Đăng ký các memory tools nếu có ProjectMemoryManager
+    if (memoryManager) {
+      this.attachMemoryManager(memoryManager);
+    }
   }
 
   attachPlanManager(planManager: PlanManager): void {
     this.register(createPlanTool(planManager));
     this.register(createUpdatePlanTaskTool(planManager));
+  }
+
+  attachMemoryManager(memoryManager: ProjectMemoryManager): void {
+    this.register(createSaveMemoryTool(memoryManager));
+    this.register(createReadMemoryTool(memoryManager));
   }
 
   /**

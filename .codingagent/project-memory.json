@@ -1,0 +1,43 @@
+{
+  "projectName": "mini-agent-loop",
+  "projectType": "Node.js / TypeScript",
+  "packageManager": "npm",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "test": "tsx src/test-suite.ts",
+    "test:scenarios": "tsx src/test-scenarios.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keyDirectories": {
+    "src/": "Mã nguồn chính của dự án",
+    "temp/": "Thư mục module"
+  },
+  "dependenciesSummary": [
+    "@google/genai",
+    "dotenv",
+    "@types/node",
+    "tsx",
+    "typescript"
+  ],
+  "codingConventions": [
+    "TypeScript strict mode",
+    "Surgical edits with replace_text",
+    "Run test verification before concluding"
+  ],
+  "learnedInsights": [
+    {
+      "key": "test_rule",
+      "insight": "Always run npm test before committing",
+      "category": "rule",
+      "recordedAt": "20:39:52 20/8/2026"
+    },
+    {
+      "key": "auth_pattern",
+      "insight": "Use JWT bearer tokens in header",
+      "category": "architecture",
+      "recordedAt": "20:39:52 20/8/2026"
+    }
+  ],
+  "lastIndexed": "2026-08-20T13:39:51.642Z"
+}

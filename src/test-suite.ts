@@ -17,6 +17,7 @@ import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
+import { ProjectMemoryManager } from './memory/project-memory.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -401,6 +402,41 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const advResult = advancedCompactor.compact(multiTurnSession.getHistory());
   assert(advResult.stats.tokensSaved > 500, 'Tối ưu hoá và tiết kiệm thành công > 500 Tokens');
   assert(advResult.stats.prunedPartsCount === 2, 'Cắt tỉa chính xác 2 turn cũ thành Semantic Outline và Log Tail');
+
+  console.log('\n========================================');
+  console.log('🧪 13. KIỂM THỬ PROJECT MEMORY MANAGER (LONG-TERM KB & WARM START)');
+  console.log('========================================');
+
+  const memoryMgr = new ProjectMemoryManager(workspace.rootDir);
+  const memData = await memoryMgr.init(workspace);
+
+  assert(memData.projectName.length > 0, 'ProjectMemoryManager quét thành công projectName');
+  assert(memData.scripts['test'] !== undefined, 'Nhận diện đúng test script: npm test');
+  assert(memData.scripts['build'] !== undefined, 'Nhận diện đúng build script: npm run build');
+
+  const insight = await memoryMgr.saveInsight('test_rule', 'Always run npm test before committing', 'rule');
+  assert(insight.key === 'test_rule', 'Lưu thành công insight vào Long-term Memory');
+
+  const digest = memoryMgr.getProjectDigest();
+  assert(digest.includes('[PROJECT KNOWLEDGE BASE'), 'Tạo thành công Warm-Start Digest');
+  assert(digest.includes('Always run npm test before committing'), 'Digest bao gồm insight vừa lưu');
+
+  console.log('\n========================================');
+  console.log('🧪 14. KIỂM THỬ MEMORY TOOLS (save_memory & read_memory)');
+  console.log('========================================');
+
+  const memRegistry = new ToolRegistry(undefined, memoryMgr);
+  const saveRes = await memRegistry.execute('save_memory', {
+    key: 'auth_pattern',
+    insight: 'Use JWT bearer tokens in header',
+    category: 'architecture',
+  });
+  assert(saveRes.saved?.key === 'auth_pattern', 'save_memory tool thực thi thành công');
+
+  const readRes = await memRegistry.execute('read_memory', {
+    query: 'auth',
+  });
+  assert(readRes.learnedInsights?.some((i: any) => i.key === 'auth_pattern'), 'read_memory tool lọc đúng theo từ khoá "auth"');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

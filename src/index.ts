@@ -154,6 +154,11 @@ async function main() {
         continue;
       }
 
+      if (trimmed === '/memory') {
+        CLI.renderMemory(agentLoop.memoryManager.getMemoryData());
+        continue;
+      }
+
       if (trimmed === '/status') {
         CLI.renderStatus({
           modelName,
