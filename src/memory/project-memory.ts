@@ -163,7 +163,8 @@ export class ProjectMemoryManager {
   }
 
   /**
-   * Tạo bản tóm tắt "Project Knowledge Digest" ngắn gọn (~150 tokens) để nạp sẵn cho LLM
+   * Tạo bản tóm tắt "Project Knowledge Digest" ngắn gọn (~150 tokens) để nạp sẵn cho LLM.
+   * Áp dụng KV-Cache Prefix Alignment: Đảm bảo thứ tự xuất dữ liệu luôn cố định để tăng tỷ lệ Cache Hit.
    */
   getProjectDigest(): string {
     const lines: string[] = [
@@ -171,12 +172,12 @@ export class ProjectMemoryManager {
       `- Dự án: ${this.memoryData.projectName} (${this.memoryData.projectType})`,
     ];
 
-    const scriptKeys = Object.keys(this.memoryData.scripts);
+    const scriptKeys = Object.keys(this.memoryData.scripts).sort();
     if (scriptKeys.length > 0) {
       lines.push(`- Lệnh khả dụng: ${scriptKeys.map((k) => `"${k}": npm run ${k}`).slice(0, 5).join(', ')}`);
     }
 
-    const dirKeys = Object.keys(this.memoryData.keyDirectories);
+    const dirKeys = Object.keys(this.memoryData.keyDirectories).sort();
     if (dirKeys.length > 0) {
       lines.push(`- Cấu trúc thư mục: ${dirKeys.join(', ')}`);
     }

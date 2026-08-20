@@ -20,8 +20,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@google/genai": "^0.1.2",
-    "dotenv": "^16.4.7"
+    "@google/genai": "^2.18.0",
+    "dotenv": "^16.4.7",
+    "minisearch": "^7.2.0",
+    "repomix": "^1.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

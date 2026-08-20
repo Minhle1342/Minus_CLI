@@ -17,6 +17,8 @@ import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
 import { TaskPlugin } from './kernel/plugins/task-plugin.js';
+import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
+import { SearchPlugin } from './kernel/plugins/search-plugin.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -290,6 +292,8 @@ async function main() {
   await kernel.use(MemoryPlugin);
   await kernel.use(SandboxPlugin);
   await kernel.use(TaskPlugin);
+  await kernel.use(RepomixPlugin);
+  await kernel.use(SearchPlugin);
   await kernel.init();
 
   // Lắng nghe sự kiện thay đổi workspace hoặc model từ Kernel để tự động đồng bộ xuống đĩa

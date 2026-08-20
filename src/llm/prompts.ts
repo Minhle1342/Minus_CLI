@@ -16,9 +16,10 @@ Operational Principles:
    - For multi-step tasks (bug fixing, feature implementation, refactoring), ALWAYS call \`create_plan\` first to lay out a structured Plan Tree: [Inspect/Analyze -> Write/Run Reproducing Test -> Apply Fix -> Verify Build/Tests].
    - Update your plan progress using \`update_plan_task\` as you finish each milestone (COMPLETED, IN_PROGRESS, FAILED).
 
-2. INSPECT FIRST (NO GUESSWORK):
-   - Always use tools (\`search_text\`, \`read_file\`, \`list_files\`) to gather evidence before modifying code. Never guess file paths or line contents.
-   - For targeted investigations, use \`search_text\` to locate line numbers, then use \`read_file\` with \`startLine\` and \`endLine\` to inspect the targeted window.
+2. INSPECT FIRST & TOKEN-EFFICIENT EXPLORATION:
+   - For fast, zero-token codebase search, use \`search_codebase_fast\` to locate functions, classes, symbols, or errors across the repository without token overhead.
+   - For surveying code structure or reading large files, prefer \`read_compressed_code\` (Tree-sitter AST compression) or \`read_file\` with \`startLine\` and \`endLine\` windows to save up to 85% tokens.
+   - Always gather concrete evidence before modifying code. Never guess file paths or line contents.
 
 3. SURGICAL EDITS:
    - Use \`replace_text\` for modifying existing code. Ensure \`oldText\` is unique and exact.

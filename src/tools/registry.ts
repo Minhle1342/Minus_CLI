@@ -11,6 +11,8 @@ import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
 import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
+import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
+import { createSearchCodebaseFastTool } from './search-code-tool.js';
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
@@ -24,7 +26,7 @@ export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
 
   constructor(planManager?: PlanManager, memoryManager?: ProjectMemoryManager) {
-    // Đăng ký mặc định 6 tool cốt lõi của Coding Agent
+    // 1. Đăng ký các công cụ khảo sát và thao tác file
     this.register(readFileTool);
     this.register(listFilesTool);
     this.register(searchTextTool);
@@ -32,12 +34,17 @@ export class ToolRegistry {
     this.register(writeFileTool);
     this.register(runCommandTool);
 
-    // Đăng ký các planning tools nếu có PlanManager
+    // 2. Đăng ký công cụ tối ưu hóa Token: Repomix (Tree-sitter compression) & MiniSearch (BM25)
+    this.register(createReadCompressedCodeTool());
+    this.register(createPackCodebaseTool());
+    this.register(createSearchCodebaseFastTool());
+
+    // 3. Đăng ký các planning tools nếu có PlanManager
     if (planManager) {
       this.attachPlanManager(planManager);
     }
 
-    // Đăng ký các memory tools nếu có ProjectMemoryManager
+    // 4. Đăng ký các memory tools nếu có ProjectMemoryManager
     if (memoryManager) {
       this.attachMemoryManager(memoryManager);
     }
@@ -79,14 +86,17 @@ export class ToolRegistry {
   }
 
   /**
-   * Xuất danh sách schema FunctionDeclaration để truyền cho Gemini API
+   * Xuất danh sách schema FunctionDeclaration để truyền cho Gemini & OpenAI-compatible API.
+   * Áp dụng KV-Cache Prefix Alignment: Sắp xếp cố định theo tên để chuỗi token schema luôn đồng nhất 100%.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
-    return this.getAll().map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    }));
+    return this.getAll()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }));
   }
 
   /**
