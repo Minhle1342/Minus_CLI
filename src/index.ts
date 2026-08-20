@@ -144,6 +144,16 @@ async function main() {
         continue;
       }
 
+      if (trimmed === '/plan') {
+        const tasks = agentLoop.planManager.getTasks();
+        if (tasks.length === 0) {
+          console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào được khởi tạo trong phiên này.${c.reset}\n`);
+        } else {
+          CLI.renderPlan(tasks);
+        }
+        continue;
+      }
+
       if (trimmed === '/status') {
         CLI.renderStatus({
           modelName,
@@ -162,6 +172,27 @@ async function main() {
           maxSteps,
           tools: toolRegistry.getAll().map((t) => t.name),
         });
+        continue;
+      }
+
+      // Lệnh hoàn tác (/undo hoặc /rollback)
+      if (trimmed === '/undo' || trimmed === '/rollback') {
+        try {
+          const rollbackRes = await agentLoop.rollback();
+          if (rollbackRes.success) {
+            console.log(`\n${c.green}✔ ${rollbackRes.message}${c.reset}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️  ${rollbackRes.message}${c.reset}\n`);
+          }
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Lỗi khi hoàn tác:${c.reset}`, err.message);
+        }
+        continue;
+      }
+
+      // Lệnh xem lịch sử Checkpoints
+      if (trimmed === '/checkpoints') {
+        CLI.renderCheckpoints(agentLoop.checkpointManager.getHistory());
         continue;
       }
 

@@ -138,7 +138,10 @@ export class CLI {
     console.log(`\n${c.cyan}${c.bold}╭── ⚡ GỢI Ý CÂU LỆNH NHANH (SLASH COMMANDS) ────────────────────────────────╮${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, DeepSeek,...)    ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace làm việc (/cd <path>)    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 6 công cụ khảo sát & sửa code              ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động            ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 8 công cụ khảo sát, sửa code & lập kế hoạch${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                   ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                    ${c.cyan}${c.bold}│${c.reset}`);
@@ -181,8 +184,12 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model <name>${c.reset}       Chuyển đổi trực tiếp sang mô hình chỉ định          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (hoặc /cd <path>)  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 6 công cụ và thông số              ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/undo${c.reset}               Hoàn tác (Rollback) về checkpoint trước khi sửa     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/checkpoints${c.reset}        Xem danh sách các điểm khôi phục snapshot           ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 8 công cụ và thông số              ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/status${c.reset}             Xem thông tin trạng thái phiên làm việc             ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/clear${c.reset}              Xoá màn hình terminal                               ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/exit${c.reset}, ${c.brightCyan}/quit${c.reset}        Thoát chương trình                                  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}VÍ DỤ TÁC VỤ THỰC TẾ:${c.reset}                                                     ${c.cyan}${c.bold}│${c.reset}`);
@@ -225,6 +232,70 @@ export class CLI {
     console.log(`${c.green}${c.bold}│${c.reset}  ${c.gray}Thư mục cũ:${c.reset} ${c.dim}${oldPath}${c.reset}`);
     console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightGreen}${c.bold}Thư mục mới:${c.reset} ${c.brightCyan}${c.bold}${newPath}${c.reset}`);
     console.log(`${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị danh sách các Shadow Git Checkpoints đã lưu
+   */
+  static renderCheckpoints(checkpoints: Array<{ index: number; timestamp: string; description: string }>): void {
+    console.log(`\n${c.yellow}${c.bold}╭── 🛡️  SHADOW GIT CHECKPOINTS HISTORY (${checkpoints.length} Snapshots) ────────────────╮${c.reset}`);
+    console.log(`${c.yellow}${c.bold}│${c.reset}                                                                            ${c.yellow}${c.bold}│${c.reset}`);
+    if (checkpoints.length === 0) {
+      console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.dim}Chưa có checkpoint nào được tạo trong phiên làm việc này.${c.reset}`);
+    } else {
+      for (const cp of checkpoints) {
+        console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.brightCyan}#${cp.index}${c.reset} [${c.gray}${cp.timestamp}${c.reset}] ${c.bold}${cp.description}${c.reset}`);
+      }
+    }
+    console.log(`${c.yellow}${c.bold}│${c.reset}                                                                            ${c.yellow}${c.bold}│${c.reset}`);
+    console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.gray}Dùng lệnh ${c.brightCyan}/undo${c.gray} để hoàn tác về checkpoint gần nhất.${c.reset}                   ${c.yellow}${c.bold}│${c.reset}`);
+    console.log(`${c.yellow}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị Cây kế hoạch động (Dynamic Plan Tree)
+   */
+  static renderPlan(tasks: Array<{ id: number; title: string; status: string; notes?: string }>): void {
+    console.log(`\n${c.brightCyan}${c.bold}╭── 📋 DYNAMIC EXECUTION PLAN (${tasks.length} Steps) ──────────────────────────────╮${c.reset}`);
+    console.log(`${c.brightCyan}${c.bold}│${c.reset}                                                                            ${c.brightCyan}${c.bold}│${c.reset}`);
+    
+    for (const t of tasks) {
+      let icon = `${c.dim}[ ]${c.reset}`;
+      let titleStyle = c.dim;
+
+      if (t.status === 'COMPLETED') {
+        icon = `${c.brightGreen}[✔]${c.reset}`;
+        titleStyle = `${c.green}${c.bold}`;
+      } else if (t.status === 'IN_PROGRESS') {
+        icon = `${c.brightYellow}[⚡]${c.reset}`;
+        titleStyle = `${c.brightYellow}${c.bold}`;
+      } else if (t.status === 'FAILED') {
+        icon = `${c.red}[✖]${c.reset}`;
+        titleStyle = `${c.red}${c.bold}`;
+      } else if (t.status === 'SKIPPED') {
+        icon = `${c.gray}[⊘]${c.reset}`;
+        titleStyle = c.gray;
+      }
+
+      console.log(`${c.brightCyan}${c.bold}│${c.reset}  ${icon} ${c.bold}${t.id}.${c.reset} ${titleStyle}${t.title}${c.reset}`);
+      if (t.notes) {
+        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ ${t.notes}${c.reset}`);
+      }
+    }
+
+    console.log(`${c.brightCyan}${c.bold}│${c.reset}                                                                            ${c.brightCyan}${c.bold}│${c.reset}`);
+    console.log(`${c.brightCyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị cảnh báo Self-Reflection & Debugging Protocol
+   */
+  static renderReflectionAlert(failures: number, advice?: string): void {
+    console.log(`${c.blue}${c.bold}│${c.reset}`);
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightYellow}⚠️  [SELF-REFLECTION TRIGGERED]${c.reset} ${c.yellow}Phát hiện lỗi (Thất bại liên tiếp: ${failures})${c.reset}`);
+    if (advice) {
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ Hướng dẫn: ${advice}${c.reset}`);
+    }
   }
 
   /**

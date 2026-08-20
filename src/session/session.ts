@@ -1,5 +1,8 @@
 import type { Content, FunctionCall } from '@google/genai';
 
+export type SessionMessage = Content;
+export type ContentPart = any;
+
 /**
  * Session quản lý lịch sử trò chuyện (conversation history) trong bộ nhớ (in-memory).
  * 
@@ -82,5 +85,13 @@ export class Session {
    */
   getHistory(): Content[] {
     return this.messages;
+  }
+
+  /**
+   * Cập nhật toàn bộ lịch sử tin nhắn (dùng khi nén context / compaction)
+   */
+  setHistory(newHistory: Content[]): void {
+    this.messages.length = 0;
+    this.messages.push(...newHistory);
   }
 }

@@ -12,6 +12,10 @@ import { runCommandTool } from './tools/run-command.js';
 import { Session } from './session/session.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { GeminiLLM } from './llm/gemini.js';
+import { CheckpointManager } from './workspace/checkpoint.js';
+import { ContextCompactor } from './agent/context-compactor.js';
+import { PlanManager } from './agent/plan-manager.js';
+import { ReflectionEngine } from './agent/reflection-engine.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -202,6 +206,127 @@ async function runUnitTests() {
   infSession.addUserMessage('Lặp mãi mãi');
   const infResult = await infiniteLoop.run(infSession);
   assert(infResult.includes('maximum steps (2) reached'), 'AgentLoop dừng an toàn khi chạm maxSteps');
+
+  console.log('\n========================================');
+  console.log('🧪 7. KIỂM THỬ CHECKPOINT MANAGER & SHADOW ROLLBACK (/undo)');
+  console.log('========================================');
+
+  const cpManager = new CheckpointManager(workspace.rootDir);
+  await cpManager.init();
+
+  const cp1 = await cpManager.createCheckpoint('Before test edit 1');
+  assert(cp1 !== null && cp1.index === 1, 'CheckpointManager tạo snapshot #1 thành công');
+  assert(cpManager.getHistory().length === 1, 'Lịch sử lưu đúng 1 checkpoint');
+
+  const cp2 = await cpManager.createCheckpoint('Before test edit 2');
+  assert(cp2 !== null && cp2.index === 2, 'CheckpointManager tạo snapshot #2 thành công');
+  assert(cpManager.getHistory().length === 2, 'Lịch sử lưu đúng 2 checkpoints');
+
+  const rollbackRes = await cpManager.rollbackLast();
+  assert(rollbackRes.success === true, 'Rollback hoàn tác checkpoint gần nhất thành công');
+  assert(cpManager.getHistory().length === 1, 'Sau rollback, checkpoint stack giảm đi 1');
+
+  console.log('\n========================================');
+  console.log('🧪 8. KIỂM THỬ CONTEXT COMPACTOR & TOKEN BUDGETING');
+  console.log('========================================');
+
+  const compactor = new ContextCompactor({
+    maxCharactersPerToolResult: 100,
+    preserveLastNToolResults: 1,
+  });
+
+  const heavySession = new Session();
+  heavySession.addUserMessage('Khảo sát codebase lớn');
+  // Tool 1: File rất lớn (bước cũ, cần nén)
+  heavySession.addModelMessage({ functionCalls: [{ name: 'read_file', args: { path: 'big-file.ts' } }] });
+  heavySession.addToolResult('read_file', {
+    path: 'big-file.ts',
+    content: 'export const A = 1;\n'.repeat(100), // ~2000 chars
+  });
+  // Tool 2: Bước mới nhất (cần giữ nguyên)
+  heavySession.addModelMessage({ functionCalls: [{ name: 'run_command', args: { command: 'npm test' } }] });
+  heavySession.addToolResult('run_command', {
+    exitCode: 0,
+    stdout: 'All tests passed!',
+  });
+
+  const compacted = compactor.compact(heavySession.getHistory());
+  assert(compacted.stats.charsSaved > 500, 'ContextCompactor cắt tỉa thành công > 500 ký tự thừa');
+  assert(compacted.stats.prunedPartsCount === 1, 'ContextCompactor nén chính xác 1 phần tử cũ');
+  assert(compacted.messages.length === heavySession.getHistory().length, 'Số lượng message được bảo toàn nguyên vẹn');
+
+  console.log('\n========================================');
+  console.log('🧪 9. KIỂM THỬ PLAN MANAGER & TASK DECOMPOSITION (PLAN TREE)');
+  console.log('========================================');
+
+  const planMgr = new PlanManager();
+  const tasks = planMgr.createPlan([
+    { title: 'Phân tích mã nguồn' },
+    { title: 'Viết reproduction test' },
+    { title: 'Sửa implementation' },
+    { title: 'Chạy test kiểm chứng' },
+  ]);
+
+  assert(tasks.length === 4, 'PlanManager tạo đủ 4 tasks');
+  assert(tasks[0].status === 'IN_PROGRESS', 'Task #1 tự động ở trạng thái IN_PROGRESS');
+  assert(tasks[1].status === 'PENDING', 'Task #2 ở trạng thái PENDING');
+
+  const updatedTask = planMgr.updateTask(1, 'COMPLETED', 'Đã tìm ra dòng lỗi');
+  assert(updatedTask?.status === 'COMPLETED', 'Task #1 chuyển sang COMPLETED');
+  assert(planMgr.getTasks()[1].status === 'IN_PROGRESS', 'Task #2 tự động chuyển sang IN_PROGRESS khi Task #1 xong');
+
+  const progress = planMgr.getProgress();
+  assert(progress.completed === 1 && progress.inProgress === 1, 'Thống kê tiến độ chính xác');
+
+  // Test qua ToolRegistry
+  const planRegistry = new ToolRegistry(planMgr);
+  const createPlanRes = await planRegistry.execute('create_plan', {
+    tasks: [{ title: 'Bước A' }, { title: 'Bước B' }],
+  });
+  assert(createPlanRes.tasks?.length === 2, 'create_plan tool thực thi thành công');
+
+  const updatePlanRes = await planRegistry.execute('update_plan_task', {
+    id: 1,
+    status: 'COMPLETED',
+  });
+  assert(updatePlanRes.task?.status === 'COMPLETED', 'update_plan_task tool cập nhật trạng thái thành công');
+
+  console.log('\n========================================');
+  console.log('🧪 10. KIỂM THỬ REFLECTION ENGINE & DEBUGGING PROTOCOL');
+  console.log('========================================');
+
+  const reflectionEngine = new ReflectionEngine();
+
+  // Test thành công không kích hoạt reflection
+  const successAnalysis = reflectionEngine.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 0, stdout: 'Pass' },
+    durationMs: 10,
+  });
+  assert(successAnalysis.isFailure === false, 'Không kích hoạt Reflection khi tool thành công');
+  assert(reflectionEngine.getConsecutiveFailures() === 0, 'Bộ đếm thất bại liên tiếp là 0');
+
+  // Test lệnh thất bại kích hoạt Debugging Protocol
+  const failAnalysis1 = reflectionEngine.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 1, stderr: 'AssertionError: expected true to be false' },
+    durationMs: 50,
+  });
+  assert(failAnalysis1.isFailure === true, 'Nhận diện đúng lệnh thất bại');
+  assert(failAnalysis1.reflectionPrompt?.includes('DEBUGGING PROTOCOL TRIGGERED') === true, 'Kích hoạt prompt Debugging Protocol');
+  assert(reflectionEngine.getConsecutiveFailures() === 1, 'Bộ đếm thất bại tăng lên 1');
+
+  // Test lỗi replace_text
+  const failAnalysis2 = reflectionEngine.analyze({
+    toolName: 'replace_text',
+    args: { path: 'a.ts', oldText: 'xxx', newText: 'yyy' },
+    result: { error: 'Không tìm thấy đoạn code cần thay thế' },
+    durationMs: 5,
+  });
+  assert(failAnalysis2.isFailure === true, 'Nhận diện đúng lỗi replace_text');
+  assert(failAnalysis2.reflectionPrompt?.includes('CẢNH BÁO') === true, 'Kích hoạt cảnh báo khi thất bại liên tiếp 2 lần');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

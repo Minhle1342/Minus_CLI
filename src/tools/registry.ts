@@ -7,6 +7,8 @@ import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
 import { writeFileTool } from './write-file.js';
 import { runCommandTool } from './run-command.js';
+import { PlanManager } from '../agent/plan-manager.js';
+import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
@@ -19,7 +21,7 @@ import { runCommandTool } from './run-command.js';
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
 
-  constructor() {
+  constructor(planManager?: PlanManager) {
     // Đăng ký mặc định 6 tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
@@ -27,6 +29,16 @@ export class ToolRegistry {
     this.register(replaceTextTool);
     this.register(writeFileTool);
     this.register(runCommandTool);
+
+    // Đăng ký các planning tools nếu có PlanManager
+    if (planManager) {
+      this.attachPlanManager(planManager);
+    }
+  }
+
+  attachPlanManager(planManager: PlanManager): void {
+    this.register(createPlanTool(planManager));
+    this.register(createUpdatePlanTaskTool(planManager));
   }
 
   /**

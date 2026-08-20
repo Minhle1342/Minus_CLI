@@ -1,0 +1,109 @@
+export interface ToolExecutionFeedback {
+  toolName: string;
+  args: Record<string, any>;
+  result: Record<string, any>;
+  durationMs: number;
+}
+
+export interface ReflectionAnalysis {
+  isFailure: boolean;
+  reflectionPrompt?: string;
+  consecutiveFailures: number;
+  advice?: string;
+}
+
+/**
+ * ReflectionEngine - Động cơ Tự vấn & Quy trình Gỡ lỗi Thông minh (Debugging Protocol)
+ * 
+ * Ngăn chặn tình trạng Agent "đoán mò" và lặp lại thao tác sai:
+ * 1. Nhận diện các thất bại khi chạy lệnh (exitCode !== 0) hoặc lỗi sửa file.
+ * 2. Tự động sinh ra hướng dẫn Debugging Protocol có cấu trúc cho LLM.
+ * 3. Đếm số lần thất bại liên tiếp và cảnh báo khi Agent đi vào ngõ cụt.
+ */
+export class ReflectionEngine {
+  private consecutiveFailures: number = 0;
+  private maxConsecutiveFailuresBeforeWarning: number = 2;
+
+  /**
+   * Phân tích kết quả thực thi của Tool và xác định xem có cần kích hoạt Self-Reflection hay không
+   */
+  analyze(feedback: ToolExecutionFeedback): ReflectionAnalysis {
+    const { toolName, result } = feedback;
+    let isFailure = false;
+    let reflectionPrompt: string | undefined;
+    let advice: string | undefined;
+
+    // 1. Phân tích lệnh run_command thất bại (test failed, build error, syntax error)
+    if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
+      isFailure = true;
+      this.consecutiveFailures++;
+
+      const errorSnippet = (result.stderr || result.stdout || '').trim().slice(0, 1000);
+
+      reflectionPrompt = [
+        `\n⚠️ [DEBUGGING PROTOCOL TRIGGERED - LỆNH THỰC THI THẤT BẠI (Exit Code: ${result.exitCode})]`,
+        `Chi tiết lỗi:`,
+        `----------------------------------------`,
+        errorSnippet || '(Không có stderr)',
+        `----------------------------------------`,
+        `👉 QUY TRÌNH TỰ VẤN (SELF-REFLECTION):`,
+        `1. [Đọc Stack Trace]: Xác định chính xác file và dòng code nào gây ra lỗi ở trên.`,
+        `2. [Kiểm tra Diff]: Sử dụng run_command (git diff) hoặc read_file để quan sát lại những gì bạn vừa sửa.`,
+        `3. [Đưa ra giả thuyết]: Nêu rõ nguyên nhân gốc rễ (Root Cause) trong suy nghĩ trước khi sửa tiếp.`,
+        `4. [Không lặp lại lỗi]: Tuyệt đối KHÔNG chạy lại thao tác giống hệt bước vừa rồi!`,
+      ].join('\n');
+
+      advice = `Lệnh thất bại (exit: ${result.exitCode}). Kích hoạt quy trình tự vấn và phân tích Stack Trace.`;
+    } 
+    // 2. Phân tích lỗi sửa file replace_text không khớp
+    else if (toolName === 'replace_text' && result.error) {
+      isFailure = true;
+      this.consecutiveFailures++;
+
+      reflectionPrompt = [
+        `\n⚠️ [SELF-REFLECTION - THAY THẾ TEXT THẤT BẠI]`,
+        `Lý do: ${result.error}`,
+        `👉 Lời khuyên: Hãy gọi read_file (kèm khoảng dòng startLine/endLine) để đọc chính xác đoạn code hiện tại trước khi gọi replace_text.`,
+      ].join('\n');
+
+      advice = `Không tìm thấy đoạn text cần thay thế. Cần đọc lại file trước khi thử lại.`;
+    }
+    // 3. Phân tích lỗi chung khác
+    else if (result.error || result.errorCode) {
+      isFailure = true;
+      this.consecutiveFailures++;
+
+      reflectionPrompt = [
+        `\n⚠️ [TOOL EXECUTION ERROR]`,
+        `Lỗi gặp phải: ${result.error || result.errorCode}`,
+        `👉 Hãy phân tích nguyên nhân và điều chỉnh lại tham số gọi tool.`,
+      ].join('\n');
+
+      advice = `Tool gặp lỗi: ${result.error || result.errorCode}`;
+    } 
+    // 4. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
+    else {
+      this.consecutiveFailures = 0;
+    }
+
+    // Cảnh báo nếu Agent thất bại liên tiếp nhiều lần
+    if (this.consecutiveFailures >= this.maxConsecutiveFailuresBeforeWarning && isFailure) {
+      reflectionPrompt += `\n🚨 [CẢNH BÁO]: Bạn đã thất bại ${this.consecutiveFailures} lần liên tiếp! Hãy dừng lại, đánh giá lại toàn bộ chiến lược hoặc chia nhỏ bài toán thành các sub-tasks đơn giản hơn.`;
+    }
+
+    return {
+      isFailure,
+      reflectionPrompt,
+      consecutiveFailures: this.consecutiveFailures,
+      advice,
+    };
+  }
+
+  getConsecutiveFailures(): number {
+    return this.consecutiveFailures;
+  }
+
+  reset(): void {
+    this.consecutiveFailures = 0;
+  }
+}
