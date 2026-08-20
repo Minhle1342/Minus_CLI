@@ -10,6 +10,10 @@ import { AgentLoop } from './agent/agent-loop.js';
 import { Session } from './session/session.js';
 import { Workspace } from './workspace/workspace.js';
 import { CLI, AVAILABLE_MODELS, colors as c } from './ui/cli-ui.js';
+import { AgentKernel } from './kernel/kernel.js';
+import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
+import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
+import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -99,12 +103,19 @@ async function main() {
     process.exit(1);
   }
 
-  // Khởi tạo các thành phần cốt lõi của Coding Agent với Workspace linh hoạt
+  // Khởi tạo Micro-Kernel với Workspace linh hoạt
   const initialPath = getInitialWorkspacePath();
   let workspace = new Workspace(initialPath);
   let llm = await createLLM(modelName);
-  const toolRegistry = new ToolRegistry();
-  const agentLoop = new AgentLoop(llm, toolRegistry, { maxSteps, workspace });
+
+  const kernel = new AgentKernel(workspace, llm);
+  await kernel.use(WorkspacePlugin);
+  await kernel.use(PlanningPlugin);
+  await kernel.use(MemoryPlugin);
+  await kernel.init();
+
+  const toolRegistry = kernel.ctx.tools;
+  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace });
 
   let sessionCount = 0;
 

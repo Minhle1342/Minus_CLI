@@ -9,21 +9,18 @@ import { ContextCompactor } from './context-compactor.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
+import { AgentKernel, KernelContext } from '../kernel/kernel.js';
 
 /**
- * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (Phase 4 - Hierarchical Memory Ready)
+ * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (Phase 5 - Micro-Kernel Ready)
  * 
- * Vòng lặp vận hành theo quy trình khép kín:
- * 1. Warm-Start: Nạp Project Knowledge Digest từ bộ nhớ dài hạn (.codingagent/).
- * 2. Tối ưu hoá Token và nén ngữ cảnh (Context Compaction).
+ * Vòng lặp vận hành theo kiến trúc Plugin & Micro-Kernel:
+ * 1. Warm-Start: Nạp Project Knowledge Digest từ bộ nhớ dài hạn.
+ * 2. Tối ưu hoá Token và nén ngữ cảnh (Context Compactor).
  * 3. Gửi Session messages + Tools cho LLM.
- * 4. Nếu LLM yêu cầu gọi Tool:
- *    - Tự động tạo Shadow Git Checkpoint trước các thao tác sửa đổi file.
- *    - Chuyển tiếp qua ToolRunner (chạy 5-stage pipeline: validation, safety, timeout).
- *    - Phân tích kết quả qua ReflectionEngine (nếu lỗi -> kích hoạt Debugging Protocol).
- *    - Ghi nhận Tool Result (kèm Reflection Prompt nếu lỗi) vào Session.
- * 5. Nếu LLM cập nhật Kế hoạch -> Hiển thị Plan Tree trực quan.
- * 6. Nếu LLM trả về Final Answer -> Kết thúc nhiệm vụ và xuất báo cáo.
+ * 4. System 2: Bóc tách và hiển thị Deep Reasoning / CoT Internal Monologue.
+ * 5. System 1: Điều phối gọi Tool qua 5-stage pipeline an toàn.
+ * 6. Reflection Engine: Kích hoạt Debugging Protocol khi gặp lỗi.
  */
 export class AgentLoop {
   private llm: any;
@@ -36,25 +33,45 @@ export class AgentLoop {
   readonly planManager: PlanManager;
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
+  readonly kernel?: AgentKernel;
 
-  constructor(llm: any, toolRegistry: ToolRegistry, options?: AgentLoopOptions) {
-    this.llm = llm;
-    this.toolRegistry = toolRegistry;
-    this._workspace = options?.workspace ?? new Workspace();
-    this.toolRunner = new ToolRunner(this.toolRegistry, this._workspace);
-    this.maxSteps = options?.maxSteps ?? 30;
-    this.checkpointManager = options?.checkpointManager ?? new CheckpointManager(this._workspace.rootDir);
-    this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
-    this.planManager = new PlanManager();
-    this.reflectionEngine = new ReflectionEngine();
-    this.memoryManager = new ProjectMemoryManager(this._workspace.rootDir);
+  constructor(
+    kernelOrLLM: AgentKernel | any,
+    toolRegistry?: ToolRegistry,
+    options?: AgentLoopOptions
+  ) {
+    if (kernelOrLLM instanceof AgentKernel) {
+      this.kernel = kernelOrLLM;
+      this.llm = this.kernel.ctx.llm;
+      this.toolRegistry = this.kernel.ctx.tools;
+      this._workspace = this.kernel.ctx.workspace;
+      this.toolRunner = this.kernel.ctx.toolRunner;
+      this.checkpointManager = this.kernel.ctx.checkpoints;
+      this.contextCompactor = this.kernel.ctx.compactor;
+      this.planManager = this.kernel.ctx.plan;
+      this.reflectionEngine = this.kernel.ctx.reflection;
+      this.memoryManager = this.kernel.ctx.memory;
+      this.maxSteps = options?.maxSteps ?? 30;
+      this.kernel.init().catch(() => {});
+    } else {
+      this.llm = kernelOrLLM;
+      this._workspace = options?.workspace ?? new Workspace();
+      this.toolRegistry = toolRegistry ?? new ToolRegistry();
+      this.toolRunner = new ToolRunner(this.toolRegistry, this._workspace);
+      this.maxSteps = options?.maxSteps ?? 30;
+      this.checkpointManager = options?.checkpointManager ?? new CheckpointManager(this._workspace.rootDir);
+      this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
+      this.planManager = new PlanManager();
+      this.reflectionEngine = new ReflectionEngine();
+      this.memoryManager = new ProjectMemoryManager(this._workspace.rootDir);
 
-    // Đăng ký các planning và memory tools vào toolRegistry
-    this.toolRegistry.attachPlanManager(this.planManager);
-    this.toolRegistry.attachMemoryManager(this.memoryManager);
-    
-    this.checkpointManager.init().catch(() => {});
-    this.memoryManager.init(this._workspace).catch(() => {});
+      // Đăng ký các planning và memory tools vào toolRegistry
+      this.toolRegistry.attachPlanManager(this.planManager);
+      this.toolRegistry.attachMemoryManager(this.memoryManager);
+
+      this.checkpointManager.init().catch(() => {});
+      this.memoryManager.init(this._workspace).catch(() => {});
+    }
   }
 
   get workspace(): Workspace {
@@ -63,15 +80,22 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
-    this.toolRunner = new ToolRunner(this.toolRegistry, this._workspace);
-    (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
-    (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
-    this.checkpointManager.init().catch(() => {});
-    this.memoryManager.init(workspace).catch(() => {});
+    if (this.kernel) {
+      this.kernel.ctx.setWorkspace(workspace);
+    } else {
+      this.toolRunner = new ToolRunner(this.toolRegistry, this._workspace);
+      (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
+      (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
+      this.checkpointManager.init().catch(() => {});
+      this.memoryManager.init(workspace).catch(() => {});
+    }
   }
 
   setLLM(llm: any) {
     this.llm = llm;
+    if (this.kernel) {
+      this.kernel.ctx.setLLM(llm);
+    }
   }
 
   /**
@@ -90,7 +114,6 @@ export class AgentLoop {
     const history = session.getHistory();
     if (history.length === 1 && history[0].role === 'user') {
       const digest = this.memoryManager.getProjectDigest();
-      // Bổ sung digest ngắn vào prompt của user để LLM hiểu ngay ngữ cảnh dự án
       const userText = history[0].parts?.[0]?.text || '';
       if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
         history[0].parts = [{ text: `${digest}\n\n[USER INSTRUCTION]:\n${userText}` }];
@@ -99,6 +122,7 @@ export class AgentLoop {
 
     for (let step = 1; step <= this.maxSteps; step++) {
       CLI.renderStepHeader(step, this.maxSteps);
+      this.kernel?.ctx.events.emit('step:before', step, this.maxSteps);
 
       // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
       const compactionResult = this.contextCompactor.compact(session.getHistory());
@@ -112,6 +136,7 @@ export class AgentLoop {
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
       if (response.reasoningContent) {
         CLI.renderReasoning(response.reasoningContent);
+        this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
       }
 
       // 4. Nếu model muốn gọi tool (System 1: Action)
@@ -139,12 +164,14 @@ export class AgentLoop {
             await this.checkpointManager.createCheckpoint(`Tool ${toolName}: ${JSON.stringify(toolArgs)}`);
           }
 
+          this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
           CLI.renderToolCall(toolName, toolArgs);
 
           // Chạy tool qua pipeline an toàn
           const executionResult = await this.toolRunner.run(toolName, toolArgs);
 
           CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
+          this.kernel?.ctx.events.emit('tool:after', toolName, executionResult.result, executionResult.durationMs);
 
           // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol)
           const reflectionAnalysis = this.reflectionEngine.analyze({
@@ -156,6 +183,7 @@ export class AgentLoop {
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
+            this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
           }
 
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
@@ -175,6 +203,7 @@ export class AgentLoop {
         }
 
         CLI.renderStepFooter();
+        this.kernel?.ctx.events.emit('step:after', step);
 
         // Quay lại đầu vòng lặp để LLM xử lý kết quả
         continue;
@@ -186,6 +215,7 @@ export class AgentLoop {
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
       CLI.renderFinalAnswer(finalAnswer);
+      this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
 
       // Ghi nhận câu trả lời cuối cùng vào Session
       session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });

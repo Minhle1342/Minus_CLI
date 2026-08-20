@@ -18,6 +18,10 @@ import { PlanManager } from './agent/plan-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
+import { AgentKernel } from './kernel/kernel.js';
+import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
+import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
+import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -463,6 +467,52 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(mockResp.reasoningContent !== undefined, 'Bóc tách thành công luồng reasoning_content (System 2)');
   assert(mockResp.toolCalls.length === 1, 'Bóc tách thành công luồng tool_calls (System 1)');
   assert(mockResp.reasoningContent.includes('validateInput'), 'Nội dung CoT chứa chuỗi tư duy phân tích rủi ro');
+
+  console.log('\n========================================');
+  console.log('🧪 16. KIỂM THỬ MICRO-KERNEL & PLUGIN-BASED ENGINE (PHASE 5)');
+  console.log('========================================');
+
+  const kernel = new AgentKernel(workspace);
+  await kernel.use(WorkspacePlugin);
+  await kernel.use(PlanningPlugin);
+  await kernel.use(MemoryPlugin);
+
+  const loadedPlugins = kernel.getLoadedPlugins();
+  assert(loadedPlugins.length === 3, 'Kernel nạp đủ 3 plugins tiêu chuẩn');
+  assert(loadedPlugins.includes('workspace-plugin'), 'Kernel nạp đúng workspace-plugin');
+  assert(loadedPlugins.includes('planning-plugin'), 'Kernel nạp đúng planning-plugin');
+  assert(loadedPlugins.includes('memory-plugin'), 'Kernel nạp đúng memory-plugin');
+
+  // Đăng ký Custom Plugin của bên thứ ba (Custom Tool Plugin)
+  let customToolExecuted: boolean = false;
+  await kernel.use({
+    name: 'custom-git-plugin',
+    apply(ctx) {
+      ctx.registerTool({
+        name: 'custom_git_branch',
+        description: 'Lấy tên git branch hiện tại',
+        parameters: { type: 'object' as any, properties: {} },
+        async execute() {
+          customToolExecuted = true;
+          return { branch: 'develop' };
+        },
+      });
+    },
+  });
+
+  assert(kernel.getLoadedPlugins().includes('custom-git-plugin'), 'Kernel hỗ trợ nạp Custom Plugin từ bên thứ 3');
+  assert(kernel.ctx.tools.get('custom_git_branch') !== undefined, 'Tool tùy biến đã được đăng ký thành công vào ToolRegistry');
+
+  const customExecRes = await kernel.ctx.tools.execute('custom_git_branch', {});
+  assert(customExecRes.branch === 'develop' && Boolean(customToolExecuted), 'Custom Plugin Tool thực thi trả về kết quả chuẩn xác');
+
+  // Kiểm tra Event Bus
+  let beforeToolEventFired: boolean = false;
+  kernel.ctx.events.on('tool:before', (name) => {
+    if (name === 'custom_git_branch') beforeToolEventFired = true;
+  });
+  kernel.ctx.events.emit('tool:before', 'custom_git_branch', {});
+  assert(Boolean(beforeToolEventFired), 'Event Bus của Micro-Kernel phát và bắt sự kiện chính xác');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
