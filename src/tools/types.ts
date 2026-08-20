@@ -1,0 +1,18 @@
+import type { FunctionDeclaration } from '@google/genai';
+import type { Workspace } from '../workspace/workspace.js';
+
+/**
+ * Định nghĩa chuẩn cho một Tool trong hệ thống Coding Agent.
+ * 
+ * Mỗi Tool gồm 4 thành phần:
+ * 1. name: Tên định danh duy nhất của Tool (vd: read_file, replace_text, run_command)
+ * 2. description: Mô tả công dụng rõ ràng để LLM hiểu khi nào và tại sao nên dùng
+ * 3. parameters: Schema FunctionDeclaration mô tả kiểu dữ liệu tham số đầu vào cho LLM
+ * 4. execute: Hàm thực thi thực tế nhận args và workspace context, trả về dữ liệu JSON thô
+ */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: FunctionDeclaration['parameters'];
+  execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>>;
+}

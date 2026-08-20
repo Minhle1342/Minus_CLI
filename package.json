@@ -1,0 +1,31 @@
+{
+  "name": "mini-agent-loop",
+  "version": "1.0.0",
+  "description": "Minimal AI Agent Loop in TypeScript + Node.js with Gemini API",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "test": "tsx src/test-suite.ts",
+    "test:scenarios": "tsx src/test-scenarios.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "ai-agent",
+    "agent-loop",
+    "gemini",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^0.1.2",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
