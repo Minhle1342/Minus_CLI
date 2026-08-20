@@ -16,6 +16,7 @@ import { CheckpointManager } from './workspace/checkpoint.js';
 import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
+import { SemanticSlicer } from './agent/semantic-slicer.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -327,6 +328,79 @@ async function runUnitTests() {
   });
   assert(failAnalysis2.isFailure === true, 'Nhận diện đúng lỗi replace_text');
   assert(failAnalysis2.reflectionPrompt?.includes('CẢNH BÁO') === true, 'Kích hoạt cảnh báo khi thất bại liên tiếp 2 lần');
+
+  console.log('\n========================================');
+  console.log('🧪 11. KIỂM THỬ SEMANTIC SLICER & AST OUTLINE EXTRACTION');
+  console.log('========================================');
+
+  const sampleTS = `
+export interface UserConfig {
+  name: string;
+}
+
+export class OrderService {
+  processOrder(id: number): boolean {
+    return true;
+  }
+}
+
+export async function calculateTotal(items: any[]): Promise<number> {
+  return items.length * 10;
+}
+  `;
+
+  const outline = SemanticSlicer.extractOutline('src/order.ts', sampleTS);
+  assert(outline.symbols.length >= 3, 'SemanticSlicer trích xuất đủ các symbols (interface, class, function)');
+  assert(outline.symbols.some((s) => s.name === 'OrderService' && s.kind === 'class'), 'Nhận diện đúng class OrderService');
+  assert(outline.symbols.some((s) => s.name === 'calculateTotal' && s.kind === 'function'), 'Nhận diện đúng function calculateTotal');
+
+  const slicedFunc = SemanticSlicer.sliceSymbol(sampleTS, 'calculateTotal');
+  assert(slicedFunc.found === true && slicedFunc.code?.includes('return items.length * 10') === true, 'Trích xuất chính xác code body của calculateTotal');
+
+  // Test read_file với outlineOnly: true
+  const readOutlineRes = await readFileTool.execute({ path: 'src/agent/agent-loop.ts', outlineOnly: true }, workspace);
+  assert(readOutlineRes.symbolsCount > 0, 'read_file outlineOnly trích xuất thành công symbols');
+
+  // Test read_file với symbol: 'AgentLoop'
+  const readSymbolRes = await readFileTool.execute({ path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' }, workspace);
+  assert(readSymbolRes.content?.includes('class AgentLoop') === true, 'read_file symbol trích xuất thành công class AgentLoop');
+
+  console.log('\n========================================');
+  console.log('🧪 12. KIỂM THỬ NÂNG CAO: MULTI-TURN COMPACTION & TOKEN BUDGET');
+  console.log('========================================');
+
+  const multiTurnSession = new Session();
+  multiTurnSession.addUserMessage('Nhiệm vụ dài nhiều bước');
+
+  // Turn 1: Đọc file lớn (cũ)
+  multiTurnSession.addModelMessage({ functionCalls: [{ name: 'read_file', args: { path: 'heavy.ts' } }] });
+  multiTurnSession.addToolResult('read_file', {
+    path: 'heavy.ts',
+    content: `export class BigEngine {\n` + `  runStep() {}\n`.repeat(500) + `}\n`,
+  });
+
+  // Turn 2: Chạy lệnh build log dài (cũ)
+  multiTurnSession.addModelMessage({ functionCalls: [{ name: 'run_command', args: { command: 'npm run build' } }] });
+  multiTurnSession.addToolResult('run_command', {
+    exitCode: 1,
+    stderr: `Start build\n` + `Compiling file...\n`.repeat(200) + `Error TS2345: Argument not assignable\nat line 45\n`,
+  });
+
+  // Turn 3: Bước mới nhất (giữ nguyên)
+  multiTurnSession.addModelMessage({ functionCalls: [{ name: 'read_file', args: { path: 'fix.ts' } }] });
+  multiTurnSession.addToolResult('read_file', {
+    path: 'fix.ts',
+    content: 'export const fix = true;',
+  });
+
+  const advancedCompactor = new ContextCompactor({
+    maxCharactersPerToolResult: 150,
+    preserveLastNToolResults: 1,
+  });
+
+  const advResult = advancedCompactor.compact(multiTurnSession.getHistory());
+  assert(advResult.stats.tokensSaved > 500, 'Tối ưu hoá và tiết kiệm thành công > 500 Tokens');
+  assert(advResult.stats.prunedPartsCount === 2, 'Cắt tỉa chính xác 2 turn cũ thành Semantic Outline và Log Tail');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

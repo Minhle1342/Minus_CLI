@@ -125,9 +125,10 @@ export class DeepseekLLM {
       }
     }
 
-    // 3. Chuyển đổi Tools sang chuẩn OpenAI Function Calling
-    const openAITools = tools.length > 0
-      ? tools.map((tool) => ({
+    // 3. Chuyển đổi Tools sang chuẩn OpenAI Function Calling (Sắp xếp cố định để tối ưu KV-Cache Prefix Hit)
+    const sortedTools = [...tools].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const openAITools = sortedTools.length > 0
+      ? sortedTools.map((tool) => ({
           type: 'function',
           function: {
             name: tool.name,
