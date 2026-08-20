@@ -35,6 +35,7 @@ export class AgentLoop {
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
   readonly kernel?: AgentKernel;
+  private _isGoalMode: boolean = false;
 
   constructor(
     kernelOrLLM: AgentKernel | any,
@@ -79,6 +80,14 @@ export class AgentLoop {
     return this._workspace;
   }
 
+  get isGoalMode(): boolean {
+    return this._isGoalMode;
+  }
+
+  setGoalMode(enabled: boolean): void {
+    this._isGoalMode = enabled;
+  }
+
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
     if (this.kernel) {
@@ -106,12 +115,15 @@ export class AgentLoop {
     return this.checkpointManager.rollbackLast();
   }
 
-  async run(session: Session): Promise<string> {
+  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean }): Promise<string> {
     const toolDeclarations = this.toolRegistry.getFunctionDeclarations();
     this.planManager.clear();
     this.reflectionEngine.reset();
     let consecutiveEmptyTurns = 0;
     const maxEmptyRetries = 2;
+
+    const isGoal = options?.isGoalMode ?? this._isGoalMode;
+    const effectiveMaxSteps = options?.maxSteps ?? (isGoal ? Infinity : this.maxSteps);
 
     // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
     const history = session.getHistory();
@@ -119,13 +131,17 @@ export class AgentLoop {
       const digest = this.memoryManager.getProjectDigest();
       const userText = history[0].parts?.[0]?.text || '';
       if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
-        history[0].parts = [{ text: `${digest}\n\n[USER INSTRUCTION]:\n${userText}` }];
+        let prefix = `${digest}\n\n`;
+        if (isGoal) {
+          prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
+        }
+        history[0].parts = [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }];
       }
     }
 
-    for (let step = 1; step <= this.maxSteps; step++) {
-      CLI.renderStepHeader(step, this.maxSteps);
-      this.kernel?.ctx.events.emit('step:before', step, this.maxSteps);
+    for (let step = 1; step <= effectiveMaxSteps; step++) {
+      CLI.renderStepHeader(step, effectiveMaxSteps);
+      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
 
       // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
       const compactionResult = this.contextCompactor.compact(session.getHistory());
@@ -285,7 +301,9 @@ export class AgentLoop {
     }
 
     // 7. Nếu đạt maxSteps mà chưa hoàn thành
-    const timeoutMessage = `Agent stopped: maximum steps (${this.maxSteps}) reached without final answer.`;
+    const timeoutMessage = isGoal
+      ? `Agent stopped: Goal execution finished.`
+      : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
     CLI.renderFinalAnswer(timeoutMessage);

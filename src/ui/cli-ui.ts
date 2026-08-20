@@ -46,6 +46,7 @@ export interface StatusOptions {
   maxSteps: number;
   sessionTurns: number;
   sessionFile?: string;
+  isGoalMode?: boolean;
 }
 
 export interface ModelOption {
@@ -57,49 +58,73 @@ export interface ModelOption {
 }
 
 export const AVAILABLE_MODELS: ModelOption[] = [
-  // 1. Google AI Studio (Free Tier: 1.500 req/ngày, 1M context)
+  // 1. Google AI Studio (Free Tier: 1.500 req/ngày, 1M Context - Đã kiểm tra hoạt động 100%)
   {
     id: '1',
-    name: 'gemini-3.1-flash-lite-preview',
+    name: 'gemini-3.7-flash',
     provider: 'Google AI Studio',
-    desc: 'Free Tier 1.500 req/ngày, phản hồi cực nhanh, gọi tool chuẩn xác',
+    desc: 'Model thế hệ mới nhất 2026, tối ưu Coding & Agentic workflow siêu tốc',
     recommended: true,
   },
   {
     id: '2',
-    name: 'gemini-2.5-flash',
+    name: 'gemini-3.6-flash',
     provider: 'Google AI Studio',
-    desc: 'Free Tier, cân bằng giữa tốc độ và khả năng lập trình toàn diện',
+    desc: 'Bản nâng cấp ổn định, phản hồi nhanh và gọi công cụ chuẩn xác',
   },
   {
     id: '3',
-    name: 'gemini-2.5-pro',
+    name: 'gemini-3.5-flash',
     provider: 'Google AI Studio',
-    desc: 'Free Tier, khả năng suy luận sâu và context khổng lồ 1M tokens',
+    desc: 'Cân bằng hoàn hảo giữa tốc độ, độ thông minh và hiệu năng thực thi',
+  },
+  {
+    id: '4',
+    name: 'gemini-3.5-flash-lite',
+    provider: 'Google AI Studio',
+    desc: 'Bản Lite thế hệ 3.5 siêu nhanh, độ trễ thấp (thay thế 2.5-flash-lite)',
+  },
+  {
+    id: '5',
+    name: 'gemini-3.1-flash-lite-preview',
+    provider: 'Google AI Studio',
+    desc: 'Phản hồi cực nhanh, gọi tool chuẩn xác, siêu nhẹ và tiết kiệm',
+  },
+  {
+    id: '6',
+    name: 'gemini-3.1-flash-lite',
+    provider: 'Google AI Studio',
+    desc: 'Bản Flash Lite chính thức thế hệ 3.1, ổn định và tối ưu tài nguyên',
+  },
+  {
+    id: '7',
+    name: 'gemini-flash-latest',
+    provider: 'Google AI Studio',
+    desc: 'Alias tự động trỏ đến mô hình Gemini Flash mới nhất của Google',
   },
 
   // 2. Groq Cloud (Free Tier: Siêu tốc độ LPU >500 tokens/s)
   {
-    id: '4',
+    id: '8',
     name: 'groq/llama-3.3-70b-versatile',
     provider: 'Groq Cloud (Free)',
     desc: 'Llama 3.3 70B chạy trên chip LPU siêu tốc ~300 tok/s, rất thông minh',
     recommended: true,
   },
   {
-    id: '5',
+    id: '9',
     name: 'groq/deepseek-r1-distill-llama-70b',
     provider: 'Groq Cloud (Free)',
     desc: 'DeepSeek R1 reasoning suy luận từng bước siêu tốc trên Groq',
   },
   {
-    id: '6',
+    id: '10',
     name: 'groq/llama-3.1-8b-instant',
     provider: 'Groq Cloud (Free)',
     desc: 'Llama 3.1 8B phản hồi tức thì ~600 tokens/s, cực kỳ nhẹ',
   },
   {
-    id: '7',
+    id: '11',
     name: 'groq/gemma2-9b-it',
     provider: 'Groq Cloud (Free)',
     desc: 'Google Gemma 2 9B chạy trên Groq LPU',
@@ -107,13 +132,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 3. Cerebras Cloud (Free Tier: 1.000.000 tokens/ngày, 1.500+ tokens/s)
   {
-    id: '8',
+    id: '12',
     name: 'cerebras/llama-3.3-70b',
     provider: 'Cerebras Cloud (Free)',
     desc: 'Llama 3.3 70B, tốc độ kỷ lục ~1.800 tok/s, hạn mức 1M tokens/ngày',
   },
   {
-    id: '9',
+    id: '13',
     name: 'cerebras/llama3.1-8b',
     provider: 'Cerebras Cloud (Free)',
     desc: 'Llama 3.1 8B siêu tốc ~2.000 tok/s, 1M tokens/ngày',
@@ -121,19 +146,19 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 4. SambaNova Cloud (Free Tier: Model Llama 405B Siêu Lớn)
   {
-    id: '10',
+    id: '14',
     name: 'sambanova/Meta-Llama-3.1-405B-Instruct',
     provider: 'SambaNova Cloud (Free)',
     desc: 'Model Llama 405B khổng lồ chạy miễn phí cho Developer',
   },
   {
-    id: '11',
+    id: '15',
     name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
     provider: 'SambaNova Cloud (Free)',
     desc: 'Llama 3.3 70B trên kiến trúc chip SN40L cực mạnh',
   },
   {
-    id: '12',
+    id: '16',
     name: 'sambanova/DeepSeek-R1-Distill-Llama-70B',
     provider: 'SambaNova Cloud (Free)',
     desc: 'DeepSeek R1 70B reasoning trên hạ tầng SambaNova',
@@ -141,19 +166,19 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 5. GitHub Models (Free Tier: Dùng GitHub Token)
   {
-    id: '13',
+    id: '17',
     name: 'github/gpt-4o',
     provider: 'GitHub Models (Free)',
     desc: 'GPT-4o chính thức miễn phí qua GitHub Token / Azure endpoint',
   },
   {
-    id: '14',
+    id: '18',
     name: 'github/gpt-4o-mini',
     provider: 'GitHub Models (Free)',
     desc: 'GPT-4o Mini tốc độ cao qua GitHub Token',
   },
   {
-    id: '15',
+    id: '19',
     name: 'github/Mistral-large-2407',
     provider: 'GitHub Models (Free)',
     desc: 'Mistral Large 128k context qua GitHub Models',
@@ -161,19 +186,19 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 6. SiliconFlow / SiliconCloud (Free Tier)
   {
-    id: '16',
+    id: '20',
     name: 'siliconflow/deepseek-ai/DeepSeek-V3',
     provider: 'SiliconFlow (Free)',
     desc: 'DeepSeek V3 671B qua hạ tầng SiliconFlow',
   },
   {
-    id: '17',
+    id: '21',
     name: 'siliconflow/deepseek-ai/DeepSeek-R1',
     provider: 'SiliconFlow (Free)',
     desc: 'DeepSeek R1 suy luận chuyên sâu',
   },
   {
-    id: '18',
+    id: '22',
     name: 'siliconflow/Qwen/Qwen2.5-Coder-32B-Instruct',
     provider: 'SiliconFlow (Free)',
     desc: 'Qwen 2.5 Coder 32B chuyên gia lập trình hàng đầu',
@@ -181,13 +206,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 7. Mistral AI (Codestral Free Tier)
   {
-    id: '19',
+    id: '23',
     name: 'mistral/codestral-latest',
     provider: 'Mistral AI (Free)',
     desc: 'Codestral chuyên gia lập trình của Mistral (Free dev key)',
   },
   {
-    id: '20',
+    id: '24',
     name: 'mistral/mistral-large-latest',
     provider: 'Mistral AI (Free)',
     desc: 'Mistral Large mô hình mạnh nhất của Mistral',
@@ -195,25 +220,25 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 8. OpenRouter (Free Router & Free Models)
   {
-    id: '21',
+    id: '25',
     name: 'openrouter/free',
     provider: 'OpenRouter (Free)',
     desc: 'Tự động định tuyến sang model miễn phí tốt nhất trên OpenRouter',
   },
   {
-    id: '22',
+    id: '26',
     name: 'openrouter/meta-llama/llama-3.3-70b-instruct:free',
     provider: 'OpenRouter (Free)',
     desc: 'Llama 3.3 70B miễn phí qua OpenRouter',
   },
   {
-    id: '23',
+    id: '27',
     name: 'openrouter/deepseek/deepseek-r1:free',
     provider: 'OpenRouter (Free)',
     desc: 'DeepSeek R1 miễn phí qua OpenRouter',
   },
   {
-    id: '24',
+    id: '28',
     name: 'openrouter/google/gemini-2.0-flash-exp:free',
     provider: 'OpenRouter (Free)',
     desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
@@ -221,13 +246,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 9. Pollinations AI (Zero-Key Free: Không cần tạo API Key)
   {
-    id: '25',
+    id: '29',
     name: 'pollinations/openai',
     provider: 'Pollinations.ai (Zero-Key)',
     desc: 'GPT-4o-mini miễn phí 100%, không cần đăng ký tài khoản hay API key',
   },
   {
-    id: '26',
+    id: '30',
     name: 'pollinations/mistral',
     provider: 'Pollinations.ai (Zero-Key)',
     desc: 'Mistral miễn phí 100%, không cần đăng ký tài khoản hay API key',
@@ -235,13 +260,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 10. DeepSeek Direct (Chính thức)
   {
-    id: '27',
+    id: '31',
     name: 'deepseek-chat',
     provider: 'DeepSeek Direct',
     desc: 'DeepSeek V3 chính thức (cần key platform.deepseek.com)',
   },
   {
-    id: '28',
+    id: '32',
     name: 'deepseek-reasoner',
     provider: 'DeepSeek Direct',
     desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
@@ -271,6 +296,7 @@ export class CLI {
    */
   static renderQuickCommands(): void {
     console.log(`\n${c.cyan}${c.bold}╭── ⚡ GỢI Ý CÂU LỆNH NHANH (SLASH COMMANDS) ────────────────────────────────╮${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/goal <mục tiêu>${c.reset}  ${c.gray}Thực thi tự trị không giới hạn số bước (Step limit = ∞)          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, Groq, Cerebras,...) [Auto-saved]${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace (/cd <path>) [Auto-saved]         ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/session${c.reset}        ${c.gray}Xem thông tin cấu hình phiên làm việc đã lưu (.codingagent)      ${c.cyan}${c.bold}│${c.reset}`);
@@ -324,6 +350,8 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}SLASH COMMANDS:${c.reset}                                                           ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/help${c.reset}               Hiển thị bảng trợ giúp này                          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/goal <mục tiêu>${c.reset}    Thực thi tự trị không giới hạn bước cho tới khi xong ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/goal on/off${c.reset}        Bật/Tắt chế độ Goal Mode vĩnh viễn cho các lệnh sau  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model${c.reset}              Hiển thị danh sách và chọn mô hình LLM (Tự động lưu) ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model <name>${c.reset}       Chuyển đổi trực tiếp sang mô hình chỉ định          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
@@ -507,9 +535,14 @@ export class CLI {
    * Hiển thị trạng thái hiện tại
    */
   static renderStatus(opts: StatusOptions): void {
+    const goalStatus = opts.isGoalMode
+      ? `${c.brightGreen}${c.bold}ON (Unlimited steps ∞)${c.reset}`
+      : `${c.yellow}OFF (${opts.maxSteps} steps)${c.reset}`;
+
     console.log(`\n${c.magenta}${c.bold}╭── 📊 SESSION TELEMETRY & STATUS ───────────────────────────────────────────╮${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
     if (opts.sessionFile) {
@@ -535,10 +568,35 @@ export class CLI {
   }
 
   /**
+   * Hiển thị banner khi khởi chạy nhiệm vụ Goal Mode không giới hạn bước
+   */
+  static renderGoalBanner(goalText: string): void {
+    console.log(`\n${c.magenta}${c.bold}╭── 🎯 AUTONOMOUS GOAL MODE (UNLIMITED STEPS) ───────────────────────────────╮${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}MỤC TIÊU:${c.reset} ${c.bold}${goalText}${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}Chế độ tự trị không giới hạn số bước (Step limit = ∞) cho tới khi hoàn tất.${c.reset}`);
+    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}`);
+  }
+
+  /**
+   * Hiển thị trạng thái Goal Mode hiện tại (Bật/Tắt)
+   */
+  static renderGoalStatus(enabled: boolean): void {
+    const statusText = enabled ? `${c.brightGreen}${c.bold}BẬT (ON - Unlimited Steps ∞)${c.reset}` : `${c.yellow}${c.bold}TẮT (OFF - Mặc định 30 bước)${c.reset}`;
+    console.log(`\n${c.magenta}${c.bold}╭── 🎯 TRẠNG THÁI CHẾ ĐỘ GOAL (GOAL MODE) ───────────────────────────────────╮${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Trạng thái hiện tại:${c.reset} ${statusText}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}Cách dùng:${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal <nội dung mục tiêu>${c.reset} : Chạy ngay mục tiêu không giới hạn bước`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal on${c.reset}                 : Bật chế độ không giới hạn cho mọi yêu cầu`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal off${c.reset}                : Tắt chế độ không giới hạn (về 30 bước)`);
+    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
    * Đầu mỗi Step trong AgentLoop
    */
   static renderStepHeader(step: number, maxSteps: number): void {
-    const progress = `${step}/${maxSteps}`;
+    const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
+    const progress = isUnlimited ? `${step}/∞ [GOAL MODE]` : `${step}/${maxSteps}`;
     const bar = '─'.repeat(Math.max(10, 58 - progress.length));
     console.log(`\n${c.blue}${c.bold}╭── ⚡ STEP ${progress} ${bar}${c.reset}`);
   }

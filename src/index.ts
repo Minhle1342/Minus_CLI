@@ -34,7 +34,7 @@ const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 3
 
 // Hàm hoàn thành tự động khi người dùng nhấn Tab
 function completer(line: string): [string[], string] {
-  const completions = ['/model', '/modal', '/workspace', '/cd', '/session', '/tools', '/status', '/clear', '/help', '/exit', '/quit'];
+  const completions = ['/model', '/modal', '/workspace', '/cd', '/session', '/tools', '/status', '/goal', '/clear', '/help', '/exit', '/quit'];
   const hits = completions.filter((c) => c.startsWith(line.toLowerCase()));
   return [hits.length ? hits : completions, line];
 }
@@ -135,22 +135,20 @@ function getInitialModelName(savedModel?: string, cliModel?: string): string {
   }
 
   // 4. Mặc định theo API Key có sẵn
-  return apiKey ? 'gemini-3.1-flash-lite-preview' : 'groq/llama-3.3-70b-versatile';
+  return apiKey ? 'gemini-3.7-flash' : 'groq/llama-3.3-70b-versatile';
 }
 
 async function createLLM(model: string) {
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)
   if (
     model.startsWith('gemini') ||
-    model === 'gemini-3.1-flash-lite-preview' ||
-    model === 'gemini-3.5-flash' ||
-    model === 'gemini-2.5-pro' ||
-    model === 'gemini-2.5-flash'
+    model.startsWith('google/gemini')
   ) {
+    const rawModel = model.replace(/^google\//, '');
     if (!apiKey) {
       throw new Error(`Chưa cấu hình GEMINI_API_KEY trong .env! Vui lòng lấy key miễn phí tại: https://aistudio.google.com/`);
     }
-    return new GeminiLLM(apiKey, model);
+    return new GeminiLLM(apiKey, rawModel);
   }
 
   // 2. Groq Cloud (Free Tier - Siêu tốc LPU)
@@ -381,7 +379,63 @@ async function main() {
           maxSteps,
           sessionTurns: sessionCount,
           sessionFile: getSessionFilePath(),
+          isGoalMode: agentLoop.isGoalMode,
         });
+        continue;
+      }
+
+      // Xử lý lệnh /goal: Thực thi tự trị không giới hạn số bước (maxSteps = ∞) tới khi xong
+      if (trimmed === '/goal' || trimmed.startsWith('/goal ')) {
+        const goalArg = trimmed.slice(5).trim();
+
+        if (goalArg.toLowerCase() === 'on') {
+          agentLoop.setGoalMode(true);
+          CLI.renderGoalStatus(true);
+          continue;
+        }
+
+        if (goalArg.toLowerCase() === 'off') {
+          agentLoop.setGoalMode(false);
+          CLI.renderGoalStatus(false);
+          continue;
+        }
+
+        let taskPrompt = goalArg;
+        if (!taskPrompt) {
+          CLI.renderGoalStatus(agentLoop.isGoalMode);
+          const inputGoal = (await rl.question(`${c.brightMagenta}Nhập mục tiêu cần thực thi (hoặc 'on'/'off' để đổi chế độ): ${c.reset}`)).trim();
+          if (!inputGoal) {
+            console.log(`${c.dim}Đã hủy lệnh /goal.${c.reset}\n`);
+            continue;
+          }
+          if (inputGoal.toLowerCase() === 'on') {
+            agentLoop.setGoalMode(true);
+            CLI.renderGoalStatus(true);
+            continue;
+          }
+          if (inputGoal.toLowerCase() === 'off') {
+            agentLoop.setGoalMode(false);
+            CLI.renderGoalStatus(false);
+            continue;
+          }
+          taskPrompt = inputGoal;
+        }
+
+        // Khởi chạy tác vụ ở chế độ Goal Mode (không giới hạn số bước)
+        CLI.renderGoalBanner(taskPrompt);
+        const session = new Session();
+        session.addUserMessage(taskPrompt);
+        sessionCount++;
+
+        try {
+          await agentLoop.run(session, { isGoalMode: true });
+        } catch (err: any) {
+          console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Goal Mode:${c.reset}`, err.message);
+          if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
+            console.log(`\n${c.yellow}💡 Gợi ý: Model này không tồn tại hoặc tài khoản/API key chưa được cấp quyền truy cập.`);
+            console.log(`👉 Bạn có thể chuyển sang model khác: /model 1 (Gemini) hoặc /model 4 (Groq)${c.reset}\n`);
+          }
+        }
         continue;
       }
 
