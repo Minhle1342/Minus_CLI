@@ -22,6 +22,10 @@ import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
+import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
+import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
+import { SandboxManager } from './sandbox/sandbox-manager.js';
+import { createRunCommandTool } from './tools/run-command.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -513,6 +517,41 @@ export async function calculateTotal(items: any[]): Promise<number> {
   });
   kernel.ctx.events.emit('tool:before', 'custom_git_branch', {});
   assert(Boolean(beforeToolEventFired), 'Event Bus của Micro-Kernel phát và bắt sự kiện chính xác');
+
+  console.log('\n========================================');
+  console.log('🧪 17. KIỂM THỬ TRUE EXECUTION SANDBOX (PHASE 6)');
+  console.log('========================================');
+
+  // 1. Kiểm thử LocalProcessSandbox
+  const localSandbox = new LocalProcessSandbox(workspace.rootDir);
+  await localSandbox.init();
+  const execSuccess = await localSandbox.exec('node -v');
+  assert(execSuccess.exitCode === 0, 'LocalProcessSandbox thực thi thành công lệnh node -v');
+  assert(execSuccess.sandboxType === 'local', 'Trả về đúng sandboxType là local');
+  assert(execSuccess.stdout.startsWith('v'), 'Nhận diện đúng output phiên bản node');
+
+  const execFail = await localSandbox.exec('node -e "process.exit(2)"');
+  assert(execFail.exitCode === 2, 'LocalProcessSandbox bắt đúng exitCode thất bại (= 2)');
+
+  // 2. Kiểm thử SandboxManager Orchestration
+  const sandboxMgr = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
+  await sandboxMgr.init();
+  const status = sandboxMgr.getStatus();
+  assert(status.mode === 'local', 'SandboxManager khởi tạo thành công ở chế độ local');
+  assert(status.activeProvider.includes('Sandbox'), 'Active provider được định danh chính xác');
+
+  // 3. Kiểm thử run_command tool tích hợp SandboxManager
+  const sandboxedRunTool = createRunCommandTool(sandboxMgr);
+  const toolExecRes = await sandboxedRunTool.execute({ command: 'node -v' }, workspace);
+  assert(toolExecRes.exitCode === 0, 'run_command tích hợp SandboxManager thực thi thành công');
+  assert(toolExecRes.sandbox === 'local', 'run_command ghi nhận sandboxType đúng');
+
+  // 4. Kiểm thử SandboxPlugin trong AgentKernel
+  const sandboxKernel = new AgentKernel(workspace);
+  await sandboxKernel.use(SandboxPlugin);
+  assert(sandboxKernel.getLoadedPlugins().includes('sandbox-plugin'), 'SandboxPlugin nạp thành công vào AgentKernel');
+  await sandboxKernel.unuse('sandbox-plugin');
+  assert(!sandboxKernel.getLoadedPlugins().includes('sandbox-plugin'), 'SandboxPlugin giải phóng và unuse thành công');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

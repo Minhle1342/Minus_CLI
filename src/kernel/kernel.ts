@@ -8,6 +8,7 @@ import { CheckpointManager } from '../workspace/checkpoint.js';
 import { ContextCompactor } from '../agent/context-compactor.js';
 import { ReflectionEngine } from '../agent/reflection-engine.js';
 import { ToolDefinition } from '../tools/types.js';
+import { SandboxManager } from '../sandbox/sandbox-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -31,6 +32,7 @@ export interface KernelContext {
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
+  sandbox: SandboxManager;
   llm: any;
   events: EventEmitter;
   registerTool: (tool: ToolDefinition) => void;
@@ -66,7 +68,9 @@ export class AgentKernel {
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
+    const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tools = new ToolRegistry(plan, memory);
+    tools.attachSandboxManager(sandbox);
     const toolRunner = new ToolRunner(tools, workspace);
 
     this.ctx = {
@@ -78,6 +82,7 @@ export class AgentKernel {
       checkpoints,
       compactor,
       reflection,
+      sandbox,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {
@@ -89,6 +94,7 @@ export class AgentKernel {
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         (this.ctx as any).memory = new ProjectMemoryManager(newWs.rootDir);
+        this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
         this.ctx.checkpoints.init().catch(() => {});
         this.ctx.memory.init(newWs).catch(() => {});
         this.ctx.events.emit('workspace:changed', oldPath, newWs.rootDir);
@@ -120,6 +126,7 @@ export class AgentKernel {
     if (this.isInitialized) return;
     await this.ctx.checkpoints.init();
     await this.ctx.memory.init(this.ctx.workspace);
+    await this.ctx.sandbox.init();
     this.isInitialized = true;
     this.ctx.events.emit('kernel:init');
   }

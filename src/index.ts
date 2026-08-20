@@ -14,6 +14,7 @@ import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
+import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -112,6 +113,7 @@ async function main() {
   await kernel.use(WorkspacePlugin);
   await kernel.use(PlanningPlugin);
   await kernel.use(MemoryPlugin);
+  await kernel.use(SandboxPlugin);
   await kernel.init();
 
   const toolRegistry = kernel.ctx.tools;
@@ -152,6 +154,11 @@ async function main() {
 
       if (trimmed === '/tools') {
         CLI.renderTools(toolRegistry.getAll().map((t) => ({ name: t.name, description: t.description })));
+        continue;
+      }
+
+      if (trimmed === '/sandbox') {
+        CLI.renderSandbox(kernel.ctx.sandbox.getStatus());
         continue;
       }
 

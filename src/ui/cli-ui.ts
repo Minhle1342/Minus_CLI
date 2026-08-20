@@ -138,6 +138,7 @@ export class CLI {
     console.log(`\n${c.cyan}${c.bold}╭── ⚡ GỢI Ý CÂU LỆNH NHANH (SLASH COMMANDS) ────────────────────────────────╮${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, DeepSeek,...)    ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace làm việc (/cd <path>)    ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sandbox${c.reset}        ${c.gray}Xem trạng thái môi trường cô lập Sandbox (Docker/Local) ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/memory${c.reset}         ${c.gray}Xem bộ nhớ dài hạn của dự án (.codingagent/ memory)     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất ${c.cyan}${c.bold}│${c.reset}`);
@@ -185,6 +186,7 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model <name>${c.reset}       Chuyển đổi trực tiếp sang mô hình chỉ định          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (hoặc /cd <path>)  ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sandbox${c.reset}            Xem trạng thái môi trường cô lập Sandbox            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/memory${c.reset}             Xem bộ nhớ dài hạn của dự án (.codingagent)         ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/undo${c.reset}               Hoàn tác (Rollback) về checkpoint trước khi sửa     ${c.cyan}${c.bold}│${c.reset}`);
@@ -322,6 +324,21 @@ export class CLI {
     }
 
     console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị trạng thái môi trường Sandbox
+   */
+  static renderSandbox(status: any): void {
+    console.log(`\n${c.green}${c.bold}╭── 🛡️  EXECUTION SANDBOX STATUS ───────────────────────────────────────────╮${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Provider:${c.reset}        ${c.brightCyan}${status.activeProvider}${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Chế độ:${c.reset}          ${c.yellow}${status.mode.toUpperCase()}${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Cách ly (Isolated):${c.reset} ${status.isIsolated ? `${c.brightGreen}✔ CÔ LẬP HOÀN TOÀN (Docker)` : `${c.yellow}⚠ HOST OS (Có bộ lọc Allowlist)`}${c.reset}`);
+    if (status.containerId) {
+      console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Container ID:${c.reset}    ${c.dim}${status.containerId}${c.reset}`);
+      console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Docker Image:${c.reset}    ${c.dim}${status.image}${c.reset}`);
+    }
+    console.log(`${c.green}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**

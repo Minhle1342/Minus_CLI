@@ -6,7 +6,7 @@ import { listFilesTool } from './list-files.js';
 import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
 import { writeFileTool } from './write-file.js';
-import { runCommandTool } from './run-command.js';
+import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -51,6 +51,10 @@ export class ToolRegistry {
   attachMemoryManager(memoryManager: ProjectMemoryManager): void {
     this.register(createSaveMemoryTool(memoryManager));
     this.register(createReadMemoryTool(memoryManager));
+  }
+
+  attachSandboxManager(sandboxManager: any): void {
+    this.register(createRunCommandTool(sandboxManager));
   }
 
   /**

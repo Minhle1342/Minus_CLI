@@ -30,13 +30,13 @@
       "key": "test_rule",
       "insight": "Always run npm test before committing",
       "category": "rule",
-      "recordedAt": "20:59:33 20/8/2026"
+      "recordedAt": "21:08:50 20/8/2026"
     },
     {
       "key": "auth_pattern",
       "insight": "Use JWT bearer tokens in header",
       "category": "architecture",
-      "recordedAt": "20:59:33 20/8/2026"
+      "recordedAt": "21:08:50 20/8/2026"
     }
   ],
   "lastIndexed": "2026-08-20T13:39:51.642Z"
