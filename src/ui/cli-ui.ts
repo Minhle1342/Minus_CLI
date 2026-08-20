@@ -58,6 +58,21 @@ export interface ModelOption {
 }
 
 export const AVAILABLE_MODELS: ModelOption[] = [
+  // 0. Smart 3-Tier Fallback Router & 9Router Gateway (Chống Rate-Limit khi Mid-Coding)
+  {
+    id: '0',
+    name: 'auto-fallback',
+    provider: '3-Tier Smart Router (Chống Rate-Limit)',
+    desc: 'Tự động luân chuyển: Gemini ➔ Groq ➔ Cerebras ➔ SambaNova ➔ Pollinations khi bị 429',
+    recommended: true,
+  },
+  {
+    id: '9r',
+    name: '9router/auto',
+    provider: '9Router Gateway (Local Proxy)',
+    desc: 'Định tuyến qua 9Router Proxy (localhost:20128/v1) với RTK Token Saver & 40+ providers',
+  },
+
   // 1. Google AI Studio (Free Tier: 1.500 req/ngày, 1M Context - Đã kiểm tra hoạt động 100%)
   {
     id: '1',

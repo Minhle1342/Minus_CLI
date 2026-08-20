@@ -24,6 +24,8 @@ import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
 import { TaskPlugin } from './kernel/plugins/task-plugin.js';
+import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
+import { SearchPlugin } from './kernel/plugins/search-plugin.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { TaskManager } from './tasks/task-manager.js';
@@ -746,6 +748,44 @@ export async function calculateTotal(items: any[]): Promise<number> {
   });
   testKernel.ctx.setLLM({ name: 'mock' }, 'gemini-3.5-flash');
   assert(modelChangedFired === 'gemini-3.5-flash', 'Micro-Kernel phát đúng event model:changed khi setLLM');
+
+  console.log('\n========================================');
+  console.log('🧪 21. KIỂM THỬ TOKEN OPTIMIZATION (REPOMIX, MINISEARCH & KV-CACHE ALIGNMENT)');
+  console.log('========================================');
+
+  // 1. Kiểm tra RepomixPlugin
+  const optKernel = new AgentKernel(workspace);
+  await optKernel.use(RepomixPlugin);
+  await optKernel.use(SearchPlugin);
+
+  assert(optKernel.ctx.tools.get('read_compressed_code') !== undefined, 'RepomixPlugin đăng ký thành công tool read_compressed_code');
+  assert(optKernel.ctx.tools.get('pack_codebase') !== undefined, 'RepomixPlugin đăng ký thành công tool pack_codebase');
+  assert(optKernel.ctx.tools.get('search_codebase_fast') !== undefined, 'SearchPlugin đăng ký thành công tool search_codebase_fast');
+
+  // 2. Kiểm tra thực thi search_codebase_fast (MiniSearch BM25)
+  const searchTool = optKernel.ctx.tools.get('search_codebase_fast')!;
+  const msSearchRes = await searchTool.execute({ query: 'AgentLoop' }, workspace);
+  assert(msSearchRes.totalHits > 0, 'search_codebase_fast tìm thấy ký hiệu code chính xác');
+  assert(msSearchRes.hits && msSearchRes.hits.length > 0, 'search_codebase_fast trả về danh sách hits với score BM25');
+
+  // 3. Kiểm tra thực thi read_compressed_code (Repomix Tree-sitter)
+  const readCompTool = optKernel.ctx.tools.get('read_compressed_code')!;
+  const compRes = await readCompTool.execute({ paths: ['src/tools/types.ts'] }, workspace);
+  assert(compRes.totalFiles === 1, 'read_compressed_code nén và đọc đúng 1 tệp');
+  assert(typeof compRes.totalTokens === 'number', 'read_compressed_code tính toán chính xác lượng token nén');
+
+  // 4. Kiểm tra KV-Cache Prefix Alignment (Sắp xếp tool declarations cố định theo tên)
+  const sortedDecls = optKernel.ctx.tools.getFunctionDeclarations();
+  let isSorted = true;
+  for (let i = 1; i < sortedDecls.length; i++) {
+    const prevName = sortedDecls[i - 1]?.name || '';
+    const currName = sortedDecls[i]?.name || '';
+    if (prevName.localeCompare(currName) > 0) {
+      isSorted = false;
+      break;
+    }
+  }
+  assert(isSorted === true, 'KV-Cache Prefix Alignment: Toàn bộ FunctionDeclarations được sắp xếp cố định theo tên');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

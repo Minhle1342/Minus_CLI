@@ -1,0 +1,88 @@
+{
+  "$schema": "https://raw.githubusercontent.com/decolua/9router/main/schema.json",
+  "name": "CodingAgent-9Router-Gateway",
+  "version": "1.0.0",
+  "server": {
+    "port": 20128,
+    "host": "127.0.0.1",
+    "prefix": "/v1"
+  },
+  "features": {
+    "rtkTokenSaver": true,
+    "compressionLevel": "medium",
+    "autoFallback": true,
+    "maxRetries": 3,
+    "timeoutMs": 60000
+  },
+  "routingTiers": {
+    "tier1_primary": [
+      {
+        "provider": "google",
+        "model": "gemini-3.7-flash",
+        "apiKeyEnv": "GEMINI_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+        "weight": 100
+      },
+      {
+        "provider": "google",
+        "model": "gemini-3.6-flash",
+        "apiKeyEnv": "GEMINI_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+        "weight": 80
+      }
+    ],
+    "tier2_fast_fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.3-70b-versatile",
+        "apiKeyEnv": "GROQ_API_KEY",
+        "baseUrl": "https://api.groq.com/openai/v1",
+        "weight": 100
+      },
+      {
+        "provider": "cerebras",
+        "model": "llama-3.3-70b",
+        "apiKeyEnv": "CEREBRAS_API_KEY",
+        "baseUrl": "https://api.cerebras.ai/v1",
+        "weight": 90
+      },
+      {
+        "provider": "sambanova",
+        "model": "Meta-Llama-3.3-70B-Instruct",
+        "apiKeyEnv": "SAMBANOVA_API_KEY",
+        "baseUrl": "https://api.sambanova.ai/v1",
+        "weight": 80
+      }
+    ],
+    "tier3_backup_free": [
+      {
+        "provider": "mistral",
+        "model": "codestral-latest",
+        "apiKeyEnv": "MISTRAL_API_KEY",
+        "baseUrl": "https://api.mistral.ai/v1",
+        "weight": 100
+      },
+      {
+        "provider": "siliconflow",
+        "model": "deepseek-ai/DeepSeek-V3",
+        "apiKeyEnv": "SILICONFLOW_API_KEY",
+        "baseUrl": "https://api.siliconflow.cn/v1",
+        "weight": 90
+      },
+      {
+        "provider": "openrouter",
+        "model": "free",
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "weight": 80
+      },
+      {
+        "provider": "pollinations",
+        "model": "openai",
+        "apiKey": "none",
+        "baseUrl": "https://text.pollinations.ai/openai",
+        "weight": 70
+      }
+    ]
+  }
+}

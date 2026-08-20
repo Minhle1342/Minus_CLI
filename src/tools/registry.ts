@@ -26,7 +26,7 @@ export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
 
   constructor(planManager?: PlanManager, memoryManager?: ProjectMemoryManager) {
-    // 1. Đăng ký các công cụ khảo sát và thao tác file
+    // Đăng ký mặc định 6 tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
     this.register(searchTextTool);
@@ -34,17 +34,12 @@ export class ToolRegistry {
     this.register(writeFileTool);
     this.register(runCommandTool);
 
-    // 2. Đăng ký công cụ tối ưu hóa Token: Repomix (Tree-sitter compression) & MiniSearch (BM25)
-    this.register(createReadCompressedCodeTool());
-    this.register(createPackCodebaseTool());
-    this.register(createSearchCodebaseFastTool());
-
-    // 3. Đăng ký các planning tools nếu có PlanManager
+    // Đăng ký các planning tools nếu có PlanManager
     if (planManager) {
       this.attachPlanManager(planManager);
     }
 
-    // 4. Đăng ký các memory tools nếu có ProjectMemoryManager
+    // Đăng ký các memory tools nếu có ProjectMemoryManager
     if (memoryManager) {
       this.attachMemoryManager(memoryManager);
     }

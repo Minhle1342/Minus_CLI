@@ -5,6 +5,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
 import { GeminiLLM } from './llm/gemini.js';
 import { DeepseekLLM } from './llm/deepseek.js';
+import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { Session } from './session/session.js';
@@ -141,6 +142,88 @@ function getInitialModelName(savedModel?: string, cliModel?: string): string {
 }
 
 async function createLLM(model: string) {
+  // 0. Smart Multi-Provider 3-Tier Fallback Router (Chống Rate-Limit & Quá tải)
+  if (model === 'auto-fallback' || model === 'smart-router') {
+    const tiers: ProviderTier[] = [];
+
+    // Tier 1: Primary Google Gemini (3.7 / 3.6 / 3.5 Flash)
+    if (apiKey) {
+      tiers.push({
+        name: 'gemini-3.7-flash',
+        provider: 'Google AI Studio',
+        tier: 1,
+        createClient: () => new GeminiLLM(apiKey, 'gemini-3.7-flash'),
+      });
+      tiers.push({
+        name: 'gemini-3.6-flash',
+        provider: 'Google AI Studio',
+        tier: 1,
+        createClient: () => new GeminiLLM(apiKey, 'gemini-3.6-flash'),
+      });
+    }
+
+    // Tier 2: High-Speed LPUs (Groq, Cerebras, SambaNova)
+    if (groqApiKey) {
+      tiers.push({
+        name: 'groq/llama-3.3-70b-versatile',
+        provider: 'Groq Cloud',
+        tier: 2,
+        createClient: () => new DeepseekLLM(groqApiKey, 'llama-3.3-70b-versatile', undefined, 'https://api.groq.com/openai/v1'),
+      });
+    }
+    if (cerebrasApiKey) {
+      tiers.push({
+        name: 'cerebras/llama-3.3-70b',
+        provider: 'Cerebras Cloud',
+        tier: 2,
+        createClient: () => new DeepseekLLM(cerebrasApiKey, 'llama-3.3-70b', undefined, 'https://api.cerebras.ai/v1'),
+      });
+    }
+    if (sambanovaApiKey) {
+      tiers.push({
+        name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
+        provider: 'SambaNova Cloud',
+        tier: 2,
+        createClient: () => new DeepseekLLM(sambanovaApiKey, 'Meta-Llama-3.3-70B-Instruct', undefined, 'https://api.sambanova.ai/v1'),
+      });
+    }
+
+    // Tier 3: Backup Free Pool & Zero-Key
+    if (mistralApiKey) {
+      tiers.push({
+        name: 'mistral/codestral-latest',
+        provider: 'Mistral AI',
+        tier: 3,
+        createClient: () => new DeepseekLLM(mistralApiKey, 'codestral-latest', undefined, 'https://api.mistral.ai/v1'),
+      });
+    }
+    if (openrouterApiKey) {
+      tiers.push({
+        name: 'openrouter/free',
+        provider: 'OpenRouter Free',
+        tier: 3,
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1'),
+      });
+    }
+    // Always attach Pollinations Zero-Key as ultimate fail-safe
+    tiers.push({
+      name: 'pollinations/openai',
+      provider: 'Pollinations Community (Zero-Key)',
+      tier: 3,
+      createClient: () => new DeepseekLLM('dummy_key', 'openai', undefined, 'https://text.pollinations.ai/openai'),
+    });
+
+    return new FallbackRouterLLM('auto-fallback', tiers);
+  }
+
+  // 0.1. 9Router Local Gateway (Proxy tại localhost:20128/v1)
+  if (model.startsWith('9router/')) {
+    const rawModel = model.replace(/^9router\//, '');
+    const baseUrl = process.env.NINE_ROUTER_BASE_URL || 'http://localhost:20128/v1';
+    const key = process.env.NINE_ROUTER_API_KEY || '123456';
+    return new DeepseekLLM(key, rawModel === 'auto' ? 'auto' : rawModel, undefined, baseUrl);
+  }
+
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)
   if (
     model.startsWith('gemini') ||

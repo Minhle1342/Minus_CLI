@@ -9,6 +9,7 @@
     "test": "tsx src/test-suite.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "build": "tsc",
+    "9router": "node scripts/start-9router.js",
     "start": "node dist/index.js"
   },
   "keywords": [
