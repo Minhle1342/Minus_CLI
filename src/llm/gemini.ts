@@ -2,6 +2,11 @@ import { GoogleGenAI, type FunctionDeclaration, type FunctionCall } from '@googl
 import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 
+export interface StreamCallbacks {
+  onThoughtToken?: (token: string) => void;
+  onContentToken?: (token: string) => void;
+}
+
 export interface LLMResponse {
   text?: string;
   reasoningContent?: string;
@@ -10,10 +15,7 @@ export interface LLMResponse {
 }
 
 /**
- * GeminiLLM chịu trách nhiệm giao tiếp với Google Gemini API (Dual-Loop CoT Separation Ready).
- * 
- * Luồng dữ liệu:
- * System Prompt + Session messages + Tool definitions ──> Gemini API ──> LLMResponse (reasoningContent + text/toolCalls)
+ * GeminiLLM - Tích hợp Real-time Streaming & CoT Separation
  */
 export class GeminiLLM {
   private client: GoogleGenAI;
@@ -34,56 +36,67 @@ export class GeminiLLM {
   }
 
   /**
-   * Gửi toàn bộ lịch sử trò chuyện và danh sách schema của tools cho Gemini
+   * Tạo phản hồi qua luồng Real-time Stream
    */
-  async generate(session: Session, tools: FunctionDeclaration[]): Promise<LLMResponse> {
+  async generateStream(
+    session: Session,
+    tools: FunctionDeclaration[],
+    callbacks?: StreamCallbacks
+  ): Promise<LLMResponse> {
     const contents = session.getHistory();
 
-    const response = await this.client.models.generateContent({
+    const responseStream = await this.client.models.generateContentStream({
       model: this.modelName,
       contents,
       config: {
         systemInstruction: this.systemPrompt,
-        // Chỉ truyền tools nếu có ít nhất 1 tool
         tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
       },
     });
 
-    const candidate = response.candidates?.[0];
-    const rawContent = candidate?.content;
-    const toolCalls: FunctionCall[] = response.functionCalls || [];
+    const thoughtParts: string[] = [];
+    const regularTextParts: string[] = [];
+    const toolCalls: FunctionCall[] = [];
+    let lastRawContent: any = undefined;
 
-    let text: string | undefined;
-    let reasoningContent: string | undefined;
+    for await (const chunk of responseStream) {
+      const candidate = chunk.candidates?.[0];
+      if (candidate?.content) {
+        lastRawContent = candidate.content;
+      }
 
-    if (candidate?.content?.parts) {
-      const thoughtParts: string[] = [];
-      const regularTextParts: string[] = [];
+      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+        toolCalls.push(...chunk.functionCalls);
+      }
 
-      for (const part of candidate.content.parts) {
-        if ('text' in part && typeof (part as any).text === 'string') {
-          // Bóc tách suy nghĩ nội tâm (System 2 CoT) từ Gemini Thinking nếu có flag thought: true
-          if ((part as any).thought) {
-            thoughtParts.push((part as any).text);
-          } else {
-            regularTextParts.push((part as any).text);
+      if (candidate?.content?.parts) {
+        for (const part of candidate.content.parts) {
+          if ('text' in part && typeof (part as any).text === 'string') {
+            const token = (part as any).text;
+            if ((part as any).thought) {
+              thoughtParts.push(token);
+              callbacks?.onThoughtToken?.(token);
+            } else {
+              regularTextParts.push(token);
+              callbacks?.onContentToken?.(token);
+            }
           }
         }
-      }
-
-      if (thoughtParts.length > 0) {
-        reasoningContent = thoughtParts.join('\n');
-      }
-      if (regularTextParts.length > 0) {
-        text = regularTextParts.join('\n');
       }
     }
 
     return {
-      text,
-      reasoningContent,
+      text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
+      reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
       toolCalls,
-      rawContent,
+      rawContent: lastRawContent,
     };
+  }
+
+  /**
+   * Phương thức generate đồng bộ (tự động gọi generateStream)
+   */
+  async generate(session: Session, tools: FunctionDeclaration[]): Promise<LLMResponse> {
+    return this.generateStream(session, tools);
   }
 }

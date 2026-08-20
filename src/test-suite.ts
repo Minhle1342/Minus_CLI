@@ -23,9 +23,13 @@ import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
+import { TaskPlugin } from './kernel/plugins/task-plugin.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
+import { TaskManager } from './tasks/task-manager.js';
 import { createRunCommandTool } from './tools/run-command.js';
+import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskTool } from './tools/task-tools.js';
+import { loadSession, saveSession, clearSession, getSessionFilePath } from './session/persistent-session.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -181,6 +185,9 @@ async function runUnitTests() {
     constructor() {
       super('dummy-key', 'mock-coding-model');
     }
+    async generateStream(): Promise<any> {
+      return this.generate();
+    }
     async generate(): Promise<any> {
       this.turn++;
       if (this.turn === 1) {
@@ -205,6 +212,9 @@ async function runUnitTests() {
   class MockInfiniteLLM extends GeminiLLM {
     constructor() {
       super('dummy-key', 'mock-infinite-model');
+    }
+    async generateStream(): Promise<any> {
+      return this.generate();
     }
     async generate(): Promise<any> {
       return { toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }] };
@@ -552,6 +562,190 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(sandboxKernel.getLoadedPlugins().includes('sandbox-plugin'), 'SandboxPlugin nạp thành công vào AgentKernel');
   await sandboxKernel.unuse('sandbox-plugin');
   assert(!sandboxKernel.getLoadedPlugins().includes('sandbox-plugin'), 'SandboxPlugin giải phóng và unuse thành công');
+
+  console.log('\n========================================');
+  console.log('🧪 18. KIỂM THỬ REAL-TIME STREAMING & ASYNCHRONOUS SUBPROCESSES');
+  console.log('========================================');
+
+  // 1. Kiểm thử Real-time Streaming Callbacks
+  class StreamingMockLLM {
+    async generateStream(session: any, tools: any, callbacks?: any): Promise<any> {
+      callbacks?.onThoughtToken?.('Thought 1: Analyzing issue\n');
+      callbacks?.onThoughtToken?.('Thought 2: Checked code');
+      callbacks?.onContentToken?.('Answer token 1 ');
+      callbacks?.onContentToken?.('Answer token 2');
+      return {
+        reasoningContent: 'Thought 1: Analyzing issue\nThought 2: Checked code',
+        text: 'Answer token 1 Answer token 2',
+        toolCalls: [],
+      };
+    }
+  }
+
+  const streamedThoughts: string[] = [];
+  const streamedTokens: string[] = [];
+  const streamLLM = new StreamingMockLLM();
+  const streamResp = await streamLLM.generateStream(new Session(), [], {
+    onThoughtToken: (t: string) => streamedThoughts.push(t),
+    onContentToken: (t: string) => streamedTokens.push(t),
+  });
+
+  assert(streamedThoughts.length === 2, 'Streamed đủ 2 token suy nghĩ thời gian thực');
+  assert(streamedTokens.length === 2, 'Streamed đủ 2 token câu trả lời thời gian thực');
+  assert(streamResp.text === 'Answer token 1 Answer token 2', 'Nội dung text tổng hợp trùng khớp');
+
+  // 2. Kiểm thử TaskManager (Background Subprocesses)
+  const taskManager = new TaskManager(workspace.rootDir);
+  const task = taskManager.startTask('node -e "console.log(\'server-heartbeat\'); setInterval(() => {}, 50)"');
+  
+  assert(task.id.startsWith('task_'), 'Khởi tạo thành công task ID');
+  assert(task.status === 'running', 'Trạng thái ban đầu là running');
+  assert(task.pid !== undefined && task.pid > 0, 'Ghi nhận PID hợp lệ của subprocess');
+
+  // Đợi 300ms để process spawn và flush stdout
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const logs = taskManager.getTaskLogs(task.id);
+  assert(logs.includes('server-heartbeat'), 'Đọc logs thời gian thực từ circular log buffer thành công');
+
+  const stopped = await taskManager.stopTask(task.id);
+  assert(stopped === true, 'Dừng background task thành công');
+  assert(task.status === 'stopped', 'Trạng thái chuyển sang stopped');
+
+  // 3. Kiểm thử Background Task Tools
+  const startTool = createStartBackgroundTaskTool(taskManager);
+  const getOutputTool = createGetTaskOutputTool(taskManager);
+  const stopTool = createStopTaskTool(taskManager);
+
+  const startRes = await startTool.execute({ command: 'node -v' }, workspace);
+  assert(startRes.success === true && startRes.task?.id, 'start_background_task tool thực thi thành công');
+
+  const outRes = await getOutputTool.execute({ taskId: startRes.task.id, lines: 10 }, workspace);
+  assert(outRes.logs !== undefined, 'get_task_output tool trả về log buffer');
+
+  const stopRes = await stopTool.execute({ taskId: startRes.task.id }, workspace);
+  assert(stopRes.success !== undefined, 'stop_task tool phản hồi thành công');
+
+  // 4. Kiểm thử TaskPlugin
+  const taskKernel = new AgentKernel(workspace);
+  await taskKernel.use(TaskPlugin);
+  assert(taskKernel.getLoadedPlugins().includes('task-plugin'), 'TaskPlugin nạp thành công vào AgentKernel');
+  assert(taskKernel.ctx.tools.get('start_background_task') !== undefined, 'Tool start_background_task được đăng ký tự động');
+  await taskKernel.unuse('task-plugin');
+  assert(!taskKernel.getLoadedPlugins().includes('task-plugin'), 'TaskPlugin unuse thành công');
+  await taskManager.dispose();
+
+  console.log('\n========================================');
+  console.log('🧪 19. KIỂM THỬ CONTINUATION PROTOCOL & EMPTY RESPONSE RECOVERY (DEEPSEEK-HARNESS)');
+  console.log('========================================');
+
+  // 1. Kiểm thử khi LLM trả về turn 1 rỗng (không text, không tool), Continuation Protocol tự động re-prompt
+  class MockEmptyTurnLLM {
+    private turn = 0;
+    async generate(session: Session): Promise<any> {
+      this.turn++;
+      if (this.turn === 1) {
+        // Turn 1 trả về hoàn toàn rỗng
+        return { text: '', toolCalls: [] };
+      }
+      // Turn 2 sau khi nhận [SYSTEM NOTE] re-prompt từ AgentLoop
+      const history = session.getHistory();
+      const lastMsg = history[history.length - 1];
+      const hasNote = lastMsg.parts?.some((p: any) => p.text?.includes('[SYSTEM NOTE]'));
+      if (hasNote) {
+        return { text: 'Tôi đã tiếp tục xử lý và hoàn thành nhiệm vụ thành công!', toolCalls: [] };
+      }
+      return { text: 'Không nhận được prompt khôi phục', toolCalls: [] };
+    }
+  }
+
+  const emptyTurnLoop = new AgentLoop(new MockEmptyTurnLLM(), new ToolRegistry(), { maxSteps: 5, workspace });
+  const emptySession = new Session();
+  emptySession.addUserMessage('Kiểm tra tự phục hồi khi gặp turn rỗng');
+  const recoveryResult = await emptyTurnLoop.run(emptySession);
+
+  assert(!recoveryResult.includes('(Không có phản hồi từ model)'), 'Không bao giờ dừng sớm với lỗi (Không có phản hồi từ model)');
+  assert(recoveryResult.includes('tiếp tục xử lý và hoàn thành nhiệm vụ'), 'Continuation Protocol tự động khôi phục và hoàn thành ở turn tiếp theo');
+
+  // 2. Kiểm thử khi LLM trả về System 2 Reasoning nhưng chưa phát sinh hành động
+  class MockReasoningOnlyLLM {
+    private turn = 0;
+    async generate(session: Session): Promise<any> {
+      this.turn++;
+      if (this.turn === 1) {
+        return {
+          reasoningContent: 'Tôi đã phân tích xong cấu trúc dự án. Cần đọc file package.json tiếp theo.',
+          text: '',
+          toolCalls: [],
+        };
+      }
+      return {
+        toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }],
+      };
+    }
+  }
+
+  const reasoningRegistry19 = new ToolRegistry();
+  const reasoningLoop19 = new AgentLoop(new MockReasoningOnlyLLM(), reasoningRegistry19, { maxSteps: 3, workspace });
+  const reasoningSession19 = new Session();
+  reasoningSession19.addUserMessage('Phân tích dự án');
+  await reasoningLoop19.run(reasoningSession19);
+  assert(reasoningSession19.getHistory().length > 2, 'Continuation Protocol thúc đẩy model từ System 2 sang System 1 Tool Call');
+
+  console.log('\n========================================');
+  console.log('🧪 20. KIỂM THỬ PERSISTENT SESSION (SAVE & RESTORE MODEL / WORKSPACE)');
+  console.log('========================================');
+
+  const testSessionFile = path.resolve(workspace.rootDir, 'temp', 'test-session.json');
+
+  // Đảm bảo dọn dẹp trước khi test
+  clearSession(testSessionFile);
+
+  // 1. Kiểm tra loadSession khi file chưa tồn tại
+  const emptyLoaded = loadSession(testSessionFile);
+  assert(emptyLoaded.modelName === undefined && emptyLoaded.workspacePath === undefined, 'loadSession trả về object rỗng khi file chưa tồn tại');
+
+  // 2. Kiểm tra saveSession và loadSession đầy đủ
+  const sampleWorkspace = path.resolve(workspace.rootDir, 'src');
+  saveSession({
+    modelName: 'deepseek-chat',
+    workspacePath: sampleWorkspace,
+  }, testSessionFile);
+
+  const fullLoaded = loadSession(testSessionFile);
+  assert(fullLoaded.modelName === 'deepseek-chat', 'Lưu và tải chính xác modelName từ session');
+  assert(fullLoaded.workspacePath === sampleWorkspace, 'Lưu và tải chính xác workspacePath từ session');
+  assert(typeof fullLoaded.lastUpdated === 'string', 'Tự động ghi nhận timestamp lastUpdated');
+
+  // 3. Kiểm tra partial update (chỉ cập nhật modelName mà không làm mất workspacePath)
+  saveSession({ modelName: 'gemini-2.5-pro' }, testSessionFile);
+  const updatedModel = loadSession(testSessionFile);
+  assert(updatedModel.modelName === 'gemini-2.5-pro', 'Cập nhật thành công modelName mới');
+  assert(updatedModel.workspacePath === sampleWorkspace, 'Bảo toàn nguyên vẹn workspacePath cũ khi cập nhật riêng model');
+
+  // 4. Kiểm tra partial update (chỉ cập nhật workspacePath mà không làm mất modelName)
+  const newWorkspace = path.resolve(workspace.rootDir, 'dist');
+  saveSession({ workspacePath: newWorkspace }, testSessionFile);
+  const updatedWs = loadSession(testSessionFile);
+  assert(updatedWs.workspacePath === newWorkspace, 'Cập nhật thành công workspacePath mới');
+  assert(updatedWs.modelName === 'gemini-2.5-pro', 'Bảo toàn nguyên vẹn modelName cũ khi cập nhật riêng workspace');
+
+  // 5. Kiểm tra getSessionFilePath trả về đường dẫn hợp lệ kết thúc bằng .codingagent/session.json
+  const defaultPath = getSessionFilePath();
+  assert(defaultPath.endsWith(path.join('.codingagent', 'session.json')), 'getSessionFilePath trả về đúng đường dẫn .codingagent/session.json');
+
+  // 6. Kiểm tra clearSession dọn dẹp file thành công
+  const cleared = clearSession(testSessionFile);
+  assert(cleared === true, 'clearSession xóa file session thành công');
+  assert(loadSession(testSessionFile).modelName === undefined, 'Sau khi clearSession, loadSession trả về rỗng');
+
+  // 7. Kiểm tra Micro-Kernel phát event model:changed
+  let modelChangedFired: string | null = null;
+  const testKernel = new AgentKernel(workspace);
+  testKernel.ctx.events.on('model:changed', (m: string) => {
+    modelChangedFired = m;
+  });
+  testKernel.ctx.setLLM({ name: 'mock' }, 'gemini-3.5-flash');
+  assert(modelChangedFired === 'gemini-3.5-flash', 'Micro-Kernel phát đúng event model:changed khi setLLM');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

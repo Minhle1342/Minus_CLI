@@ -12,15 +12,16 @@ import { ProjectMemoryManager } from '../memory/project-memory.js';
 import { AgentKernel, KernelContext } from '../kernel/kernel.js';
 
 /**
- * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (Phase 5 - Micro-Kernel Ready)
+ * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
  * 
  * Vòng lặp vận hành theo kiến trúc Plugin & Micro-Kernel:
  * 1. Warm-Start: Nạp Project Knowledge Digest từ bộ nhớ dài hạn.
  * 2. Tối ưu hoá Token và nén ngữ cảnh (Context Compactor).
- * 3. Gửi Session messages + Tools cho LLM.
+ * 3. Gửi Session messages + Tools cho LLM (Real-time Streaming).
  * 4. System 2: Bóc tách và hiển thị Deep Reasoning / CoT Internal Monologue.
  * 5. System 1: Điều phối gọi Tool qua 5-stage pipeline an toàn.
- * 6. Reflection Engine: Kích hoạt Debugging Protocol khi gặp lỗi.
+ * 6. Continuation Protocol: Tự động phát hiện và khôi phục khi LLM trả về turn rỗng (chống dừng sớm).
+ * 7. Reflection Engine: Kích hoạt Debugging Protocol khi gặp lỗi.
  */
 export class AgentLoop {
   private llm: any;
@@ -91,10 +92,10 @@ export class AgentLoop {
     }
   }
 
-  setLLM(llm: any) {
+  setLLM(llm: any, modelName?: string) {
     this.llm = llm;
     if (this.kernel) {
-      this.kernel.ctx.setLLM(llm);
+      this.kernel.ctx.setLLM(llm, modelName);
     }
   }
 
@@ -109,6 +110,8 @@ export class AgentLoop {
     const toolDeclarations = this.toolRegistry.getFunctionDeclarations();
     this.planManager.clear();
     this.reflectionEngine.reset();
+    let consecutiveEmptyTurns = 0;
+    const maxEmptyRetries = 2;
 
     // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
     const history = session.getHistory();
@@ -130,8 +133,20 @@ export class AgentLoop {
         session.setHistory(compactionResult.messages);
       }
 
-      // 3. Gửi session hiện tại cho LLM
-      const response = await this.llm.generate(session, toolDeclarations);
+      // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
+      let response;
+      if (typeof this.llm.generateStream === 'function') {
+        response = await this.llm.generateStream(session, toolDeclarations, {
+          onThoughtToken: (token: string) => {
+            this.kernel?.ctx.events.emit('model:thought', token);
+          },
+          onContentToken: (token: string) => {
+            this.kernel?.ctx.events.emit('model:token', token);
+          },
+        });
+      } else {
+        response = await this.llm.generate(session, toolDeclarations);
+      }
 
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
       if (response.reasoningContent) {
@@ -139,8 +154,13 @@ export class AgentLoop {
         this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
       }
 
+      const hasToolCalls = Boolean(response.toolCalls && response.toolCalls.length > 0);
+      const hasValidText = Boolean(response.text && response.text.trim().length > 0);
+      const hasReasoning = Boolean(response.reasoningContent && response.reasoningContent.trim().length > 0);
+
       // 4. Nếu model muốn gọi tool (System 1: Action)
-      if (response.toolCalls && response.toolCalls.length > 0) {
+      if (hasToolCalls) {
+        consecutiveEmptyTurns = 0;
         CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
 
         // Ghi lại phản hồi gọi tool của model vào Session
@@ -209,8 +229,49 @@ export class AgentLoop {
         continue;
       }
 
-      // 5. Nếu model trả về câu trả lời cuối cùng (Final Answer)
-      const finalAnswer = response.text || '(Không có phản hồi từ model)';
+      // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
+      if (!hasValidText) {
+        consecutiveEmptyTurns++;
+
+        if (consecutiveEmptyTurns <= maxEmptyRetries) {
+          if (hasReasoning) {
+            CLI.renderReflectionAlert(
+              consecutiveEmptyTurns,
+              'Model sinh suy luận System 2 nhưng chưa phát sinh tool_calls. Đang tự động kích hoạt Continuation Protocol...'
+            );
+            session.addUserMessage(
+              '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.'
+            );
+          } else {
+            CLI.renderReflectionAlert(
+              consecutiveEmptyTurns,
+              'Model trả về phản hồi rỗng. Đang tự động kích hoạt Continuation Protocol để tiếp tục tác vụ...'
+            );
+            session.addUserMessage(
+              '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.'
+            );
+          }
+
+          CLI.renderStepFooter();
+          this.kernel?.ctx.events.emit('step:after', step);
+          continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
+        }
+
+        // Nếu đã thử re-prompt 3 lần mà vẫn không có text nhưng có reasoning, dùng reasoning làm fallback
+        if (hasReasoning) {
+          const fallbackAnswer = `[Tóm tắt kết quả phân tích]:\n${response.reasoningContent}`;
+          CLI.renderModelAction('final_answer');
+          CLI.renderStepFooter();
+          CLI.renderFinalAnswer(fallbackAnswer);
+          this.kernel?.ctx.events.emit('model:final_answer', fallbackAnswer);
+          session.addModelMessage({ text: fallbackAnswer, rawContent: response.rawContent });
+          return fallbackAnswer;
+        }
+      }
+
+      // 6. Nếu model trả về câu trả lời cuối cùng hợp lệ (Final Answer)
+      const finalAnswer = response.text || '(Nhiệm vụ đã hoàn tất)';
+      consecutiveEmptyTurns = 0;
       
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
@@ -223,7 +284,7 @@ export class AgentLoop {
       return finalAnswer;
     }
 
-    // 6. Nếu đạt maxSteps mà chưa hoàn thành
+    // 7. Nếu đạt maxSteps mà chưa hoàn thành
     const timeoutMessage = `Agent stopped: maximum steps (${this.maxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();

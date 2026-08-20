@@ -45,6 +45,7 @@ export interface StatusOptions {
   workspaceRoot: string;
   maxSteps: number;
   sessionTurns: number;
+  sessionFile?: string;
 }
 
 export interface ModelOption {
@@ -56,60 +57,194 @@ export interface ModelOption {
 }
 
 export const AVAILABLE_MODELS: ModelOption[] = [
+  // 1. Google AI Studio (Free Tier: 1.500 req/ngày, 1M context)
   {
     id: '1',
     name: 'gemini-3.1-flash-lite-preview',
     provider: 'Google AI Studio',
-    desc: 'Miễn phí 1.500 req/ngày, phản hồi cực nhanh, gọi tool chuẩn',
+    desc: 'Free Tier 1.500 req/ngày, phản hồi cực nhanh, gọi tool chuẩn xác',
     recommended: true,
   },
   {
     id: '2',
-    name: 'gemini-3.5-flash',
+    name: 'gemini-2.5-flash',
     provider: 'Google AI Studio',
-    desc: 'Cân bằng giữa tốc độ và khả năng lập trình toàn diện',
+    desc: 'Free Tier, cân bằng giữa tốc độ và khả năng lập trình toàn diện',
   },
   {
     id: '3',
     name: 'gemini-2.5-pro',
     provider: 'Google AI Studio',
-    desc: 'Khả năng suy luận và xử lý logic code chuyên sâu nhất của Google',
+    desc: 'Free Tier, khả năng suy luận sâu và context khổng lồ 1M tokens',
   },
+
+  // 2. Groq Cloud (Free Tier: Siêu tốc độ LPU >500 tokens/s)
   {
     id: '4',
-    name: 'deepseek-chat',
-    provider: 'DeepSeek Direct V3',
-    desc: 'Mô hình lập trình mạnh mẽ hàng đầu của DeepSeek (cần key)',
+    name: 'groq/llama-3.3-70b-versatile',
+    provider: 'Groq Cloud (Free)',
+    desc: 'Llama 3.3 70B chạy trên chip LPU siêu tốc ~300 tok/s, rất thông minh',
+    recommended: true,
   },
   {
     id: '5',
-    name: 'deepseek-reasoner',
-    provider: 'DeepSeek Direct R1',
-    desc: 'Mô hình lý luận sâu Chain of Thought (cần key)',
+    name: 'groq/deepseek-r1-distill-llama-70b',
+    provider: 'Groq Cloud (Free)',
+    desc: 'DeepSeek R1 reasoning suy luận từng bước siêu tốc trên Groq',
   },
   {
     id: '6',
-    name: 'openrouter/free',
-    provider: 'OpenRouter Free Router',
-    desc: 'Tự động định tuyến sang các model miễn phí trên OpenRouter',
+    name: 'groq/llama-3.1-8b-instant',
+    provider: 'Groq Cloud (Free)',
+    desc: 'Llama 3.1 8B phản hồi tức thì ~600 tokens/s, cực kỳ nhẹ',
   },
   {
     id: '7',
-    name: 'gemma2-9b-it',
+    name: 'groq/gemma2-9b-it',
     provider: 'Groq Cloud (Free)',
-    desc: 'Gemma 2 9B chạy trên chip LPU siêu tốc > 500 tokens/s (cần GROQ_API_KEY)',
+    desc: 'Google Gemma 2 9B chạy trên Groq LPU',
   },
+
+  // 3. Cerebras Cloud (Free Tier: 1.000.000 tokens/ngày, 1.500+ tokens/s)
   {
     id: '8',
-    name: 'google/gemma-2-27b-it',
-    provider: 'OpenRouter (Gemma 2 27B)',
-    desc: 'Gemma 2 27B thông minh qua OpenRouter / OpenAI format',
+    name: 'cerebras/llama-3.3-70b',
+    provider: 'Cerebras Cloud (Free)',
+    desc: 'Llama 3.3 70B, tốc độ kỷ lục ~1.800 tok/s, hạn mức 1M tokens/ngày',
   },
   {
     id: '9',
-    name: 'google/gemma-2-9b-it:free',
-    provider: 'OpenRouter Free',
-    desc: 'Gemma 2 9B bản miễn phí qua OpenRouter',
+    name: 'cerebras/llama3.1-8b',
+    provider: 'Cerebras Cloud (Free)',
+    desc: 'Llama 3.1 8B siêu tốc ~2.000 tok/s, 1M tokens/ngày',
+  },
+
+  // 4. SambaNova Cloud (Free Tier: Model Llama 405B Siêu Lớn)
+  {
+    id: '10',
+    name: 'sambanova/Meta-Llama-3.1-405B-Instruct',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'Model Llama 405B khổng lồ chạy miễn phí cho Developer',
+  },
+  {
+    id: '11',
+    name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'Llama 3.3 70B trên kiến trúc chip SN40L cực mạnh',
+  },
+  {
+    id: '12',
+    name: 'sambanova/DeepSeek-R1-Distill-Llama-70B',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'DeepSeek R1 70B reasoning trên hạ tầng SambaNova',
+  },
+
+  // 5. GitHub Models (Free Tier: Dùng GitHub Token)
+  {
+    id: '13',
+    name: 'github/gpt-4o',
+    provider: 'GitHub Models (Free)',
+    desc: 'GPT-4o chính thức miễn phí qua GitHub Token / Azure endpoint',
+  },
+  {
+    id: '14',
+    name: 'github/gpt-4o-mini',
+    provider: 'GitHub Models (Free)',
+    desc: 'GPT-4o Mini tốc độ cao qua GitHub Token',
+  },
+  {
+    id: '15',
+    name: 'github/Mistral-large-2407',
+    provider: 'GitHub Models (Free)',
+    desc: 'Mistral Large 128k context qua GitHub Models',
+  },
+
+  // 6. SiliconFlow / SiliconCloud (Free Tier)
+  {
+    id: '16',
+    name: 'siliconflow/deepseek-ai/DeepSeek-V3',
+    provider: 'SiliconFlow (Free)',
+    desc: 'DeepSeek V3 671B qua hạ tầng SiliconFlow',
+  },
+  {
+    id: '17',
+    name: 'siliconflow/deepseek-ai/DeepSeek-R1',
+    provider: 'SiliconFlow (Free)',
+    desc: 'DeepSeek R1 suy luận chuyên sâu',
+  },
+  {
+    id: '18',
+    name: 'siliconflow/Qwen/Qwen2.5-Coder-32B-Instruct',
+    provider: 'SiliconFlow (Free)',
+    desc: 'Qwen 2.5 Coder 32B chuyên gia lập trình hàng đầu',
+  },
+
+  // 7. Mistral AI (Codestral Free Tier)
+  {
+    id: '19',
+    name: 'mistral/codestral-latest',
+    provider: 'Mistral AI (Free)',
+    desc: 'Codestral chuyên gia lập trình của Mistral (Free dev key)',
+  },
+  {
+    id: '20',
+    name: 'mistral/mistral-large-latest',
+    provider: 'Mistral AI (Free)',
+    desc: 'Mistral Large mô hình mạnh nhất của Mistral',
+  },
+
+  // 8. OpenRouter (Free Router & Free Models)
+  {
+    id: '21',
+    name: 'openrouter/free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Tự động định tuyến sang model miễn phí tốt nhất trên OpenRouter',
+  },
+  {
+    id: '22',
+    name: 'openrouter/meta-llama/llama-3.3-70b-instruct:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Llama 3.3 70B miễn phí qua OpenRouter',
+  },
+  {
+    id: '23',
+    name: 'openrouter/deepseek/deepseek-r1:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'DeepSeek R1 miễn phí qua OpenRouter',
+  },
+  {
+    id: '24',
+    name: 'openrouter/google/gemini-2.0-flash-exp:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
+  },
+
+  // 9. Pollinations AI (Zero-Key Free: Không cần tạo API Key)
+  {
+    id: '25',
+    name: 'pollinations/openai',
+    provider: 'Pollinations.ai (Zero-Key)',
+    desc: 'GPT-4o-mini miễn phí 100%, không cần đăng ký tài khoản hay API key',
+  },
+  {
+    id: '26',
+    name: 'pollinations/mistral',
+    provider: 'Pollinations.ai (Zero-Key)',
+    desc: 'Mistral miễn phí 100%, không cần đăng ký tài khoản hay API key',
+  },
+
+  // 10. DeepSeek Direct (Chính thức)
+  {
+    id: '27',
+    name: 'deepseek-chat',
+    provider: 'DeepSeek Direct',
+    desc: 'DeepSeek V3 chính thức (cần key platform.deepseek.com)',
+  },
+  {
+    id: '28',
+    name: 'deepseek-reasoner',
+    provider: 'DeepSeek Direct',
+    desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
   },
 ];
 
@@ -136,18 +271,20 @@ export class CLI {
    */
   static renderQuickCommands(): void {
     console.log(`\n${c.cyan}${c.bold}╭── ⚡ GỢI Ý CÂU LỆNH NHANH (SLASH COMMANDS) ────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, DeepSeek,...)    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace làm việc (/cd <path>)    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sandbox${c.reset}        ${c.gray}Xem trạng thái môi trường cô lập Sandbox (Docker/Local) ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/memory${c.reset}         ${c.gray}Xem bộ nhớ dài hạn của dự án (.codingagent/ memory)     ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 10 công cụ khảo sát, sửa code, kế hoạch & nhớ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                   ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/exit${c.reset}           ${c.gray}Thoát chương trình                                      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, Groq, Cerebras,...) [Auto-saved]${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace (/cd <path>) [Auto-saved]         ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/session${c.reset}        ${c.gray}Xem thông tin cấu hình phiên làm việc đã lưu (.codingagent)      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sandbox${c.reset}        ${c.gray}Xem trạng thái môi trường cô lập Sandbox (Docker/Local)          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tasks${c.reset}          ${c.gray}Xem danh sách background tasks & subprocesses đang chạy          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)                   ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/memory${c.reset}         ${c.gray}Xem bộ nhớ dài hạn của dự án (.codingagent/ memory)              ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất          ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động                     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 13 công cụ khảo sát, sửa code, background & nhớ     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                           ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                            ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                             ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/exit${c.reset}           ${c.gray}Thoát chương trình                                               ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
@@ -158,14 +295,19 @@ export class CLI {
     console.log(`\n${c.magenta}${c.bold}╭── 🤖 DANH SÁCH MÔ HÌNH KHẢ DỤNG (SELECT MODEL) ───────────────────────────╮${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}                                                                            ${c.magenta}${c.bold}│${c.reset}`);
     
+    let lastProvider = '';
     for (const m of AVAILABLE_MODELS) {
+      if (m.provider !== lastProvider) {
+        lastProvider = m.provider;
+        console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}❖ ${m.provider.toUpperCase()}${c.reset}`);
+      }
+
       const isCurrent = m.name === currentModel;
-      const marker = isCurrent ? `${c.brightGreen}${c.bold}* [ACTIVE]${c.reset}` : `          `;
-      const recBadge = m.recommended ? `${c.brightYellow}(Recommended)${c.reset}` : '';
+      const marker = isCurrent ? ` ${c.brightGreen}${c.bold}* [ACTIVE]${c.reset}` : '';
+      const recBadge = m.recommended ? ` ${c.brightYellow}(Recommended)${c.reset}` : '';
       
-      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}[${m.id}]${c.reset} ${c.bold}${m.name}${c.reset} ${recBadge}`);
-      console.log(`${c.magenta}${c.bold}│${c.reset}      ${c.dim}Nhà cung cấp: ${m.provider} | ${m.desc}${c.reset}`);
-      console.log(`${c.magenta}${c.bold}│${c.reset}      ${marker}`);
+      console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}${c.bold}[${m.id.padStart(2, ' ')}]${c.reset} ${c.bold}${m.name}${c.reset}${recBadge}${marker}`);
+      console.log(`${c.magenta}${c.bold}│${c.reset}         ${c.dim}${m.desc}${c.reset}`);
       console.log(`${c.magenta}${c.bold}│${c.reset}`);
     }
 
@@ -182,16 +324,18 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}SLASH COMMANDS:${c.reset}                                                           ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/help${c.reset}               Hiển thị bảng trợ giúp này                          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model${c.reset}              Hiển thị danh sách và chọn mô hình LLM              ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model${c.reset}              Hiển thị danh sách và chọn mô hình LLM (Tự động lưu) ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model <name>${c.reset}       Chuyển đổi trực tiếp sang mô hình chỉ định          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (hoặc /cd <path>)  ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (Tự động lưu)     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/session${c.reset}            Xem thông tin model và workspace lưu từ phiên trước  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sandbox${c.reset}            Xem trạng thái môi trường cô lập Sandbox            ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tasks${c.reset}              Xem danh sách background tasks & subprocesses       ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/memory${c.reset}             Xem bộ nhớ dài hạn của dự án (.codingagent)         ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/undo${c.reset}               Hoàn tác (Rollback) về checkpoint trước khi sửa     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/checkpoints${c.reset}        Xem danh sách các điểm khôi phục snapshot           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 10 công cụ và thông số             ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 13 công cụ và thông số             ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/status${c.reset}             Xem thông tin trạng thái phiên làm việc             ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/clear${c.reset}              Xoá màn hình terminal                               ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/exit${c.reset}, ${c.brightCyan}/quit${c.reset}        Thoát chương trình                                  ${c.cyan}${c.bold}│${c.reset}`);
@@ -342,6 +486,24 @@ export class CLI {
   }
 
   /**
+   * Hiển thị danh sách các Background Tasks đang chạy
+   */
+  static renderTasks(tasks: Array<{ id: string; command: string; status: string; startedAt: string; pid?: number }>): void {
+    console.log(`\n${c.cyan}${c.bold}╭── ⚙️  BACKGROUND PROCESSES & TASKS (${tasks.length}) ────────────────────────╮${c.reset}`);
+    if (tasks.length === 0) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Không có background task nào đang chạy.${c.reset}`);
+    } else {
+      for (const t of tasks) {
+        const statusBadge = t.status === 'running'
+          ? `${c.brightGreen}RUNNING (PID: ${t.pid || 'N/A'})${c.reset}`
+          : `${c.gray}STOPPED${c.reset}`;
+        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}[${t.id}]${c.reset} ${c.brightCyan}${t.command}${c.reset} ── ${statusBadge} ${c.dim}(Khởi chạy lúc: ${t.startedAt})${c.reset}`);
+      }
+    }
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
    * Hiển thị trạng thái hiện tại
    */
   static renderStatus(opts: StatusOptions): void {
@@ -350,7 +512,26 @@ export class CLI {
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
+    if (opts.sessionFile) {
+      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Persisted in:${c.reset}  ${c.dim}${opts.sessionFile}${c.reset}`);
+    }
     console.log(`${c.magenta}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị thông tin cấu hình phiên làm việc đã lưu trữ (.codingagent/session.json)
+   */
+  static renderSessionInfo(data: { modelName?: string; workspacePath?: string; lastUpdated?: string }, sessionFile: string): void {
+    console.log(`\n${c.magenta}${c.bold}╭── 💾 PERSISTED SESSION CONFIG (.codingagent/session.json) ────────────────╮${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model đã lưu:${c.reset}     ${c.brightCyan}${data.modelName || 'Chưa đặt'}${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace đã lưu:${c.reset} ${c.dim}${data.workspacePath || 'Chưa đặt'}${c.reset}`);
+    if (data.lastUpdated) {
+      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Cập nhật lúc:${c.reset}     ${c.gray}${data.lastUpdated}${c.reset}`);
+    }
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Tệp lưu trữ:${c.reset}      ${c.dim}${sessionFile}${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}💡 Tự động nạp lại khi khởi động 'npm run dev' tiếp theo.${c.reset}`);
+    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**

@@ -9,6 +9,7 @@ import { ContextCompactor } from '../agent/context-compactor.js';
 import { ReflectionEngine } from '../agent/reflection-engine.js';
 import { ToolDefinition } from '../tools/types.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
+import { TaskManager } from '../tasks/task-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -21,6 +22,7 @@ export interface KernelEvents {
   'model:thought': (thought: string) => void;
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
+  'model:changed': (newModel: string) => void;
 }
 
 export interface KernelContext {
@@ -33,11 +35,12 @@ export interface KernelContext {
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
   sandbox: SandboxManager;
+  tasks: TaskManager;
   llm: any;
   events: EventEmitter;
   registerTool: (tool: ToolDefinition) => void;
   setWorkspace: (workspace: Workspace) => void;
-  setLLM: (llm: any) => void;
+  setLLM: (llm: any, modelName?: string) => void;
 }
 
 export interface AgentPlugin {
@@ -51,10 +54,10 @@ export interface AgentPlugin {
 /**
  * AgentKernel - Vi nhân điều phối trung tâm theo chuẩn Cordis (Micro-Kernel Architecture)
  * 
- * Nguyên lý hoạt động:
- * 1. Kernel chỉ quản lý Context, Event Bus và Plugin Lifecycle.
- * 2. Tất cả mọi tính năng (LLM, Workspace, Tools, Memory, Plan, Sandbox) đều là Plugins độc lập.
- * 3. Cho phép cắm/rút (Hot-pluggable) các Tool và Service mới mà không cần chạm vào Agent Core Loop.
+ * Quản lý:
+ * 1. KernelContext và toàn bộ các subsystem (Tools, Workspace, Sandbox, Tasks, Plan, Memory).
+ * 2. Event Bus đa luồng.
+ * 3. Hot-pluggable Plugin Lifecycle.
  */
 export class AgentKernel {
   readonly ctx: KernelContext;
@@ -69,6 +72,7 @@ export class AgentKernel {
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
+    const tasks = new TaskManager(workspace.rootDir);
     const tools = new ToolRegistry(plan, memory);
     tools.attachSandboxManager(sandbox);
     const toolRunner = new ToolRunner(tools, workspace);
@@ -83,6 +87,7 @@ export class AgentKernel {
       compactor,
       reflection,
       sandbox,
+      tasks,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {
@@ -94,13 +99,17 @@ export class AgentKernel {
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         (this.ctx as any).memory = new ProjectMemoryManager(newWs.rootDir);
+        (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
         this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
         this.ctx.checkpoints.init().catch(() => {});
         this.ctx.memory.init(newWs).catch(() => {});
         this.ctx.events.emit('workspace:changed', oldPath, newWs.rootDir);
       },
-      setLLM: (newLlm: any) => {
+      setLLM: (newLlm: any, newModelName?: string) => {
         this.ctx.llm = newLlm;
+        if (newModelName) {
+          this.ctx.events.emit('model:changed', newModelName);
+        }
       },
     };
   }
