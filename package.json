@@ -10,7 +10,7 @@
     "test": "tsx src/test-suite.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "build": "tsc",
-    "search:up": "docker compose -f deploy/searxng/compose.yaml up -d",
+    "search:up": "tsx src/scripts/start-searxng.ts",
     "search:down": "docker compose -f deploy/searxng/compose.yaml down",
     "9router": "node scripts/start-9router.js",
     "start": "node dist/index.js"

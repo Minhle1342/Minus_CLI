@@ -33,8 +33,33 @@ export class ReflectionEngine {
     let reflectionPrompt: string | undefined;
     let advice: string | undefined;
 
-    // 1. Phân tích lệnh run_command thất bại (test failed, build error, syntax error)
-    if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
+    const environmentFailureCodes = new Set([
+      'COMMAND_NOT_FOUND',
+      'COMMAND_NOT_EXECUTABLE',
+      'COMMAND_TIMEOUT',
+      'COMMAND_RESOURCE_LIMIT',
+      'NATIVE_DEPENDENCY_MISSING',
+      'PACKAGE_DEPENDENCY_MISSING',
+      'MULTIPLE_RUNTIMES_REQUIRED',
+      'RUNTIME_SANDBOX_INIT_FAILED',
+    ]);
+
+    // 1. Lỗi môi trường/runtime cần hướng dẫn khắc phục, không phải phân tích stack trace mã nguồn.
+    if (toolName === 'run_command' && environmentFailureCodes.has(result.errorCode)) {
+      isFailure = true;
+      this.consecutiveFailures++;
+      const details = result.diagnostic || result.stderr || result.errorCode;
+      const suggestion = result.suggestion || 'Correct the execution environment before retrying.';
+      reflectionPrompt = [
+        `\n⚠️ [EXECUTION ENVIRONMENT FAILURE - ${result.errorCode}]`,
+        details,
+        `👉 ${suggestion}`,
+        `Do not inspect application stack traces or retry the same command unchanged because the process did not start successfully.`,
+      ].join('\n');
+      advice = `${result.errorCode}: ${details}`;
+    }
+    // 2. Phân tích lệnh run_command thất bại (test failed, build error, syntax error)
+    else if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
       isFailure = true;
       this.consecutiveFailures++;
 
@@ -55,7 +80,7 @@ export class ReflectionEngine {
 
       advice = `Lệnh thất bại (exit: ${result.exitCode}). Kích hoạt quy trình tự vấn và phân tích Stack Trace.`;
     } 
-    // 2. Phân tích lỗi sửa file replace_text không khớp
+    // 3. Phân tích lỗi sửa file replace_text không khớp
     else if (toolName === 'replace_text' && result.error) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -68,7 +93,7 @@ export class ReflectionEngine {
 
       advice = `Không tìm thấy đoạn text cần thay thế. Cần đọc lại file trước khi thử lại.`;
     }
-    // 3. Phân tích lỗi chung khác
+    // 4. Phân tích lỗi chung khác
     else if (result.error || result.errorCode) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -81,7 +106,7 @@ export class ReflectionEngine {
 
       advice = `Tool gặp lỗi: ${result.error || result.errorCode}`;
     } 
-    // 4. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
+    // 5. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
     else {
       this.consecutiveFailures = 0;
     }

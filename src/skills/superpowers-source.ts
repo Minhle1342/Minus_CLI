@@ -78,9 +78,9 @@ export const SUPERPOWERS_BUILTIN_SKILLS: Omit<SkillManifest, 'path' | 'source'>[
     id: 'finishing-a-development-branch',
     name: 'Finishing a Development Branch',
     version: '1.0.0',
-    description: 'Clean up worktrees, verify full test suite, stage atomic commits, and prepare branch integration.',
+    description: 'Inspect changes, verify the full test suite, stage atomic commits, and push to the user-requested remote branch. Use git_status, git_diff, git_add, git_commit, then git_push; report credential or branch-protection failures only after observing the tool result.',
     priority: 80,
-    requiredCapabilities: ['git.status', 'git.commit', 'worktree.remove', 'shell.verify'],
+    requiredCapabilities: ['git.status', 'git.stage', 'git.commit', 'git.push', 'worktree.remove', 'shell.verify'],
     tags: ['git', 'cleanup', 'release', 'superpowers'],
   },
 ];

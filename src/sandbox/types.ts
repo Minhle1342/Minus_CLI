@@ -6,6 +6,15 @@ export interface SandboxExecutionResult {
   exitCode: number;
   durationMs: number;
   sandboxType: 'docker' | 'local' | 'microvm';
+  success?: boolean;
+  errorCode?: string;
+  diagnostic?: string;
+  suggestion?: string;
+  missingExecutable?: string;
+  missingDependency?: string;
+  timedOut?: boolean;
+  runtime?: string;
+  image?: string;
 }
 
 export interface SandboxOptions {
@@ -24,6 +33,8 @@ export interface SandboxStatus {
   dockerAvailable: boolean;
   containerId?: string;
   image?: string;
+  runtime?: string;
+  detectedFrom?: string;
 }
 
 export interface ISandboxProvider {

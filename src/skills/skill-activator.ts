@@ -2,6 +2,7 @@ import { SkillManifest, SkillActivationDecision } from './types.js';
 import { SkillRegistry } from './skill-registry.js';
 import { Session } from '../session/session.js';
 import { CapabilityCatalog } from '../capabilities/capability-catalog.js';
+import { detectExplicitGitMutationIntent } from '../tools/git-intent.js';
 
 export interface ActivationContext {
   session: Session;
@@ -63,10 +64,12 @@ export class SkillActivator {
       let matchesContext = false;
       if (context.userRequest) {
         const lowerReq = context.userRequest.toLowerCase();
+        const gitIntent = detectExplicitGitMutationIntent(context.userRequest);
         matchesContext =
           skill.id.includes(lowerReq) ||
           skill.name.toLowerCase().includes(lowerReq) ||
           skill.tags?.some((t) => lowerReq.includes(t.toLowerCase())) ||
+          (skill.id === 'finishing-a-development-branch' && (gitIntent.stage || gitIntent.commit || gitIntent.push)) ||
           false;
       }
 

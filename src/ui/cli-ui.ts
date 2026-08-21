@@ -33,6 +33,38 @@ export const colors = {
 
 const c = colors;
 
+const BASE_TYPEWRITER_DELAY_MS = 8;
+export const FINAL_ANSWER_CHARACTER_DELAY_MS = BASE_TYPEWRITER_DELAY_MS / 2;
+
+export interface TypewriterOptions {
+  delayMs?: number;
+  write?: (character: string) => void;
+  wait?: (delayMs: number) => Promise<void>;
+}
+
+/** Render text one Unicode grapheme at a time so Vietnamese marks and emoji stay intact. */
+export async function writeTypewriterText(text: string, options: TypewriterOptions = {}): Promise<void> {
+  const delayMs = Math.max(0, options.delayMs ?? FINAL_ANSWER_CHARACTER_DELAY_MS);
+  const write = options.write ?? ((character: string) => process.stdout.write(character));
+  const wait = options.wait ?? ((durationMs: number) => new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const characters = Array.from(segmenter.segment(text), (entry) => entry.segment);
+
+  for (let index = 0; index < characters.length; index++) {
+    write(characters[index]);
+    if (delayMs > 0 && index < characters.length - 1) await wait(delayMs);
+  }
+}
+
+export function isToolResultFailure(result: Record<string, any>): boolean {
+  return Boolean(
+    result.error
+    || result.errorCode
+    || result.success === false
+    || (typeof result.exitCode === 'number' && result.exitCode !== 0),
+  );
+}
+
 export interface BannerOptions {
   modelName: string;
   workspaceRoot: string;
@@ -672,6 +704,18 @@ export class CLI {
   }
 
   /**
+   * Hiển thị ngay trạng thái System 2 trong lúc request tới LLM đang chờ phản hồi.
+   * Dùng một dòng tĩnh thay cho spinner để log không bị ghi đè khi output được
+   * redirect, chạy trong CI hoặc nhiều agent cùng ghi ra terminal.
+   */
+  static renderLLMThinking(): void {
+    console.log(`${c.blue}${c.bold}│${c.reset}`);
+    console.log(
+      `${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 Reasoning (System 2):${c.reset} ${c.dim}LLM đang phân tích ngữ cảnh và xác định bước tiếp theo...${c.reset}`,
+    );
+  }
+
+  /**
    * Hiển thị luồng suy luận nội tâm sâu (System 2 Deep Reasoning / CoT)
    */
   static renderReasoning(thoughtText: string): void {
@@ -720,7 +764,7 @@ export class CLI {
    * Hiển thị Tool Result
    */
   static renderToolResult(name: string, durationMs: number, result: Record<string, any>): void {
-    const isError = Boolean(result.error || result.errorCode);
+    const isError = isToolResultFailure(result);
     const badge = isError ? `${c.red}✖ ERROR` : `${c.green}✔ OK`;
 
     console.log(`${c.blue}${c.bold}│${c.reset}`);
@@ -754,6 +798,12 @@ export class CLI {
       const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${preview}${c.reset}`);
     }
+    if (result.diagnostic) {
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.yellow}Diagnosis: ${result.diagnostic}${c.reset}`);
+    }
+    if (result.suggestion) {
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.cyan}Next: ${result.suggestion}${c.reset}`);
+    }
   }
 
   /**
@@ -766,9 +816,16 @@ export class CLI {
   /**
    * Hiển thị Final Answer
    */
-  static renderFinalAnswer(answer: string): void {
+  static async renderFinalAnswer(answer: string, options: { animate?: boolean } = {}): Promise<void> {
+    const content = answer.trim();
+    const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
     console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
-    console.log(answer.trim());
+    if (shouldAnimate) {
+      await writeTypewriterText(content);
+      process.stdout.write('\n');
+    } else {
+      console.log(content);
+    }
     console.log(`\n${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 

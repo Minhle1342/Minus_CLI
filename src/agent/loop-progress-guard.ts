@@ -22,6 +22,8 @@ const WORKSPACE_MUTATING_TOOLS = new Set([
   'create_worktree',
   'remove_worktree',
   'git_commit',
+  'git_add',
+  'git_push',
 ]);
 
 const GUARDED_INSPECTION_TOOLS = new Set([
@@ -50,8 +52,39 @@ export class LoopProgressGuard {
 
   observe(observation: ToolProgressObservation): ToolProgressDecision {
     const { toolName, args, result } = observation;
+    const isFailure = Boolean(
+      result.error
+      || result.errorCode
+      || result.success === false
+      || (typeof result.exitCode === 'number' && result.exitCode !== 0),
+    );
 
-    if (result.error || result.errorCode) {
+    if (isFailure && toolName === 'run_command') {
+      const groupedEnvironmentFailure = (
+        (result.errorCode === 'COMMAND_NOT_FOUND' && result.missingExecutable)
+        || (['NATIVE_DEPENDENCY_MISSING', 'PACKAGE_DEPENDENCY_MISSING'].includes(result.errorCode) && result.missingDependency)
+      );
+      const callFingerprint = stableStringify(groupedEnvironmentFailure
+        ? {
+            toolName,
+            errorCode: result.errorCode,
+            missingExecutable: result.missingExecutable,
+            missingDependency: result.missingDependency,
+          }
+        : { toolName, args });
+      const resultFingerprint = stableStringify({
+        error: result.error,
+        errorCode: result.errorCode,
+        missingExecutable: result.missingExecutable,
+        missingDependency: result.missingDependency,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+      return this.recordObservation(callFingerprint, resultFingerprint, toolName, true);
+    }
+
+    if (isFailure) {
       return { repetitionCount: 0, shouldStop: false };
     }
 
@@ -66,26 +99,29 @@ export class LoopProgressGuard {
 
     const callFingerprint = stableStringify({ toolName, args });
     const resultFingerprint = stableStringify(result);
+    return this.recordObservation(callFingerprint, resultFingerprint, toolName, false);
+  }
+
+  private recordObservation(
+    callFingerprint: string,
+    resultFingerprint: string,
+    toolName: string,
+    failed: boolean,
+  ): ToolProgressDecision {
     const previous = this.seen.get(callFingerprint);
-    const repetitionCount = previous?.resultFingerprint === resultFingerprint
-      ? previous.repetitionCount + 1
-      : 1;
-
+    const repetitionCount = previous?.resultFingerprint === resultFingerprint ? previous.repetitionCount + 1 : 1;
     this.seen.set(callFingerprint, { resultFingerprint, repetitionCount });
+    if (repetitionCount < 2) return { repetitionCount, shouldStop: false };
 
-    if (repetitionCount < 2) {
-      return { repetitionCount, shouldStop: false };
-    }
+    const message = failed
+      ? repetitionCount === 2
+        ? `[SYSTEM LOOP GUARD]: The same run_command failure class occurred twice. Treat the environment diagnostic as authoritative; change runtime, image, dependencies, permissions, or command strategy before calling run_command again.`
+        : `[SYSTEM LOOP GUARD]: The same run_command failure persisted ${repetitionCount} times. This turn is being stopped to prevent an environment-error retry loop.`
+      : repetitionCount === 2
+        ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Treat this observation as authoritative and do not call it again unless a workspace-changing action occurs. An empty workspace is a valid state; proceed by creating the requested project files.`
+        : `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result ${repetitionCount} times without progress. This turn is being stopped to prevent an infinite tool loop.`;
 
-    const message = repetitionCount === 2
-      ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Treat this observation as authoritative and do not call it again unless a workspace-changing action occurs. An empty workspace is a valid state; proceed by creating the requested project files.`
-      : `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result ${repetitionCount} times without progress. This turn is being stopped to prevent an infinite tool loop.`;
-
-    return {
-      repetitionCount,
-      message,
-      shouldStop: repetitionCount >= 3,
-    };
+    return { repetitionCount, message, shouldStop: repetitionCount >= 3 };
   }
 }
 

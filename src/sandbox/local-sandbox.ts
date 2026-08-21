@@ -52,6 +52,7 @@ export class LocalProcessSandbox implements ISandboxProvider {
         exitCode: 0,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
+        success: true,
       };
     } catch (err: any) {
       const exitCode = typeof err.code === 'number' ? err.code : 1;
@@ -61,6 +62,8 @@ export class LocalProcessSandbox implements ISandboxProvider {
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
+        success: false,
+        timedOut: Boolean(err?.killed && err?.signal === 'SIGTERM'),
       };
     }
   }

@@ -1,13 +1,16 @@
-import { exec, spawn } from 'node:child_process';
+import { exec, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface DockerSandboxConfig {
   image?: string;
+  runtime?: string;
+  detectedFrom?: string;
   workspacePath: string;
   memoryLimitMb?: number;
   cpuLimit?: number;
@@ -27,6 +30,8 @@ export class DockerSandbox implements ISandboxProvider {
   readonly name = 'Docker Container Sandbox';
   readonly type = 'docker' as const;
   private image: string;
+  private runtime: string;
+  private detectedFrom?: string;
   private workspacePath: string;
   private memoryLimitMb: number;
   private cpuLimit: number;
@@ -35,6 +40,8 @@ export class DockerSandbox implements ISandboxProvider {
 
   constructor(config: DockerSandboxConfig) {
     this.image = config.image || 'node:20-alpine';
+    this.runtime = config.runtime || 'custom';
+    this.detectedFrom = config.detectedFrom;
     this.workspacePath = path.resolve(config.workspacePath);
     this.memoryLimitMb = config.memoryLimitMb || 1024;
     this.cpuLimit = config.cpuLimit || 2.0;
@@ -45,7 +52,7 @@ export class DockerSandbox implements ISandboxProvider {
    */
   async isAvailable(): Promise<boolean> {
     try {
-      await execAsync('docker info', { timeout: 4000 });
+      await execFileAsync('docker', ['info'], { timeout: 4000 });
       return true;
     } catch {
       return false;
@@ -72,6 +79,7 @@ export class DockerSandbox implements ISandboxProvider {
           const child = spawn(exePath, [], {
             detached: true,
             stdio: 'ignore',
+            windowsHide: true,
           });
           child.unref();
           launched = true;
@@ -80,6 +88,7 @@ export class DockerSandbox implements ISandboxProvider {
           const child = spawn('cmd.exe', ['/c', 'start', '""', 'Docker Desktop'], {
             detached: true,
             stdio: 'ignore',
+            windowsHide: true,
           });
           child.unref();
           launched = true;
@@ -115,7 +124,7 @@ export class DockerSandbox implements ISandboxProvider {
 
     while (Date.now() - startTime < maxWaitMs) {
       try {
-        await execAsync('docker info', { timeout: 3000 });
+        await execFileAsync('docker', ['info'], { timeout: 3000 });
         console.log(`\n\x1b[32m✔ Docker Daemon đã sẵn sàng!\x1b[0m\n`);
         return true;
       } catch {
@@ -142,24 +151,28 @@ export class DockerSandbox implements ISandboxProvider {
     const normalizedWsPath = this.workspacePath.replace(/\\/g, '/');
 
     // Chạy container ở chế độ background (detached)
-    const runCommand = `docker run -d --name ${containerName} ` +
-      `--memory=${this.memoryLimitMb}m ` +
-      `--cpus=${this.cpuLimit} ` +
-      `--pids-limit=200 ` +
-      `--security-opt=no-new-privileges ` +
-      `-v "${normalizedWsPath}:/workspace:rw" ` +
-      `-w /workspace ` +
-      `${this.image} tail -f /dev/null`;
+    const runArgs = [
+      'run', '-d', '--name', containerName,
+      `--memory=${this.memoryLimitMb}m`,
+      `--cpus=${this.cpuLimit}`,
+      '--pids-limit=200',
+      '--security-opt=no-new-privileges',
+      '-v', `${normalizedWsPath}:/workspace:rw`,
+      '-w', '/workspace',
+      this.image,
+      'tail', '-f', '/dev/null',
+    ];
 
     try {
-      const { stdout } = await execAsync(runCommand, { timeout: 15000 });
+      const { stdout } = await execFileAsync('docker', runArgs, { timeout: 300000, maxBuffer: 1024 * 1024 * 5 });
       this.containerId = (stdout || '').trim().slice(0, 12);
       this.isDockerReady = true;
 
       // Cài đặt trước các công cụ thiết yếu (curl, git, bash, ca-certificates) nếu container chưa có
       try {
-        await execAsync(
-          `docker exec ${this.containerId} sh -c "which curl >/dev/null 2>&1 || (apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true)"`,
+        await execFileAsync(
+          'docker',
+          ['exec', this.containerId, 'sh', '-c', 'command -v curl >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 || (apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true)'],
           { timeout: 25000 }
         );
       } catch {
@@ -182,12 +195,10 @@ export class DockerSandbox implements ISandboxProvider {
     const startTime = Date.now();
     const timeout = options?.timeoutMs ?? 30000;
     
-    // Thoát các ký tự đặc biệt cho shell
-    const escapedCmd = command.replace(/"/g, '\\"');
-    const dockerExecCmd = `docker exec ${this.containerId} sh -c "${escapedCmd}"`;
+    const dockerExecArgs = ['exec', this.containerId, 'sh', '-c', command];
 
     try {
-      const { stdout, stderr } = await execAsync(dockerExecCmd, {
+      const { stdout, stderr } = await execFileAsync('docker', dockerExecArgs, {
         timeout,
         maxBuffer: 1024 * 1024 * 5,
       });
@@ -198,9 +209,13 @@ export class DockerSandbox implements ISandboxProvider {
         exitCode: 0,
         durationMs: Date.now() - startTime,
         sandboxType: 'docker',
+        success: true,
+        runtime: this.runtime,
+        image: this.image,
       };
     } catch (err: any) {
       const stderr = (err.stderr || err.message || '').trim();
+      const timedOut = Boolean(err?.killed && err?.signal === 'SIGTERM');
       const isMissingUtility =
         stderr.includes('curl: not found') ||
         stderr.includes('git: not found') ||
@@ -210,11 +225,12 @@ export class DockerSandbox implements ISandboxProvider {
       // Tự động cài đặt gói bị thiếu và thực thi lại một lần (Self-healing Sandbox)
       if (isMissingUtility && this.containerId) {
         try {
-          await execAsync(
-            `docker exec ${this.containerId} sh -c "apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true"`,
+          await execFileAsync(
+            'docker',
+            ['exec', this.containerId, 'sh', '-c', 'apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true'],
             { timeout: 25000 }
           );
-          const retried = await execAsync(dockerExecCmd, {
+          const retried = await execFileAsync('docker', dockerExecArgs, {
             timeout,
             maxBuffer: 1024 * 1024 * 5,
           });
@@ -224,6 +240,9 @@ export class DockerSandbox implements ISandboxProvider {
             exitCode: 0,
             durationMs: Date.now() - startTime,
             sandboxType: 'docker',
+            success: true,
+            runtime: this.runtime,
+            image: this.image,
           };
         } catch (retryErr: any) {
           const exitCode = typeof retryErr.code === 'number' ? retryErr.code : 1;
@@ -233,6 +252,10 @@ export class DockerSandbox implements ISandboxProvider {
             exitCode,
             durationMs: Date.now() - startTime,
             sandboxType: 'docker',
+            success: false,
+            runtime: this.runtime,
+            image: this.image,
+            timedOut: Boolean(retryErr?.killed && retryErr?.signal === 'SIGTERM'),
           };
         }
       }
@@ -244,6 +267,10 @@ export class DockerSandbox implements ISandboxProvider {
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'docker',
+        success: false,
+        runtime: this.runtime,
+        image: this.image,
+        timedOut,
       };
     }
   }
@@ -256,6 +283,8 @@ export class DockerSandbox implements ISandboxProvider {
       dockerAvailable: this.isDockerReady,
       containerId: this.containerId || undefined,
       image: this.image,
+      runtime: this.runtime,
+      detectedFrom: this.detectedFrom,
     };
   }
 
@@ -265,7 +294,7 @@ export class DockerSandbox implements ISandboxProvider {
   async dispose(): Promise<void> {
     if (this.containerId) {
       try {
-        await execAsync(`docker rm -f ${this.containerId}`, { timeout: 5000 });
+        await execFileAsync('docker', ['rm', '-f', this.containerId], { timeout: 5000 });
       } catch {
         // Bỏ qua lỗi cleanup
       } finally {

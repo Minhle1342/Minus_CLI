@@ -201,11 +201,13 @@ export class AgentKernel {
     if (this.isInitialized) return;
     await this.ctx.checkpoints.init();
     await this.ctx.memory.init(this.ctx.workspace);
-    await this.ctx.sandbox.init();
 
     if (!this.plugins.has('superpowers')) {
       await this.use(new SuperpowersPlugin());
     }
+
+    // Tool/capability registration must survive a Docker startup failure.
+    await this.ctx.sandbox.init();
 
     this.isInitialized = true;
     this.ctx.events.emit('kernel:init');

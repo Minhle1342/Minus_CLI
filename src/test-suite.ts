@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Workspace } from './workspace/workspace.js';
 import { ToolRegistry } from './tools/registry.js';
 import { ToolRunner } from './tools/tool-runner.js';
@@ -20,6 +22,8 @@ import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
 import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
+import { LoopProgressGuard } from './agent/loop-progress-guard.js';
+import { FinalAnswerGuard } from './agent/final-answer-guard.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
@@ -39,7 +43,15 @@ import { createWebSearchTool } from './tools/web-search.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { TaskManager } from './tasks/task-manager.js';
-import { createRunCommandTool } from './tools/run-command.js';
+import { createRunCommandTool, isAllowedCommand } from './tools/run-command.js';
+import { diagnoseCommandFailure } from './sandbox/command-diagnostics.js';
+import { detectWorkspaceRuntimeProfile, inferCommandRuntime } from './sandbox/runtime-profiles.js';
+import {
+  CLI,
+  FINAL_ANSWER_CHARACTER_DELAY_MS,
+  isToolResultFailure,
+  writeTypewriterText,
+} from './ui/cli-ui.js';
 import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskTool } from './tools/task-tools.js';
 import { loadSession, saveSession, clearSession, getSessionFilePath } from './session/persistent-session.js';
 import { SkillLoader } from './skills/skill-loader.js';
@@ -55,9 +67,13 @@ import { WorktreeManager } from './workspace/worktree-manager.js';
 import { ApprovalManager } from './agent/approval-manager.js';
 import { ReviewManager } from './agent/review-manager.js';
 import { SuperpowersPlugin } from './kernel/plugins/superpowers-plugin.js';
+import { createGitTools } from './tools/git-tools.js';
+import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+const execFileAsync = promisify(execFile);
 
 let passed = 0;
 let failed = 0;
@@ -125,11 +141,16 @@ async function runUnitTests() {
   const readFull = await readFileTool.execute({ path: 'package.json' }, workspace);
   assert(readFull.content && readFull.content.includes('mini-agent-loop'), 'read_file đọc đúng file package.json');
   const packageConfig = JSON.parse(await fs.readFile(path.join(workspace.rootDir, 'package.json'), 'utf-8'));
+  const searchStartupScript = await fs.readFile(
+    path.join(workspace.rootDir, 'src', 'scripts', 'start-searxng.ts'),
+    'utf-8',
+  );
   assert(
     packageConfig.scripts?.predev === 'npm run search:up'
-      && packageConfig.scripts?.['search:up']?.includes('docker compose')
-      && packageConfig.scripts?.['search:up']?.includes('up -d'),
-    'npm run dev tự động khởi động SearXNG ở chế độ nền qua predev lifecycle',
+      && packageConfig.scripts?.['search:up'] === 'tsx src/scripts/start-searxng.ts'
+      && searchStartupScript.includes('startDockerDaemon')
+      && searchStartupScript.includes("['compose', '-f', COMPOSE_FILE, 'up', '-d']"),
+    'npm run dev tự bật Docker daemon rồi khởi động SearXNG ở chế độ nền qua predev lifecycle',
   );
   
   const readRange = await readFileTool.execute({ path: 'package.json', startLine: 1, endLine: 3 }, workspace);
@@ -180,6 +201,16 @@ async function runUnitTests() {
 
   const cmdBlocked = await runCommandTool.execute({ command: 'rm -rf /' }, workspace);
   assert(cmdBlocked.errorCode === 'COMMAND_NOT_ALLOWED', 'run_command chặn thành công lệnh nguy hiểm ngoài allowlist');
+  const gitPushBypass = await runCommandTool.execute({ command: 'git push origin main' }, workspace);
+  assert(
+    gitPushBypass.errorCode === 'GIT_OPERATION_REQUIRES_DEDICATED_TOOL',
+    'run_command chặn git push để không bỏ qua quyền của tool Git chuyên dụng',
+  );
+  const gitPushGlobalOptionBypass = await runCommandTool.execute({ command: 'git -C . push origin main' }, workspace);
+  assert(
+    gitPushGlobalOptionBypass.errorCode === 'GIT_OPERATION_REQUIRES_DEDICATED_TOOL',
+    'run_command vẫn chặn git push khi Git có global option -C',
+  );
 
   console.log('\n========================================');
   console.log('🧪 4. KIỂM THỬ TOOL REGISTRY & FUNCTION DECLARATIONS');
@@ -945,6 +976,163 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const execFail = await localSandbox.exec('node -e "process.exit(2)"');
   assert(execFail.exitCode === 2, 'LocalProcessSandbox bắt đúng exitCode thất bại (= 2)');
 
+  // 1b. Runtime-aware profiles and structured command diagnostics.
+  const runtimeFixture = await fs.mkdtemp(path.join(workspace.rootDir, '.runtime-profile-test-'));
+  try {
+    await fs.writeFile(
+      path.join(runtimeFixture, 'Fixture.csproj'),
+      '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>',
+      'utf8',
+    );
+    await fs.writeFile(path.join(runtimeFixture, 'package.json'), '{"name":"mixed-fixture"}', 'utf8');
+    const dotnetProfile = detectWorkspaceRuntimeProfile(runtimeFixture);
+    assert(
+      dotnetProfile.runtime === 'dotnet' && dotnetProfile.image === 'mcr.microsoft.com/dotnet/sdk:8.0',
+      'Sandbox tự nhận diện project .NET 8 và chọn đúng SDK image',
+    );
+  } finally {
+    await fs.rm(runtimeFixture, { recursive: true, force: true });
+  }
+
+  const dotnetInference = inferCommandRuntime('dotnet test ChamHinhAI.RestApi.Tests');
+  assert(
+    dotnetInference.runtime === 'dotnet' && dotnetInference.executable === 'dotnet',
+    'Nhận diện runtime .NET từ lệnh run_command',
+  );
+  assert(
+    inferCommandRuntime('npm test && dotnet test').mixed === true,
+    'Nhận diện compound command yêu cầu nhiều runtime để hướng dẫn tách lệnh',
+  );
+
+  const missingDotnetResult = {
+    stdout: '',
+    stderr: 'sh: dotnet: not found',
+    exitCode: 127,
+    durationMs: 5,
+    sandboxType: 'docker' as const,
+  };
+  const missingDotnetDiagnosis = diagnoseCommandFailure(
+    'dotnet test',
+    missingDotnetResult,
+    {
+      mode: 'docker',
+      activeProvider: 'Docker Container Sandbox',
+      isIsolated: true,
+      dockerAvailable: true,
+      image: 'node:20-alpine',
+      runtime: 'node',
+    },
+  );
+  assert(
+    missingDotnetDiagnosis?.errorCode === 'COMMAND_NOT_FOUND'
+      && missingDotnetDiagnosis.missingExecutable === 'dotnet',
+    'Chuẩn hóa exit 127 thành COMMAND_NOT_FOUND kèm executable bị thiếu',
+  );
+  assert(isToolResultFailure({ exitCode: 127 }) === true, 'UI đánh dấu exitCode khác 0 là ERROR thay vì OK');
+  assert(isAllowedCommand('dotnet test') === true, 'Local sandbox allowlist hỗ trợ dotnet khi host có SDK');
+
+  const nativeDependencyDiagnosis = diagnoseCommandFailure(
+    'dotnet test',
+    {
+      stdout: '',
+      stderr: "System.DllNotFoundException: Unable to load shared library 'OpenCvSharpExtern' or one of its dependencies.",
+      exitCode: 1,
+      durationMs: 10,
+      sandboxType: 'docker',
+    },
+  );
+  assert(
+    nativeDependencyDiagnosis?.errorCode === 'NATIVE_DEPENDENCY_MISSING'
+      && nativeDependencyDiagnosis.missingDependency === 'OpenCvSharpExtern',
+    'Phân loại đúng native library/platform dependency bị thiếu',
+  );
+  assert(
+    diagnoseCommandFailure('dotnet test', {
+      stdout: 'Determining projects to restore...',
+      stderr: '',
+      exitCode: 1,
+      durationMs: 120000,
+      sandboxType: 'docker',
+      timedOut: true,
+    })?.errorCode === 'COMMAND_TIMEOUT',
+    'Phân loại timeout riêng thay vì báo nhầm test failure',
+  );
+
+  const environmentReflection = new ReflectionEngine().analyze({
+    toolName: 'run_command',
+    args: { command: 'dotnet test' },
+    result: { ...missingDotnetResult, ...missingDotnetDiagnosis },
+    durationMs: 5,
+  });
+  assert(
+    environmentReflection.reflectionPrompt?.includes('EXECUTION ENVIRONMENT FAILURE') === true
+      && !environmentReflection.reflectionPrompt?.includes('[Đọc Stack Trace]'),
+    'Reflection phân biệt lỗi runtime với lỗi stack trace của ứng dụng',
+  );
+
+  const failedCommandGuard = new LoopProgressGuard();
+  const missingCommandObservation = (command: string) => failedCommandGuard.observe({
+    toolName: 'run_command',
+    args: { command },
+    result: { ...missingDotnetResult, ...missingDotnetDiagnosis },
+  });
+  assert(missingCommandObservation('dotnet restore').shouldStop === false, 'Loop guard cho phép lần chẩn đoán lỗi môi trường đầu tiên');
+  assert(
+    missingCommandObservation('dotnet build').message?.includes('failure class occurred twice') === true,
+    'Loop guard cảnh báo khi cùng executable tiếp tục thiếu ở lệnh khác',
+  );
+  assert(
+    missingCommandObservation('dotnet test').shouldStop === true,
+    'Loop guard dừng vòng lặp sau ba lỗi COMMAND_NOT_FOUND cùng nhóm',
+  );
+
+  const finalAnswerGuard = new FinalAnswerGuard();
+  finalAnswerGuard.observeToolResult('run_command', {
+    exitCode: 127,
+    errorCode: 'COMMAND_NOT_FOUND',
+    diagnostic: 'Executable "dotnet" is not available in the selected sandbox.',
+  });
+  assert(
+    finalAnswerGuard.evaluate('Tôi sẽ cần sử dụng một môi trường khác. Tôi sẽ tiếp tục bằng cách chạy các test case trong môi trường khác.').allow === false,
+    'Final-answer guard chặn lời hứa tiếp tục sau lỗi môi trường',
+  );
+  assert(
+    finalAnswerGuard.evaluate('I will proceed by switching environments and running the test suite.').allow === false,
+    'Final-answer guard chặn deferred tool work bằng tiếng Anh',
+  );
+  assert(
+    finalAnswerGuard.evaluate('Không thể chạy test vì SDK bắt buộc chưa có; lệnh dừng với COMMAND_NOT_FOUND và exit 127.').allow === true,
+    'Final-answer guard vẫn cho phép báo cáo blocker trung thực có bằng chứng',
+  );
+  assert(
+    finalAnswerGuard.evaluate('Đã chạy 42 test: 42 pass. Nếu bạn muốn, tôi sẽ đo thêm tải 1.000 kết nối.').allow === true,
+    'Final-answer guard không chặn đề nghị tùy chọn rõ ràng',
+  );
+  const gitCapabilityGuard = new FinalAnswerGuard();
+  const gitGuardContext = {
+    userRequest: 'commit và push code mới lên nhánh develop',
+    availableToolNames: ['git_status', 'git_diff', 'git_add', 'git_commit', 'git_push'],
+  };
+  assert(
+    gitCapabilityGuard.evaluate(
+      "I'm unable to commit and push because I don't have the necessary tools or permissions.",
+      gitGuardContext,
+    ).reason === 'unverified-capability-denial',
+    'Final-answer guard chặn lời từ chối Git sai khi tool được cấp và chưa được thử',
+  );
+  gitCapabilityGuard.observeToolResult('git_commit', { success: true });
+  gitCapabilityGuard.observeToolResult('git_push', {
+    error: 'remote: protected branch hook declined',
+    errorCode: 'GIT_PUSH_FAILED',
+  });
+  assert(
+    gitCapabilityGuard.evaluate(
+      'Không thể push vì remote từ chối protected branch; local commit đã được tạo.',
+      gitGuardContext,
+    ).allow === true,
+    'Final-answer guard cho phép blocker Git có bằng chứng sau khi tool đã được gọi',
+  );
+
   // 2. Kiểm thử SandboxManager Orchestration
   const sandboxMgr = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
   await sandboxMgr.init();
@@ -957,6 +1145,18 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const toolExecRes = await sandboxedRunTool.execute({ command: 'node -v' }, workspace);
   assert(toolExecRes.exitCode === 0, 'run_command tích hợp SandboxManager thực thi thành công');
   assert(toolExecRes.sandbox === 'local', 'run_command ghi nhận sandboxType đúng');
+  const explicitHostExecRes = await sandboxedRunTool.execute({ command: 'node -v', execution_target: 'host' }, workspace);
+  assert(
+    explicitHostExecRes.exitCode === 0
+      && explicitHostExecRes.executionTarget === 'host'
+      && explicitHostExecRes.sandbox === 'local',
+    'run_command hỗ trợ chuyển sang host có allowlist khi dependency native không tương thích container',
+  );
+  const invalidExecutionTarget = await sandboxedRunTool.execute({ command: 'node -v', execution_target: 'remote' }, workspace);
+  assert(
+    invalidExecutionTarget.errorCode === 'INVALID_EXECUTION_TARGET',
+    'run_command từ chối execution_target không hợp lệ',
+  );
 
   // 4. Kiểm thử SandboxPlugin trong AgentKernel
   const sandboxKernel = new AgentKernel(workspace);
@@ -995,6 +1195,39 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(streamedThoughts.length === 2, 'Streamed đủ 2 token suy nghĩ thời gian thực');
   assert(streamedTokens.length === 2, 'Streamed đủ 2 token câu trả lời thời gian thực');
   assert(streamResp.text === 'Answer token 1 Answer token 2', 'Nội dung text tổng hợp trùng khớp');
+
+  const thinkingOutput: string[] = [];
+  const originalConsoleLog = console.log;
+  console.log = (...args: any[]) => thinkingOutput.push(args.map(String).join(' '));
+  try {
+    CLI.renderStepHeader(1, 3);
+    CLI.renderLLMThinking();
+    CLI.renderModelAction('final_answer');
+  } finally {
+    console.log = originalConsoleLog;
+  }
+  const stepOutputIndex = thinkingOutput.findIndex((line) => line.includes('STEP 1/3'));
+  const reasoningOutputIndex = thinkingOutput.findIndex((line) => line.includes('LLM đang phân tích ngữ cảnh'));
+  const resultOutputIndex = thinkingOutput.findIndex((line) => line.includes('Completed'));
+  assert(
+    stepOutputIndex >= 0 && reasoningOutputIndex > stepOutputIndex && resultOutputIndex > reasoningOutputIndex,
+    'CLI hiển thị STEP → trạng thái LLM suy luận → kết quả, không để step trống trong lúc chờ model',
+  );
+
+  const typedCharacters: string[] = [];
+  const typewriterDelays: number[] = [];
+  await writeTypewriterText('A🇻🇳ế🙂', {
+    write: (character) => typedCharacters.push(character),
+    wait: async (delayMs) => { typewriterDelays.push(delayMs); },
+  });
+  assert(
+    typedCharacters.join('') === 'A🇻🇳ế🙂'
+      && typedCharacters.length === 4
+      && typewriterDelays.length === 3
+      && typewriterDelays.every((delayMs) => delayMs === 4)
+      && FINAL_ANSWER_CHARACTER_DELAY_MS === 4,
+    'Final Answer render từng Unicode grapheme từ đầu đến cuối ở tốc độ nhanh x2 (4ms/ký tự)',
+  );
 
   // 2. Kiểm thử TaskManager (Background Subprocesses)
   const taskManager = new TaskManager(workspace.rootDir);
@@ -1067,6 +1300,93 @@ export async function calculateTotal(items: any[]): Promise<number> {
 
   assert(!recoveryResult.includes('(Không có phản hồi từ model)'), 'Không bao giờ dừng sớm với lỗi (Không có phản hồi từ model)');
   assert(recoveryResult.includes('tiếp tục xử lý và hoàn thành nhiệm vụ'), 'Continuation Protocol tự động khôi phục và hoàn thành ở turn tiếp theo');
+
+  class MockDeferredFinalLLM {
+    calls = 0;
+    async generate(session: Session): Promise<any> {
+      this.calls++;
+      if (this.calls === 1) {
+        return {
+          text: 'Tôi đã gặp lỗi dotnet không được tìm thấy. Tôi sẽ tiếp tục bằng cách chạy test trong môi trường khác.',
+          toolCalls: [],
+        };
+      }
+      const hasGuardNote = session.getHistory().some((message) =>
+        message.parts?.some((part: any) => part.text?.includes('[SYSTEM FINAL ANSWER GUARD]')),
+      );
+      return {
+        text: hasGuardNote
+          ? 'Không còn đường chạy an toàn: COMMAND_NOT_FOUND (exit 127). Cần cài .NET SDK hoặc chọn image .NET trước khi có thể chạy test.'
+          : 'Guard note was not recorded.',
+        toolCalls: [],
+      };
+    }
+  }
+
+  const deferredFinalLLM = new MockDeferredFinalLLM();
+  const deferredFinalLoop = new AgentLoop(deferredFinalLLM, new ToolRegistry(), { maxSteps: 3, workspace });
+  const deferredFinalSession = new Session('deferred-final-answer-session');
+  deferredFinalSession.addUserMessage('Test API và đo performance rồi báo cáo');
+  const deferredFinalResult = await deferredFinalLoop.run(deferredFinalSession);
+  assert(
+    deferredFinalLLM.calls === 2
+      && deferredFinalResult.includes('COMMAND_NOT_FOUND')
+      && deferredFinalSession.getEvents().some(
+        (event) => event.type === 'step/end' && event.data.reason === 'incomplete-final-answer',
+      ),
+    'AgentLoop từ chối Final Answer hứa làm sau, re-prompt và chỉ kết thúc bằng kết quả hoặc blocker thực',
+  );
+
+  class MockGitRefusalRecoveryLLM {
+    calls = 0;
+    async generate(session: Session): Promise<any> {
+      this.calls++;
+      if (this.calls === 1) {
+        return {
+          text: "I'm unable to commit and push because I don't have the necessary tools or permissions.",
+          toolCalls: [],
+        };
+      }
+      const hasCapabilityGuard = session.getHistory().some((message) =>
+        message.parts?.some((part: any) => part.text?.includes('[SYSTEM CAPABILITY GUARD]')),
+      );
+      if (this.calls === 2 && hasCapabilityGuard) {
+        return {
+          text: '',
+          toolCalls: [
+            { name: 'git_commit', args: { message: 'test: capability recovery' } },
+            { name: 'git_push', args: { remote: 'origin', branch: 'develop' } },
+          ],
+        };
+      }
+      return { text: 'Đã commit và push lên nhánh develop.', toolCalls: [] };
+    }
+  }
+
+  const gitRecoveryRegistry = new ToolRegistry();
+  for (const toolName of ['git_commit', 'git_push']) {
+    gitRecoveryRegistry.register({
+      name: toolName,
+      description: `Mock ${toolName}`,
+      parameters: { type: 'OBJECT', properties: {} } as any,
+      execute: async (_args, _workspace, context) => ({
+        success: context?.userRequest === 'commit và push code mới lên nhánh develop',
+      }),
+    });
+  }
+  const gitRecoveryLLM = new MockGitRefusalRecoveryLLM();
+  const gitRecoveryLoop = new AgentLoop(gitRecoveryLLM, gitRecoveryRegistry, { maxSteps: 4, workspace });
+  const gitRecoverySession = new Session('git-capability-recovery-session');
+  gitRecoverySession.addUserMessage('commit và push code mới lên nhánh develop');
+  const gitRecoveryResult = await gitRecoveryLoop.run(gitRecoverySession);
+  assert(
+    gitRecoveryLLM.calls === 3
+      && gitRecoveryResult.includes('Đã commit và push')
+      && gitRecoverySession.getEvents().some(
+        (event) => event.type === 'step/end' && event.data.reason === 'incomplete-final-answer',
+      ),
+    'AgentLoop không chấp nhận false refusal và buộc LLM dùng git_commit/git_push đang khả dụng',
+  );
 
   // 2. Kiểm thử khi LLM trả về System 2 Reasoning nhưng chưa phát sinh hành động
   class MockReasoningOnlyLLM {
@@ -1485,6 +1805,8 @@ Always write tests first!`;
   assert(capCatalog.hasCapability('filesystem.read'), 'CapabilityCatalog có filesystem.read');
   assert(capCatalog.hasCapability('worktree.create'), 'CapabilityCatalog có worktree.create');
   assert(capCatalog.hasCapability('git.commit'), 'CapabilityCatalog có git.commit');
+  assert(capCatalog.hasCapability('git.stage'), 'CapabilityCatalog có git.stage');
+  assert(capCatalog.hasCapability('git.push'), 'CapabilityCatalog có git.push');
   assert(capCatalog.findForTool('read_file')?.name === 'filesystem.read', 'CapabilityCatalog ánh xạ đúng tool read_file sang capability');
 
   const capPolicy = new CapabilityPolicy();
@@ -1495,9 +1817,11 @@ Always write tests first!`;
   const writeEval = capPolicy.evaluate(capCatalog.get('filesystem.write'), { isReadOnly: true });
   assert(writeEval.allowed === false && Boolean(writeEval.reason?.includes('CAPABILITY_READONLY_VIOLATION')), 'CapabilityPolicy chặn mutating capability trong read-only scope');
 
-  // Approval required check
+  // Explicit user intent is the per-turn approval gate enforced by Git tools.
   const commitEval = capPolicy.evaluate(capCatalog.get('git.commit'));
-  assert(commitEval.allowed === false && commitEval.requiresApproval === true, 'CapabilityPolicy yêu cầu phê duyệt cho capability git.commit');
+  const pushEval = capPolicy.evaluate(capCatalog.get('git.push'));
+  assert(commitEval.allowed === true, 'CapabilityPolicy cấp capability git.commit; tool vẫn kiểm tra yêu cầu người dùng theo lượt');
+  assert(pushEval.allowed === true, 'CapabilityPolicy cấp capability git.push; tool vẫn kiểm tra yêu cầu người dùng theo lượt');
 
   // 4. SkillActivator: Deterministic Evaluation & Dependencies
   const activator = new SkillActivator(skillRegistry, capCatalog);
@@ -1509,6 +1833,84 @@ Always write tests first!`;
   });
   assert(activationRes.activeSkills.some((s) => s.id === 'using-superpowers'), 'SkillActivator tự động kích hoạt autoActivate skill (using-superpowers)');
   assert(activationRes.promptSections.length > 0, 'SkillActivator sinh đúng promptSections có định dạng');
+  const gitActivationRes = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'commit và push code mới lên nhánh develop',
+  });
+  assert(
+    gitActivationRes.activeSkills.some((s) => s.id === 'finishing-a-development-branch'),
+    'SkillActivator nhận diện yêu cầu commit/push tiếng Việt và kích hoạt workflow hoàn tất nhánh',
+  );
+  assert(
+    detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
+      && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,
+    'Git intent phân biệt thảo luận capability với yêu cầu thực thi trực tiếp',
+  );
+
+  // 4.1 Dedicated Git mutation tools with per-turn authorization and a real local remote.
+  const gitFixture = await fs.mkdtemp(path.join(workspace.rootDir, '.git-tools-test-'));
+  try {
+    const repoPath = path.join(gitFixture, 'repo');
+    const remotePath = path.join(gitFixture, 'remote.git');
+    await fs.mkdir(repoPath, { recursive: true });
+    await execFileAsync('git', ['init', '--bare', remotePath], { cwd: gitFixture });
+    await execFileAsync('git', ['init', '-b', 'feature', repoPath], { cwd: gitFixture });
+    await execFileAsync('git', ['config', 'user.name', 'Coding Agent Test'], { cwd: repoPath });
+    await execFileAsync('git', ['config', 'user.email', 'coding-agent@example.invalid'], { cwd: repoPath });
+    await execFileAsync('git', ['remote', 'add', 'origin', remotePath], { cwd: repoPath });
+    await fs.writeFile(path.join(repoPath, 'sample.txt'), 'authorized git tools\n', 'utf8');
+
+    const gitWorkspace = new Workspace(repoPath);
+    const gitTools = new Map(createGitTools(gitWorkspace).map((tool) => [tool.name, tool]));
+    const unauthorizedAdd = await gitTools.get('git_add')!.execute({ all: true }, gitWorkspace);
+    assert(
+      unauthorizedAdd.errorCode === 'GIT_OPERATION_NOT_AUTHORIZED',
+      'git_add từ chối mutation khi lượt hiện tại không có yêu cầu Git rõ ràng',
+    );
+
+    const gitExecutionContext = { userRequest: 'commit và push code mới lên nhánh develop' };
+    const addResult = await gitTools.get('git_add')!.execute({ all: true }, gitWorkspace, gitExecutionContext);
+    const commitResult = await gitTools.get('git_commit')!.execute(
+      { message: 'test: verify authorized git workflow' },
+      gitWorkspace,
+      gitExecutionContext,
+    );
+    const mismatchedBranchResult = await gitTools.get('git_push')!.execute(
+      { remote: 'origin', branch: 'main' },
+      gitWorkspace,
+      gitExecutionContext,
+    );
+    const unauthorizedForceResult = await gitTools.get('git_push')!.execute(
+      { remote: 'origin', branch: 'develop', forceWithLease: true },
+      gitWorkspace,
+      gitExecutionContext,
+    );
+    const pushResult = await gitTools.get('git_push')!.execute(
+      { remote: 'origin', branch: 'develop' },
+      gitWorkspace,
+      gitExecutionContext,
+    );
+    const remoteHead = await execFileAsync('git', ['rev-parse', 'refs/heads/develop'], { cwd: remotePath });
+    assert(addResult.success === true, 'git_add stage thay đổi khi được người dùng cấp quyền theo lượt');
+    assert(commitResult.success === true && Boolean(commitResult.commit), 'git_commit tạo commit thật khi được cấp quyền');
+    assert(
+      mismatchedBranchResult.errorCode === 'GIT_BRANCH_NOT_AUTHORIZED',
+      'git_push không cho LLM đổi nhánh đích khác với nhánh người dùng yêu cầu',
+    );
+    assert(
+      unauthorizedForceResult.errorCode === 'GIT_FORCE_PUSH_NOT_AUTHORIZED',
+      'git_push không cho LLM tự bật force-with-lease khi người dùng chỉ yêu cầu push thường',
+    );
+    assert(
+      pushResult.success === true && pushResult.branch === 'develop' && remoteHead.stdout.trim() === commitResult.commit,
+      'git_push đẩy HEAD lên đúng nhánh đích của remote thật',
+    );
+  } finally {
+    const resolvedFixture = path.resolve(gitFixture);
+    if (resolvedFixture.startsWith(path.resolve(workspace.rootDir) + path.sep)) {
+      await fs.rm(resolvedFixture, { recursive: true, force: true });
+    }
+  }
 
   // 5. Session Skill Persistence & Replay
   spTestSession.recordSkillDecision({
@@ -1565,6 +1967,9 @@ Always write tests first!`;
   assert(spKernel.ctx.tools.get('create_worktree') !== undefined, 'SuperpowersPlugin đăng ký thành công create_worktree tool');
   assert(spKernel.ctx.tools.get('list_worktrees') !== undefined, 'SuperpowersPlugin đăng ký thành công list_worktrees tool');
   assert(spKernel.ctx.tools.get('git_status') !== undefined, 'SuperpowersPlugin đăng ký thành công git_status tool');
+  assert(spKernel.ctx.tools.get('git_add') !== undefined, 'SuperpowersPlugin đăng ký thành công git_add tool');
+  assert(spKernel.ctx.tools.get('git_commit') !== undefined, 'SuperpowersPlugin đăng ký thành công git_commit tool');
+  assert(spKernel.ctx.tools.get('git_push') !== undefined, 'SuperpowersPlugin đăng ký thành công git_push tool');
   assert(spKernel.ctx.tools.get('request_approval') !== undefined, 'SuperpowersPlugin đăng ký thành công request_approval tool');
   assert(spKernel.ctx.tools.get('request_review') !== undefined, 'SuperpowersPlugin đăng ký thành công request_review tool');
   assert((spKernel.ctx as any).skills instanceof SkillRegistry, 'SuperpowersPlugin gắn SkillRegistry vào KernelContext');

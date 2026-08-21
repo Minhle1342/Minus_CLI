@@ -1,5 +1,6 @@
 import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
+import type { ToolExecutionContext } from './types.js';
 
 export interface ToolExecutionResult {
   toolName: string;
@@ -26,7 +27,11 @@ export class ToolRunner {
     this.workspace = workspace;
   }
 
-  async run(toolName: string, args: Record<string, any>): Promise<ToolExecutionResult> {
+  async run(
+    toolName: string,
+    args: Record<string, any>,
+    context?: ToolExecutionContext,
+  ): Promise<ToolExecutionResult> {
     const startTime = Date.now();
 
     // Stage 1: Tool Lookup
@@ -92,7 +97,7 @@ export class ToolRunner {
 
     // Stage 4: Safe Execution
     try {
-      const rawResult = await tool.execute(args, this.workspace);
+      const rawResult = await tool.execute(args, this.workspace, context);
       
       // Stage 5: Output Normalization
       const normalizedResult = typeof rawResult === 'object' && rawResult !== null

@@ -29,7 +29,7 @@ Then start the CLI normally:
 npm run dev
 ```
 
-The npm `predev` lifecycle automatically runs `npm run search:up` first. Docker Compose uses detached mode (`-d`), so SearXNG keeps running in the background while the CLI starts. Re-running `npm run dev` is safe when the container is already running. `web_search` is registered by `SearchPlugin` and is included in the function declarations sent to the selected LLM.
+The npm `predev` lifecycle automatically runs `npm run search:up` first. If the Docker daemon is not available, the startup script attempts to launch Docker Desktop and waits for the engine before invoking Compose. Docker Compose uses detached mode (`-d`), so SearXNG keeps running in the background while the CLI starts. Re-running `npm run dev` is safe when the container is already running. `web_search` is registered by `SearchPlugin` and is included in the function declarations sent to the selected LLM.
 
 ## How the LLM decides to search
 

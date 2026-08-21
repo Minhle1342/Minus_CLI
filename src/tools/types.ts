@@ -1,6 +1,14 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type { Workspace } from '../workspace/workspace.js';
 
+export interface ToolExecutionContext {
+  sessionId?: string;
+  agentId?: string;
+  turn?: number;
+  /** Original human request for the current turn, before guard prompts. */
+  userRequest?: string;
+}
+
 /**
  * Định nghĩa chuẩn cho một Tool trong hệ thống Coding Agent.
  * 
@@ -14,5 +22,9 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: FunctionDeclaration['parameters'];
-  execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>>;
+  execute(
+    args: Record<string, any>,
+    workspace: Workspace,
+    context?: ToolExecutionContext,
+  ): Promise<Record<string, any>>;
 }

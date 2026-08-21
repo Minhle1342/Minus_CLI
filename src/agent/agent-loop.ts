@@ -21,6 +21,7 @@ import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
+import { FinalAnswerGuard } from './final-answer-guard.js';
 import { createDelegateAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
 
 /**
@@ -54,6 +55,7 @@ export class AgentLoop {
   readonly subagentManager: SubagentManager;
   readonly effectLedger: EffectLedger;
   readonly progressGuard = new LoopProgressGuard();
+  readonly finalAnswerGuard = new FinalAnswerGuard();
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
   readonly kernel?: AgentKernel;
@@ -211,6 +213,11 @@ export class AgentLoop {
   private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
     this.activeSession = session;
     const toolDeclarations = this.toolProvider.getFunctionDeclarations();
+    const turnUserMessage = [...session.getHistory()].reverse().find((message) => message.role === 'user');
+    const turnUserRequest = turnUserMessage?.parts
+      ?.map((part: any) => typeof part?.text === 'string' ? part.text : '')
+      .filter(Boolean)
+      .join('\n') || '';
     this.planManager.bindSession(session);
     this.goalManager.bindSession(session);
     this.memoryManager.bindSession(session);
@@ -218,7 +225,9 @@ export class AgentLoop {
     this.effectLedger.bindSession(session);
     this.reflectionEngine.reset();
     this.progressGuard.reset();
+    this.finalAnswerGuard.reset();
     let consecutiveEmptyTurns = 0;
+    let consecutiveIncompleteFinals = 0;
     const maxEmptyRetries = 2;
 
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
@@ -322,6 +331,7 @@ export class AgentLoop {
       // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
       let response;
       const requestOptions = { systemPrompt: this.promptAssembler.assemble() };
+      CLI.renderLLMThinking();
       if (typeof this.llm.generateStream === 'function') {
         response = await this.llm.generateStream(session, toolDeclarations, {
           onThoughtToken: (token: string) => {
@@ -390,14 +400,22 @@ export class AgentLoop {
           });
           await this.persistSession(session);
 
-          const isSideEffectTool = ['write_file', 'replace_text', 'run_command'].includes(toolName);
-          const effect = isSideEffectTool
-            ? this.effectLedger.prepare(toolName, toolCallId, true)
+          const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
+            write_file: { reversible: true, checkpoint: true },
+            replace_text: { reversible: true, checkpoint: true },
+            run_command: { reversible: true, checkpoint: true },
+            git_add: { reversible: true, checkpoint: true },
+            git_commit: { reversible: true, checkpoint: true },
+            git_push: { reversible: false, checkpoint: false },
+          };
+          const sideEffect = sideEffectConfig[toolName];
+          const effect = sideEffect
+            ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible)
             : undefined;
           if (effect) await this.persistSession(session);
 
           // Tạo Shadow Git Checkpoint trước các thao tác sửa đổi file hoặc chạy lệnh
-          if (effect) {
+          if (effect && sideEffect.checkpoint) {
             const checkpoint = await this.checkpointManager.createCheckpoint(`Tool ${toolName}: ${JSON.stringify(toolArgs)}`);
             this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id);
             await this.persistSession(session);
@@ -407,7 +425,12 @@ export class AgentLoop {
           CLI.renderToolCall(toolName, toolArgs);
 
           // Chạy tool qua pipeline an toàn
-          const executionResult = await this.toolRunner.run(toolName, toolArgs);
+          const executionResult = await this.toolRunner.run(toolName, toolArgs, {
+            sessionId: session.id,
+            agentId: this.agentId,
+            turn,
+            userRequest: turnUserRequest,
+          });
 
           CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
           this.kernel?.ctx.events.emit('tool:after', toolName, executionResult.result, executionResult.durationMs);
@@ -419,6 +442,7 @@ export class AgentLoop {
             result: executionResult.result,
             durationMs: executionResult.durationMs,
           });
+          this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
@@ -524,7 +548,7 @@ export class AgentLoop {
           const fallbackAnswer = `[Tóm tắt kết quả phân tích]:\n${response.reasoningContent}`;
           CLI.renderModelAction('final_answer');
           CLI.renderStepFooter();
-          CLI.renderFinalAnswer(fallbackAnswer);
+          await CLI.renderFinalAnswer(fallbackAnswer);
           this.kernel?.ctx.events.emit('model:final_answer', fallbackAnswer);
           session.addModelMessage({ text: fallbackAnswer, rawContent: response.rawContent });
           await this.persistSession(session);
@@ -543,10 +567,35 @@ export class AgentLoop {
       // 6. Nếu model trả về câu trả lời cuối cùng hợp lệ (Final Answer)
       const finalAnswer = response.text || '(Nhiệm vụ đã hoàn tất)';
       consecutiveEmptyTurns = 0;
+
+      const finalAnswerDecision = this.finalAnswerGuard.evaluate(finalAnswer, {
+        userRequest: turnUserRequest,
+        availableToolNames: toolDeclarations.map((tool) => tool.name || '').filter(Boolean),
+      });
+      if (!finalAnswerDecision.allow) {
+        consecutiveIncompleteFinals++;
+        CLI.renderReflectionAlert(
+          consecutiveIncompleteFinals,
+          'Final Answer đang hứa thực hiện công việc ở lượt sau. Agent sẽ tiếp tục xử lý ngay trong lượt hiện tại.',
+        );
+        session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+        session.addUserMessage(finalAnswerDecision.continuationPrompt!);
+        await this.persistSession(session);
+        CLI.renderStepFooter();
+        session.append('step/end', { turn, step, reason: 'incomplete-final-answer' });
+        await this.persistSession(session);
+        await this.agentHooks.run('agent/after-step', {
+          ...hookContext,
+          reason: 'incomplete-final-answer',
+        });
+        this.kernel?.ctx.events.emit('step:after', step);
+        continue;
+      }
+      consecutiveIncompleteFinals = 0;
       
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
-      CLI.renderFinalAnswer(finalAnswer);
+      await CLI.renderFinalAnswer(finalAnswer);
       this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
 
       // Ghi nhận câu trả lời cuối cùng vào Session
@@ -570,7 +619,7 @@ export class AgentLoop {
       : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
-    CLI.renderFinalAnswer(timeoutMessage);
+    await CLI.renderFinalAnswer(timeoutMessage, { animate: false });
     await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
     

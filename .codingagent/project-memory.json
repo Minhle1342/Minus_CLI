@@ -35,8 +35,8 @@
       "source": "manual",
       "confidence": 1,
       "createdAt": "09:20:03 21/8/2026",
-      "updatedAt": "2026-08-21T12:29:53.029Z",
-      "recordedAt": "2026-08-21T12:29:53.029Z"
+      "updatedAt": "2026-08-21T14:40:18.060Z",
+      "recordedAt": "2026-08-21T14:40:18.060Z"
     },
     {
       "id": "memory-auth_pattern",
@@ -47,8 +47,8 @@
       "source": "model",
       "confidence": 1,
       "createdAt": "09:20:03 21/8/2026",
-      "updatedAt": "2026-08-21T12:29:53.034Z",
-      "recordedAt": "2026-08-21T12:29:53.034Z"
+      "updatedAt": "2026-08-21T14:40:18.064Z",
+      "recordedAt": "2026-08-21T14:40:18.064Z"
     }
   ],
   "lastIndexed": "2026-08-20T13:39:51.642Z"

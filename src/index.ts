@@ -508,6 +508,7 @@ async function main() {
       await fallbackSandbox.init();
       (kernel.ctx as any).sandbox = fallbackSandbox;
       kernel.ctx.tools.attachSandboxManager(fallbackSandbox);
+      await kernel.init();
     } else {
       throw err;
     }
