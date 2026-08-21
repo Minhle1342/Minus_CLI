@@ -166,6 +166,26 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
 
   // 7. Git Operations
   {
+    name: 'git.list',
+    toolName: 'git_list_commands',
+    category: 'git',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Discover all built-in and installed external Git subcommands available at runtime.',
+  },
+  {
+    name: 'git.command',
+    toolName: 'git_command',
+    category: 'git',
+    sideEffect: 'external',
+    reversible: false,
+    requiresApproval: false,
+    retryable: false,
+    description: 'Execute any installed Git subcommand through argv with runtime read/write/network/destructive authorization.',
+  },
+  {
     name: 'git.status',
     toolName: 'git_status',
     category: 'git',

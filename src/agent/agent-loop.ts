@@ -23,6 +23,7 @@ import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { FinalAnswerGuard } from './final-answer-guard.js';
 import { createDelegateAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
+import { classifyGitCommand } from '../tools/git-command-policy.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -408,14 +409,25 @@ export class AgentLoop {
             git_commit: { reversible: true, checkpoint: true },
             git_push: { reversible: false, checkpoint: false },
           };
-          const sideEffect = sideEffectConfig[toolName];
+          let sideEffect: { reversible: boolean; checkpoint: boolean } | undefined = sideEffectConfig[toolName];
+          if (toolName === 'git_command') {
+            const gitRisk = classifyGitCommand(
+              String(toolArgs.subcommand || ''),
+              Array.isArray(toolArgs.args) ? toolArgs.args.map(String) : [],
+            ).risk;
+            sideEffect = gitRisk === 'read'
+              ? undefined
+              : gitRisk === 'network'
+                ? { reversible: false, checkpoint: false }
+                : { reversible: true, checkpoint: true };
+          }
           const effect = sideEffect
             ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible)
             : undefined;
           if (effect) await this.persistSession(session);
 
           // Tạo Shadow Git Checkpoint trước các thao tác sửa đổi file hoặc chạy lệnh
-          if (effect && sideEffect.checkpoint) {
+          if (effect && sideEffect?.checkpoint) {
             const checkpoint = await this.checkpointManager.createCheckpoint(`Tool ${toolName}: ${JSON.stringify(toolArgs)}`);
             this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id);
             await this.persistSession(session);

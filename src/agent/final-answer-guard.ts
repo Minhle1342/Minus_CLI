@@ -1,4 +1,5 @@
 import { detectExplicitGitMutationIntent, normalizeIntentText } from '../tools/git-intent.js';
+import { detectExplicitGitCommandNames } from '../tools/git-command-policy.js';
 
 export interface FinalAnswerGuardDecision {
   allow: boolean;
@@ -94,14 +95,26 @@ export class FinalAnswerGuard {
     context?: FinalAnswerGuardContext,
   ): FinalAnswerGuardDecision | undefined {
     const intent = detectExplicitGitMutationIntent(context?.userRequest);
-    const requestedTools = [
+    const commandNames = detectExplicitGitCommandNames(context?.userRequest);
+    const requestedTools = new Set([
+      ...(intent.stage && !intent.commit ? ['git_add'] : []),
       ...(intent.commit ? ['git_commit'] : []),
       ...(intent.push ? ['git_push'] : []),
-    ];
-    if (requestedTools.length === 0) return undefined;
+    ]);
+    const dedicatedCommands: Record<string, string> = {
+      add: 'git_add',
+      commit: 'git_commit',
+      diff: 'git_diff',
+      push: 'git_push',
+      status: 'git_status',
+    };
+    for (const commandName of commandNames) {
+      requestedTools.add(dedicatedCommands[commandName] || 'git_command');
+    }
+    if (requestedTools.size === 0) return undefined;
 
     const availableTools = new Set(context?.availableToolNames || []);
-    const untriedTools = requestedTools.filter(
+    const untriedTools = [...requestedTools].filter(
       (toolName) => availableTools.has(toolName) && !this.observedToolNames.has(toolName),
     );
     if (untriedTools.length === 0) return undefined;

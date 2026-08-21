@@ -37,8 +37,6 @@ const ALLOWED_COMMAND_PREFIXES = [
   'cargo ',
   'rustc ',
   'tsc',
-  'git ',
-  'git',
   'curl ',
   'wget ',
 ];
@@ -65,8 +63,8 @@ export function isAllowedCommand(command: string): boolean {
   });
 }
 
-/** Git mutations must pass the per-turn authorization enforced by dedicated tools. */
-export function findRestrictedGitMutation(command: string): string | undefined {
+/** All Git commands use argv-based Git tools so aliases/shell text cannot bypass policy. */
+export function findGitSubcommand(command: string): string | undefined {
   const invocations = command.toLowerCase().matchAll(/\bgit(?:\.exe)?\b([^;&|\n]*)/g);
   for (const invocation of invocations) {
     const tokens = (String(invocation[1] || '').match(/"[^"]*"|'[^']*'|\S+/g) || [])
@@ -86,7 +84,7 @@ export function findRestrictedGitMutation(command: string): string | undefined {
         index++;
         continue;
       }
-      return ['add', 'commit', 'push'].includes(token) ? token : undefined;
+      return token;
     }
   }
   return undefined;
@@ -98,13 +96,13 @@ export function findRestrictedGitMutation(command: string): string | undefined {
 export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal trong Sandbox cô lập. Docker Sandbox tự nhận diện và chuyển runtime phù hợp cho Node.js, .NET, Python, Java, Go và Rust. Chỉ dùng Git dạng đọc; git add/commit/push phải gọi các tool Git chuyên dụng để áp dụng quyền theo yêu cầu người dùng.',
+    description: 'Thực thi lệnh terminal trong Sandbox cô lập. Docker Sandbox tự nhận diện và chuyển runtime phù hợp cho Node.js, .NET, Python, Java, Go và Rust. Mọi lệnh Git phải dùng git_command hoặc tool Git chuyên dụng để áp dụng scope và quyền theo yêu cầu người dùng.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test" hoặc "git diff")',
+          description: 'Lệnh terminal không phải Git cần thực thi (ví dụ: "npm test" hoặc "dotnet test")',
         },
         timeout_ms: {
           type: Type.NUMBER,
@@ -139,13 +137,13 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
         };
       }
 
-      const restrictedGitMutation = findRestrictedGitMutation(rawCommand);
-      if (restrictedGitMutation) {
+      const gitSubcommand = findGitSubcommand(rawCommand);
+      if (gitSubcommand) {
         return {
           command: rawCommand,
-          error: `Git ${restrictedGitMutation} phải được thực thi bằng tool git_${restrictedGitMutation} chuyên dụng.`,
-          errorCode: 'GIT_OPERATION_REQUIRES_DEDICATED_TOOL',
-          suggestion: `Use git_${restrictedGitMutation} so the explicit per-turn user authorization can be verified.`,
+          error: `Git ${gitSubcommand} phải được thực thi bằng git_command hoặc tool Git chuyên dụng.`,
+          errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
+          suggestion: `Use git_command with subcommand "${gitSubcommand}" and a separate args array so workspace scope and per-turn authorization can be verified.`,
         };
       }
 

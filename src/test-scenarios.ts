@@ -4,6 +4,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { Session } from './session/session.js';
 import { Workspace } from './workspace/workspace.js';
+import { createGitTools } from './tools/git-tools.js';
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ async function runScenario(title: string, prompt: string, maxSteps: number = 30)
   const workspace = new Workspace(process.cwd());
   const llm = new GeminiLLM(apiKey!, modelName);
   const toolRegistry = new ToolRegistry();
+  for (const tool of createGitTools(workspace)) toolRegistry.register(tool);
   const agentLoop = new AgentLoop(llm, toolRegistry, { maxSteps, workspace });
 
   const session = new Session();
@@ -56,7 +58,7 @@ async function main() {
   // Kịch bản 2: Thực thi lệnh kiểm thử
   await runScenario(
     'Kịch bản 2: Kiểm tra trạng thái Git và Node version',
-    'Dùng tool run_command để kiểm tra git status và node version hiện tại của hệ thống.'
+    'Dùng git_status để kiểm tra trạng thái Git và run_command để kiểm tra node version hiện tại của hệ thống.'
   );
 
   // Kịch bản 3: Tác vụ kiểm tra và sửa đổi code

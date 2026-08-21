@@ -73,7 +73,7 @@ export class ReflectionEngine {
         `----------------------------------------`,
         `👉 QUY TRÌNH TỰ VẤN (SELF-REFLECTION):`,
         `1. [Đọc Stack Trace]: Xác định chính xác file và dòng code nào gây ra lỗi ở trên.`,
-        `2. [Kiểm tra Diff]: Sử dụng run_command (git diff) hoặc read_file để quan sát lại những gì bạn vừa sửa.`,
+        `2. [Kiểm tra Diff]: Sử dụng git_diff hoặc read_file để quan sát lại những gì bạn vừa sửa.`,
         `3. [Đưa ra giả thuyết]: Nêu rõ nguyên nhân gốc rễ (Root Cause) trong suy nghĩ trước khi sửa tiếp.`,
         `4. [Không lặp lại lỗi]: Tuyệt đối KHÔNG chạy lại thao tác giống hệt bước vừa rồi!`,
       ].join('\n');

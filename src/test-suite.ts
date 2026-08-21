@@ -69,6 +69,7 @@ import { ReviewManager } from './agent/review-manager.js';
 import { SuperpowersPlugin } from './kernel/plugins/superpowers-plugin.js';
 import { createGitTools } from './tools/git-tools.js';
 import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
+import { classifyGitCommand, detectExplicitGitCommandNames } from './tools/git-command-policy.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -203,13 +204,18 @@ async function runUnitTests() {
   assert(cmdBlocked.errorCode === 'COMMAND_NOT_ALLOWED', 'run_command chặn thành công lệnh nguy hiểm ngoài allowlist');
   const gitPushBypass = await runCommandTool.execute({ command: 'git push origin main' }, workspace);
   assert(
-    gitPushBypass.errorCode === 'GIT_OPERATION_REQUIRES_DEDICATED_TOOL',
+    gitPushBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
     'run_command chặn git push để không bỏ qua quyền của tool Git chuyên dụng',
   );
   const gitPushGlobalOptionBypass = await runCommandTool.execute({ command: 'git -C . push origin main' }, workspace);
   assert(
-    gitPushGlobalOptionBypass.errorCode === 'GIT_OPERATION_REQUIRES_DEDICATED_TOOL',
+    gitPushGlobalOptionBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
     'run_command vẫn chặn git push khi Git có global option -C',
+  );
+  const gitReadBypass = await runCommandTool.execute({ command: 'git status --short' }, workspace);
+  assert(
+    gitReadBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
+    'run_command chuyển cả Git read-only sang git_command để áp dụng một policy thống nhất',
   );
 
   console.log('\n========================================');
@@ -1132,6 +1138,17 @@ export async function calculateTotal(items: any[]): Promise<number> {
     ).allow === true,
     'Final-answer guard cho phép blocker Git có bằng chứng sau khi tool đã được gọi',
   );
+  const genericGitGuard = new FinalAnswerGuard();
+  assert(
+    genericGitGuard.evaluate(
+      "I cannot switch branches because I don't have Git tools.",
+      {
+        userRequest: 'hãy chuyển sang nhánh develop',
+        availableToolNames: ['git_command', 'git_list_commands'],
+      },
+    ).reason === 'unverified-capability-denial',
+    'Final-answer guard chặn false refusal cho Git subcommand tổng quát chưa được thử',
+  );
 
   // 2. Kiểm thử SandboxManager Orchestration
   const sandboxMgr = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
@@ -1805,6 +1822,8 @@ Always write tests first!`;
   assert(capCatalog.hasCapability('filesystem.read'), 'CapabilityCatalog có filesystem.read');
   assert(capCatalog.hasCapability('worktree.create'), 'CapabilityCatalog có worktree.create');
   assert(capCatalog.hasCapability('git.commit'), 'CapabilityCatalog có git.commit');
+  assert(capCatalog.hasCapability('git.list'), 'CapabilityCatalog có git.list');
+  assert(capCatalog.hasCapability('git.command'), 'CapabilityCatalog có git.command');
   assert(capCatalog.hasCapability('git.stage'), 'CapabilityCatalog có git.stage');
   assert(capCatalog.hasCapability('git.push'), 'CapabilityCatalog có git.push');
   assert(capCatalog.findForTool('read_file')?.name === 'filesystem.read', 'CapabilityCatalog ánh xạ đúng tool read_file sang capability');
@@ -1841,10 +1860,30 @@ Always write tests first!`;
     gitActivationRes.activeSkills.some((s) => s.id === 'finishing-a-development-branch'),
     'SkillActivator nhận diện yêu cầu commit/push tiếng Việt và kích hoạt workflow hoàn tất nhánh',
   );
+  const genericGitActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'hãy git rebase develop',
+  });
+  assert(
+    genericGitActivation.activeSkills.some((s) => s.id === 'git-operations'),
+    'SkillActivator kích hoạt Git Operations cho subcommand ngoài commit/push',
+  );
   assert(
     detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
       && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,
     'Git intent phân biệt thảo luận capability với yêu cầu thực thi trực tiếp',
+  );
+  assert(
+    detectExplicitGitCommandNames('hãy git rebase develop').includes('rebase')
+      && detectExplicitGitCommandNames('LLM có thể gọi git reset không?').length === 0,
+    'Generic Git intent nhận lệnh trực tiếp nhưng không cấp quyền từ câu hỏi capability',
+  );
+  assert(
+    classifyGitCommand('status').risk === 'read'
+      && classifyGitCommand('branch', ['feature']).risk === 'write'
+      && classifyGitCommand('fetch', ['origin']).risk === 'network'
+      && classifyGitCommand('reset', ['--hard', 'HEAD']).risk === 'destructive',
+    'Git policy phân loại đúng read/write/network/destructive',
   );
 
   // 4.1 Dedicated Git mutation tools with per-turn authorization and a real local remote.
@@ -1862,6 +1901,65 @@ Always write tests first!`;
 
     const gitWorkspace = new Workspace(repoPath);
     const gitTools = new Map(createGitTools(gitWorkspace).map((tool) => [tool.name, tool]));
+    const commandList = await gitTools.get('git_list_commands')!.execute({}, gitWorkspace);
+    const runtimeCommandOutput = await execFileAsync('git', ['--list-cmds=main,others'], { cwd: repoPath });
+    const runtimeCommandNames = runtimeCommandOutput.stdout.split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+    const genericStatus = await gitTools.get('git_command')!.execute(
+      { subcommand: 'status', args: ['--short'] },
+      gitWorkspace,
+      { userRequest: 'inspect repository' },
+    );
+    const runtimeHelperStage = await gitTools.get('git_command')!.execute(
+      { subcommand: 'stage', args: ['--all'] },
+      gitWorkspace,
+      { userRequest: 'hãy git stage --all' },
+    );
+    const hashFromStdin = await gitTools.get('git_command')!.execute(
+      { subcommand: 'hash-object', args: ['--stdin'], stdin: 'generic git command\n' },
+      gitWorkspace,
+      { userRequest: 'calculate object hash' },
+    );
+    const unauthorizedGenericBranch = await gitTools.get('git_command')!.execute(
+      { subcommand: 'branch', args: ['generic-feature'] },
+      gitWorkspace,
+      { userRequest: 'Thêm tất cả tool liên quan Git' },
+    );
+    const escapedInit = await gitTools.get('git_command')!.execute(
+      { subcommand: 'init', args: ['..\\outside-repo'] },
+      gitWorkspace,
+      { userRequest: 'hãy git init repository' },
+    );
+    const arbitraryExecution = await gitTools.get('git_command')!.execute(
+      { subcommand: 'submodule', args: ['foreach', 'echo unsafe'] },
+      gitWorkspace,
+      { userRequest: 'hãy git submodule foreach' },
+    );
+    await execFileAsync('git', ['config', 'alias.danger', '!echo should-not-run'], { cwd: repoPath });
+    const aliasExecution = await gitTools.get('git_command')!.execute(
+      { subcommand: 'danger' },
+      gitWorkspace,
+      { userRequest: 'hãy git danger' },
+    );
+    assert(
+      commandList.success === true
+        && runtimeCommandNames.every((name) => commandList.commands.some((command: any) => command.name === name))
+        && commandList.commands.some((command: any) => command.name === 'status')
+        && commandList.commands.some((command: any) => command.name === 'update-ref'),
+      'git_list_commands khám phá toàn bộ porcelain/plumbing command đang cài',
+    );
+    assert(genericStatus.success === true && genericStatus.risk === 'read', 'git_command chạy read-only subcommand không qua shell');
+    assert(runtimeHelperStage.success === true, 'git_command thực thi command runtime/helper không xuất hiện trong porcelain help chính');
+    assert(
+      hashFromStdin.success === true && /^[0-9a-f]{40,64}\s*$/i.test(hashFromStdin.stdout),
+      'git_command truyền stdin cho plumbing command',
+    );
+    assert(
+      unauthorizedGenericBranch.errorCode === 'GIT_OPERATION_NOT_AUTHORIZED',
+      'git_command không coi yêu cầu nâng cấp capability là quyền tạo nhánh',
+    );
+    assert(escapedInit.errorCode === 'GIT_SCOPE_VIOLATION', 'git_command chặn đường dẫn thoát workspace');
+    assert(arbitraryExecution.errorCode === 'GIT_EXTERNAL_EXECUTION_BLOCKED', 'git_command chặn subcommand có thể chạy shell tùy ý');
+    assert(aliasExecution.errorCode === 'GIT_SUBCOMMAND_NOT_AVAILABLE', 'git_command không thực thi Git shell alias');
     const unauthorizedAdd = await gitTools.get('git_add')!.execute({ all: true }, gitWorkspace);
     assert(
       unauthorizedAdd.errorCode === 'GIT_OPERATION_NOT_AUTHORIZED',
@@ -1874,6 +1972,31 @@ Always write tests first!`;
       { message: 'test: verify authorized git workflow' },
       gitWorkspace,
       gitExecutionContext,
+    );
+    const genericBranch = await gitTools.get('git_command')!.execute(
+      { subcommand: 'branch', args: ['generic-feature'] },
+      gitWorkspace,
+      { userRequest: 'hãy tạo nhánh generic-feature' },
+    );
+    const genericSwitch = await gitTools.get('git_command')!.execute(
+      { subcommand: 'switch', args: ['generic-feature'] },
+      gitWorkspace,
+      { userRequest: 'hãy chuyển sang nhánh generic-feature' },
+    );
+    const plumbingUpdateRef = await gitTools.get('git_command')!.execute(
+      { subcommand: 'update-ref', args: ['refs/heads/plumbing-test', 'HEAD'] },
+      gitWorkspace,
+      { userRequest: 'hãy git update-ref refs/heads/plumbing-test HEAD' },
+    );
+    const unauthorizedHardReset = await gitTools.get('git_command')!.execute(
+      { subcommand: 'reset', args: ['--hard', 'HEAD'] },
+      gitWorkspace,
+      { userRequest: 'hãy git reset HEAD' },
+    );
+    const authorizedHardReset = await gitTools.get('git_command')!.execute(
+      { subcommand: 'reset', args: ['--hard', 'HEAD'] },
+      gitWorkspace,
+      { userRequest: 'hãy git reset --hard HEAD' },
     );
     const mismatchedBranchResult = await gitTools.get('git_push')!.execute(
       { remote: 'origin', branch: 'main' },
@@ -1890,9 +2013,21 @@ Always write tests first!`;
       gitWorkspace,
       gitExecutionContext,
     );
+    const genericFetch = await gitTools.get('git_command')!.execute(
+      { subcommand: 'fetch', args: ['origin'] },
+      gitWorkspace,
+      { userRequest: 'hãy git fetch origin' },
+    );
     const remoteHead = await execFileAsync('git', ['rev-parse', 'refs/heads/develop'], { cwd: remotePath });
     assert(addResult.success === true, 'git_add stage thay đổi khi được người dùng cấp quyền theo lượt');
     assert(commitResult.success === true && Boolean(commitResult.commit), 'git_commit tạo commit thật khi được cấp quyền');
+    assert(genericBranch.success === true && genericSwitch.success === true, 'git_command tạo và switch branch khi được yêu cầu');
+    assert(plumbingUpdateRef.success === true, 'git_command thực thi low-level plumbing command update-ref');
+    assert(
+      unauthorizedHardReset.errorCode === 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
+        && authorizedHardReset.success === true,
+      'git_command yêu cầu destructive intent khớp chính xác trước reset --hard',
+    );
     assert(
       mismatchedBranchResult.errorCode === 'GIT_BRANCH_NOT_AUTHORIZED',
       'git_push không cho LLM đổi nhánh đích khác với nhánh người dùng yêu cầu',
@@ -1905,6 +2040,7 @@ Always write tests first!`;
       pushResult.success === true && pushResult.branch === 'develop' && remoteHead.stdout.trim() === commitResult.commit,
       'git_push đẩy HEAD lên đúng nhánh đích của remote thật',
     );
+    assert(genericFetch.success === true && genericFetch.risk === 'network', 'git_command thực thi network command khi được yêu cầu rõ ràng');
   } finally {
     const resolvedFixture = path.resolve(gitFixture);
     if (resolvedFixture.startsWith(path.resolve(workspace.rootDir) + path.sep)) {
@@ -1967,6 +2103,8 @@ Always write tests first!`;
   assert(spKernel.ctx.tools.get('create_worktree') !== undefined, 'SuperpowersPlugin đăng ký thành công create_worktree tool');
   assert(spKernel.ctx.tools.get('list_worktrees') !== undefined, 'SuperpowersPlugin đăng ký thành công list_worktrees tool');
   assert(spKernel.ctx.tools.get('git_status') !== undefined, 'SuperpowersPlugin đăng ký thành công git_status tool');
+  assert(spKernel.ctx.tools.get('git_list_commands') !== undefined, 'SuperpowersPlugin đăng ký thành công git_list_commands tool');
+  assert(spKernel.ctx.tools.get('git_command') !== undefined, 'SuperpowersPlugin đăng ký thành công generic git_command tool');
   assert(spKernel.ctx.tools.get('git_add') !== undefined, 'SuperpowersPlugin đăng ký thành công git_add tool');
   assert(spKernel.ctx.tools.get('git_commit') !== undefined, 'SuperpowersPlugin đăng ký thành công git_commit tool');
   assert(spKernel.ctx.tools.get('git_push') !== undefined, 'SuperpowersPlugin đăng ký thành công git_push tool');

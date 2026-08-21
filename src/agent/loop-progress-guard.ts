@@ -24,6 +24,7 @@ const WORKSPACE_MUTATING_TOOLS = new Set([
   'git_commit',
   'git_add',
   'git_push',
+  'git_command',
 ]);
 
 const GUARDED_INSPECTION_TOOLS = new Set([
