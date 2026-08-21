@@ -7,6 +7,9 @@ const DEFAULT_MAX_RESULTS = 8;
 const MAX_RESULTS = 20;
 const MAX_PAGE = 20;
 const MAX_TEXT_LENGTH = 1_500;
+const MAX_ADDITIONAL_QUERIES = 4;
+const MAX_FILTER_VALUES = 10;
+const RRF_RANK_CONSTANT = 60;
 
 type FetchImplementation = typeof fetch;
 
@@ -37,6 +40,31 @@ interface SearxngResponse {
   unresponsive_engines?: unknown;
 }
 
+interface NormalizedSearchResult {
+  title: string;
+  url: string;
+  snippet?: string;
+  engines: string[];
+  category?: string;
+  score?: number;
+  publishedDate?: string;
+}
+
+interface SearchSuccess {
+  ok: true;
+  query: string;
+  payload: SearxngResponse;
+  results: NormalizedSearchResult[];
+}
+
+interface SearchFailure {
+  ok: false;
+  query: string;
+  error: Record<string, any>;
+}
+
+type SearchAttempt = SearchSuccess | SearchFailure;
+
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -56,11 +84,11 @@ function truncateText(value: unknown, maxLength = MAX_TEXT_LENGTH): string | und
     : normalized;
 }
 
-function normalizeStringList(value: unknown, limit = 10): string[] {
+function normalizeStringList(value: unknown, limit = MAX_FILTER_VALUES, maxLength = 300): string[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => truncateText(item, 300))
-    .filter((item): item is string => Boolean(item))
+  return [...new Set(value
+    .map((item) => truncateText(item, maxLength))
+    .filter((item): item is string => Boolean(item)))]
     .slice(0, limit);
 }
 
@@ -74,11 +102,71 @@ function normalizeCsv(value: unknown): string | undefined {
   return items.length > 0 ? items.join(',') : undefined;
 }
 
-function buildSearchUrl(baseUrl: string, args: Record<string, any>): URL {
-  const normalizedBase = baseUrl.trim();
-  if (!normalizedBase) {
-    throw new Error('SEARXNG_BASE_URL must not be empty.');
+function quoteSearchTerm(value: string): string {
+  const escaped = value.replace(/["“”]/g, ' ').replace(/\s+/g, ' ').trim();
+  return escaped.includes(' ') ? `"${escaped}"` : escaped;
+}
+
+function normalizeDomain(value: string): string | undefined {
+  const candidate = value.replace(/^site:/i, '').trim();
+  try {
+    const hostname = new URL(candidate.includes('://') ? candidate : `https://${candidate}`).hostname;
+    return /^[a-z0-9.-]+$/i.test(hostname) ? hostname.toLowerCase() : undefined;
+  } catch {
+    return undefined;
   }
+}
+
+function normalizeFileType(value: string): string | undefined {
+  const candidate = value.replace(/^\.?filetype:/i, '').replace(/^\./, '').trim().toLowerCase();
+  return /^[a-z0-9]{1,12}$/.test(candidate) ? candidate : undefined;
+}
+
+function normalizeEngineShortcut(value: string): string | undefined {
+  const candidate = value.replace(/^!+/, '').trim();
+  return /^[a-z0-9_+-]{1,40}$/i.test(candidate) ? candidate : undefined;
+}
+
+function orFilter(operator: 'site' | 'filetype', values: string[]): string | undefined {
+  if (values.length === 0) return undefined;
+  const terms = values.map((value) => `${operator}:${value}`);
+  return terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
+}
+
+function buildAdvancedQueries(args: Record<string, any>, primaryQuery: string): string[] {
+  const keywords = normalizeStringList(args.keywords).map((value) => value.replace(/[\r\n]/g, ' '));
+  const exactPhrases = normalizeStringList(args.exact_phrases).map(quoteSearchTerm);
+  const exclusions = normalizeStringList(args.exclude_keywords).map((value) => `-${quoteSearchTerm(value)}`);
+  const domains = normalizeStringList(args.site_domains)
+    .map(normalizeDomain)
+    .filter((value): value is string => Boolean(value));
+  const fileTypes = normalizeStringList(args.file_types)
+    .map(normalizeFileType)
+    .filter((value): value is string => Boolean(value));
+  const engineShortcuts = normalizeStringList(args.engine_shortcuts)
+    .map(normalizeEngineShortcut)
+    .filter((value): value is string => Boolean(value))
+    .map((value) => `!${value}`);
+
+  const filters = [
+    ...keywords,
+    ...exactPhrases,
+    ...exclusions,
+    orFilter('site', [...new Set(domains)]),
+    orFilter('filetype', [...new Set(fileTypes)]),
+  ].filter((value): value is string => Boolean(value));
+
+  const seeds = [
+    primaryQuery,
+    ...normalizeStringList(args.additional_queries, MAX_ADDITIONAL_QUERIES, 500),
+  ];
+  const compiled = seeds.map((seed) => [...engineShortcuts, seed, ...filters].join(' ').trim());
+  return [...new Set(compiled)].slice(0, MAX_ADDITIONAL_QUERIES + 1);
+}
+
+function buildSearchUrl(baseUrl: string, query: string, args: Record<string, any>): URL {
+  const normalizedBase = baseUrl.trim();
+  if (!normalizedBase) throw new Error('SEARXNG_BASE_URL must not be empty.');
 
   const base = new URL(normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`);
   if (!['http:', 'https:'].includes(base.protocol)) {
@@ -86,26 +174,21 @@ function buildSearchUrl(baseUrl: string, args: Record<string, any>): URL {
   }
 
   const url = new URL('search', base);
-  url.searchParams.set('q', String(args.query).trim());
+  url.searchParams.set('q', query);
   url.searchParams.set('format', 'json');
   url.searchParams.set('pageno', String(clampInteger(args.page, 1, 1, MAX_PAGE)));
   url.searchParams.set('safesearch', String(clampInteger(args.safe_search, 1, 0, 2)));
 
   const language = truncateText(args.language, 32);
   if (language) url.searchParams.set('language', language);
-
   const categories = normalizeCsv(args.categories);
   if (categories) url.searchParams.set('categories', categories);
-
-  if (['day', 'month', 'year'].includes(args.time_range)) {
-    url.searchParams.set('time_range', args.time_range);
-  }
-
+  if (['day', 'month', 'year'].includes(args.time_range)) url.searchParams.set('time_range', args.time_range);
   return url;
 }
 
 function normalizeEngines(result: SearxngResult): string[] {
-  const engines = normalizeStringList(result.engines, 8);
+  const engines = normalizeStringList(result.engines, 8, 100);
   const engine = truncateText(result.engine, 100);
   if (engine && !engines.includes(engine)) engines.unshift(engine);
   return engines;
@@ -119,6 +202,49 @@ function normalizeUnresponsiveEngines(value: unknown): Array<{ engine: string; r
     const engine = truncateText(item[0], 100);
     if (!engine) return [];
     return [{ engine, reason: truncateText(item[1], 300) }];
+  });
+}
+
+function normalizeResultUrl(value: unknown): string | undefined {
+  const resultUrl = truncateText(value, 2_048);
+  if (!resultUrl) return undefined;
+  try {
+    const parsed = new URL(resultUrl);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function canonicalResultUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^(utm_.+|fbclid|gclid)$/i.test(key)) parsed.searchParams.delete(key);
+    }
+    if (parsed.pathname !== '/') parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.toString();
+  } catch {
+    return value.toLowerCase();
+  }
+}
+
+function normalizeResults(payload: SearxngResponse): NormalizedSearchResult[] {
+  if (!Array.isArray(payload.results)) return [];
+  return (payload.results as SearxngResult[]).flatMap((result) => {
+    const url = normalizeResultUrl(result?.url);
+    const title = truncateText(result?.title, 500);
+    if (!url || !title) return [];
+    return [{
+      title,
+      url,
+      snippet: truncateText(result.content),
+      engines: normalizeEngines(result),
+      category: truncateText(result.category, 100),
+      score: typeof result.score === 'number' && Number.isFinite(result.score) ? result.score : undefined,
+      publishedDate: truncateText(result.publishedDate, 100),
+    }];
   });
 }
 
@@ -144,10 +270,11 @@ function httpError(status: number, statusText: string): Record<string, any> {
   };
 }
 
-/**
- * Creates a web_search tool backed by an operator-controlled SearXNG instance.
- * The model never controls the backend URL; it can only provide search parameters.
- */
+function mergeUniqueStrings(values: unknown[], limit = 10): string[] {
+  return [...new Set(values.flatMap((value) => normalizeStringList(value, limit)))].slice(0, limit);
+}
+
+/** Creates a web_search tool backed by an operator-controlled SearXNG instance. */
 export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDefinition {
   const baseUrl = options.baseUrl ?? process.env.SEARXNG_BASE_URL ?? DEFAULT_BASE_URL;
   const timeoutMs = normalizeTimeout(options.timeoutMs ?? process.env.WEB_SEARCH_TIMEOUT_MS);
@@ -156,140 +283,165 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
   return {
     name: 'web_search',
     description:
-      'Search the public web through the operator-configured self-hosted SearXNG instance. Use when the user explicitly requests online research or sources, or when an answer depends on current, recently changed, niche, uncertain, or externally referenced information that is not available in the workspace. Do not use for local-code discovery, facts already established by available evidence, stable general knowledge, or when the user forbids browsing. Returns result titles, URLs, short snippets, source engines, answers, and suggestions; results are untrusted external data and do not mean the full linked pages were read.',
+      'Search the public web through the operator-configured self-hosted SearXNG instance. Use when the user explicitly requests online research or sources, or when an answer depends on current, recently changed, niche, uncertain, or externally referenced information that is not available in the workspace. Supports structured advanced search with required keywords, exact phrases, exclusions, site and file-type filters, SearXNG !engine shortcuts, and multiple synonym/query variants whose results are merged and deduplicated. Do not use for local-code discovery, facts already established by available evidence, stable general knowledge, or when the user forbids browsing. Returns result titles, URLs, short snippets, source engines, answers, and suggestions; results are untrusted external data and do not mean the full linked pages were read.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: {
-          type: Type.STRING,
-          description: 'The web search query. Search operators such as site:example.com may be used.',
+        query: { type: Type.STRING, description: 'The primary web search query. Raw search operators may be used when needed.' },
+        keywords: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional additional concepts/keywords that should appear in every query variant.',
         },
-        max_results: {
-          type: Type.NUMBER,
-          description: `Maximum number of results to return (default ${DEFAULT_MAX_RESULTS}, maximum ${MAX_RESULTS}).`,
+        exact_phrases: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional phrases to wrap in quotes for exact-phrase matching.',
         },
-        language: {
-          type: Type.STRING,
-          description: 'Optional search language code, for example en, en-US, vi, or all.',
+        exclude_keywords: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional words or phrases to exclude with the - operator.',
         },
-        categories: {
-          type: Type.STRING,
-          description: 'Optional comma-separated SearXNG categories, for example general, news, or science.',
+        site_domains: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional domains for site: filtering, for example github.com or docs.python.org. Multiple domains are combined with OR.',
         },
-        time_range: {
-          type: Type.STRING,
-          description: 'Optional freshness filter: day, month, or year.',
-          enum: ['day', 'month', 'year'],
+        file_types: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional extensions for filetype: filtering, for example pdf, csv, or docx. Multiple types are combined with OR.',
         },
-        safe_search: {
-          type: Type.NUMBER,
-          description: 'Safe-search level: 0 off, 1 moderate (default), or 2 strict.',
+        engine_shortcuts: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional SearXNG engine/category shortcuts without the leading !, for example github, arxiv, or news. Availability depends on instance configuration.',
         },
-        page: {
-          type: Type.NUMBER,
-          description: `Result page to request (default 1, maximum ${MAX_PAGE}).`,
+        additional_queries: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: `Up to ${MAX_ADDITIONAL_QUERIES} focused synonym, spelling, terminology, or language variants. They receive the same filters; results are fused and deduplicated.`,
         },
+        max_results: { type: Type.NUMBER, description: `Maximum number of merged results to return (default ${DEFAULT_MAX_RESULTS}, maximum ${MAX_RESULTS}).` },
+        language: { type: Type.STRING, description: 'Optional search language code, for example en, en-US, vi, or all.' },
+        categories: { type: Type.STRING, description: 'Optional comma-separated SearXNG categories, for example general, news, or science.' },
+        time_range: { type: Type.STRING, description: 'Optional freshness filter: day, month, or year.', enum: ['day', 'month', 'year'] },
+        safe_search: { type: Type.NUMBER, description: 'Safe-search level: 0 off, 1 moderate (default), or 2 strict.' },
+        page: { type: Type.NUMBER, description: `Result page to request (default 1, maximum ${MAX_PAGE}).` },
       },
       required: ['query'],
     },
     async execute(args): Promise<Record<string, any>> {
-      const query = typeof args.query === 'string' ? args.query.trim() : '';
-      if (!query) {
-        return {
-          error: 'Parameter "query" is required and must not be empty.',
-          errorCode: 'INVALID_ARGS',
-        };
-      }
+      const primaryQuery = truncateText(args.query, 500);
+      if (!primaryQuery) return { error: 'Parameter "query" is required and must not be empty.', errorCode: 'INVALID_ARGS' };
       if (typeof fetchImpl !== 'function') {
-        return {
-          error: 'This Node.js runtime does not provide fetch(). Use Node.js 18 or newer.',
-          errorCode: 'FETCH_UNAVAILABLE',
-        };
+        return { error: 'This Node.js runtime does not provide fetch(). Use Node.js 18 or newer.', errorCode: 'FETCH_UNAVAILABLE' };
       }
 
-      let url: URL;
+      const queries = buildAdvancedQueries(args, primaryQuery);
+      let urls: URL[];
       try {
-        url = buildSearchUrl(baseUrl, { ...args, query });
+        urls = queries.map((query) => buildSearchUrl(baseUrl, query, args));
       } catch (error: any) {
-        return {
-          error: `Invalid SearXNG configuration: ${error.message}`,
-          errorCode: 'SEARXNG_CONFIG_ERROR',
-        };
+        return { error: `Invalid SearXNG configuration: ${error.message}`, errorCode: 'SEARXNG_CONFIG_ERROR' };
       }
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            'User-Agent': 'CodingAgent-web-search/1.0',
-          },
-          signal: controller.signal,
-        });
-
-        if (!response.ok) return httpError(response.status, response.statusText);
-
-        let payload: SearxngResponse;
+      const searchOnce = async (query: string, url: URL): Promise<SearchAttempt> => {
         try {
-          payload = await response.json() as SearxngResponse;
-        } catch {
+          const response = await fetchImpl(url, {
+            method: 'GET',
+            headers: { Accept: 'application/json', 'User-Agent': 'CodingAgent-web-search/2.0' },
+            signal: controller.signal,
+          });
+          if (!response.ok) return { ok: false, query, error: httpError(response.status, response.statusText) };
+
+          let payload: SearxngResponse;
+          try {
+            payload = await response.json() as SearxngResponse;
+          } catch {
+            return {
+              ok: false,
+              query,
+              error: { error: 'SearXNG returned a non-JSON response. Ensure "json" is enabled under search.formats.', errorCode: 'SEARXNG_INVALID_RESPONSE' },
+            };
+          }
+          if (!payload || !Array.isArray(payload.results)) {
+            return {
+              ok: false,
+              query,
+              error: { error: 'SearXNG returned an unexpected response without a results array.', errorCode: 'SEARXNG_INVALID_RESPONSE' },
+            };
+          }
+          return { ok: true, query, payload, results: normalizeResults(payload) };
+        } catch (error: any) {
+          const timedOut = error?.name === 'AbortError' || controller.signal.aborted;
           return {
-            error: 'SearXNG returned a non-JSON response. Ensure "json" is enabled under search.formats.',
-            errorCode: 'SEARXNG_INVALID_RESPONSE',
+            ok: false,
+            query,
+            error: {
+              error: timedOut
+                ? `SearXNG search timed out after ${timeoutMs} ms.`
+                : `Could not reach the configured SearXNG instance: ${error?.message || String(error)}.`,
+              errorCode: timedOut ? 'SEARXNG_TIMEOUT' : 'SEARXNG_UNAVAILABLE',
+            },
           };
         }
+      };
 
-        if (!payload || !Array.isArray(payload.results)) {
-          return {
-            error: 'SearXNG returned an unexpected response without a results array.',
-            errorCode: 'SEARXNG_INVALID_RESPONSE',
-          };
+      try {
+        const attempts = await Promise.all(queries.map((query, index) => searchOnce(query, urls[index])));
+        const successes = attempts.filter((attempt): attempt is SearchSuccess => attempt.ok);
+        const failures = attempts.filter((attempt): attempt is SearchFailure => !attempt.ok);
+        if (successes.length === 0) return { ...failures[0]?.error, queries, queryCount: queries.length };
+
+        const merged = new Map<string, NormalizedSearchResult & { matchedQueries: string[]; reciprocalRankScore: number }>();
+        for (const success of successes) {
+          success.results.forEach((result, index) => {
+            const key = canonicalResultUrl(result.url);
+            const rankContribution = 1 / (RRF_RANK_CONSTANT + index + 1);
+            const existing = merged.get(key);
+            if (existing) {
+              existing.reciprocalRankScore += rankContribution;
+              if (!existing.matchedQueries.includes(success.query)) existing.matchedQueries.push(success.query);
+              existing.engines = [...new Set([...existing.engines, ...result.engines])];
+              if (!existing.snippet && result.snippet) existing.snippet = result.snippet;
+            } else {
+              merged.set(key, { ...result, matchedQueries: [success.query], reciprocalRankScore: rankContribution });
+            }
+          });
         }
 
         const maxResults = clampInteger(args.max_results, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
-        const results = (payload.results as SearxngResult[])
+        const results = [...merged.values()]
+          .sort((a, b) => b.reciprocalRankScore - a.reciprocalRankScore)
           .slice(0, maxResults)
-          .flatMap((result, index) => {
-            const resultUrl = truncateText(result?.url, 2_048);
-            const title = truncateText(result?.title, 500);
-            if (!resultUrl || !title) return [];
-            return [{
-              position: index + 1,
-              title,
-              url: resultUrl,
-              snippet: truncateText(result.content),
-              engines: normalizeEngines(result),
-              category: truncateText(result.category, 100),
-              score: typeof result.score === 'number' && Number.isFinite(result.score)
-                ? result.score
-                : undefined,
-              publishedDate: truncateText(result.publishedDate, 100),
-            }];
-          });
+          .map((result, index) => ({ position: index + 1, ...result, reciprocalRankScore: Number(result.reciprocalRankScore.toFixed(6)) }));
+
+        const estimatedTotals = successes
+          .map(({ payload }) => payload.number_of_results)
+          .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+        const unresponsiveEngines = [...new Map(successes
+          .flatMap(({ payload }) => normalizeUnresponsiveEngines(payload.unresponsive_engines))
+          .map((item) => [`${item.engine}\u0000${item.reason ?? ''}`, item])).values()].slice(0, 10);
 
         return {
           provider: 'searxng',
-          query: truncateText(payload.query, 500) ?? query,
+          query: queries[0],
+          queries,
+          queryCount: queries.length,
+          successfulQueries: successes.length,
           page: clampInteger(args.page, 1, 1, MAX_PAGE),
           returnedResults: results.length,
-          estimatedTotalResults: typeof payload.number_of_results === 'number'
-            ? payload.number_of_results
-            : undefined,
+          estimatedTotalResults: estimatedTotals.length > 0 ? Math.max(...estimatedTotals) : undefined,
           results,
-          answers: normalizeStringList(payload.answers),
-          corrections: normalizeStringList(payload.corrections),
-          suggestions: normalizeStringList(payload.suggestions),
-          unresponsiveEngines: normalizeUnresponsiveEngines(payload.unresponsive_engines),
-        };
-      } catch (error: any) {
-        const timedOut = error?.name === 'AbortError' || controller.signal.aborted;
-        return {
-          error: timedOut
-            ? `SearXNG search timed out after ${timeoutMs} ms.`
-            : `Could not reach the configured SearXNG instance: ${error?.message || String(error)}.`,
-          errorCode: timedOut ? 'SEARXNG_TIMEOUT' : 'SEARXNG_UNAVAILABLE',
+          answers: mergeUniqueStrings(successes.map(({ payload }) => payload.answers)),
+          corrections: mergeUniqueStrings(successes.map(({ payload }) => payload.corrections)),
+          suggestions: mergeUniqueStrings(successes.map(({ payload }) => payload.suggestions)),
+          unresponsiveEngines,
+          queryErrors: failures.map((failure) => ({ query: failure.query, ...failure.error })),
         };
       } finally {
         clearTimeout(timeout);
