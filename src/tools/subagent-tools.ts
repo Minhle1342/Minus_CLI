@@ -28,6 +28,65 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
   };
 }
 
+export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
+  return {
+    name: 'spawn_agent',
+    description: 'Spawn a clean-context child agent with an explicit task brief and scoped capabilities.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        brief: { type: Type.STRING, description: 'Detailed prompt brief and task instructions for the child agent.' },
+        maxSteps: { type: Type.INTEGER, description: 'Maximum step budget for the child agent.' },
+        toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional list of allowed tool names.' },
+        worktreePath: { type: Type.STRING, description: 'Optional isolated worktree path for this agent.' },
+      },
+      required: ['brief'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const brief = String(args.brief || '').trim();
+      if (!brief) return { error: 'Param "brief" is required.' };
+      const handle = manager.spawn(brief, {
+        maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
+        toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
+        worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
+      });
+      return { success: true, agentId: handle.id, agent: handle };
+    },
+  };
+}
+
+export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
+  return {
+    name: 'wait_agent',
+    description: 'Wait synchronously for a spawned child agent to complete its task without polling.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        agentId: { type: Type.STRING, description: 'The child agent ID to wait for.' },
+        timeoutMs: { type: Type.INTEGER, description: 'Timeout in milliseconds (default 60000ms).' },
+      },
+      required: ['agentId'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const agentId = String(args.agentId || '').trim();
+      if (!agentId) return { error: 'Param "agentId" is required.' };
+      try {
+        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
+        const result = await manager.waitFor(agentId, timeoutMs);
+        return {
+          success: true,
+          agentId: result.id,
+          status: result.status,
+          answer: result.answer,
+          error: result.error,
+        };
+      } catch (err: any) {
+        return { success: false, error: err.message, agentId };
+      }
+    },
+  };
+}
+
 export function createGetAgentResultTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'get_agent_result',

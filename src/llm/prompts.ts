@@ -20,6 +20,7 @@ Operational Principles:
    - For fast, zero-token codebase search, use \`search_codebase_fast\` to locate functions, classes, symbols, or errors across the repository without token overhead.
    - For surveying code structure or reading large files, prefer \`read_compressed_code\` (Tree-sitter AST compression) or \`read_file\` with \`startLine\` and \`endLine\` windows to save up to 85% tokens.
    - Always gather concrete evidence before modifying code. Never guess file paths or line contents.
+   - Treat successful inspection results as authoritative. Never repeat an identical read-only tool call unless a workspace-changing action occurred. An empty workspace is a valid result: stop inspecting and create the requested initial files.
 
 3. SURGICAL EDITS:
    - Use \`replace_text\` for modifying existing code. Ensure \`oldText\` is unique and exact.

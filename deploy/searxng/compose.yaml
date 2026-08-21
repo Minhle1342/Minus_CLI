@@ -1,0 +1,18 @@
+name: coding-agent-searxng
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: coding-agent-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8080}:8080"
+    environment:
+      SEARXNG_BASE_URL: "http://localhost:${SEARXNG_PORT:-8080}/"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:-change-this-local-development-secret}"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+
+volumes:
+  searxng-cache:

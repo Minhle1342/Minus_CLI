@@ -102,6 +102,10 @@ Subagent chạy trong child session riêng, dùng tool scope được giới h�
 5. **`write_file`**: Tạo file mới hoặc ghi đè file hoàn chỉnh (tự động tạo thư mục cha).
 6. **`run_command`**: Thực thi các lệnh kiểm thử và build an toàn (`npm test`, `npm run build`, `git diff`,...).
 
+### Self-hosted web search
+
+`SearchPlugin` còn đăng ký **`web_search`**, dùng SearXNG miễn phí và tự host. Chạy instance local đi kèm bằng `npm run search:up`, cấu hình `SEARXNG_BASE_URL`, rồi xem [hướng dẫn web search](docs/WEB_SEARCH.md) để biết tham số, bảo mật và cách vận hành.
+
 ---
 
 ## 📂 Cấu Trúc Mã Nguồn
@@ -150,16 +154,49 @@ CodingAgent/
 │   │   ├── write-file.ts          # Tool tạo mới / ghi đè file
 │   │   └── run-command.ts         # Tool thực thi lệnh CLI (có allowlist & timeout)
 │   │
-│   ├── test-suite.ts              # 185 assertions kiểm tra toàn diện hệ thống
+│   ├── skills/                    # Superpowers Skills Registry, Loader & Activator
+│   │   ├── types.ts               # Định nghĩa SkillManifest & Activation types
+│   │   ├── skill-loader.ts        # Parser frontmatter an toàn & SHA-256 hashing
+│   │   ├── skill-registry.ts      # Quản lý danh mục kỹ năng Superpowers
+│   │   ├── skill-activator.ts     # Kích hoạt xác định và nạp prompt sections
+│   │   ├── superpowers-source.ts  # Bộ 8 Superpowers skills tích hợp sẵn
+│   │   ├── verification-policy.ts # Ràng buộc verification-before-completion
+│   │   └── workflow-map.ts        # Bản đồ quy trình Superpowers (Brainstorming -> Finishing)
+│   │
+│   ├── capabilities/              # Capability Catalog & Safety Policies
+│   │   ├── types.ts               # Định nghĩa CapabilityDescriptor & Policy
+│   │   ├── capability-catalog.ts  # Danh mục các capability của hệ thống
+│   │   ├── capability-policy.ts   # Thẩm định an toàn, quyền readonly và approval
+│   │   └── default-capabilities.ts # Ánh xạ chuẩn từ Tool sang Capability
+│   │
+│   ├── test-suite.ts              # 228 assertions kiểm tra toàn diện hệ thống
 │   └── test-scenarios.ts          # Các kịch bản kiểm thử trực tiếp với Gemini
 │
 ├── package.json                   # Khai báo dependencies & scripts
 ├── tsconfig.json                  # Cấu hình TypeScript NodeNext
+├── docs/
+│   ├── SUPERPOWERS_INTEGRATION.md # Hướng dẫn chi tiết kiến trúc Superpowers
+│   └── superpowers/               # Kế hoạch & Ma trận tương thích
 ├── CODING_AGENT_ARCHITECTURE.md   # Giải thích chuyên sâu kiến trúc Coding Agent
 ├── CODING_AGENT_WALKTHROUGH.md    # Nhật ký theo dõi 6 bước giải quyết 1 bug thực tế
 ├── LEARNING.md                    # 10 câu hỏi nền tảng về kiến trúc Agent
 └── README.md                      # Tài liệu tổng quan dự án
 ```
+
+---
+
+## ⚡ Tích Hợp Superpowers & Capability Catalog
+
+Hệ thống tích hợp đầy đủ phương pháp luận và bộ kỹ năng từ **Superpowers** (`obra/superpowers`):
+- **Skills as Contextual Instructions:** Các file Markdown kỹ năng (`using-superpowers`, `test-driven-development`, `writing-plans`, v.v.) được phát hiện, xác thực và nạp xác định vào System Prompt theo từng turn.
+- **Explicit Capability Adapters:** Tách biệt rõ ràng giữa mô tả nghiệp vụ của kỹ năng và công cụ thực thi mã lệnh thông qua `CapabilityCatalog`.
+- **An Toàn & Kiểm Soát:** Hỗ trợ tạo workspace cô lập (`create_worktree`), phê duyệt trước hành động rủi ro cao (`/approvals`), review đa vai trò (`request_review`), và bắt buộc vượt qua kiểm thử trước khi kết thúc (`VerificationPolicy`).
+
+### Các lệnh điều hành Superpowers trên CLI:
+- `/skills`: Xem danh sách tất cả các kỹ năng đã cài đặt và trạng thái kích hoạt.
+- `/skills inspect <id>`: Kiểm tra chi tiết manifest, hash, và yêu cầu của 1 skill.
+- `/capabilities`: Xem danh mục capabilities, phân loại side-effect và quy tắc an toàn.
+- `/approvals`: Xem và duyệt/từ chối các yêu cầu chờ phê duyệt từ Agent.
 
 ---
 
@@ -192,6 +229,8 @@ npm run build
 ```bash
 npm run dev
 ```
+
+Lệnh `npm run dev` tự động chạy lifecycle script `predev`, khởi động SearXNG bằng Docker Compose ở chế độ nền trước khi mở CLI. Có thể dừng riêng search service bằng `npm run search:down`.
 
 ---
 

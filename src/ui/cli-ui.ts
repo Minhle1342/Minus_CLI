@@ -38,6 +38,7 @@ export interface BannerOptions {
   workspaceRoot: string;
   maxSteps: number;
   tools: string[];
+  sandboxStatus?: string;
 }
 
 export interface StatusOptions {
@@ -47,6 +48,7 @@ export interface StatusOptions {
   sessionTurns: number;
   sessionFile?: string;
   isGoalMode?: boolean;
+  sandboxStatus?: string;
 }
 
 export interface ModelOption {
@@ -338,7 +340,10 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.magenta}🤖 Model:${c.reset}     ${c.bold}${opts.modelName}${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.blue}📂 Workspace:${c.reset} ${c.dim}${opts.workspaceRoot}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.yellow}🛡️  Max Steps:${c.reset} ${c.bold}${opts.maxSteps}${c.reset} steps per request`);
+    if (opts.sandboxStatus) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightGreen}🛡️  Sandbox:${c.reset}   ${opts.sandboxStatus}`);
+    }
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.yellow}⚡ Max Steps:${c.reset} ${c.bold}${opts.maxSteps}${c.reset} steps per request`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.green}🛠️  Tools (${opts.tools.length}):${c.reset} ${c.dim}${opts.tools.join(', ')}${c.reset}`);
     console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.gray}Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để xem gợi ý lệnh nhanh, ${c.brightCyan}/model${c.gray} để đổi model.${c.reset}    ${c.cyan}${c.bold}│${c.reset}`);
@@ -603,6 +608,9 @@ export class CLI {
     console.log(`\n${c.magenta}${c.bold}╭── 📊 SESSION TELEMETRY & STATUS ───────────────────────────────────────────╮${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
+    if (opts.sandboxStatus) {
+      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Sandbox:${c.reset}       ${opts.sandboxStatus}`);
+    }
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
@@ -762,6 +770,84 @@ export class CLI {
     console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
     console.log(answer.trim());
     console.log(`\n${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị danh sách Skills và trạng thái kích hoạt
+   */
+  static renderSkills(skills: any[], activeDecisions: any[] = []): void {
+    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+    console.log(`${c.cyan}${c.bold}║                       🛠️  SUPERPOWERS SKILL REGISTRY                       ║${c.reset}`);
+    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+    const activeMap = new Map(activeDecisions.map((d: any) => [d.skillId, d]));
+
+    for (const skill of skills) {
+      const active = activeMap.get(skill.id);
+      const statusBadge = active
+        ? active.decision === 'activated'
+          ? `${c.green}${c.bold}[ACTIVE]${c.reset}`
+          : `${c.yellow}${c.bold}[${active.decision.toUpperCase()}]${c.reset}`
+        : `${c.gray}[INSTALLED]${c.reset}`;
+
+      console.log(`  ${statusBadge} ${c.bold}${c.brightCyan}${skill.id}${c.reset} ${c.gray}(v${skill.version})${c.reset} - ${c.white}${skill.name}${c.reset}`);
+      console.log(`     ${c.dim}${skill.description}${c.reset}`);
+      if (skill.requires && skill.requires.length > 0) {
+        console.log(`     ${c.blue}Requires:${c.reset} ${skill.requires.join(', ')}`);
+      }
+      if (skill.requiredCapabilities && skill.requiredCapabilities.length > 0) {
+        console.log(`     ${c.magenta}Capabilities:${c.reset} ${skill.requiredCapabilities.join(', ')}`);
+      }
+      console.log('');
+    }
+  }
+
+  /**
+   * Hiển thị danh mục Capabilities
+   */
+  static renderCapabilities(capabilities: any[]): void {
+    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+    console.log(`${c.cyan}${c.bold}║                       ⚡  CAPABILITY CATALOG                               ║${c.reset}`);
+    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+    const byCat = new Map<string, any[]>();
+    for (const cap of capabilities) {
+      const list = byCat.get(cap.category) || [];
+      list.push(cap);
+      byCat.set(cap.category, list);
+    }
+
+    for (const [cat, items] of byCat.entries()) {
+      console.log(`  ${c.bold}${c.yellow}📂 ${cat.toUpperCase()}${c.reset}`);
+      for (const cap of items) {
+        const sideEffectColor = cap.sideEffect === 'none' ? c.green : c.red;
+        const approvalBadge = cap.requiresApproval ? ` ${c.yellow}[APPROVAL REQUIRED]${c.reset}` : '';
+        console.log(`    • ${c.bold}${c.brightCyan}${cap.name}${c.reset} -> ${c.dim}${cap.toolName || 'system'}${c.reset}${approvalBadge}`);
+        console.log(`      ${c.gray}Side-effect: ${sideEffectColor}${cap.sideEffect}${c.gray} | Reversible: ${cap.reversible} | Retryable: ${cap.retryable}${c.reset}`);
+        console.log(`      ${c.dim}${cap.description}${c.reset}`);
+      }
+      console.log('');
+    }
+  }
+
+  /**
+   * Hiển thị danh sách yêu cầu phê duyệt (Approvals)
+   */
+  static renderApprovals(approvals: any[]): void {
+    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+    console.log(`${c.cyan}${c.bold}║                       🛡️  PENDING APPROVALS                                ║${c.reset}`);
+    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+    if (approvals.length === 0) {
+      console.log(`  ${c.green}✔ Không có yêu cầu phê duyệt nào đang chờ.${c.reset}\n`);
+      return;
+    }
+
+    for (const req of approvals) {
+      console.log(`  ${c.yellow}${c.bold}⏳ [${req.id}]${c.reset} Action: ${c.bold}${req.action}${c.reset}`);
+      console.log(`     ${c.dim}${req.description}${c.reset}`);
+      console.log(`     ${c.gray}Requested at: ${req.requestedAt}${c.reset}\n`);
+    }
   }
 
   /**

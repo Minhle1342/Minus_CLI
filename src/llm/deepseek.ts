@@ -54,6 +54,49 @@ export class DeepseekLLM {
   }
 
   /**
+   * Chuyển đổi đệ quy JSON Schema từ Google GenAI format sang OpenAI/JSON-Schema chuẩn
+   * (ví dụ: 'OBJECT' -> 'object', 'STRING' -> 'string', 'ARRAY' -> 'array', 'NUMBER' -> 'number')
+   */
+  private normalizeSchemaToOpenAI(schema: any): any {
+    if (!schema || typeof schema !== 'object') {
+      return schema;
+    }
+
+    if (Array.isArray(schema)) {
+      return schema.map((item) => this.normalizeSchemaToOpenAI(item));
+    }
+
+    const normalized: Record<string, any> = {};
+
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === 'type' && typeof value === 'string') {
+        normalized.type = value.toLowerCase();
+      } else if (key === 'properties' && value && typeof value === 'object') {
+        const props: Record<string, any> = {};
+        for (const [propName, propSchema] of Object.entries(value)) {
+          props[propName] = this.normalizeSchemaToOpenAI(propSchema);
+        }
+        normalized.properties = props;
+      } else if (key === 'items' && value) {
+        normalized.items = this.normalizeSchemaToOpenAI(value);
+      } else if (key === 'required' && Array.isArray(value)) {
+        normalized.required = value;
+      } else if (typeof value === 'object' && value !== null) {
+        normalized[key] = this.normalizeSchemaToOpenAI(value);
+      } else {
+        normalized[key] = value;
+      }
+    }
+
+    // Nếu là object mà chưa có properties, gán properties rỗng cho chuẩn JSON Schema
+    if (normalized.type === 'object' && !normalized.properties) {
+      normalized.properties = {};
+    }
+
+    return normalized;
+  }
+
+  /**
    * Chuyển đổi định dạng Schema FunctionDeclaration của Google GenAI sang OpenAI Tools Format
    */
   private convertToolsToOpenAI(tools: FunctionDeclaration[]): any[] {
@@ -65,7 +108,7 @@ export class DeepseekLLM {
       function: {
         name: tool.name,
         description: tool.description || '',
-        parameters: tool.parameters || { type: 'object', properties: {} },
+        parameters: this.normalizeSchemaToOpenAI(tool.parameters || { type: 'object', properties: {} }),
       },
     }));
   }
@@ -75,58 +118,193 @@ export class DeepseekLLM {
    */
   private convertHistoryToOpenAIMessages(session: Session, systemPrompt: string): any[] {
     const history = session.getHistory();
-    const messages: any[] = [];
+    const rawMessages: any[] = [];
 
     // 1. Luôn đưa System Prompt lên đầu tiên để cố định KV-Cache Prefix
-    messages.push({
+    rawMessages.push({
       role: 'system',
       content: systemPrompt,
     });
 
+    let lastAssistantToolCalls: Array<{ id: string; name: string }> = [];
+
     // 2. Chuyển đổi các lượt tin nhắn trong Session
-    for (const item of history) {
-      if (item.role === 'user') {
+    for (let msgIdx = 0; msgIdx < history.length; msgIdx++) {
+      const item = history[msgIdx];
+      const functionResponses = item.parts
+        ?.filter((part: any) => part.functionResponse)
+        .map((part: any) => part.functionResponse) || [];
+
+      if (functionResponses.length > 0) {
+        for (let respIdx = 0; respIdx < functionResponses.length; respIdx++) {
+          const response = functionResponses[respIdx];
+          let matchedId = response.id || response.toolCallId;
+
+          // Nếu response không có ID hoặc ID không khớp với assistant trước đó,
+          // đối chiếu với tool_calls của assistant liền trước
+          if (!matchedId || !lastAssistantToolCalls.some((tc) => tc.id === matchedId)) {
+            if (lastAssistantToolCalls[respIdx]) {
+              matchedId = lastAssistantToolCalls[respIdx].id;
+            } else {
+              const byName = lastAssistantToolCalls.find((tc) => tc.name === response.name);
+              if (byName) {
+                matchedId = byName.id;
+              } else {
+                matchedId = matchedId || `call_${msgIdx}_${respIdx}`;
+              }
+            }
+          }
+
+          rawMessages.push({
+            role: 'tool',
+            content: typeof response.response === 'string'
+              ? response.response
+              : JSON.stringify(response.response?.result ?? response.response ?? {}),
+            tool_call_id: matchedId,
+          });
+        }
+      } else if (item.role === 'user') {
         const textParts = item.parts?.filter((p: any) => p.text).map((p: any) => p.text).join('\n') || '';
-        messages.push({
-          role: 'user',
-          content: textParts,
-        });
+        if (textParts || !item.parts || item.parts.length === 0) {
+          rawMessages.push({
+            role: 'user',
+            content: textParts,
+          });
+        }
+        lastAssistantToolCalls = [];
       } else if (item.role === 'model') {
         const textParts = item.parts?.filter((p: any) => p.text).map((p: any) => p.text).join('\n') || '';
         const functionCalls = item.parts?.filter((p: any) => p.functionCall).map((p: any) => p.functionCall) || [];
 
         if (functionCalls.length > 0) {
-          messages.push({
+          const formattedToolCalls = functionCalls.map((fc: any, index: number) => ({
+            id: fc.id || `call_${msgIdx}_${index}`,
+            type: 'function' as const,
+            function: {
+              name: fc.name,
+              arguments: typeof fc.args === 'string' ? fc.args : JSON.stringify(fc.args || {}),
+            },
+          }));
+
+          lastAssistantToolCalls = formattedToolCalls.map((tc) => ({ id: tc.id, name: tc.function.name }));
+
+          rawMessages.push({
             role: 'assistant',
             content: textParts || null,
-            tool_calls: functionCalls.map((fc: any, index: number) => ({
-              id: fc.id || `call_${Date.now()}_${index}`,
-              type: 'function',
-              function: {
-                name: fc.name,
-                arguments: JSON.stringify(fc.args || {}),
-              },
-            })),
+            tool_calls: formattedToolCalls,
           });
         } else {
-          messages.push({
+          lastAssistantToolCalls = [];
+          rawMessages.push({
             role: 'assistant',
             content: textParts,
-          });
-        }
-      } else if (item.role === 'function' || item.role === 'tool') {
-        const functionResponses = item.parts?.filter((p: any) => p.functionResponse).map((p: any) => p.functionResponse) || [];
-        for (const fr of functionResponses) {
-          messages.push({
-            role: 'tool',
-            content: JSON.stringify(fr.response?.result || fr.response || {}),
-            tool_call_id: fr.id || fr.toolCallId || `call_${fr.name}`,
           });
         }
       }
     }
 
-    return messages;
+    return this.sanitizeOpenAIMessages(rawMessages);
+  }
+
+  /**
+   * Đảm bảo tính toàn vẹn và thứ tự hợp lệ nghiêm ngặt theo chuẩn OpenAI Message Order:
+   * 1. Mọi tin nhắn role "tool" PHẢI có tool_call_id tương ứng trong message role "assistant" liền trước.
+   * 2. Mọi tool_calls của assistant PHẢI có tool response tương ứng trước khi chuyển sang user/assistant mới.
+   * 3. Tự động sửa hoặc bổ sung ID để không bao giờ bị lỗi 400 (invalid_request_message_order).
+   */
+  private sanitizeOpenAIMessages(messages: any[]): any[] {
+    const validMessages: any[] = [];
+    let currentAssistantToolCalls: Map<string, boolean> | null = null;
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      if (msg.role === 'system') {
+        validMessages.push(msg);
+        continue;
+      }
+
+      if (msg.role === 'assistant') {
+        // Nếu assistant message trước đó có tool_calls chưa được phản hồi đầy đủ
+        if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
+          for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
+            if (!answered) {
+              validMessages.push({
+                role: 'tool',
+                tool_call_id: missingId,
+                content: JSON.stringify({ status: 'completed' }),
+              });
+            }
+          }
+        }
+
+        if (msg.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+          currentAssistantToolCalls = new Map();
+          for (const tc of msg.tool_calls) {
+            currentAssistantToolCalls.set(tc.id, false);
+          }
+        } else {
+          currentAssistantToolCalls = null;
+        }
+
+        validMessages.push(msg);
+        continue;
+      }
+
+      if (msg.role === 'tool') {
+        // Tin nhắn tool chỉ hợp lệ nếu có assistant message trước đó gọi nó
+        if (currentAssistantToolCalls && currentAssistantToolCalls.has(msg.tool_call_id)) {
+          currentAssistantToolCalls.set(msg.tool_call_id, true);
+          validMessages.push(msg);
+        } else if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
+          // Nếu tool_call_id không khớp trực tiếp, gán vào tool call chưa trả lời đầu tiên
+          const unansweredEntry = Array.from(currentAssistantToolCalls.entries()).find(([_, answered]) => !answered);
+          if (unansweredEntry) {
+            const unansweredId = unansweredEntry[0];
+            currentAssistantToolCalls.set(unansweredId, true);
+            validMessages.push({
+              ...msg,
+              tool_call_id: unansweredId,
+            });
+          }
+        }
+        // Nếu không có assistant tool_calls nào đang chờ -> Bỏ qua tin nhắn tool mồ côi này để tránh 400
+        continue;
+      }
+
+      if (msg.role === 'user') {
+        // Nếu assistant trước đó có tool_calls chưa được trả lời hết trước khi có user message mới
+        if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
+          for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
+            if (!answered) {
+              validMessages.push({
+                role: 'tool',
+                tool_call_id: missingId,
+                content: JSON.stringify({ status: 'completed' }),
+              });
+            }
+          }
+          currentAssistantToolCalls = null;
+        }
+
+        validMessages.push(msg);
+      }
+    }
+
+    // Nếu assistant message cuối cùng có tool_calls chưa được trả lời
+    if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
+      for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
+        if (!answered) {
+          validMessages.push({
+            role: 'tool',
+            tool_call_id: missingId,
+            content: JSON.stringify({ status: 'completed' }),
+          });
+        }
+      }
+    }
+
+    return validMessages;
   }
 
   /**
@@ -195,7 +373,7 @@ export class DeepseekLLM {
 
     let fullText = '';
     let fullReasoning = '';
-    const toolCallMap = new Map<number, { name: string; argsText: string }>();
+    const toolCallMap = new Map<number, { id: string; name: string; argsText: string }>();
 
     if (response.body) {
       const reader = response.body.getReader();
@@ -234,9 +412,10 @@ export class DeepseekLLM {
               for (const tc of delta.tool_calls) {
                 const idx = tc.index ?? 0;
                 if (!toolCallMap.has(idx)) {
-                  toolCallMap.set(idx, { name: '', argsText: '' });
+                  toolCallMap.set(idx, { id: '', name: '', argsText: '' });
                 }
                 const entry = toolCallMap.get(idx)!;
+                if (tc.id) entry.id += tc.id;
                 if (tc.function?.name) entry.name += tc.function.name;
                 if (tc.function?.arguments) entry.argsText += tc.function.arguments;
               }
@@ -248,7 +427,7 @@ export class DeepseekLLM {
       }
     }
 
-    const toolCalls: FunctionCall[] = [];
+    const toolCalls: (FunctionCall & { id?: string })[] = [];
     for (const [_, entry] of toolCallMap.entries()) {
       let args = {};
       try {
@@ -260,6 +439,7 @@ export class DeepseekLLM {
         toolCalls.push({
           name: entry.name,
           args,
+          id: entry.id || undefined,
         });
       }
     }

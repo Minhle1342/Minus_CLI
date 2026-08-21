@@ -9,6 +9,9 @@ export type SubagentHandle = DelegationState;
 export interface SubagentOptions {
   maxSteps?: number;
   toolNames?: string[];
+  brief?: string;
+  modelName?: string;
+  worktreePath?: string;
 }
 
 export type SubagentFactory = (
@@ -25,6 +28,7 @@ export type SubagentFactory = (
  */
 export class SubagentManager {
   private handles = new Map<string, { handle: SubagentHandle; controller: AbortController }>();
+  private completionListeners = new Map<string, Array<(handle: SubagentHandle) => void>>();
   private counter = 0;
   private boundSession?: Session;
   private boundSessionId?: string;
@@ -91,6 +95,49 @@ export class SubagentManager {
     return { ...handle };
   }
 
+  spawn(brief: string, options: SubagentOptions = {}): SubagentHandle {
+    return this.start(brief, options);
+  }
+
+  /**
+   * Đợi subagent hoàn thành một cách đồng bộ không cần vòng lặp polling
+   */
+  async waitFor(id: string, timeoutMs = 60000): Promise<SubagentHandle> {
+    const entry = this.handles.get(id);
+    if (!entry) {
+      throw new Error(`Subagent '${id}' not found.`);
+    }
+
+    if (entry.handle.status !== 'running') {
+      return { ...entry.handle };
+    }
+
+    return new Promise<SubagentHandle>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout waiting for subagent '${id}' after ${timeoutMs}ms.`));
+      }, timeoutMs);
+
+      const listener = (h: SubagentHandle) => {
+        cleanup();
+        resolve(h);
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        const listeners = this.completionListeners.get(id) || [];
+        this.completionListeners.set(
+          id,
+          listeners.filter((l) => l !== listener)
+        );
+      };
+
+      const existingListeners = this.completionListeners.get(id) || [];
+      existingListeners.push(listener);
+      this.completionListeners.set(id, existingListeners);
+    });
+  }
+
   /** Resume a stopped/failed delegation only when an operator explicitly asks. */
   resume(id: string, options: SubagentOptions = {}): SubagentHandle | undefined {
     const entry = this.handles.get(id);
@@ -131,6 +178,7 @@ export class SubagentManager {
     entry.handle.finishedAt = new Date().toISOString();
     this.agents.update(id, { status: 'stopped' });
     this.recordState(entry.handle);
+    this.notifyCompletion(entry.handle);
     return true;
   }
 
@@ -140,6 +188,17 @@ export class SubagentManager {
     handle.finishedAt = new Date().toISOString();
     this.agents.update(handle.id, { status: 'error' });
     this.recordState(handle);
+    this.notifyCompletion(handle);
+  }
+
+  private notifyCompletion(handle: SubagentHandle): void {
+    const listeners = this.completionListeners.get(handle.id) || [];
+    for (const listener of listeners) {
+      try {
+        listener({ ...handle });
+      } catch {}
+    }
+    this.completionListeners.delete(handle.id);
   }
 
   private launch(handle: SubagentHandle, session: Session, options: SubagentOptions, controller: AbortController): void {
@@ -166,6 +225,7 @@ export class SubagentManager {
       }
       handle.finishedAt = new Date().toISOString();
       this.recordState(handle);
+      this.notifyCompletion(handle);
     }).catch((error: any) => {
       if (controller.signal.aborted) {
         handle.status = 'stopped';
@@ -173,6 +233,7 @@ export class SubagentManager {
         this.agents.update(handle.id, { status: 'stopped' });
         handle.finishedAt = new Date().toISOString();
         this.recordState(handle);
+        this.notifyCompletion(handle);
       } else {
         this.finishFailure(handle, error);
       }

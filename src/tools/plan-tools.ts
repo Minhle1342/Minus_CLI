@@ -2,6 +2,49 @@ import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { PlanManager, TaskStatus } from '../agent/plan-manager.js';
 
+type PlanTaskInput = { id?: number; title: string };
+
+function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; error?: string } {
+  const tasks: PlanTaskInput[] = [];
+
+  for (let index = 0; index < rawTasks.length; index += 1) {
+    const rawTask = rawTasks[index];
+
+    if (typeof rawTask === 'string') {
+      const title = rawTask.trim();
+      if (!title) {
+        return { error: `Phần tử tasks[${index}] phải là chuỗi không rỗng.` };
+      }
+      tasks.push({ title });
+      continue;
+    }
+
+    if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) {
+      return { error: `Phần tử tasks[${index}] phải là chuỗi hoặc object có title.` };
+    }
+
+    const candidate = rawTask as Record<string, unknown>;
+    if (typeof candidate.title !== 'string' || !candidate.title.trim()) {
+      return { error: `Phần tử tasks[${index}].title phải là chuỗi không rỗng.` };
+    }
+
+    let id: number | undefined;
+    if (candidate.id !== undefined) {
+      const parsedId = Number(candidate.id);
+      if (!Number.isInteger(parsedId) || parsedId < 1) {
+        return { error: `Phần tử tasks[${index}].id phải là số nguyên dương.` };
+      }
+      id = parsedId;
+    }
+
+    tasks.push(id === undefined
+      ? { title: candidate.title.trim() }
+      : { id, title: candidate.title.trim() });
+  }
+
+  return { tasks };
+}
+
 /**
  * Tool: create_plan
  * Cho phép LLM khởi tạo Plan Tree phân rã nhiệm vụ
@@ -36,9 +79,18 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
     },
     async execute(args) {
       if (!args.tasks || !Array.isArray(args.tasks) || args.tasks.length === 0) {
-        return { error: 'Tham số "tasks" phải là một mảng danh sách các nhiệm vụ.' };
+        return {
+          error: 'Tham số "tasks" phải là một mảng danh sách các nhiệm vụ.',
+          errorCode: 'INVALID_ARGS',
+        };
       }
-      const tasks = planManager.createPlan(args.tasks);
+
+      const normalized = normalizePlanTasks(args.tasks);
+      if (!normalized.tasks) {
+        return { error: normalized.error, errorCode: 'INVALID_ARGS' };
+      }
+
+      const tasks = planManager.createPlan(normalized.tasks);
       return {
         message: `Đã khởi tạo kế hoạch thành công gồm ${tasks.length} bước.`,
         tasks,

@@ -21,10 +21,16 @@ import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
 import { TaskPlugin } from './kernel/plugins/task-plugin.js';
 import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
 import { SearchPlugin } from './kernel/plugins/search-plugin.js';
+import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { getCodexCredentials, isCodexAuthenticated } from './llm/codex-auth.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
+
+// Tự động bật Docker Sandbox mặc định để chạy lệnh không giới hạn (Zero-Restriction) khi chạy npm run dev
+if (!process.env.SANDBOX_MODE) {
+  process.env.SANDBOX_MODE = 'docker';
+}
 
 const apiKey = process.env.GEMINI_API_KEY || '';
 const deepseekApiKey = process.env.DEEPSEEK_API_KEY || '';
@@ -40,16 +46,44 @@ const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 3
 
 // Hàm hoàn thành tự động khi người dùng nhấn Tab
 function completer(line: string): [string[], string] {
-  const completions = ['/model', '/modal', '/workspace', '/cd', '/session', '/sessions', '/new-session', '/fork-session', '/tools', '/status', '/agents', '/goal', '/clear', '/help', '/exit', '/quit'];
+  const completions = [
+    '/model',
+    '/modal',
+    '/workspace',
+    '/cd',
+    '/session',
+    '/sessions',
+    '/new-session',
+    '/fork-session',
+    '/sandbox',
+    '/tasks',
+    '/plan',
+    '/memory',
+    '/tools',
+    '/status',
+    '/agents',
+    '/goal',
+    '/skills',
+    '/capabilities',
+    '/approvals',
+    '/undo',
+    '/rollback',
+    '/checkpoints',
+    '/clear',
+    '/help',
+    '/exit',
+    '/quit',
+  ];
   const hits = completions.filter((c) => c.startsWith(line.toLowerCase()));
   return [hits.length ? hits : completions, line];
 }
 
-// Phân tích tham số dòng lệnh CLI (--workspace, --model, positional workspace)
-function parseCommandLineArgs(): { cliWorkspace?: string; cliModel?: string } {
+// Phân tích tham số dòng lệnh CLI (--workspace, --model, --sandbox, positional workspace)
+function parseCommandLineArgs(): { cliWorkspace?: string; cliModel?: string; cliSandbox?: string } {
   const args = process.argv.slice(2);
   let cliWorkspace: string | undefined;
   let cliModel: string | undefined;
+  let cliSandbox: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--workspace' && args[i + 1]) {
@@ -62,12 +96,21 @@ function parseCommandLineArgs(): { cliWorkspace?: string; cliModel?: string } {
       i++;
     } else if (args[i].startsWith('--model=')) {
       cliModel = args[i].split('=')[1];
+    } else if (args[i] === '--sandbox' && args[i + 1]) {
+      cliSandbox = args[i + 1];
+      i++;
+    } else if (args[i].startsWith('--sandbox=')) {
+      cliSandbox = args[i].split('=')[1];
+    } else if (args[i] === '--docker') {
+      cliSandbox = 'docker';
+    } else if (args[i] === '--local') {
+      cliSandbox = 'local';
     } else if (!args[i].startsWith('-') && !cliWorkspace) {
       cliWorkspace = args[i];
     }
   }
 
-  return { cliWorkspace, cliModel };
+  return { cliWorkspace, cliModel, cliSandbox };
 }
 
 // Phân tích đường dẫn workspace khởi tạo theo thứ tự ưu tiên
@@ -417,7 +460,10 @@ async function main() {
   }
 
   // 1. Tải cấu hình phiên làm việc đã lưu từ trước (Model name & Workspace path)
-  const { cliWorkspace, cliModel } = parseCommandLineArgs();
+  const { cliWorkspace, cliModel, cliSandbox } = parseCommandLineArgs();
+  if (cliSandbox) {
+    process.env.SANDBOX_MODE = cliSandbox;
+  }
   const savedSession = loadSession();
 
   const initialPath = getInitialWorkspacePath(savedSession.workspacePath, cliWorkspace);
@@ -449,7 +495,23 @@ async function main() {
   await kernel.use(TaskPlugin);
   await kernel.use(RepomixPlugin);
   await kernel.use(SearchPlugin);
-  await kernel.init();
+
+  try {
+    await kernel.init();
+  } catch (err: any) {
+    if (err.message && (err.message.includes('Docker') || err.message.includes('SANDBOX_MODE=docker'))) {
+      console.warn(`\n${c.yellow}⚠️  [Docker Sandbox]: ${err.message}${c.reset}`);
+      console.warn(`${c.gray}👉 Đang tự động chuyển sang Local Process Sandbox (Host OS với bộ lọc Allowlist).${c.reset}`);
+      console.warn(`${c.gray}💡 Để chạy lệnh không giới hạn (Zero-Restriction), vui lòng khởi động Docker Desktop trên máy tính.${c.reset}\n`);
+      process.env.SANDBOX_MODE = 'local';
+      const fallbackSandbox = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
+      await fallbackSandbox.init();
+      (kernel.ctx as any).sandbox = fallbackSandbox;
+      kernel.ctx.tools.attachSandboxManager(fallbackSandbox);
+    } else {
+      throw err;
+    }
+  }
 
   // Lắng nghe sự kiện thay đổi workspace hoặc model từ Kernel để tự động đồng bộ xuống đĩa
   kernel.ctx.events.on('workspace:changed', (_oldPath: string, newPath: string) => {
@@ -458,6 +520,13 @@ async function main() {
   kernel.ctx.events.on('model:changed', (newModel: string) => {
     saveSession({ modelName: newModel });
   });
+
+  const getSandboxStatusLabel = (): string => {
+    const sbStatus = kernel.ctx.sandbox.getStatus();
+    return sbStatus.isIsolated
+      ? `${c.brightGreen}${c.bold}✔ Docker Sandbox (Isolated - Không giới hạn lệnh)${c.reset} ${c.dim}[${sbStatus.containerId || ''}]${c.reset}`
+      : `${c.yellow}⚠ Local Sandbox (Host OS - Giới hạn Allowlist)${c.reset}`;
+  };
 
   const toolRegistry = kernel.ctx.tools;
   const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence });
@@ -496,6 +565,7 @@ async function main() {
     workspaceRoot: workspace.rootDir,
     maxSteps,
     tools: toolRegistry.getAll().map((t) => t.name),
+    sandboxStatus: getSandboxStatusLabel(),
   });
 
   const rl = readline.createInterface({ input, output, completer });
@@ -630,6 +700,7 @@ async function main() {
           sessionTurns: sessionCount,
           sessionFile: getSessionFilePath(),
           isGoalMode: agentLoop.isGoalMode,
+          sandboxStatus: getSandboxStatusLabel(),
         });
         continue;
       }
@@ -754,6 +825,7 @@ async function main() {
           workspaceRoot: workspace.rootDir,
           maxSteps,
           tools: toolRegistry.getAll().map((t) => t.name),
+          sandboxStatus: getSandboxStatusLabel(),
         });
         continue;
       }
@@ -869,6 +941,82 @@ async function main() {
         continue;
       }
 
+      // Lệnh xem và quản lý Superpowers Skills (/skills)
+      if (trimmed === '/skills' || trimmed.startsWith('/skills ')) {
+        const parts = trimmed.split(' ');
+        const subCmd = parts[1];
+        const targetId = parts[2];
+        const skillsRegistry = (agentLoop.kernel?.ctx as any)?.skills;
+
+        if (!skillsRegistry) {
+          console.log(`\n${c.yellow}⚠️  Skill registry chưa được khởi tạo.${c.reset}\n`);
+          continue;
+        }
+
+        if (subCmd === 'inspect' && targetId) {
+          const skill = skillsRegistry.get(targetId);
+          if (!skill) {
+            console.log(`\n${c.red}✖ Không tìm thấy skill: ${targetId}${c.reset}\n`);
+          } else {
+            console.log(`\n${c.cyan}${c.bold}=== SKILL MANIFEST: ${skill.id} ===${c.reset}`);
+            console.log(`Name: ${skill.name} (v${skill.version})`);
+            console.log(`Source: ${skill.source} | Priority: ${skill.priority}`);
+            console.log(`Path: ${skill.path}`);
+            console.log(`Hash: ${skill.contentHash}`);
+            console.log(`Description: ${skill.description}`);
+            if (skill.requires) console.log(`Requires: ${skill.requires.join(', ')}`);
+            if (skill.requiredCapabilities) console.log(`Required Capabilities: ${skill.requiredCapabilities.join(', ')}`);
+            console.log('');
+          }
+        } else {
+          CLI.renderSkills(skillsRegistry.list(), activeSession.getSkillDecisions());
+        }
+        continue;
+      }
+
+      // Lệnh xem Capability Catalog (/capabilities)
+      if (trimmed === '/capabilities') {
+        const capabilitiesCatalog = (agentLoop.kernel?.ctx as any)?.capabilities;
+        if (capabilitiesCatalog) {
+          CLI.renderCapabilities(capabilitiesCatalog.list());
+        } else {
+          console.log(`\n${c.yellow}⚠️  Capability catalog chưa được khởi tạo.${c.reset}\n`);
+        }
+        continue;
+      }
+
+      // Lệnh xem và xử lý Approvals (/approvals)
+      if (trimmed === '/approvals' || trimmed.startsWith('/approvals ')) {
+        const parts = trimmed.split(' ');
+        const subCmd = parts[1];
+        const targetId = parts[2];
+        const approvalMgr = (agentLoop.kernel?.ctx as any)?.approvals;
+
+        if (!approvalMgr) {
+          console.log(`\n${c.yellow}⚠️  Approval manager chưa được khởi tạo.${c.reset}\n`);
+          continue;
+        }
+
+        if (subCmd === 'approve' && targetId) {
+          const success = approvalMgr.resolveApproval(targetId, true, 'Approved by operator via CLI');
+          if (success) {
+            console.log(`\n${c.green}✔ Đã phê duyệt yêu cầu: ${targetId}${c.reset}\n`);
+          } else {
+            console.log(`\n${c.red}✖ Không thể phê duyệt yêu cầu: ${targetId}${c.reset}\n`);
+          }
+        } else if (subCmd === 'reject' && targetId) {
+          const success = approvalMgr.resolveApproval(targetId, false, 'Rejected by operator via CLI');
+          if (success) {
+            console.log(`\n${c.yellow}⚠️  Đã từ chối yêu cầu: ${targetId}${c.reset}\n`);
+          } else {
+            console.log(`\n${c.red}✖ Không thể từ chối yêu cầu: ${targetId}${c.reset}\n`);
+          }
+        } else {
+          CLI.renderApprovals(approvalMgr.getPending());
+        }
+        continue;
+      }
+
       if (trimmed.toLowerCase() === '/exit' || trimmed.toLowerCase() === '/quit' || trimmed.toLowerCase() === 'exit') {
         console.log(`\n${c.green}Tạm biệt! Chúc bạn lập trình vui vẻ! 👋${c.reset}\n`);
         break;
@@ -903,6 +1051,9 @@ async function main() {
     }
   } finally {
     rl.close();
+    try {
+      await kernel.ctx.sandbox.dispose();
+    } catch {}
   }
 }
 

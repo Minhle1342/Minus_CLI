@@ -21,11 +21,10 @@ const ALLOWED_COMMAND_PREFIXES = [
   'node -v',
   'node --version',
   'tsc',
-  'git status',
-  'git diff',
-  'git log',
-  'git branch',
-  'git show',
+  'git ',
+  'git',
+  'curl ',
+  'wget ',
 ];
 
 /**

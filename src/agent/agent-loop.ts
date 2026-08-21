@@ -20,6 +20,7 @@ import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { EffectLedger } from './effect-ledger.js';
+import { LoopProgressGuard } from './loop-progress-guard.js';
 import { createDelegateAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
 
 /**
@@ -52,6 +53,7 @@ export class AgentLoop {
   readonly agentId: string;
   readonly subagentManager: SubagentManager;
   readonly effectLedger: EffectLedger;
+  readonly progressGuard = new LoopProgressGuard();
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
   readonly kernel?: AgentKernel;
@@ -215,6 +217,7 @@ export class AgentLoop {
     this.subagentManager.bindSession(session);
     this.effectLedger.bindSession(session);
     this.reflectionEngine.reset();
+    this.progressGuard.reset();
     let consecutiveEmptyTurns = 0;
     const maxEmptyRetries = 2;
 
@@ -347,7 +350,7 @@ export class AgentLoop {
         consecutiveEmptyTurns = 0;
         CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
 
-        const toolCallIds = response.toolCalls.map((_: any, callIndex: number) => `call-${turn}-${step}-${callIndex}`);
+        const toolCallIds = response.toolCalls.map((call: any, callIndex: number) => (call as any).id || `call-${turn}-${step}-${callIndex}`);
         const toolCallsWithIds = response.toolCalls.map((call: any, callIndex: number) => ({
           ...call,
           id: toolCallIds[callIndex],
@@ -361,6 +364,10 @@ export class AgentLoop {
         });
         await this.persistSession(session);
         const assistantSeq = session.lastEvent?.seq;
+        const responseFunctionCallParts = (response.rawContent?.parts || [])
+          .filter((part: any) => part.functionCall);
+
+        let terminalStall: { toolName: string; repetitionCount: number } | undefined;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
         for (const [callIndex, call] of response.toolCalls.entries()) {
@@ -379,6 +386,7 @@ export class AgentLoop {
             toolCallId,
             assistantSeq,
             args: toolArgs,
+            thoughtSignature: responseFunctionCallParts[callIndex]?.thoughtSignature,
           });
           await this.persistSession(session);
 
@@ -417,18 +425,27 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
           }
 
+          const progressDecision = this.progressGuard.observe({
+            toolName,
+            args: toolArgs,
+            result: executionResult.result,
+          });
+
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
           if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
             CLI.renderPlan(this.planManager.getTasks());
           }
 
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
-          const payloadToRecord = reflectionAnalysis.reflectionPrompt
-            ? {
-                ...executionResult.result,
-                _system_reflection_prompt: reflectionAnalysis.reflectionPrompt,
-              }
-            : executionResult.result;
+          const payloadToRecord = {
+            ...executionResult.result,
+            ...(reflectionAnalysis.reflectionPrompt
+              ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
+              : {}),
+            ...(progressDecision.message
+              ? { _system_loop_guard: progressDecision.message }
+              : {}),
+          };
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
           await this.persistSession(session);
@@ -437,17 +454,30 @@ export class AgentLoop {
             this.effectLedger.commit(effect.id, outcome);
             await this.persistSession(session);
           }
+
+          if (progressDecision.shouldStop) {
+            terminalStall = { toolName, repetitionCount: progressDecision.repetitionCount };
+            break;
+          }
         }
 
-        session.append('step/end', { turn, step, reason: 'tool-results-recorded' });
+        const stepReason = terminalStall ? 'repeated-no-progress' : 'tool-results-recorded';
+        session.append('step/end', { turn, step, reason: stepReason });
         await this.persistSession(session);
         await this.agentHooks.run('agent/after-step', {
           ...hookContext,
-          reason: 'tool-results-recorded',
+          reason: stepReason,
         });
 
         CLI.renderStepFooter();
         this.kernel?.ctx.events.emit('step:after', step);
+
+        if (terminalStall) {
+          const stallMessage = `Agent stopped: repeated no-progress tool call "${terminalStall.toolName}" ${terminalStall.repetitionCount} times with identical arguments and result.`;
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress');
+          this.goalManager.disarm();
+          return stallMessage;
+        }
 
         // Quay lại đầu vòng lặp để LLM xử lý kết quả
         continue;

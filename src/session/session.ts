@@ -1,5 +1,6 @@
 import type { Content, FunctionCall } from '@google/genai';
 import type { MemoryRecord } from '../memory/types.js';
+import type { SkillActivationDecision } from '../skills/types.js';
 
 export type SessionMessage = Content;
 export type ContentPart = any;
@@ -20,6 +21,7 @@ export type SessionEventType =
   | 'input/claimed'
   | 'agent/delegation'
   | 'effect/change'
+  | 'skill/change'
   | 'session/fork'
   | 'session/compaction';
 
@@ -80,6 +82,7 @@ export interface SessionEventData {
   toolName?: string;
   toolCallId?: string;
   assistantSeq?: number;
+  thoughtSignature?: string;
   args?: Record<string, any>;
   result?: Record<string, any>;
   plan?: Array<{ id: number; title: string; status: string; notes?: string }>;
@@ -87,6 +90,7 @@ export interface SessionEventData {
   memory?: MemoryRecord | null;
   delegation?: DelegationState | null;
   effect?: EffectState | null;
+  skill?: SkillActivationDecision | null;
 }
 
 export interface SessionEvent {
@@ -147,6 +151,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'input/claimed',
     'agent/delegation',
     'effect/change',
+    'skill/change',
     'session/fork',
     'session/compaction',
   ].includes(event.type)) {
@@ -251,16 +256,30 @@ export class Session {
     if (params.rawContent) {
       const content = cloneJson(params.rawContent);
       const functionCalls = params.functionCalls || [];
-      if (functionCalls.length > 0 && content.parts) {
+      if (functionCalls.length > 0) {
         let callIndex = 0;
-        content.parts = content.parts.map((part: any) => {
+        const parts = (content.parts || []).map((part: any) => {
           if (!part.functionCall) return part;
           const call = functionCalls[callIndex++];
           return call
-            ? { ...part, functionCall: { ...part.functionCall, id: (call as any).id || part.functionCall.id } }
+            ? {
+                ...part,
+                functionCall: {
+                  ...part.functionCall,
+                  name: call.name || part.functionCall.name,
+                  args: call.args || part.functionCall.args || {},
+                  id: (call as any).id || part.functionCall.id,
+                },
+              }
             : part;
         });
+
+        if (callIndex < functionCalls.length) {
+          throw new Error('Raw model content is missing functionCall parts; refusing to persist unsigned synthetic calls.');
+        }
+        content.parts = parts;
       }
+      content.role = 'model';
       this.append('assistant/message', { content });
       return;
     }
@@ -354,6 +373,27 @@ export class Session {
 
   getOpenEffects(): EffectState[] {
     return this.getEffectStates().filter((effect) => effect.status === 'prepared');
+  }
+
+  recordSkillDecision(decision: SkillActivationDecision, reason?: string): SessionEvent {
+    return this.append('skill/change', {
+      skill: cloneJson(decision),
+      reason: reason || decision.reason,
+    });
+  }
+
+  getSkillDecisions(): SkillActivationDecision[] {
+    const decisions = new Map<string, SkillActivationDecision>();
+    for (const event of this.eventLog) {
+      if (event.type === 'skill/change' && event.data.skill) {
+        decisions.set(event.data.skill.skillId, cloneJson(event.data.skill));
+      }
+    }
+    return Array.from(decisions.values());
+  }
+
+  getActiveSkillDecisions(): SkillActivationDecision[] {
+    return this.getSkillDecisions().filter((d) => d.decision === 'activated');
   }
 
   getDiagnostics(): SessionDiagnostics {
@@ -546,6 +586,14 @@ export class Session {
 
   getHistory(): Content[] {
     let projected: Content[] = [];
+    const toolCallsByAssistantSeq = new Map<number, SessionEvent[]>();
+
+    for (const event of this.eventLog) {
+      if (event.type !== 'tool/call' || event.data.assistantSeq === undefined) continue;
+      const calls = toolCallsByAssistantSeq.get(event.data.assistantSeq) || [];
+      calls.push(event);
+      toolCallsByAssistantSeq.set(event.data.assistantSeq, calls);
+    }
 
     for (const event of this.eventLog) {
       if (event.type === 'session/compaction') {
@@ -554,7 +602,33 @@ export class Session {
       }
 
       if ((event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result') && event.data.content) {
-        projected.push(cloneJson(event.data.content));
+        const content = cloneJson(event.data.content);
+
+        if (event.type === 'assistant/message') {
+          const parts = content.parts || [];
+          const existingCallIds = new Set(parts
+            .map((part: any) => part.functionCall?.id)
+            .filter(Boolean));
+
+          for (const callEvent of toolCallsByAssistantSeq.get(event.seq) || []) {
+            const callId = callEvent.data.toolCallId;
+            if (callId && existingCallIds.has(callId)) continue;
+            parts.push({
+              ...(callEvent.data.thoughtSignature
+                ? { thoughtSignature: callEvent.data.thoughtSignature }
+                : {}),
+              functionCall: {
+                name: callEvent.data.toolName || 'unknown_tool',
+                args: callEvent.data.args || {},
+                id: callId,
+              },
+            });
+            if (callId) existingCallIds.add(callId);
+          }
+          content.parts = parts;
+        }
+
+        projected.push(content);
       }
     }
 

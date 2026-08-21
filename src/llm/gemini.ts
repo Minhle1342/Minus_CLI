@@ -48,7 +48,7 @@ export class GeminiLLM {
     callbacks?: StreamCallbacks,
     request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
-    const contents = session.getHistory();
+    const contents = this.prepareContents(session);
 
     const responseStream = await this.client.models.generateContentStream({
       model: this.modelName,
@@ -62,12 +62,12 @@ export class GeminiLLM {
     const thoughtParts: string[] = [];
     const regularTextParts: string[] = [];
     const toolCalls: FunctionCall[] = [];
-    let lastRawContent: any = undefined;
+    const streamedParts: any[] = [];
 
     for await (const chunk of responseStream) {
       const candidate = chunk.candidates?.[0];
-      if (candidate?.content) {
-        lastRawContent = candidate.content;
+      if (candidate?.content?.parts) {
+        streamedParts.push(...candidate.content.parts.map((part: any) => cloneJson(part)));
       }
 
       if (chunk.functionCalls && chunk.functionCalls.length > 0) {
@@ -90,12 +90,80 @@ export class GeminiLLM {
       }
     }
 
+    const functionCallParts = streamedParts.filter((part) => part.functionCall);
+    const nonFunctionCallParts = streamedParts.filter((part) => !part.functionCall);
+    const normalizedFunctionCallParts = toolCalls.map((call, index) => {
+      const matchingIndex = functionCallParts.findIndex(
+        (part) => part.functionCall?.name === call.name,
+      );
+      const sourceIndex = matchingIndex >= 0 ? matchingIndex : 0;
+      const sourcePart = functionCallParts[sourceIndex];
+      if (!sourcePart) return undefined;
+      functionCallParts.splice(sourceIndex, 1);
+      return {
+        ...sourcePart,
+        functionCall: {
+          ...sourcePart.functionCall,
+          name: call.name,
+          args: call.args || sourcePart.functionCall?.args || {},
+        },
+      };
+    }).filter(Boolean);
+
+    if (toolCalls.length > 0 && normalizedFunctionCallParts.length !== toolCalls.length) {
+      throw new Error('Gemini streaming response contained tool calls without their original functionCall parts. Refusing to persist a call without thought signatures.');
+    }
+
+    const rawContent = streamedParts.length > 0
+      ? { role: 'model' as const, parts: [...nonFunctionCallParts, ...normalizedFunctionCallParts] }
+      : undefined;
+
     return {
       text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
       reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
       toolCalls,
-      rawContent: lastRawContent,
+      rawContent,
     };
+  }
+
+  /**
+   * Gemini thinking signatures are opaque and cannot be reconstructed. Legacy
+   * unsigned tool exchanges remain durable in Session, but are omitted from a
+   * Gemini request together with their matching results.
+   */
+  private prepareContents(session: Session): import('@google/genai').Content[] {
+    const history = session.getHistory();
+    if (!requiresThoughtSignatures(this.modelName)) return history;
+
+    const unsignedCallIds = new Set<string>();
+    const sanitized: import('@google/genai').Content[] = [];
+
+    for (const content of history) {
+      const parts = (content.parts || []).filter((part: any) => {
+        if (part.functionCall && !part.thoughtSignature) {
+          if (part.functionCall.id) unsignedCallIds.add(part.functionCall.id);
+          return false;
+        }
+        if (part.functionResponse && part.functionResponse.id
+          && unsignedCallIds.has(part.functionResponse.id)) {
+          return false;
+        }
+        return true;
+      });
+
+      const hasMeaningfulPart = parts.some((part: any) => (
+        part.functionCall
+        || part.functionResponse
+        || part.inlineData
+        || part.fileData
+        || (typeof part.text === 'string' && part.text.length > 0)
+      ));
+      if (hasMeaningfulPart) {
+        sanitized.push({ ...cloneJson(content), parts: cloneJson(parts) });
+      }
+    }
+
+    return sanitized;
   }
 
   /**
@@ -104,4 +172,12 @@ export class GeminiLLM {
   async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
     return this.generateStream(session, tools, undefined, request);
   }
+}
+
+function requiresThoughtSignatures(modelName: string): boolean {
+  return /^gemini-(?:3|2\.5)(?:\.|-|$)/i.test(modelName);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }

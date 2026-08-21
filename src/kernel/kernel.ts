@@ -17,6 +17,7 @@ import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
+import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -201,6 +202,11 @@ export class AgentKernel {
     await this.ctx.checkpoints.init();
     await this.ctx.memory.init(this.ctx.workspace);
     await this.ctx.sandbox.init();
+
+    if (!this.plugins.has('superpowers')) {
+      await this.use(new SuperpowersPlugin());
+    }
+
     this.isInitialized = true;
     this.ctx.events.emit('kernel:init');
   }

@@ -1,0 +1,228 @@
+import { CapabilityDescriptor } from './types.js';
+import { CapabilityCatalog } from './capability-catalog.js';
+
+export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
+  // 1. Filesystem
+  {
+    name: 'filesystem.read',
+    toolName: 'read_file',
+    category: 'filesystem',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Read the contents of a file within the workspace safely.',
+  },
+  {
+    name: 'filesystem.list',
+    toolName: 'list_files',
+    category: 'filesystem',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'List directories and files within the workspace.',
+  },
+  {
+    name: 'filesystem.search',
+    toolName: 'search_text',
+    category: 'filesystem',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Search for text or regex patterns in workspace files.',
+  },
+  {
+    name: 'network.search',
+    toolName: 'web_search',
+    category: 'network',
+    sideEffect: 'external',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Search the public web through the operator-configured self-hosted SearXNG instance.',
+  },
+  {
+    name: 'filesystem.edit',
+    toolName: 'replace_text',
+    category: 'filesystem',
+    sideEffect: 'workspace',
+    reversible: true,
+    requiresApproval: false,
+    retryable: false,
+    description: 'Surgically replace specific blocks of text in workspace files.',
+  },
+  {
+    name: 'filesystem.write',
+    toolName: 'write_file',
+    category: 'filesystem',
+    sideEffect: 'workspace',
+    reversible: true,
+    requiresApproval: false,
+    retryable: false,
+    description: 'Write complete files or overwrite content in workspace files.',
+  },
+
+  // 2. Shell & Verification
+  {
+    name: 'shell.verify',
+    toolName: 'run_command',
+    category: 'shell',
+    sideEffect: 'workspace',
+    reversible: false,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Execute allowlisted test and build verification commands.',
+  },
+
+  // 3. Planning
+  {
+    name: 'plan.update',
+    toolName: 'update_plan_task',
+    category: 'planning',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Create, update, and manage structured hierarchical task plans.',
+  },
+
+  // 4. Memory
+  {
+    name: 'memory.retrieve',
+    toolName: 'read_project_memory',
+    category: 'memory',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Retrieve project architecture conventions and past lessons learned.',
+  },
+
+  // 5. Agent Orchestration
+  {
+    name: 'agent.delegate',
+    toolName: 'delegate_agent',
+    category: 'agent',
+    sideEffect: 'none',
+    reversible: false,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Delegate background subagent execution for specialized tasks.',
+  },
+  {
+    name: 'agent.spawn',
+    toolName: 'spawn_agent',
+    category: 'agent',
+    sideEffect: 'none',
+    reversible: false,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Spawn a clean-context child agent with explicit brief and tool scope.',
+  },
+  {
+    name: 'agent.wait',
+    toolName: 'wait_agent',
+    category: 'agent',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Wait for child agent task completion and retrieve final outputs.',
+  },
+
+  // 6. Worktree Lifecycle
+  {
+    name: 'worktree.create',
+    toolName: 'create_worktree',
+    category: 'worktree',
+    sideEffect: 'workspace',
+    reversible: true,
+    requiresApproval: false,
+    retryable: false,
+    description: 'Create an isolated Git worktree for parallel feature development.',
+  },
+  {
+    name: 'worktree.list',
+    toolName: 'list_worktrees',
+    category: 'worktree',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'List all active isolated Git worktrees in the project.',
+  },
+  {
+    name: 'worktree.remove',
+    toolName: 'remove_worktree',
+    category: 'worktree',
+    sideEffect: 'workspace',
+    reversible: false,
+    requiresApproval: false,
+    retryable: false,
+    description: 'Safely remove a finished isolated Git worktree directory.',
+  },
+
+  // 7. Git Operations
+  {
+    name: 'git.status',
+    toolName: 'git_status',
+    category: 'git',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Inspect current Git working tree status without modifying files.',
+  },
+  {
+    name: 'git.diff',
+    toolName: 'git_diff',
+    category: 'git',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'View unstaged or staged Git diffs across the workspace.',
+  },
+  {
+    name: 'git.commit',
+    toolName: 'git_commit',
+    category: 'git',
+    sideEffect: 'workspace',
+    reversible: true,
+    requiresApproval: true,
+    retryable: false,
+    description: 'Create an atomic Git commit with approved message.',
+  },
+
+  // 8. Human Approval & Review
+  {
+    name: 'approval.request',
+    toolName: 'request_approval',
+    category: 'approval',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Request operator confirmation or choice before critical actions.',
+  },
+  {
+    name: 'agent.review',
+    toolName: 'request_review',
+    category: 'review',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Submit completed implementation for independent spec & quality review.',
+  },
+];
+
+export function createDefaultCapabilityCatalog(): CapabilityCatalog {
+  const catalog = new CapabilityCatalog();
+  for (const cap of DEFAULT_CAPABILITIES) {
+    catalog.register(cap);
+  }
+  return catalog;
+}

@@ -44,21 +44,27 @@ export class SandboxManager {
         cpuLimit: this.cpuLimit,
       });
 
-      const dockerAvailable = await dockerProvider.isAvailable();
+      let dockerAvailable = await dockerProvider.isAvailable();
+
+      // Nếu Docker chưa chạy, tự động kích hoạt Docker Desktop
+      if (!dockerAvailable) {
+        dockerAvailable = await dockerProvider.startDockerDaemon(25);
+      }
 
       if (dockerAvailable) {
         try {
           await dockerProvider.init();
           this.activeProvider = dockerProvider;
           return;
-        } catch {
-          // Khởi tạo Docker lỗi, fallback nếu ở chế độ auto
-          if (this.mode === 'docker') {
-            throw new Error('Chế độ SANDBOX_MODE=docker được chỉ định nhưng không thể khởi động Docker container.');
-          }
+        } catch (err: any) {
+          // Khởi tạo Docker lỗi, fallback nếu ở chế độ auto hoặc docker
+          console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể khởi động Docker container: ${err.message}\x1b[0m`);
+          console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS).\x1b[0m\n`);
         }
       } else if (this.mode === 'docker') {
-        throw new Error('Chế độ SANDBOX_MODE=docker được chỉ định nhưng Docker Daemon không hoạt động.');
+        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể tự động khởi chạy Docker Desktop hoặc Docker Daemon chưa sẵn sàng.\x1b[0m`);
+        console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS với bộ lọc Allowlist).\x1b[0m`);
+        console.warn(`\x1b[90m💡 Để chạy lệnh không giới hạn (Zero-Restriction), vui lòng kiểm tra Docker Desktop trên máy tính.\x1b[0m\n`);
       }
     }
 

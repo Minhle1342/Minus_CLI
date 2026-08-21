@@ -41,11 +41,26 @@ export class PlanManager {
    * Khởi tạo hoặc thay thế kế hoạch mới
    */
   createPlan(tasks: Array<{ id?: number; title: string }>): PlanTask[] {
-    this.tasks = tasks.map((t, idx) => ({
-      id: t.id ?? idx + 1,
-      title: t.title.trim(),
-      status: idx === 0 ? 'IN_PROGRESS' : 'PENDING',
-    }));
+    if (!Array.isArray(tasks) || tasks.length === 0) {
+      throw new Error('Plan requires at least one task.');
+    }
+
+    const normalizedTasks = tasks.map((task, index): PlanTask => {
+      if (!task || typeof task !== 'object' || typeof task.title !== 'string' || !task.title.trim()) {
+        throw new Error(`Invalid plan task at index ${index}: title must be a non-empty string.`);
+      }
+      if (task.id !== undefined && (!Number.isInteger(task.id) || task.id < 1)) {
+        throw new Error(`Invalid plan task at index ${index}: id must be a positive integer.`);
+      }
+
+      return {
+        id: task.id ?? index + 1,
+        title: task.title.trim(),
+        status: index === 0 ? 'IN_PROGRESS' : 'PENDING',
+      };
+    });
+
+    this.tasks = normalizedTasks;
     this.persist('created');
     return [...this.tasks];
   }

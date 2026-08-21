@@ -5,10 +5,13 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "predev": "npm run search:up",
     "dev": "tsx src/index.ts",
     "test": "tsx src/test-suite.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "build": "tsc",
+    "search:up": "docker compose -f deploy/searxng/compose.yaml up -d",
+    "search:down": "docker compose -f deploy/searxng/compose.yaml down",
     "9router": "node scripts/start-9router.js",
     "start": "node dist/index.js"
   },

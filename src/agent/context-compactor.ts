@@ -154,6 +154,7 @@ export class ContextCompactor {
         return {
           functionResponse: {
             name: resp.name,
+            id: resp.id,
             response: compressedPayload,
           },
         };

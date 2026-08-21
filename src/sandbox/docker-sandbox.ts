@@ -1,5 +1,6 @@
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import fs from 'node:fs';
 import path from 'node:path';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
 
@@ -52,6 +53,82 @@ export class DockerSandbox implements ISandboxProvider {
   }
 
   /**
+   * Tự động khởi chạy Docker Desktop trên hệ điều hành và chờ Docker Daemon sẵn sàng
+   */
+  async startDockerDaemon(maxWaitSeconds: number = 30): Promise<boolean> {
+    const platform = process.platform;
+    let launched = false;
+
+    try {
+      if (platform === 'win32') {
+        const standardPaths = [
+          path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Docker', 'Docker', 'Docker Desktop.exe'),
+          path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Docker', 'Docker', 'Docker Desktop.exe'),
+          'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
+        ];
+
+        const exePath = standardPaths.find((p) => fs.existsSync(p));
+        if (exePath) {
+          const child = spawn(exePath, [], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.unref();
+          launched = true;
+        } else {
+          // Thử mở qua lệnh start của Windows
+          const child = spawn('cmd.exe', ['/c', 'start', '""', 'Docker Desktop'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.unref();
+          launched = true;
+        }
+      } else if (platform === 'darwin') {
+        // macOS
+        const child = spawn('open', ['-a', 'Docker'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+        launched = true;
+      } else if (platform === 'linux') {
+        // Linux
+        try {
+          await execAsync('sudo systemctl start docker || systemctl --user start docker', { timeout: 5000 });
+          launched = true;
+        } catch {}
+      }
+    } catch {
+      launched = false;
+    }
+
+    if (!launched) {
+      return false;
+    }
+
+    console.log(`\n\x1b[36m🚀 Đang tự động khởi chạy Docker Desktop...\x1b[0m`);
+    process.stdout.write(`\x1b[33m⏳ Đang chờ Docker Daemon khởi động và sẵn sàng...\x1b[0m`);
+
+    const startTime = Date.now();
+    const maxWaitMs = maxWaitSeconds * 1000;
+
+    while (Date.now() - startTime < maxWaitMs) {
+      try {
+        await execAsync('docker info', { timeout: 3000 });
+        console.log(`\n\x1b[32m✔ Docker Daemon đã sẵn sàng!\x1b[0m\n`);
+        return true;
+      } catch {
+        process.stdout.write('.');
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+
+    console.log(`\n\x1b[33m⚠️  Docker Desktop chưa phản hồi sau ${maxWaitSeconds}s.\x1b[0m\n`);
+    return false;
+  }
+
+  /**
    * Khởi tạo Container cô lập và mount Workspace
    */
   async init(): Promise<void> {
@@ -78,6 +155,16 @@ export class DockerSandbox implements ISandboxProvider {
       const { stdout } = await execAsync(runCommand, { timeout: 15000 });
       this.containerId = (stdout || '').trim().slice(0, 12);
       this.isDockerReady = true;
+
+      // Cài đặt trước các công cụ thiết yếu (curl, git, bash, ca-certificates) nếu container chưa có
+      try {
+        await execAsync(
+          `docker exec ${this.containerId} sh -c "which curl >/dev/null 2>&1 || (apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true)"`,
+          { timeout: 25000 }
+        );
+      } catch {
+        // Không block tiến trình khởi động nếu container bị giới hạn mạng
+      }
     } catch (err: any) {
       this.isDockerReady = false;
       throw new Error(`Không thể khởi tạo Docker Sandbox: ${err.message}`);
@@ -113,10 +200,47 @@ export class DockerSandbox implements ISandboxProvider {
         sandboxType: 'docker',
       };
     } catch (err: any) {
+      const stderr = (err.stderr || err.message || '').trim();
+      const isMissingUtility =
+        stderr.includes('curl: not found') ||
+        stderr.includes('git: not found') ||
+        stderr.includes('bash: not found') ||
+        stderr.includes('wget: not found');
+
+      // Tự động cài đặt gói bị thiếu và thực thi lại một lần (Self-healing Sandbox)
+      if (isMissingUtility && this.containerId) {
+        try {
+          await execAsync(
+            `docker exec ${this.containerId} sh -c "apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true"`,
+            { timeout: 25000 }
+          );
+          const retried = await execAsync(dockerExecCmd, {
+            timeout,
+            maxBuffer: 1024 * 1024 * 5,
+          });
+          return {
+            stdout: (retried.stdout || '').trim(),
+            stderr: (retried.stderr || '').trim(),
+            exitCode: 0,
+            durationMs: Date.now() - startTime,
+            sandboxType: 'docker',
+          };
+        } catch (retryErr: any) {
+          const exitCode = typeof retryErr.code === 'number' ? retryErr.code : 1;
+          return {
+            stdout: (retryErr.stdout || '').trim(),
+            stderr: (retryErr.stderr || retryErr.message || '').trim(),
+            exitCode,
+            durationMs: Date.now() - startTime,
+            sandboxType: 'docker',
+          };
+        }
+      }
+
       const exitCode = typeof err.code === 'number' ? err.code : 1;
       return {
         stdout: (err.stdout || '').trim(),
-        stderr: (err.stderr || err.message || '').trim(),
+        stderr,
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'docker',
