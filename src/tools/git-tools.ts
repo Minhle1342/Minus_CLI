@@ -440,9 +440,13 @@ function parseInstalledGitCommands(helpOutput: string): InstalledGitCommand[] {
       continue;
     }
     if (!includeSection) continue;
-    const match = line.match(/^\s{3}([a-z0-9][a-z0-9-]*)\s{2,}(.+)$/i);
+    const match = line.match(/^\s{3}([a-z0-9][a-z0-9-]*)(?:\s{2,}(.+))?$/i);
     if (!match) continue;
-    commands.set(match[1], { name: match[1], description: match[2].trim(), source });
+    commands.set(match[1], {
+      name: match[1],
+      description: match[2]?.trim() || `Installed external Git command: ${match[1]}`,
+      source,
+    });
   }
   return [...commands.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
