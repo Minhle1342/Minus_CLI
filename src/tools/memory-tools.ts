@@ -25,6 +25,18 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
           type: Type.STRING,
           description: 'Phân loại: "convention", "architecture", "gotcha", "rule".',
         },
+        scope: {
+          type: Type.STRING,
+          description: 'Phạm vi: project (mặc định), session, hoặc goal.',
+        },
+        confidence: {
+          type: Type.NUMBER,
+          description: 'Độ tin cậy từ 0 đến 1 (mặc định 1).',
+        },
+        goalId: {
+          type: Type.STRING,
+          description: 'ID durable goal nếu memory thuộc scope goal.',
+        },
       },
       required: ['key', 'insight'],
     },
@@ -37,7 +49,12 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         return { error: 'Tham số "key" và "insight" là bắt buộc.' };
       }
 
-      const saved = await memoryManager.saveInsight(key, insight, category);
+      const saved = await memoryManager.saveInsight(key, insight, category, {
+        scope: args.scope || 'project',
+        confidence: args.confidence,
+        goalId: args.goalId,
+        source: 'model',
+      });
       return {
         message: `Đã lưu kiến thức "${key}" vào Bộ nhớ dài hạn thành công.`,
         saved,
@@ -61,18 +78,24 @@ export function createReadMemoryTool(memoryManager: ProjectMemoryManager): ToolD
           type: Type.STRING,
           description: 'Từ khoá tìm kiếm tuỳ chọn để lọc kinh nghiệm đã lưu.',
         },
+        scope: {
+          type: Type.STRING,
+          description: 'Lọc theo project, session, goal; bỏ trống để tìm tất cả scope.',
+        },
+        limit: {
+          type: Type.NUMBER,
+          description: 'Số memory tối đa trả về (mặc định 8).',
+        },
       },
     },
     async execute(args) {
       const data = memoryManager.getMemoryData();
       const query = String(args.query || '').toLowerCase().trim();
-
-      let filteredInsights = data.learnedInsights;
-      if (query) {
-        filteredInsights = data.learnedInsights.filter(
-          (i) => i.key.toLowerCase().includes(query) || i.insight.toLowerCase().includes(query)
-        );
-      }
+      const scope = args.scope ? String(args.scope) : undefined;
+      const records = memoryManager.retrieve(query, {
+        scopes: scope ? [scope as any] : undefined,
+        limit: Number(args.limit) || 8,
+      });
 
       return {
         projectName: data.projectName,
@@ -80,7 +103,8 @@ export function createReadMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         scripts: data.scripts,
         keyDirectories: data.keyDirectories,
         codingConventions: data.codingConventions,
-        learnedInsights: filteredInsights,
+        learnedInsights: records.filter((item) => item.scope === 'project'),
+        memories: records,
         digest: memoryManager.getProjectDigest(),
       };
     },

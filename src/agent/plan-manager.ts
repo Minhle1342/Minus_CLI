@@ -1,3 +1,5 @@
+import { Session } from '../session/session.js';
+
 export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
 
 export interface PlanTask {
@@ -17,6 +19,23 @@ export interface PlanTask {
  */
 export class PlanManager {
   private tasks: PlanTask[] = [];
+  private session?: Session;
+
+  bindSession(session: Session): void {
+    if (this.session === session) return;
+
+    this.session = session;
+    const planEvent = session
+      .getEvents()
+      .filter((event) => event.type === 'plan/change')
+      .at(-1);
+    this.tasks = (planEvent?.data.plan || []).map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status as TaskStatus,
+      ...(task.notes ? { notes: task.notes } : {}),
+    }));
+  }
 
   /**
    * Khởi tạo hoặc thay thế kế hoạch mới
@@ -27,6 +46,7 @@ export class PlanManager {
       title: t.title.trim(),
       status: idx === 0 ? 'IN_PROGRESS' : 'PENDING',
     }));
+    this.persist('created');
     return [...this.tasks];
   }
 
@@ -51,6 +71,8 @@ export class PlanManager {
         nextPending.status = 'IN_PROGRESS';
       }
     }
+
+    this.persist('updated');
 
     return task;
   }
@@ -87,5 +109,13 @@ export class PlanManager {
    */
   clear(): void {
     this.tasks = [];
+    this.persist('cleared');
+  }
+
+  private persist(reason: string): void {
+    this.session?.append('plan/change', {
+      reason,
+      plan: this.tasks.map((task) => ({ ...task })),
+    });
   }
 }

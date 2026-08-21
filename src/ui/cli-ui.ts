@@ -286,6 +286,45 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     provider: 'DeepSeek Direct',
     desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
   },
+
+  // 11. OpenAI Codex CLI Models (GPT-5.6 Series qua ChatGPT Plus OAuth hoặc OpenAI API)
+  {
+    id: 'cs',
+    name: 'codex/gpt-5.6-sol',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: '☀️ GPT-5.6 Sol: Đỉnh cao suy luận, quy hoạch logic phức tạp & hoàn thiện code tối đa',
+    recommended: true,
+  },
+  {
+    id: 'ct',
+    name: 'codex/gpt-5.6-terra',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: '🌍 GPT-5.6 Terra: Mô hình chủ lực cân bằng tốc độ & chất lượng cho coding hàng ngày',
+  },
+  {
+    id: 'cl',
+    name: 'codex/gpt-5.6-luna',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: '🌙 GPT-5.6 Luna: Siêu tốc độ, nhẹ, tối ưu cho tác vụ rõ ràng & lặp lại nhanh',
+  },
+  {
+    id: 'c4',
+    name: 'codex/o4-mini',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: 'o4-mini: Reasoning code thế hệ mới tối ưu cho coding agent',
+  },
+  {
+    id: 'c3',
+    name: 'codex/o3-mini',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: 'o3-mini: Suy luận chuyên sâu lập trình và giải quyết thuật toán hóc búa',
+  },
+  {
+    id: 'cg',
+    name: 'codex/gpt-4o',
+    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    desc: 'GPT-4o: Đa năng, xử lý ngữ cảnh lớn & sinh mã ổn định',
+  },
 ];
 
 export class CLI {
@@ -315,6 +354,9 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, Groq, Cerebras,...) [Auto-saved]${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace (/cd <path>) [Auto-saved]         ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/session${c.reset}        ${c.gray}Xem thông tin cấu hình phiên làm việc đã lưu (.codingagent)      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sessions${c.reset}       ${c.gray}Liệt kê/mở/tạo các event-sourced session                    ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/new-session${c.reset}   ${c.gray}Tạo session hội thoại mới                                      ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/fork-session [seq]${c.reset} ${c.gray}Tạo branch session từ boundary event chỉ định                 ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sandbox${c.reset}        ${c.gray}Xem trạng thái môi trường cô lập Sandbox (Docker/Local)          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tasks${c.reset}          ${c.gray}Xem danh sách background tasks & subprocesses đang chạy          ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)                   ${c.cyan}${c.bold}│${c.reset}`);
@@ -323,6 +365,7 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động                     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 16 công cụ khảo sát, nén code, tìm kiếm, sửa & nhớ  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                           ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/agents${c.reset}         ${c.gray}Xem, stop hoặc explicit resume các subagent                   ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                             ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/exit${c.reset}           ${c.gray}Thoát chương trình                                               ${c.cyan}${c.bold}│${c.reset}`);
@@ -372,6 +415,9 @@ export class CLI {
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (Tự động lưu)     ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/session${c.reset}            Xem thông tin model và workspace lưu từ phiên trước  ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sessions${c.reset}           Liệt kê, mở hoặc tạo session event-sourced           ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/new-session${c.reset}     Tạo session hội thoại mới và bắt đầu context sạch       ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/fork-session [seq]${c.reset} Fork session từ event boundary đã chọn                  ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sandbox${c.reset}            Xem trạng thái môi trường cô lập Sandbox            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tasks${c.reset}              Xem danh sách background tasks & subprocesses       ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
@@ -569,10 +615,11 @@ export class CLI {
   /**
    * Hiển thị thông tin cấu hình phiên làm việc đã lưu trữ (.codingagent/session.json)
    */
-  static renderSessionInfo(data: { modelName?: string; workspacePath?: string; lastUpdated?: string }, sessionFile: string): void {
+  static renderSessionInfo(data: { modelName?: string; workspacePath?: string; activeSessionId?: string; lastUpdated?: string }, sessionFile: string): void {
     console.log(`\n${c.magenta}${c.bold}╭── 💾 PERSISTED SESSION CONFIG (.codingagent/session.json) ────────────────╮${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model đã lưu:${c.reset}     ${c.brightCyan}${data.modelName || 'Chưa đặt'}${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace đã lưu:${c.reset} ${c.dim}${data.workspacePath || 'Chưa đặt'}${c.reset}`);
+    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session đang dùng:${c.reset} ${c.brightCyan}${data.activeSessionId || 'Chưa tạo'}${c.reset}`);
     if (data.lastUpdated) {
       console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Cập nhật lúc:${c.reset}     ${c.gray}${data.lastUpdated}${c.reset}`);
     }

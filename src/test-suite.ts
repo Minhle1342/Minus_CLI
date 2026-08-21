@@ -10,11 +10,15 @@ import { replaceTextTool } from './tools/replace-text.js';
 import { writeFileTool } from './tools/write-file.js';
 import { runCommandTool } from './tools/run-command.js';
 import { Session } from './session/session.js';
+import { SessionPersistence } from './session/session-persistence.js';
+import { SessionManager } from './session/session-manager.js';
 import { AgentLoop } from './agent/agent-loop.js';
+import { EffectLedger } from './agent/effect-ledger.js';
 import { GeminiLLM } from './llm/gemini.js';
 import { CheckpointManager } from './workspace/checkpoint.js';
 import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
+import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
@@ -157,6 +161,11 @@ async function runUnitTests() {
   assert(registry.getAll().length === 6, 'ToolRegistry chứa đủ 6 tools cốt lõi');
   const decls = registry.getFunctionDeclarations();
   assert(decls.length === 6, 'Xuất đúng 6 FunctionDeclaration cho Gemini API');
+  const readOnlyScope = registry.createScope('read-only-agent', ['read_file', 'list_files']);
+  assert(readOnlyScope.getFunctionDeclarations().length === 2, 'ToolScope xuất đúng capability allowlist cho agent');
+  const scopedRunner = new ToolRunner(readOnlyScope, workspace);
+  const deniedScopedTool = await scopedRunner.run('run_command', { command: 'node -v' });
+  assert(deniedScopedTool.result.errorCode === 'UNKNOWN_TOOL', 'ToolRunner enforce tool scope khi agent gọi capability ngoài allowlist');
 
   console.log('\n========================================');
   console.log('🧪 5. KIỂM THỬ SESSION IN-MEMORY');
@@ -207,8 +216,40 @@ async function runUnitTests() {
   const testSession = new Session();
   testSession.addUserMessage('Khảo sát và xác minh project');
 
+  const observedAgentHooks: string[] = [];
+  const removeAgentHook = codingLoop.agentHooks.register('test-lifecycle-observer', {
+    'agent/turn-start': () => { observedAgentHooks.push('turn-start'); },
+    'agent/pre-step': (context) => { observedAgentHooks.push(`pre-step-${context.step}`); },
+    'agent/request': () => { observedAgentHooks.push('request'); },
+    'agent/after-step': (context) => { observedAgentHooks.push(`after-step-${context.step}`); },
+    'agent/turn-stopping': () => { observedAgentHooks.push('turn-stopping'); },
+  });
+
   const result = await codingLoop.run(testSession);
+  removeAgentHook();
   assert(result.includes('hoàn thành xuất sắc'), 'AgentLoop hoàn thành chu trình multi-step với mock LLM');
+  assert(codingLoop.agentRegistry.get(codingLoop.agentId)?.status === 'idle', 'AgentLoop cập nhật live agent status về idle sau turn');
+  assert(observedAgentHooks.includes('turn-start') && observedAgentHooks.includes('turn-stopping'), 'AgentLoop phát live lifecycle hooks cho plugin');
+  assert(observedAgentHooks.includes('request') && observedAgentHooks.includes('after-step-1'), 'Plugin quan sát được agent request và after-step');
+  const lifecycleTypes = testSession.getEvents().map((event) => event.type);
+  assert(lifecycleTypes.includes('turn/start') && lifecycleTypes.includes('turn/end'), 'Session ghi nhận lifecycle turn start/end');
+  assert(lifecycleTypes.includes('step/start') && lifecycleTypes.includes('step/end'), 'Session ghi nhận lifecycle step start/end');
+  assert(lifecycleTypes.includes('tool/call'), 'Session ghi nhận tool/call durable trước khi thực thi tool');
+  const durableAssistantCall = testSession.getEvents()
+    .find((event) => event.type === 'assistant/message')?.data.content?.parts?.find((part: any) => part.functionCall)?.functionCall;
+  const durableToolResult = testSession.getEvents()
+    .find((event) => event.type === 'tool/result')?.data.content?.parts?.find((part: any) => part.functionResponse)?.functionResponse;
+  assert(Boolean(durableAssistantCall?.id) && durableAssistantCall?.id === durableToolResult?.id, 'Tool call ID giữ nguyên qua assistant message và tool result projection');
+  const recordedEffects = testSession.getEffectStates();
+  assert(recordedEffects.some((effect) => effect.toolName === 'run_command' && effect.status === 'committed'), 'Side-effect tool ghi durable effect lifecycle đến committed');
+  const rollbackLedger = new EffectLedger();
+  const rollbackSession = new Session('effect-rollback-session');
+  rollbackLedger.bindSession(rollbackSession);
+  const rollbackEffect = rollbackLedger.prepare('replace_text', 'rollback-call-1');
+  rollbackLedger.attachCheckpoint(rollbackEffect.id, 'checkpoint-rollback-1');
+  rollbackLedger.commit(rollbackEffect.id);
+  rollbackLedger.rollback(rollbackEffect.id);
+  assert(rollbackSession.getEffectStates().find((effect) => effect.id === rollbackEffect.id)?.status === 'rolledback', 'Effect ledger ghi nhận committed → rolledback qua operator action');
 
   // Mock LLM lặp vô tận để kiểm tra maxSteps
   class MockInfiniteLLM extends GeminiLLM {
@@ -228,6 +269,107 @@ async function runUnitTests() {
   infSession.addUserMessage('Lặp mãi mãi');
   const infResult = await infiniteLoop.run(infSession);
   assert(infResult.includes('maximum steps (2) reached'), 'AgentLoop dừng an toàn khi chạm maxSteps');
+
+  const policyLoop = new AgentLoop(new MockCodingLLM(), registry, { maxSteps: 5, workspace });
+  policyLoop.agentHooks.register('test-request-policy', {
+    'agent/request': () => ({ allow: false, reason: 'approval-required' }),
+  });
+  const policySession = new Session();
+  policySession.addUserMessage('Yêu cầu cần approval');
+  const policyResult = await policyLoop.run(policySession);
+  assert(policyResult.includes('approval-required'), 'Agent hook có thể chặn model request theo policy');
+  assert(policySession.getEvents().some((event) => event.type === 'turn/end'), 'Turn bị policy chặn vẫn được đóng durable');
+
+  class MockDelayedFinalLLM {
+    private calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return { text: `Concurrent request ${this.calls}`, toolCalls: [] };
+    }
+  }
+  const serializedLoop = new AgentLoop(new MockDelayedFinalLLM(), registry, { maxSteps: 2, workspace });
+  const serializedSession = new Session('serialized-run-session');
+  const concurrentAnswers = await Promise.all([
+    serializedLoop.run(serializedSession),
+    serializedLoop.run(serializedSession),
+  ]);
+  const serializedEvents = serializedSession.getEvents();
+  const turnStarts = serializedEvents.filter((event) => event.type === 'turn/start');
+  const turnEnds = serializedEvents.filter((event) => event.type === 'turn/end');
+  assert(concurrentAnswers.length === 2 && turnStarts.length === 2 && turnEnds.length === 2, 'Concurrent run cùng session được serialize thành hai turn đầy đủ');
+  assert(turnStarts[0].seq < turnEnds[0].seq && turnEnds[0].seq < turnStarts[1].seq, 'Session event log không bị interleave giữa hai run cùng session');
+
+  const inboxLoop = new AgentLoop(new MockCodingLLM(), registry, { maxSteps: 5, workspace });
+  const inboxSession = new Session('inbox-test');
+  const firstQueued = inboxLoop.submit(inboxSession, 'Yêu cầu inbox thứ nhất');
+  const secondQueued = inboxLoop.submit(inboxSession, 'Yêu cầu inbox thứ hai');
+  const queuedResults = await Promise.all([firstQueued, secondQueued]);
+  assert(queuedResults.length === 2 && queuedResults.every((answer) => answer.length > 0), 'Agent inbox drain tuần tự nhiều input thành công');
+  assert(inboxSession.getEvents().filter((event) => event.type === 'turn/start').length === 2, 'Input đến trong lúc agent chạy được chuyển thành turn kế tiếp');
+  assert(
+    inboxSession.getEvents().some((event) => event.type === 'input/queued') &&
+      inboxSession.getEvents().filter((event) => event.type === 'input/claimed').length === 2,
+    'Inbox ghi durable queued/claimed pairing cho từng input',
+  );
+
+  class MockFinalLLM {
+    async generate(): Promise<any> {
+      return { text: 'Đã tiếp tục input pending.', toolCalls: [] };
+    }
+  }
+  const pendingInputSession = new Session('pending-input-replay');
+  pendingInputSession.append('input/queued', {
+    inputId: 'pending-input-1',
+    inputText: 'Input phải được replay sau restart',
+    source: 'human',
+  });
+  const pendingLoop = new AgentLoop(new MockFinalLLM(), registry, { maxSteps: 2, workspace });
+  const pendingAnswers = await pendingLoop.resumePending(pendingInputSession);
+  assert(pendingAnswers.length === 1 && pendingAnswers[0].includes('tiếp tục'), 'Durable pending input được replay bởi explicit resumePending');
+  assert(pendingInputSession.getPendingInputs().length === 0, 'Replay pending input không để lại queue dangling');
+
+  const delegationParent = new AgentLoop(new MockFinalLLM(), registry, { maxSteps: 2, workspace, agentId: 'delegation-parent' });
+  const delegationParentSession = new Session('delegation-parent-session');
+  delegationParent.bindSession(delegationParentSession);
+  const delegated = delegationParent.subagentManager.start('Kiểm tra nhanh bằng subagent', { maxSteps: 2 });
+  for (let attempt = 0; attempt < 50 && delegationParent.subagentManager.get(delegated.id)?.status === 'running'; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const delegatedResult = delegationParent.subagentManager.get(delegated.id);
+  assert(delegated.status === 'running' && delegatedResult?.status === 'completed', 'Subagent provider tạo child AgentLoop chạy nền và trả kết quả');
+  assert(delegationParent.agentRegistry.get(delegated.id)?.status === 'idle', 'Subagent được phản ánh trong live AgentRegistry');
+  assert(
+    delegationParentSession.getDelegationStates().find((state) => state.id === delegated.id)?.status === 'completed',
+    'Delegation state được ghi vào event log của parent session',
+  );
+
+  const interruptedDelegationSession = new Session('interrupted-delegation-session');
+  interruptedDelegationSession.append('agent/delegation', {
+    delegation: {
+      id: 'subagent-restarted-1',
+      sessionId: 'session-subagent-restarted-1',
+      objective: 'Delegation bị gián đoạn bởi restart',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    },
+  });
+  const recoveredDelegationLoop = new AgentLoop(new MockFinalLLM(), registry, {
+    maxSteps: 2,
+    workspace,
+    agentId: 'delegation-recovery-parent',
+    enableSubagents: false,
+  });
+  recoveredDelegationLoop.bindSession(interruptedDelegationSession);
+  assert(
+    interruptedDelegationSession.getDelegationStates().find((state) => state.id === 'subagent-restarted-1')?.status === 'stopped',
+    'Delegation đang chạy được đánh dấu stopped an toàn sau process restart',
+  );
+  const resumed = recoveredDelegationLoop.subagentManager.resume('subagent-restarted-1', { maxSteps: 2 });
+  for (let attempt = 0; attempt < 50 && recoveredDelegationLoop.subagentManager.get('subagent-restarted-1')?.status === 'running'; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert(resumed?.status === 'running' && recoveredDelegationLoop.subagentManager.get('subagent-restarted-1')?.status === 'completed', 'Delegation chỉ resume khi explicit và hoàn tất được lần chạy mới');
 
   console.log('\n========================================');
   console.log('🧪 7. KIỂM THỬ CHECKPOINT MANAGER & SHADOW ROLLBACK (/undo)');
@@ -299,6 +441,38 @@ async function runUnitTests() {
 
   const progress = planMgr.getProgress();
   assert(progress.completed === 1 && progress.inProgress === 1, 'Thống kê tiến độ chính xác');
+
+  const planSession = new Session('plan-replay-test');
+  const durablePlan = new PlanManager();
+  durablePlan.bindSession(planSession);
+  durablePlan.createPlan([{ title: 'Replay step A' }, { title: 'Replay step B' }]);
+  durablePlan.updateTask(1, 'COMPLETED', 'Đã hoàn tất bước A');
+  const replayedPlan = new PlanManager();
+  replayedPlan.bindSession(Session.fromSnapshot(planSession.toSnapshot()));
+  assert(replayedPlan.getTasks()[0]?.status === 'COMPLETED', 'Plan state được replay từ session events');
+  assert(replayedPlan.getTasks()[1]?.status === 'IN_PROGRESS', 'Plan replay khôi phục task kế tiếp đang chạy');
+
+  console.log('\n========================================');
+  console.log('🧪 9B. KIỂM THỬ DURABLE GOAL LIFECYCLE');
+  console.log('========================================');
+
+  const goalSession = new Session('goal-replay-test');
+  const goalManager = new GoalManager();
+  goalManager.bindSession(goalSession);
+  const createdGoal = goalManager.create('Hoàn tất mục tiêu có thể tiếp tục', 3);
+  const firstRound = goalManager.beginRound();
+  assert(createdGoal.phase === 'active', 'Goal mới được tạo ở phase active');
+  assert(firstRound?.roundsStarted === 1, 'Goal ghi nhận durable round đầu tiên');
+  assert(goalManager.isArmed() === true, 'Goal được armed bởi thao tác explicit trong process hiện tại');
+
+  const resumedGoalManager = new GoalManager();
+  resumedGoalManager.bindSession(Session.fromSnapshot(goalSession.toSnapshot()));
+  assert(resumedGoalManager.getState()?.roundsStarted === 1, 'Goal state được replay từ session events');
+  assert(resumedGoalManager.isArmed() === false, 'Load session không tự động kích hoạt goal');
+  resumedGoalManager.resume();
+  assert(resumedGoalManager.isArmed() === true, 'Resume là continuation authority explicit');
+  resumedGoalManager.pause();
+  assert(resumedGoalManager.getState()?.phase === 'paused' && !resumedGoalManager.isArmed(), 'Pause disarm và ghi phase paused');
 
   // Test qua ToolRegistry
   const planRegistry = new ToolRegistry(planMgr);
@@ -441,6 +615,23 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(digest.includes('[PROJECT KNOWLEDGE BASE'), 'Tạo thành công Warm-Start Digest');
   assert(digest.includes('Always run npm test before committing'), 'Digest bao gồm insight vừa lưu');
 
+  const memorySession = new Session('memory-scope-test');
+  memoryMgr.bindSession(memorySession);
+  const sessionInsight = await memoryMgr.saveInsight(
+    'current_task_context',
+    'The current task is validating durable session replay',
+    'insight',
+    { scope: 'session', confidence: 0.8, source: 'model' },
+  );
+  assert(sessionInsight.scope === 'session' && memorySession.getMemoryRecords().length === 1, 'Session memory ghi vào event log thay vì project file');
+  assert(
+    memoryMgr.retrieve('durable replay', { scopes: ['session'], limit: 2 })[0]?.key === 'current_task_context',
+    'Memory retrieval lọc theo scope và relevance',
+  );
+  const replayedMemoryMgr = new ProjectMemoryManager(workspace.rootDir);
+  replayedMemoryMgr.bindSession(Session.fromSnapshot(memorySession.toSnapshot()));
+  assert(replayedMemoryMgr.retrieve('session replay', { scopes: ['session'] }).length === 1, 'Session memory replay được sau khi restore session');
+
   console.log('\n========================================');
   console.log('🧪 14. KIỂM THỬ MEMORY TOOLS (save_memory & read_memory)');
   console.log('========================================');
@@ -499,6 +690,20 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(loadedPlugins.includes('planning-plugin'), 'Kernel nạp đúng planning-plugin');
   assert(loadedPlugins.includes('memory-plugin'), 'Kernel nạp đúng memory-plugin');
 
+  const removePromptSection = kernel.ctx.systemPrompt.register({
+    id: 'test-approval-policy',
+    priority: 10,
+    content: 'All destructive actions require explicit approval.',
+  });
+  assert(kernel.ctx.systemPrompt.list().includes('test-approval-policy'), 'Plugin đăng ký được system-prompt section');
+  assert(kernel.ctx.systemPrompt.assemble().includes('explicit approval'), 'Prompt assembler ghép section theo cấu hình plugin');
+  removePromptSection();
+  const registeredAgent = kernel.ctx.agents.register('review-agent', 'Review Agent');
+  const runningAgent = kernel.ctx.agents.update('review-agent', { status: 'running', sessionId: 'hook-probe', turn: 1, step: 1 });
+  assert(registeredAgent.status === 'idle' && runningAgent.status === 'running', 'Kernel AgentRegistry quản lý live agent lifecycle');
+  assert(kernel.ctx.agents.list().some((agent) => agent.id === 'review-agent'), 'AgentRegistry liệt kê được agent composable');
+  assert(kernel.ctx.events.listenerCount('tool:before') >= 1, 'Kernel event bus cung cấp typed listener contract cho plugin');
+
   // Đăng ký Custom Plugin của bên thứ ba (Custom Tool Plugin)
   let customToolExecuted: boolean = false;
   await kernel.use({
@@ -521,6 +726,27 @@ export async function calculateTotal(items: any[]): Promise<number> {
 
   const customExecRes = await kernel.ctx.tools.execute('custom_git_branch', {});
   assert(customExecRes.branch === 'develop' && Boolean(customToolExecuted), 'Custom Plugin Tool thực thi trả về kết quả chuẩn xác');
+
+  let pluginHookObserved = false;
+  await kernel.use({
+    name: 'agent-observer-plugin',
+    apply(ctx) {
+      ctx.agentHooks.register('plugin-agent-observer', {
+        'agent/pre-step': () => { pluginHookObserved = true; },
+      }, -10);
+    },
+  });
+  assert(kernel.ctx.agentHooks.list().includes('plugin-agent-observer'), 'Plugin đăng ký được agent lifecycle hook vào Kernel context');
+  const hookProbeSession = new Session('hook-probe');
+  const hookDecision = await kernel.ctx.agentHooks.run('agent/pre-step', {
+    session: hookProbeSession,
+    turn: 1,
+    step: 1,
+    maxSteps: 3,
+    isGoalMode: false,
+    metadata: {},
+  });
+  assert(hookDecision.allow && pluginHookObserved, 'Kernel agent hook chạy theo đúng thứ tự và cho phép tiếp tục');
 
   // Kiểm tra Event Bus
   let beforeToolEventFired: boolean = false;
@@ -696,6 +922,103 @@ export async function calculateTotal(items: any[]): Promise<number> {
   console.log('\n========================================');
   console.log('🧪 20. KIỂM THỬ PERSISTENT SESSION (SAVE & RESTORE MODEL / WORKSPACE)');
   console.log('========================================');
+
+  console.log('\n========================================');
+  console.log('20A. EVENT-SOURCED SESSION & JSONL RESUME');
+  console.log('========================================');
+
+  const sessionWorkspace = path.resolve(workspace.rootDir, 'temp', 'session-persistence-test');
+  await fs.rm(sessionWorkspace, { recursive: true, force: true });
+
+  const sessionPersistence = new SessionPersistence(sessionWorkspace);
+  const sessionManager = new SessionManager(sessionWorkspace);
+  const managerCreated = await sessionManager.create('manager-created-session');
+  managerCreated.addUserMessage('Session được quản lý qua Kernel capability');
+  await sessionManager.save(managerCreated);
+  const managerLoaded = await new SessionManager(sessionWorkspace).load(managerCreated.id);
+  assert(managerLoaded?.getHistory()[0]?.parts?.[0]?.text === 'Session được quản lý qua Kernel capability', 'SessionManager load/save session qua capability context');
+  const managerFork = await sessionManager.fork(managerCreated, 1, 'manager-forked-session');
+  assert(managerFork.getHistory().length === 1 && (await sessionManager.list()).includes('manager-forked-session'), 'SessionManager fork và discover child session bền vững');
+  const durableSession = new Session('durable-test-session');
+  durableSession.addUserMessage('Khởi tạo session bền vững');
+  await sessionPersistence.save(durableSession);
+
+  const resumedSession = await sessionPersistence.load(durableSession.id);
+  assert(resumedSession?.seq === 1, 'JSONL lưu và resume đúng event đầu tiên');
+  assert(resumedSession?.getHistory()[0]?.parts?.[0]?.text === 'Khởi tạo session bền vững', 'Resume khôi phục đúng message projection');
+
+  resumedSession!.addModelMessage({ text: 'Đã tiếp nhận.' });
+  await sessionPersistence.save(resumedSession!);
+  const resumedAgain = await sessionPersistence.load(durableSession.id);
+  assert(resumedAgain?.seq === 2 && resumedAgain.getHistory().length === 2, 'Append event mới không ghi đè event cũ');
+
+  const forkedSession = resumedAgain!.fork(1, 'forked-session-test');
+  assert(forkedSession.id === 'forked-session-test' && forkedSession.getHistory().length === 1, 'Session fork tạo child branch đúng boundary');
+  assert(resumedAgain!.seq === 2 && forkedSession.getEvents().some((event) => event.type === 'session/fork'), 'Fork không mutate parent và ghi metadata branch durable');
+  await sessionPersistence.save(forkedSession);
+  const restoredFork = await sessionPersistence.load(forkedSession.id);
+  assert(restoredFork?.getHistory().length === 1, 'Child session fork được persistence và restore độc lập');
+
+  const persistedPath = sessionPersistence.getSessionPath(durableSession.id);
+  const firstFlush = await fs.readFile(persistedPath, 'utf8');
+  await sessionPersistence.save(resumedAgain!);
+  const secondFlush = await fs.readFile(persistedPath, 'utf8');
+  assert(firstFlush === secondFlush, 'Flush lặp lại không tạo duplicate events');
+
+  const interrupted = new Session('interrupted-test-session');
+  interrupted.addUserMessage('Kiểm tra crash recovery');
+  interrupted.append('turn/start', { turn: 1 });
+  interrupted.append('step/start', { turn: 1, step: 1 });
+  interrupted.addModelMessage({ functionCalls: [{ name: 'run_command', args: { command: 'npm test' } }] });
+  const interruptedAssistantSeq = interrupted.lastEvent?.seq;
+  interrupted.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'run_command',
+    toolCallId: 'recovery-call-1',
+    assistantSeq: interruptedAssistantSeq,
+    args: { command: 'npm test' },
+  });
+  interrupted.append('effect/change', {
+    effect: {
+      id: 'recovery-effect-1',
+      toolName: 'run_command',
+      toolCallId: 'recovery-call-1',
+      status: 'prepared',
+      reversible: true,
+      checkpointId: 'checkpoint-recovery-1',
+      preparedAt: new Date().toISOString(),
+    },
+    reason: 'prepared',
+  });
+  const interruptedDiagnostics = interrupted.getDiagnostics();
+  assert(interruptedDiagnostics.openTurns.length === 1 && interruptedDiagnostics.openSteps.length === 1 && interruptedDiagnostics.pendingToolCallIds.includes('recovery-call-1') && interruptedDiagnostics.effects[0]?.status === 'prepared', 'Session diagnostics phát hiện turn/step/tool/effect dang dở trước recovery');
+  await sessionPersistence.save(interrupted);
+
+  const recovered = await sessionPersistence.load(interrupted.id);
+  const recoveredEvents = recovered?.getEvents() || [];
+  const recoveredResult = recoveredEvents.find(
+    (event) => event.type === 'tool/result' && event.data.toolCallId === 'recovery-call-1'
+  );
+  assert(recoveredResult?.data.result?.errorCode === 'TOOL_OUTCOME_UNKNOWN', 'Crash recovery ghi nhận tool result chưa xác định');
+  assert(recovered?.getPendingToolCalls().length === 0, 'Crash recovery đóng pairing tool/call còn dang dở');
+  assert(recoveredEvents.some((event) => event.type === 'turn/end' && event.data.reason === 'interrupted'), 'Crash recovery đóng turn bị gián đoạn');
+  assert(recovered?.getDiagnostics().openTurns.length === 0 && recovered?.getDiagnostics().openSteps.length === 0, 'Session diagnostics xác nhận recovery đã đóng lifecycle mở');
+  assert(recovered?.getEffectStates().find((effect) => effect.id === 'recovery-effect-1')?.outcome === 'unknown', 'Crash recovery không giả định side-effect dang dở đã thành công');
+
+  const unstarted = new Session('unstarted-test-session');
+  unstarted.addUserMessage('Kiểm tra tool chưa bắt đầu');
+  unstarted.append('turn/start', { turn: 1 });
+  unstarted.append('step/start', { turn: 1, step: 1 });
+  unstarted.addModelMessage({ functionCalls: [{ name: 'read_file', args: { path: 'README.md' } }] });
+  await sessionPersistence.save(unstarted);
+  const repairedUnstarted = await sessionPersistence.load(unstarted.id);
+  assert(
+    repairedUnstarted?.getEvents().some((event) => event.type === 'tool/result' && event.data.result?.errorCode === 'TOOL_NOT_STARTED') === true,
+    'Crash recovery phân biệt tool call chưa kịp bắt đầu'
+  );
+
+  await fs.rm(sessionWorkspace, { recursive: true, force: true });
 
   const testSessionFile = path.resolve(workspace.rootDir, 'temp', 'test-session.json');
 

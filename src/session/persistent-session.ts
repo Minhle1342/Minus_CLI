@@ -22,6 +22,7 @@ export const SESSION_FILE = getSessionFilePath();
 export interface SessionData {
   modelName?: string;
   workspacePath?: string;
+  activeSessionId?: string;
   lastUpdated?: string;
 }
 

@@ -9,6 +9,7 @@ import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { Session } from './session/session.js';
+import { SessionPersistence } from './session/session-persistence.js';
 import { loadSession, saveSession, getSessionFilePath } from './session/persistent-session.js';
 import { Workspace } from './workspace/workspace.js';
 import { CLI, AVAILABLE_MODELS, colors as c } from './ui/cli-ui.js';
@@ -20,6 +21,7 @@ import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
 import { TaskPlugin } from './kernel/plugins/task-plugin.js';
 import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
 import { SearchPlugin } from './kernel/plugins/search-plugin.js';
+import { getCodexCredentials, isCodexAuthenticated } from './llm/codex-auth.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -33,11 +35,12 @@ const githubToken = process.env.GITHUB_TOKEN || process.env.GITHUB_API_KEY || ''
 const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || '';
 const mistralApiKey = process.env.MISTRAL_API_KEY || '';
 const openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
+const openaiApiKey = process.env.OPENAI_API_KEY || '';
 const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 30;
 
 // Hàm hoàn thành tự động khi người dùng nhấn Tab
 function completer(line: string): [string[], string] {
-  const completions = ['/model', '/modal', '/workspace', '/cd', '/session', '/tools', '/status', '/goal', '/clear', '/help', '/exit', '/quit'];
+  const completions = ['/model', '/modal', '/workspace', '/cd', '/session', '/sessions', '/new-session', '/fork-session', '/tools', '/status', '/agents', '/goal', '/clear', '/help', '/exit', '/quit'];
   const hits = completions.filter((c) => c.startsWith(line.toLowerCase()));
   return [hits.length ? hits : completions, line];
 }
@@ -308,23 +311,70 @@ async function createLLM(model: string) {
     return new DeepseekLLM('dummy_key', rawModel, undefined, 'https://text.pollinations.ai/openai');
   }
 
-  // 9. OpenRouter Free Models & Direct OpenRouter
-  if (model.startsWith('openrouter/') || model.endsWith(':free') || model.includes('/')) {
-    const rawModel = model.replace(/^openrouter\//, '');
-    const key = openrouterApiKey || deepseekApiKey;
-    if (!key) {
-      throw new Error(`Chưa cấu hình OPENROUTER_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://openrouter.ai/keys và dán vào .env.`);
+  // 9. OpenAI Codex CLI (GPT-5.6 Sol / Terra / Luna, o4-mini, o3-mini qua OpenAI API hoặc ChatGPT Plus OAuth)
+  if (
+    model.startsWith('codex/') ||
+    model.startsWith('gpt-5.6-') ||
+    model === 'gpt-5.6-sol' ||
+    model === 'gpt-5.6-terra' ||
+    model === 'gpt-5.6-luna'
+  ) {
+    const rawModel = model.replace(/^codex\//, '');
+    const codexCreds = getCodexCredentials();
+
+    // 1. Nếu có OPENAI_API_KEY trong .env -> Luôn ưu tiên dùng endpoint chính thức (tránh Cloudflare bot challenge)
+    if (openaiApiKey) {
+      const baseUrl = process.env.CODEX_BASE_URL || 'https://api.openai.com/v1';
+      return new DeepseekLLM(openaiApiKey, rawModel, undefined, baseUrl);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://openrouter.ai/api/v1');
+
+    // 2. Nếu có token OAuth từ Codex CLI (~/.codex/auth.json)
+    if (codexCreds?.accessToken) {
+      const codexBaseUrl = process.env.CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex';
+      return new DeepseekLLM(
+        codexCreds.accessToken,
+        rawModel,
+        undefined,
+        codexBaseUrl,
+        codexCreds.accountId ? { 'chatgpt-account-id': codexCreds.accountId } : undefined
+      );
+    }
+
+    throw new Error(
+      `Chưa tìm thấy OPENAI_API_KEY hoặc OAuth token của Codex CLI!\n` +
+      `👉 Cách tốt nhất: Thêm OPENAI_API_KEY=sk-... vào file .env để kết nối trực tiếp không qua Cloudflare.\n` +
+      `👉 Hoặc đăng nhập 'codex login' và cấu hình proxy.`
+    );
   }
 
-  // 10. DeepSeek Direct (V3 / R1)
+  // 10. OpenAI Direct (Chính thức qua API Key)
+  if (model.startsWith('openai/')) {
+    const rawModel = model.replace(/^openai\//, '');
+    const key = openaiApiKey || getCodexCredentials()?.accessToken;
+    if (!key) {
+      throw new Error(`Chưa cấu hình OPENAI_API_KEY trong file .env! Vui lòng dán key vào .env.`);
+    }
+    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    return new DeepseekLLM(key, rawModel, undefined, baseUrl);
+  }
+
+  // 11. DeepSeek Direct (V3 / R1)
   if (model === 'deepseek-chat' || model === 'deepseek-reasoner') {
     const key = deepseekApiKey;
     if (!key) {
       throw new Error(`Chưa cấu hình DEEPSEEK_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://platform.deepseek.com/ và dán vào .env.`);
     }
     return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com');
+  }
+
+  // 12. OpenRouter Free Models & Direct OpenRouter (Chỉ bắt các model có tiền tố openrouter/ hoặc :free)
+  if (model.startsWith('openrouter/') || model.endsWith(':free')) {
+    const rawModel = model.replace(/^openrouter\//, '');
+    const key = openrouterApiKey || deepseekApiKey;
+    if (!key) {
+      throw new Error(`Chưa cấu hình OPENROUTER_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://openrouter.ai/keys và dán vào .env.`);
+    }
+    return new DeepseekLLM(key, rawModel, undefined, 'https://openrouter.ai/api/v1');
   }
 
   // Fallback mặc định
@@ -338,18 +388,31 @@ async function createLLM(model: string) {
 }
 
 async function main() {
-  const hasAnyKey = apiKey || deepseekApiKey || groqApiKey || cerebrasApiKey || sambanovaApiKey || githubToken || siliconflowApiKey || mistralApiKey || openrouterApiKey;
+  const hasCodexAuth = isCodexAuthenticated();
+  const hasAnyKey =
+    apiKey ||
+    deepseekApiKey ||
+    groqApiKey ||
+    cerebrasApiKey ||
+    sambanovaApiKey ||
+    githubToken ||
+    siliconflowApiKey ||
+    mistralApiKey ||
+    openrouterApiKey ||
+    openaiApiKey ||
+    hasCodexAuth;
+
   if (!hasAnyKey) {
-    console.error(`\n${c.red}${c.bold}❌ LỖI KHỞI ĐỘNG:${c.reset} Chưa cấu hình API Key trong file .env!`);
-    console.error(`${c.gray}Vui lòng mở file .env và điền ít nhất một trong các API key miễn phí:${c.reset}`);
-    console.error(`  ${c.cyan}GEMINI_API_KEY=AIzaSy...${c.reset} (Google AI Studio)`);
-    console.error(`  ${c.cyan}GROQ_API_KEY=gsk_...${c.reset} (Groq Cloud)`);
-    console.error(`  ${c.cyan}CEREBRAS_API_KEY=csk-...${c.reset} (Cerebras Cloud)`);
-    console.error(`  ${c.cyan}SAMBANOVA_API_KEY=...${c.reset} (SambaNova Cloud)`);
-    console.error(`  ${c.cyan}GITHUB_TOKEN=ghp_...${c.reset} (GitHub Models)`);
-    console.error(`  ${c.cyan}SILICONFLOW_API_KEY=sk-...${c.reset} (SiliconFlow)`);
-    console.error(`  ${c.cyan}MISTRAL_API_KEY=...${c.reset} (Mistral AI)`);
-    console.error(`  ${c.cyan}OPENROUTER_API_KEY=sk-or-v1-...${c.reset} (OpenRouter)\n`);
+    console.error(`\n${c.red}${c.bold}❌ LỖI KHỞI ĐỘNG:${c.reset} Chưa cấu hình API Key hoặc chưa đăng nhập Codex CLI!`);
+    console.error(`${c.gray}Vui lòng thực hiện một trong các cách sau:${c.reset}`);
+    console.error(`  ${c.brightYellow}1. Đăng nhập Codex CLI:${c.reset} Gõ lệnh ${c.cyan}codex login${c.reset} trong terminal (Dùng tài khoản ChatGPT Plus)`);
+    console.error(`  ${c.brightYellow}2. Hoặc điền ít nhất một API key miễn phí vào file .env:${c.reset}`);
+    console.error(`     ${c.cyan}GEMINI_API_KEY=AIzaSy...${c.reset} (Google AI Studio)`);
+    console.error(`     ${c.cyan}GROQ_API_KEY=gsk_...${c.reset} (Groq Cloud)`);
+    console.error(`     ${c.cyan}CEREBRAS_API_KEY=csk-...${c.reset} (Cerebras Cloud)`);
+    console.error(`     ${c.cyan}SAMBANOVA_API_KEY=...${c.reset} (SambaNova Cloud)`);
+    console.error(`     ${c.cyan}GITHUB_TOKEN=ghp_...${c.reset} (GitHub Models)`);
+    console.error(`     ${c.cyan}OPENAI_API_KEY=sk-...${c.reset} (OpenAI API)\n`);
     process.exit(1);
   }
 
@@ -362,11 +425,20 @@ async function main() {
 
   let workspace = new Workspace(initialPath);
   let llm = await createLLM(modelName);
+  let sessionPersistence = new SessionPersistence(workspace.rootDir);
+  let activeSession = savedSession.activeSessionId
+    ? await sessionPersistence.load(savedSession.activeSessionId)
+    : undefined;
+  if (!activeSession) {
+    activeSession = new Session();
+    await sessionPersistence.save(activeSession);
+  }
 
   // Tự động lưu cấu hình phiên làm việc hiện tại
   saveSession({
     modelName,
     workspacePath: workspace.rootDir,
+    activeSessionId: activeSession.id,
   });
 
   const kernel = new AgentKernel(workspace, llm);
@@ -388,9 +460,35 @@ async function main() {
   });
 
   const toolRegistry = kernel.ctx.tools;
-  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace });
+  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence });
+  agentLoop.bindSession(activeSession);
 
   let sessionCount = 0;
+
+  const executeDurableGoal = async (objective?: string): Promise<void> => {
+    if (!activeSession) {
+      throw new Error('Không có active session để chạy goal.');
+    }
+
+    if (objective) {
+      agentLoop.goalManager.create(objective);
+      sessionCount++;
+    } else {
+      agentLoop.goalManager.arm();
+    }
+
+    const state = agentLoop.goalManager.beginRound();
+    if (!state) {
+      throw new Error('Không có durable goal để tiếp tục. Dùng /goal <mục tiêu> trước.');
+    }
+
+    CLI.renderGoalBanner(state.objective);
+    if (objective) {
+      await agentLoop.submit(activeSession, objective, 'human', { isGoalMode: true });
+    } else {
+      await agentLoop.run(activeSession, { isGoalMode: true });
+    }
+  };
 
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
@@ -456,6 +554,71 @@ async function main() {
       if (trimmed === '/session') {
         const persisted = loadSession();
         CLI.renderSessionInfo(persisted, getSessionFilePath());
+        console.log(`${c.gray}  Event log: ${sessionPersistence.getSessionPath(activeSession.id)} (${activeSession.seq} events)${c.reset}\n`);
+        continue;
+      }
+
+      if (trimmed === '/sessions' || trimmed.startsWith('/sessions ')) {
+        const sessionArgs = trimmed.slice('/sessions'.length).trim().split(/\s+/).filter(Boolean);
+        const action = sessionArgs[0]?.toLowerCase();
+        const targetId = sessionArgs[1];
+        try {
+          if (action === 'inspect') {
+            const inspected = targetId ? await kernel.ctx.sessions.load(targetId) : activeSession;
+            if (!inspected) {
+              console.log(`\n${c.yellow}Không tìm thấy session để inspect.${c.reset}\n`);
+            } else {
+              console.log(`\n${c.brightCyan}Session diagnostics:${c.reset}\n${JSON.stringify(inspected.getDiagnostics(), null, 2)}\n`);
+            }
+          } else if (action === 'open' && targetId) {
+            const loaded = await kernel.ctx.sessions.load(targetId);
+            if (!loaded) {
+              console.log(`\n${c.yellow}Không tìm thấy session:${c.reset} ${targetId}\n`);
+            } else {
+              activeSession = loaded;
+              agentLoop.bindSession(activeSession);
+              saveSession({ activeSessionId: activeSession.id });
+              console.log(`\n${c.green}✔ Đã mở session:${c.reset} ${activeSession.id} (${activeSession.seq} events)\n`);
+            }
+          } else if (action === 'new') {
+            activeSession = await kernel.ctx.sessions.create(targetId);
+            agentLoop.bindSession(activeSession);
+            saveSession({ activeSessionId: activeSession.id });
+            console.log(`\n${c.green}✔ Đã tạo session:${c.reset} ${activeSession.id}\n`);
+          } else {
+            const ids = await kernel.ctx.sessions.list();
+            console.log(`\n${c.brightCyan}Persisted sessions:${c.reset}`);
+            for (const id of ids) console.log(`  ${id === activeSession.id ? c.green + '▶' : ' '} ${id}${c.reset}`);
+            console.log(`${c.gray}Dùng /sessions open <id>, /sessions new [id] hoặc /sessions inspect [id].${c.reset}\n`);
+          }
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Session operation failed:${c.reset}`, err.message);
+        }
+        continue;
+      }
+
+      if (trimmed === '/new-session') {
+        activeSession = await kernel.ctx.sessions.create();
+        agentLoop.bindSession(activeSession);
+        await sessionPersistence.save(activeSession);
+        saveSession({ activeSessionId: activeSession.id });
+        console.log(`\n${c.green}✔ Đã tạo session mới:${c.reset} ${activeSession.id}\n`);
+        continue;
+      }
+
+      if (trimmed === '/fork-session' || trimmed.startsWith('/fork-session ')) {
+        const boundaryText = trimmed.slice('/fork-session'.length).trim();
+        const boundarySeq = boundaryText ? Number(boundaryText) : activeSession.seq;
+        try {
+          await sessionPersistence.save(activeSession);
+          const parentId = activeSession.id;
+          activeSession = await kernel.ctx.sessions.fork(activeSession, boundarySeq);
+          agentLoop.bindSession(activeSession);
+          saveSession({ activeSessionId: activeSession.id });
+          console.log(`\n${c.green}✔ Đã fork session:${c.reset} ${parentId} @ seq ${boundarySeq} → ${activeSession.id}\n`);
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Không thể fork session:${c.reset}`, err.message);
+        }
         continue;
       }
 
@@ -471,6 +634,28 @@ async function main() {
         continue;
       }
 
+      if (trimmed === '/agents' || trimmed.startsWith('/agents ')) {
+        const agentArg = trimmed.slice('/agents'.length).trim();
+        const [action, agentId] = agentArg.split(/\s+/, 2);
+        if (action === 'resume' && agentId) {
+          const resumed = agentLoop.subagentManager.resume(agentId);
+          if (resumed) {
+            await sessionPersistence.save(activeSession);
+            console.log(`\n${c.green}✔ Đã explicit resume subagent:${c.reset} ${agentId} (${resumed.sessionId})\n`);
+          } else {
+            console.log(`\n${c.yellow}Subagent không tồn tại hoặc chưa ở trạng thái stopped/failed:${c.reset} ${agentId}\n`);
+          }
+        } else if (action === 'stop' && agentId) {
+          const stopped = agentLoop.subagentManager.stop(agentId);
+          if (stopped) await sessionPersistence.save(activeSession);
+          console.log(`\n${stopped ? c.green : c.yellow}${stopped ? '✔ Đã dừng' : 'Không thể dừng'} subagent:${c.reset} ${agentId}\n`);
+        } else {
+          console.log(`\n${c.brightCyan}Subagents:${c.reset} ${JSON.stringify(agentLoop.subagentManager.list(), null, 2)}\n`);
+          console.log(`${c.gray}Dùng /agents resume <id> hoặc /agents stop <id> để điều khiển explicit.${c.reset}\n`);
+        }
+        continue;
+      }
+
       // Xử lý lệnh /goal: Thực thi tự trị không giới hạn số bước (maxSteps = ∞) tới khi xong
       if (trimmed === '/goal' || trimmed.startsWith('/goal ')) {
         const goalArg = trimmed.slice(5).trim();
@@ -483,7 +668,48 @@ async function main() {
 
         if (goalArg.toLowerCase() === 'off') {
           agentLoop.setGoalMode(false);
+          agentLoop.goalManager.disarm();
           CLI.renderGoalStatus(false);
+          continue;
+        }
+
+        if (goalArg.toLowerCase() === 'status') {
+          const state = agentLoop.goalManager.getState();
+          console.log(`\n${c.brightMagenta}Goal lifecycle:${c.reset} ${state ? JSON.stringify(state, null, 2) : 'chưa có durable goal'}\n`);
+          continue;
+        }
+
+        if (goalArg.toLowerCase() === 'pause') {
+          const state = agentLoop.goalManager.pause();
+          console.log(`\n${c.yellow}Goal paused:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+          continue;
+        }
+
+        if (goalArg.toLowerCase() === 'complete') {
+          const state = agentLoop.goalManager.complete();
+          console.log(`\n${c.green}Goal completed:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+          continue;
+        }
+
+        if (goalArg.toLowerCase().startsWith('block')) {
+          const reason = goalArg.slice('block'.length).trim() || 'Blocked by operator.';
+          const state = agentLoop.goalManager.block(reason);
+          console.log(`\n${c.red}Goal blocked:${c.reset} ${state?.blocker || reason}\n`);
+          continue;
+        }
+
+        if (goalArg.toLowerCase() === 'resume') {
+          const state = agentLoop.goalManager.resume();
+          if (!state) {
+            console.log(`\n${c.yellow}Chưa có durable goal để resume.${c.reset}\n`);
+            continue;
+          }
+          try {
+            await executeDurableGoal();
+          } catch (err: any) {
+            agentLoop.goalManager.block(err.message || 'Goal execution failed.');
+            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Goal:${c.reset}`, err.message);
+          }
           continue;
         }
 
@@ -508,15 +734,10 @@ async function main() {
           taskPrompt = inputGoal;
         }
 
-        // Khởi chạy tác vụ ở chế độ Goal Mode (không giới hạn số bước)
-        CLI.renderGoalBanner(taskPrompt);
-        const session = new Session();
-        session.addUserMessage(taskPrompt);
-        sessionCount++;
-
         try {
-          await agentLoop.run(session, { isGoalMode: true });
+          await executeDurableGoal(taskPrompt);
         } catch (err: any) {
+          agentLoop.goalManager.block(err.message || 'Goal execution failed.');
           console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Goal Mode:${c.reset}`, err.message);
           if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
             console.log(`\n${c.yellow}💡 Gợi ý: Model này không tồn tại hoặc tài khoản/API key chưa được cấp quyền truy cập.`);
@@ -540,7 +761,7 @@ async function main() {
       // Lệnh hoàn tác (/undo hoặc /rollback)
       if (trimmed === '/undo' || trimmed === '/rollback') {
         try {
-          const rollbackRes = await agentLoop.rollback();
+          const rollbackRes = await agentLoop.rollback(activeSession);
           if (rollbackRes.success) {
             console.log(`\n${c.green}✔ ${rollbackRes.message}${c.reset}\n`);
           } else {
@@ -592,8 +813,15 @@ async function main() {
           }
 
           const oldPath = workspace.rootDir;
+          await sessionPersistence.save(activeSession);
           workspace = new Workspace(resolvedPath);
           agentLoop.setWorkspace(workspace);
+          sessionPersistence = new SessionPersistence(workspace.rootDir);
+          agentLoop.setSessionPersistence(sessionPersistence);
+          activeSession = new Session();
+          agentLoop.bindSession(activeSession);
+          await sessionPersistence.save(activeSession);
+          saveSession({ activeSessionId: activeSession.id });
           saveSession({ workspacePath: workspace.rootDir });
           CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
         } catch (err: any) {
@@ -651,13 +879,11 @@ async function main() {
       console.log(`${c.bold}${trimmed}${c.reset}`);
       console.log(`${c.cyan}${c.bold}└────────────────────────────────────────────────────────────────────────────┘${c.reset}`);
 
-      // Mỗi tác vụ tạo một Session mới độc lập
-      const session = new Session();
-      session.addUserMessage(trimmed);
+      // Các prompt tiếp tục cùng một session và được flush xuống JSONL.
       sessionCount++;
 
       try {
-        await agentLoop.run(session);
+        await agentLoop.submit(activeSession, trimmed);
       } catch (err: any) {
         console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Agent Loop:${c.reset}`, err.message);
         if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {

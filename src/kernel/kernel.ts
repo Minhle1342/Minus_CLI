@@ -10,6 +10,13 @@ import { ReflectionEngine } from '../agent/reflection-engine.js';
 import { ToolDefinition } from '../tools/types.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { TaskManager } from '../tasks/task-manager.js';
+import { GoalManager } from '../agent/goal-manager.js';
+import { AgentHookRegistry } from '../agent/agent-hooks.js';
+import { AgentInbox } from '../agent/agent-inbox.js';
+import { PromptAssembler } from '../llm/prompt-assembler.js';
+import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
+import { AgentRegistry } from '../agent/agent-registry.js';
+import { SessionManager } from '../session/session-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -20,9 +27,48 @@ export interface KernelEvents {
   'tool:after': (toolName: string, result: Record<string, any>, durationMs: number) => void;
   'tool:error': (toolName: string, error: any) => void;
   'model:thought': (thought: string) => void;
+  'model:token': (token: string) => void;
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
+  'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
+}
+
+/** Typed event surface for plugins and live agent observers. */
+export class KernelEventBus {
+  private readonly emitter = new EventEmitter();
+
+  on<K extends keyof KernelEvents>(
+    event: K,
+    listener: (...args: Parameters<KernelEvents[K]>) => void,
+  ): this {
+    this.emitter.on(event as string, listener as (...args: any[]) => void);
+    return this;
+  }
+
+  once<K extends keyof KernelEvents>(
+    event: K,
+    listener: (...args: Parameters<KernelEvents[K]>) => void,
+  ): this {
+    this.emitter.once(event as string, listener as (...args: any[]) => void);
+    return this;
+  }
+
+  off<K extends keyof KernelEvents>(
+    event: K,
+    listener: (...args: Parameters<KernelEvents[K]>) => void,
+  ): this {
+    this.emitter.off(event as string, listener as (...args: any[]) => void);
+    return this;
+  }
+
+  emit<K extends keyof KernelEvents>(event: K, ...args: Parameters<KernelEvents[K]>): boolean {
+    return this.emitter.emit(event as string, ...args);
+  }
+
+  listenerCount<K extends keyof KernelEvents>(event: K): number {
+    return this.emitter.listenerCount(event as string);
+  }
 }
 
 export interface KernelContext {
@@ -30,6 +76,12 @@ export interface KernelContext {
   tools: ToolRegistry;
   toolRunner: ToolRunner;
   plan: PlanManager;
+  goal: GoalManager;
+  agentHooks: AgentHookRegistry;
+  inbox: AgentInbox;
+  systemPrompt: PromptAssembler;
+  agents: AgentRegistry;
+  sessions: SessionManager;
   memory: ProjectMemoryManager;
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
@@ -37,7 +89,7 @@ export interface KernelContext {
   sandbox: SandboxManager;
   tasks: TaskManager;
   llm: any;
-  events: EventEmitter;
+  events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
   setWorkspace: (workspace: Workspace) => void;
   setLLM: (llm: any, modelName?: string) => void;
@@ -65,8 +117,14 @@ export class AgentKernel {
   private isInitialized = false;
 
   constructor(workspace: Workspace = new Workspace(), llm?: any) {
-    const events = new EventEmitter();
+    const events = new KernelEventBus();
     const plan = new PlanManager();
+    const goal = new GoalManager();
+    const agentHooks = new AgentHookRegistry();
+    const inbox = new AgentInbox();
+    const systemPrompt = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
+    const agents = new AgentRegistry();
+    const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
@@ -82,6 +140,12 @@ export class AgentKernel {
       tools,
       toolRunner,
       plan,
+      goal,
+      agentHooks,
+      inbox,
+      systemPrompt,
+      agents,
+      sessions,
       memory,
       checkpoints,
       compactor,
@@ -98,7 +162,8 @@ export class AgentKernel {
         this.ctx.workspace = newWs;
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
-        (this.ctx as any).memory = new ProjectMemoryManager(newWs.rootDir);
+        this.ctx.memory.setWorkspace(newWs.rootDir);
+        this.ctx.sessions.setWorkspace(newWs.rootDir);
         (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
         this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
         this.ctx.checkpoints.init().catch(() => {});

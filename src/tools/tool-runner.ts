@@ -1,4 +1,4 @@
-import { ToolRegistry } from './registry.js';
+import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
 
 export interface ToolExecutionResult {
@@ -18,10 +18,10 @@ export interface ToolExecutionResult {
  * 5. Output Normalization: Chuẩn hoá kết quả trả về dưới dạng JSON thô cho Session/LLM
  */
 export class ToolRunner {
-  private registry: ToolRegistry;
+  private registry: ToolProvider;
   private workspace: Workspace;
 
-  constructor(registry: ToolRegistry, workspace: Workspace) {
+  constructor(registry: ToolProvider, workspace: Workspace) {
     this.registry = registry;
     this.workspace = workspace;
   }

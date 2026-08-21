@@ -66,6 +66,33 @@ Một dự án mẫu giáo khoa giúp người học hiểu bản chất bên tr
 
 ---
 
+## 🧠 Session State + Memory Architecture
+
+Hệ thống hiện tại đã tách rõ ba lớp trạng thái:
+
+- **Session event log**: nguồn sự thật append-only cho message, tool call/result, plan, goal, queued input, fork và delegation state; được lưu dưới `.codingagent/sessions/*.jsonl`.
+- **Working projection**: `Session.getHistory()` dựng lại context gửi cho LLM; compaction chỉ thay projection, không xóa raw events.
+- **Memory architecture**: `ProjectMemoryManager` lưu insight theo scope `project/session/goal`, kèm source và confidence để retrieval có provenance.
+
+Delegation có lifecycle durable (`running/completed/failed/stopped`). Sau restart, delegation đang `running` được chuyển thành `stopped`; chỉ `/agents resume <id>` hoặc `resume_agent` mới tạo lần chạy lại. Quy tắc này tránh tự nhân đôi side effect của tool.
+
+Side-effect tools (`write_file`, `replace_text`, `run_command`) có effect ledger durable: `prepared → committed/failed → rolledback`. Nếu crash xảy ra sau `prepared`, recovery đánh dấu `outcome: unknown` để operator không vô tình retry một action có thể đã chạy.
+
+Session operator commands: `/sessions`, `/sessions open <id>`, `/sessions new [id]`, `/sessions inspect [id]`.
+
+Flow của một request:
+
+```text
+submit → input/queued → input/claimed → turn/start
+       → pre-step/request hooks → LLM request
+       → step/start → tool/call → tool/result → step/end
+       → turn/end → session persistence
+```
+
+Subagent chạy trong child session riêng, dùng tool scope được giới hạn; parent nhận handle và các event `agent/delegation`.
+
+---
+
 ## 🔑 6 Công Cụ Cốt Lõi Của Coding Agent
 
 1. **`read_file`**: Đọc nội dung file text trong workspace (hỗ trợ chỉ định khoảng dòng `startLine`/`endLine`).
@@ -87,14 +114,26 @@ CodingAgent/
 │   │
 │   ├── agent/
 │   │   ├── agent-loop.ts          # Vòng lặp điều phối cốt lõi (Agent Loop)
+│   │   ├── agent-hooks.ts         # Plugin hooks cho agent/* lifecycle
+│   │   ├── agent-inbox.ts          # Serialized inbox và durable input replay
+│   │   ├── agent-registry.ts       # Live agent registry/status trong Kernel
+│   │   ├── subagent-manager.ts     # Delegated child agents, polling và cancellation
+│   │   ├── goal-manager.ts         # Durable Goal lifecycle, replay và explicit resume
 │   │   └── types.ts               # Interface cấu hình & trạng thái Agent
 │   │
 │   ├── llm/
 │   │   ├── gemini.ts              # Adapter giao tiếp Google Gemini SDK (@google/genai)
+│   │   ├── prompt-assembler.ts     # System-prompt sections do plugin ghép deterministic
 │   │   └── prompts.ts             # System prompt định hướng Coding Agent
 │   │
 │   ├── session/
-│   │   └── session.ts             # Lưu trữ hội thoại & thought_signature in-memory
+│   │   ├── session.ts              # Event-sourced session và message projection
+│   │   ├── session-manager.ts       # Kernel capability: load/create/fork/list sessions
+│   │   └── session-persistence.ts  # Append-only JSONL persistence & resume
+│   │
+│   ├── memory/
+│   │   ├── project-memory.ts        # Project KB, scoped retrieval và provenance
+│   │   └── types.ts                 # Memory scope/source/confidence contracts
 │   │
 │   ├── workspace/
 │   │   └── workspace.ts           # Quản lý ranh giới an toàn, resolveSafePath, ignore list
@@ -103,6 +142,7 @@ CodingAgent/
 │   │   ├── types.ts               # Interface ToolDefinition chuẩn
 │   │   ├── registry.ts            # Tool Registry quản lý 6 tools & xuất FunctionDeclarations
 │   │   ├── tool-runner.ts         # 5-stage Tool Execution Pipeline (Validation -> Safety -> Run)
+│   │   ├── subagent-tools.ts      # delegate/get/status/stop/resume agent
 │   │   ├── read-file.ts           # Tool đọc file (có line range & size limit)
 │   │   ├── list-files.ts          # Tool liệt kê thư mục
 │   │   ├── search-text.ts         # Tool tìm kiếm chuỗi văn bản trong code
@@ -110,7 +150,7 @@ CodingAgent/
 │   │   ├── write-file.ts          # Tool tạo mới / ghi đè file
 │   │   └── run-command.ts         # Tool thực thi lệnh CLI (có allowlist & timeout)
 │   │
-│   ├── test-suite.ts              # 26 Unit Tests kiểm tra toàn diện hệ thống
+│   ├── test-suite.ts              # 185 assertions kiểm tra toàn diện hệ thống
 │   └── test-scenarios.ts          # Các kịch bản kiểm thử trực tiếp với Gemini
 │
 ├── package.json                   # Khai báo dependencies & scripts
@@ -138,7 +178,7 @@ GEMINI_MODEL=gemini-3.5-flash
 ```
 
 ### 3. Chạy kiểm thử tự động (Unit Tests)
-Chạy bộ 26 unit test kiểm tra Workspace, 6 Tools, ToolRunner Pipeline, và Mock Agent Loop:
+Chạy bộ test kiểm tra Workspace, tools, ToolRunner Pipeline, session lifecycle, memory, hooks và subagents:
 ```bash
 npm test
 ```

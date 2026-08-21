@@ -14,6 +14,12 @@ import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
 import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
 
+export interface ToolProvider {
+  get(name: string): ToolDefinition | undefined;
+  getAll(): ToolDefinition[];
+  getFunctionDeclarations(): FunctionDeclaration[];
+}
+
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
  * 
@@ -57,6 +63,10 @@ export class ToolRegistry {
 
   attachSandboxManager(sandboxManager: any): void {
     this.register(createRunCommandTool(sandboxManager));
+  }
+
+  createScope(scopeId: string, allowedToolNames?: string[]): ToolScope {
+    return new ToolScope(scopeId, this, allowedToolNames);
   }
 
   /**
@@ -114,5 +124,52 @@ export class ToolRegistry {
         errorCode: 'EXECUTION_ERROR',
       };
     }
+  }
+}
+
+/**
+ * Per-agent tool capability view. Local registrations stay inside the scope;
+ * base tools are visible only when included in the allowlist.
+ */
+export class ToolScope implements ToolProvider {
+  private localTools = new Map<string, ToolDefinition>();
+  private allowed?: Set<string>;
+
+  constructor(
+    readonly id: string,
+    private readonly base: ToolRegistry,
+    allowedToolNames?: string[],
+  ) {
+    this.allowed = allowedToolNames ? new Set(allowedToolNames) : undefined;
+  }
+
+  register(tool: ToolDefinition): void {
+    this.localTools.set(tool.name, tool);
+  }
+
+  get(name: string): ToolDefinition | undefined {
+    const local = this.localTools.get(name);
+    if (local) return local;
+    if (this.allowed && !this.allowed.has(name)) return undefined;
+    return this.base.get(name);
+  }
+
+  getAll(): ToolDefinition[] {
+    const visible = this.allowed
+      ? this.base.getAll().filter((tool) => this.allowed!.has(tool.name))
+      : this.base.getAll();
+    const byName = new Map(visible.map((tool) => [tool.name, tool]));
+    for (const [name, tool] of this.localTools) byName.set(name, tool);
+    return Array.from(byName.values());
+  }
+
+  getFunctionDeclarations(): FunctionDeclaration[] {
+    return this.getAll()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }));
   }
 }

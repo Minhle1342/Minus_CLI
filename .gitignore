@@ -6,3 +6,6 @@ dist/
 *.log
 .gemini/
 temp/
+.codingagent/project-memory.json
+.codingagent/session.json
+.codingagent/sessions/

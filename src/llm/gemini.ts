@@ -7,6 +7,10 @@ export interface StreamCallbacks {
   onContentToken?: (token: string) => void;
 }
 
+export interface LLMRequestOptions {
+  systemPrompt?: string;
+}
+
 export interface LLMResponse {
   text?: string;
   reasoningContent?: string;
@@ -41,7 +45,8 @@ export class GeminiLLM {
   async generateStream(
     session: Session,
     tools: FunctionDeclaration[],
-    callbacks?: StreamCallbacks
+    callbacks?: StreamCallbacks,
+    request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
     const contents = session.getHistory();
 
@@ -49,7 +54,7 @@ export class GeminiLLM {
       model: this.modelName,
       contents,
       config: {
-        systemInstruction: this.systemPrompt,
+        systemInstruction: request?.systemPrompt || this.systemPrompt,
         tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
       },
     });
@@ -96,7 +101,7 @@ export class GeminiLLM {
   /**
    * Phương thức generate đồng bộ (tự động gọi generateStream)
    */
-  async generate(session: Session, tools: FunctionDeclaration[]): Promise<LLMResponse> {
-    return this.generateStream(session, tools);
+  async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
+    return this.generateStream(session, tools, undefined, request);
   }
 }

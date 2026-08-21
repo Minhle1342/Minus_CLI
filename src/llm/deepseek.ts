@@ -1,45 +1,51 @@
 import { type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
-import { LLMResponse, StreamCallbacks } from './gemini.js';
+import { LLMResponse, LLMRequestOptions, StreamCallbacks } from './gemini.js';
 
 export interface DeepseekLLMOptions {
   modelName?: string;
   apiKey?: string;
   baseURL?: string;
   systemPrompt?: string;
+  extraHeaders?: Record<string, string>;
 }
 
 /**
- * DeepseekLLM - Hỗ trợ DeepSeek Chat, DeepSeek Coder, DeepSeek R1 & Groq Gemma
+ * DeepseekLLM - Hỗ trợ DeepSeek, OpenAI Codex, GPT-5.6 (Sol/Terra/Luna), Groq & OpenAI-compatible APIs
  * 
  * Tích hợp:
  * 1. OpenAI-compatible Function Calling format.
  * 2. Deterministic Tool Ordering để tối đa hóa KV-Cache hit rate (>80%).
  * 3. Real-time Streaming & SSE Chunk Parsing cho cả System 2 Thinking và System 1 Actions.
+ * 4. Tự động hỗ trợ headers tùy chỉnh (như chatgpt-account-id cho ChatGPT Plus OAuth).
  */
 export class DeepseekLLM {
   readonly modelName: string;
   readonly apiKey: string;
   readonly baseURL: string;
   readonly systemPrompt: string;
+  readonly extraHeaders: Record<string, string>;
 
   constructor(
     apiKeyOrOptions?: string | DeepseekLLMOptions,
     modelName?: string,
     systemPrompt?: string,
-    baseURL?: string
+    baseURL?: string,
+    extraHeaders?: Record<string, string>
   ) {
     if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
       this.modelName = apiKeyOrOptions.modelName || 'deepseek-chat';
       this.apiKey = apiKeyOrOptions.apiKey || process.env.DEEPSEEK_API_KEY || '';
       this.baseURL = apiKeyOrOptions.baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
       this.systemPrompt = apiKeyOrOptions.systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
+      this.extraHeaders = apiKeyOrOptions.extraHeaders || {};
     } else {
       this.apiKey = apiKeyOrOptions || process.env.DEEPSEEK_API_KEY || '';
       this.modelName = modelName || 'deepseek-chat';
       this.systemPrompt = systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
       this.baseURL = baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+      this.extraHeaders = extraHeaders || {};
     }
 
     if (!this.apiKey) {
@@ -67,14 +73,14 @@ export class DeepseekLLM {
   /**
    * Chuyển đổi Session History sang định dạng messages của OpenAI/DeepSeek
    */
-  private convertHistoryToOpenAIMessages(session: Session): any[] {
+  private convertHistoryToOpenAIMessages(session: Session, systemPrompt: string): any[] {
     const history = session.getHistory();
     const messages: any[] = [];
 
     // 1. Luôn đưa System Prompt lên đầu tiên để cố định KV-Cache Prefix
     messages.push({
       role: 'system',
-      content: this.systemPrompt,
+      content: systemPrompt,
     });
 
     // 2. Chuyển đổi các lượt tin nhắn trong Session
@@ -94,7 +100,7 @@ export class DeepseekLLM {
             role: 'assistant',
             content: textParts || null,
             tool_calls: functionCalls.map((fc: any, index: number) => ({
-              id: `call_${Date.now()}_${index}`,
+              id: fc.id || `call_${Date.now()}_${index}`,
               type: 'function',
               function: {
                 name: fc.name,
@@ -114,7 +120,7 @@ export class DeepseekLLM {
           messages.push({
             role: 'tool',
             content: JSON.stringify(fr.response?.result || fr.response || {}),
-            tool_call_id: `call_${fr.name}`,
+            tool_call_id: fr.id || fr.toolCallId || `call_${fr.name}`,
           });
         }
       }
@@ -129,9 +135,10 @@ export class DeepseekLLM {
   async generateStream(
     session: Session,
     tools: FunctionDeclaration[],
-    callbacks?: StreamCallbacks
+    callbacks?: StreamCallbacks,
+    request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
-    const messages = this.convertHistoryToOpenAIMessages(session);
+    const messages = this.convertHistoryToOpenAIMessages(session, request?.systemPrompt || this.systemPrompt);
     const openAITools = tools.length > 0 ? this.convertToolsToOpenAI(tools) : undefined;
     const endpoint = `${this.baseURL.replace(/\/+$/, '')}/chat/completions`;
 
@@ -148,6 +155,27 @@ export class DeepseekLLM {
       }
     }
 
+    // Các model suy luận chuyên sâu (reasoning models) như o1/o3/o4/sol
+    const isReasoningModel =
+      effectiveModel.startsWith('o1') ||
+      effectiveModel.startsWith('o3') ||
+      effectiveModel.startsWith('o4') ||
+      effectiveModel.includes('sol') ||
+      effectiveModel.includes('reasoner') ||
+      effectiveModel.includes('r1');
+
+    const requestBody: any = {
+      model: effectiveModel,
+      messages,
+      tools: openAITools,
+      stream: true,
+    };
+
+    // Chỉ đặt temperature cho model thông thường (reasoning models dùng mặc định)
+    if (!isReasoningModel) {
+      requestBody.temperature = 0.2;
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -155,19 +183,14 @@ export class DeepseekLLM {
         'Authorization': `Bearer ${this.apiKey}`,
         'HTTP-Referer': 'https://github.com/mini-agent-loop',
         'X-Title': 'Autonomous Coding Agent',
+        ...this.extraHeaders,
       },
-      body: JSON.stringify({
-        model: effectiveModel,
-        messages,
-        tools: openAITools,
-        stream: true,
-        temperature: 0.2,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`DeepSeek API error (${response.status}): ${errorText}`);
+      throw new Error(`LLM API error (${response.status}): ${errorText}`);
     }
 
     let fullText = '';
@@ -251,7 +274,7 @@ export class DeepseekLLM {
   /**
    * Phương thức generate đồng bộ (tự động gọi generateStream)
    */
-  async generate(session: Session, tools: FunctionDeclaration[]): Promise<LLMResponse> {
-    return this.generateStream(session, tools);
+  async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
+    return this.generateStream(session, tools, undefined, request);
   }
 }

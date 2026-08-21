@@ -27,16 +27,28 @@
   ],
   "learnedInsights": [
     {
+      "id": "memory-test_rule",
       "key": "test_rule",
       "insight": "Always run npm test before committing",
       "category": "rule",
-      "recordedAt": "23:23:04 20/8/2026"
+      "scope": "project",
+      "source": "manual",
+      "confidence": 1,
+      "createdAt": "09:20:03 21/8/2026",
+      "updatedAt": "2026-08-21T03:44:09.538Z",
+      "recordedAt": "2026-08-21T03:44:09.538Z"
     },
     {
+      "id": "memory-auth_pattern",
       "key": "auth_pattern",
       "insight": "Use JWT bearer tokens in header",
       "category": "architecture",
-      "recordedAt": "23:23:04 20/8/2026"
+      "scope": "project",
+      "source": "model",
+      "confidence": 1,
+      "createdAt": "09:20:03 21/8/2026",
+      "updatedAt": "2026-08-21T03:44:09.543Z",
+      "recordedAt": "2026-08-21T03:44:09.543Z"
     }
   ],
   "lastIndexed": "2026-08-20T13:39:51.642Z"

@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
+import type { Session } from '../session/session.js';
+import { MemoryCategory, MemoryQueryOptions, MemoryRecord, MemoryScope, MemorySource } from './types.js';
 
-export interface LearnedInsight {
+export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insight' | 'category'>> {
   key: string;
   insight: string;
-  category?: 'convention' | 'architecture' | 'gotcha' | 'rule';
-  recordedAt: string;
+  category?: MemoryCategory;
+  recordedAt?: string;
 }
 
 export interface ProjectMemoryData {
@@ -33,6 +35,7 @@ export class ProjectMemoryManager {
   private workspaceDir: string;
   private memoryFilePath: string;
   private memoryData: ProjectMemoryData;
+  private session?: Session;
 
   constructor(workspaceDir: string) {
     this.workspaceDir = path.resolve(workspaceDir);
@@ -65,7 +68,12 @@ export class ProjectMemoryManager {
     try {
       await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
       const raw = await fs.readFile(this.memoryFilePath, 'utf-8');
-      this.memoryData = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      this.memoryData = {
+        ...this.getDefaultMemory(),
+        ...parsed,
+        learnedInsights: (parsed.learnedInsights || []).map((item: LearnedInsight) => this.normalizeInsight(item)),
+      };
     } catch {
       // Chưa có file -> Tự động quét và index workspace lần đầu
       await this.autoIndexWorkspace(workspace ?? new Workspace(this.workspaceDir));
@@ -131,23 +139,60 @@ export class ProjectMemoryManager {
   /**
    * Lưu một hiểu biết hoặc kinh nghiệm mới vào bộ nhớ dài hạn
    */
-  async saveInsight(key: string, insight: string, category: LearnedInsight['category'] = 'insight' as any): Promise<LearnedInsight> {
-    const existingIndex = this.memoryData.learnedInsights.findIndex((i) => i.key === key);
-    const item: LearnedInsight = {
-      key,
-      insight,
-      category,
-      recordedAt: new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN'),
-    };
+  bindSession(session: Session): void {
+    this.session = session;
+  }
 
-    if (existingIndex >= 0) {
-      this.memoryData.learnedInsights[existingIndex] = item;
-    } else {
-      this.memoryData.learnedInsights.push(item);
+  setWorkspace(workspaceDir: string): void {
+    this.workspaceDir = path.resolve(workspaceDir);
+    this.memoryFilePath = path.join(this.workspaceDir, '.codingagent', 'project-memory.json');
+    this.memoryData = this.getDefaultMemory();
+    this.session = undefined;
+  }
+
+  async saveInsight(
+    key: string,
+    insight: string,
+    category: LearnedInsight['category'] = 'insight',
+    options: { scope?: MemoryScope; source?: MemorySource; confidence?: number; goalId?: string; tags?: string[] } = {},
+  ): Promise<MemoryRecord> {
+    const scope = options.scope || 'project';
+    if (scope !== 'project' && !this.session) {
+      throw new Error(`Cannot save ${scope}-scoped memory without a bound session.`);
     }
 
-    await this.save();
-    return item;
+    const now = new Date().toISOString();
+    const existing = this.memoryData.learnedInsights.find((i) => i.key === key);
+    const item: LearnedInsight = {
+      id: existing?.id || `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      key,
+      insight,
+      category: category || 'insight',
+      scope,
+      source: options.source || 'manual',
+      confidence: Math.max(0, Math.min(1, options.confidence ?? 1)),
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      sessionId: scope === 'project' ? undefined : this.session?.id,
+      goalId: options.goalId,
+      tags: options.tags,
+      recordedAt: now,
+    };
+
+    const record = this.normalizeInsight(item) as MemoryRecord;
+    if (scope === 'project') {
+      const existingIndex = this.memoryData.learnedInsights.findIndex((i) => i.key === key);
+      if (existingIndex >= 0) {
+        this.memoryData.learnedInsights[existingIndex] = record;
+      } else {
+        this.memoryData.learnedInsights.push(record);
+      }
+      await this.save();
+    } else {
+      this.session!.addMemoryRecord(record);
+    }
+
+    return record;
   }
 
   /**
@@ -185,14 +230,65 @@ export class ProjectMemoryManager {
     if (this.memoryData.learnedInsights.length > 0) {
       lines.push(`- Kinh nghiệm đã ghi nhớ:`);
       for (const item of this.memoryData.learnedInsights.slice(-4)) {
-        lines.push(`  * [${item.key}]: ${item.insight}`);
+        lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
       }
     }
 
     return lines.join('\n');
   }
 
+  retrieve(query = '', options: MemoryQueryOptions = {}): MemoryRecord[] {
+    const scopes = options.scopes || ['project', 'session', 'goal'];
+    const candidates = [
+      ...this.memoryData.learnedInsights.map((item) => this.normalizeInsight(item) as MemoryRecord),
+      ...(this.session?.getMemoryRecords() || []),
+    ].filter((item) => {
+      if (!scopes.includes(item.scope)) return false;
+      if (options.sessionId && item.sessionId !== options.sessionId) return false;
+      if (options.goalId && item.goalId !== options.goalId) return false;
+      return true;
+    });
+
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const scored = candidates.map((item) => {
+      const haystack = [item.key, item.insight, item.category, ...(item.tags || [])].join(' ').toLowerCase();
+      const score = terms.length === 0
+        ? 0
+        : terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
+      return { item, score };
+    });
+
+    return scored
+      .filter(({ score }) => terms.length === 0 || score > 0)
+      .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))
+      .slice(0, options.limit ?? 8)
+      .map(({ item }) => ({ ...item }));
+  }
+
+  getRelevantMemory(query: string, session?: Session, limit = 4): MemoryRecord[] {
+    if (session) this.bindSession(session);
+    return this.retrieve(query, { limit });
+  }
+
   getMemoryData(): ProjectMemoryData {
-    return { ...this.memoryData };
+    return {
+      ...this.memoryData,
+      learnedInsights: this.memoryData.learnedInsights.map((item) => ({ ...item })),
+    };
+  }
+
+  private normalizeInsight(item: LearnedInsight): LearnedInsight {
+    const now = new Date().toISOString();
+    return {
+      ...item,
+      id: item.id || `memory-${item.key}`,
+      category: item.category || 'insight',
+      scope: item.scope || 'project',
+      source: item.source || 'manual',
+      confidence: typeof item.confidence === 'number' ? item.confidence : 1,
+      createdAt: item.createdAt || item.recordedAt || now,
+      updatedAt: item.updatedAt || item.recordedAt || now,
+      recordedAt: item.recordedAt || item.updatedAt || now,
+    };
   }
 }

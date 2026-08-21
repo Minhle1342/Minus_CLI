@@ -1,6 +1,6 @@
 import { FunctionDeclaration, FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
-import { GeminiLLM, LLMResponse, StreamCallbacks } from './gemini.js';
+import { GeminiLLM, LLMRequestOptions, LLMResponse, StreamCallbacks } from './gemini.js';
 import { DeepseekLLM } from './deepseek.js';
 import { colors as c } from '../ui/cli-ui.js';
 
@@ -52,7 +52,8 @@ export class FallbackRouterLLM {
   async generateStream(
     session: Session,
     tools: FunctionDeclaration[],
-    callbacks?: StreamCallbacks
+    callbacks?: StreamCallbacks,
+    request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
     let lastError: any = null;
     const initialIndex = this.activeIndex;
@@ -68,7 +69,7 @@ export class FallbackRouterLLM {
           console.log(`\n${c.yellow}${c.bold}⚡ [AUTO-FALLBACK ACTIVATED]${c.reset} ${c.brightYellow}Chuyển sang Tier ${currentTier.tier}: ${c.bold}${currentTier.name}${c.reset} (${currentTier.provider})...`);
         }
 
-        const response = await client.generateStream(session, tools, callbacks);
+        const response = await client.generateStream(session, tools, callbacks, request);
 
         // Thành công -> cập nhật activeIndex
         this.activeIndex = currentIndex;
@@ -102,7 +103,7 @@ export class FallbackRouterLLM {
     throw lastError || new Error('Fallback Router không thể khởi tạo phản hồi.');
   }
 
-  async generate(session: Session, tools: FunctionDeclaration[]): Promise<LLMResponse> {
-    return this.generateStream(session, tools);
+  async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
+    return this.generateStream(session, tools, undefined, request);
   }
 }
