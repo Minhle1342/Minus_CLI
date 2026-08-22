@@ -976,10 +976,51 @@ async function main() {
       }
 
       // Lệnh xem Capability Catalog (/capabilities)
-      if (trimmed === '/capabilities') {
+      if (trimmed === '/capabilities' || trimmed.startsWith('/capabilities ')) {
         const capabilitiesCatalog = (agentLoop.kernel?.ctx as any)?.capabilities;
         if (capabilitiesCatalog) {
-          CLI.renderCapabilities(capabilitiesCatalog.list());
+          const parts = trimmed.split(/\s+/).filter(Boolean);
+          const target = parts[1];
+          const subTarget = parts[2];
+
+          if (!target) {
+            CLI.renderCapabilities(capabilitiesCatalog.list());
+          } else if (target === 'inspect' && subTarget) {
+            const cap = capabilitiesCatalog.get(subTarget);
+            if (cap) {
+              CLI.renderCapabilities([cap]);
+            } else {
+              console.log(`\n${c.red}✖ Không tìm thấy capability: ${subTarget}${c.reset}\n`);
+            }
+          } else if (target === 'categories') {
+            const cats = capabilitiesCatalog.getCategories ? capabilitiesCatalog.getCategories() : [];
+            console.log(`\n${c.cyan}${c.bold}Các Capability Categories khả dụng:${c.reset}`);
+            for (const cat of cats) {
+              const count = capabilitiesCatalog.getByCategory(cat).length;
+              console.log(`  • ${c.yellow}${cat}${c.reset} (${count} capabilities)`);
+            }
+            console.log('');
+          } else {
+            const byName = capabilitiesCatalog.get(target);
+            if (byName) {
+              CLI.renderCapabilities([byName]);
+            } else {
+              const byCategory = capabilitiesCatalog.getByCategory(target as any);
+              if (byCategory.length > 0) {
+                CLI.renderCapabilities(byCategory);
+              } else {
+                const searchResults = capabilitiesCatalog.search ? capabilitiesCatalog.search(target) : [];
+                if (searchResults.length > 0) {
+                  CLI.renderCapabilities(searchResults);
+                } else {
+                  console.log(`\n${c.red}✖ Không tìm thấy capability hoặc category: ${target}${c.reset}`);
+                  if (capabilitiesCatalog.getCategories) {
+                    console.log(`${c.gray}Các category khả dụng: ${capabilitiesCatalog.getCategories().join(', ')}${c.reset}\n`);
+                  }
+                }
+              }
+            }
+          }
         } else {
           console.log(`\n${c.yellow}⚠️  Capability catalog chưa được khởi tạo.${c.reset}\n`);
         }

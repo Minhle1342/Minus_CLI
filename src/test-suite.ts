@@ -2245,6 +2245,11 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Slash command suggester không trộn fuzzy candidate khi command đã khớp chính xác',
   );
   assert(
+    Boolean(getSlashCommandSuggestions('/capabilities')[0]?.usage?.includes('/capabilities ['))
+      && getSlashCommandSuggestions('/capabilities')[0]?.matchedBy === 'exact',
+    'Slash command suggester hiển thị đầy đủ usage giá trị phía sau khi khớp chính xác /capabilities',
+  );
+  assert(
     getSlashCommandSuggestions('normal prompt').length === 0
       && getSlashCommandSuggestions('/model gemini').length === 0
       && completeSlashCommand('/mod')[0][0] === '/model'
@@ -2973,6 +2978,14 @@ Always write tests first!`;
   assert(capCatalog.hasCapability('git.stage'), 'CapabilityCatalog có git.stage');
   assert(capCatalog.hasCapability('git.push'), 'CapabilityCatalog có git.push');
   assert(capCatalog.findForTool('read_file')?.name === 'filesystem.read', 'CapabilityCatalog ánh xạ đúng tool read_file sang capability');
+  assert(capCatalog.getCategories().includes('filesystem'), 'CapabilityCatalog getCategories trả về categories khả dụng');
+  assert(capCatalog.getCapabilityNames().includes('filesystem.read'), 'CapabilityCatalog getCapabilityNames trả về danh sách tên capability');
+  assert(capCatalog.getSlashUsage().includes('/capabilities'), 'CapabilityCatalog getSlashUsage trả về định dạng usage hợp lệ');
+  assert(capCatalog.getAvailableValues().categories.length > 0, 'CapabilityCatalog getAvailableValues chứa categories');
+  assert(capCatalog.getSuggestions('file').includes('filesystem.read'), 'CapabilityCatalog getSuggestions gợi ý giá trị phía sau slash command');
+  assert(capCatalog.search('read').some((c) => c.name === 'filesystem.read'), 'CapabilityCatalog search tìm kiếm chính xác');
+  assert(capCatalog.inspect('filesystem.read')?.type === 'capability', 'CapabilityCatalog inspect capability trả về chi tiết capability');
+  assert(capCatalog.inspect('filesystem')?.type === 'category', 'CapabilityCatalog inspect category trả về danh sách thuộc category');
 
   const capPolicy = new CapabilityPolicy();
   const readEval = capPolicy.evaluate(capCatalog.get('filesystem.read'));

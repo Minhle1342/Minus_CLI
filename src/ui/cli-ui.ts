@@ -64,7 +64,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent' },
   { command: '/goal', usage: '/goal [on|off|status|resume|objective]', description: 'Điều khiển Goal Mode' },
   { command: '/skills', usage: '/skills [inspect] [id]', description: 'Xem Superpowers skills' },
-  { command: '/capabilities', description: 'Xem capability catalog' },
+  { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Xem capability catalog' },
   { command: '/approvals', usage: '/approvals [approve|reject] [id]', description: 'Xử lý yêu cầu phê duyệt' },
   { command: '/undo', description: 'Hoàn tác checkpoint gần nhất', aliases: ['/rollback'] },
   { command: '/checkpoints', description: 'Xem lịch sử checkpoint' },
@@ -759,12 +759,16 @@ export class CLI {
 
   /**
    * Hiển thị cảnh báo Self-Reflection & Debugging Protocol
+   * Chỉ hiển thị khi thực sự có bế tắc kéo dài (failures >= 3), tránh gây nhiễu cho các lượt kiểm tra bình thường.
    */
   static renderReflectionAlert(failures: number, advice?: string): void {
+    if (failures < 3) {
+      return;
+    }
     console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightYellow}⚠️  [SELF-REFLECTION TRIGGERED]${c.reset} ${c.yellow}Phát hiện lỗi (Thất bại liên tiếp: ${failures})${c.reset}`);
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.dim}[Hệ thống đang tự điều chỉnh chiến lược (Thất bại liên tiếp: ${failures})]${c.reset}`);
     if (advice) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ Hướng dẫn: ${advice}${c.reset}`);
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ ${advice}${c.reset}`);
     }
   }
 

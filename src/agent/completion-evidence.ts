@@ -33,6 +33,16 @@ export function classifyToolEvidence(
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
   }
+  if (toolName === 'git_status' || toolName === 'git_diff') {
+    return ['inspection', 'git'];
+  }
+  if (toolName === 'git_command') {
+    const sub = String(args.subcommand || result.subcommand || '').trim().toLowerCase();
+    if (['log', 'status', 'diff', 'show', 'branch', 'tag', 'rev-parse', 'ls-files', 'cat-file'].includes(sub)) {
+      return ['inspection', 'git'];
+    }
+    return ['git'];
+  }
   if (GIT_TOOLS.has(toolName)) return ['git'];
   if (toolName === 'web_search') return ['external'];
   if (INSPECTION_TOOLS.has(toolName)) return ['inspection'];
@@ -144,7 +154,10 @@ export class CompletionEvidenceGate {
       reasons.push('The final answer claims a push without a successful git_push result.');
     }
 
-    const claimsBlocker = /\b(?:blocked|cannot|unable|khong the|bi chan|that bai)\b/.test(normalized);
+    const claimsBlocker =
+      /\b(?:i\s+am\s+blocked|verification\s+is\s+blocked|cannot\s+(?:proceed|continue|complete|execute|perform|run|test|build)|unable\s+to\s+(?:proceed|continue|complete|execute|perform|run|test|build)|blocked\s+by|bi\s+chan\s+khong\s+the|tac\s+vu\s+bi\s+chan|khong\s+the\s+(?:tiep\s+tuc|hoan\s+thanh|chay|kiem\s+thu|thuc\s+hien))\b/i.test(
+        normalized,
+      ) || (/\b(?:blocked|unable|khong the)\b/i.test(normalized) && /\b(?:test|tests|build|lint|verification|push|commit|fix)\b/i.test(normalized));
     if (claimsBlocker) {
       const blockerChecks: Array<{ claimed: boolean; supported: boolean; label: string }> = [
         {

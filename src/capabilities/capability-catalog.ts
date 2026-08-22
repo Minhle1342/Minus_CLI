@@ -1,4 +1,4 @@
-import { CapabilityDescriptor, CapabilityCategory } from './types.js';
+﻿import { CapabilityDescriptor, CapabilityCategory } from './types.js';
 
 export class CapabilityCatalog {
   private capabilities: Map<string, CapabilityDescriptor> = new Map();
@@ -66,6 +66,103 @@ export class CapabilityCatalog {
    */
   getByCategory(category: CapabilityCategory): CapabilityDescriptor[] {
     return this.list().filter((d) => d.category === category);
+  }
+
+  /**
+   * Lấy danh sách các categories duy nhất hiện có trong Catalog
+   */
+  getCategories(): CapabilityCategory[] {
+    const categories = new Set<CapabilityCategory>();
+    for (const desc of this.capabilities.values()) {
+      categories.add(desc.category);
+    }
+    return Array.from(categories);
+  }
+
+  /**
+   * Lấy danh sách toàn bộ tên các Capability
+   */
+  getCapabilityNames(): string[] {
+    return Array.from(this.capabilities.keys());
+  }
+
+  /**
+   * Cung cấp chuỗi usage hướng dẫn tham số phía sau của slash command /capabilities
+   */
+  getSlashUsage(): string {
+    const categories = this.getCategories();
+    const catPreview = categories.length > 0 ? categories.slice(0, 3).join('|') + '|...' : 'category';
+    return `/capabilities [${catPreview}|name|inspect]`;
+  }
+
+  /**
+   * Lấy toàn bộ các giá trị/tham số khả dụng phía sau slash command (/capabilities <value>)
+   */
+  getAvailableValues(): {
+    categories: CapabilityCategory[];
+    capabilities: string[];
+    tools: string[];
+    subCommands: string[];
+  } {
+    const categories = this.getCategories();
+    const capabilities = this.getCapabilityNames();
+    const tools = Array.from(
+      new Set(
+        Array.from(this.capabilities.values())
+          .map((c) => c.toolName)
+          .filter((t): t is string => Boolean(t))
+      )
+    );
+    const subCommands = ['inspect', 'categories', 'tools'];
+    return {
+      categories,
+      capabilities,
+      tools,
+      subCommands,
+    };
+  }
+
+  /**
+   * Gợi ý các giá trị tham số phía sau /capabilities khi người dùng gõ
+   */
+  getSuggestions(query = ''): string[] {
+    const normalized = query.trim().toLowerCase();
+    const { categories, capabilities, subCommands } = this.getAvailableValues();
+    const allValues = [...subCommands, ...categories, ...capabilities];
+    if (!normalized) {
+      return allValues;
+    }
+    return allValues.filter((val) => val.toLowerCase().includes(normalized));
+  }
+
+  /**
+   * Tìm kiếm capabilities theo từ khoá (name, category, toolName, description)
+   */
+  search(query: string): CapabilityDescriptor[] {
+    if (!query) return this.list();
+    const lower = query.trim().toLowerCase();
+    return this.list().filter(
+      (c) =>
+        c.name.toLowerCase().includes(lower) ||
+        c.category.toLowerCase().includes(lower) ||
+        (c.toolName && c.toolName.toLowerCase().includes(lower)) ||
+        c.description.toLowerCase().includes(lower)
+    );
+  }
+
+  /**
+   * Tra cứu chi tiết một capability hoặc danh sách capabilities thuộc category
+   */
+  inspect(nameOrCategory: string): { type: 'capability'; data: CapabilityDescriptor } | { type: 'category'; data: CapabilityDescriptor[] } | undefined {
+    const cap = this.get(nameOrCategory);
+    if (cap) {
+      return { type: 'capability', data: cap };
+    }
+    const catList = this.getByCategory(nameOrCategory as CapabilityCategory);
+    if (catList.length > 0) {
+      return { type: 'category', data: catList };
+    }
+    return undefined;
   }
 
   clear(): void {
