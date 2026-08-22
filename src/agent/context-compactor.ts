@@ -1,5 +1,6 @@
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
+import { assertHistoryToolPairing } from '../session/session-invariants.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -47,6 +48,7 @@ export class ContextCompactor {
    * Thực hiện nén và tối ưu hoá danh sách tin nhắn trong Session
    */
   compact(messages: SessionMessage[]): { messages: SessionMessage[]; stats: CompactionStats } {
+    assertHistoryToolPairing(messages);
     let originalLength = 0;
     let compactedLength = 0;
     let prunedPartsCount = 0;
@@ -190,6 +192,7 @@ export class ContextCompactor {
       prunedPartsCount,
     };
 
+    assertHistoryToolPairing(compactedMessages);
     return { messages: compactedMessages, stats };
   }
 }

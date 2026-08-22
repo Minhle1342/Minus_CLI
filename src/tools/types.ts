@@ -22,6 +22,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: FunctionDeclaration['parameters'];
+  /** Optional strict schema for the canonical JSON result returned by execute(). */
+  outputSchema?: FunctionDeclaration['parameters'];
   execute(
     args: Record<string, any>,
     workspace: Workspace,

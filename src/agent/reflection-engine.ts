@@ -85,13 +85,20 @@ export class ReflectionEngine {
       isFailure = true;
       this.consecutiveFailures++;
 
+      const suggestedRead = result.suggestedRead
+        ? `Gọi read_file với đúng tham số: ${JSON.stringify(result.suggestedRead)}.`
+        : 'Gọi read_file trên một khoảng dòng hẹp với includeLineNumbers=false.';
+
       reflectionPrompt = [
         `\n⚠️ [SELF-REFLECTION - THAY THẾ TEXT THẤT BẠI]`,
+        `Mã lỗi: ${result.errorCode || 'REPLACE_TEXT_FAILED'}`,
         `Lý do: ${result.error}`,
-        `👉 Lời khuyên: Hãy gọi read_file (kèm khoảng dòng startLine/endLine) để đọc chính xác đoạn code hiện tại trước khi gọi replace_text.`,
+        `👉 ${suggestedRead}`,
+        `Dùng content nguyên bản không có số dòng làm oldText, truyền contentHash thành expectedFileHash, và không lặp lại nguyên tham số vừa thất bại.`,
+        `Không sao chép phần preview trên CLI; nhãn "preview only" nghĩa là chỉ phần hiển thị bị rút gọn.`,
       ].join('\n');
 
-      advice = `Không tìm thấy đoạn text cần thay thế. Cần đọc lại file trước khi thử lại.`;
+      advice = `replace_text thất bại (${result.errorCode || 'unknown'}). Cần đọc lại đúng vùng file trước khi thử với tham số mới.`;
     }
     // 4. Phân tích lỗi chung khác
     else if (result.error || result.errorCode) {

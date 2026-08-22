@@ -12,7 +12,13 @@ import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { loadSession, saveSession, getSessionFilePath } from './session/persistent-session.js';
 import { Workspace } from './workspace/workspace.js';
-import { CLI, AVAILABLE_MODELS, colors as c } from './ui/cli-ui.js';
+import {
+  CLI,
+  AVAILABLE_MODELS,
+  RealtimeSlashCommandHints,
+  colors as c,
+  completeSlashCommand,
+} from './ui/cli-ui.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
@@ -46,36 +52,7 @@ const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 3
 
 // Hàm hoàn thành tự động khi người dùng nhấn Tab
 function completer(line: string): [string[], string] {
-  const completions = [
-    '/model',
-    '/modal',
-    '/workspace',
-    '/cd',
-    '/session',
-    '/sessions',
-    '/new-session',
-    '/fork-session',
-    '/sandbox',
-    '/tasks',
-    '/plan',
-    '/memory',
-    '/tools',
-    '/status',
-    '/agents',
-    '/goal',
-    '/skills',
-    '/capabilities',
-    '/approvals',
-    '/undo',
-    '/rollback',
-    '/checkpoints',
-    '/clear',
-    '/help',
-    '/exit',
-    '/quit',
-  ];
-  const hits = completions.filter((c) => c.startsWith(line.toLowerCase()));
-  return [hits.length ? hits : completions, line];
+  return completeSlashCommand(line);
 }
 
 // Phân tích tham số dòng lệnh CLI (--workspace, --model, --sandbox, positional workspace)
@@ -570,6 +547,29 @@ async function main() {
   });
 
   const rl = readline.createInterface({ input, output, completer });
+  const slashHints = new RealtimeSlashCommandHints(output);
+  let slashHintRefreshScheduled = false;
+  const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean }): void => {
+    if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
+      slashHints.clear();
+      return;
+    }
+    const removesOnlySlash = rl.line === '/'
+      && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
+    if (removesOnlySlash) {
+      slashHints.clear();
+      return;
+    }
+    if (slashHintRefreshScheduled) return;
+    slashHintRefreshScheduled = true;
+    setImmediate(() => {
+      slashHintRefreshScheduled = false;
+      slashHints.update(rl.line, rl.cursor + 2);
+    });
+  };
+  // Clear transient rows before readline handles Enter and invokes the question callback.
+  // Character updates are deferred, so prepending does not read stale rl.line state.
+  input.prependListener('keypress', handleInputKeypress);
 
   try {
     while (true) {
@@ -1051,6 +1051,8 @@ async function main() {
       }
     }
   } finally {
+    input.removeListener('keypress', handleInputKeypress);
+    slashHints.dispose();
     rl.close();
     try {
       await kernel.ctx.sandbox.dispose();

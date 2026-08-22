@@ -18,7 +18,8 @@ interface ToolFailureSummary {
   detail?: string;
 }
 
-const OPTIONAL_OFFER_PATTERN = /(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?\n]{0,180}/g;
+const OPTIONAL_OFFER_PATTERN = /(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can|khi can)[^.!?\n]{0,180}/gi;
+const CONVERSATIONAL_INTRO_PATTERN = /(?:toi|chung toi|minh)\s+se\s+(?:kiem tra|tom tat|trinh bay|giai thich|cung cap|gui|liet ke|phan tich)\s+[^.!?\n]{0,80}(?:duoi day|sau day|nhu sau|la|:|bao gom)[^.!?\n]{0,40}/gi;
 
 const DEFERRED_WORK_PATTERNS = [
   /\b(?:i|we)\s+(?:will|shall|am going to|are going to|need to|plan to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work)\b/,
@@ -32,6 +33,13 @@ const CAPABILITY_DENIAL_PATTERNS = [
   /\b(?:i|we)\s+(?:cannot|cant|dont have|do not have|lack)\b/,
   /\b(?:khong the|khong co|thieu)\b/,
 ];
+
+function hasSubstantiveDelivery(raw: string): boolean {
+  const hasList = (raw.match(/\n\s*[-*•]\s+/g) || []).length >= 2 || (raw.match(/\n\s*\d+[\.)]\s+/g) || []).length >= 2;
+  const hasCodeBlock = /```[\s\S]+?```/.test(raw);
+  const hasHashOrTable = /\b[0-9a-f]{7,40}\b/.test(raw) || /\|[-:]+\|/.test(raw);
+  return (hasList || hasCodeBlock || hasHashOrTable) && raw.trim().length >= 60;
+}
 
 /**
  * Prevents an in-progress status update from being accepted as the final answer.
@@ -66,9 +74,23 @@ export class FinalAnswerGuard {
 
   evaluate(answer: string, context?: FinalAnswerGuardContext): FinalAnswerGuardDecision {
     const normalized = normalizeForMatching(answer);
-    const withoutOptionalOffers = normalized.replace(OPTIONAL_OFFER_PATTERN, ' ');
+    const withoutOptionalOffers = normalized
+      .replace(OPTIONAL_OFFER_PATTERN, ' ')
+      .replace(CONVERSATIONAL_INTRO_PATTERN, ' ');
     const promisesFutureToolWork = DEFERRED_WORK_PATTERNS.some((pattern) => pattern.test(withoutOptionalOffers));
-    if (!promisesFutureToolWork) {
+
+    let isDeferred = promisesFutureToolWork;
+    if (isDeferred && hasSubstantiveDelivery(answer)) {
+      const lines = answer.trim().split('\n').filter((l) => l.trim());
+      const lastLine = normalizeForMatching(lines[lines.length - 1] || '');
+      const onlyEndedWithPromise = DEFERRED_WORK_PATTERNS.some((p) => p.test(lastLine))
+        && !lastLine.includes('neu') && !lastLine.includes('if');
+      if (!onlyEndedWithPromise) {
+        isDeferred = false;
+      }
+    }
+
+    if (!isDeferred) {
       const gitDenial = this.evaluateGitCapabilityDenial(normalized, context);
       if (gitDenial) return gitDenial;
       return { allow: true };

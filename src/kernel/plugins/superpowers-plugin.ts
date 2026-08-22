@@ -94,14 +94,15 @@ export class SuperpowersPlugin implements AgentPlugin {
     });
 
     // 4. Theo dõi thay đổi code & xác thực qua VerificationPolicy
-    ctx.events.on('tool:after', (toolName, result) => {
-      if (['write_file', 'replace_text'].includes(toolName)) {
+    ctx.events.on('tool:after', (toolName, result, _durationMs, args) => {
+      const failed = Boolean(result?.error || result?.errorCode || result?.success === false
+        || (typeof result?.exitCode === 'number' && result.exitCode !== 0));
+      if (['write_file', 'replace_text'].includes(toolName) && !failed) {
         this.verificationPolicy.recordModification();
       } else if (toolName === 'run_command') {
-        const isSuccess = !result?.error && (result?.exitCode === 0 || result?.success !== false);
         this.verificationPolicy.recordVerification(
-          result?.command || 'test',
-          isSuccess,
+          String(args?.command || ''),
+          !failed,
           result?.stdout?.slice(0, 200) || '',
           result?.exitCode
         );

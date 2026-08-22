@@ -154,7 +154,14 @@ export class ProjectMemoryManager {
     key: string,
     insight: string,
     category: LearnedInsight['category'] = 'insight',
-    options: { scope?: MemoryScope; source?: MemorySource; confidence?: number; goalId?: string; tags?: string[] } = {},
+    options: {
+      scope?: MemoryScope;
+      source?: MemorySource;
+      confidence?: number;
+      goalId?: string;
+      tags?: string[];
+      expiresAt?: string;
+    } = {},
   ): Promise<MemoryRecord> {
     const scope = options.scope || 'project';
     if (scope !== 'project' && !this.session) {
@@ -162,26 +169,69 @@ export class ProjectMemoryManager {
     }
 
     const now = new Date().toISOString();
-    const existing = this.memoryData.learnedInsights.find((i) => i.key === key);
+    const existingRecords = scope === 'project'
+      ? this.memoryData.learnedInsights
+      : (this.session?.getMemoryRecords() || []);
+    const sameKeyRecords = existingRecords.filter((item) => item.key === key);
+    const existing = [...sameKeyRecords].reverse().find((item) => this.normalizeInsight(item).trustStatus === 'active')
+      || sameKeyRecords.at(-1);
+    const source = options.source || 'manual';
+    const latestObservedResult = this.session?.getEvents()
+      .filter((event) => event.type === 'tool/result')
+      .at(-1);
+    if (options.confidence !== undefined && (!Number.isFinite(options.confidence) || options.confidence < 0 || options.confidence > 1)) {
+      throw new Error('Memory confidence must be a finite number between 0 and 1.');
+    }
+    if (options.expiresAt && !Number.isFinite(Date.parse(options.expiresAt))) {
+      throw new Error('Memory expiresAt must be a valid ISO-8601 timestamp.');
+    }
+    const requestedConfidence = options.confidence ?? (source === 'model' ? 0.5 : 1);
+    const normalizedExistingInsight = existing?.insight.trim().toLowerCase();
+    const hasConflict = Boolean(existing && normalizedExistingInsight !== insight.trim().toLowerCase());
+    const lacksModelProvenance = source === 'model' && !latestObservedResult;
+    const existingIsUntrusted = Boolean(existing && this.normalizeInsight(existing).trustStatus !== 'active');
+    const trustStatus = source === 'model' && (hasConflict || lacksModelProvenance || existingIsUntrusted)
+      ? 'contested'
+      : 'active';
+    const modelExpiry = source === 'model'
+      ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      : undefined;
     const item: LearnedInsight = {
-      id: existing?.id || `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: trustStatus === 'contested'
+        ? `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        : existing?.id || `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       key,
       insight,
       category: category || 'insight',
       scope,
-      source: options.source || 'manual',
-      confidence: Math.max(0, Math.min(1, options.confidence ?? 1)),
-      createdAt: existing?.createdAt || now,
+      source,
+      confidence: Math.max(0, Math.min(1, trustStatus === 'contested'
+        ? Math.min(requestedConfidence, 0.35)
+        : requestedConfidence)),
+      trustStatus,
+      createdAt: trustStatus === 'contested' ? now : existing?.createdAt || now,
       updatedAt: now,
       sessionId: scope === 'project' ? undefined : this.session?.id,
       goalId: options.goalId,
       tags: options.tags,
+      sourceEventSeq: latestObservedResult?.seq,
+      sourceToolCallId: latestObservedResult?.data.toolCallId,
+      expiresAt: options.expiresAt || modelExpiry,
+      ...(trustStatus === 'contested'
+        ? {
+            conflictReason: hasConflict
+              ? `Model-authored value conflicts with the previous value for key "${key}".`
+              : `Model-authored value for key "${key}" has no supporting tool-result provenance.`,
+          }
+        : {}),
       recordedAt: now,
     };
 
     const record = this.normalizeInsight(item) as MemoryRecord;
     if (scope === 'project') {
-      const existingIndex = this.memoryData.learnedInsights.findIndex((i) => i.key === key);
+      const existingIndex = trustStatus === 'contested'
+        ? -1
+        : this.memoryData.learnedInsights.findIndex((i) => i.id === record.id);
       if (existingIndex >= 0) {
         this.memoryData.learnedInsights[existingIndex] = record;
       } else {
@@ -199,12 +249,8 @@ export class ProjectMemoryManager {
    * Lưu toàn bộ dữ liệu trí nhớ xuống đĩa (.codingagent/project-memory.json)
    */
   async save(): Promise<void> {
-    try {
-      await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
-      await fs.writeFile(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2), 'utf-8');
-    } catch (err: any) {
-      console.error('Không thể lưu Project Memory:', err.message);
-    }
+    await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
+    await fs.writeFile(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2), 'utf-8');
   }
 
   /**
@@ -227,9 +273,13 @@ export class ProjectMemoryManager {
       lines.push(`- Cấu trúc thư mục: ${dirKeys.join(', ')}`);
     }
 
-    if (this.memoryData.learnedInsights.length > 0) {
+    const trustedInsights = this.memoryData.learnedInsights
+      .map((item) => this.normalizeInsight(item))
+      .filter((item) => this.isTrustedForAutomaticContext(item, 0.65))
+      .slice(-4);
+    if (trustedInsights.length > 0) {
       lines.push(`- Kinh nghiệm đã ghi nhớ:`);
-      for (const item of this.memoryData.learnedInsights.slice(-4)) {
+      for (const item of trustedInsights) {
         lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
       }
     }
@@ -239,6 +289,8 @@ export class ProjectMemoryManager {
 
   retrieve(query = '', options: MemoryQueryOptions = {}): MemoryRecord[] {
     const scopes = options.scopes || ['project', 'session', 'goal'];
+    const minConfidence = options.minConfidence ?? 0;
+    const now = Date.now();
     const candidates = [
       ...this.memoryData.learnedInsights.map((item) => this.normalizeInsight(item) as MemoryRecord),
       ...(this.session?.getMemoryRecords() || []),
@@ -246,6 +298,9 @@ export class ProjectMemoryManager {
       if (!scopes.includes(item.scope)) return false;
       if (options.sessionId && item.sessionId !== options.sessionId) return false;
       if (options.goalId && item.goalId !== options.goalId) return false;
+      if (item.confidence < minConfidence) return false;
+      if (!options.includeContested && item.trustStatus !== 'active') return false;
+      if (!options.includeExpired && item.expiresAt && Date.parse(item.expiresAt) <= now) return false;
       return true;
     });
 
@@ -267,7 +322,7 @@ export class ProjectMemoryManager {
 
   getRelevantMemory(query: string, session?: Session, limit = 4): MemoryRecord[] {
     if (session) this.bindSession(session);
-    return this.retrieve(query, { limit });
+    return this.retrieve(query, { limit, minConfidence: 0.55 });
   }
 
   getMemoryData(): ProjectMemoryData {
@@ -279,16 +334,36 @@ export class ProjectMemoryManager {
 
   private normalizeInsight(item: LearnedInsight): LearnedInsight {
     const now = new Date().toISOString();
+    const source = item.source || 'manual';
+    const rawConfidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
+      ? item.confidence
+      : source === 'model' ? 0.5 : 1;
+    const validTrustStatuses = new Set(['active', 'contested', 'superseded']);
+    const invalidExpiry = Boolean(item.expiresAt && !Number.isFinite(Date.parse(item.expiresAt)));
+    const inferredTrustStatus = source === 'model' && !item.sourceEventSeq ? 'contested' : 'active';
+    const trustStatus = invalidExpiry
+      ? 'contested'
+      : validTrustStatuses.has(String(item.trustStatus))
+        ? item.trustStatus!
+        : inferredTrustStatus;
     return {
       ...item,
       id: item.id || `memory-${item.key}`,
       category: item.category || 'insight',
       scope: item.scope || 'project',
-      source: item.source || 'manual',
-      confidence: typeof item.confidence === 'number' ? item.confidence : 1,
+      source,
+      confidence: Math.max(0, Math.min(1, rawConfidence)),
+      trustStatus,
+      ...(invalidExpiry ? { conflictReason: 'Memory contains an invalid expiration timestamp.' } : {}),
       createdAt: item.createdAt || item.recordedAt || now,
       updatedAt: item.updatedAt || item.recordedAt || now,
       recordedAt: item.recordedAt || item.updatedAt || now,
     };
+  }
+
+  private isTrustedForAutomaticContext(item: LearnedInsight, minConfidence: number): boolean {
+    return (item.trustStatus || 'active') === 'active'
+      && (item.confidence ?? 0) >= minConfidence
+      && (!item.expiresAt || Date.parse(item.expiresAt) > Date.now());
   }
 }

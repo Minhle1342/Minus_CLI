@@ -1,5 +1,8 @@
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, ChildProcess, execFile } from 'node:child_process';
 import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export interface BackgroundTask {
   id: string;
@@ -11,6 +14,7 @@ export interface BackgroundTask {
   exitCode?: number | null;
   logs: string[];
   process?: ChildProcess;
+  stopRequested?: boolean;
 }
 
 /**
@@ -53,7 +57,9 @@ export class TaskManager {
     const child = spawn(command, [], {
       cwd: effectiveCwd,
       shell: true,
-      detached: false,
+      // POSIX process groups make whole-tree termination possible. Windows
+      // uses taskkill /T against the exact shell PID instead.
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -77,7 +83,7 @@ export class TaskManager {
     child.stderr?.on('data', appendLog);
 
     child.on('exit', (code) => {
-      task.status = code === 0 ? 'stopped' : 'failed';
+      task.status = task.stopRequested || code === 0 ? 'stopped' : 'failed';
       task.exitCode = code;
       task.logs.push(`[SYSTEM] Tiến trình kết thúc với mã thoát: ${code}`);
     });
@@ -112,19 +118,11 @@ export class TaskManager {
       return false;
     }
 
-    try {
-      task.process.kill('SIGTERM');
-      task.status = 'stopped';
-      return true;
-    } catch {
-      try {
-        task.process.kill('SIGKILL');
-        task.status = 'stopped';
-        return true;
-      } catch {
-        return false;
-      }
-    }
+    task.stopRequested = true;
+    const stopped = await this.terminateProcessTree(task);
+    task.status = stopped ? 'stopped' : 'failed';
+    if (!stopped) task.logs.push('[SYSTEM ERROR] Process tree did not terminate after stop request.');
+    return stopped;
   }
 
   /**
@@ -147,15 +145,66 @@ export class TaskManager {
    * Dọn dẹp toàn bộ tiến trình khi thoát
    */
   async dispose(): Promise<void> {
+    const failedTaskIds: string[] = [];
     for (const task of this.tasks.values()) {
       if (task.status === 'running' && task.process) {
-        try {
-          task.process.kill('SIGTERM');
-        } catch {
-          // Bỏ qua lỗi
-        }
+        const stopped = await this.stopTask(task.id);
+        if (!stopped) failedTaskIds.push(task.id);
       }
     }
+    if (failedTaskIds.length > 0) {
+      throw new Error(`Failed to terminate background process tree(s): ${failedTaskIds.join(', ')}.`);
+    }
     this.tasks.clear();
+  }
+
+  private async terminateProcessTree(task: BackgroundTask): Promise<boolean> {
+    const child = task.process;
+    const pid = task.pid;
+    if (!child || !pid) return false;
+
+    try {
+      if (process.platform === 'win32') {
+        await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+      } else {
+        try {
+          process.kill(-pid, 'SIGTERM');
+        } catch {
+          child.kill('SIGTERM');
+        }
+      }
+    } catch (error: any) {
+      // taskkill reports a failure when the process exited between observation
+      // and termination. Treat that as success only after liveness verification.
+      task.logs.push(`[SYSTEM] Stop command reported: ${error.message}`);
+    }
+
+    if (await this.waitUntilExited(child, pid, 3000)) return true;
+    try {
+      if (process.platform === 'win32') {
+        await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+      } else {
+        process.kill(-pid, 'SIGKILL');
+      }
+    } catch {}
+    return this.waitUntilExited(child, pid, 2000);
+  }
+
+  private async waitUntilExited(child: ChildProcess, pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || !this.isProcessAlive(pid)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return child.exitCode !== null || !this.isProcessAlive(pid);
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

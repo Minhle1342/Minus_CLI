@@ -9,7 +9,7 @@ import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed
 const ALLOWED_COMMAND_PREFIXES = [
   'npm test',
-  'npm run',
+  'npm run ',
   'npm start',
   'npm --version',
   'npm list',

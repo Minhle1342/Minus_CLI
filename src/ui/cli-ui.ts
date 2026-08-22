@@ -36,6 +36,177 @@ const c = colors;
 const BASE_TYPEWRITER_DELAY_MS = 8;
 export const FINAL_ANSWER_CHARACTER_DELAY_MS = BASE_TYPEWRITER_DELAY_MS / 2;
 
+export interface SlashCommandDefinition {
+  command: string;
+  usage?: string;
+  description: string;
+  aliases?: string[];
+}
+
+export interface SlashCommandSuggestion extends SlashCommandDefinition {
+  matchedBy: 'exact' | 'prefix' | 'contains' | 'fuzzy';
+  score: number;
+}
+
+export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  { command: '/model', usage: '/model [id|name]', description: 'Chọn mô hình LLM', aliases: ['/modal'] },
+  { command: '/workspace', usage: '/workspace [path]', description: 'Xem hoặc đổi workspace', aliases: ['/cd'] },
+  { command: '/session', description: 'Xem cấu hình session hiện tại' },
+  { command: '/sessions', usage: '/sessions [open|new|inspect]', description: 'Quản lý các session đã lưu' },
+  { command: '/new-session', description: 'Tạo session hội thoại mới' },
+  { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary' },
+  { command: '/sandbox', description: 'Xem trạng thái sandbox' },
+  { command: '/tasks', description: 'Xem background tasks' },
+  { command: '/plan', description: 'Xem cây kế hoạch hiện tại' },
+  { command: '/memory', description: 'Xem bộ nhớ dự án' },
+  { command: '/tools', description: 'Liệt kê tool đã đăng ký' },
+  { command: '/status', description: 'Xem trạng thái phiên làm việc' },
+  { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent' },
+  { command: '/goal', usage: '/goal [on|off|status|resume|objective]', description: 'Điều khiển Goal Mode' },
+  { command: '/skills', usage: '/skills [inspect] [id]', description: 'Xem Superpowers skills' },
+  { command: '/capabilities', description: 'Xem capability catalog' },
+  { command: '/approvals', usage: '/approvals [approve|reject] [id]', description: 'Xử lý yêu cầu phê duyệt' },
+  { command: '/undo', description: 'Hoàn tác checkpoint gần nhất', aliases: ['/rollback'] },
+  { command: '/checkpoints', description: 'Xem lịch sử checkpoint' },
+  { command: '/clear', description: 'Xoá màn hình terminal' },
+  { command: '/help', description: 'Hiển thị hướng dẫn', aliases: ['/?'] },
+  { command: '/exit', description: 'Thoát chương trình', aliases: ['/quit'] },
+] as const;
+
+/** Rank prefix and typo-tolerant slash-command suggestions without matching command arguments. */
+export function getSlashCommandSuggestions(input: string, limit = 5): SlashCommandSuggestion[] {
+  const normalized = input.trimStart().toLowerCase();
+  if (!normalized.startsWith('/') || /\s/.test(normalized)) return [];
+  const query = normalized;
+  if (query === '/') {
+    return SLASH_COMMANDS.slice(0, Math.max(0, limit)).map((definition, index) => ({
+      ...definition,
+      matchedBy: 'prefix',
+      score: index,
+    }));
+  }
+  const suggestions = SLASH_COMMANDS.flatMap((definition, catalogIndex) => {
+    let best: Pick<SlashCommandSuggestion, 'matchedBy' | 'score'> | undefined;
+    for (const candidate of [definition.command, ...(definition.aliases || [])]) {
+      const value = candidate.toLowerCase();
+      let ranked: Pick<SlashCommandSuggestion, 'matchedBy' | 'score'> | undefined;
+      if (value === query) {
+        ranked = { matchedBy: 'exact', score: catalogIndex / 1000 };
+      } else if (value.startsWith(query)) {
+        ranked = { matchedBy: 'prefix', score: 10 + value.length - query.length + catalogIndex / 1000 };
+      } else if (query.length > 1 && value.includes(query.slice(1))) {
+        ranked = { matchedBy: 'contains', score: 30 + value.indexOf(query.slice(1)) + catalogIndex / 1000 };
+      } else if (query.length >= 3) {
+        const distance = levenshteinDistance(query, value);
+        const maxDistance = query.length <= 5 ? 2 : 3;
+        if (distance <= maxDistance) ranked = { matchedBy: 'fuzzy', score: 50 + distance * 5 + catalogIndex / 1000 };
+      }
+      if (ranked && (!best || ranked.score < best.score)) best = ranked;
+    }
+    return best ? [{ ...definition, ...best }] : [];
+  });
+  const ranked = suggestions.sort((left, right) => left.score - right.score);
+  const exact = ranked.filter((suggestion) => suggestion.matchedBy === 'exact');
+  return (exact.length > 0 ? exact : ranked).slice(0, Math.max(0, limit));
+}
+
+export function completeSlashCommand(line: string): [string[], string] {
+  // Returning every match makes readline print a second completion table on repeated Tab,
+  // which collides with the realtime table. The leading › row is the accepted candidate.
+  const best = getSlashCommandSuggestions(line, 1)[0];
+  if (best && line.trimStart().toLowerCase() === best.command.toLowerCase()) return [[], line];
+  return [best ? [best.command] : [], line];
+}
+
+export interface SlashHintTerminal {
+  isTTY?: boolean;
+  columns?: number;
+  write(chunk: string): unknown;
+}
+
+/** Renders transient hints below readline's active input while preserving its cursor position. */
+export class RealtimeSlashCommandHints {
+  private static readonly RESERVED_ROWS = 7;
+  private visible = false;
+  private renderKey?: string;
+
+  constructor(private readonly terminal: SlashHintTerminal) {}
+
+  update(line: string, cursorColumn = line.length + 2): void {
+    if (!this.terminal.isTTY) return;
+    const suggestions = getSlashCommandSuggestions(line);
+    if (suggestions.length === 0) {
+      this.clear();
+      return;
+    }
+
+    const width = Math.max(40, this.terminal.columns || 80);
+    const nextRenderKey = `${line}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+    if (this.visible && this.renderKey === nextRenderKey) return;
+    const commandWidth = Math.min(
+      Math.max(12, Math.floor(width * 0.45)),
+      Math.max(...suggestions.map((item) => (item.usage || item.command).length)),
+    );
+    const rows = suggestions.map((item, index) => {
+      const label = truncateDisplayText(item.usage || item.command, commandWidth).padEnd(commandWidth);
+      const alias = item.aliases?.length ? ` (${item.aliases.join(', ')})` : '';
+      const availableDescriptionWidth = Math.max(10, width - commandWidth - 6);
+      const description = truncateDisplayText(`${item.description}${alias}`, availableDescriptionWidth);
+      const marker = index === 0 ? '›' : ' ';
+      return `${c.cyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.dim}${description}${c.reset}`;
+    });
+    const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
+    this.renderBelowInput(
+      [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
+      this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
+      cursorColumn,
+    );
+    this.visible = true;
+    this.renderKey = nextRenderKey;
+  }
+
+  clear(): void {
+    if (!this.terminal.isTTY || !this.visible) return;
+    this.renderBelowInput([]);
+    this.visible = false;
+    this.renderKey = undefined;
+  }
+
+  dispose(): void {
+    this.clear();
+  }
+
+  private renderBelowInput(lines: string[], reserveRows = 0, cursorColumn = 0): void {
+    const body = lines.length > 0 ? lines.join('\r\n') : '';
+    // Reserve rows before saving the cursor. Otherwise writing hints at the bottom of the
+    // viewport scrolls the screen and invalidates the saved cursor position, leaving copies.
+    const reservation = reserveRows > 0
+      ? `${'\n'.repeat(reserveRows)}\x1b[${reserveRows}A\r${cursorColumn > 0 ? `\x1b[${cursorColumn}C` : ''}`
+      : '';
+    this.terminal.write(`\x1b[?25l${reservation}\x1b[s\x1b[1E\x1b[0J${body}\x1b[u\x1b[?25h`);
+  }
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    for (let index = 0; index < current.length; index++) previous[index] = current[index];
+  }
+  return previous[right.length];
+}
+
+function truncateDisplayText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
 export interface TypewriterOptions {
   delayMs?: number;
   write?: (character: string) => void;
@@ -63,6 +234,20 @@ export function isToolResultFailure(result: Record<string, any>): boolean {
     || result.success === false
     || (typeof result.exitCode === 'number' && result.exitCode !== 0),
   );
+}
+
+/** Keep tool-call logs readable without implying that the actual argument was truncated. */
+export function formatToolArgumentPreview(value: unknown, maxLength = 180): string {
+  const serialized = JSON.stringify(value);
+  const printable = serialized ?? String(value);
+  if (printable.length <= maxLength) return printable;
+  const headLength = Math.max(20, Math.floor((maxLength - 1) * 0.65));
+  const tailLength = Math.max(12, maxLength - headLength - 1);
+  const lineCount = typeof value === 'string' ? value.split(/\r?\n/).length : undefined;
+  const metadata = typeof value === 'string'
+    ? ` [preview only; full argument sent: ${value.length} chars, ${lineCount} lines]`
+    : ` [preview only; full argument sent: ${printable.length} chars]`;
+  return `${printable.slice(0, headLength)}…${printable.slice(-tailLength)}${metadata}`;
 }
 
 export interface BannerOptions {
@@ -478,13 +663,10 @@ export class CLI {
    * Liệt kê danh mục Tool
    */
   static renderTools(toolList: Array<{ name: string; description: string }>): void {
-    console.log(`\n${c.green}${c.bold}╭── 🛠️  REGISTERED TOOL CATALOG (${toolList.length} Tools) ───────────────────────────────╮${c.reset}`);
+    console.log(`\n${c.green}${c.bold}╭── 🛠️  REGISTERED TOOL CATALOG ──────────────────────────────────────────────────────╮${c.reset}`);
     console.log(`${c.green}${c.bold}│${c.reset}                                                                            ${c.green}${c.bold}│${c.reset}`);
-    for (const tool of toolList) {
-      console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}◆ ${tool.name}${c.reset}`);
-      console.log(`${c.green}${c.bold}│${c.reset}    ${c.dim}${tool.description}${c.reset}`);
-      console.log(`${c.green}${c.bold}│${c.reset}`);
-    }
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}🔧 ${toolList.length} tools registered${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}`);
     console.log(`${c.green}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
@@ -529,7 +711,14 @@ export class CLI {
   /**
    * Hiển thị Cây kế hoạch động (Dynamic Plan Tree)
    */
-  static renderPlan(tasks: Array<{ id: number; title: string; status: string; notes?: string }>): void {
+  static renderPlan(tasks: Array<{
+    id: number;
+    title: string;
+    acceptanceCriteria?: string;
+    status: string;
+    notes?: string;
+    evidence?: Array<{ toolName: string; outcome: string }>;
+  }>): void {
     console.log(`\n${c.brightCyan}${c.bold}╭── 📋 DYNAMIC EXECUTION PLAN (${tasks.length} Steps) ──────────────────────────────╮${c.reset}`);
     console.log(`${c.brightCyan}${c.bold}│${c.reset}                                                                            ${c.brightCyan}${c.bold}│${c.reset}`);
     
@@ -552,6 +741,13 @@ export class CLI {
       }
 
       console.log(`${c.brightCyan}${c.bold}│${c.reset}  ${icon} ${c.bold}${t.id}.${c.reset} ${titleStyle}${t.title}${c.reset}`);
+      if (t.status === 'IN_PROGRESS' && t.acceptanceCriteria) {
+        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ Acceptance: ${t.acceptanceCriteria}${c.reset}`);
+      }
+      if (t.evidence?.length) {
+        const evidence = t.evidence.map((item) => `${item.toolName}:${item.outcome}`).join(', ');
+        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ Evidence: ${evidence}${c.reset}`);
+      }
       if (t.notes) {
         console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ ${t.notes}${c.reset}`);
       }
@@ -755,7 +951,7 @@ export class CLI {
     entries.forEach(([k, v], idx) => {
       const isLast = idx === entries.length - 1;
       const prefix = isLast ? '└─' : '├─';
-      const valStr = typeof v === 'string' && v.length > 80 ? `${v.slice(0, 77)}...` : JSON.stringify(v);
+      const valStr = formatToolArgumentPreview(v);
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.gray}${prefix}${c.reset} ${c.cyan}${k}:${c.reset} ${c.dim}${valStr}${c.reset}`);
     });
   }
@@ -820,6 +1016,9 @@ export class CLI {
     const content = answer.trim();
     const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
     console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}🔍 Root cause analysis:${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}📝 Files modified:${c.reset}`);
+    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}✅ Test/build verification commands executed and confirmation of success:${c.reset}`);
     if (shouldAnimate) {
       await writeTypewriterText(content);
       process.stdout.write('\n');

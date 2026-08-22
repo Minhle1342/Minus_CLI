@@ -201,7 +201,8 @@ function normalizeUnresponsiveEngines(value: unknown): Array<{ engine: string; r
     if (!Array.isArray(item)) return [];
     const engine = truncateText(item[0], 100);
     if (!engine) return [];
-    return [{ engine, reason: truncateText(item[1], 300) }];
+    const reason = truncateText(item[1], 300);
+    return [{ engine, ...(reason ? { reason } : {}) }];
   });
 }
 
@@ -236,14 +237,18 @@ function normalizeResults(payload: SearxngResponse): NormalizedSearchResult[] {
     const url = normalizeResultUrl(result?.url);
     const title = truncateText(result?.title, 500);
     if (!url || !title) return [];
+    const snippet = truncateText(result.content);
+    const category = truncateText(result.category, 100);
+    const score = typeof result.score === 'number' && Number.isFinite(result.score) ? result.score : undefined;
+    const publishedDate = truncateText(result.publishedDate, 100);
     return [{
       title,
       url,
-      snippet: truncateText(result.content),
       engines: normalizeEngines(result),
-      category: truncateText(result.category, 100),
-      score: typeof result.score === 'number' && Number.isFinite(result.score) ? result.score : undefined,
-      publishedDate: truncateText(result.publishedDate, 100),
+      ...(snippet ? { snippet } : {}),
+      ...(category ? { category } : {}),
+      ...(score !== undefined ? { score } : {}),
+      ...(publishedDate ? { publishedDate } : {}),
     }];
   });
 }
@@ -435,7 +440,9 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           successfulQueries: successes.length,
           page: clampInteger(args.page, 1, 1, MAX_PAGE),
           returnedResults: results.length,
-          estimatedTotalResults: estimatedTotals.length > 0 ? Math.max(...estimatedTotals) : undefined,
+          ...(estimatedTotals.length > 0
+            ? { estimatedTotalResults: Math.max(...estimatedTotals) }
+            : {}),
           results,
           answers: mergeUniqueStrings(successes.map(({ payload }) => payload.answers)),
           corrections: mergeUniqueStrings(successes.map(({ payload }) => payload.corrections)),

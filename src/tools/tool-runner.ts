@@ -1,6 +1,7 @@
 import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
+import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
 
 export interface ToolExecutionResult {
   toolName: string;
@@ -48,25 +49,37 @@ export class ToolRunner {
       };
     }
 
-    // Stage 2: Input Validation (Kiểm tra tham số required theo parameters schema)
-    const requiredParams = (tool.parameters as any)?.required || [];
-    for (const param of requiredParams) {
-      if (args[param] === undefined || args[param] === null || args[param] === '') {
-        return {
-          toolName,
-          args,
-          result: {
-            error: `Tham số bắt buộc "${param}" bị thiếu khi gọi tool "${toolName}".`,
-            errorCode: 'INVALID_ARGS',
-          },
-          durationMs: Date.now() - startTime,
-        };
-      }
+    // Stage 2: lossless JSON snapshot + recursive schema validation.
+    let executionArgs: Record<string, any>;
+    try {
+      executionArgs = deepFreeze(cloneJsonStrict(args || {}, `Arguments for ${toolName}`));
+    } catch (error: any) {
+      return {
+        toolName,
+        args,
+        result: { error: error.message, errorCode: 'INVALID_ARGS' },
+        durationMs: Date.now() - startTime,
+      };
+    }
+    const validation = validateSchemaValue(executionArgs, tool.parameters as any, '$', {
+      rejectUnknownProperties: true,
+    });
+    if (!validation.valid) {
+      return {
+        toolName,
+        args: executionArgs,
+        result: {
+          error: `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`,
+          errorCode: 'INVALID_ARGS',
+          validationErrors: validation.errors,
+        },
+        durationMs: Date.now() - startTime,
+      };
     }
 
     // Stage 3: Workspace & Safety Policy Check
-    if (args.path) {
-      const rawPath = String(args.path);
+    if (executionArgs.path) {
+      const rawPath = String(executionArgs.path);
       try {
         this.workspace.resolveSafePath(rawPath);
       } catch (err: any) {
@@ -97,17 +110,44 @@ export class ToolRunner {
 
     // Stage 4: Safe Execution
     try {
-      const rawResult = await tool.execute(args, this.workspace, context);
+      const rawResult = await tool.execute(executionArgs, this.workspace, context);
       
       // Stage 5: Output Normalization
       const normalizedResult = typeof rawResult === 'object' && rawResult !== null
         ? rawResult
         : { output: String(rawResult) };
 
+      let resultSnapshot: Record<string, any>;
+      try {
+        resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`);
+      } catch (error: any) {
+        return {
+          toolName,
+          args: executionArgs,
+          result: { error: error.message, errorCode: 'INVALID_TOOL_RESULT' },
+          durationMs: Date.now() - startTime,
+        };
+      }
+      const outputValidation = validateSchemaValue(resultSnapshot, tool.outputSchema as any, '$', {
+        rejectUnknownProperties: true,
+      });
+      if (!outputValidation.valid) {
+        return {
+          toolName,
+          args: executionArgs,
+          result: {
+            error: `Tool "${toolName}" returned an invalid result: ${outputValidation.errors.join('; ')}`,
+            errorCode: 'INVALID_TOOL_RESULT',
+            validationErrors: outputValidation.errors,
+          },
+          durationMs: Date.now() - startTime,
+        };
+      }
+
       return {
         toolName,
-        args,
-        result: normalizedResult,
+        args: executionArgs,
+        result: deepFreeze(resultSnapshot),
         durationMs: Date.now() - startTime,
       };
     } catch (err: any) {

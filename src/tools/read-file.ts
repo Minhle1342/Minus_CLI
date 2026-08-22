@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -38,6 +39,10 @@ export const readFileTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Tên hàm, lớp, hoặc interface cụ thể muốn đọc phần thân (ví dụ: "AgentLoop" hoặc "createPlan")',
       },
+      includeLineNumbers: {
+        type: Type.BOOLEAN,
+        description: 'Mặc định true. Đặt false khi cần sao chép content nguyên bản vào oldText của replace_text.',
+      },
     },
     required: ['path'],
   },
@@ -61,6 +66,9 @@ export const readFileTool: ToolDefinition = {
       }
 
       const fileContent = await fs.readFile(safePath, 'utf-8');
+      const contentHash = `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
+      const eol = detectEol(fileContent);
+      const includeLineNumbers = args.includeLineNumbers !== false;
 
       // 1. Chế độ Outline Only (AST Semantic Outline)
       if (args.outlineOnly) {
@@ -71,6 +79,8 @@ export const readFileTool: ToolDefinition = {
           symbolsCount: outline.symbols.length,
           summary: outline.summary,
           symbols: outline.symbols,
+          contentHash,
+          eol,
         };
       }
 
@@ -80,13 +90,18 @@ export const readFileTool: ToolDefinition = {
         if (sliced.found && sliced.code) {
           const lines = sliced.code.split('\n');
           const start = sliced.startLine || 1;
-          const numbered = lines.map((l, i) => `${start + i}: ${l}`).join('\n');
+          const content = includeLineNumbers
+            ? lines.map((l, i) => `${start + i}: ${l}`).join('\n')
+            : sliced.code;
           return {
             path: rawPath,
             symbol: args.symbol,
             startLine: sliced.startLine,
             endLine: sliced.endLine,
-            content: numbered,
+            content,
+            contentHash,
+            eol,
+            lineNumbersIncluded: includeLineNumbers,
           };
         } else {
           return {
@@ -111,16 +126,19 @@ export const readFileTool: ToolDefinition = {
       }
 
       const selectedLines = lines.slice(startLine - 1, endLine);
-      const numberedContent = selectedLines
-        .map((line, idx) => `${startLine + idx}: ${line}`)
-        .join('\n');
+      const content = includeLineNumbers
+        ? selectedLines.map((line, idx) => `${startLine + idx}: ${line}`).join('\n')
+        : selectedLines.join('\n');
 
       return {
         path: rawPath,
-        content: numberedContent,
+        content,
         totalLines,
         startLine,
         endLine,
+        contentHash,
+        eol,
+        lineNumbersIncluded: includeLineNumbers,
       };
     } catch (err: any) {
       return {
@@ -130,3 +148,12 @@ export const readFileTool: ToolDefinition = {
     }
   },
 };
+
+function detectEol(content: string): 'crlf' | 'lf' | 'mixed' | 'none' {
+  const crlf = (content.match(/\r\n/g) || []).length;
+  const lf = (content.match(/(?<!\r)\n/g) || []).length;
+  if (crlf > 0 && lf > 0) return 'mixed';
+  if (crlf > 0) return 'crlf';
+  if (lf > 0) return 'lf';
+  return 'none';
+}

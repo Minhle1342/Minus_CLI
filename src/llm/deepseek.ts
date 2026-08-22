@@ -1,7 +1,7 @@
 import { type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
-import { LLMResponse, LLMRequestOptions, StreamCallbacks } from './gemini.js';
+import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason } from './gemini.js';
 
 export interface DeepseekLLMOptions {
   modelName?: string;
@@ -210,7 +210,8 @@ export class DeepseekLLM {
    * Đảm bảo tính toàn vẹn và thứ tự hợp lệ nghiêm ngặt theo chuẩn OpenAI Message Order:
    * 1. Mọi tin nhắn role "tool" PHẢI có tool_call_id tương ứng trong message role "assistant" liền trước.
    * 2. Mọi tool_calls của assistant PHẢI có tool response tương ứng trước khi chuyển sang user/assistant mới.
-   * 3. Tự động sửa hoặc bổ sung ID để không bao giờ bị lỗi 400 (invalid_request_message_order).
+   * 3. Tool call bị thiếu kết quả chỉ được khép lại bằng lỗi tường minh;
+   *    tuyệt đối không bịa kết quả thành công.
    */
   private sanitizeOpenAIMessages(messages: any[]): any[] {
     const validMessages: any[] = [];
@@ -229,11 +230,7 @@ export class DeepseekLLM {
         if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
           for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
             if (!answered) {
-              validMessages.push({
-                role: 'tool',
-                tool_call_id: missingId,
-                content: JSON.stringify({ status: 'completed' }),
-              });
+              validMessages.push(this.createMissingToolResult(missingId));
             }
           }
         }
@@ -277,11 +274,7 @@ export class DeepseekLLM {
         if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
           for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
             if (!answered) {
-              validMessages.push({
-                role: 'tool',
-                tool_call_id: missingId,
-                content: JSON.stringify({ status: 'completed' }),
-              });
+              validMessages.push(this.createMissingToolResult(missingId));
             }
           }
           currentAssistantToolCalls = null;
@@ -295,16 +288,24 @@ export class DeepseekLLM {
     if (currentAssistantToolCalls && currentAssistantToolCalls.size > 0) {
       for (const [missingId, answered] of currentAssistantToolCalls.entries()) {
         if (!answered) {
-          validMessages.push({
-            role: 'tool',
-            tool_call_id: missingId,
-            content: JSON.stringify({ status: 'completed' }),
-          });
+          validMessages.push(this.createMissingToolResult(missingId));
         }
       }
     }
 
     return validMessages;
+  }
+
+  private createMissingToolResult(toolCallId: string): any {
+    return {
+      role: 'tool',
+      tool_call_id: toolCallId,
+      content: JSON.stringify({
+        error: 'The tool call was not executed before the conversation advanced.',
+        errorCode: 'TOOL_NOT_STARTED',
+        retryable: true,
+      }),
+    };
   }
 
   /**
@@ -374,6 +375,54 @@ export class DeepseekLLM {
     let fullText = '';
     let fullReasoning = '';
     const toolCallMap = new Map<number, { id: string; name: string; argsText: string }>();
+    let rawFinishReason: string | undefined;
+    let sawDoneMarker = false;
+
+    const processSseLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) return;
+      if (trimmed === 'data: [DONE]') {
+        sawDoneMarker = true;
+        return;
+      }
+
+      let json: any;
+      try {
+        json = JSON.parse(trimmed.slice(5).trim());
+      } catch (error) {
+        throw new Error('LLM stream contained a malformed SSE JSON payload.', { cause: error });
+      }
+
+      const choice = json.choices?.[0];
+      if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
+        rawFinishReason = String(choice.finish_reason);
+      }
+      const delta = choice?.delta;
+      if (!delta) return;
+
+      if (delta.reasoning_content) {
+        fullReasoning += delta.reasoning_content;
+        callbacks?.onThoughtToken?.(delta.reasoning_content);
+      }
+
+      if (delta.content) {
+        fullText += delta.content;
+        callbacks?.onContentToken?.(delta.content);
+      }
+
+      if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!toolCallMap.has(idx)) {
+            toolCallMap.set(idx, { id: '', name: '', argsText: '' });
+          }
+          const entry = toolCallMap.get(idx)!;
+          if (tc.id) entry.id += tc.id;
+          if (tc.function?.name) entry.name += tc.function.name;
+          if (tc.function?.arguments) entry.argsText += tc.function.arguments;
+        }
+      }
+    };
 
     if (response.body) {
       const reader = response.body.getReader();
@@ -388,66 +437,47 @@ export class DeepseekLLM {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          if (trimmed === 'data: [DONE]') continue;
-
-          try {
-            const json = JSON.parse(trimmed.slice(5).trim());
-            const delta = json.choices?.[0]?.delta;
-            if (!delta) continue;
-
-            if (delta.reasoning_content) {
-              fullReasoning += delta.reasoning_content;
-              callbacks?.onThoughtToken?.(delta.reasoning_content);
-            }
-
-            if (delta.content) {
-              fullText += delta.content;
-              callbacks?.onContentToken?.(delta.content);
-            }
-
-            if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index ?? 0;
-                if (!toolCallMap.has(idx)) {
-                  toolCallMap.set(idx, { id: '', name: '', argsText: '' });
-                }
-                const entry = toolCallMap.get(idx)!;
-                if (tc.id) entry.id += tc.id;
-                if (tc.function?.name) entry.name += tc.function.name;
-                if (tc.function?.arguments) entry.argsText += tc.function.arguments;
-              }
-            }
-          } catch {
-            // Bỏ qua dòng json không hợp lệ
-          }
-        }
+        for (const line of lines) processSseLine(line);
       }
+
+      buffer += decoder.decode();
+      for (const line of buffer.split('\n')) processSseLine(line);
     }
 
     const toolCalls: (FunctionCall & { id?: string })[] = [];
     for (const [_, entry] of toolCallMap.entries()) {
       let args = {};
+      let argumentsValid = true;
       try {
         args = entry.argsText ? JSON.parse(entry.argsText) : {};
       } catch {
-        args = {};
+        argumentsValid = false;
+        args = {
+          originalToolName: entry.name,
+          rawArguments: entry.argsText,
+        };
       }
       if (entry.name) {
         toolCalls.push({
-          name: entry.name,
+          name: argumentsValid ? entry.name : '__invalid_tool_call__',
           args,
           id: entry.id || undefined,
         });
       }
     }
 
+    const finishReason = rawFinishReason
+      ? normalizeOpenAIFinishReason(rawFinishReason)
+      : sawDoneMarker
+        ? 'unknown'
+        : 'transport_eof';
+
     return {
       text: fullText || undefined,
       reasoningContent: fullReasoning || undefined,
       toolCalls,
+      finishReason,
+      rawFinishReason,
     };
   }
 
@@ -456,5 +486,27 @@ export class DeepseekLLM {
    */
   async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
     return this.generateStream(session, tools, undefined, request);
+  }
+}
+
+function normalizeOpenAIFinishReason(raw: string): LLMFinishReason {
+  switch (raw.toLowerCase()) {
+    case 'stop':
+      return 'stop';
+    case 'tool_calls':
+    case 'function_call':
+      return 'tool_calls';
+    case 'length':
+    case 'max_tokens':
+      return 'max_tokens';
+    case 'content_filter':
+      return 'content_filter';
+    case 'error':
+      return 'error';
+    case 'aborted':
+    case 'cancelled':
+      return 'aborted';
+    default:
+      return 'unknown';
   }
 }

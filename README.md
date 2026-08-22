@@ -95,10 +95,10 @@ Subagent chạy trong child session riêng, dùng tool scope được giới h�
 
 ## 🔑 6 Công Cụ Cốt Lõi Của Coding Agent
 
-1. **`read_file`**: Đọc nội dung file text trong workspace (hỗ trợ chỉ định khoảng dòng `startLine`/`endLine`).
+1. **`read_file`**: Đọc nội dung file text trong workspace (hỗ trợ `startLine`/`endLine`, `includeLineNumbers: false` để lấy source nguyên bản, cùng `contentHash`/EOL cho edit an toàn).
 2. **`list_files`**: Liệt kê danh sách file & thư mục con (tự động bỏ qua `node_modules`, `.git`, `dist`).
 3. **`search_text`**: Tìm kiếm từ khoá/hàm trên toàn bộ codebase với giới hạn tối đa 50 kết quả.
-4. **`replace_text`**: Sửa đổi code chính xác (surgical edit) bằng cách thay thế duy nhất 1 đoạn text gốc (`oldText` $\rightarrow$ `newText`).
+4. **`replace_text`**: Sửa code theo một block duy nhất (`oldText` $\rightarrow$ `newText`), tự xử lý LF/CRLF và base indentation, chặn ambiguity/stale file bằng `expectedFileHash`, đồng thời trả chẩn đoán đọc lại có cấu trúc khi không khớp.
 5. **`write_file`**: Tạo file mới hoặc ghi đè file hoàn chỉnh (tự động tạo thư mục cha).
 6. **`run_command`**: Thực thi các lệnh kiểm thử và build an toàn (`npm test`, `npm run build`, `git diff`,...).
 

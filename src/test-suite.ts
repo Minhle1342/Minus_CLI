@@ -12,6 +12,7 @@ import { replaceTextTool } from './tools/replace-text.js';
 import { writeFileTool } from './tools/write-file.js';
 import { runCommandTool } from './tools/run-command.js';
 import { Session } from './session/session.js';
+import { computeRequestDigest } from './session/session-invariants.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { SessionManager } from './session/session-manager.js';
 import { AgentLoop } from './agent/agent-loop.js';
@@ -24,8 +25,10 @@ import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
 import { FinalAnswerGuard } from './agent/final-answer-guard.js';
+import { CompletionEvidenceGate } from './agent/completion-evidence.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
+import { CodeSearchEngine } from './search/code-search-engine.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
@@ -40,6 +43,7 @@ import {
   WEB_SEARCH_PROMPT_SECTION_ID,
 } from './kernel/plugins/search-plugin.js';
 import { createWebSearchTool } from './tools/web-search.js';
+import { createSearchCodebaseFastTool } from './tools/search-code-tool.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { TaskManager } from './tasks/task-manager.js';
@@ -49,6 +53,10 @@ import { detectWorkspaceRuntimeProfile, inferCommandRuntime } from './sandbox/ru
 import {
   CLI,
   FINAL_ANSWER_CHARACTER_DELAY_MS,
+  RealtimeSlashCommandHints,
+  completeSlashCommand,
+  formatToolArgumentPreview,
+  getSlashCommandSuggestions,
   isToolResultFailure,
   writeTypewriterText,
 } from './ui/cli-ui.js';
@@ -134,6 +142,273 @@ async function runUnitTests() {
   const protectRes = await runner.run('replace_text', { path: '.env', oldText: 'A', newText: 'B' });
   assert(protectRes.result.errorCode === 'SECURITY_VIOLATION', 'ToolRunner chặn sửa đổi file .env bảo vệ');
 
+  const contractRegistry = new ToolRegistry();
+  contractRegistry.register({
+    name: 'contract_probe',
+    description: 'Exercise recursive input/output contracts and immutable snapshots.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        config: {
+          type: 'OBJECT',
+          properties: {
+            mode: { type: 'STRING', enum: ['safe'] },
+            retries: { type: 'INTEGER', minimum: 0, maximum: 3 },
+          },
+          required: ['mode', 'retries'],
+        },
+      },
+      required: ['config'],
+    } as any,
+    outputSchema: {
+      type: 'OBJECT',
+      properties: {
+        ok: { type: 'BOOLEAN' },
+        observedMode: { type: 'STRING' },
+        argsFrozen: { type: 'BOOLEAN' },
+        nestedFrozen: { type: 'BOOLEAN' },
+        nested: {
+          type: 'OBJECT',
+          properties: { count: { type: 'NUMBER' } },
+          required: ['count'],
+        },
+      },
+      required: ['ok', 'observedMode', 'argsFrozen', 'nestedFrozen', 'nested'],
+    } as any,
+    execute: async (args) => {
+      try {
+        args.config.mode = 'mutated';
+      } catch {}
+      return {
+        ok: true,
+        observedMode: args.config.mode,
+        argsFrozen: Object.isFrozen(args),
+        nestedFrozen: Object.isFrozen(args.config),
+        nested: { count: 2 },
+      };
+    },
+  });
+  contractRegistry.register({
+    name: 'invalid_output_probe',
+    description: 'Return a deliberately invalid output contract.',
+    parameters: { type: 'OBJECT', properties: {} } as any,
+    outputSchema: {
+      type: 'OBJECT',
+      properties: { count: { type: 'NUMBER' } },
+      required: ['count'],
+    } as any,
+    execute: async () => ({ count: 'not-a-number' }),
+  });
+  const contractRunner = new ToolRunner(contractRegistry, workspace);
+  const badNestedArgs = await contractRunner.run('contract_probe', {
+    config: { mode: 'safe', retries: 'two' },
+  });
+  assert(
+    badNestedArgs.result.errorCode === 'INVALID_ARGS'
+      && badNestedArgs.result.validationErrors?.some((item: string) => item.includes('$.config.retries')),
+    'ToolRunner validates nested argument types instead of checking required keys only',
+  );
+  const nonJsonArgs = await contractRunner.run('contract_probe', {
+    config: { mode: new Date(), retries: 1 },
+  });
+  assert(
+    nonJsonArgs.result.errorCode === 'INVALID_ARGS' && nonJsonArgs.result.error.includes('non-plain object'),
+    'ToolRunner rejects non-JSON objects before they can be silently coerced at the tool boundary',
+  );
+  const unknownArgs = await contractRunner.run('contract_probe', {
+    config: { mode: 'safe', retries: 1 },
+    invented: true,
+  });
+  assert(unknownArgs.result.errorCode === 'INVALID_ARGS', 'ToolRunner rejects undeclared hallucinated arguments');
+  const callerArgs = { config: { mode: 'safe', retries: 1 } };
+  const validContract = await contractRunner.run('contract_probe', callerArgs);
+  assert(
+    validContract.result.ok === true
+      && validContract.result.observedMode === 'safe'
+      && validContract.result.argsFrozen === true
+      && validContract.result.nestedFrozen === true
+      && callerArgs.config.mode === 'safe',
+    'ToolRunner gives tools a deeply frozen JSON snapshot without mutating caller-owned arguments',
+  );
+  try {
+    validContract.result.nested.count = 99;
+  } catch {}
+  assert(
+    validContract.result.nested.count === 2 && Object.isFrozen(validContract.result.nested),
+    'ToolRunner returns a deeply frozen output snapshot',
+  );
+  const invalidOutput = await contractRunner.run('invalid_output_probe', {});
+  assert(invalidOutput.result.errorCode === 'INVALID_TOOL_RESULT', 'ToolRunner validates tool outputs against outputSchema');
+
+  const evidenceGate = new CompletionEvidenceGate();
+  const evidenceSession = new Session('typed-completion-evidence-test');
+  evidenceSession.append('turn/start', { turn: 1 });
+  evidenceSession.append('step/start', { turn: 1, step: 1 });
+  const unsupportedCompletion = evidenceGate.evaluate('Implemented the fix and tests passed.', evidenceSession, {
+    turn: 1,
+    codeChangeRequired: true,
+  });
+  assert(
+    unsupportedCompletion.allow === false && unsupportedCompletion.reasons.length >= 2,
+    'CompletionEvidenceGate rejects mutation and verification claims without durable observations',
+  );
+  evidenceSession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'replace_text',
+    toolCallId: 'evidence-mutation',
+    args: { path: 'src/index.ts', oldText: 'a', newText: 'b' },
+  });
+  evidenceSession.addToolResultWithId('replace_text', { success: true, replacements: 1 }, 'evidence-mutation');
+  evidenceSession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'run_command',
+    toolCallId: 'evidence-version',
+    args: { command: 'node -v' },
+  });
+  evidenceSession.addToolResultWithId('run_command', { exitCode: 0, stdout: 'v22' }, 'evidence-version');
+  const versionIsNotVerification = evidenceGate.evaluate('Implemented the fix and tests passed.', evidenceSession, {
+    turn: 1,
+    codeChangeRequired: true,
+  });
+  assert(
+    versionIsNotVerification.allow === false
+      && versionIsNotVerification.reasons.some((reason) => reason.includes('No successful test/build')),
+    'A successful environment probe such as node -v cannot masquerade as verification evidence',
+  );
+  evidenceSession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'run_command',
+    toolCallId: 'evidence-test',
+    args: { command: 'npm test' },
+  });
+  evidenceSession.addToolResultWithId('run_command', { exitCode: 0, stdout: 'all tests passed' }, 'evidence-test');
+  assert(
+    evidenceGate.evaluate('Implemented the fix and tests passed.', evidenceSession, {
+      turn: 1,
+      codeChangeRequired: true,
+    }).allow === true,
+    'CompletionEvidenceGate accepts typed mutation plus later verification evidence',
+  );
+  const unrelatedFailureSession = new Session('unrelated-blocker-evidence-test');
+  unrelatedFailureSession.append('tool/call', {
+    toolName: 'read_file',
+    toolCallId: 'unrelated-read-failure',
+    args: { path: 'missing.txt' },
+  });
+  unrelatedFailureSession.addToolResultWithId(
+    'read_file',
+    { error: 'File not found', errorCode: 'NOT_FOUND' },
+    'unrelated-read-failure',
+  );
+  assert(
+    evidenceGate.evaluate('Unable to run tests because verification is blocked.', unrelatedFailureSession).allow === false,
+    'An unrelated failed inspection cannot be cited as evidence for a verification blocker',
+  );
+
+  const gitLogSession = new Session('git-log-inspection-test');
+  gitLogSession.append('turn/start', { turn: 1 });
+  gitLogSession.append('step/start', { turn: 1, step: 1 });
+  gitLogSession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'git_command',
+    toolCallId: 'git-log-call',
+    args: { subcommand: 'log', args: ['-n', '3'] },
+  });
+  gitLogSession.addToolResultWithId(
+    'git_command',
+    {
+      exitCode: 0,
+      stdout: '6179b62 Enhance Git Command Handling\n82a4a24 Update sandbox runtimes\ne9dbc7d feat: Implement skill loading',
+    },
+    'git-log-call',
+  );
+  assert(
+    evidenceGate.evaluate(
+      'Dưới đây là 3 commit gần nhất đã cập nhật trong repo:\n- 6179b62 Enhance Git Command Handling\n- 82a4a24 Update sandbox runtimes\n- e9dbc7d feat: Implement skill loading',
+      gitLogSession,
+      { turn: 1, userRequest: 'Kiểm tra 3 commit gần nhất' },
+    ).allow === true,
+    'CompletionEvidenceGate không bị false positive khi trích dẫn hoặc tóm tắt log commit chứa từ khóa implement/update',
+  );
+
+  const invariantSession = new Session('runtime-invariants-test');
+  invariantSession.append('turn/start', { turn: 1 });
+  invariantSession.append('step/start', { turn: 1, step: 1 });
+  invariantSession.recordRequestHeader({
+    turn: 1,
+    step: 1,
+    systemPrompt: 'stable system prompt',
+    tools: [{ name: 'read_file' }],
+    history: [],
+  });
+  invariantSession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'read_file',
+    toolCallId: 'invariant-read',
+    args: { path: 'package.json' },
+  });
+  invariantSession.addToolResultWithId('read_file', { content: '{}' }, 'invariant-read');
+  invariantSession.append('step/end', { turn: 1, step: 1, reason: 'verified' });
+  invariantSession.append('turn/end', { turn: 1, reason: 'complete' });
+  let validRuntimeInvariant = true;
+  try {
+    invariantSession.assertRuntimeInvariants();
+  } catch {
+    validRuntimeInvariant = false;
+  }
+  assert(validRuntimeInvariant, 'Session accepts a balanced lifecycle with paired tool results and a valid request digest');
+  const tamperedSnapshot = invariantSession.toSnapshot();
+  const requestEvent = tamperedSnapshot.events.find((event) => event.type === 'request/header');
+  if (requestEvent?.data.requestHeader) requestEvent.data.requestHeader.systemPrompt = 'tampered prompt';
+  let requestTamperRejected = false;
+  try {
+    Session.fromSnapshot(tamperedSnapshot).assertRuntimeInvariants();
+  } catch (error: any) {
+    requestTamperRejected = error.message.includes('digest mismatch');
+  }
+  assert(requestTamperRejected, 'Runtime invariants detect reconstructed-request tampering through the recorded digest');
+  const forgedHistorySnapshot = invariantSession.toSnapshot();
+  const forgedRequestEvent = forgedHistorySnapshot.events.find((event) => event.type === 'request/header');
+  if (forgedRequestEvent?.data.requestHeader) {
+    forgedRequestEvent.data.requestHeader.history = [{ role: 'user', parts: [{ text: 'forged history' }] }];
+    const { digest: _oldDigest, ...forgedHeader } = forgedRequestEvent.data.requestHeader;
+    forgedRequestEvent.data.requestHeader.digest = computeRequestDigest(forgedHeader);
+  }
+  let forgedHistoryRejected = false;
+  try {
+    Session.fromSnapshot(forgedHistorySnapshot).assertRuntimeInvariants();
+  } catch (error: any) {
+    forgedHistoryRejected = error.message.includes('cannot be reconstructed');
+  }
+  assert(
+    forgedHistoryRejected,
+    'Runtime invariants reconstruct model-facing history instead of trusting a self-consistent forged request header',
+  );
+  let lossySessionDataRejected = false;
+  try {
+    invariantSession.append('user/message', {
+      content: { role: 'user', parts: [undefined] } as any,
+    });
+  } catch (error: any) {
+    lossySessionDataRejected = error.message.includes('non-JSON value');
+  }
+  assert(lossySessionDataRejected, 'Session event storage rejects lossy non-JSON values such as undefined');
+  let orphanedCompactionRejected = false;
+  try {
+    invariantSession.setHistory([{
+      role: 'model',
+      parts: [{ functionCall: { id: 'unpaired-call', name: 'read_file', args: { path: 'package.json' } } }],
+    }]);
+  } catch (error: any) {
+    orphanedCompactionRejected = error.message.includes('has no result');
+  }
+  assert(orphanedCompactionRejected, 'Compaction cannot persist a history projection with an unpaired tool call');
+
   console.log('\n========================================');
   console.log('🧪 3. KIỂM THỬ 6 TOOLS CỐT LÕI');
   console.log('========================================');
@@ -187,10 +462,159 @@ async function runUnitTests() {
   }, workspace);
   assert(replaceNotFound.error && replaceNotFound.error.includes('Không tìm thấy'), 'replace_text báo lỗi rõ ràng khi không tìm thấy oldText');
 
+  // Test 3.6A: robust replace_text matching and stale-edit protection.
+  const robustReplacePath = 'temp/test-replace-robust.txt';
+  const crlfSource = 'function render() {\r\n  return "old";\r\n}';
+  await writeFileTool.execute({ path: robustReplacePath, content: crlfSource }, workspace);
+  const rawEditRead = await readFileTool.execute({
+    path: robustReplacePath,
+    includeLineNumbers: false,
+  }, workspace);
+  assert(
+    rawEditRead.content === crlfSource
+      && rawEditRead.eol === 'crlf'
+      && String(rawEditRead.contentHash).startsWith('sha256:'),
+    'read_file trả content nguyên bản, EOL và contentHash để replace_text dùng an toàn',
+  );
+  const crlfReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'function render() {\n  return "old";\n}',
+    newText: 'function render() {\n  return "new";\n}',
+    expectedFileHash: rawEditRead.contentHash,
+  }, workspace);
+  const crlfUpdated = await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8');
+  assert(
+    crlfReplace.success === true
+      && crlfReplace.matchStrategy === 'normalized_eol'
+      && crlfUpdated === 'function render() {\r\n  return "new";\r\n}',
+    'replace_text tự khớp LF/CRLF và giữ EOL gốc của file Windows',
+  );
+
+  const mixedEolSource = 'const prefix = true;\nfunction render() {\r\n  return "old";\r\n}';
+  await writeFileTool.execute({ path: robustReplacePath, content: mixedEolSource }, workspace);
+  const mixedEolReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'function render() {\n  return "old";\n}',
+    newText: 'function render() {\n  return "local";\n}',
+  }, workspace);
+  const mixedEolUpdated = await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8');
+  assert(
+    mixedEolReplace.success === true
+      && mixedEolUpdated === 'const prefix = true;\nfunction render() {\r\n  return "local";\r\n}',
+    'replace_text giữ EOL cục bộ của block trong file có line ending hỗn hợp',
+  );
+
+  await writeFileTool.execute({
+    path: robustReplacePath,
+    content: 'function demo() {\n    if (ready) {\n      return 1;\n    }\n}\n',
+  }, workspace);
+  const indentationReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'if (ready) {\n  return 1;\n}',
+    newText: 'if (ready) {\n  return 2;\n}',
+  }, workspace);
+  const indentationUpdated = await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8');
+  assert(
+    indentationReplace.success === true
+      && indentationReplace.matchStrategy === 'normalized_indentation'
+      && indentationUpdated.includes('    if (ready) {\n      return 2;\n    }'),
+    'replace_text khớp block nhiều dòng lệch base indentation mà vẫn giữ indentation đích',
+  );
+
+  await writeFileTool.execute({
+    path: robustReplacePath,
+    content: 'function demo() {\n    if (ready) {\n\n      return 1;\n    }\n}\n',
+  }, workspace);
+  const collapseIndentedBlock = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'if (ready) {\n\n  return 1;\n}',
+    newText: 'return 2;',
+  }, workspace);
+  assert(
+    collapseIndentedBlock.success === true
+      && await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8') === 'function demo() {\n    return 2;\n}\n',
+    'replace_text xử lý blank line và giữ base indentation khi block được rút thành một dòng',
+  );
+
+  await writeFileTool.execute({
+    path: robustReplacePath,
+    content: '  if (ready) {\n    run();\n  }\n\n    if (ready) {\n      run();\n    }\n',
+  }, workspace);
+  const ambiguousReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'if (ready) {\n  run();\n}',
+    newText: 'if (ready) {\n  stop();\n}',
+  }, workspace);
+  assert(
+    ambiguousReplace.errorCode === 'TEXT_NOT_UNIQUE' && ambiguousReplace.occurrences === 2,
+    'replace_text vẫn chặn thay thế khi block chuẩn hoá khớp nhiều vị trí',
+  );
+
+  await writeFileTool.execute({
+    path: robustReplacePath,
+    content: 'mark();\nnext();\n\nmark();\r\nnext();\r\n',
+  }, workspace);
+  const crossEolAmbiguity = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'mark();\nnext();\n',
+    newText: 'changed();\n',
+  }, workspace);
+  assert(
+    crossEolAmbiguity.errorCode === 'TEXT_NOT_UNIQUE' && crossEolAmbiguity.occurrences === 2,
+    'replace_text phát hiện ambiguity kể cả khi một block dùng LF và block còn lại dùng CRLF',
+  );
+
+  await writeFileTool.execute({ path: robustReplacePath, content: crlfSource }, workspace);
+  const exactModeRejectsEolMismatch = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: 'function render() {\n  return "old";\n}',
+    newText: 'unused',
+    matchMode: 'exact',
+  }, workspace);
+  assert(
+    exactModeRejectsEolMismatch.errorCode === 'TEXT_NOT_FOUND',
+    'replace_text exact mode không tự nới lỏng điều kiện so khớp',
+  );
+
+  const beforeStaleEdit = await readFileTool.execute({ path: robustReplacePath, includeLineNumbers: false }, workspace);
+  await writeFileTool.execute({ path: robustReplacePath, content: 'newer content' }, workspace);
+  const staleReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: crlfSource,
+    newText: 'stale overwrite',
+    expectedFileHash: beforeStaleEdit.contentHash,
+  }, workspace);
+  assert(
+    staleReplace.errorCode === 'FILE_CONTENT_CHANGED'
+      && await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8') === 'newer content',
+    'replace_text chặn ghi đè khi file thay đổi sau lần read_file',
+  );
+
+  await writeFileTool.execute({ path: robustReplacePath, content: 'keep\nremove\n' }, workspace);
+  const deleteThroughRunner = await runner.run('replace_text', {
+    path: robustReplacePath,
+    oldText: 'remove\n',
+    newText: '',
+  });
+  assert(
+    deleteThroughRunner.result.success === true
+      && await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8') === 'keep\n',
+    'ToolRunner cho phép replace_text dùng newText rỗng để xoá đoạn đã khớp',
+  );
+
+  const longArgumentPreview = formatToolArgumentPreview('first line\n' + 'x'.repeat(300) + '\nlast line');
+  assert(
+    longArgumentPreview.includes('preview only; full argument sent')
+      && longArgumentPreview.includes('first line')
+      && longArgumentPreview.includes('last line'),
+    'CLI ghi rõ chuỗi tool arg dài chỉ bị rút gọn phần hiển thị, không bị cắt dữ liệu gửi tới tool',
+  );
+
   // Dọn dẹp file tạm
   try {
     const safeTemp = workspace.resolveSafePath(testFilePath);
     await fs.unlink(safeTemp);
+    await fs.unlink(workspace.resolveSafePath(robustReplacePath));
   } catch {}
 
   // Test 3.7: run_command
@@ -373,6 +797,57 @@ async function runUnitTests() {
       && message.content.includes('entries')),
     'Adapter OpenAI/DeepSeek chuyển functionResponse role user của Gemini thành tool message',
   );
+  const repairedOpenAIHistory = (deepseekAdapter as any).sanitizeOpenAIMessages([
+    { role: 'system', content: 'test' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'missing-call-1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+    },
+    { role: 'user', content: 'continue' },
+  ]);
+  const missingToolResult = repairedOpenAIHistory.find(
+    (message: any) => message.role === 'tool' && message.tool_call_id === 'missing-call-1',
+  );
+  assert(
+    missingToolResult?.content.includes('TOOL_NOT_STARTED')
+      && !missingToolResult?.content.includes('"status":"completed"'),
+    'Adapter OpenAI/DeepSeek không bịa thành công cho tool call chưa được thực thi',
+  );
+
+  const originalFetch = globalThis.fetch;
+  const streamEncoder = new TextEncoder();
+  try {
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(streamEncoder.encode(
+          'data: {"choices":[{"delta":{"content":"partial output"},"finish_reason":"length"}]}\n\ndata: [DONE]',
+        ));
+        controller.close();
+      },
+    }), { status: 200 });
+    const maxTokenStream = await deepseekAdapter.generateStream(new Session('max-token-adapter-session'), []);
+    assert(
+      maxTokenStream.text === 'partial output' && maxTokenStream.finishReason === 'max_tokens',
+      'Adapter OpenAI/DeepSeek bảo toàn partial text và phân loại finish_reason length thành max_tokens',
+    );
+
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(streamEncoder.encode(
+          'data: {"choices":[{"delta":{"content":"truncated transport"}}]}',
+        ));
+        controller.close();
+      },
+    }), { status: 200 });
+    const eofStream = await deepseekAdapter.generateStream(new Session('transport-eof-adapter-session'), []);
+    assert(
+      eofStream.text === 'truncated transport' && eofStream.finishReason === 'transport_eof',
+      'Adapter OpenAI/DeepSeek xử lý buffer SSE cuối và nhận diện transport EOF thiếu finish reason',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 
   const rawGoogleTools: any[] = [{
     name: 'create_plan',
@@ -438,6 +913,20 @@ async function runUnitTests() {
     calls = 0;
     async generate(): Promise<any> {
       this.calls++;
+      if (this.calls === 4) {
+        return {
+          text: 'Đã nhận cảnh báo no-progress và dừng lặp tool bằng một kết luận rõ ràng.',
+          toolCalls: [],
+        };
+      }
+      if (this.calls === 3) {
+        return {
+          toolCalls: [
+            { name: 'list_files', args: { path: '.' } },
+            { name: 'read_file', args: { path: 'package.json' } },
+          ],
+        };
+      }
       return { toolCalls: [{ name: 'list_files', args: { path: '.' } }] };
     }
   }
@@ -450,12 +939,230 @@ async function runUnitTests() {
     .filter((event) => event.type === 'tool/result')
     .map((event) => event.data.result);
   assert(
-    repeatedListLLM.calls === 3 && repeatedListResult.includes('repeated no-progress tool call'),
-    'AgentLoop dừng circuit breaker sau 3 list_files giống hệt thay vì lặp đến maxSteps',
+    repeatedListLLM.calls === 4 && repeatedListResult.includes('kết luận rõ ràng'),
+    'AgentLoop giữ turn hoạt động sau cảnh báo no-progress để model đổi chiến lược',
   );
   assert(
     guardedResults.some((toolResult) => Boolean(toolResult?._system_loop_guard)),
     'Cảnh báo no-progress được ghi durable trong tool result để model nhìn thấy ở step kế tiếp',
+  );
+  const guardedToolEvents = repeatedListSession.getEvents().filter(
+    (event) => event.type === 'tool/call' || event.type === 'tool/result',
+  );
+  assert(
+    guardedToolEvents.filter((event) => event.type === 'tool/call').length === 4
+      && guardedToolEvents.filter((event) => event.type === 'tool/result').length === 4
+      && guardedToolEvents.some(
+        (event) => event.type === 'tool/result' && event.data.toolName === 'read_file',
+      ),
+    'No-progress guard không bỏ các tool call còn lại trong cùng assistant response',
+  );
+  assert(
+    repeatedListSession.getEvents().some(
+      (event) => event.type === 'step/end' && event.data.reason === 'strategy-change-requested',
+    ) && repeatedListSession.getEvents().some(
+      (event) => event.type === 'turn/end' && event.data.reason === 'completed',
+    ),
+    'No-progress chỉ kết thúc step hiện tại và turn vẫn hoàn tất bằng phản hồi model',
+  );
+
+  class MockInvalidToolCallLLM {
+    calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      return this.calls === 1
+        ? { toolCalls: [{ name: '', args: {} }] }
+        : { text: 'Đã khôi phục sau tool call không hợp lệ.', toolCalls: [] };
+    }
+  }
+  const invalidToolLoop = new AgentLoop(new MockInvalidToolCallLLM(), registry, { maxSteps: 3, workspace });
+  const invalidToolSession = new Session('invalid-tool-call-session');
+  invalidToolSession.addUserMessage('Kiểm tra tool call không có tên');
+  const invalidToolResult = await invalidToolLoop.run(invalidToolSession);
+  assert(
+    invalidToolResult.includes('Đã khôi phục')
+      && invalidToolSession.getEvents().some(
+        (event) => event.type === 'tool/result'
+          && event.data.toolName === '__invalid_tool_call__'
+          && event.data.result?.errorCode === 'INVALID_TOOL_CALL',
+      ),
+    'Tool call thiếu tên vẫn nhận durable error result và agent tiếp tục step kế tiếp',
+  );
+
+  class MockMaxTokensRecoveryLLM {
+    calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      if (this.calls === 1) {
+        return {
+          text: 'Đây mới là phần đầu, chưa hoàn tất',
+          toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }],
+          finishReason: 'max_tokens',
+          rawFinishReason: 'length',
+        };
+      }
+      return {
+        text: 'Đã tiếp tục sau giới hạn token và hoàn tất câu trả lời.',
+        toolCalls: [],
+        finishReason: 'stop',
+      };
+    }
+  }
+  const maxTokensRecoveryLLM = new MockMaxTokensRecoveryLLM();
+  const maxTokensRecoveryLoop = new AgentLoop(maxTokensRecoveryLLM, registry, { maxSteps: 3, workspace });
+  const maxTokensRecoverySession = new Session('max-tokens-recovery-session');
+  maxTokensRecoverySession.addUserMessage('Thực hiện yêu cầu dài và báo cáo đầy đủ');
+  const maxTokensRecoveryResult = await maxTokensRecoveryLoop.run(maxTokensRecoverySession);
+  assert(
+    maxTokensRecoveryLLM.calls === 2
+      && maxTokensRecoveryResult.includes('hoàn tất câu trả lời')
+      && maxTokensRecoverySession.getEvents().some(
+        (event) => event.type === 'step/end' && event.data.reason === 'max_tokens-continuation',
+      ),
+    'AgentLoop tiếp tục cùng turn khi provider kết thúc vì max tokens',
+  );
+  assert(
+    !maxTokensRecoverySession.getEvents().some((event) => event.type === 'tool/call'),
+    'AgentLoop không thực thi tool call nằm trong response bị cắt bởi max tokens',
+  );
+
+  let persistentSearchExecutions = 0;
+  class MockPersistentSearchLoopLLM {
+    calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      return {
+        toolCalls: [{ name: 'search_codebase_fast', args: { query: 'AgentLoop', limit: 5 } }],
+      };
+    }
+  }
+  const persistentSearchRegistry = new ToolRegistry();
+  persistentSearchRegistry.register({
+    name: 'search_codebase_fast',
+    description: 'Return a stable search observation for bounded-loop testing.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING' },
+        limit: { type: 'NUMBER' },
+      },
+      required: ['query'],
+    } as any,
+    execute: async () => {
+      persistentSearchExecutions++;
+      return { hits: [{ path: 'src/agent/agent-loop.ts', line: 40 }], total: 1 };
+    },
+  });
+  const persistentSearchLLM = new MockPersistentSearchLoopLLM();
+  const persistentSearchLoop = new AgentLoop(persistentSearchLLM, persistentSearchRegistry, { maxSteps: 20, workspace });
+  const persistentSearchSession = new Session('persistent-search-loop-session');
+  persistentSearchSession.addUserMessage('Do not repeat the same code search indefinitely.');
+  const persistentSearchResult = await persistentSearchLoop.run(persistentSearchSession, {
+    isGoalMode: true,
+    maxSteps: 20,
+  });
+  assert(
+    persistentSearchLLM.calls === 5
+      && persistentSearchExecutions === 5
+      && persistentSearchResult.includes('ignored 3 consecutive strategy-change requests')
+      && persistentSearchSession.getEvents().some(
+        (event) => event.type === 'turn/end' && event.data.reason === 'repeated-no-progress-terminal',
+      ),
+    'Repeated search_codebase_fast is bounded and ends with an explicit no-progress blocker',
+  );
+  assert(
+    persistentSearchSession.getEvents().filter((event) => event.type === 'tool/call').length === 5
+      && persistentSearchSession.getEvents().filter((event) => event.type === 'tool/result').length === 5
+      && persistentSearchSession.getDiagnostics().openTurns.length === 0
+      && persistentSearchSession.getDiagnostics().openSteps.length === 0,
+    'Bounded no-progress termination preserves tool pairing and closes lifecycle',
+  );
+
+  class MockPersistentDeferredFinalLLM {
+    calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      return {
+        text: 'I will continue to inspect and fix this now.',
+        toolCalls: [],
+      };
+    }
+  }
+  const persistentDeferredLLM = new MockPersistentDeferredFinalLLM();
+  const persistentDeferredLoop = new AgentLoop(persistentDeferredLLM, new ToolRegistry(), { maxSteps: 20, workspace });
+  const persistentDeferredSession = new Session('persistent-deferred-final-session');
+  persistentDeferredSession.addUserMessage('Execute the work instead of promising to continue.');
+  const persistentDeferredResult = await persistentDeferredLoop.run(persistentDeferredSession, {
+    isGoalMode: true,
+    maxSteps: 20,
+  });
+  assert(
+    persistentDeferredLLM.calls === 4
+      && persistentDeferredResult.includes('4 non-terminal progress updates')
+      && persistentDeferredSession.getEvents().some(
+        (event) => event.type === 'turn/end' && event.data.reason === 'incomplete-final-answer-terminal',
+      ),
+    'Repeated deferred Final Answers are bounded and end with an explicit terminal report',
+  );
+  assert(
+    persistentDeferredSession.getDiagnostics().openTurns.length === 0
+      && persistentDeferredSession.getDiagnostics().openSteps.length === 0,
+    'Bounded deferred-final termination closes lifecycle in goal mode',
+  );
+
+  const cancellationController = new AbortController();
+  let secondCancelledToolExecutions = 0;
+  const cancellationRegistry = new ToolRegistry();
+  cancellationRegistry.register({
+    name: 'phase4_abort_first',
+    description: 'Abort the current test batch after the first tool executes.',
+    parameters: { type: 'OBJECT', properties: {} } as any,
+    execute: async () => {
+      cancellationController.abort();
+      return { success: true };
+    },
+  });
+  cancellationRegistry.register({
+    name: 'phase4_never_run',
+    description: 'Must remain undispatched after cancellation.',
+    parameters: { type: 'OBJECT', properties: {} } as any,
+    execute: async () => {
+      secondCancelledToolExecutions++;
+      return { success: true };
+    },
+  });
+  class MockCancelledBatchLLM {
+    async generate(): Promise<any> {
+      return {
+        toolCalls: [
+          { name: 'phase4_abort_first', args: {} },
+          { name: 'phase4_never_run', args: {} },
+        ],
+      };
+    }
+  }
+  const cancelledBatchLoop = new AgentLoop(new MockCancelledBatchLLM(), cancellationRegistry, { maxSteps: 3, workspace });
+  const cancelledBatchSession = new Session('cancelled-tool-batch-session');
+  cancelledBatchSession.addUserMessage('Cancel the batch after its first tool.');
+  const cancelledBatchResult = await cancelledBatchLoop.run(cancelledBatchSession, {
+    signal: cancellationController.signal,
+  });
+  const cancelledBatchDiagnostics = cancelledBatchSession.getDiagnostics();
+  assert(
+    secondCancelledToolExecutions === 0
+      && cancelledBatchResult.includes('recorded as aborted')
+      && cancelledBatchSession.getEvents().some(
+        (event) => event.type === 'tool/result'
+          && event.data.toolName === 'phase4_never_run'
+          && event.data.result?.errorCode === 'ABORTED_BEFORE_DISPATCH',
+      ),
+    'Cancellation between tool calls skips dispatch and records ABORTED_BEFORE_DISPATCH durably',
+  );
+  assert(
+    cancelledBatchDiagnostics.openTurns.length === 0
+      && cancelledBatchDiagnostics.openSteps.length === 0
+      && cancelledBatchDiagnostics.pendingToolCallIds.length === 0,
+    'Cancellation between tool calls closes turn/step lifecycle without dangling calls',
   );
 
   const policyLoop = new AgentLoop(new MockCodingLLM(), registry, { maxSteps: 5, workspace });
@@ -464,9 +1171,56 @@ async function runUnitTests() {
   });
   const policySession = new Session();
   policySession.addUserMessage('Yêu cầu cần approval');
-  const policyResult = await policyLoop.run(policySession);
+  const policyOutput: string[] = [];
+  const policyConsoleLog = console.log;
+  console.log = (...args: any[]) => policyOutput.push(args.map(String).join(' '));
+  let policyResult: string;
+  try {
+    policyResult = await policyLoop.run(policySession);
+  } finally {
+    console.log = policyConsoleLog;
+  }
   assert(policyResult.includes('approval-required'), 'Agent hook có thể chặn model request theo policy');
   assert(policySession.getEvents().some((event) => event.type === 'turn/end'), 'Turn bị policy chặn vẫn được đóng durable');
+
+  assert(
+    policyOutput.some((line) => line.includes('FINAL ANSWER'))
+      && policyOutput.some((line) => line.includes('approval-required')),
+    'Policy rejection always renders a terminal notice instead of returning silently',
+  );
+
+  class MockThrowingLLM {
+    async generate(): Promise<any> {
+      throw new Error('phase4-provider-stream-failure');
+    }
+  }
+  const failedRunLoop = new AgentLoop(new MockThrowingLLM(), registry, { maxSteps: 2, workspace });
+  const failedRunSession = new Session('failed-run-lifecycle-session');
+  failedRunSession.addUserMessage('Verify lifecycle closure when the provider throws.');
+  const failedRunOutput: string[] = [];
+  const failedRunConsoleLog = console.log;
+  console.log = (...args: any[]) => failedRunOutput.push(args.map(String).join(' '));
+  let failedRunRejected = false;
+  try {
+    await failedRunLoop.run(failedRunSession);
+  } catch (error: any) {
+    failedRunRejected = error?.message === 'phase4-provider-stream-failure';
+  } finally {
+    console.log = failedRunConsoleLog;
+  }
+  const failedRunDiagnostics = failedRunSession.getDiagnostics();
+  assert(
+    failedRunRejected
+      && failedRunDiagnostics.openTurns.length === 0
+      && failedRunDiagnostics.openSteps.length === 0
+      && failedRunLoop.agentRegistry.get(failedRunLoop.agentId)?.status === 'error',
+    'Provider exception closes append-only lifecycle and moves the agent to error state',
+  );
+  assert(
+    failedRunOutput.some((line) => line.includes('FINAL ANSWER'))
+      && failedRunOutput.some((line) => line.includes('phase4-provider-stream-failure')),
+    'Provider exception renders a clear terminal notice before rejecting the Promise',
+  );
 
   class MockDelayedFinalLLM {
     private calls = 0;
@@ -702,6 +1456,152 @@ async function runUnitTests() {
   console.log('🧪 10. KIỂM THỬ REFLECTION ENGINE & DEBUGGING PROTOCOL');
   console.log('========================================');
 
+  const scopedPlanSession = new Session('turn-scoped-plan-test');
+  const scopedPlan = new PlanManager();
+  scopedPlan.bindSession(scopedPlanSession);
+  scopedPlan.beginTurn(1, 'Implement a parser fix and verify the test suite');
+  let echoedPlanRejected = false;
+  try {
+    scopedPlan.createPlan([{ title: 'Implement a parser fix and verify the test suite' }]);
+  } catch (error: any) {
+    echoedPlanRejected = error.message.includes('3-7 atomic tasks') || error.message.includes('repeats');
+  }
+  assert(echoedPlanRejected, 'Plan theo turn từ chối một task chỉ lặp lại request phức tạp');
+
+  const scopedTasks = scopedPlan.createPlan([
+    { title: 'Inspect parser control flow', acceptanceCriteria: 'Relevant parser branches and callers are identified' },
+    { title: 'Implement the parser correction', acceptanceCriteria: 'The affected parser behavior is corrected in source' },
+    { title: 'Run parser tests and build', acceptanceCriteria: 'Tests and build exit successfully' },
+  ]);
+  assert(
+    scopedTasks.length === 3 && Boolean(scopedPlan.getCompletionBlocker()?.includes('3 task(s) remain')),
+    'Plan phức tạp được phân rã thành state machine có completion gate',
+  );
+
+  let evidenceGateRejected = false;
+  try {
+    scopedPlan.updateTask(1, 'COMPLETED', 'Claimed complete without a tool');
+  } catch (error: any) {
+    evidenceGateRejected = error.message.includes('matching successful inspection evidence');
+  }
+  assert(evidenceGateRejected, 'Task không thể COMPLETED nếu harness chưa quan sát tool evidence thành công');
+  scopedPlan.recordToolEvidence('read_file', { path: 'src/parser.ts' }, { content: 'parser source' });
+  scopedPlan.updateTask(1, 'COMPLETED', 'Parser flow inspected');
+  assert(
+    scopedPlan.getActiveTask()?.id === 2 && scopedPlan.getTasks()[0].evidence[0]?.toolName === 'read_file',
+    'Hoàn tất task hợp lệ tự kích hoạt bước kế tiếp và lưu observed evidence',
+  );
+
+  const replayedScopedPlan = new PlanManager();
+  replayedScopedPlan.bindSession(Session.fromSnapshot(scopedPlanSession.toSnapshot()));
+  assert(
+    replayedScopedPlan.getActiveTask()?.id === 2
+      && replayedScopedPlan.renderExecutionContext().includes('AUTHORITATIVE TURN STATE'),
+    'Plan, active task và evidence được replay bền vững qua session snapshot',
+  );
+  scopedPlan.beginTurn(2, 'Read the README');
+  assert(
+    scopedPlan.getTasks().length === 0
+      && scopedPlan.getRequirements().required === false
+      && scopedPlanSession.getEvents().filter((event) => event.type === 'plan/change').length >= 4,
+    'Request mới tạo ranh giới plan mới nhưng vẫn giữ audit events của turn cũ',
+  );
+
+  class MockPlanExecutorLLM {
+    private call = 0;
+    readonly prompts: string[] = [];
+
+    async generate(_session: Session, _tools: any[], request?: { systemPrompt?: string }): Promise<any> {
+      this.prompts.push(request?.systemPrompt || '');
+      this.call++;
+      if (this.call === 1) {
+        return {
+          toolCalls: [{
+            name: 'create_plan',
+            args: {
+              tasks: [
+                { title: 'Inspect package metadata', acceptanceCriteria: 'package.json has been read' },
+                { title: 'Implement configuration correction', acceptanceCriteria: 'Configuration source is updated' },
+                { title: 'Run build verification', acceptanceCriteria: 'A verification command exits successfully' },
+              ],
+            },
+          }],
+        };
+      }
+      if (this.call === 2) {
+        return { toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }] };
+      }
+      if (this.call === 3) {
+        return {
+          toolCalls: [
+            { name: 'update_plan_task', args: { id: 1, status: 'COMPLETED', evidence: 'package.json observed' } },
+            { name: 'replace_text', args: { path: 'package.json', oldText: 'before', newText: 'after' } },
+          ],
+        };
+      }
+      if (this.call === 4) {
+        return {
+          toolCalls: [
+            { name: 'update_plan_task', args: { id: 2, status: 'COMPLETED', evidence: 'configuration mutation observed' } },
+            { name: 'run_command', args: { command: 'npm run build' } },
+          ],
+        };
+      }
+      if (this.call === 5) {
+        return { text: 'Everything is done.', toolCalls: [] };
+      }
+      if (this.call === 6) {
+        return {
+          toolCalls: [{
+            name: 'update_plan_task',
+            args: { id: 3, status: 'COMPLETED', evidence: 'build command exited successfully' },
+          }],
+        };
+      }
+      return { text: 'Completed every execution-plan step with observed tool evidence.', toolCalls: [] };
+    }
+  }
+
+  const planExecutorLLM = new MockPlanExecutorLLM();
+  const planExecutorRegistry = new ToolRegistry();
+  planExecutorRegistry.register({
+    name: 'replace_text',
+    description: 'Mock a successful configuration mutation without modifying the test workspace.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING' },
+        oldText: { type: 'STRING' },
+        newText: { type: 'STRING' },
+      },
+      required: ['path', 'oldText', 'newText'],
+    } as any,
+    execute: async () => ({ success: true, replacements: 1 }),
+  });
+  const planExecutorLoop = new AgentLoop(planExecutorLLM, planExecutorRegistry, {
+    maxSteps: 8,
+    workspace,
+  });
+  const planExecutorSession = new Session('plan-executor-loop-test');
+  planExecutorSession.addUserMessage('Implement a small configuration fix and verify tests');
+  const planExecutorResult = await planExecutorLoop.run(planExecutorSession);
+  assert(
+    planExecutorResult.includes('Completed every execution-plan step')
+      && planExecutorLoop.planManager.getProgress().completed === 3,
+    'AgentLoop thực thi tuần tự đến khi mọi plan task có evidence và hoàn thành',
+  );
+  assert(
+    planExecutorLLM.prompts[0]?.includes('PLAN REQUIRED')
+      && planExecutorLLM.prompts.slice(1).some((prompt) => prompt.includes('AUTHORITATIVE TURN STATE')),
+    'Authoritative active plan được inject lại vào system prompt ở mọi model step',
+  );
+  assert(
+    planExecutorSession.getEvents().some(
+      (event) => event.type === 'step/end' && event.data.reason === 'incomplete-plan-final-answer',
+    ),
+    'Final Answer bị từ chối và agent tiếp tục trong cùng turn khi plan còn IN_PROGRESS',
+  );
+
   const reflectionEngine = new ReflectionEngine();
 
   // Test thành công không kích hoạt reflection
@@ -832,7 +1732,7 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'current_task_context',
     'The current task is validating durable session replay',
     'insight',
-    { scope: 'session', confidence: 0.8, source: 'model' },
+    { scope: 'session', confidence: 0.8, source: 'manual' },
   );
   assert(sessionInsight.scope === 'session' && memorySession.getMemoryRecords().length === 1, 'Session memory ghi vào event log thay vì project file');
   assert(
@@ -842,6 +1742,75 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const replayedMemoryMgr = new ProjectMemoryManager(workspace.rootDir);
   replayedMemoryMgr.bindSession(Session.fromSnapshot(memorySession.toSnapshot()));
   assert(replayedMemoryMgr.retrieve('session replay', { scopes: ['session'] }).length === 1, 'Session memory replay được sau khi restore session');
+
+  const memoryTrustDir = path.join(workspace.rootDir, 'temp', 'memory-trust-test');
+  await fs.rm(memoryTrustDir, { recursive: true, force: true });
+  const trustMemoryManager = new ProjectMemoryManager(memoryTrustDir);
+  await trustMemoryManager.init(new Workspace(memoryTrustDir));
+  const trustSession = new Session('memory-provenance-test');
+  trustSession.append('tool/call', {
+    toolName: 'read_file',
+    toolCallId: 'memory-source-observation',
+    args: { path: 'package.json' },
+  });
+  trustSession.addToolResultWithId(
+    'read_file',
+    { content: '{"scripts":{"test":"npm test"}}' },
+    'memory-source-observation',
+  );
+  trustMemoryManager.bindSession(trustSession);
+  await trustMemoryManager.saveInsight('test_command', 'Use npm test', 'rule', {
+    source: 'manual',
+    confidence: 1,
+  });
+  const contestedMemory = await trustMemoryManager.saveInsight('test_command', 'Never run tests', 'rule', {
+    source: 'model',
+    confidence: 0.95,
+  });
+  assert(
+    contestedMemory.trustStatus === 'contested'
+      && contestedMemory.confidence <= 0.35
+      && contestedMemory.sourceEventSeq !== undefined
+      && contestedMemory.sourceToolCallId === 'memory-source-observation',
+    'Model-authored conflicting memory is downgraded and retains tool-result provenance',
+  );
+  const repeatedContestedMemory = await trustMemoryManager.saveInsight('test_command', 'Never run tests', 'rule', {
+    source: 'model',
+    confidence: 0.95,
+  });
+  assert(
+    repeatedContestedMemory.trustStatus === 'contested' && repeatedContestedMemory.confidence <= 0.35,
+    'Repeating a contested model claim cannot promote it into trusted memory',
+  );
+  assert(
+    trustMemoryManager.retrieve('test command').some((item) => item.insight === 'Use npm test')
+      && !trustMemoryManager.retrieve('never run').some((item) => item.insight === 'Never run tests')
+      && trustMemoryManager.retrieve('never run', { includeContested: true }).some((item) => item.trustStatus === 'contested'),
+    'Default memory retrieval preserves trusted knowledge and excludes contested model claims',
+  );
+  await trustMemoryManager.saveInsight('temporary_hint', 'Temporary experimental setting', 'insight', {
+    source: 'model',
+    confidence: 0.8,
+    expiresAt: new Date(Date.now() - 1000).toISOString(),
+  });
+  assert(
+    trustMemoryManager.retrieve('temporary experimental').length === 0
+      && trustMemoryManager.retrieve('temporary experimental', { includeExpired: true }).length === 1,
+    'Expired memory is excluded unless a caller explicitly opts in',
+  );
+  const unsupportedMemory = new ProjectMemoryManager(memoryTrustDir);
+  await unsupportedMemory.init(new Workspace(memoryTrustDir));
+  unsupportedMemory.bindSession(new Session('memory-no-provenance-test'));
+  const noProvenanceMemory = await unsupportedMemory.saveInsight('unobserved_claim', 'Model-only assertion', 'insight', {
+    scope: 'session',
+    source: 'model',
+    confidence: 0.9,
+  });
+  assert(
+    noProvenanceMemory.trustStatus === 'contested' && noProvenanceMemory.sourceEventSeq === undefined,
+    'Model-authored memory without supporting tool provenance is never trusted automatically',
+  );
+  await fs.rm(memoryTrustDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 14. KIỂM THỬ MEMORY TOOLS (save_memory & read_memory)');
@@ -857,8 +1826,12 @@ export async function calculateTotal(items: any[]): Promise<number> {
 
   const readRes = await memRegistry.execute('read_memory', {
     query: 'auth',
+    includeContested: true,
   });
-  assert(readRes.learnedInsights?.some((i: any) => i.key === 'auth_pattern'), 'read_memory tool lọc đúng theo từ khoá "auth"');
+  assert(
+    readRes.learnedInsights?.some((i: any) => i.key === 'auth_pattern' && i.trustStatus === 'contested'),
+    'read_memory tool can explicitly audit contested model-authored memory by keyword',
+  );
 
   console.log('\n========================================');
   console.log('🧪 15. KIỂM THỬ SYSTEM 1 VS SYSTEM 2 (COT DEEP REASONING SEPARATION)');
@@ -1114,6 +2087,13 @@ export async function calculateTotal(items: any[]): Promise<number> {
     finalAnswerGuard.evaluate('Đã chạy 42 test: 42 pass. Nếu bạn muốn, tôi sẽ đo thêm tải 1.000 kết nối.').allow === true,
     'Final-answer guard không chặn đề nghị tùy chọn rõ ràng',
   );
+  assert(
+    finalAnswerGuard.evaluate(
+      'Tôi sẽ kiểm tra 3 commit gần nhất cho bạn. Dưới đây là kết quả:\n- 6179b62 Enhance Git Command\n- 82a4a24 Update sandbox\n- e9dbc7d feat: Implement skill loading',
+      { userRequest: 'Kiểm tra 3 commit gần nhất', availableToolNames: ['git_command'] },
+    ).allow === true,
+    'Final-answer guard không chặn câu trả lời đã cung cấp đầy đủ dữ liệu thực tế kèm câu chào mở bài',
+  );
   const gitCapabilityGuard = new FinalAnswerGuard();
   const gitGuardContext = {
     userRequest: 'commit và push code mới lên nhánh develop',
@@ -1246,6 +2226,62 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Final Answer render từng Unicode grapheme từ đầu đến cuối ở tốc độ nhanh x2 (4ms/ký tự)',
   );
 
+  const sessionSuggestions = getSlashCommandSuggestions('/sess');
+  assert(
+    sessionSuggestions.length >= 2
+      && sessionSuggestions[0].command === '/session'
+      && sessionSuggestions[1].command === '/sessions'
+      && sessionSuggestions.slice(0, 2).every((suggestion) => suggestion.matchedBy === 'prefix'),
+    'Slash command suggester xếp các prefix gần nhất theo thời gian thực',
+  );
+  const typoSuggestions = getSlashCommandSuggestions('/modle');
+  assert(
+    typoSuggestions[0]?.command === '/model' && typoSuggestions[0].matchedBy === 'fuzzy',
+    'Slash command suggester sửa được typo bằng fuzzy distance',
+  );
+  assert(
+    getSlashCommandSuggestions('/model').length === 1
+      && getSlashCommandSuggestions('/model')[0].matchedBy === 'exact',
+    'Slash command suggester không trộn fuzzy candidate khi command đã khớp chính xác',
+  );
+  assert(
+    getSlashCommandSuggestions('normal prompt').length === 0
+      && getSlashCommandSuggestions('/model gemini').length === 0
+      && completeSlashCommand('/mod')[0][0] === '/model'
+      && completeSlashCommand('/')[0].length === 1
+      && completeSlashCommand('/')[0][0] === getSlashCommandSuggestions('/')[0].command
+      && completeSlashCommand('/model')[0].length === 0
+      && completeSlashCommand('/modal')[0][0] === '/model',
+    'Gợi ý chỉ xuất hiện khi đang nhập command token và dùng chung kết quả với Tab completion',
+  );
+
+  const slashHintWrites: string[] = [];
+  const slashHints = new RealtimeSlashCommandHints({
+    isTTY: true,
+    columns: 100,
+    write: (chunk: string) => { slashHintWrites.push(chunk); },
+  });
+  slashHints.update('/sess');
+  assert(
+    Boolean(slashHintWrites.at(-1)?.includes('/session')
+      && slashHintWrites.at(-1)?.includes('/sessions')
+      && slashHintWrites.at(-1)?.includes('\n\n\n\n\n\n\n\x1b[7A')
+      && slashHintWrites.at(-1)?.includes('\x1b[s')
+      && slashHintWrites.at(-1)?.includes('\x1b[u')),
+    'Realtime slash hints render dưới input và khôi phục cursor readline',
+  );
+  const writesBeforeDuplicateUpdate = slashHintWrites.length;
+  slashHints.update('/sess');
+  assert(
+    slashHintWrites.length === writesBeforeDuplicateUpdate,
+    'Realtime slash hints không redraw khi Tab không làm thay đổi command đã hoàn thành',
+  );
+  slashHints.update('normal prompt');
+  assert(
+    Boolean(slashHintWrites.at(-1)?.includes('\x1b[0J') && !slashHintWrites.at(-1)?.includes('/session')),
+    'Realtime slash hints tự xoá khi input không còn là slash command',
+  );
+
   // 2. Kiểm thử TaskManager (Background Subprocesses)
   const taskManager = new TaskManager(workspace.rootDir);
   const task = taskManager.startTask('node -e "console.log(\'server-heartbeat\'); setInterval(() => {}, 50)"');
@@ -1262,6 +2298,10 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const stopped = await taskManager.stopTask(task.id);
   assert(stopped === true, 'Dừng background task thành công');
   assert(task.status === 'stopped', 'Trạng thái chuyển sang stopped');
+  assert(
+    task.process?.exitCode !== null || task.process?.signalCode !== null,
+    'stopTask waits until the background shell exits instead of only sending a kill signal',
+  );
 
   // 3. Kiểm thử Background Task Tools
   const startTool = createStartBackgroundTaskTool(taskManager);
@@ -1381,16 +2421,33 @@ export async function calculateTotal(items: any[]): Promise<number> {
   }
 
   const gitRecoveryRegistry = new ToolRegistry();
-  for (const toolName of ['git_commit', 'git_push']) {
-    gitRecoveryRegistry.register({
-      name: toolName,
-      description: `Mock ${toolName}`,
-      parameters: { type: 'OBJECT', properties: {} } as any,
-      execute: async (_args, _workspace, context) => ({
-        success: context?.userRequest === 'commit và push code mới lên nhánh develop',
-      }),
-    });
-  }
+  gitRecoveryRegistry.register({
+    name: 'git_commit',
+    description: 'Mock git_commit',
+    parameters: {
+      type: 'OBJECT',
+      properties: { message: { type: 'STRING' } },
+      required: ['message'],
+    } as any,
+    execute: async (_args, _workspace, context) => ({
+      success: context?.userRequest === 'commit và push code mới lên nhánh develop',
+    }),
+  });
+  gitRecoveryRegistry.register({
+    name: 'git_push',
+    description: 'Mock git_push',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        remote: { type: 'STRING' },
+        branch: { type: 'STRING' },
+      },
+      required: ['remote', 'branch'],
+    } as any,
+    execute: async (_args, _workspace, context) => ({
+      success: context?.userRequest === 'commit và push code mới lên nhánh develop',
+    }),
+  });
   const gitRecoveryLLM = new MockGitRefusalRecoveryLLM();
   const gitRecoveryLoop = new AgentLoop(gitRecoveryLLM, gitRecoveryRegistry, { maxSteps: 4, workspace });
   const gitRecoverySession = new Session('git-capability-recovery-session');
@@ -1628,6 +2685,71 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const msSearchRes = await searchTool.execute({ query: 'AgentLoop' }, workspace);
   assert(msSearchRes.totalHits > 0, 'search_codebase_fast tìm thấy ký hiệu code chính xác');
   assert(msSearchRes.hits && msSearchRes.hits.length > 0, 'search_codebase_fast trả về danh sách hits với score BM25');
+  const agentKeywordResult = await searchTool.execute({ query: 'agent', limit: 8, fuzzy: true }, workspace);
+  assert(
+    agentKeywordResult.totalHits > 0
+      && agentKeywordResult.hits.some((hit: any) => hit.path.includes('agent'))
+      && agentKeywordResult.index?.indexedFiles > 0,
+    'search_codebase_fast finds the literal keyword "agent" and reports index diagnostics',
+  );
+
+  const freshnessWorkspacePath = path.resolve(workspace.rootDir, 'temp', 'code-search-freshness-test');
+  await fs.rm(freshnessWorkspacePath, { recursive: true, force: true });
+  await fs.mkdir(path.join(freshnessWorkspacePath, 'src'), { recursive: true });
+  await fs.writeFile(
+    path.join(freshnessWorkspacePath, 'src', 'initial.ts'),
+    'export const neutralValue = true;\n',
+    'utf-8',
+  );
+  const freshnessTool = createSearchCodebaseFastTool();
+  const freshnessWorkspace = new Workspace(freshnessWorkspacePath);
+  const beforeAgentFile = await freshnessTool.execute({ query: 'agent', limit: 8, fuzzy: true }, freshnessWorkspace);
+  await fs.writeFile(
+    path.join(freshnessWorkspacePath, 'src', 'agent-service.ts'),
+    'export class AgentService { runAgent() { return "agent"; } }\n',
+    'utf-8',
+  );
+  const afterAgentFile = await freshnessTool.execute({ query: 'agent', limit: 8, fuzzy: true }, freshnessWorkspace);
+  assert(
+    beforeAgentFile.totalHits === 0
+      && afterAgentFile.totalHits > 0
+      && afterAgentFile.hits.some((hit: any) => hit.path === 'src/agent-service.ts')
+      && afterAgentFile.index.indexedFiles === 2,
+    'A cached search tool detects file additions and atomically refreshes its workspace index',
+  );
+
+  const concurrentSearchEngine = new CodeSearchEngine(freshnessWorkspacePath);
+  const concurrentSearches = await Promise.all([
+    concurrentSearchEngine.search('agent', { limit: 8, fuzzy: true }),
+    concurrentSearchEngine.search('agent', { limit: 8, fuzzy: true }),
+  ]);
+  assert(
+    concurrentSearches.every((hits) => hits.some((hit) => hit.path === 'src/agent-service.ts')),
+    'Concurrent first searches share one complete index build instead of observing partial state',
+  );
+
+  const internalMiniSearch = (concurrentSearchEngine as any).miniSearch;
+  const originalMiniSearch = internalMiniSearch.search.bind(internalMiniSearch);
+  internalMiniSearch.search = () => [];
+  const literalFallbackHits = await concurrentSearchEngine.search('agent', { limit: 8, fuzzy: false });
+  internalMiniSearch.search = originalMiniSearch;
+  assert(
+    literalFallbackHits.some((hit) => hit.path === 'src/agent-service.ts'),
+    'Literal substring fallback prevents a tokenizer/BM25 miss from becoming a false no-result response',
+  );
+
+  let missingSearchRootRejected = false;
+  try {
+    await new CodeSearchEngine(path.join(freshnessWorkspacePath, 'missing-root')).search('agent');
+  } catch (error: any) {
+    missingSearchRootRejected = error.message.includes('Cannot read code-search workspace');
+  }
+  assert(missingSearchRootRejected, 'An unreadable search root is reported as an index error, not as zero matches');
+  assert(
+    (await freshnessTool.execute({ query: 'agent', limit: 0 }, freshnessWorkspace)).errorCode === 'INVALID_ARGS',
+    'search_codebase_fast rejects a zero result limit instead of fabricating an empty search',
+  );
+  await fs.rm(freshnessWorkspacePath, { recursive: true, force: true });
 
   // 2b. Verify SearXNG request mapping and bounded response normalization without network access.
   let requestedSearchUrl = '';
@@ -1689,10 +2811,34 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(
     webSearchRes.provider === 'searxng'
       && webSearchRes.returnedResults === 1
+      && webSearchRes.estimatedTotalResults === 42
       && webSearchRes.results[0]?.url === 'https://example.com/agent'
       && webSearchRes.results[0]?.engines?.length === 2
       && webSearchRes.unresponsiveEngines[0]?.engine === 'google',
     'web_search returns compact normalized results and drops malformed entries',
+  );
+
+  const minimalWebRegistry = new ToolRegistry();
+  minimalWebRegistry.register(createWebSearchTool({
+    fetchImpl: (async () => new Response(JSON.stringify({
+      query: 'deepseek harness',
+      results: [{ title: 'DeepSeek Harness', url: 'https://github.com/deepseek-ai/deepseek-harness' }],
+      unresponsive_engines: [['brave']],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch,
+  }));
+  const minimalWebResult = await new ToolRunner(minimalWebRegistry, workspace).run('web_search', {
+    query: 'what is deepseek-ai/deepseek-harness repository',
+  });
+  assert(
+    minimalWebResult.result.errorCode === undefined
+      && minimalWebResult.result.returnedResults === 1
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result, 'estimatedTotalResults')
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result.results[0], 'snippet')
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result.results[0], 'category')
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result.results[0], 'score')
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result.results[0], 'publishedDate')
+      && !Object.prototype.hasOwnProperty.call(minimalWebResult.result.unresponsiveEngines[0], 'reason'),
+    'web_search omits unavailable optional fields and remains strict-JSON-safe through ToolRunner',
   );
 
   const fusionRequestUrls: string[] = [];
@@ -2083,9 +3229,19 @@ Always write tests first!`;
   const checkBefore = verifyPolicy.canComplete(['test-driven-development']);
   assert(checkBefore.allowed === false, 'VerificationPolicy chặn Final Answer khi có code sửa đổi chưa verify');
 
+  verifyPolicy.recordVerification('node -v', true, 'v22.0.0', 0);
+  const checkAfterProbe = verifyPolicy.canComplete(['test-driven-development']);
+  assert(checkAfterProbe.allowed === false, 'VerificationPolicy không coi lệnh probe node -v là bằng chứng kiểm thử');
+
   verifyPolicy.recordVerification('npm test', true, '185 passed');
   const checkAfter = verifyPolicy.canComplete(['test-driven-development']);
   assert(checkAfter.allowed === true, 'VerificationPolicy cho phép hoàn tất sau khi lệnh test thành công');
+
+  const skillOnlyVerification = new VerificationPolicy();
+  assert(
+    skillOnlyVerification.canComplete(['verification-before-completion']).allowed === false,
+    'A verification-mandating skill requires observed verification even before a mutation is recorded',
+  );
 
   // 9. SuperpowersWorkflowMap
   const workflowMap = new SuperpowersWorkflowMap();

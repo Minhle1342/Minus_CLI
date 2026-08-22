@@ -25,7 +25,13 @@ export interface KernelEvents {
   'step:before': (step: number, maxSteps: number) => void;
   'step:after': (step: number) => void;
   'tool:before': (toolName: string, args: Record<string, any>) => void;
-  'tool:after': (toolName: string, result: Record<string, any>, durationMs: number) => void;
+  'tool:after': (
+    toolName: string,
+    result: Record<string, any>,
+    durationMs: number,
+    args: Record<string, any>,
+    context?: { sessionId?: string; agentId?: string; turn?: number },
+  ) => void;
   'tool:error': (toolName: string, error: any) => void;
   'model:thought': (thought: string) => void;
   'model:token': (token: string) => void;

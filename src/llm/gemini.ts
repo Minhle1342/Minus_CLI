@@ -11,11 +11,25 @@ export interface LLMRequestOptions {
   systemPrompt?: string;
 }
 
+export type LLMFinishReason =
+  | 'stop'
+  | 'tool_calls'
+  | 'max_tokens'
+  | 'content_filter'
+  | 'error'
+  | 'aborted'
+  | 'transport_eof'
+  | 'unknown';
+
 export interface LLMResponse {
   text?: string;
   reasoningContent?: string;
   toolCalls: FunctionCall[];
   rawContent?: import('@google/genai').Content;
+  /** Normalized provider termination state. Optional for legacy/custom adapters. */
+  finishReason?: LLMFinishReason;
+  /** Original provider value retained for diagnostics. */
+  rawFinishReason?: string;
 }
 
 /**
@@ -63,9 +77,13 @@ export class GeminiLLM {
     const regularTextParts: string[] = [];
     const toolCalls: FunctionCall[] = [];
     const streamedParts: any[] = [];
+    let rawFinishReason: string | undefined;
 
     for await (const chunk of responseStream) {
       const candidate = chunk.candidates?.[0];
+      if (candidate?.finishReason !== undefined && candidate.finishReason !== null) {
+        rawFinishReason = String(candidate.finishReason);
+      }
       if (candidate?.content?.parts) {
         streamedParts.push(...candidate.content.parts.map((part: any) => cloneJson(part)));
       }
@@ -123,6 +141,8 @@ export class GeminiLLM {
       reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
       toolCalls,
       rawContent,
+      finishReason: normalizeGeminiFinishReason(rawFinishReason, toolCalls.length > 0),
+      rawFinishReason,
     };
   }
 
@@ -176,6 +196,27 @@ export class GeminiLLM {
 
 function requiresThoughtSignatures(modelName: string): boolean {
   return /^gemini-(?:3|2\.5)(?:\.|-|$)/i.test(modelName);
+}
+
+function normalizeGeminiFinishReason(raw: string | undefined, hasToolCalls: boolean): LLMFinishReason {
+  if (!raw) return 'unknown';
+  switch (raw.toUpperCase()) {
+    case 'STOP':
+      return hasToolCalls ? 'tool_calls' : 'stop';
+    case 'MAX_TOKENS':
+      return 'max_tokens';
+    case 'SAFETY':
+    case 'BLOCKLIST':
+    case 'PROHIBITED_CONTENT':
+    case 'RECITATION':
+    case 'SPII':
+      return 'content_filter';
+    case 'MALFORMED_FUNCTION_CALL':
+    case 'UNEXPECTED_TOOL_CALL':
+      return 'error';
+    default:
+      return 'unknown';
+  }
 }
 
 function cloneJson<T>(value: T): T {
