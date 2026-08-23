@@ -128,6 +128,25 @@ export class ProjectMemoryManager {
       }
     } catch {}
 
+    // 3. Quét tệp chỉ dẫn dự án chuẩn: AGENTS.md, CODEX.md, CLAUDE.md
+    for (const docFile of ['AGENTS.md', 'CODEX.md', 'CLAUDE.md']) {
+      try {
+        const docPath = path.join(rootDir, docFile);
+        const content = await fs.readFile(docPath, 'utf-8');
+        if (content.trim()) {
+          const ruleLines = content
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith('-') || l.startsWith('*') || /^\d+\./.test(l))
+            .map((l) => l.replace(/^[-*]|\d+\.\s*/, '').trim());
+          if (ruleLines.length > 0) {
+            this.memoryData.codingConventions.push(...ruleLines.slice(0, 5));
+          }
+          break;
+        }
+      } catch {}
+    }
+
     this.memoryData.projectType = projectType;
     this.memoryData.packageManager = packageManager;
     this.memoryData.scripts = scripts;
@@ -282,6 +301,10 @@ export class ProjectMemoryManager {
       for (const item of trustedInsights) {
         lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
       }
+    }
+
+    if (this.memoryData.codingConventions && this.memoryData.codingConventions.length > 0) {
+      lines.push(`- Chỉ dẫn dự án (AGENTS.md): ${this.memoryData.codingConventions.slice(0, 3).join('; ')}`);
     }
 
     return lines.join('\n');

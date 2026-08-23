@@ -5,6 +5,7 @@ import { readFileTool } from './read-file.js';
 import { listFilesTool } from './list-files.js';
 import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
+import { applyPatchTool } from './apply-patch.js';
 import { writeFileTool } from './write-file.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { PlanManager } from '../agent/plan-manager.js';
@@ -13,11 +14,15 @@ import { ProjectMemoryManager } from '../memory/project-memory.js';
 import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
 import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
+import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
+import { createDiscoverToolsTool } from './tool-discovery.js';
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
   getAll(): ToolDefinition[];
   getFunctionDeclarations(): FunctionDeclaration[];
+  getRelevantTools?(query: string): FunctionDeclaration[];
+  getRetriever?(): ToolRetriever;
 }
 
 /**
@@ -27,18 +32,30 @@ export interface ToolProvider {
  * - Agent Loop (điều phối vòng lặp)
  * - LLM (chọn tool)
  * - Tool Runner (kiểm tra an toàn và thực thi)
+ * - Dynamic Tool Retriever (RATS - lọc động tool phù hợp ngữ cảnh, chống loãng description)
  */
-export class ToolRegistry {
+export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
+  private retriever: ToolRetriever;
 
-  constructor(planManager?: PlanManager, memoryManager?: ProjectMemoryManager) {
-    // Đăng ký mặc định 6 tool cốt lõi của Coding Agent
+  constructor(
+    planManager?: PlanManager,
+    memoryManager?: ProjectMemoryManager,
+    retrieverConfig?: ToolRetrieverConfig
+  ) {
+    this.retriever = new ToolRetriever(retrieverConfig);
+
+    // Đăng ký mặc định các tool cốt lõi của Coding Agent (bao gồm apply_patch)
     this.register(readFileTool);
     this.register(listFilesTool);
     this.register(searchTextTool);
+    this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
     this.register(runCommandTool);
+
+    // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
+    this.register(createDiscoverToolsTool(this));
 
     // Đăng ký các planning tools nếu có PlanManager
     if (planManager) {
@@ -70,10 +87,11 @@ export class ToolRegistry {
   }
 
   /**
-   * Đăng ký một tool mới vào Registry
+   * Đăng ký một tool mới vào Registry và tái đồng bộ chỉ mục RATS
    */
   register(tool: ToolDefinition): void {
     this.tools.set(tool.name, tool);
+    this.retriever.indexTools(this.getAll());
   }
 
   /**
@@ -91,7 +109,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Xuất danh sách schema FunctionDeclaration để truyền cho Gemini & OpenAI-compatible API.
+   * Xuất danh sách schema FunctionDeclaration đầy đủ.
    * Áp dụng KV-Cache Prefix Alignment: Sắp xếp cố định theo tên để chuỗi token schema luôn đồng nhất 100%.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
@@ -102,6 +120,21 @@ export class ToolRegistry {
         description: tool.description,
         parameters: tool.parameters,
       }));
+  }
+
+  /**
+   * Dynamic Tool Retrieval (RATS): Lấy tập hợp FunctionDeclaration phù hợp nhất với ngữ cảnh hiện tại
+   */
+  getRelevantTools(query: string): FunctionDeclaration[] {
+    return this.retriever.retrieve(query, this.getAll());
+  }
+
+  getRetriever(): ToolRetriever {
+    return this.retriever;
+  }
+
+  configureRetriever(config: Partial<ToolRetrieverConfig>): void {
+    this.retriever.configure(config);
   }
 
   /**
@@ -134,6 +167,7 @@ export class ToolRegistry {
 export class ToolScope implements ToolProvider {
   private localTools = new Map<string, ToolDefinition>();
   private allowed?: Set<string>;
+  private retriever: ToolRetriever;
 
   constructor(
     readonly id: string,
@@ -141,10 +175,13 @@ export class ToolScope implements ToolProvider {
     allowedToolNames?: string[],
   ) {
     this.allowed = allowedToolNames ? new Set(allowedToolNames) : undefined;
+    this.retriever = new ToolRetriever();
+    this.retriever.indexTools(this.getAll());
   }
 
   register(tool: ToolDefinition): void {
     this.localTools.set(tool.name, tool);
+    this.retriever.indexTools(this.getAll());
   }
 
   get(name: string): ToolDefinition | undefined {
@@ -171,5 +208,13 @@ export class ToolScope implements ToolProvider {
         description: tool.description,
         parameters: tool.parameters,
       }));
+  }
+
+  getRelevantTools(query: string): FunctionDeclaration[] {
+    return this.retriever.retrieve(query, this.getAll());
+  }
+
+  getRetriever(): ToolRetriever {
+    return this.retriever;
   }
 }

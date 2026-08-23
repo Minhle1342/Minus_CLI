@@ -18,6 +18,7 @@ interface SeenObservation {
 const WORKSPACE_MUTATING_TOOLS = new Set([
   'write_file',
   'replace_text',
+  'apply_patch',
   'run_command',
   'create_worktree',
   'remove_worktree',

@@ -54,6 +54,7 @@ export const writeFileTool: ToolDefinition = {
       await fs.writeFile(safePath, content, 'utf-8');
 
       return {
+        success: true,
         path: rawPath,
         bytesWritten: Buffer.byteLength(content, 'utf-8'),
         created: !isExisting,

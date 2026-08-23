@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
@@ -141,13 +142,55 @@ export const readFileTool: ToolDefinition = {
         lineNumbersIncluded: includeLineNumbers,
       };
     } catch (err: any) {
+      if (err.code === 'ENOENT' || String(err.message).includes('ENOENT')) {
+        const suggestions = await findSimilarFiles(rawPath, workspace);
+        return {
+          path: rawPath,
+          error: `Không tìm thấy file "${rawPath}". (ENOENT: no such file or directory)`,
+          errorCode: 'FILE_NOT_FOUND',
+          suggestions: suggestions.length > 0 ? suggestions : undefined,
+          suggestionText: suggestions.length > 0
+            ? `File không tồn tại. Các file khả dụng trong cùng thư mục: ${suggestions.join(', ')}`
+            : 'File không tồn tại. Hãy dùng search_codebase_fast hoặc list_files để tìm đúng đường dẫn.',
+        };
+      }
+
       return {
         path: rawPath,
         error: `Không thể đọc file: ${err.message}`,
+        errorCode: 'READ_ERROR',
       };
     }
   },
 };
+
+async function findSimilarFiles(rawPath: string, workspace: Workspace): Promise<string[]> {
+  try {
+    const parentDir = path.dirname(rawPath);
+    const baseName = path.basename(rawPath).toLowerCase().replace(/\.[^.]+$/, '');
+    const safeParent = workspace.resolveSafePath(parentDir || '.');
+
+    const entries = await fs.readdir(safeParent, { withFileTypes: true });
+    const candidates: string[] = [];
+
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const entryClean = entry.name.toLowerCase().replace(/\.[^.]+$/, '');
+        if (
+          entryClean.includes(baseName)
+          || baseName.includes(entryClean)
+          || entry.name.endsWith('.ts')
+          || entry.name.endsWith('.js')
+        ) {
+          candidates.push(path.join(parentDir, entry.name).replace(/\\/g, '/'));
+        }
+      }
+    }
+    return candidates.slice(0, 5);
+  } catch {
+    return [];
+  }
+}
 
 function detectEol(content: string): 'crlf' | 'lf' | 'mixed' | 'none' {
   const crlf = (content.match(/\r\n/g) || []).length;

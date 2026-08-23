@@ -571,6 +571,20 @@ async function main() {
   // Character updates are deferred, so prepending does not read stale rl.line state.
   input.prependListener('keypress', handleInputKeypress);
 
+  // Đăng ký Permission Prompt Handler cho interactive CLI mode
+  kernel.ctx.permissions.setPromptHandler(async (request) => {
+    slashHints.clear();
+    CLI.renderPermissionPrompt(request);
+    const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    if (answer === 'y' || answer === 'yes' || answer === '') {
+      return 'approve';
+    }
+    if (answer === 'a' || answer === 'all' || answer === 'always') {
+      return 'approve_all_session';
+    }
+    return 'reject';
+  });
+
   try {
     while (true) {
       const userPrompt = await rl.question(CLI.getPromptSymbol());
@@ -1055,6 +1069,22 @@ async function main() {
           }
         } else {
           CLI.renderApprovals(approvalMgr.getPending());
+        }
+        continue;
+      }
+
+      // Lệnh quản lý phân quyền (/permissions)
+      if (trimmed === '/permissions' || trimmed.startsWith('/permissions ') || trimmed === '/permission' || trimmed.startsWith('/permission ')) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const sub = parts[0]?.toLowerCase();
+        if (sub === 'reset') {
+          kernel.ctx.permissions.clearSessionApprovals();
+          console.log(`\n${c.green}✔ Đã reset toàn bộ danh mục auto-approved trong phiên này.${c.reset}\n`);
+        } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
+          kernel.ctx.permissions.setMode(sub as any);
+          console.log(`\n${c.green}✔ Đã chuyển chế độ phân quyền sang: ${c.bold}${sub}${c.reset}\n`);
+        } else {
+          CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);
         }
         continue;
       }

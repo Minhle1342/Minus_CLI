@@ -2,6 +2,7 @@ import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
 import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
+import type { PermissionManager } from '../security/permission-manager.js';
 
 export interface ToolExecutionResult {
   toolName: string;
@@ -16,16 +17,27 @@ export interface ToolExecutionResult {
  * 1. Tool Lookup: Tìm kiếm tool trong ToolRegistry (Xử lý UNKNOWN_TOOL)
  * 2. Input Validation: Kiểm tra các tham số bắt buộc theo Schema (Xử lý INVALID_ARGS)
  * 3. Security Policy: Rà soát ranh giới workspace & file bảo vệ (Xử lý SECURITY_VIOLATION)
+ *    3.5. Permission & Approval Gate: Phê duyệt của người dùng trước khi sửa file / chạy lệnh nhạy cảm
  * 4. Safe Execution: Thực thi hàm trong khối try/catch an toàn
  * 5. Output Normalization: Chuẩn hoá kết quả trả về dưới dạng JSON thô cho Session/LLM
  */
 export class ToolRunner {
   private registry: ToolProvider;
   private workspace: Workspace;
+  private permissionManager?: PermissionManager;
 
-  constructor(registry: ToolProvider, workspace: Workspace) {
+  constructor(registry: ToolProvider, workspace: Workspace, permissionManager?: PermissionManager) {
     this.registry = registry;
     this.workspace = workspace;
+    this.permissionManager = permissionManager;
+  }
+
+  setPermissionManager(permissionManager: PermissionManager): void {
+    this.permissionManager = permissionManager;
+  }
+
+  getPermissionManager(): PermissionManager | undefined {
+    return this.permissionManager;
   }
 
   async run(
@@ -108,6 +120,29 @@ export class ToolRunner {
       }
     }
 
+    // Stage 3.5: Permission & Interactive Operator Approval Check
+    if (this.permissionManager) {
+      const permCheck = await this.permissionManager.checkPermission(toolName, executionArgs, context);
+      if (!permCheck.allowed) {
+        const errorResult: Record<string, any> = {
+          error: permCheck.reason || 'Thao tác bị từ chối do chưa được người dùng cấp quyền.',
+          errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
+        };
+        if (permCheck.recommendedTool) {
+          errorResult.recommendedTool = permCheck.recommendedTool;
+        }
+        if (permCheck.recommendedArgs) {
+          errorResult.recommendedArgs = permCheck.recommendedArgs;
+        }
+        return {
+          toolName,
+          args: executionArgs,
+          result: errorResult,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
+
     // Stage 4: Safe Execution
     try {
       const rawResult = await tool.execute(executionArgs, this.workspace, context);
@@ -119,7 +154,9 @@ export class ToolRunner {
 
       let resultSnapshot: Record<string, any>;
       try {
-        resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`);
+        resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`, {
+          omitUndefinedObjectProperties: true,
+        });
       } catch (error: any) {
         return {
           toolName,

@@ -44,6 +44,16 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
     description: 'Search the public web through the operator-configured self-hosted SearXNG instance.',
   },
   {
+    name: 'network.fetch',
+    toolName: 'web_fetch',
+    category: 'network',
+    sideEffect: 'external',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Fetch and parse full web pages, documentation, GitHub issues, and extract code blocks with injection defense.',
+  },
+  {
     name: 'filesystem.edit',
     toolName: 'replace_text',
     category: 'filesystem',

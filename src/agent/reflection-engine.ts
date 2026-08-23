@@ -80,7 +80,25 @@ export class ReflectionEngine {
 
       advice = `Lệnh thất bại (exit: ${result.exitCode}). Kích hoạt quy trình tự vấn và phân tích Stack Trace.`;
     } 
-    // 3. Phân tích lỗi sửa file replace_text không khớp
+    // 3. Phân tích lỗi áp dụng patch apply_patch
+    else if (toolName === 'apply_patch' && (result.error || result.errorCode)) {
+      isFailure = true;
+      this.consecutiveFailures++;
+
+      const details = result.diagnostic || result.error || result.errorCode;
+      reflectionPrompt = [
+        `\n⚠️ [SELF-REFLECTION - ÁP DỤNG PATCH THẤT BẠI]`,
+        `Mã lỗi: ${result.errorCode || 'PATCH_APPLY_FAILED'}`,
+        `Chi tiết: ${details}`,
+        `💡 HƯỚNG DẪN TỰ ĐIỀU CHỈNH (CODEX CLI FUZZ RECOVERY):`,
+        `1. Dùng read_file để kiểm tra lại chính xác các dòng code hiện tại trong file.`,
+        `2. Kiểm tra context lines (dòng trước/sau @@) xem có bị thay đổi bởi thao tác trước đó không.`,
+        `3. Tạo lại Unified Diff với context lines chính xác hoặc tăng fuzzLevel nếu cần.`,
+      ].join('\n');
+
+      advice = `apply_patch thất bại (${result.errorCode || 'unknown'}). Cần đọc lại file trước khi tạo patch mới.`;
+    }
+    // 4. Phân tích lỗi sửa file replace_text không khớp
     else if (toolName === 'replace_text' && result.error) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -93,14 +111,13 @@ export class ReflectionEngine {
         `\n⚠️ [SELF-REFLECTION - THAY THẾ TEXT THẤT BẠI]`,
         `Mã lỗi: ${result.errorCode || 'REPLACE_TEXT_FAILED'}`,
         `Lý do: ${result.error}`,
-        `👉 ${suggestedRead}`,
+        `💡 ${suggestedRead}`,
         `Dùng content nguyên bản không có số dòng làm oldText, truyền contentHash thành expectedFileHash, và không lặp lại nguyên tham số vừa thất bại.`,
-        `Không sao chép phần preview trên CLI; nhãn "preview only" nghĩa là chỉ phần hiển thị bị rút gọn.`,
       ].join('\n');
 
       advice = `replace_text thất bại (${result.errorCode || 'unknown'}). Cần đọc lại đúng vùng file trước khi thử với tham số mới.`;
     }
-    // 4. Phân tích lỗi chung khác
+    // 5. Phân tích lỗi chung khác
     else if (result.error || result.errorCode) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -108,12 +125,12 @@ export class ReflectionEngine {
       reflectionPrompt = [
         `\n⚠️ [TOOL EXECUTION ERROR]`,
         `Lỗi gặp phải: ${result.error || result.errorCode}`,
-        `👉 Hãy phân tích nguyên nhân và điều chỉnh lại tham số gọi tool.`,
+        `💡 Hãy phân tích nguyên nhân và điều chỉnh lại tham số gọi tool.`,
       ].join('\n');
 
       advice = `Tool gặp lỗi: ${result.error || result.errorCode}`;
     } 
-    // 5. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
+    // 6. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
     else {
       this.consecutiveFailures = 0;
     }

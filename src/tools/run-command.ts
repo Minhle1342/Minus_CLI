@@ -6,8 +6,50 @@ import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
 import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 
-// Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed
+// Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
+  // Khám phá Codebase & Điều tra tệp tin (Terminal-First)
+  'cat ',
+  'cat',
+  'type ',
+  'type',
+  'Get-Content',
+  'gc ',
+  'head ',
+  'head',
+  'tail ',
+  'tail',
+  'more ',
+  'less ',
+  'ls',
+  'ls ',
+  'dir',
+  'dir ',
+  'tree',
+  'Get-ChildItem',
+  'gci ',
+  'grep ',
+  'rg ',
+  'ripgrep ',
+  'findstr ',
+  'Select-String',
+  'sls ',
+  'find ',
+  'find.',
+  'fd ',
+  'wc ',
+  'wc',
+  'which ',
+  'where ',
+  'pwd',
+  'echo ',
+  'printf ',
+  'env',
+  'printenv',
+  'jq ',
+  'sed ',
+  'awk ',
+  // Build, Test & Package Management
   'npm test',
   'npm run ',
   'npm start',
@@ -90,19 +132,65 @@ export function findGitSubcommand(command: string): string | undefined {
   return undefined;
 }
 
+export interface FileMisuseDetection {
+  tool: string;
+  reason: string;
+  suggestedArgs?: Record<string, any>;
+}
+
+/** Phát hiện hành vi dùng nhầm run_command để đọc file / duyệt thư mục / tìm kiếm */
+export function detectFileCommandMisuse(command: string): FileMisuseDetection | undefined {
+  const trimmed = command.trim();
+
+  // 1. Đọc file qua shell (cat, type, Get-Content, gc, head, tail, more, less)
+  const readMatch = trimmed.match(/^(?:cat|type|Get-Content|gc|head|tail|more|less)\s+([^\s;&|]+)/i);
+  if (readMatch) {
+    const filePath = readMatch[1].replace(/^["']|["']$/g, '');
+    return {
+      tool: 'read_file',
+      reason: 'Đọc nội dung file với hashing và an toàn token',
+      suggestedArgs: { path: filePath },
+    };
+  }
+
+  // 2. Duyệt file/thư mục qua shell (ls, dir, tree, Get-ChildItem, gci)
+  const listMatch = trimmed.match(/^(?:ls|dir|tree|Get-ChildItem|gci)(?:\s+([^\s;&|]+))?$/i);
+  if (listMatch) {
+    const dirPath = (listMatch[1] || '').replace(/^["']|["']$/g, '') || undefined;
+    return {
+      tool: 'list_files',
+      reason: 'Liệt kê cấu trúc thư mục với bộ lọc tự động bỏ qua node_modules/.git',
+      suggestedArgs: dirPath ? { dirPath } : {},
+    };
+  }
+
+  // 3. Tìm kiếm chuỗi qua shell (grep, findstr, Select-String, sls)
+  const grepMatch = trimmed.match(/^(?:grep|findstr|Select-String|sls)\s+(?:-[a-zA-Z0-9-]+\s+)*['"]?([^'"]+)['"]?/i);
+  if (grepMatch) {
+    const query = grepMatch[1];
+    return {
+      tool: 'search_codebase_fast',
+      reason: 'Tìm kiếm BM25 nhanh trên toàn bộ codebase không tốn token',
+      suggestedArgs: { query },
+    };
+  }
+
+  return undefined;
+}
+
 /**
- * Tạo Tool run_command có tích hợp SandboxManager (Phase 6 - True Execution Sandbox)
+ * Tạo Tool run_command có tích hợp SandboxManager (Codex CLI Terminal-First Execution)
  */
 export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal trong Sandbox cô lập. Docker Sandbox tự nhận diện và chuyển runtime phù hợp cho Node.js, .NET, Python, Java, Go và Rust. Mọi lệnh Git phải dùng git_command hoặc tool Git chuyên dụng để áp dụng scope và quyền theo yêu cầu người dùng.',
+    description: 'Thực thi lệnh terminal (build, test, lint, explore, inspect, scripts) trong Sandbox cô lập theo chuẩn Terminal-First của Codex CLI. Hỗ trợ chạy các lệnh tìm kiếm (rg, grep, find), duyệt file (ls, dir, tree), đọc log, kiểm thử (npm test, pytest), biên dịch (tsc, npm run build), và thực thi script.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal không phải Git cần thực thi (ví dụ: "npm test" hoặc "dotnet test")',
+          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v")',
         },
         timeout_ms: {
           type: Type.NUMBER,

@@ -378,13 +378,26 @@ export class AgentLoop {
       }
 
       // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
+      // Dynamic Tool Retrieval (RATS): Truy xuất tập tool phù hợp nhất cho ngữ cảnh của bước này
+      const activeTask = this.planManager.getActiveTask();
+      const activeStepQuery = [
+        turnUserRequest,
+        activeTask?.title || '',
+        activeTask?.acceptanceCriteria || '',
+        activeTask?.notes || '',
+      ].filter(Boolean).join(' ');
+
+      const activeToolDeclarations = typeof (this.toolProvider as any).getRelevantTools === 'function'
+        ? (this.toolProvider as any).getRelevantTools(activeStepQuery)
+        : toolDeclarations;
+
       let response;
       const assembledSystemPrompt = `${this.promptAssembler.assemble()}\n\n${this.planManager.renderExecutionContext()}`;
       session.recordRequestHeader({
         turn,
         step,
         systemPrompt: assembledSystemPrompt,
-        tools: toolDeclarations,
+        tools: activeToolDeclarations,
         history: session.getHistory(),
       });
       session.assertRuntimeInvariants({ allowOpenLifecycle: true });
@@ -392,7 +405,7 @@ export class AgentLoop {
       const requestOptions = { systemPrompt: assembledSystemPrompt };
       CLI.renderLLMThinking();
       if (typeof this.llm.generateStream === 'function') {
-        response = await this.llm.generateStream(session, toolDeclarations, {
+        response = await this.llm.generateStream(session, activeToolDeclarations, {
           onThoughtToken: (token: string) => {
             this.kernel?.ctx.events.emit('model:thought', token);
           },
@@ -401,7 +414,7 @@ export class AgentLoop {
           },
         }, requestOptions);
       } else {
-        response = await this.llm.generate(session, toolDeclarations, requestOptions);
+        response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
       }
 
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
@@ -815,7 +828,7 @@ export class AgentLoop {
         }
       }
 
-      // 6. Nếu model trả về câu trả lời cuối cùng hợp lệ (Final Answer)
+      // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
       const finalAnswer = response.text || '(Nhiệm vụ đã hoàn tất)';
       consecutiveEmptyTurns = 0;
 
@@ -865,7 +878,7 @@ export class AgentLoop {
         userRequest: turnUserRequest,
       });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
-      if (this.planManager.getRequirements().verificationRequired) {
+      if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
         activeSkills.push('verification-before-completion');
       }
       const verificationDecision = this.verificationPolicy.canComplete(activeSkills);
@@ -884,6 +897,7 @@ export class AgentLoop {
               continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
             }
           : { allow: true };
+
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;
         const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
@@ -894,8 +908,8 @@ export class AgentLoop {
             : 'Model liên tục trả về Final Answer không có đủ evidence, kết quả, hoặc blocker thực. Turn sẽ kết thúc với thông báo rõ ràng.',
         );
         session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-        if (canRetryIncompleteFinal) {
-          session.addUserMessage(finalAnswerDecision.continuationPrompt!);
+        if (canRetryIncompleteFinal && finalAnswerDecision.continuationPrompt) {
+          session.addUserMessage(finalAnswerDecision.continuationPrompt);
         }
         await this.persistSession(session);
         CLI.renderStepFooter();

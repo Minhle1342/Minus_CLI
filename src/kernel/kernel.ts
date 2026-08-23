@@ -18,6 +18,7 @@ import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
+import { PermissionManager } from '../security/permission-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -38,6 +39,7 @@ export interface KernelEvents {
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
+  'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
   'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
 }
 
@@ -82,6 +84,7 @@ export interface KernelContext {
   workspace: Workspace;
   tools: ToolRegistry;
   toolRunner: ToolRunner;
+  permissions: PermissionManager;
   plan: PlanManager;
   goal: GoalManager;
   agentHooks: AgentHookRegistry;
@@ -140,12 +143,14 @@ export class AgentKernel {
     const tasks = new TaskManager(workspace.rootDir);
     const tools = new ToolRegistry(plan, memory);
     tools.attachSandboxManager(sandbox);
-    const toolRunner = new ToolRunner(tools, workspace);
+    const permissions = new PermissionManager();
+    const toolRunner = new ToolRunner(tools, workspace, permissions);
 
     this.ctx = {
       workspace,
       tools,
       toolRunner,
+      permissions,
       plan,
       goal,
       agentHooks,
@@ -167,7 +172,7 @@ export class AgentKernel {
       setWorkspace: (newWs: Workspace) => {
         const oldPath = this.ctx.workspace.rootDir;
         this.ctx.workspace = newWs;
-        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs);
+        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
         this.ctx.sessions.setWorkspace(newWs.rootDir);

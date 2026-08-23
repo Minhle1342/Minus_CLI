@@ -134,8 +134,8 @@ export class PlanManager {
 
     this.activeTurn = turn;
     this.goal = goal;
-    this.planRequired = CODE_CHANGE_PATTERN.test(goal);
-    this.verificationRequired = this.planRequired;
+    this.planRequired = this.inferPlanRequirement(goal);
+    this.verificationRequired = this.inferVerificationRequirement(goal);
     this.tasks = [];
     this.persist('turn-started');
   }
@@ -145,7 +145,7 @@ export class PlanManager {
       ...(this.activeTurn === undefined ? {} : { turn: this.activeTurn }),
       goal: this.goal,
       required: this.planRequired,
-      minimumTasks: this.planRequired ? 3 : 1,
+      minimumTasks: 1,
       maximumTasks: 7,
       verificationRequired: this.verificationRequired,
     };
@@ -157,9 +157,6 @@ export class PlanManager {
     }
     if (tasks.length > 7) {
       throw new Error('Plan must contain at most 7 atomic tasks.');
-    }
-    if (this.planRequired && tasks.length < 3) {
-      throw new Error('This code-changing request requires 3-7 atomic tasks; a request-level summary is not an execution plan.');
     }
 
     const ids = new Set<number>();
@@ -189,21 +186,6 @@ export class PlanManager {
         evidence: [],
       };
     });
-
-    if (
-      this.goal
-      && normalizedTasks.length === 1
-      && titleSimilarity(normalizedTasks[0].title, this.goal) >= 0.72
-    ) {
-      throw new Error('The plan only repeats the user request. Decompose the goal into concrete execution steps instead.');
-    }
-
-    if (
-      this.verificationRequired
-      && !normalizedTasks.some((task) => VERIFICATION_PATTERN.test(`${task.title} ${task.acceptanceCriteria}`))
-    ) {
-      throw new Error('A code-changing plan must include an explicit test/build/verification task.');
-    }
 
     this.tasks = normalizedTasks;
     this.persist('created');
@@ -264,7 +246,6 @@ export class PlanManager {
     if ((status === 'FAILED' || status === 'SKIPPED') && !normalizedNotes) {
       throw new Error(`${status} requires notes explaining the concrete blocker or skip reason.`);
     }
-
     task.status = status;
     if (normalizedNotes) task.notes = normalizedNotes;
 
@@ -300,9 +281,6 @@ export class PlanManager {
   }
 
   getCompletionBlocker(): string | undefined {
-    if (this.planRequired && !this.hasPlan()) {
-      return 'This multi-step code request requires create_plan before completion.';
-    }
     if (!this.hasPlan()) return undefined;
     const unfinished = this.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status));
     if (unfinished.length === 0) return undefined;
@@ -337,10 +315,24 @@ export class PlanManager {
       `Goal: ${requirements.goal || '(not captured)'}`,
       ...lines,
       active
-        ? `ACTIVE TASK: Work only toward #${active.id}. Do not mark it COMPLETED until a successful non-planning tool result has been observed.`
-        : 'All tasks are terminal. Report concrete results and blockers accurately.',
-      'Do not provide a Final Answer while any task is PENDING or IN_PROGRESS.',
+        ? `ACTIVE TASK: Work toward #${active.id}. Update status via update_plan_task as milestones complete.`
+        : 'All tasks are completed.',
     ].join('\n');
+  }
+
+  private inferPlanRequirement(goal: string): boolean {
+    const text = normalizeComparableText(goal);
+    if (!text) return false;
+    return (
+      /\b(implement|refactor|fix|migrate|integrate|build|create|sua|trien khai)\b/.test(text)
+      && /\b(and|then|after|verify|tests?|build|lint|multi|steps?|kiem chung)\b/.test(text)
+    );
+  }
+
+  private inferVerificationRequirement(goal: string): boolean {
+    const text = normalizeComparableText(goal);
+    if (!text) return false;
+    return /\b(verify|test|tests|build|typecheck|lint|kiem chung|kiem thu)\b/.test(text);
   }
 
   buildContinuationPrompt(blocker = this.getCompletionBlocker()): string {

@@ -1,5 +1,6 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
+import { htmlToCleanMarkdown, extractCodeBlocksFromHtml } from './web-fetch.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8080';
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -334,6 +335,15 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
         time_range: { type: Type.STRING, description: 'Optional freshness filter: day, month, or year.', enum: ['day', 'month', 'year'] },
         safe_search: { type: Type.NUMBER, description: 'Safe-search level: 0 off, 1 moderate (default), or 2 strict.' },
         page: { type: Type.NUMBER, description: `Result page to request (default 1, maximum ${MAX_PAGE}).` },
+        fetch_top_content: {
+          type: Type.BOOLEAN,
+          description: 'When true, automatically fetches and extracts clean markdown & code snippets from the top 1-2 search results for immediate single-turn resolution.',
+        },
+        mode: {
+          type: Type.STRING,
+          description: 'Search mode: "live" for real-time web search (default), or "cached" for local/cached index retrieval.',
+          enum: ['live', 'cached'],
+        },
       },
       required: ['query'],
     },
@@ -432,6 +442,59 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           .flatMap(({ payload }) => normalizeUnresponsiveEngines(payload.unresponsive_engines))
           .map((item) => [`${item.engine}\u0000${item.reason ?? ''}`, item])).values()].slice(0, 10);
 
+        let extractedTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
+        if (Boolean(args.fetch_top_content) && results.length > 0) {
+          const targets = results.slice(0, 1);
+          const fetchedItems = await Promise.all(targets.map(async (item) => {
+            try {
+              const res = await fetchImpl(item.url, {
+                method: 'GET',
+                headers: { 'User-Agent': 'CodingAgent-DeepInvestigator/2.0', Accept: 'text/html,application/xhtml+xml,text/plain;q=0.8' },
+                signal: controller.signal,
+              });
+              if (!res.ok) return null;
+              const text = await res.text();
+              const { markdown, title } = htmlToCleanMarkdown(text, item.url);
+              const codeBlocks = extractCodeBlocksFromHtml(text);
+              return {
+                url: item.url,
+                title: title || item.title,
+                markdown: markdown.slice(0, 3000),
+                codeBlocks: codeBlocks.slice(0, 5),
+              };
+            } catch {
+              return null;
+            }
+          }));
+          extractedTopContent = fetchedItems.filter((i): i is NonNullable<typeof i> => Boolean(i));
+        }
+
+        const investigationLeads = results.slice(0, 5).map((r) => {
+          let leadType = 'general_reference';
+          try {
+            const parsed = new URL(r.url);
+            const host = parsed.hostname.toLowerCase();
+            const path = parsed.pathname.toLowerCase();
+            if (host.includes('github.com') || host.includes('gitlab.com')) {
+              leadType = (path.includes('/issues') || path.includes('/pull')) ? 'issue_tracker' : (path.includes('/releases') ? 'release_notes' : 'source_repository');
+            } else if (host.startsWith('docs.') || path.includes('/docs/') || path.includes('/api/') || host.includes('nodejs.org') || host.includes('readthedocs') || host.includes('developer.mozilla.org')) {
+              leadType = 'official_documentation';
+            } else if (host.includes('stackoverflow.com') || host.includes('stackexchange.com')) {
+              leadType = 'community_solution';
+            } else if (host.includes('npmjs.com') || host.includes('pypi.org') || host.includes('crates.io')) {
+              leadType = 'package_registry';
+            }
+          } catch {
+            leadType = 'general_reference';
+          }
+          return {
+            url: r.url,
+            title: r.title,
+            leadType,
+            suggestedAction: `Use web_fetch(url="${r.url}") for complete documentation and code extraction.`,
+          };
+        });
+
         return {
           provider: 'searxng',
           query: queries[0],
@@ -449,6 +512,8 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           suggestions: mergeUniqueStrings(successes.map(({ payload }) => payload.suggestions)),
           unresponsiveEngines,
           queryErrors: failures.map((failure) => ({ query: failure.query, ...failure.error })),
+          investigationLeads,
+          ...(extractedTopContent && extractedTopContent.length > 0 ? { extractedTopContent } : {}),
         };
       } finally {
         clearTimeout(timeout);

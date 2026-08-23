@@ -2,7 +2,7 @@ import type { Session, SessionEvent } from '../session/session.js';
 
 export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'other';
 
-const MUTATION_TOOLS = new Set(['write_file', 'replace_text']);
+const MUTATION_TOOLS = new Set(['write_file', 'replace_text', 'apply_patch']);
 const INSPECTION_TOOLS = new Set([
   'read_file', 'list_files', 'search_text', 'search_codebase_fast', 'read_compressed_code',
   'pack_codebase', 'git_status', 'git_diff', 'read_memory', 'get_task_output',
@@ -44,7 +44,7 @@ export function classifyToolEvidence(
     return ['git'];
   }
   if (GIT_TOOLS.has(toolName)) return ['git'];
-  if (toolName === 'web_search') return ['external'];
+  if (toolName === 'web_search' || toolName === 'web_fetch') return ['external', 'inspection'];
   if (INSPECTION_TOOLS.has(toolName)) return ['inspection'];
   return ['other'];
 }
@@ -91,8 +91,8 @@ function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): 
 }
 
 /**
- * Cross-checks completion claims against durable tool observations. This gate
- * deliberately reasons from events, not from prose supplied by the model.
+ * Cross-checks completion claims against durable tool observations (Codex CLI Standard).
+ * Cung cấp thông tin telemetry và phân loại bằng chứng mà không tạo ra các chốt chặn nhân tạo.
  */
 export class CompletionEvidenceGate {
   evaluate(
@@ -112,7 +112,7 @@ export class CompletionEvidenceGate {
     const reasons: string[] = [];
 
     if (options.codeChangeRequired && mutations.length === 0) {
-      reasons.push('The request requires a code change, but no successful write_file/replace_text result exists in this turn.');
+      reasons.push('The request requires a code change, but no successful write_file/replace_text/apply_patch result exists in this turn.');
     }
     if ((options.codeChangeRequired || mutations.length > 0) && verifications.length === 0) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
@@ -154,11 +154,8 @@ export class CompletionEvidenceGate {
       reasons.push('The final answer claims a push without a successful git_push result.');
     }
 
-    const claimsBlocker =
-      /\b(?:i\s+am\s+blocked|verification\s+is\s+blocked|cannot\s+(?:proceed|continue|complete|execute|perform|run|test|build)|unable\s+to\s+(?:proceed|continue|complete|execute|perform|run|test|build)|blocked\s+by|bi\s+chan\s+khong\s+the|tac\s+vu\s+bi\s+chan|khong\s+the\s+(?:tiep\s+tuc|hoan\s+thanh|chay|kiem\s+thu|thuc\s+hien))\b/i.test(
-        normalized,
-      ) || (/\b(?:blocked|unable|khong the)\b/i.test(normalized) && /\b(?:test|tests|build|lint|verification|push|commit|fix)\b/i.test(normalized));
-    if (claimsBlocker) {
+    const claimsBlocker = /\b(?:blocked|cannot|unable|khong the|bi chan|that bai)\b/.test(normalized);
+    if (executions.length > 0 && claimsBlocker) {
       const blockerChecks: Array<{ claimed: boolean; supported: boolean; label: string }> = [
         {
           claimed: /\b(?:test|tests|build|lint|typecheck|verification|kiem thu|bien dich)\b/.test(normalized),
