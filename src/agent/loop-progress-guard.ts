@@ -1,3 +1,5 @@
+import { isVerificationCommand } from './completion-evidence.js';
+
 export interface ToolProgressObservation {
   toolName: string;
   args: Record<string, any>;
@@ -19,13 +21,14 @@ const WORKSPACE_MUTATING_TOOLS = new Set([
   'write_file',
   'replace_text',
   'apply_patch',
-  'run_command',
+  'create_file',
+  'delete_file',
+  'move_file',
   'create_worktree',
   'remove_worktree',
   'git_commit',
   'git_add',
   'git_push',
-  'git_command',
 ]);
 
 const GUARDED_INSPECTION_TOOLS = new Set([
@@ -39,17 +42,24 @@ const GUARDED_INSPECTION_TOOLS = new Set([
   'read_memory',
   'git_status',
   'list_worktrees',
+  'submit_solution',
+  'inspect_symbol',
+  'find_references',
+  'get_diagnostics',
 ]);
 
 /**
- * Detects successful tool calls that repeatedly return the same observation.
+ * Detects successful tool calls that repeatedly return the same observation,
+ * as well as alternating Ping-Pong loops (e.g. submit_solution <-> run_command).
  * State is intentionally scoped to one live turn and reset before each run.
  */
 export class LoopProgressGuard {
   private readonly seen = new Map<string, SeenObservation>();
+  private readonly callHistory: Array<{ toolName: string; callFingerprint: string }> = [];
 
   reset(): void {
     this.seen.clear();
+    this.callHistory.length = 0;
   }
 
   observe(observation: ToolProgressObservation): ToolProgressDecision {
@@ -90,18 +100,54 @@ export class LoopProgressGuard {
       return { repetitionCount: 0, shouldStop: false };
     }
 
-    if (WORKSPACE_MUTATING_TOOLS.has(toolName)) {
+    // Pure verification run_commands (e.g. npm test, npm run build, pytest) are treated as guarded observations rather than workspace mutations
+    const isPureVerification = toolName === 'run_command' && isVerificationCommand(args.command);
+
+    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || (toolName === 'run_command' && !isPureVerification)) {
       this.reset();
       return { repetitionCount: 0, shouldStop: false };
     }
 
-    if (!GUARDED_INSPECTION_TOOLS.has(toolName)) {
+    if (!GUARDED_INSPECTION_TOOLS.has(toolName) && !isPureVerification) {
       return { repetitionCount: 0, shouldStop: false };
     }
 
     const callFingerprint = stableStringify({ toolName, args });
     const resultFingerprint = stableStringify(result);
+
+    // Track alternating call patterns (e.g. A -> B -> A -> B)
+    this.callHistory.push({ toolName, callFingerprint });
+    if (this.callHistory.length > 8) this.callHistory.shift();
+
+    const alternatingDecision = this.checkAlternatingLoop();
+    if (alternatingDecision.shouldStop) {
+      return alternatingDecision;
+    }
+
     return this.recordObservation(callFingerprint, resultFingerprint, toolName, false);
+  }
+
+  private checkAlternatingLoop(): ToolProgressDecision {
+    if (this.callHistory.length >= 4) {
+      const len = this.callHistory.length;
+      const c0 = this.callHistory[len - 4];
+      const c1 = this.callHistory[len - 3];
+      const c2 = this.callHistory[len - 2];
+      const c3 = this.callHistory[len - 1];
+
+      if (
+        c0.callFingerprint === c2.callFingerprint
+        && c1.callFingerprint === c3.callFingerprint
+        && c0.callFingerprint !== c1.callFingerprint
+      ) {
+        return {
+          repetitionCount: 2,
+          message: `[SYSTEM LOOP GUARD]: Detected alternating loop between '${c0.toolName}' and '${c1.toolName}'. The verification outcome is already settled; do not repeat these tools. Conclude your work and output the final response now.`,
+          shouldStop: true,
+        };
+      }
+    }
+    return { repetitionCount: 0, shouldStop: false };
   }
 
   private recordObservation(

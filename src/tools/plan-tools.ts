@@ -150,6 +150,11 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
         };
       }
 
+      // Rehydrate plan from session if planManager has no plan currently in memory
+      if (!planManager.hasPlan()) {
+        planManager.rehydrateFromSession();
+      }
+
       let updated;
       try {
         updated = planManager.updateTask(id, status, args.evidence || args.notes);
@@ -171,15 +176,52 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
           activeTask: planManager.getActiveTask(),
         };
       }
+
       if (!updated) {
         if (!planManager.hasPlan()) {
-          return {
-            error: 'No execution plan has been created in this turn. Call "create_plan" first to define execution steps, or skip calling "update_plan_task" for simple single-step tasks.',
-            errorCode: 'NO_PLAN_EXISTS',
-            hint: 'Call create_plan first with a tasks array: [{ title: "Inspect code" }, { title: "Implement fix" }, { title: "Run verification" }].',
-          };
+          // Antigravity & Codex resilience pattern: Auto-recover/initialize plan from context if possible
+          const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
+            || (typeof args.notes === 'string' && args.notes.trim())
+            || `Task #${id}`;
+          try {
+            planManager.createPlan([
+              { id, title: fallbackTitle, acceptanceCriteria: `Observable result for: ${fallbackTitle}` },
+            ]);
+            updated = planManager.updateTask(id, status, args.evidence || args.notes);
+            return {
+              message: `Execution plan auto-initialized with step #${id} and updated to ${status}.`,
+              task: updated,
+              progress: planManager.getProgress(),
+              recovered: true,
+            };
+          } catch {
+            return {
+              error: 'No execution plan has been created in this session. Call "create_plan" first to define execution steps, or skip calling "update_plan_task" for simple single-step tasks.',
+              errorCode: 'NO_PLAN_EXISTS',
+              hint: 'Call create_plan first with a tasks array: [{ title: "Inspect code" }, { title: "Implement fix" }, { title: "Run verification" }].',
+            };
+          }
         }
+
         const existingTasks = planManager.getTasks();
+        // If task ID is not found, dynamically register it if under limit (Codex/Antigravity dynamic expansion)
+        if (existingTasks.length < 7 && !existingTasks.some((t) => t.id === id)) {
+          const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
+            || (typeof args.notes === 'string' && args.notes.trim())
+            || `Task #${id}`;
+          try {
+            planManager.addTask({ id, title: fallbackTitle, acceptanceCriteria: `Observable result for: ${fallbackTitle}` });
+            updated = planManager.updateTask(id, status, args.evidence || args.notes);
+            return {
+              message: `Added and updated step #${id} to ${status}.`,
+              task: updated,
+              progress: planManager.getProgress(),
+            };
+          } catch {
+            // fall through to standard error reporting
+          }
+        }
+
         const availableIds = existingTasks.map((t) => `#${t.id}: "${t.title}" (${t.status})`).join(', ');
         const activeTask = planManager.getActiveTask();
         return {
@@ -189,6 +231,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
           hint: activeTask ? `Currently active step is #${activeTask.id} ("${activeTask.title}"). Pass id: ${activeTask.id}.` : 'No active step exists.',
         };
       }
+
       return {
         message: `Updated step #${id} to ${status}.`,
         task: updated,

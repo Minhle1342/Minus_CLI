@@ -52,6 +52,7 @@ export function classifyToolEvidence(
 ): EvidenceKind[] {
   if (isToolResultFailure(result)) return [];
   if (MUTATION_TOOLS.has(toolName)) return ['mutation'];
+  if (toolName === 'submit_solution') return ['verification'];
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
   }

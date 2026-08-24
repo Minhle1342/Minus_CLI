@@ -56,7 +56,7 @@ import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
 import { FinalAnswerGuard } from './agent/final-answer-guard.js';
-import { CompletionEvidenceGate } from './agent/completion-evidence.js';
+import { CompletionEvidenceGate, classifyToolEvidence } from './agent/completion-evidence.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
 import { HypothesisTracker } from './agent/hypothesis-tracker.js';
@@ -1632,6 +1632,43 @@ async function runUnitTests() {
     status: 'COMPLETED',
   });
   assert(updatePlanRes.task?.status === 'COMPLETED', 'update_plan_task tool cập nhật trạng thái thành công');
+
+  // Kiểm thử Cross-Turn Interruption & Session Rehydration (Rate limit / Out-of-quota Recovery)
+  const interruptionSession = new Session('rate-limit-plan-recovery-test');
+  const interruptionPlanMgr = new PlanManager();
+  interruptionPlanMgr.bindSession(interruptionSession);
+  interruptionPlanMgr.beginTurn(1, 'Split Screen Design UI for Login');
+
+  const interruptionRegistry = new ToolRegistry(interruptionPlanMgr);
+  await interruptionRegistry.execute('create_plan', {
+    tasks: [
+      { id: 1, title: 'Inspect Login Screen UI' },
+      { id: 2, title: 'Setup Split Screen layout' },
+      { id: 3, title: 'Split Screen Design UI for Login' },
+      { id: 4, title: 'Verify UI & unit tests' },
+    ],
+  });
+  interruptionPlanMgr.recordToolEvidence('read_file', { path: 'login.tsx' }, { content: 'login UI source' });
+  await interruptionRegistry.execute('update_plan_task', { id: 1, status: 'COMPLETED', notes: 'Done step 1' });
+  interruptionPlanMgr.recordToolEvidence('replace_text', { path: 'login.tsx' }, { success: true });
+  await interruptionRegistry.execute('update_plan_task', { id: 2, status: 'COMPLETED', notes: 'Done step 2' });
+
+  // Mô phỏng lượt 2 bắt đầu sau khi lượt 1 bị ngắt quãng do rate limit / out of quota
+  interruptionPlanMgr.beginTurn(2, 'Tiếp tục thực hiện task 3');
+  assert(interruptionPlanMgr.getTasks().length === 0, 'Turn 2 khởi tạo ranh giới mới trong bộ nhớ');
+
+  // Lượt 2 gọi update_plan_task trực tiếp cho step 3 mà không cần gọi lại create_plan
+  const resumeRes = await interruptionRegistry.execute('update_plan_task', {
+    id: 3,
+    status: 'IN_PROGRESS',
+    notes: 'In progress',
+    evidence: 'Started Task 3: Split Screen Design UI for Login.',
+  });
+  assert(resumeRes.task?.id === 3, 'update_plan_task tự động rehydrate plan từ session event log');
+  assert(resumeRes.task?.status === 'IN_PROGRESS', 'Step 3 được chuyển sang IN_PROGRESS thành công sau khi rehydrate');
+  assert(interruptionPlanMgr.getTasks().length === 4, 'Toàn bộ 4 task của plan trước được bảo toàn nguyên vẹn');
+  assert(interruptionPlanMgr.getTasks()[0].status === 'COMPLETED', 'Step 1 vẫn COMPLETED');
+  assert(interruptionPlanMgr.getTasks()[1].status === 'COMPLETED', 'Step 2 vẫn COMPLETED');
 
   console.log('\n========================================');
   console.log('🧪 10. KIỂM THỬ REFLECTION ENGINE & DEBUGGING PROTOCOL');
@@ -4256,10 +4293,28 @@ Always write tests first!`;
   assert(submitResult.success === true, 'submit_solution thực thi thành công');
   assert(submitResult.submitted === true, 'submit_solution trả về submitted flag = true');
   assert(submitResult.filesModified.length === 2, 'submit_solution ghi nhận đúng 2 file sửa đổi');
+  assert(submitResult.nextAction === 'final_answer', 'submit_solution trả về nextAction = final_answer');
+  assert(Boolean(submitResult.message.includes('COMPLETE')), 'submit_solution thông báo task đã COMPLETE');
 
   const customRegistry = new ToolRegistry();
   registerSubmitSolutionTool(customRegistry, testWorkspace);
   assert(customRegistry.has('submit_solution'), 'registerSubmitSolutionTool đăng ký thành công vào ToolRegistry');
+
+  // Kiểm thử classifyToolEvidence với submit_solution
+  const submitEvidenceKinds = classifyToolEvidence('submit_solution', {}, { success: true, submitted: true });
+  assert(submitEvidenceKinds.includes('verification'), 'classifyToolEvidence định danh submit_solution là verification evidence');
+
+  // Kiểm thử LoopProgressGuard phát hiện vòng lặp xen kẽ (Alternating Loop Ping-Pong)
+  const alternatingGuard = new LoopProgressGuard();
+  const subObs = { toolName: 'submit_solution', args: { summary: 'done', verificationEvidence: 'npm test' }, result: { success: true, submitted: true } };
+  const runObs = { toolName: 'run_command', args: { command: 'npm run build' }, result: { exitCode: 0, stdout: 'build ok' } };
+  
+  alternatingGuard.observe(subObs); // A
+  alternatingGuard.observe(runObs); // B
+  alternatingGuard.observe(subObs); // A
+  const altDecision = alternatingGuard.observe(runObs); // B -> Detected A-B-A-B loop!
+  assert(altDecision.shouldStop === true, 'LoopProgressGuard phát hiện và chặn đứng vòng lặp xen kẽ A->B->A->B');
+  assert(Boolean(altDecision.message?.includes('alternating loop')), 'LoopProgressGuard sinh cảnh báo alternating loop chính xác');
 
   // 30.2. WorkspaceStateVerifier
   const wsVerifier = new WorkspaceStateVerifier(process.cwd());

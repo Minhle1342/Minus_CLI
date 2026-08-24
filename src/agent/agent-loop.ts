@@ -24,7 +24,7 @@ import { LoopProgressGuard } from './loop-progress-guard.js';
 import { FinalAnswerGuard } from './final-answer-guard.js';
 import { createDelegateAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
-import { CompletionEvidenceGate, isToolResultFailure } from './completion-evidence.js';
+import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
@@ -315,6 +315,8 @@ export class AgentLoop {
     let consecutivePlanCompletionRejects = 0;
     let consecutiveIncompleteFinishes = 0;
     let consecutiveNoProgressStrategyChanges = 0;
+    let hasSubmittedSolution = false;
+    let submittedSolutionSummary: string | undefined;
     const maxEmptyRetries = 2;
     const maxIncompleteFinishRetries = 3;
     const maxIncompleteFinalRetries = 3;
@@ -687,13 +689,27 @@ export class AgentLoop {
           this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
           CLI.renderToolCall(toolName, toolArgs);
 
-          // Chạy tool qua pipeline an toàn
-          const executionResult = await this.toolRunner.run(toolName, toolArgs, {
-            sessionId: session.id,
-            agentId: this.agentId,
-            turn,
-            userRequest: turnUserRequest,
-          });
+          // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
+          // Chặn các lệnh kiểm thử / submit dư thừa nếu nhiệm vụ đã được submit_solution hoàn tất và không có thay đổi file mới
+          let executionResult: { durationMs: number; result: Record<string, any> };
+          if (hasSubmittedSolution && (toolName === 'submit_solution' || (toolName === 'run_command' && isVerificationCommand(toolArgs.command)))) {
+            const redundantPayload = {
+              success: true,
+              submitted: true,
+              summary: submittedSolutionSummary || 'Task completed and submitted.',
+              nextAction: 'final_answer',
+              message: 'Solution has already been submitted and verified. No files have changed since submission. Do not execute further verification tools; conclude your turn with your final response to the user immediately.',
+            };
+            executionResult = { durationMs: 0, result: redundantPayload };
+          } else {
+            // Chạy tool qua pipeline an toàn
+            executionResult = await this.toolRunner.run(toolName, toolArgs, {
+              sessionId: session.id,
+              agentId: this.agentId,
+              turn,
+              userRequest: turnUserRequest,
+            });
+          }
 
           CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
           this.kernel?.ctx.events.emit(
@@ -714,8 +730,9 @@ export class AgentLoop {
           }, this._workspace);
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result);
-          if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text'].includes(toolName)) {
+          if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             this.verificationPolicy.recordModification(String(toolArgs.path || ''));
+            hasSubmittedSolution = false;
           }
           if (toolName === 'run_command') {
             this.verificationPolicy.recordVerification(
@@ -723,6 +740,16 @@ export class AgentLoop {
               !isToolResultFailure(executionResult.result),
               String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
               executionResult.result.exitCode,
+            );
+          }
+          if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
+            hasSubmittedSolution = true;
+            submittedSolutionSummary = String(toolArgs.summary || '').trim();
+            this.verificationPolicy.recordVerification(
+              String(toolArgs.verificationEvidence || 'submit_solution'),
+              true,
+              submittedSolutionSummary.slice(0, 240),
+              0,
             );
           }
 
@@ -817,6 +844,27 @@ export class AgentLoop {
 
       // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
       if (!hasValidText) {
+        // Post-Submission Graceful Auto-Finalization (Codex CLI Standard):
+        // Nếu đã submit_solution thành công và có summary đầy đủ mà model sinh turn rỗng/chỉ reasoning, chốt Final Answer ngay lập tức
+        if (hasSubmittedSolution && submittedSolutionSummary) {
+          const finalAnswer = submittedSolutionSummary;
+          CLI.renderModelAction('final_answer');
+          CLI.renderStepFooter();
+          await CLI.renderFinalAnswer(finalAnswer);
+          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
+          session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+          await this.persistSession(session);
+          session.append('step/end', { turn, step, reason: 'submitted-solution-final-answer' });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', {
+            ...hookContext,
+            reason: 'submitted-solution-final-answer',
+          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+          this.goalManager.disarm();
+          return finalAnswer;
+        }
+
         consecutiveEmptyTurns++;
 
         if (consecutiveEmptyTurns <= maxEmptyRetries) {
@@ -827,18 +875,20 @@ export class AgentLoop {
                 'Model sinh suy luận System 2 nhưng chưa phát sinh tool_calls. Đang tự động kích hoạt Continuation Protocol...'
               );
             }
-            session.addUserMessage(
-              '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.'
-            );
+            const noteText = hasSubmittedSolution
+              ? '[SYSTEM NOTE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools or build commands. Output your final response and summary to the user now.'
+              : '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.';
+            session.addUserMessage(noteText);
             await this.persistSession(session);
           } else {
             CLI.renderReflectionAlert(
               consecutiveEmptyTurns,
               'Model trả về phản hồi rỗng. Đang tự động kích hoạt Continuation Protocol để tiếp tục tác vụ...'
             );
-            session.addUserMessage(
-              '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.'
-            );
+            const noteText = hasSubmittedSolution
+              ? '[SYSTEM NOTE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools or build commands. Output your final response and summary to the user now.'
+              : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
+            session.addUserMessage(noteText);
             await this.persistSession(session);
           }
 

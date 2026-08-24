@@ -100,31 +100,49 @@ export class PlanManager {
   private verificationRequired = false;
 
   bindSession(session: Session): void {
-    if (this.session === session) return;
+    if (this.session === session && this.tasks.length > 0) return;
 
     this.session = session;
-    const planEvent = session
+    this.rehydrateFromSession();
+  }
+
+  /** Rehydrate plan state from the most recent valid session plan event. */
+  rehydrateFromSession(): boolean {
+    if (!this.session) return false;
+    const planEvents = this.session
       .getEvents()
-      .filter((event) => event.type === 'plan/change')
-      .at(-1);
-    this.activeTurn = planEvent?.data.planTurn;
-    this.goal = planEvent?.data.planGoal || '';
-    this.planRequired = Boolean(planEvent?.data.planRequired);
-    this.verificationRequired = Boolean(planEvent?.data.planVerificationRequired);
-    this.tasks = (planEvent?.data.plan || []).map((task) => ({
-      id: task.id,
-      title: task.title,
-      acceptanceCriteria: task.acceptanceCriteria || `Produce a verifiable result for: ${task.title}`,
-      status: VALID_STATUSES.has(task.status as TaskStatus) ? task.status as TaskStatus : 'PENDING',
-      ...(task.notes ? { notes: task.notes } : {}),
-      evidence: (task.evidence || []).map((item) => ({
-        toolName: item.toolName,
-        kind: item.kind || 'other',
-        outcome: item.outcome === 'failure' ? 'failure' : 'success',
-        summary: item.summary,
-        recordedAt: item.recordedAt,
-      })),
-    }));
+      .filter((event) => event.type === 'plan/change');
+
+    for (let i = planEvents.length - 1; i >= 0; i--) {
+      const event = planEvents[i];
+      if (event.data.reason === 'cleared') {
+        this.tasks = [];
+        return false;
+      }
+      const plan = event.data.plan;
+      if (Array.isArray(plan) && plan.length > 0) {
+        this.activeTurn = event.data.planTurn ?? this.activeTurn;
+        this.goal = event.data.planGoal || this.goal;
+        this.planRequired = Boolean(event.data.planRequired);
+        this.verificationRequired = Boolean(event.data.planVerificationRequired);
+        this.tasks = plan.map((task: any) => ({
+          id: task.id,
+          title: task.title,
+          acceptanceCriteria: task.acceptanceCriteria || `Produce a verifiable result for: ${task.title}`,
+          status: VALID_STATUSES.has(task.status as TaskStatus) ? (task.status as TaskStatus) : 'PENDING',
+          ...(task.notes ? { notes: task.notes } : {}),
+          evidence: (task.evidence || []).map((item: any) => ({
+            toolName: item.toolName,
+            kind: item.kind || 'other',
+            outcome: item.outcome === 'failure' ? 'failure' : 'success',
+            summary: item.summary,
+            recordedAt: item.recordedAt,
+          })),
+        }));
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Start a fresh plan boundary for a new user turn while preserving old events. */
@@ -192,6 +210,30 @@ export class PlanManager {
     return this.getTasks();
   }
 
+  /** Dynamically add a task to an existing in-flight plan. */
+  addTask(task: PlanTaskInput): PlanTask {
+    if (this.tasks.length >= 7) {
+      throw new Error('Plan already contains the maximum of 7 tasks.');
+    }
+    const id = task.id !== undefined && Number.isInteger(task.id) && task.id > 0
+      ? task.id
+      : (Math.max(0, ...this.tasks.map((t) => t.id)) + 1);
+    if (this.tasks.some((t) => t.id === id)) {
+      throw new Error(`Duplicate plan task id: ${id}.`);
+    }
+    const title = task.title?.trim() || `Step ${id}`;
+    const newTask: PlanTask = {
+      id,
+      title,
+      acceptanceCriteria: task.acceptanceCriteria?.trim() || `Produce an observable, verifiable result for: ${title}`,
+      status: this.tasks.some((t) => t.status === 'IN_PROGRESS') ? 'PENDING' : 'IN_PROGRESS',
+      evidence: [],
+    };
+    this.tasks.push(newTask);
+    this.persist('task-added');
+    return cloneTask(newTask);
+  }
+
   /** Attach durable evidence from an actually observed non-planning tool result. */
   recordToolEvidence(toolName: string, args: Record<string, any>, result: Record<string, any>): void {
     if (!this.hasPlan() || PLAN_TOOL_NAMES.has(toolName)) return;
@@ -217,25 +259,46 @@ export class PlanManager {
     if (!Number.isInteger(id) || id < 1 || !VALID_STATUSES.has(status)) {
       throw new Error('Task id/status is invalid.');
     }
+    if (this.tasks.length === 0) {
+      this.rehydrateFromSession();
+    }
     const taskIndex = this.tasks.findIndex((task) => task.id === id);
     if (taskIndex < 0) return null;
 
     const task = this.tasks[taskIndex];
     const activeTask = this.getActiveTaskReference();
     if (TERMINAL_STATUSES.has(task.status)) {
+      if (task.status === status) {
+        if (notes && typeof notes === 'string') task.notes = notes.trim();
+        return cloneTask(task);
+      }
       throw new Error(`Task #${id} is already terminal (${task.status}) and cannot be reopened.`);
-    }
-    if (activeTask && activeTask.id !== id) {
-      throw new Error(`Task #${activeTask.id} is the only active task. Finish it before updating task #${id}.`);
-    }
-    if (status === 'PENDING') {
-      throw new Error('An active task cannot be moved backwards to PENDING.');
-    }
-    if (status === 'IN_PROGRESS') {
-      return cloneTask(task);
     }
 
     const normalizedNotes = typeof notes === 'string' ? notes.trim() : '';
+
+    if (status === 'IN_PROGRESS') {
+      if (activeTask && activeTask.id !== id) {
+        if (activeTask.id < id) {
+          activeTask.status = 'COMPLETED';
+          if (!activeTask.notes) activeTask.notes = 'Completed prior to starting next step';
+        }
+      }
+      task.status = 'IN_PROGRESS';
+      if (normalizedNotes) task.notes = normalizedNotes;
+      this.persist('task-started');
+      return cloneTask(task);
+    }
+
+    if (activeTask && activeTask.id !== id && activeTask.id < id) {
+      activeTask.status = 'COMPLETED';
+      if (!activeTask.notes) activeTask.notes = 'Completed prior to advancing';
+    }
+
+    if (status === 'PENDING') {
+      throw new Error('An active task cannot be moved backwards to PENDING.');
+    }
+
     if (
       status === 'COMPLETED'
       && this.activeTurn !== undefined
@@ -250,7 +313,7 @@ export class PlanManager {
     if (normalizedNotes) task.notes = normalizedNotes;
 
     const nextPending = this.tasks.slice(taskIndex + 1).find((candidate) => candidate.status === 'PENDING');
-    if (nextPending) nextPending.status = 'IN_PROGRESS';
+    if (nextPending && status === 'COMPLETED') nextPending.status = 'IN_PROGRESS';
 
     this.persist('updated');
     return cloneTask(task);

@@ -17,6 +17,7 @@ export interface SubmitSolutionResult {
   filesModified: string[];
   verificationEvidence: string;
   timestamp: string;
+  nextAction?: string;
   message: string;
 }
 
@@ -78,7 +79,8 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         filesModified,
         verificationEvidence,
         timestamp,
-        message: 'Solution successfully submitted with empirical verification evidence.',
+        nextAction: 'final_answer',
+        message: 'Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final answer and summary to the user.',
       };
     },
   };
