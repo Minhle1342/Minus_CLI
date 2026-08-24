@@ -742,6 +742,46 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     return 'reject';
   });
 
+  const switchComposeWorkspace = async (targetPath: string, saveCurrent = true): Promise<void> => {
+    const resolvedPath = path.resolve(targetPath);
+    const oldPath = workspace.rootDir;
+    if (saveCurrent) await sessionPersistence.save(activeSession!).catch(() => {});
+    workspace = new Workspace(resolvedPath);
+    activeWorkspaceRef = workspace;
+    agentLoop.setWorkspace(workspace);
+    sessionPersistence = new SessionPersistence(workspace.rootDir);
+    agentLoop.setSessionPersistence(sessionPersistence);
+    agentLoop.bindSession(activeSession!);
+    await sessionPersistence.save(activeSession!);
+    saveSession({ activeSessionId: activeSession!.id, workspacePath: workspace.rootDir });
+    CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
+  };
+
+  const renderComposeState = (): void => {
+    const state = kernel.ctx.compose.getState();
+    if (!state) {
+      console.log(`\n${c.yellow}No Compose run exists. Use /compose <objective>.${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${c.brightMagenta}${c.bold}Compose ${state.id.slice(0, 8)}${c.reset} ${c.cyan}[${state.phase}]${c.reset}`);
+    console.log(`  Objective: ${state.objective}`);
+    console.log(`  Spec: ${state.specPath}${state.specHash ? ` (${state.specHash.slice(0, 12)})` : ''}`);
+    console.log(`  Worktree: ${state.worktreePath || 'not created'}`);
+    console.log(`  Grill: ${state.grillQnA.filter((item) => Boolean(item.answer)).length}/${state.grillQnA.length} answered`);
+    console.log(`  Acceptance: ${state.testMatrix.map((item) => `${item.id}=${item.status}`).join(', ') || 'empty'}\n`);
+  };
+
+  const applyComposeResult = async (result: Awaited<ReturnType<typeof kernel.ctx.compose.advance>>): Promise<void> => {
+    console.log(`\n${c.brightMagenta}${c.bold}[COMPOSE ${result.state.phase}]${c.reset} ${result.message}\n`);
+    if (result.workspaceAction?.type === 'switch') {
+      await switchComposeWorkspace(result.workspaceAction.path, fs.existsSync(workspace.rootDir));
+    }
+    if (result.completion) {
+      await kernel.ctx.dream.recordComposeCompletion(result.completion);
+      console.log(`${c.green}Verified Compose outcome was handed to Dream memory at .knowledge/DREAM_INSIGHTS.md.${c.reset}\n`);
+    }
+  };
+
   try {
     while (true) {
       const userPrompt = await readUserPrompt(rl, input, CLI.getPromptSymbol());
@@ -758,6 +798,33 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
 
       // Xử lý các Slash Commands
+      if (trimmed === '/compose' || trimmed.startsWith('/compose ') || trimmed === '/compose-next' || trimmed.startsWith('/compose-next ')) {
+        try {
+          if (trimmed === '/compose-next' || trimmed.startsWith('/compose-next ')) {
+            const answer = trimmed.slice('/compose-next'.length).trim() || undefined;
+            await applyComposeResult(await kernel.ctx.compose.advance(workspace, answer));
+            continue;
+          }
+          const inputValue = trimmed.slice('/compose'.length).trim();
+          const lower = inputValue.toLowerCase();
+          if (!inputValue || lower === 'status') {
+            renderComposeState();
+          } else if (lower === 'abort') {
+            const result = await kernel.ctx.compose.abort();
+            console.log(`\n${c.yellow}${result.message}${c.reset}\n`);
+            if (result.workspaceAction) await switchComposeWorkspace(result.workspaceAction.path, fs.existsSync(workspace.rootDir));
+          } else if (lower.startsWith('answer ')) {
+            await kernel.ctx.compose.answerGrill(inputValue.slice('answer '.length));
+            renderComposeState();
+          } else {
+            await applyComposeResult(await kernel.ctx.compose.start(inputValue));
+          }
+        } catch (error: any) {
+          console.error(`\n${c.red}Compose: ${error.message}${c.reset}\n`);
+        }
+        continue;
+      }
+
       if (trimmed === '/help') {
         CLI.renderHelp();
         continue;
@@ -1600,6 +1667,10 @@ ${planPrompt}`;
     input.removeListener('keypress', handleInputKeypress);
     slashHints.dispose();
     rl.close();
+    try {
+      const { disposeLspManager } = await import('./lsp/lsp-manager.js');
+      await disposeLspManager(kernel.ctx.workspace);
+    } catch {}
     try {
       await kernel.ctx.sandbox.dispose();
     } catch {}

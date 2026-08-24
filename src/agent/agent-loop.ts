@@ -105,7 +105,7 @@ export class AgentLoop {
       this._workspace = this.kernel.ctx.workspace;
       this.toolProvider = options?.toolScope || this.toolRegistry;
       this.toolRunner = options?.toolScope
-        ? new ToolRunner(this.toolProvider, this._workspace)
+        ? new ToolRunner(this.toolProvider, this._workspace, undefined, this.kernel.ctx.compose)
         : this.kernel.ctx.toolRunner;
       this.checkpointManager = this.kernel.ctx.checkpoints;
       this.contextCompactor = this.kernel.ctx.compactor;
@@ -199,7 +199,7 @@ export class AgentLoop {
       if (this.toolProvider === this.toolRegistry) {
         this.toolRunner = this.kernel.ctx.toolRunner;
       } else {
-        this.toolRunner = new ToolRunner(this.toolProvider, workspace);
+        this.toolRunner = new ToolRunner(this.toolProvider, workspace, undefined, this.kernel.ctx.compose);
       }
     } else {
       this.toolRunner = new ToolRunner(this.toolProvider, this._workspace);
@@ -500,7 +500,8 @@ export class AgentLoop {
             ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
           ].join('\n')
         : '';
-      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, advicePrompt].filter(Boolean).join('\n\n');
+      const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
+      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, composeContext, advicePrompt].filter(Boolean).join('\n\n');
 
       session.recordRequestHeader({
         turn,

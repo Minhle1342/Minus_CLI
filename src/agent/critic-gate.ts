@@ -17,6 +17,13 @@ export interface CriticEvaluation {
   auditRecord?: TaskAuditRecord;
 }
 
+export interface ComposeAcceptanceContract {
+  matrix: Array<{ id: string; status: string; evidenceSeq?: number }>;
+  lastMutationSeq: number;
+  changedFiles: string[];
+  registeredFiles: string[];
+}
+
 /**
  * CriticGate - Cổng Phản biện Độc lập (Actor-Critic Dual-Role Architecture)
  * 
@@ -33,6 +40,17 @@ export class CriticGate {
 
   constructor(evidenceGate?: CompletionEvidenceGate) {
     this.evidenceGate = evidenceGate || new CompletionEvidenceGate();
+  }
+
+  /** Independent, side-effect-free acceptance decision for a locked Compose run. */
+  evaluateComposeAcceptance(contract: ComposeAcceptanceContract): { approved: boolean; reasons: string[] } {
+    const reasons: string[] = [];
+    const stale = contract.matrix.filter((item) => item.status !== 'PASSED' || (item.evidenceSeq || 0) <= contract.lastMutationSeq);
+    if (contract.matrix.length === 0) reasons.push('Compose acceptance matrix is empty.');
+    else if (stale.length > 0) reasons.push(`${stale.length} acceptance scenario(s) lack fresh passing evidence.`);
+    const unregistered = contract.changedFiles.filter((file) => !contract.registeredFiles.some((registered) => file === registered || file.startsWith(`${registered.replace(/\/$/, '')}/`)));
+    if (unregistered.length > 0) reasons.push(`Unregistered changed paths: ${unregistered.join(', ')}`);
+    return { approved: reasons.length === 0, reasons };
   }
 
   /**

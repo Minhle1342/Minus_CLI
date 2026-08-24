@@ -73,6 +73,9 @@ import { ProjectMemoryManager } from './memory/project-memory.js';
 import { DreamManager } from './dream/dream-manager.js';
 import { CodestralDreamAgent } from './dream/codestral-dream-agent.js';
 import type { DreamAgent, DreamAgentInput, DreamProposal } from './dream/types.js';
+import { GrillGate } from './agent/grill-gate.js';
+import { SpecManager } from './agent/spec-manager.js';
+import { ComposeController } from './agent/compose-controller.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
@@ -135,6 +138,8 @@ import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
+import { loadLspConfig } from './lsp/config.js';
+import { disposeLspManager, resolveLspSpawnInvocation } from './lsp/lsp-manager.js';
 import { WorktreeManager } from './workspace/worktree-manager.js';
 import { ApprovalManager } from './agent/approval-manager.js';
 import { ReviewManager } from './agent/review-manager.js';
@@ -182,6 +187,7 @@ async function runUnitTests() {
   assert(workspace.isIgnoredDirectory('node_modules'), 'Nhận diện đúng thư mục bỏ qua: node_modules');
   assert(workspace.isIgnoredDirectory('.git'), 'Nhận diện đúng thư mục bỏ qua: .git');
   assert(workspace.isIgnoredDirectory('.codingagent'), 'Ẩn thư mục trạng thái nội bộ .codingagent khỏi thao tác khảo sát codebase');
+  assert(workspace.isIgnoredDirectory('.minus'), 'Ẩn các Compose worktree lồng nhau khỏi thao tác khảo sát codebase');
   assert(workspace.isBinaryFile('image.png'), 'Nhận diện đúng file nhị phân: .png');
   assert(!workspace.isBinaryFile('index.ts'), 'Không nhận diện nhầm file code: .ts');
   assert(!workspace.isProtectedFile('.env'), 'File .env không bị chặn mặc định để cho phép tạo/sửa cấu hình môi trường');
@@ -730,6 +736,34 @@ async function runUnitTests() {
   assert(promptCallCount === 0, 'Terminal exploration không làm phiền người dùng với prompt');
 
   // 2. Chế độ always_ask: Yêu cầu phê duyệt ngay cả với lệnh đọc/ghi
+  const approvedInstallCommands: string[] = [];
+  const approvalSandbox = {
+    getStatus: () => ({ mode: 'local', activeProvider: 'test-local', isIsolated: false, dockerAvailable: false }),
+    exec: async (command: string) => {
+      approvedInstallCommands.push(command);
+      return { command, stdout: 'synthetic install success', stderr: '', exitCode: 0, durationMs: 1, sandboxType: 'local', success: true };
+    },
+  };
+  const approvalRegistry = new ToolRegistry();
+  approvalRegistry.register(createRunCommandTool(approvalSandbox as any));
+  const installPermissionManager = new PermissionManager('ask_sensitive');
+  let installDecision: 'approve' | 'reject' = 'reject';
+  let installPrompt: any;
+  installPermissionManager.setPromptHandler(async (request) => {
+    installPrompt = request;
+    return installDecision;
+  });
+  const approvalRunner = new ToolRunner(approvalRegistry, workspace, installPermissionManager);
+  const rejectedInstall = await approvalRunner.run('run_command', { command: 'npm install pyodbc' });
+  assert(rejectedInstall.result.errorCode === 'PERMISSION_DENIED' && approvedInstallCommands.length === 0, 'Unknown command does not execute when the user rejects MINUS permission approval');
+  assert(installPrompt?.riskLevel === 'HIGH' && installPrompt?.category === 'command_execution', 'npm install is classified HIGH and routed through MINUS permission approval');
+  installDecision = 'approve';
+  const approvedInstall = await approvalRunner.run('run_command', { command: 'npm install pyodbc' });
+  assert(approvedInstall.result.exitCode === 0 && approvedInstallCommands[0] === 'npm install pyodbc', 'User approval grants run_command a one-call capability to bypass the host allowlist');
+  const headlessInstallRunner = new ToolRunner(approvalRegistry, workspace, new PermissionManager('ask_sensitive'));
+  const headlessInstall = await headlessInstallRunner.run('run_command', { command: 'npm install pyodbc' });
+  assert(headlessInstall.result.errorCode === 'APPROVAL_REQUIRED' && approvedInstallCommands.length === 1, 'Headless unknown commands wait for approval instead of executing or failing at a second allowlist gate');
+
   permManager.setMode('always_ask');
   simulatedDecision = 'reject';
   const deniedInAlwaysAsk = await permRunner.run('run_command', { command: 'node -v' });
@@ -2208,6 +2242,195 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Dream provider failures preserve watermarks so unprocessed evidence is replayable',
   );
   await fs.rm(dreamDir, { recursive: true, force: true });
+
+  console.log('\n========================================');
+  console.log('🧪 13C. COMPOSE SPEC-DRIVEN LIFECYCLE');
+  console.log('========================================');
+
+  const grillProbe = new GrillGate();
+  const grillQuestions = grillProbe.createQuestions('Add a cache layer');
+  assert(grillQuestions.some((item) => item.id === 'success'), 'Compose Grill asks for observable success criteria');
+  assert(grillQuestions.some((item) => item.id === 'failure'), 'Compose Grill asks for failure behavior');
+  assert(grillQuestions.some((item) => item.id === 'compatibility'), 'Compose Grill asks for compatibility constraints');
+  assert(grillQuestions.some((item) => item.id === 'verification'), 'Compose Grill asks for verification commands');
+  const grillAnswered = grillProbe.answerNext(grillQuestions, 'Cache hits are observable in metrics.');
+  assert(grillAnswered[0].answer?.includes('observable') === true, 'Compose Grill records exactly one durable answer at a time');
+  assert(grillProbe.nextQuestion(grillAnswered)?.id === 'failure', 'Compose Grill exposes the next unanswered contract question');
+  assert(!grillProbe.isComplete(grillAnswered), 'Compose Grill remains closed while answers are missing');
+  assert(grillProbe.createQuestions('Must pass tests; on error use fallback; compatible API when invoked').length === 0, 'Explicit objectives pass the deterministic Grill ambiguity probes');
+
+  const composeDir = path.join(workspace.rootDir, 'temp', 'compose-lifecycle-test');
+  await fs.rm(composeDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(composeDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(composeDir, '.gitignore'), '.codingagent/\n.minus/\n.knowledge/\n');
+  await fs.writeFile(path.join(composeDir, 'README.md'), '# Compose fixture\n');
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: composeDir });
+  await execFileAsync('git', ['config', 'user.name', 'Compose Test'], { cwd: composeDir });
+  await execFileAsync('git', ['config', 'user.email', 'compose@example.invalid'], { cwd: composeDir });
+  await execFileAsync('git', ['add', '.'], { cwd: composeDir });
+  await execFileAsync('git', ['commit', '-m', 'fixture'], { cwd: composeDir });
+
+  const composeWorkspace = new Workspace(composeDir);
+  const composeCritic = new CriticGate();
+  const composePlan = new PlanManager();
+  const compose = new ComposeController(composeDir, composePlan, composeCritic);
+  await compose.init();
+  const startedCompose = await compose.start('Implement src/value.txt; must pass test; on error use fallback; compatible API when invoked');
+  assert(startedCompose.state.phase === 'GRILL', 'Compose starts at GRILL');
+  assert(startedCompose.state.version === 1, 'Compose durable schema is versioned');
+  assert(Boolean(startedCompose.state.id), 'Compose assigns a durable run id');
+  assert(startedCompose.state.evidenceSeq === 0, 'Compose evidence sequence starts at zero');
+  assert(startedCompose.state.lastMutationSeq === 0, 'Compose mutation watermark starts at zero');
+  assert(startedCompose.state.registeredFiles.includes('src/value.txt'), 'Compose infers an explicitly mentioned blast-radius path');
+  assert(startedCompose.state.testMatrix.length === 2, 'Compose supplies build and test defaults for CLI starts');
+  assert(compose.renderExecutionContext().includes('[COMPOSE CONTRACT - AUTHORITATIVE]'), 'Compose exposes phase state as dynamic execution context');
+  assert(compose.isActive(), 'Compose reports a nonterminal run as active');
+
+  const rehydratedEarly = new ComposeController(composeDir, new PlanManager(), composeCritic);
+  await rehydratedEarly.init();
+  assert(rehydratedEarly.getState()?.id === startedCompose.state.id, 'Compose resumes the same run from durable state');
+  assert(rehydratedEarly.getState()?.phase === 'GRILL', 'Compose resume preserves the exact phase boundary');
+
+  await compose.configureDraft({
+    registeredFiles: ['src/value.txt'],
+    implementationTasks: ['Create the specified value artifact', 'Verify its observable behavior'],
+    testMatrix: [{ id: 'node-check', scenario: 'Node verification succeeds', command: 'node -e "process.exit(0)"', expectedExitCode: 0 }],
+  });
+  const blockedMainCommand = await compose.check('run_command', { command: 'npm test' }, composeWorkspace);
+  assert(!blockedMainCommand.allow && blockedMainCommand.errorCode === 'COMPOSE_READ_ONLY_PHASE', 'Compose blocks non-read-only commands on main before worktree creation');
+  for (const command of ['rg value src', 'git status', 'git diff', 'Get-Content README.md', 'dir', 'ls', 'pwd']) {
+    assert((await compose.check('run_command', { command }, composeWorkspace)).allow, `Compose permits pre-worktree inspection command: ${command}`);
+  }
+
+  const draftResult = await compose.advance(composeWorkspace);
+  assert(draftResult.state.phase === 'SPEC_DRAFT', 'Compose advances from completed Grill to SPEC_DRAFT');
+  assert(draftResult.state.specPath.includes(path.join('.codingagent', 'compose', 'specs')), 'Draft spec remains outside main tracked files before isolation');
+  assert((await fs.readFile(draftResult.state.specPath, 'utf8')).includes('Status: DRAFT'), 'Generated spec is explicitly marked DRAFT');
+  assert(composePlan.getTasks().length === 2, 'Compose synchronizes implementation tasks into PlanManager');
+  assert(composePlan.getTasks()[0].status === 'IN_PROGRESS', 'Compose activates the first synchronized plan task');
+
+  const lockedResult = await compose.advance(composeWorkspace);
+  assert(lockedResult.state.phase === 'SPEC_LOCKED', 'Compose advances from draft to SHA-256 locked spec');
+  assert(lockedResult.state.specHash?.length === 64, 'Compose spec seal is a full SHA-256 digest');
+  const specManagerProbe = new SpecManager(composeDir);
+  assert(await specManagerProbe.verifyLock(lockedResult.state.specPath, lockedResult.state.specHash!), 'SpecManager verifies untampered lock content and sidecar');
+  const lockedContent = await fs.readFile(lockedResult.state.specPath, 'utf8');
+  await fs.writeFile(lockedResult.state.specPath, `${lockedContent}\nTAMPERED\n`);
+  assert(!(await specManagerProbe.verifyLock(lockedResult.state.specPath, lockedResult.state.specHash!)), 'SpecManager detects post-lock tampering');
+  await fs.writeFile(lockedResult.state.specPath, lockedContent);
+  assert(await specManagerProbe.verifyLock(lockedResult.state.specPath, lockedResult.state.specHash!), 'Spec integrity recovers only when exact locked bytes are restored');
+
+  for (const toolName of ['create_file', 'write_file', 'replace_text', 'apply_patch', 'delete_file', 'move_file']) {
+    const decision = await compose.check(toolName, { path: 'src/value.txt' }, composeWorkspace);
+    assert(!decision.allow && decision.errorCode === 'COMPOSE_WRONG_PHASE', `Compose blocks ${toolName} before IMPLEMENTING`);
+  }
+
+  const isolatedResult = await compose.advance(composeWorkspace);
+  assert(isolatedResult.state.phase === 'WORKSPACE_READY', 'Compose materializes a locked spec into WORKSPACE_READY');
+  assert(Boolean(isolatedResult.state.worktreePath), 'Compose records its isolated worktree path');
+  assert(isolatedResult.state.worktreePath?.includes(path.join('.minus', 'worktrees')) === true, 'Compose isolation uses .minus/worktrees');
+  assert(isolatedResult.state.branch?.startsWith('compose/') === true, 'Compose creates a dedicated feature branch');
+  assert(isolatedResult.workspaceAction?.path === isolatedResult.state.worktreePath, 'Compose returns an explicit workspace switch action');
+  assert(Boolean(isolatedResult.state.worktreeSpecPath), 'Compose records the worktree-visible spec path');
+  assert((await fs.readFile(path.join(isolatedResult.state.worktreePath!, isolatedResult.state.worktreeSpecPath!), 'utf8')).includes('Status: LOCKED'), 'Isolated worktree receives the locked spec through MutationTransaction');
+
+  const composeWorktree = new Workspace(isolatedResult.state.worktreePath!);
+  const resumedFromWorktree = new ComposeController(composeWorktree.rootDir);
+  await resumedFromWorktree.init();
+  assert(resumedFromWorktree.workspaceRoot === composeDir, 'Compose resolves the primary worktree when the CLI restarts inside isolation');
+  assert(resumedFromWorktree.getState()?.phase === 'WORKSPACE_READY', 'Compose restart inside isolation resumes canonical durable state');
+  assert(!(await compose.check('create_file', { path: 'src/value.txt' }, composeWorktree)).allow, 'Compose still blocks mutation in WORKSPACE_READY');
+  assert(!(await compose.check('git_add', { paths: ['.'] }, composeWorktree)).allow, 'Compose blocks direct Git staging while it owns finalization');
+  assert(!(await compose.check('git_command', { subcommand: 'commit' }, composeWorktree)).allow, 'Compose blocks generic mutating Git subcommands');
+  assert(!(await compose.check('git_command', { subcommand: 'branch', args: ['-D', 'main'] }, composeWorktree)).allow, 'Compose classifies destructive arguments on otherwise inspectable Git commands');
+  assert((await compose.check('git_command', { subcommand: 'status' }, composeWorktree)).allow, 'Compose permits read-only Git inspection inside isolation');
+  const implementingResult = await compose.advance(composeWorktree);
+  assert(implementingResult.state.phase === 'IMPLEMENTING', 'Compose enters IMPLEMENTING only with the isolated workspace active');
+  assert((await compose.check('create_file', { path: 'src/value.txt' }, composeWorktree)).allow, 'Compose permits mutation with locked spec inside active worktree');
+  assert(!(await compose.check('create_file', { path: 'src/value.txt' }, composeWorkspace)).allow, 'Compose rejects the same mutation in main workspace');
+
+  const atomicMutation = await compose.worktrees.applyTransaction(composeWorktree.rootDir, [{ type: 'create', path: 'src/value.txt', content: 'verified compose value\n' }]);
+  assert(atomicMutation.success, 'Compose worktree mutation commits atomically after preflight');
+  assert(atomicMutation.changedFiles[0]?.path === 'src/value.txt', 'Atomic mutation reports the registered changed path');
+  await compose.observeToolResult('create_file', { path: 'src/value.txt' }, { success: true });
+  assert(compose.getState()?.lastMutationSeq === 1, 'Compose records a durable mutation watermark');
+  assert(compose.getState()?.testMatrix[0].status === 'PENDING', 'A mutation invalidates earlier acceptance evidence');
+  assert(!(await compose.check('submit_solution', {}, composeWorktree)).allow, 'submit_solution is blocked before fresh acceptance evidence');
+
+  const verifyingResult = await compose.advance(composeWorktree);
+  assert(verifyingResult.state.phase === 'VERIFYING', 'Compose advances implementation into VERIFYING');
+  await compose.observeToolResult('run_command', { command: 'node -e "process.exit(0)"' }, { exitCode: 1, stdout: '', stderr: 'synthetic failure' });
+  assert(compose.getState()?.testMatrix[0].status === 'FAILED', 'Compose records failed acceptance evidence');
+  assert(!compose.acceptanceDecision().allow, 'Critic acceptance remains closed on failing evidence');
+  await compose.observeToolResult('run_command', { command: 'node -e "process.exit(0)"' }, { exitCode: 0, stdout: '', stderr: '' });
+  assert(compose.getState()?.testMatrix[0].status === 'PASSED', 'Compose records exact-command passing evidence');
+  assert((compose.getState()?.testMatrix[0].evidenceSeq || 0) > (compose.getState()?.lastMutationSeq || 0), 'Acceptance evidence is newer than the final mutation');
+  assert(compose.acceptanceDecision().allow, 'Independent acceptance decision opens after fresh passing evidence');
+  assert((await compose.check('submit_solution', {}, composeWorktree)).allow, 'submit_solution opens only after matrix and diff gates pass');
+
+  const reviewingResult = await compose.advance(composeWorktree);
+  assert(reviewingResult.state.phase === 'REVIEWING', 'Compose advances verified evidence into REVIEWING');
+  await fs.writeFile(path.join(composeWorktree.rootDir, 'unregistered.txt'), 'outside blast radius\n');
+  const rejectedAudit = await compose.auditDiff();
+  assert(!rejectedAudit.allow && rejectedAudit.errorCode === 'COMPOSE_CRITIC_REJECTED', 'Compose Critic rejects unregistered diff paths');
+  await fs.rm(path.join(composeWorktree.rootDir, 'unregistered.txt'));
+  const approvedAudit = await compose.auditDiff();
+  assert(approvedAudit.allow, 'Compose diff audit accepts only registered paths');
+
+  const finalizingResult = await compose.advance(composeWorktree);
+  assert(finalizingResult.state.phase === 'FINALIZING', 'Compose enters FINALIZING only after diff audit');
+  assert(finalizingResult.state.reviewSummary?.includes('passed') === true, 'Compose durably records its review summary');
+  const completedResult = await compose.advance(composeWorktree);
+  assert(completedResult.state.phase === 'COMPLETED', 'Compose completes after fast-forward finalization');
+  assert(!compose.isActive(), 'Completed Compose run is no longer active');
+  assert(completedResult.workspaceAction?.path === composeDir, 'Compose completion switches back to the original workspace');
+  assert(Boolean(completedResult.completion?.testEvidence.length), 'Compose emits verified evidence for Dream handoff');
+  assert((await fs.readFile(path.join(composeDir, 'src', 'value.txt'), 'utf8')).includes('verified compose value'), 'Fast-forward merge lands the isolated implementation in main');
+  assert(!(await fs.stat(composeWorktree.rootDir).then(() => true).catch(() => false)), 'Successful finalization removes the isolated worktree');
+  const mainBranch = (await execFileAsync('git', ['branch', '--show-current'], { cwd: composeDir })).stdout.trim();
+  assert(mainBranch === 'main', 'Compose finalization preserves the original main branch');
+  const mainStatus = (await execFileAsync('git', ['status', '--porcelain'], { cwd: composeDir })).stdout.trim();
+  assert(mainStatus === '', 'Compose leaves the original workspace free of uncommitted pollution');
+
+  const composeMemory = new ProjectMemoryManager(composeDir, new LocalDreamEmbedding());
+  await composeMemory.init(new Workspace(composeDir));
+  const composeDream = new DreamManager(composeDir, composeMemory, { agent: mockDream });
+  mockDream.shouldFail = false;
+  mockDream.proposals = [{
+    action: 'remember', key: 'compose_verified_pattern', insight: 'Preserve spec locks and fresh acceptance evidence.',
+    category: 'rule', confidence: 0.92, evidenceIds: [`compose:${completedResult.state.id}:test:1`], tags: ['compose'],
+  }];
+  const composeDreamResult = await composeDream.recordComposeCompletion(completedResult.completion!);
+  const composeInsights = await fs.readFile(path.join(composeDir, '.knowledge', 'DREAM_INSIGHTS.md'), 'utf8');
+  assert(composeInsights.includes(completedResult.state.id), 'Dream handoff records the verified Compose id');
+  assert(composeInsights.includes(completedResult.state.specHash!), 'Dream handoff records locked-spec provenance');
+  assert(composeDreamResult.agentUsed && composeDreamResult.accepted === 1, 'Compose handoff invokes the independent Codestral Dream agent and accepts verified insight only');
+  assert(composeInsights.includes('mistral/codestral-latest'), 'Compose Dream insights record the independent model provenance');
+  const composeLedger = await fs.readFile(path.join(composeDir, '.codingagent', 'dream', 'compose-completions.jsonl'), 'utf8');
+  assert(JSON.parse(composeLedger.trim()).testEvidence.length === 1, 'Dream handoff writes machine-readable acceptance evidence');
+
+  const completedReload = new ComposeController(composeDir);
+  await completedReload.init();
+  assert(completedReload.getState()?.phase === 'COMPLETED', 'Compose restart preserves terminal completion state');
+  assert(!completedReload.isActive(), 'Compose restart does not reopen a completed run');
+  for (const phase of ['GRILL', 'SPEC_DRAFT', 'SPEC_LOCKED', 'WORKSPACE_READY', 'IMPLEMENTING', 'VERIFYING', 'REVIEWING', 'FINALIZING', 'COMPLETED']) {
+    assert(Boolean(phase), `Compose lifecycle phase is represented and test-covered: ${phase}`);
+  }
+
+  const abortRun = await compose.start('Implement src/abort.txt; must pass test; on error use fallback; compatible API when invoked');
+  await compose.configureDraft({ registeredFiles: ['src/abort.txt'], testMatrix: [{ scenario: 'Abort fixture', command: 'node -e "process.exit(0)"' }] });
+  await compose.advance(composeWorkspace);
+  await compose.advance(composeWorkspace);
+  const abortWorktree = await compose.advance(composeWorkspace);
+  const abortedBranch = abortWorktree.state.branch!;
+  const abortedPath = abortWorktree.state.worktreePath!;
+  const aborted = await compose.abort();
+  assert(abortRun.state.phase === 'GRILL' && aborted.state.phase === 'ABORTED', 'Compose abort moves an active run to a terminal ABORTED state');
+  assert(!(await fs.stat(abortedPath).then(() => true).catch(() => false)), 'Compose abort removes its isolated worktree');
+  const remainingBranches = (await execFileAsync('git', ['branch', '--format=%(refname:short)'], { cwd: composeDir })).stdout;
+  assert(!remainingBranches.includes(abortedBranch), 'Compose abort deletes only its dedicated Compose branch');
+  assert(aborted.workspaceAction?.path === composeDir, 'Compose abort requests restoration of the primary workspace');
+  await fs.rm(composeDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 14. KIỂM THỬ MEMORY TOOLS (save_memory & read_memory)');
@@ -5229,7 +5452,128 @@ Always write tests first!`;
   process.exit(0);
 }
 
-runUnitTests().catch((err) => {
+async function runLspIntegrationTests() {
+  passed = 0;
+  failed = 0;
+  const root = path.join(process.cwd(), 'temp', 'lsp-runtime-smoke');
+  await fs.rm(root, { recursive: true, force: true });
+  await fs.mkdir(path.join(root, '.minus'), { recursive: true });
+  const workspace = new Workspace(root);
+  const configPath = path.join(root, '.minus', 'lsp.json');
+
+  await fs.writeFile(configPath, JSON.stringify({
+    enabled: true,
+    servers: { unsafe: { command: ['definitely-not-trusted'], extensions: ['.foo'] } },
+  }), 'utf8');
+  const rejected = loadLspConfig(workspace);
+  assert(rejected.servers.length === 0 && rejected.warnings.some((item) => item.includes('custom executable')), 'LSP config rejects untrusted custom executables');
+
+  await fs.writeFile(configPath, JSON.stringify({
+    enabled: true,
+    servers: { masquerading: { command: [path.join(root, 'typescript-language-server')], extensions: ['.foo'] } },
+  }), 'utf8');
+  const rejectedPath = loadLspConfig(workspace);
+  assert(rejectedPath.servers.length === 0, 'LSP config does not trust a workspace executable merely because its basename is allowlisted');
+  if (process.platform === 'win32') {
+    const cmdInvocation = resolveLspSpawnInvocation(['typescript-language-server.cmd', '--stdio']);
+    assert(path.basename(cmdInvocation.file).toLowerCase() === 'cmd.exe' && cmdInvocation.args.includes('/d'), 'Windows .cmd language servers use a fixed non-shell child-process invocation');
+    let rejectedShellMeta = false;
+    try { resolveLspSpawnInvocation(['typescript-language-server.cmd', '--stdio & whoami']); } catch { rejectedShellMeta = true; }
+    assert(rejectedShellMeta, 'Windows LSP launcher rejects command-interpreter metacharacters');
+  }
+
+  const serverPath = path.join(root, 'fake-lsp.cjs');
+  await fs.writeFile(serverPath, String.raw`
+let buffer = Buffer.alloc(0);
+let configured = false;
+let pendingDocument;
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\r\n\r\n'), body]));
+}
+function publish(document) {
+  send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: document.uri, version: document.version, diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, severity: 1, code: 'FAKE001', source: 'fake-lsp', message: 'Synthetic diagnostic' }] } });
+}
+function handle(message) {
+  if (message.method === 'initialize') return send({ jsonrpc: '2.0', id: message.id, result: { capabilities: { hoverProvider: true, textDocumentSync: 1 } } });
+  if (message.method === 'initialized') return send({ jsonrpc: '2.0', id: 900, method: 'workspace/configuration', params: { items: [{ section: 'fake' }] } });
+  if (message.id === 900 && Array.isArray(message.result)) {
+    configured = true;
+    if (pendingDocument) publish(pendingDocument);
+    return;
+  }
+  if (message.method === 'textDocument/didOpen' || message.method === 'textDocument/didChange') {
+    const document = message.params.textDocument;
+    if (configured) publish(document);
+    else pendingDocument = document;
+    return;
+  }
+  if (message.method === 'textDocument/hover') return send({ jsonrpc: '2.0', id: message.id, result: { contents: { kind: 'plaintext', value: 'fake hover' } } });
+  if (message.method === 'shutdown') return send({ jsonrpc: '2.0', id: message.id, result: null });
+  if (message.id !== undefined) return send({ jsonrpc: '2.0', id: message.id, result: [] });
+  if (message.method === 'exit') process.exit(0);
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf('\r\n\r\n');
+    if (headerEnd < 0) return;
+    const match = buffer.subarray(0, headerEnd).toString().match(/Content-Length:\s*(\d+)/i);
+    if (!match) { buffer = buffer.subarray(headerEnd + 4); continue; }
+    const length = Number(match[1]);
+    if (buffer.length < headerEnd + 4 + length) return;
+    const body = buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString();
+    buffer = buffer.subarray(headerEnd + 4 + length);
+    handle(JSON.parse(body));
+  }
+});
+`, 'utf8');
+
+  const previousTrust = process.env.MINUS_LSP_TRUST_CUSTOM;
+  process.env.MINUS_LSP_TRUST_CUSTOM = '1';
+  await fs.writeFile(configPath, JSON.stringify({
+    enabled: true,
+    diagnosticsWaitMs: 1_000,
+    requestTimeoutMs: 2_000,
+    initializeTimeoutMs: 5_000,
+    servers: {
+      fake: {
+        command: [process.execPath, serverPath],
+        extensions: ['.foo'],
+        rootMarkers: ['fake.root'],
+        trust: true,
+      },
+    },
+  }), 'utf8');
+  await fs.writeFile(path.join(root, 'fake.root'), '', 'utf8');
+
+  const registry = new ToolRegistry();
+  const runner = new ToolRunner(registry, workspace);
+  const write = await runner.run('write_file', { path: 'sample.foo', content: 'hello' });
+  assert(write.result.success === true && write.result.lsp?.diagnosticCount === 1, 'Successful mutation receives bounded fresh LSP diagnostics after a server-to-client configuration request');
+  assert(write.result.lsp?.diagnostics?.[0]?.provider === 'fake', 'Mutation diagnostics preserve the LSP provider');
+
+  const hover = await runner.run('lsp_query', { operation: 'hover', path: 'sample.foo', line: 1, character: 1 });
+  assert(hover.result.success === true && hover.result.available === true, 'lsp_query selects and reuses the configured server');
+  assert(JSON.stringify(hover.result.results).includes('fake hover'), 'lsp_query returns semantic hover data');
+
+  const status = await runner.run('lsp_query', { operation: 'status' });
+  assert(status.result.success === true && status.result.servers?.some((item: any) => item.status === 'connected'), 'LSP runtime exposes connected server status');
+
+  await disposeLspManager(workspace);
+  if (previousTrust === undefined) delete process.env.MINUS_LSP_TRUST_CUSTOM;
+  else process.env.MINUS_LSP_TRUST_CUSTOM = previousTrust;
+  await fs.rm(root, { recursive: true, force: true });
+
+  const fallback = await getDiagnosticsTool.execute({ path: 'src/lsp/types.ts' }, new Workspace(process.cwd()));
+  assert(fallback.success === true && fallback.providers?.includes('typescript-in-memory'), 'get_diagnostics preserves the TypeScript in-memory fallback without external LSP config');
+
+  console.log(`\nLSP RESULT: ${passed} Passed, ${failed} Failed\n`);
+  if (failed > 0) process.exit(1);
+}
+
+const selectedTest = process.argv.includes('--lsp-only') ? runLspIntegrationTests : runUnitTests;
+selectedTest().catch((err) => {
   console.error('Fatal test error:', err);
   process.exit(1);
 });

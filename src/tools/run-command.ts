@@ -1,6 +1,6 @@
 import { exec } from 'node:child_process';
 import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
+import { ToolDefinition, type ToolExecutionContext } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
@@ -213,8 +213,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       },
       required: [],
     },
-    async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
+    async execute(args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
       const rawCommand = String(args.command || args.CommandLine || '').trim();
+      const hasExplicitPermission = context?.permissionGranted === true;
       const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
       const configuredTimeout = Number(process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
       const requestedTimeout = Number(args.timeout_ms);
@@ -285,7 +286,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       if (executionTarget === 'host') {
-        if (!isAllowedCommand(rawCommand)) {
+        if (!isAllowedCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" không nằm trong allowlist để thực thi trên Host.`,
@@ -332,7 +333,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const status = sandboxManager.getStatus();
         
         // Nếu không ở trong môi trường Docker Container cô lập, vẫn áp dụng allowlist bảo vệ máy chủ
-        if (!status.isIsolated && !isAllowedCommand(rawCommand)) {
+        if (!status.isIsolated && !isAllowedCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép trên Host. (Bật Docker Sandbox để chạy lệnh không giới hạn).`,
@@ -388,7 +389,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Fallback mặc định
-      if (!isAllowedCommand(rawCommand)) {
+      if (!isAllowedCommand(rawCommand) && !hasExplicitPermission) {
         return {
           command: rawCommand,
           error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép.`,

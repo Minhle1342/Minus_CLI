@@ -13,6 +13,7 @@ import { moveFileTool } from './move-file.js';
 import { inspectSymbolTool } from './inspect-symbol.js';
 import { findReferencesTool } from './find-references.js';
 import { getDiagnosticsTool } from './get-diagnostics.js';
+import { lspQueryTool } from './lsp-query.js';
 import { analyzeImpactTool } from './blast-radius.js';
 import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
@@ -80,6 +81,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(inspectSymbolTool);
     this.register(findReferencesTool);
     this.register(getDiagnosticsTool);
+    this.register(lspQueryTool);
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
     this.register(runCommandTool);

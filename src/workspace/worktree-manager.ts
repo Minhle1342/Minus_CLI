@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { Workspace } from './workspace.js';
+import { MutationTransaction, type StagedMutationOp } from './mutation-transaction.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,10 +17,12 @@ export interface WorktreeInfo {
 export class WorktreeManager {
   readonly workspaceRoot: string;
   readonly worktreeDir: string;
+  readonly composeWorktreeDir: string;
 
   constructor(workspaceRoot: string) {
     this.workspaceRoot = path.resolve(workspaceRoot);
     this.worktreeDir = path.join(this.workspaceRoot, '.codingagent', 'worktrees');
+    this.composeWorktreeDir = path.join(this.workspaceRoot, '.minus', 'worktrees');
   }
 
   private async execGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -27,6 +31,80 @@ export class WorktreeManager {
       timeout: 30000,
       maxBuffer: 10 * 1024 * 1024,
     });
+  }
+
+  private async execGitIn(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+    return execFileAsync('git', args, { cwd, timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+  }
+
+  /** Create a unique Compose branch under .minus/worktrees. */
+  async createFeatureWorktree(featureName: string, branch?: string): Promise<{ worktreePath: string; branch: string; reused?: boolean }> {
+    const safeName = featureName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || 'feature';
+    const resolvedBranch = branch || `compose/${safeName}-${Date.now().toString(36)}`;
+    await fs.promises.mkdir(this.composeWorktreeDir, { recursive: true });
+    const targetPath = path.join(this.composeWorktreeDir, safeName);
+    const relative = path.relative(this.composeWorktreeDir, targetPath);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Unsafe Compose worktree path.');
+    if (fs.existsSync(targetPath)) {
+      const existing = (await this.list()).find((item) => item.path === path.resolve(targetPath));
+      if (existing?.branch === resolvedBranch) return { worktreePath: targetPath, branch: resolvedBranch, reused: true };
+      throw new Error(`Compose worktree path is occupied by another branch: ${targetPath}`);
+    }
+    try {
+      await this.execGit(['worktree', 'add', '-b', resolvedBranch, targetPath, 'HEAD']);
+      return { worktreePath: targetPath, branch: resolvedBranch };
+    } catch (error: any) {
+      try {
+        await this.execGit(['show-ref', '--verify', `refs/heads/${resolvedBranch}`]);
+        await this.execGit(['worktree', 'add', targetPath, resolvedBranch]);
+        return { worktreePath: targetPath, branch: resolvedBranch, reused: true };
+      } catch {}
+      throw new Error(`Failed to create Compose worktree: ${error.message}`);
+    }
+  }
+
+  /** Apply preflighted mutations atomically inside an isolated worktree. */
+  async applyTransaction(targetWorktreePath: string, operations: StagedMutationOp[]) {
+    this.assertManagedWorktree(targetWorktreePath);
+    const transaction = new MutationTransaction(new Workspace(targetWorktreePath));
+    for (const op of operations) {
+      if (op.type === 'create') transaction.stageCreate(op.path, op.content, op.expectedAbsent);
+      else if (op.type === 'update') transaction.stageUpdate(op.path, op.newContent, op.expectedFileHash);
+      else if (op.type === 'delete') transaction.stageDelete(op.path, op.expectedFileHash, op.reason);
+      else transaction.stageMove(op.sourcePath, op.targetPath, op.expectedSourceHash);
+    }
+    return transaction.commit();
+  }
+
+  /** Commit, fast-forward into the original branch, and clean up only after success. */
+  async mergeAndCleanup(params: { worktreePath: string; branch: string; commitMessage: string }): Promise<{ commit: string }> {
+    this.assertManagedWorktree(params.worktreePath);
+    const status = (await this.execGitIn(params.worktreePath, ['status', '--porcelain'])).stdout.trim();
+    if (status) {
+      await this.execGitIn(params.worktreePath, ['add', '-A']);
+      await this.execGitIn(params.worktreePath, ['commit', '-m', params.commitMessage]);
+    }
+    const commit = (await this.execGitIn(params.worktreePath, ['rev-parse', 'HEAD'])).stdout.trim();
+    await this.execGit(['merge', '--ff-only', params.branch]);
+    await this.remove(params.worktreePath, false);
+    await this.execGit(['branch', '-d', params.branch]).catch(() => {});
+    return { commit };
+  }
+
+  /** Discard only a managed Compose worktree and its dedicated branch. */
+  async discardFeatureWorktree(worktreePath: string, branch?: string): Promise<void> {
+    await this.remove(worktreePath, true);
+    if (branch?.startsWith('compose/')) await this.execGit(['branch', '-D', branch]).catch(() => {});
+  }
+
+  private assertManagedWorktree(targetWorktreePath: string): void {
+    const target = path.resolve(targetWorktreePath);
+    if (target === this.workspaceRoot) throw new Error('Cannot operate on the main workspace as an isolated worktree.');
+    const managed = [this.worktreeDir, this.composeWorktreeDir].some((root) => {
+      const relative = path.relative(root, target);
+      return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+    });
+    if (!managed) throw new Error('Unsafe worktree path: target is outside managed worktree directories.');
   }
 
   /**
@@ -119,10 +197,7 @@ export class WorktreeManager {
     }
 
     // Phải nằm trong .codingagent/worktrees
-    const relative = path.relative(this.worktreeDir, resolvedTarget);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new Error('Unsafe worktree path: Can only remove worktrees inside .codingagent/worktrees');
-    }
+    this.assertManagedWorktree(resolvedTarget);
 
     try {
       const args = ['worktree', 'remove'];

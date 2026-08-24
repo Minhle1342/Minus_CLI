@@ -7,6 +7,9 @@ export interface ToolExecutionContext {
   turn?: number;
   /** Original human request for the current turn, before guard prompts. */
   userRequest?: string;
+  /** Internal capability set by ToolRunner only after PermissionManager approval. */
+  permissionGranted?: boolean;
+  permissionRequestId?: string;
 }
 
 /**

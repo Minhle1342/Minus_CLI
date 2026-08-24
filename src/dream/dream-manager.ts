@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProjectMemoryManager, MemoryConsolidationPlan } from '../memory/project-memory.js';
 import type { MemoryProvenance, MemoryRecord } from '../memory/types.js';
 import { writeFileAtomically } from '../memory/atomic-write.js';
+import { Workspace } from '../workspace/workspace.js';
 import { CodestralDreamAgent } from './codestral-dream-agent.js';
 import { DreamTrajectoryReader } from './trajectory-reader.js';
 import type {
@@ -50,6 +51,12 @@ function canonicalKey(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
 }
 
+function redactComposeText(value: string): string {
+  return value
+    .replace(/\b((?:api[_-]?key|token|password|secret))\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .replace(/\b(?:sk|key)-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED]');
+}
+
 function provenanceFor(evidence: DreamEvidence[]): MemoryProvenance[] {
   return evidence.map((item) => ({
     evidenceId: item.id,
@@ -81,6 +88,15 @@ export interface DreamStatus {
   lastRunAt?: string;
   lastReport?: DreamRunReport;
   cursorCount: number;
+}
+
+export interface ComposeDreamCompletion {
+  composeId: string;
+  featureName: string;
+  objective: string;
+  specHash: string;
+  testEvidence: string[];
+  reviewSummary: string;
 }
 
 export class DreamManager {
@@ -136,6 +152,56 @@ export class DreamManager {
 
   async runIfDue(): Promise<DreamRunReport> {
     return this.run({ mode: 'auto', force: false });
+  }
+
+  /** Persist verified Compose outcomes as deterministic Dream input; no live model call occurs here. */
+  async recordComposeCompletion(completion: ComposeDreamCompletion): Promise<{ model: string; agentUsed: boolean; accepted: number; error?: string }> {
+    const recordedAt = new Date().toISOString();
+    const safeCompletion = {
+      ...completion,
+      objective: redactComposeText(completion.objective),
+      reviewSummary: redactComposeText(completion.reviewSummary),
+      testEvidence: completion.testEvidence.map(redactComposeText),
+    };
+    const record = { ...safeCompletion, recordedAt };
+    const ledgerPath = path.join(this.workspaceDir, '.codingagent', 'dream', 'compose-completions.jsonl');
+    let ledger = '';
+    try { ledger = await fs.readFile(ledgerPath, 'utf8'); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
+    await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
+    await writeFileAtomically(ledgerPath, `${ledger}${JSON.stringify(record)}\n`);
+
+    const insightPath = path.join(this.workspaceDir, '.knowledge', 'DREAM_INSIGHTS.md');
+    let markdown = '# Dream Insights\n\nVerified outcomes captured from completed Compose runs.\n';
+    try { markdown = await fs.readFile(insightPath, 'utf8'); } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
+    let acceptedInsights: VerifiedDreamMemory[] = [];
+    let dreamError: string | undefined;
+    if (this.agent.isConfigured()) {
+      const evidence: DreamEvidence[] = [
+        { id: `compose:${completion.composeId}:objective`, sessionId: `compose:${completion.composeId}`, eventSeq: 1, createdAt: recordedAt, kind: 'human', text: safeCompletion.objective, verified: true },
+        ...safeCompletion.testEvidence.map((item, index): DreamEvidence => ({ id: `compose:${completion.composeId}:test:${index + 1}`, sessionId: `compose:${completion.composeId}`, eventSeq: index + 2, createdAt: recordedAt, kind: 'tool-success', text: item, verified: true })),
+        { id: `compose:${completion.composeId}:review`, sessionId: `compose:${completion.composeId}`, eventSeq: safeCompletion.testEvidence.length + 2, createdAt: recordedAt, kind: 'audit', text: safeCompletion.reviewSummary, verified: true },
+      ];
+      try {
+        await this.memory.init(new Workspace(this.workspaceDir));
+        const existing = this.memory.getMemoryData().learnedInsights.map((item) => ({
+          id: item.id || `memory-${item.key}`, key: item.key, insight: item.insight,
+          category: item.category || 'insight', confidence: item.confidence ?? 0, trustStatus: item.trustStatus || 'active',
+        }));
+        const proposals = await this.agent.propose({ evidence, existingMemory: existing, maxProposals: this.config.maxProposals });
+        const policy = this.verifyProposals(proposals, evidence);
+        await this.memory.applyConsolidation(policy.plan);
+        acceptedInsights = policy.accepted;
+      } catch (error: any) {
+        dreamError = error?.message || String(error);
+      }
+    }
+    const learned = acceptedInsights.length > 0
+      ? `- Codestral insights:\n${acceptedInsights.map((item) => `  - ${item.insight} (confidence=${item.confidence.toFixed(2)})`).join('\n')}\n`
+      : `- Codestral insights: none accepted${dreamError ? ` (${redactComposeText(dreamError)})` : ''}\n`;
+    const section = `\n## ${safeCompletion.featureName} (${recordedAt})\n\n- Compose: \`${safeCompletion.composeId}\`\n- Spec SHA-256: \`${safeCompletion.specHash}\`\n- Independent Dream model: \`mistral/${this.agent.model}\`\n- Objective: ${safeCompletion.objective}\n- Review: ${safeCompletion.reviewSummary}\n- Evidence:\n${safeCompletion.testEvidence.map((item) => `  - ${item}`).join('\n')}\n${learned}`;
+    await fs.mkdir(path.dirname(insightPath), { recursive: true });
+    await writeFileAtomically(insightPath, `${markdown.trimEnd()}\n${section}`);
+    return { model: `mistral/${this.agent.model}`, agentUsed: this.agent.isConfigured(), accepted: acceptedInsights.length, ...(dreamError ? { error: dreamError } : {}) };
   }
 
   async run(options: { mode?: 'apply' | 'preview' | 'auto'; force?: boolean } = {}): Promise<DreamRunReport> {

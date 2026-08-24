@@ -175,7 +175,7 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
-    if (name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
+    if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
     if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
     if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
     if (name.includes('web') || name.includes('fetch') || name.includes('url')) return 'network';
@@ -205,6 +205,9 @@ export class ToolRetriever {
     }
     if (text.includes('360') || text.includes('panorama') || text.includes('symbol')) {
       tags.add('symbol context 360 panorama definition callers callees tests');
+    }
+    if (text.includes('lsp') || text.includes('language server')) {
+      tags.add('lsp language server hover definition references diagnostics implementation call hierarchy');
     }
     if (text.includes('schedule') || text.includes('timer') || text.includes('cron') || text.includes('watchdog')) {
       tags.add('schedule timer cron delay watchdog wakeup recurring');

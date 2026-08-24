@@ -23,6 +23,7 @@ export class Workspace {
     'coverage',
     '.gemini',
     '.codingagent',
+    '.minus',
     'temp',
     '.turbo',
     '.next',

@@ -50,6 +50,9 @@ export class SuperpowersPlugin implements AgentPlugin {
     for (const tool of gitTools) {
       ctx.tools.register(tool);
     }
+    ctx.events.on('workspace:changed', () => {
+      for (const tool of createGitTools(ctx.workspace)) ctx.tools.register(tool);
+    });
 
     const approvalTools = createApprovalTools(this.approvalManager);
     for (const tool of approvalTools) {

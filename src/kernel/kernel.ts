@@ -25,6 +25,9 @@ import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
 import { DreamManager } from '../dream/dream-manager.js';
+import { ComposeController } from '../agent/compose-controller.js';
+import { ComposePlugin } from './plugins/compose-plugin.js';
+import { disposeLspManager } from '../lsp/lsp-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -101,6 +104,7 @@ export interface KernelContext {
   sessions: SessionManager;
   memory: ProjectMemoryManager;
   dream: DreamManager;
+  compose: ComposeController;
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
@@ -155,6 +159,7 @@ export class AgentKernel {
     const reflection = new ReflectionEngine();
     const hypothesis = new HypothesisTracker();
     const critic = new CriticGate();
+    const compose = new ComposeController(workspace.rootDir, plan, critic);
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
     const schedules = new ScheduleManager();
@@ -167,7 +172,7 @@ export class AgentKernel {
     tools.attachSharedContextService(sharedContext);
     tools.attachAgentEventBus(agentEvents);
     const permissions = new PermissionManager();
-    const toolRunner = new ToolRunner(tools, workspace, permissions);
+    const toolRunner = new ToolRunner(tools, workspace, permissions, compose);
 
     this.ctx = {
       workspace,
@@ -183,6 +188,7 @@ export class AgentKernel {
       sessions,
       memory,
       dream,
+      compose,
       checkpoints,
       compactor,
       reflection,
@@ -199,9 +205,11 @@ export class AgentKernel {
         this.ctx.tools.register(tool);
       },
       setWorkspace: (newWs: Workspace) => {
+        const oldWorkspace = this.ctx.workspace;
         const oldPath = this.ctx.workspace.rootDir;
+        void disposeLspManager(oldWorkspace);
         this.ctx.workspace = newWs;
-        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions);
+        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, this.ctx.compose);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
         this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory);
@@ -242,9 +250,13 @@ export class AgentKernel {
     if (this.isInitialized) return;
     await this.ctx.checkpoints.init();
     await this.ctx.memory.init(this.ctx.workspace);
+    await this.ctx.compose.init();
 
     if (!this.plugins.has('superpowers')) {
       await this.use(new SuperpowersPlugin());
+    }
+    if (!this.plugins.has('compose')) {
+      await this.use(new ComposePlugin());
     }
 
     // Tool/capability registration must survive a Docker startup failure.

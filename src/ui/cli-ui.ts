@@ -66,6 +66,8 @@ export interface SlashCommandSuggestion extends SlashCommandDefinition {
 }
 
 export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  { command: '/compose', usage: '/compose <objective>|status|abort|answer <text>', description: 'Spec-driven lifecycle in an isolated worktree', category: 'Planning' },
+  { command: '/compose-next', usage: '/compose-next [grill answer]', description: 'Advance Compose by one legal phase', category: 'Planning' },
   { command: '/model', usage: '/model [id|name]', description: 'Chọn mô hình LLM', category: 'Model & Routing', aliases: ['/modal'] },
   { command: '/tokens', usage: '/tokens [low|medium|high|max|output|input|thinking|reset] [val]', description: 'Chọn gói cấu hình sẵn (low/medium/high/max) hoặc chỉnh token', category: 'Model & Routing', aliases: ['/token', '/token-budget'] },
   { command: '/workspace', usage: '/workspace [path]', description: 'Xem hoặc đổi workspace', category: 'Workspace', aliases: ['/cd'] },

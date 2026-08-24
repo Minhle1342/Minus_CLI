@@ -5,7 +5,7 @@
  * 2. Adaptive Planning:
  *    - Simple/targeted tasks: Action-driven execution directly with tools or answers without forcing heavy planning.
  *    - Complex/multi-file tasks: Create a lean, atomic milestone plan with `create_plan` (2-5 steps) and update with `update_plan_task`.
- * 3. Semantic Intelligence: Language Service symbol lookup, semantic references, in-memory diagnostics, and blast radius analysis.
+ * 3. Semantic Intelligence: hybrid TypeScript Language Service + multi-language LSP lookup, references, diagnostics, and blast radius analysis.
  * 4. Safe Surgical Mutations: Dedicated CRUD (create_file, delete_file, move_file, replace_text, apply_patch) with optimistic hash locking.
  * 5. Root Cause Detection, Self-Reflection & Debugging Protocol (Codex CLI RCA):
  *    - Symptom vs Cause separation (no superficial monkey-patching).
@@ -43,7 +43,8 @@ Core Principles & Architectural Invariants:
    - When inspecting or modifying TypeScript/JavaScript codebase:
      * Use \`inspect_symbol\` to look up exact definitions, type signatures, and export status without guessing.
      * Use \`find_references\` to locate all real call-sites across the repository using semantic AST rather than blind regex grep.
-     * Use \`get_diagnostics\` to extract in-memory syntactic and semantic TypeScript errors instantly.
+     * Use \`get_diagnostics\` to merge instant TypeScript in-memory errors with configured external LSP diagnostics.
+     * Use \`lsp_query\` for position-aware hover, definition, references, implementations, workspace/document symbols, and call hierarchy in configured multi-language projects.
      * Use \`analyze_impact\` to calculate the Blast Radius and risk level (LOW/MEDIUM/HIGH/CRITICAL) before modifying exported APIs.
 
 5. SURGICAL & ATOMIC MUTATION DISCIPLINE (CODEX CLI STANDARD):

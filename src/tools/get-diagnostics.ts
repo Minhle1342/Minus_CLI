@@ -3,6 +3,7 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { getOrCreateTypeScriptService } from './inspect-symbol.js';
 import { toolError, toolSuccess } from './tool-result.js';
+import { getOrCreateLspManager } from '../lsp/lsp-manager.js';
 
 /**
  * Tool get_diagnostics
@@ -26,8 +27,12 @@ export const getDiagnosticsTool: ToolDefinition = {
     const rawPath = args.path ? String(args.path).trim() : undefined;
 
     try {
-      const tsService = getOrCreateTypeScriptService(workspace);
-      const diagnostics = tsService.getDiagnostics(rawPath);
+      const usesTypeScriptService = !rawPath || /\.[cm]?[jt]sx?$/i.test(rawPath);
+      const tsDiagnostics = usesTypeScriptService
+        ? getOrCreateTypeScriptService(workspace).getDiagnostics(rawPath)
+        : [];
+      const lspResult = await getOrCreateLspManager(workspace).diagnostics(rawPath, { sync: true, wait: true });
+      const diagnostics = dedupeDiagnostics([...tsDiagnostics.map((item) => ({ ...item, provider: 'typescript-in-memory' })), ...lspResult.diagnostics]);
 
       const errors = diagnostics.filter((d) => d.category === 'error');
       const warnings = diagnostics.filter((d) => d.category === 'warning');
@@ -37,9 +42,23 @@ export const getDiagnosticsTool: ToolDefinition = {
         totalErrors: errors.length,
         totalWarnings: warnings.length,
         diagnostics: diagnostics.slice(0, 30),
+        providers: [...new Set([...lspResult.providers, ...(usesTypeScriptService ? ['typescript-in-memory'] : [])])],
+        lspAvailable: lspResult.available,
+        lspStatus: lspResult.status,
+        warnings: lspResult.warnings,
       });
     } catch (err: any) {
       return toolError(`Lỗi khi trích xuất diagnostics: ${err.message}`, 'EXECUTION_ERROR');
     }
   },
 };
+
+function dedupeDiagnostics<T extends { file: string; line: number; character: number; message: string; code?: string | number }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.file}:${item.line}:${item.character}:${item.code ?? ''}:${item.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}

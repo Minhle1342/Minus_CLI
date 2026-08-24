@@ -134,6 +134,16 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
     description: 'Extract syntactic and semantic TypeScript diagnostics in-memory.',
   },
   {
+    name: 'semantic.lsp',
+    toolName: 'lsp_query',
+    category: 'filesystem',
+    sideEffect: 'none',
+    reversible: true,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Query configured multi-language LSP servers for position-aware code intelligence.',
+  },
+  {
     name: 'semantic.impact',
     toolName: 'analyze_impact',
     category: 'filesystem',

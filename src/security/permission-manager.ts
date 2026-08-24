@@ -20,6 +20,16 @@ export type PermissionPromptHandler = (
   request: PermissionRequest
 ) => Promise<'approve' | 'reject' | 'approve_all_session'>;
 
+export interface PermissionCheckResult {
+  allowed: boolean;
+  reason?: string;
+  errorCode?: string;
+  recommendedTool?: string;
+  recommendedArgs?: Record<string, any>;
+  permissionGranted?: boolean;
+  permissionRequestId?: string;
+}
+
 /**
  * PermissionManager - Quản lý phân quyền và phê duyệt tương tác (Interactive Approval Gate)
  * 
@@ -62,16 +72,10 @@ export class PermissionManager {
     toolName: string,
     args: Record<string, any>,
     context?: ToolExecutionContext,
-  ): Promise<{
-    allowed: boolean;
-    reason?: string;
-    errorCode?: string;
-    recommendedTool?: string;
-    recommendedArgs?: Record<string, any>;
-  }> {
+  ): Promise<PermissionCheckResult> {
     // 1. Chế độ Auto-Approve (Tự động duyệt tất cả)
     if (this.mode === 'auto_approve') {
-      return { allowed: true };
+      return { allowed: true, permissionGranted: toolName === 'run_command' };
     }
 
     // 2. Chế độ Read-Only (Chỉ cho phép đọc, cấm mọi thao tác ghi / chạy lệnh)
@@ -97,16 +101,20 @@ export class PermissionManager {
 
     // Nếu người dùng đã chọn "Luôn đồng ý danh mục này trong phiên"
     if (this.sessionApprovedCategories.has(request.category)) {
-      return { allowed: true };
+      return {
+        allowed: true,
+        permissionGranted: toolName === 'run_command',
+        permissionRequestId: request.id,
+      };
     }
 
     // Nếu không có Prompt Handler (môi trường non-interactive / headless CI)
     if (!this.promptHandler) {
-      if (request.riskLevel === 'CRITICAL') {
+      if (toolName === 'run_command' || request.riskLevel === 'CRITICAL') {
         return {
           allowed: false,
           errorCode: 'APPROVAL_REQUIRED',
-          reason: `Lệnh "${request.target}" có mức độ rủi ro CRITICAL và yêu cầu người dùng phê duyệt trực tiếp.`,
+          reason: `Lệnh "${request.target}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (MINUS PERMISSION APPROVAL) trực tiếp từ người dùng.`,
         };
       }
       return { allowed: true };
@@ -117,12 +125,20 @@ export class PermissionManager {
       const decision = await this.promptHandler(request);
 
       if (decision === 'approve') {
-        return { allowed: true };
+        return {
+          allowed: true,
+          permissionGranted: toolName === 'run_command',
+          permissionRequestId: request.id,
+        };
       }
 
       if (decision === 'approve_all_session') {
         this.sessionApprovedCategories.add(request.category);
-        return { allowed: true };
+        return {
+          allowed: true,
+          permissionGranted: toolName === 'run_command',
+          permissionRequestId: request.id,
+        };
       }
 
       // Khi người dùng từ chối (reject):
@@ -232,7 +248,7 @@ export class PermissionManager {
       }
 
       // 2. Phân loại lệnh cài đặt / mạng / quyền hệ thống -> HIGH
-      if (/\b(npm\s+(?:i|install)\s+-g|pip\s+install|chmod|chown|sudo|curl\s+.*\|\s*bash)\b/i.test(lower)) {
+      if (/\b(npm\s+(?:i|install)(?:\s|$)|pnpm\s+(?:add|install)(?:\s|$)|yarn\s+add(?:\s|$)|pip\s+install|chmod|chown|sudo|curl\s+.*\|\s*bash)\b/i.test(lower)) {
         return {
           id,
           toolName,

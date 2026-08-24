@@ -3,12 +3,22 @@ import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
 import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
 import type { PermissionManager } from '../security/permission-manager.js';
+import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 
 export interface ToolExecutionResult {
   toolName: string;
   args: Record<string, any>;
   result: Record<string, any>;
   durationMs: number;
+}
+
+export interface ToolExecutionGuard {
+  check(
+    toolName: string,
+    args: Record<string, any>,
+    workspace: Workspace,
+    context?: ToolExecutionContext,
+  ): Promise<{ allow: boolean; reason?: string; errorCode?: string }>;
 }
 
 /**
@@ -25,11 +35,17 @@ export class ToolRunner {
   private registry: ToolProvider;
   private workspace: Workspace;
   private permissionManager?: PermissionManager;
+  private executionGuard?: ToolExecutionGuard;
 
-  constructor(registry: ToolProvider, workspace: Workspace, permissionManager?: PermissionManager) {
+  constructor(registry: ToolProvider, workspace: Workspace, permissionManager?: PermissionManager, executionGuard?: ToolExecutionGuard) {
     this.registry = registry;
     this.workspace = workspace;
     this.permissionManager = permissionManager;
+    this.executionGuard = executionGuard;
+  }
+
+  setExecutionGuard(executionGuard?: ToolExecutionGuard): void {
+    this.executionGuard = executionGuard;
   }
 
   setPermissionManager(permissionManager: PermissionManager): void {
@@ -46,6 +62,7 @@ export class ToolRunner {
     context?: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
     const startTime = Date.now();
+    let executionContext = context;
 
     // Stage 1: Tool Lookup
     const tool = this.registry.get(toolName);
@@ -120,6 +137,22 @@ export class ToolRunner {
       }
     }
 
+    // Stage 3.25: durable orchestration policy (for example Compose spec/worktree gates).
+    if (this.executionGuard) {
+      const decision = await this.executionGuard.check(toolName, executionArgs, this.workspace, context);
+      if (!decision.allow) {
+        return {
+          toolName,
+          args: executionArgs,
+          result: {
+            error: decision.reason || 'Tool execution was rejected by the active orchestration policy.',
+            errorCode: decision.errorCode || 'EXECUTION_GUARD_REJECTED',
+          },
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
+
     // Stage 3.5: Permission & Interactive Operator Approval Check
     if (this.permissionManager) {
       const permCheck = await this.permissionManager.checkPermission(toolName, executionArgs, context);
@@ -141,16 +174,24 @@ export class ToolRunner {
           durationMs: Date.now() - startTime,
         };
       }
+      if (permCheck.permissionGranted) {
+        executionContext = {
+          ...context,
+          permissionGranted: true,
+          ...(permCheck.permissionRequestId ? { permissionRequestId: permCheck.permissionRequestId } : {}),
+        };
+      }
     }
 
     // Stage 4: Safe Execution
     try {
-      const rawResult = await tool.execute(executionArgs, this.workspace, context);
+      const rawResult = await tool.execute(executionArgs, this.workspace, executionContext);
       
       // Stage 5: Output Normalization
-      const normalizedResult = typeof rawResult === 'object' && rawResult !== null
+      let normalizedResult = typeof rawResult === 'object' && rawResult !== null
         ? rawResult
         : { output: String(rawResult) };
+      normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
 
       let resultSnapshot: Record<string, any>;
       try {
