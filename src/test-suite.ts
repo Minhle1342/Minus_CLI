@@ -68,6 +68,7 @@ import { AuditLedger } from './agent/audit-ledger.js';
 import { HypothesisRollbackOrchestrator } from './agent/hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './agent/adaptive-reasoning-controller.js';
 import { CodeSearchEngine } from './search/code-search-engine.js';
+import { classifyLLMError, retryWithExponentialBackoff } from './llm/error-handling.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
@@ -101,6 +102,25 @@ import {
   writeTypewriterText,
 } from './ui/cli-ui.js';
 import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskTool } from './tools/task-tools.js';
+import { createManageTaskTool } from './tools/manage-task.js';
+import { createScheduleTool } from './tools/schedule-tool.js';
+import { ScheduleManager } from './tasks/schedule-manager.js';
+import { searchWebTool } from './tools/search-web.js';
+import { readUrlContentTool, htmlToMarkdown } from './tools/read-url-content.js';
+import { SharedContextService } from './agent/shared-context-service.js';
+import { AgentEventBus } from './agent/agent-event-bus.js';
+import { AgentOrchestrator } from './agent/agent-orchestrator.js';
+import { SubagentManager } from './agent/subagent-manager.js';
+import { AgentRegistry } from './agent/agent-registry.js';
+import { createReadSharedContextTool, createWriteSharedContextTool } from './tools/shared-context-tools.js';
+import { createPublishAgentEventTool } from './tools/agent-event-tools.js';
+import { CodebaseIntelligenceService } from './tools/codebase-intelligence.js';
+import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
+import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
+import { getSymbolContext360Tool, createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
+import { getArchitectureTopologyTool, createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
+import { ToolSynergyAdvisor } from './agent/tool-synergy-advisor.js';
+import { ToolRetriever } from './tools/tool-retriever.js';
 import { loadSession, saveSession, clearSession, getSessionFilePath } from './session/persistent-session.js';
 import { SkillLoader } from './skills/skill-loader.js';
 import { SkillRegistry } from './skills/skill-registry.js';
@@ -4476,6 +4496,562 @@ Always write tests first!`;
   assert(Boolean(hunk2Reflection.reflectionPrompt?.includes('Hunk #2')), 'Reflection prompt chỉ rõ Hunk #2');
 
   console.log('\n========================================');
+  console.log('🧪 31. KIỂM THỬ CODEX CLI LIFECYCLE COUPLING GIỮA /GOAL VÀ /PLAN');
+  console.log('========================================');
+
+  const couplingSession = new Session('goal-plan-coupling-test');
+  const couplingGoalMgr = new GoalManager();
+  const couplingPlanMgr = new PlanManager();
+  couplingGoalMgr.bindSession(couplingSession);
+  couplingPlanMgr.bindSession(couplingSession);
+
+  // 1. Khởi tạo Goal và Plan
+  couplingGoalMgr.create('Refactor authentication system to OAuth2');
+  couplingPlanMgr.createPlan([
+    { title: 'Inspect existing auth module', acceptanceCriteria: 'Read auth.ts' },
+    { title: 'Implement OAuth2 token provider', acceptanceCriteria: 'Create oauth.ts' },
+    { title: 'Run unit test suite', acceptanceCriteria: 'npm test exits with 0' },
+  ]);
+
+  assert(couplingPlanMgr.hasPlan() === true, 'PlanManager đã tạo thành công 3 tasks');
+  assert(couplingPlanMgr.getNextIncompleteTask()?.id === 1, 'getNextIncompleteTask trả về đúng Task #1 đang IN_PROGRESS');
+  assert(couplingPlanMgr.isAllTasksCompleted() === false, 'isAllTasksCompleted trả về false khi còn 2 tasks PENDING');
+
+  // 2. Kiểm tra GoalManager.canComplete chặn hoàn thành khi Plan chưa xong
+  const prematureCheck = couplingGoalMgr.canComplete(couplingPlanMgr);
+  assert(prematureCheck.allowed === false, 'GoalManager.canComplete từ chối hoàn thành khi Plan còn task dở dang');
+  assert(Boolean(prematureCheck.reason?.includes('unfinished tasks') || prematureCheck.reason?.includes('incomplete')), 'canComplete trả về lý do chặn rõ ràng');
+
+  let throwsOnPrematureComplete = false;
+  try {
+    couplingGoalMgr.complete(couplingPlanMgr);
+  } catch (err: any) {
+    throwsOnPrematureComplete = true;
+  }
+  assert(throwsOnPrematureComplete === true, 'GoalManager.complete ném ngoại lệ khi gọi với Plan chưa hoàn tất');
+
+  // 3. Giả lập hoàn thành từng task
+  couplingPlanMgr.updateTask(1, 'COMPLETED', 'Inspected auth.ts');
+  assert(couplingPlanMgr.getNextIncompleteTask()?.id === 2, 'Sau khi Task #1 xong, getNextIncompleteTask trỏ tới Task #2');
+  assert(couplingPlanMgr.isAllTasksCompleted() === false, 'isAllTasksCompleted vẫn là false khi còn Task #2, #3');
+
+  couplingPlanMgr.updateTask(2, 'COMPLETED', 'Created oauth.ts');
+  couplingPlanMgr.updateTask(3, 'COMPLETED', 'Ran tests: all 12 passed');
+  assert(couplingPlanMgr.isAllTasksCompleted() === true, 'isAllTasksCompleted chuyển sang true khi 100% tasks đã COMPLETED');
+
+  // 4. Kiểm tra GoalManager.complete thành công sau khi Plan đã 100% COMPLETED
+  const validCheck = couplingGoalMgr.canComplete(couplingPlanMgr);
+  assert(validCheck.allowed === true, 'GoalManager.canComplete cho phép hoàn thành khi toàn bộ Plan đã COMPLETED');
+
+  const completedState = couplingGoalMgr.complete(couplingPlanMgr);
+  assert(completedState?.phase === 'complete', 'GoalManager chuyển sang trạng thái complete thành công');
+
+  // 5. Kiểm thử setPlanRequired
+  couplingPlanMgr.setPlanRequired(true, 'goal-mode-active');
+  assert(couplingPlanMgr.getRequirements().required === true, 'setPlanRequired ép buộc yêu cầu Plan thành công');
+
+  console.log('\n========================================');
+  console.log('🧪 32. KIỂM THỬ RATE LIMIT, OUT OF QUOTA & INTERRUPTED PLAN RECOVERY (CODEX CLI)');
+  console.log('========================================');
+
+  // 1. Phân loại lỗi LLM
+  const rateLimitErr = classifyLLMError({ status: 429, message: 'Resource exhausted: rate limit exceeded. Please retry in 3.5s' });
+  assert(rateLimitErr.kind === 'TRANSIENT_RATE_LIMIT', 'Nhận diện đúng lỗi TRANSIENT_RATE_LIMIT (HTTP 429)');
+  assert(rateLimitErr.retryable === true, 'Đánh dấu 429 là retryable = true');
+  assert(rateLimitErr.retryAfterMs === 3500, 'Trích xuất chính xác retryAfterMs = 3500ms');
+
+  const hardQuotaErr = classifyLLMError({ message: 'Quota exceeded for model gemini-2.5-pro. Check your plan and billing details.' });
+  assert(hardQuotaErr.kind === 'HARD_QUOTA_EXHAUSTED', 'Nhận diện đúng lỗi HARD_QUOTA_EXHAUSTED (Hạn mức cạn)');
+  assert(hardQuotaErr.retryable === false, 'Hard quota đánh dấu retryable = false');
+
+  const authErr = classifyLLMError({ status: 401, message: 'API_KEY_INVALID: API key not valid' });
+  assert(authErr.kind === 'AUTHENTICATION_ERROR', 'Nhận diện đúng AUTHENTICATION_ERROR (401)');
+  assert(authErr.retryable === false, 'Auth error không retry');
+
+  const serverErr = classifyLLMError({ status: 503, message: 'Model is overloaded' });
+  assert(serverErr.kind === 'SERVER_ERROR', 'Nhận diện đúng SERVER_ERROR (503)');
+  assert(serverErr.retryable === true, 'Server error đánh dấu retryable = true');
+
+  // 2. Kiểm thử retryWithExponentialBackoff
+  let attemptCount = 0;
+  const mockTransientFn = async () => {
+    attemptCount++;
+    if (attemptCount < 3) {
+      throw { status: 429, message: 'Rate limit temporary' };
+    }
+    return 'SUCCESS_AFTER_RETRY';
+  };
+
+  const recordedDelays: number[] = [];
+  const retryResult = await retryWithExponentialBackoff(mockTransientFn, {
+    maxRetries: 3,
+    baseDelayMs: 10,
+    maxDelayMs: 100,
+    jitterMs: 5,
+    sleepFn: async (ms) => { recordedDelays.push(ms); },
+  });
+  assert(retryResult === 'SUCCESS_AFTER_RETRY', 'retryWithExponentialBackoff tự động thử lại và thành công');
+  assert(attemptCount === 3, 'Thực hiện đúng 3 lần gọi (2 lần lỗi 429 + 1 lần thành công)');
+  assert(recordedDelays.length === 2, 'Ghi nhận đúng 2 chu kỳ sleep');
+
+  let nonRetryableCalled = 0;
+  let nonRetryErrorCaught = false;
+  try {
+    await retryWithExponentialBackoff(async () => {
+      nonRetryableCalled++;
+      throw { message: 'quota exceeded for billing plan' };
+    }, { maxRetries: 3, baseDelayMs: 10 });
+  } catch {
+    nonRetryErrorCaught = true;
+  }
+  assert(nonRetryErrorCaught && nonRetryableCalled === 1, 'Lỗi Hard Quota ném ra ngay lập tức mà không retry vô ích');
+
+  // 3. Kiểm thử Graceful Suspension & Plan State Preservation khi gặp Hard Quota
+  const quotaSession = new Session('quota-interruption-test');
+  const quotaPlanMgr = new PlanManager();
+  const quotaGoalMgr = new GoalManager();
+  quotaPlanMgr.bindSession(quotaSession);
+  quotaGoalMgr.bindSession(quotaSession);
+
+  quotaGoalMgr.create('Implement Large Payment Gateway Migration');
+  quotaPlanMgr.createPlan([
+    { title: 'Setup Stripe webhook endpoint', acceptanceCriteria: 'Webhook created' },
+    { title: 'Implement recurring billing logic', acceptanceCriteria: 'Subscription tested' },
+    { title: 'Deploy migration scripts', acceptanceCriteria: 'DB schema updated' },
+  ]);
+
+  // Giả lập Task 1 đã xong trước khi gặp sự cố
+  quotaPlanMgr.updateTask(1, 'COMPLETED', 'Webhook created and tested');
+  assert(quotaPlanMgr.getNextIncompleteTask()?.id === 2, 'Task #2 đang là active task');
+
+  // Giả lập AgentLoop gặp sự cố Quota cạn tại Task 2
+  class QuotaExhaustedLLM {
+    async generate(): Promise<any> {
+      throw new Error('Quota exceeded for model. Please check billing or upgrade plan.');
+    }
+  }
+
+  const quotaLoop = new AgentLoop(new QuotaExhaustedLLM(), new ToolRegistry(), { maxSteps: 3, workspace });
+  quotaLoop.bindSession(quotaSession);
+
+  let quotaLoopThrew = false;
+  try {
+    await quotaLoop.run(quotaSession, { isGoalMode: true });
+  } catch (err: any) {
+    quotaLoopThrew = true;
+  }
+  assert(quotaLoopThrew === true, 'AgentLoop bắt lỗi Quota và kết thúc graceful');
+
+  // Kiểm tra trạng thái sau khi suspend
+  const suspendedGoal = quotaGoalMgr.getState();
+  assert(suspendedGoal?.phase === 'paused', 'Goal được chuyển sang phase: paused khi gặp Quota Exhausted');
+  assert(Boolean(suspendedGoal?.blocker?.includes('HARD_QUOTA_EXHAUSTED')), 'Goal blocker ghi nhận rõ mã HARD_QUOTA_EXHAUSTED');
+
+  // Kiểm tra 100% tiến độ PlanManager được bảo toàn
+  const tasksAfterSuspend = quotaPlanMgr.getTasks();
+  assert(tasksAfterSuspend[0].status === 'COMPLETED', 'Tiến độ Task #1 vẫn là COMPLETED');
+  assert(tasksAfterSuspend[1].status === 'IN_PROGRESS', 'Tiến độ Task #2 vẫn là IN_PROGRESS');
+  assert(tasksAfterSuspend[2].status === 'PENDING', 'Tiến độ Task #3 vẫn là PENDING');
+  assert(quotaPlanMgr.getNextIncompleteTask()?.id === 2, 'getNextIncompleteTask tiếp tục chỉ đúng Task #2 dở dang');
+
+  // 4. Kiểm thử Phục hồi ở phiên sau (/plan resume & /goal resume)
+  const resumeGoal = quotaGoalMgr.resume();
+  assert(resumeGoal?.phase === 'active', 'Goal resume đưa trạng thái trở lại active');
+  assert(resumeGoal?.blocker === undefined, 'Goal blocker được xóa sạch khi resume');
+  assert(quotaPlanMgr.getNextIncompleteTask()?.id === 2, 'Hệ thống sẵn sàng tiếp tục chính xác từ Task #2');
+
+  console.log('\n========================================');
+  console.log('🧪 33. KIỂM THỬ 4 CÔNG CỤ CHUẨN GOOGLE ANTIGRAVITY CLI (manage_task, schedule, run_command Async, search_web & read_url_content)');
+  console.log('========================================');
+
+  const agyTaskMgr = new TaskManager(workspace.rootDir);
+  const agyScheduleMgr = new ScheduleManager();
+  const manageTaskTool = createManageTaskTool(agyTaskMgr);
+  const scheduleTool = createScheduleTool(agyScheduleMgr);
+
+  // 1. Kiểm thử manage_task: list, status, send_input, kill
+  const bgProc = agyTaskMgr.startTask('node -e "process.stdin.on(\'data\', (d) => { console.log(\'ECHO:\' + d.toString().trim()); }); setInterval(()=>{}, 1000);"', workspace.rootDir);
+  assert(bgProc.status === 'running', 'Khởi chạy background process thành công');
+
+  const agyListRes = await manageTaskTool.execute({ Action: 'list' }, workspace);
+  assert(agyListRes.action === 'list', 'manage_task(list) trả về action=list');
+  assert(agyListRes.count >= 1, 'manage_task(list) tìm thấy ít nhất 1 task');
+
+  const statusRes = await manageTaskTool.execute({ Action: 'status', TaskId: bgProc.id }, workspace);
+  assert(statusRes.status === 'running', 'manage_task(status) trả về trạng thái running');
+  assert(statusRes.taskId === bgProc.id, 'manage_task(status) trả về đúng TaskId');
+
+  const sendRes = await manageTaskTool.execute({ Action: 'send_input', TaskId: bgProc.id, Input: 'PING_123' }, workspace);
+  assert(sendRes.success === true, 'manage_task(send_input) gửi dữ liệu vào stdin thành công');
+
+  const killRes = await manageTaskTool.execute({ Action: 'kill', TaskId: bgProc.id }, workspace);
+  assert(killRes.success === true, 'manage_task(kill) dừng background task thành công');
+
+  // 2. Kiểm thử run_command với WaitMsBeforeAsync (Unified Async Dispatch)
+  const agyRunCommand = createRunCommandTool(undefined, agyTaskMgr);
+  
+  // 2a. Lệnh chạy nhanh (< WaitMsBeforeAsync): trả về kết quả đồng bộ ngay
+  const syncCmdRes = await agyRunCommand.execute({
+    command: 'node -e "console.log(\'FAST_SYNC_OUTPUT\')"',
+    WaitMsBeforeAsync: 3000,
+  }, workspace);
+  assert(syncCmdRes.isBackgroundTask === undefined, 'Lệnh nhanh hoàn tất đồng bộ mà không tạo background task');
+  assert(syncCmdRes.stdout.includes('FAST_SYNC_OUTPUT'), 'Lệnh nhanh trả về stdout chính xác');
+  assert(syncCmdRes.success === true, 'Lệnh nhanh trả về success=true');
+
+  // 2b. Lệnh chạy lâu (> WaitMsBeforeAsync): tự động chuyển sang Background Task
+  const asyncCmdRes = await agyRunCommand.execute({
+    command: 'node -e "setInterval(()=>{}, 1000)"',
+    WaitMsBeforeAsync: 200,
+  }, workspace);
+  assert(asyncCmdRes.isBackgroundTask === true, 'Lệnh chạy lâu tự động chuyển sang isBackgroundTask=true');
+  assert(typeof asyncCmdRes.taskId === 'string', 'Trả về taskId dạng chuỗi');
+  assert(asyncCmdRes.status === 'running', 'Background task đang ở trạng thái running');
+
+  // Dọn dẹp task vừa tạo
+  if (asyncCmdRes.taskId) {
+    await manageTaskTool.execute({ Action: 'kill', TaskId: asyncCmdRes.taskId }, workspace);
+  }
+
+  // 3. Kiểm thử schedule & ScheduleManager
+  let scheduleNotified = false;
+  let receivedSchedulePrompt = '';
+  agyScheduleMgr.onNotification((notif) => {
+    scheduleNotified = true;
+    receivedSchedulePrompt = notif.prompt;
+  });
+
+  const oneShotRes = await scheduleTool.execute({
+    DurationSeconds: 1,
+    Prompt: 'Wakeup agent after test',
+    TimerCondition: 'any',
+  }, workspace);
+  assert(oneShotRes.success === true, 'schedule(one_shot) thiết lập timer thành công');
+  assert(oneShotRes.mode === 'one_shot', 'Đúng mode one_shot');
+
+  // Kiểm thử Early-Cancellation khi có sự kiện
+  const earlyCancelled = agyScheduleMgr.handleIncomingEvent('sender_xyz');
+  assert(earlyCancelled.length >= 1, 'ScheduleManager hủy sớm timer thành công khi nhận incoming event');
+
+  const cronRes = await scheduleTool.execute({
+    CronExpression: '*/5 * * * *',
+    Prompt: 'Recurring health check',
+    MaxIterations: 3,
+  }, workspace);
+  assert(cronRes.success === true, 'schedule(cron) thiết lập cron thành công');
+  assert(cronRes.mode === 'cron', 'Đúng mode cron');
+  agyScheduleMgr.cancelSchedule(cronRes.scheduleId);
+
+  // 4. Kiểm thử search_web & read_url_content
+  assert(searchWebTool.name === 'search_web', 'search_web tool được định nghĩa đúng tên');
+  assert(Boolean(searchWebTool.parameters?.properties?.query), 'search_web bắt buộc query parameter');
+
+  assert(readUrlContentTool.name === 'read_url_content', 'read_url_content tool được định nghĩa đúng tên');
+
+  // Kiểm thử htmlToMarkdown
+  const sampleHtml = `
+    <html>
+      <head><style>.test{color:red;}</style><script>alert(1);</script></head>
+      <body>
+        <h1>Documentation Title</h1>
+        <p>This is a guide with <strong>bold text</strong> and <a href="https://example.com">external link</a>.</p>
+        <pre><code>function test() { return 42; }</code></pre>
+        <ul>
+          <li>First feature</li>
+          <li>Second feature</li>
+        </ul>
+      </body>
+    </html>
+  `;
+  const parsedMarkdown = htmlToMarkdown(sampleHtml);
+  assert(parsedMarkdown.includes('# Documentation Title'), 'htmlToMarkdown chuyển đổi đúng H1');
+  assert(parsedMarkdown.includes('**bold text**'), 'htmlToMarkdown chuyển đổi đúng thẻ strong/bold');
+  assert(parsedMarkdown.includes('[external link](https://example.com)'), 'htmlToMarkdown chuyển đổi đúng liên kết link');
+  assert(parsedMarkdown.includes("function test() { return 42; }"), 'htmlToMarkdown chuyển đổi đúng code block');
+  assert(!parsedMarkdown.includes('<script>'), 'htmlToMarkdown loại bỏ sạch sẽ thẻ script');
+  assert(!parsedMarkdown.includes('.test{color:red;}'), 'htmlToMarkdown loại bỏ sạch sẽ thẻ style');
+
+  // 5. Kiểm thử Đăng ký Toàn diện vào ToolRegistry & KernelContext
+  const agyFullRegistry = new ToolRegistry();
+  agyFullRegistry.attachTaskManager(agyTaskMgr);
+  agyFullRegistry.attachScheduleManager(agyScheduleMgr);
+
+  const registeredToolNames = agyFullRegistry.getAll().map((t) => t.name);
+  assert(registeredToolNames.includes('manage_task'), 'ToolRegistry chứa manage_task');
+  assert(registeredToolNames.includes('schedule'), 'ToolRegistry chứa schedule');
+  assert(registeredToolNames.includes('search_web'), 'ToolRegistry chứa search_web');
+  assert(registeredToolNames.includes('read_url_content'), 'ToolRegistry chứa read_url_content');
+  assert(registeredToolNames.includes('run_command'), 'ToolRegistry chứa run_command');
+
+  agyScheduleMgr.dispose();
+  await agyTaskMgr.dispose();
+
+  console.log('\n========================================');
+  console.log('🧪 34. KIỂM THỬ SUBAGENT CAPABILITY MATCHING, SHARED CONTEXT SERVICE (OCC) & AGENT EVENT BUS');
+  console.log('========================================');
+
+  // 1. Kiểm thử Capability Matching & Task Allocation trong SubagentManager & AgentOrchestrator
+  const capRegistry = new AgentRegistry();
+  const dummyFactory = (_id: string, _session: Session, _opts: any, _signal: AbortSignal) => {
+    return {
+      submit: async () => 'DUMMY_RESULT',
+    } as any;
+  };
+  const capSubMgr = new SubagentManager(capRegistry, dummyFactory);
+  const capSession = new Session('session-cap-test');
+  capSubMgr.bindSession(capSession);
+
+  // Spawn agent với capabilities
+  const feAgent = capSubMgr.start('Xây dựng giao diện React Dashboard', {
+    capabilities: ['frontend', 'react', 'tailwind'],
+  });
+  assert(feAgent.status === 'running', 'Subagent frontend khởi chạy thành công');
+
+  const foundAgents = capSubMgr.findAgentsByCapabilities(['frontend', 'react']);
+  assert(foundAgents.length >= 1, 'findAgentsByCapabilities tìm thấy agent phù hợp');
+  assert(foundAgents[0].id === feAgent.id, 'Agent tìm thấy đúng ID của frontend agent');
+
+  // Kiểm thử AgentOrchestrator tích hợp SubagentManager
+  const orchestrator = new AgentOrchestrator(capRegistry, capSubMgr);
+  const allocated = orchestrator.allocateTask('Dựng UI component', ['frontend', 'react']);
+  assert(allocated.id !== undefined, 'AgentOrchestrator phân bổ tác vụ thành công qua SubagentManager');
+
+  // 2. Kiểm thử SharedContextService & Optimistic Concurrency Control (OCC)
+  const sharedCtx = new SharedContextService();
+  const readCtxTool = createReadSharedContextTool(sharedCtx);
+  const writeCtxTool = createWriteSharedContextTool(sharedCtx);
+
+  // 2a. Ghi lần đầu
+  const writeRes1 = await writeCtxTool.execute({
+    key: 'api_contract',
+    value: JSON.stringify({ version: '1.0', endpoint: '/api/v1/auth' }),
+    agentId: 'backend-agent',
+  }, workspace);
+  assert(writeRes1.success === true, 'write_shared_context ghi dữ liệu lần đầu thành công');
+  assert(typeof writeRes1.entry.versionHash === 'string', 'Sinh mã băm SHA-256 versionHash hợp lệ');
+  const v1Hash = writeRes1.entry.versionHash;
+
+  // 2b. Đọc lại dữ liệu
+  const readRes1 = await readCtxTool.execute({ key: 'api_contract' }, workspace);
+  assert(readRes1.success === true, 'read_shared_context đọc dữ liệu chính xác');
+  assert(readRes1.entry.value.endpoint === '/api/v1/auth', 'Dữ liệu đọc ra khớp hoàn toàn với dữ liệu đã ghi');
+
+  // 2c. Cập nhật với đúng expectedVersionHash
+  const writeRes2 = await writeCtxTool.execute({
+    key: 'api_contract',
+    value: JSON.stringify({ version: '1.1', endpoint: '/api/v1/auth', role: 'admin' }),
+    agentId: 'backend-agent',
+    expectedVersionHash: v1Hash,
+  }, workspace);
+  assert(writeRes2.success === true, 'Cập nhật thành công khi expectedVersionHash khớp');
+  assert(writeRes2.entry.versionHash !== v1Hash, 'versionHash mới được cập nhật sau khi ghi');
+
+  // 2d. Cập nhật với sai expectedVersionHash (Phát hiện xung đột OCC)
+  const writeResConflict = await writeCtxTool.execute({
+    key: 'api_contract',
+    value: JSON.stringify({ version: '2.0-STALE' }),
+    agentId: 'frontend-agent',
+    expectedVersionHash: 'STALE_OLD_HASH_123',
+  }, workspace);
+  assert(writeResConflict.success === false, 'Từ chối ghi khi expectedVersionHash không khớp');
+  assert(writeResConflict.conflict === true, 'Phát hiện chính xác cờ xung đột Optimistic Concurrency');
+
+  // 3. Kiểm thử AgentEventBus & Pub/Sub Topic Messaging
+  const agentEventBus = new AgentEventBus();
+  const publishEventTool = createPublishAgentEventTool(agentEventBus);
+
+  let receivedEvent: any = null;
+  agentEventBus.subscribe('schema:updated', (event) => {
+    receivedEvent = event;
+  });
+
+  const pubRes = await publishEventTool.execute({
+    topic: 'schema:updated',
+    payload: { entity: 'User', fields: ['id', 'email', 'name'] },
+    senderId: 'db-architect-agent',
+  }, workspace);
+  assert(pubRes.success === true, 'publish_agent_event phát sự kiện thành công');
+  assert(receivedEvent !== null, 'Listener nhận được sự kiện broadcast');
+  assert(receivedEvent.topic === 'schema:updated', 'Topic của sự kiện nhận được chính xác');
+  assert(receivedEvent.payload.entity === 'User', 'Payload của sự kiện nhận được chính xác');
+  assert(receivedEvent.senderId === 'db-architect-agent', 'SenderId của sự kiện nhận được chính xác');
+
+  // 4. Kiểm thử Đăng ký vào ToolRegistry & KernelContext
+  const multiAgentRegistry = new ToolRegistry();
+  multiAgentRegistry.attachSharedContextService(sharedCtx);
+  multiAgentRegistry.attachAgentEventBus(agentEventBus);
+
+  const multiAgentToolNames = multiAgentRegistry.getAll().map((t) => t.name);
+  assert(multiAgentToolNames.includes('read_shared_context'), 'ToolRegistry chứa read_shared_context');
+  assert(multiAgentToolNames.includes('write_shared_context'), 'ToolRegistry chứa write_shared_context');
+  assert(multiAgentToolNames.includes('publish_agent_event'), 'ToolRegistry chứa publish_agent_event');
+
+  console.log('\n========================================');
+  console.log('🧪 35. KIỂM THỬ 4 CÔNG CỤ HIỂU CODEBASE & KIẾN TRÚC TOÀN DIỆN (query_call_graph, get_route_map, get_symbol_context_360, get_architecture_topology)');
+  console.log('========================================');
+
+  const codeIntelService = new CodebaseIntelligenceService(workspace);
+  const callGraphTool = createQueryCallGraphTool(codeIntelService);
+  const routeMapTool = createGetRouteMapTool(codeIntelService);
+  const symbolContextTool = createGetSymbolContext360Tool(codeIntelService);
+  const archTopologyTool = createGetArchitectureTopologyTool(codeIntelService);
+
+  // 1. Kiểm thử query_call_graph (Call Graph 2 chiều)
+  const callGraphRes = await callGraphTool.execute({
+    symbolName: 'AgentLoop',
+    direction: 'both',
+    depth: 2,
+  }, workspace);
+  assert(callGraphRes.success === true, 'query_call_graph thực thi thành công');
+  assert(callGraphRes.callGraph.symbol === 'AgentLoop', 'query_call_graph truy vết đúng symbol');
+  assert(callGraphRes.callGraph.direction === 'both', 'query_call_graph đúng chiều phân tích both');
+  assert(Array.isArray(callGraphRes.callGraph.callees), 'query_call_graph trả về mảng callees');
+  assert(Array.isArray(callGraphRes.callGraph.callers), 'query_call_graph trả về mảng callers');
+
+  // 2. Kiểm thử get_route_map (Bóc tách API Endpoints & Routes)
+  const testRouteFile = path.join(workspace.rootDir, 'src', 'test-routes.ts');
+  await fs.writeFile(testRouteFile, `
+    import express from 'express';
+    const app = express();
+    app.get('/api/v1/auth/login', (req, res) => res.json({ token: 'test' }));
+    app.post('/api/v1/users/:id', (req, res) => res.json({ ok: true }));
+  `);
+
+  const routeRes = await routeMapTool.execute({
+    pathPattern: 'auth/login',
+  }, workspace);
+  assert(routeRes.success === true, 'get_route_map thực thi thành công');
+  assert(routeRes.count >= 1, 'get_route_map tìm thấy route theo pattern');
+  assert(routeRes.routes[0].path === '/api/v1/auth/login', 'get_route_map trích xuất chính xác URL path');
+  assert(routeRes.routes[0].method === 'GET', 'get_route_map trích xuất chính xác HTTP Method GET');
+
+  // Dọn dẹp test route file
+  try {
+    await fs.unlink(testRouteFile);
+  } catch {}
+
+  // 3. Kiểm thử get_symbol_context_360 (View toàn cảnh 360 độ)
+  const sym360Res = await symbolContextTool.execute({
+    symbolName: 'AgentLoop',
+  }, workspace);
+  assert(sym360Res.success === true, 'get_symbol_context_360 thực thi thành công');
+  assert(sym360Res.context360.symbol === 'AgentLoop', 'get_symbol_context_360 đúng tên symbol');
+  assert(sym360Res.context360.kind === 'class', 'get_symbol_context_360 định danh đúng kind=class');
+  assert(Array.isArray(sym360Res.context360.importedDependencies), 'get_symbol_context_360 trích xuất danh sách imports');
+  assert(sym360Res.context360.referencingFiles.length > 0, 'get_symbol_context_360 tìm thấy các referencing files');
+  assert(sym360Res.context360.relatedTests.length > 0, 'get_symbol_context_360 tự động liên kết các test suites liên quan');
+
+  // 4. Kiểm thử get_architecture_topology (Phân tầng kiến trúc & Phụ thuộc vòng)
+  const archRes = await archTopologyTool.execute({
+    entryDir: 'src',
+  }, workspace);
+  assert(archRes.success === true, 'get_architecture_topology thực thi thành công');
+  assert(archRes.topology.totalFiles > 0, 'get_architecture_topology quét được các files trong project');
+  assert(archRes.topology.totalDependencies > 0, 'get_architecture_topology xây dựng đồ thị dependencies');
+  assert(archRes.topology.layers.service !== undefined, 'get_architecture_topology phân tầng đúng Service layer');
+  assert(archRes.topology.layers.tools !== undefined, 'get_architecture_topology phân tầng đúng Tools layer');
+  assert(Array.isArray(archRes.topology.circularCycles), 'get_architecture_topology phân tích chu trình phụ thuộc vòng');
+
+  // 5. Kiểm thử Đăng ký Mặc định vào ToolRegistry
+  const defaultRegistry = new ToolRegistry();
+  const allToolNames = defaultRegistry.getAll().map((t) => t.name);
+  assert(allToolNames.includes('query_call_graph'), 'ToolRegistry chứa query_call_graph mặc định');
+  assert(allToolNames.includes('get_route_map'), 'ToolRegistry chứa get_route_map mặc định');
+  assert(allToolNames.includes('get_symbol_context_360'), 'ToolRegistry chứa get_symbol_context_360 mặc định');
+  assert(allToolNames.includes('get_architecture_topology'), 'ToolRegistry chứa get_architecture_topology mặc định');
+
+  console.log('\n========================================');
+  console.log('🧪 36. KIỂM THỬ ĐIỀU PHỐI CÔNG CỤ ĐỘNG & NGĂN CHẶN LOÃNG NGỮ CẢNH (TOOL SYNERGY ADVISOR & RATS RETRIEVAL)');
+  console.log('========================================');
+
+  // 1. Kiểm thử ToolSynergyAdvisor: Phân tích và sinh lời khuyên theo Playbook chuẩn tắc
+  const advisor = new ToolSynergyAdvisor();
+
+  // 1a. Playbook C (Safe Mutation): Vừa sửa code -> Gợi ý get_diagnostics & test
+  const adviceMutation = advisor.advise({
+    lastToolName: 'replace_text',
+    lastToolResult: { success: true },
+  });
+  assert(adviceMutation.playbook === 'C_MUTATION', 'Advisor nhận diện đúng Playbook C sau khi sửa code');
+  assert(adviceMutation.suggestedTools.includes('get_diagnostics'), 'Gợi ý get_diagnostics sau khi sửa code');
+  assert(adviceMutation.suggestedTools.includes('run_command'), 'Gợi ý run_command sau khi sửa code');
+
+  // 1b. Playbook B (Deep Debugging): Phát hiện lỗi -> Gợi ý query_call_graph & inspect_symbol
+  const adviceError = advisor.advise({
+    lastToolName: 'run_command',
+    lastToolResult: { error: 'TypeError: undefined is not a function' },
+    hasErrors: true,
+  });
+  assert(adviceError.playbook === 'B_DEBUGGING', 'Advisor nhận diện đúng Playbook B khi gặp lỗi');
+  assert(adviceError.suggestedTools.includes('query_call_graph'), 'Gợi ý query_call_graph để lần vết call stack');
+  assert(adviceError.suggestedTools.includes('inspect_symbol'), 'Gợi ý inspect_symbol để tra cứu định nghĩa');
+
+  // 1c. Playbook D (Async CLI): Chạy Background Task -> Gợi ý schedule & manage_task
+  const adviceBg = advisor.advise({
+    lastToolName: 'run_command',
+    lastToolResult: { isBackgroundTask: true, taskId: 'task-123' },
+  });
+  assert(adviceBg.playbook === 'D_ASYNC_CLI', 'Advisor nhận diện đúng Playbook D cho Background Task');
+  assert(adviceBg.suggestedTools.includes('schedule'), 'Gợi ý schedule để chờ phản ứng không polling');
+  assert(adviceBg.suggestedTools.includes('manage_task'), 'Gợi ý manage_task để điều khiển stdin');
+
+  // 1d. Playbook E (Multi-Agent OCC): Xung đột phiên bản Blackboard -> Gợi ý read_shared_context
+  const adviceOcc = advisor.advise({
+    lastToolName: 'write_shared_context',
+    lastToolResult: { conflict: true, error: 'Optimistic concurrency conflict' },
+    hasSharedContextConflicts: true,
+  });
+  assert(adviceOcc.playbook === 'E_MULTI_AGENT', 'Advisor nhận diện đúng Playbook E khi gặp xung đột OCC');
+  assert(adviceOcc.suggestedTools.includes('read_shared_context'), 'Gợi ý đọc lại versionHash mới nhất');
+
+  // 1e. Playbook A (Discovery): Bắt đầu Task mới -> Gợi ý get_symbol_context_360 & get_route_map
+  const adviceNewTask = advisor.advise({
+    activeTaskTitle: 'Tích hợp API Authentication',
+    lastToolName: 'update_plan_task',
+    lastToolResult: { success: true },
+  });
+  assert(adviceNewTask.playbook === 'A_DISCOVERY', 'Advisor nhận diện đúng Playbook A khi bắt đầu task mới');
+  assert(adviceNewTask.suggestedTools.includes('get_symbol_context_360'), 'Gợi ý xem toàn cảnh symbol');
+
+  // 1f. Kiểm thử formatAdvicePrompt: Tạo chuỗi prompt súc tích
+  const advicePromptText = advisor.formatAdvicePrompt({
+    lastToolName: 'replace_text',
+    lastToolResult: { success: true },
+  });
+  assert(advicePromptText.includes('[TOOL PLAYBOOK GUIDANCE - C_MUTATION]'), 'formatAdvicePrompt chứa đúng tiêu đề Playbook');
+  assert(advicePromptText.includes('get_diagnostics'), 'formatAdvicePrompt chứa danh sách suggested tools');
+
+  // 2. Kiểm thử ToolRetriever (RATS): Ngăn chặn loãng ngữ cảnh với 35+ tools
+  const ratsRetriever = new ToolRetriever({
+    enabled: true,
+    activationThreshold: 5,
+    topK: 5,
+  });
+
+  const fullKernel = new AgentKernel(workspace);
+  const fullToolList = fullKernel.ctx.tools.getAll();
+  assert(fullToolList.length >= 25, 'Registry chứa đầy đủ hệ sinh thái công cụ');
+  ratsRetriever.indexTools(fullToolList);
+
+  // 2a. Đảm bảo Core Anchor Tools luôn có mặt (không bị mất sau khi lọc)
+  const queryEmptyRes = ratsRetriever.retrieve('', fullToolList);
+  const retrievedNames = queryEmptyRes.map((t: any) => t.name);
+  assert(retrievedNames.includes('read_file'), 'RATS luôn bao gồm read_file');
+  assert(retrievedNames.includes('replace_text'), 'RATS luôn bao gồm replace_text');
+  assert(retrievedNames.includes('get_symbol_context_360'), 'RATS luôn bao gồm get_symbol_context_360');
+  assert(retrievedNames.includes('get_diagnostics'), 'RATS luôn bao gồm get_diagnostics');
+
+  // 2b. Truy xuất chính xác tool theo truy vấn ngữ nghĩa
+  const queryCallGraphHits = ratsRetriever.retrieve('call graph hierarchy callers callees trace', fullToolList).map((t: any) => t.name);
+  assert(queryCallGraphHits.includes('query_call_graph'), 'RATS truy xuất chính xác query_call_graph theo ngữ nghĩa');
+
+  const queryRouteHits = ratsRetriever.retrieve('route endpoints API router controllers', fullToolList).map((t: any) => t.name);
+  assert(queryRouteHits.includes('get_route_map'), 'RATS truy xuất chính xác get_route_map theo ngữ nghĩa');
+
+  const queryBlackboardHits = ratsRetriever.retrieve('shared blackboard context state occ lock', fullToolList).map((t: any) => t.name);
+  assert(queryBlackboardHits.includes('read_shared_context') || queryBlackboardHits.includes('write_shared_context'), 'RATS truy xuất chính xác shared context tools');
+
+  console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   console.log('========================================\n');
 

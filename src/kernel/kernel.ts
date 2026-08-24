@@ -21,6 +21,9 @@ import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
 import { PermissionManager } from '../security/permission-manager.js';
 import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
 import { CriticGate } from '../agent/critic-gate.js';
+import { ScheduleManager } from '../tasks/schedule-manager.js';
+import { SharedContextService } from '../agent/shared-context-service.js';
+import { AgentEventBus } from '../agent/agent-event-bus.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -103,6 +106,9 @@ export interface KernelContext {
   critic: CriticGate;
   sandbox: SandboxManager;
   tasks: TaskManager;
+  schedules: ScheduleManager;
+  sharedContext: SharedContextService;
+  agentEvents: AgentEventBus;
   llm: any;
   events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
@@ -148,8 +154,15 @@ export class AgentKernel {
     const critic = new CriticGate();
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
+    const schedules = new ScheduleManager();
+    const sharedContext = new SharedContextService();
+    const agentEvents = new AgentEventBus();
     const tools = new ToolRegistry(plan, memory);
     tools.attachSandboxManager(sandbox);
+    tools.attachTaskManager(tasks);
+    tools.attachScheduleManager(schedules);
+    tools.attachSharedContextService(sharedContext);
+    tools.attachAgentEventBus(agentEvents);
     const permissions = new PermissionManager();
     const toolRunner = new ToolRunner(tools, workspace, permissions);
 
@@ -173,6 +186,9 @@ export class AgentKernel {
       critic,
       sandbox,
       tasks,
+      schedules,
+      sharedContext,
+      agentEvents,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {

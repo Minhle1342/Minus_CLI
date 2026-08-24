@@ -328,6 +328,31 @@ export class PlanManager {
     return task ? cloneTask(task) : undefined;
   }
 
+  /** Lấy task chưa hoàn thành kế tiếp (đang IN_PROGRESS hoặc PENDING đầu tiên) */
+  getNextIncompleteTask(): PlanTask | undefined {
+    const active = this.getActiveTaskReference();
+    if (active) return cloneTask(active);
+    const pending = this.tasks.find((task) => task.status === 'PENDING');
+    return pending ? cloneTask(pending) : undefined;
+  }
+
+  /** Kiểm tra xem toàn bộ các task trong plan đã ở trạng thái terminal hợp lệ (COMPLETED hoặc SKIPPED) chưa */
+  isAllTasksCompleted(): boolean {
+    if (this.tasks.length === 0) return false;
+    return this.tasks.every((task) => task.status === 'COMPLETED' || task.status === 'SKIPPED');
+  }
+
+  /** Lấy danh sách các task chưa hoàn thành */
+  getIncompleteTasks(): PlanTask[] {
+    return this.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status)).map(cloneTask);
+  }
+
+  /** Ép buộc hoặc cập nhật yêu cầu phải có Plan */
+  setPlanRequired(required: boolean, reason?: string): void {
+    this.planRequired = required;
+    this.persist(reason || (required ? 'plan-mandated' : 'plan-optional'));
+  }
+
   hasPlan(): boolean {
     return this.tasks.length > 0;
   }

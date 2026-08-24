@@ -12,6 +12,8 @@ export interface SubagentOptions {
   brief?: string;
   modelName?: string;
   worktreePath?: string;
+  capabilities?: string[];
+  requiredCapabilities?: string[];
 }
 
 export type SubagentFactory = (
@@ -87,7 +89,11 @@ export class SubagentManager {
     };
     this.handles.set(id, { handle, controller });
     this.agents.register(id, `Subagent: ${cleanObjective.slice(0, 60)}`);
-    this.agents.update(id, { status: 'running', sessionId: session.id });
+    this.agents.update(id, {
+      status: 'running',
+      sessionId: session.id,
+      capabilities: options.capabilities || options.requiredCapabilities,
+    });
     this.recordState(handle);
 
     this.launch(handle, session, options, controller);
@@ -97,6 +103,46 @@ export class SubagentManager {
 
   spawn(brief: string, options: SubagentOptions = {}): SubagentHandle {
     return this.start(brief, options);
+  }
+
+  /**
+   * Phân bổ hoặc tạo mới một Agent chuyên trách dựa trên yêu cầu năng lực (Capability Matching)
+   */
+  allocateTask(objective: string, requiredCapabilities: string[] = [], options: SubagentOptions = {}): SubagentHandle {
+    const cleanObjective = objective.trim();
+    if (!cleanObjective) throw new Error('Subagent objective must not be empty.');
+
+    // Kiểm tra xem có agent nào rảnh và đáp ứng toàn bộ requiredCapabilities không
+    if (requiredCapabilities.length > 0) {
+      const candidates = this.agents.list().filter((a) => {
+        if (a.status !== 'idle') return false;
+        if (!a.capabilities || a.capabilities.length === 0) return false;
+        return requiredCapabilities.every((req) => a.capabilities!.includes(req));
+      });
+
+      if (candidates.length > 0) {
+        const selected = candidates[0];
+        const resumed = this.resume(selected.id, { ...options, brief: cleanObjective });
+        if (resumed) return resumed;
+      }
+    }
+
+    // Nếu không có agent sẵn có, tự động spawn agent mới với capabilities được gán
+    return this.start(cleanObjective, {
+      ...options,
+      capabilities: requiredCapabilities.length > 0 ? requiredCapabilities : options.capabilities,
+    });
+  }
+
+  /**
+   * Tìm kiếm danh sách các agent phù hợp với capabilities
+   */
+  findAgentsByCapabilities(capabilities: string[]): import('./agent-registry.js').AgentRecord[] {
+    if (capabilities.length === 0) return this.agents.list();
+    return this.agents.list().filter((a) => {
+      if (!a.capabilities) return false;
+      return capabilities.every((req) => a.capabilities!.includes(req));
+    });
   }
 
   /**

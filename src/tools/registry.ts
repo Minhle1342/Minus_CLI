@@ -16,6 +16,20 @@ import { getDiagnosticsTool } from './get-diagnostics.js';
 import { analyzeImpactTool } from './blast-radius.js';
 import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
+import { createManageTaskTool } from './manage-task.js';
+import { createScheduleTool } from './schedule-tool.js';
+import { searchWebTool } from './search-web.js';
+import { readUrlContentTool } from './read-url-content.js';
+import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
+import { createPublishAgentEventTool } from './agent-event-tools.js';
+import { queryCallGraphTool } from './query-call-graph.js';
+import { getRouteMapTool } from './get-route-map.js';
+import { getSymbolContext360Tool } from './symbol-context-360.js';
+import { getArchitectureTopologyTool } from './architecture-topology.js';
+import { TaskManager } from '../tasks/task-manager.js';
+import { ScheduleManager } from '../tasks/schedule-manager.js';
+import { SharedContextService } from '../agent/shared-context-service.js';
+import { AgentEventBus } from '../agent/agent-event-bus.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -69,6 +83,12 @@ export class ToolRegistry implements ToolProvider {
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
     this.register(runCommandTool);
+    this.register(searchWebTool);
+    this.register(readUrlContentTool);
+    this.register(queryCallGraphTool);
+    this.register(getRouteMapTool);
+    this.register(getSymbolContext360Tool);
+    this.register(getArchitectureTopologyTool);
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
@@ -100,6 +120,24 @@ export class ToolRegistry implements ToolProvider {
 
   attachSandboxManager(sandboxManager: any): void {
     this.register(createRunCommandTool(sandboxManager));
+  }
+
+  attachTaskManager(taskManager: TaskManager): void {
+    this.register(createManageTaskTool(taskManager));
+    this.register(createRunCommandTool(undefined, taskManager));
+  }
+
+  attachScheduleManager(scheduleManager: ScheduleManager): void {
+    this.register(createScheduleTool(scheduleManager));
+  }
+
+  attachSharedContextService(sharedContext: SharedContextService): void {
+    this.register(createReadSharedContextTool(sharedContext));
+    this.register(createWriteSharedContextTool(sharedContext));
+  }
+
+  attachAgentEventBus(eventBus: AgentEventBus): void {
+    this.register(createPublishAgentEventTool(eventBus));
   }
 
   createScope(scopeId: string, allowedToolNames?: string[]): ToolScope {

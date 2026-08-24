@@ -1,4 +1,5 @@
 import { GoalPhase, GoalState, Session } from '../session/session.js';
+import type { PlanManager } from './plan-manager.js';
 
 /**
  * Durable goal lifecycle and continuation authority.
@@ -13,13 +14,13 @@ export class GoalManager {
   private armed = false;
 
   bindSession(session: Session): void {
-    if (this.session === session) return;
-
     this.session = session;
-    this.state = undefined;
-    this.armed = false;
+    this.rehydrateFromSession();
+  }
 
-    const latest = session
+  rehydrateFromSession(): void {
+    if (!this.session) return;
+    const latest = this.session
       .getEvents()
       .filter((event) => event.type === 'goal/change' && event.data.goal !== undefined)
       .at(-1);
@@ -29,6 +30,9 @@ export class GoalManager {
   }
 
   getState(): GoalState | undefined {
+    if (this.session) {
+      this.rehydrateFromSession();
+    }
     return this.state ? cloneGoal(this.state) : undefined;
   }
 
@@ -78,8 +82,8 @@ export class GoalManager {
     return this.getState();
   }
 
-  pause(): GoalState | undefined {
-    return this.transition('paused', undefined, false);
+  pause(blocker?: string): GoalState | undefined {
+    return this.transition('paused', blocker, false);
   }
 
   resume(): GoalState | undefined {
@@ -94,7 +98,30 @@ export class GoalManager {
     return this.transition('blocked', reason.trim() || 'Blocked by operator.', false);
   }
 
-  complete(): GoalState | undefined {
+  /**
+   * Kiểm tra điều kiện hoàn thành mục tiêu (bắt buộc toàn bộ Plan phải COMPLETED nếu có plan)
+   */
+  canComplete(planManager?: PlanManager): { allowed: boolean; reason?: string } {
+    if (!this.state) {
+      return { allowed: false, reason: 'No active goal exists to complete.' };
+    }
+    if (planManager && planManager.hasPlan() && !planManager.isAllTasksCompleted()) {
+      const blocker = planManager.getCompletionBlocker();
+      return {
+        allowed: false,
+        reason: `Cannot complete goal: ${blocker || 'the associated execution plan has unfinished tasks.'}`,
+      };
+    }
+    return { allowed: true };
+  }
+
+  complete(planManager?: PlanManager): GoalState | undefined {
+    if (planManager) {
+      const check = this.canComplete(planManager);
+      if (!check.allowed) {
+        throw new Error(check.reason);
+      }
+    }
     return this.transition('complete', undefined, false);
   }
 

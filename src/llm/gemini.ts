@@ -2,6 +2,7 @@ import { GoogleGenAI, type FunctionDeclaration, type FunctionCall } from '@googl
 import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { retryWithExponentialBackoff } from './error-handling.js';
 
 export interface StreamCallbacks {
   onThoughtToken?: (token: string) => void;
@@ -118,11 +119,19 @@ export class GeminiLLM {
       };
     }
 
-    const responseStream = await this.client.models.generateContentStream({
-      model: this.modelName,
-      contents,
-      config: generateConfig,
-    });
+    const responseStream = await retryWithExponentialBackoff(
+      () => this.client.models.generateContentStream({
+        model: this.modelName,
+        contents,
+        config: generateConfig,
+      }),
+      {
+        maxRetries: 3,
+        baseDelayMs: 1500,
+        maxDelayMs: 12000,
+        jitterMs: 500,
+      },
+    );
 
     const thoughtParts: string[] = [];
     const regularTextParts: string[] = [];

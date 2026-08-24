@@ -6,6 +6,7 @@ import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
 import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
+import { TaskManager } from '../tasks/task-manager.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -180,18 +181,26 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
 }
 
 /**
- * Tạo Tool run_command có tích hợp SandboxManager (Codex CLI Terminal-First Execution)
+ * Tạo Tool run_command có tích hợp SandboxManager và TaskManager (Chuẩn Antigravity CLI Unified Command Execution)
  */
-export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefinition {
+export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal (build, test, lint, explore, inspect, scripts) trong Sandbox cô lập theo chuẩn Terminal-First của Codex CLI. Hỗ trợ chạy các lệnh tìm kiếm (rg, grep, find), duyệt file (ls, dir, tree), đọc log, kiểm thử (npm test, pytest), biên dịch (tsc, npm run build), và thực thi script.',
+    description: 'Thực thi lệnh terminal (build, test, lint, explore, inspect, scripts) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu (dev server, long build) sang background task mà không làm treo Agent.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
           description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v")',
+        },
+        CommandLine: {
+          type: Type.STRING,
+          description: 'Bí danh chuẩn Antigravity của lệnh terminal cần thực thi.',
+        },
+        WaitMsBeforeAsync: {
+          type: Type.INTEGER,
+          description: 'Số milliseconds chờ đợi sau khi bắt đầu lệnh trước khi gửi xuống chạy nền (background task). Tối đa 10000ms. Nếu lệnh kết thúc trong khoảng này, trả về kết quả đồng bộ; nếu chưa, chuyển thành Background Task.',
         },
         timeout_ms: {
           type: Type.NUMBER,
@@ -202,10 +211,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
           description: 'Nơi thực thi: "auto" (mặc định, ưu tiên sandbox) hoặc "host" (host OS, chỉ dành cho lệnh allowlist khi dependency native không tương thích container).',
         },
       },
-      required: ['command'],
+      required: [],
     },
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-      const rawCommand = String(args.command || '').trim();
+      const rawCommand = String(args.command || args.CommandLine || '').trim();
       const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
       const configuredTimeout = Number(process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
       const requestedTimeout = Number(args.timeout_ms);
@@ -216,7 +225,46 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
       );
 
       if (!rawCommand) {
-        return { error: 'Tham số "command" là bắt buộc.' };
+        return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
+      }
+
+      // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
+      const waitMsBeforeAsync = typeof args.WaitMsBeforeAsync === 'number'
+        ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
+        : (typeof args.wait_ms_before_async === 'number' ? Math.min(10000, Math.max(0, args.wait_ms_before_async)) : undefined);
+
+      if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
+        const bgTask = taskManager.startTask(rawCommand, workspace.rootDir);
+        const startTime = Date.now();
+        const deadline = startTime + waitMsBeforeAsync;
+
+        while (Date.now() < deadline) {
+          if (bgTask.status !== 'running') break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        if (bgTask.status !== 'running') {
+          return {
+            command: rawCommand,
+            exitCode: bgTask.exitCode ?? (bgTask.status === 'stopped' ? 0 : 1),
+            stdout: truncateOutput(bgTask.logs.join('\n')),
+            stderr: '',
+            durationMs: Date.now() - startTime,
+            success: bgTask.exitCode === 0 || bgTask.status === 'stopped',
+            sandboxType: 'local',
+          };
+        }
+
+        return {
+          command: rawCommand,
+          isBackgroundTask: true,
+          taskId: bgTask.id,
+          pid: bgTask.pid,
+          status: 'running',
+          message: `Tool is running as a background task with task id: ${bgTask.id}`,
+          recentLogs: bgTask.logs.slice(-10),
+          instruction: `Sử dụng tool manage_task với TaskId="${bgTask.id}" để xem status, gửi stdin (send_input), hoặc kill.`,
+        };
       }
       if (!['auto', 'host'].includes(executionTarget)) {
         return {

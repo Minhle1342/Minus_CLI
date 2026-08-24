@@ -7,6 +7,7 @@ export interface AgentRecord {
   sessionId?: string;
   turn?: number;
   step?: number;
+  capabilities?: string[];
   updatedAt: string;
 }
 

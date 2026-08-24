@@ -98,6 +98,35 @@ export class TaskManager {
   }
 
   /**
+   * Gửi dữ liệu (chuỗi văn bản/lệnh) vào stdin của một background task đang chạy
+   */
+  sendInput(taskId: string, input: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || !task.process || task.status !== 'running') {
+      return false;
+    }
+    if (!task.process.stdin || task.process.stdin.destroyed) {
+      return false;
+    }
+    try {
+      const sanitized = input.endsWith('\n') ? input : input + '\n';
+      task.process.stdin.write(sanitized);
+      task.logs.push(`[STDIN INPUT] ${input}`);
+      return true;
+    } catch (err: any) {
+      task.logs.push(`[STDIN ERROR] ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Lấy thông tin chi tiết một task
+   */
+  getTask(taskId: string): BackgroundTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /**
    * Lấy logs mới nhất của một background task
    */
   getTaskLogs(taskId: string, linesCount: number = 30): string {

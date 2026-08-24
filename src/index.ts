@@ -565,9 +565,45 @@ async function main() {
       if (attachmentResult.hasAttachments) {
         CLI.renderAttachmentSummary(attachmentResult.attachments);
       }
-      await agentLoop.submit(activeSession, attachmentResult.expandedPrompt, 'human', { isGoalMode: true });
+      const goalAutonomousPrompt = `[AUTONOMOUS GOAL EXECUTION - CODEX CLI RALPH LOOP]:
+Goal Objective: ${objective}
+
+Follow the OpenAI Codex CLI Goal-driven Execution Protocol:
+1. If no execution plan exists yet in PlanManager, create a structured plan using create_plan before modifying code.
+2. Execute each task sequentially, gathering observable verification evidence.
+3. Update task status via update_plan_task as milestones complete.
+4. Submit final verified solution via submit_solution once all tasks are complete and verified.`;
+
+      await agentLoop.submit(
+        activeSession,
+        goalAutonomousPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''),
+        'human',
+        { isGoalMode: true },
+      );
     } else {
-      await agentLoop.run(activeSession, { isGoalMode: true });
+      // Tiếp tục Goal round dựa trên task kế tiếp của PlanManager
+      const nextTask = agentLoop.planManager.getNextIncompleteTask();
+      if (nextTask) {
+        const roundPrompt = `[GOAL CONTINUATION - ROUND #${state.roundsStarted}]:
+Goal: ${state.objective}
+Target Task #${nextTask.id}: ${nextTask.title}
+Acceptance Criteria: ${nextTask.acceptanceCriteria}
+
+Please focus on executing and verifying this task. Update its status to COMPLETED using update_plan_task upon verification.`;
+        await agentLoop.submit(activeSession, roundPrompt, 'system', { isGoalMode: true });
+      } else {
+        await agentLoop.run(activeSession, { isGoalMode: true });
+      }
+    }
+
+    // Kiểm tra sau khi turn kết thúc: nếu tất cả task đã xong thì hoàn tất Goal
+    if (agentLoop.planManager.hasPlan() && agentLoop.planManager.isAllTasksCompleted()) {
+      try {
+        agentLoop.goalManager.complete(agentLoop.planManager);
+        console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
+      } catch {
+        // keep active
+      }
     }
   };
 
@@ -579,6 +615,20 @@ async function main() {
     tools: toolRegistry.getAll().map((t) => t.name),
     sandboxStatus: getSandboxStatusLabel(),
   });
+
+  // Kiểm tra phiên gián đoạn / Quota suspension trước đó để hỗ trợ One-Click Resume
+  const existingGoalState = agentLoop.goalManager.getState();
+  const nextIncomplete = agentLoop.planManager.getNextIncompleteTask();
+  if (existingGoalState?.phase === 'paused' || (agentLoop.planManager.hasPlan() && nextIncomplete)) {
+    const activeTaskTitle = nextIncomplete ? `Task #${nextIncomplete.id} "${nextIncomplete.title}"` : existingGoalState?.objective;
+    console.log(`\n${c.yellow}${c.bold}⚠️  [PHÁT HIỆN PHIÊN BỊ TẠM DỪNG / GIÁN ĐOẠN TRƯỚC ĐÓ]${c.reset}`);
+    if (existingGoalState?.blocker) {
+      console.log(`   ${c.dim}Lý do dừng:${c.reset} ${c.yellow}${existingGoalState.blocker}${c.reset}`);
+    }
+    console.log(`   ${c.dim}Tiến độ hiện tại:${c.reset} ${c.brightCyan}${activeTaskTitle}${c.reset}`);
+    console.log(`   💡 ${c.brightGreen}Gõ ${c.bold}/goal resume${c.reset} ${c.brightGreen}hoặc ${c.bold}/plan resume${c.reset} ${c.brightGreen}để tiếp tục thực thi chính xác từ bước này.${c.reset}`);
+    console.log(`   💡 ${c.dim}Gõ ${c.bold}/model${c.reset} ${c.dim}nếu bạn muốn đổi provider/model trước khi tiếp tục.${c.reset}\n`);
+  }
 
   const rl = readline.createInterface({ input, output, completer });
   const getActiveModelInfo = () => ({
@@ -735,6 +785,28 @@ async function main() {
           continue;
         }
 
+        if (planPrompt.toLowerCase() === 'resume') {
+          const nextTask = agentLoop.planManager.getNextIncompleteTask();
+          if (!nextTask) {
+            console.log(`\n${c.yellow}ℹ Toàn bộ các task trong kế hoạch đã hoàn tất (hoặc chưa có kế hoạch nào).${c.reset}\n`);
+            continue;
+          }
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING PLAN EXECUTION]${c.reset} ${c.dim}Tiếp tục từ Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
+          const resumePrompt = `[RESUME INCOMPLETE PLAN]:
+Continue executing the in-flight plan.
+Next Target Task #${nextTask.id}: ${nextTask.title}
+Acceptance Criteria: ${nextTask.acceptanceCriteria}
+
+Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
+          sessionCount++;
+          try {
+            await agentLoop.submit(activeSession, resumePrompt, 'system');
+          } catch (err: any) {
+            console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
         // Người dùng yêu cầu lập kế hoạch cho một nhiệm vụ cụ thể:
         console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Đang kích hoạt Planning Skills (writing-plans, planning-with-files) cho tác vụ:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
 
@@ -757,6 +829,10 @@ ${planPrompt}`;
         sessionCount++;
         try {
           await agentLoop.submit(activeSession, expandedPlanningPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''));
+          const tasks = agentLoop.planManager.getTasks();
+          if (tasks.length > 0) {
+            console.log(`\n💡 ${c.brightGreen}${c.bold}[PLAN READY]${c.reset} ${c.dim}Kế hoạch gồm ${tasks.length} bước đã sẵn sàng. Gõ ${c.bold}${c.brightCyan}/goal resume${c.reset} ${c.dim}hoặc ${c.bold}${c.brightCyan}/goal on${c.reset} ${c.dim}để chuyển sang chế độ tự trị (Autonomous Ralph Loop) thực thi trọn gói.${c.reset}\n`);
+          }
         } catch (err: any) {
           console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Planning Loop:${c.reset}`, err.message);
         }
@@ -906,6 +982,16 @@ ${planPrompt}`;
           continue;
         }
 
+        if (goalArg.toLowerCase() === 'plan') {
+          const tasks = agentLoop.planManager.getTasks();
+          if (tasks.length === 0) {
+            console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào gắn với goal này. Dùng /plan <yêu cầu> để tạo kế hoạch.${c.reset}\n`);
+          } else {
+            CLI.renderPlan(tasks);
+          }
+          continue;
+        }
+
         if (goalArg.toLowerCase() === 'pause') {
           const state = agentLoop.goalManager.pause();
           console.log(`\n${c.yellow}Goal paused:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
@@ -913,8 +999,12 @@ ${planPrompt}`;
         }
 
         if (goalArg.toLowerCase() === 'complete') {
-          const state = agentLoop.goalManager.complete();
-          console.log(`\n${c.green}Goal completed:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+          try {
+            const state = agentLoop.goalManager.complete(agentLoop.planManager);
+            console.log(`\n${c.green}Goal completed:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+          } catch (err: any) {
+            console.log(`\n${c.red}Không thể hoàn thành Goal:${c.reset} ${err.message}\n`);
+          }
           continue;
         }
 

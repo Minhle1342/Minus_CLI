@@ -50,6 +50,8 @@ export class ToolRetriever {
         'replace_text',
         'write_file',
         'run_command',
+        'get_symbol_context_360',
+        'get_diagnostics',
       ],
       minScore: config?.minScore ?? 0.05,
     };
@@ -173,13 +175,14 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
+    if (name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
+    if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
+    if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
     if (name.includes('web') || name.includes('fetch') || name.includes('url')) return 'network';
-    if (name.includes('file') || name.includes('dir') || name.includes('text')) return 'filesystem';
+    if (name.includes('file') || name.includes('dir') || name.includes('text') || name.includes('patch')) return 'filesystem_mutation';
     if (name.includes('search') || name.includes('codebase') || name.includes('find')) return 'search';
-    if (name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'shell';
     if (name.includes('plan') || name.includes('task')) return 'planning';
     if (name.includes('memory') || name.includes('digest')) return 'memory';
-    if (name.includes('subagent') || name.includes('delegate')) return 'subagent';
     if (name.includes('repomix') || name.includes('pack') || name.includes('compress')) return 'repomix';
     if (name.includes('git') || name.includes('commit') || name.includes('push') || name.includes('diff')) return 'git';
     if (name.includes('approval')) return 'approval';
@@ -191,6 +194,30 @@ export class ToolRetriever {
     const tags = new Set<string>();
     const text = `${tool.name} ${tool.description}`.toLowerCase();
 
+    if (text.includes('call_graph') || text.includes('callers') || text.includes('callees') || text.includes('hierarchy') || text.includes('trace')) {
+      tags.add('call graph callers callees hierarchy execution flow trace');
+    }
+    if (text.includes('route') || text.includes('endpoint') || text.includes('controller') || text.includes('express') || text.includes('api')) {
+      tags.add('route endpoint api router controller handlers middleware');
+    }
+    if (text.includes('topology') || text.includes('architecture') || text.includes('layers') || text.includes('circular') || text.includes('cycle')) {
+      tags.add('architecture topology layers dependencies circular dependency matrix');
+    }
+    if (text.includes('360') || text.includes('panorama') || text.includes('symbol')) {
+      tags.add('symbol context 360 panorama definition callers callees tests');
+    }
+    if (text.includes('schedule') || text.includes('timer') || text.includes('cron') || text.includes('watchdog')) {
+      tags.add('schedule timer cron delay watchdog wakeup recurring');
+    }
+    if (text.includes('task') || text.includes('background') || text.includes('stdin') || text.includes('interactive') || text.includes('send_input')) {
+      tags.add('task background process pid kill stdin send_input repl');
+    }
+    if (text.includes('shared_context') || text.includes('blackboard') || text.includes('occ') || text.includes('versionhash')) {
+      tags.add('shared context blackboard state occ concurrency lock');
+    }
+    if (text.includes('event') || text.includes('topic') || text.includes('publish') || text.includes('broadcast')) {
+      tags.add('event bus pub sub topic broadcast messaging');
+    }
     if (text.includes('web') || text.includes('fetch') || text.includes('url') || text.includes('scrape') || text.includes('searxng') || text.includes('online')) {
       tags.add('web fetch url browse search online internet research documentation issue');
     }

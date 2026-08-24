@@ -35,6 +35,8 @@ import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
 import { summarizeStepWithCodestral, generateFallbackStepSummary } from './step-summarizer.js';
+import { classifyLLMError } from '../llm/error-handling.js';
+import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -87,6 +89,8 @@ export class AgentLoop {
   private runQueues = new Map<string, Promise<string>>();
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
+  readonly toolAdvisor = new ToolSynergyAdvisor();
+  private lastToolExecution?: { toolName: string; result: any };
 
   constructor(
     kernelOrLLM: AgentKernel | any,
@@ -257,24 +261,52 @@ export class AgentLoop {
       () => this.runInternal(session, options),
     ).catch(async (error) => {
       // Preserve an auditable, balanced lifecycle even when a provider, hook,
-      // persistence adapter, or tool pipeline throws unexpectedly. This also
-      // pairs any assistant-declared tool calls whose outcome is not known.
+      // persistence adapter, or tool pipeline throws unexpectedly.
+      const errClassification = classifyLLMError(error);
+      const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+
+      if (isQuotaOrRateLimit) {
+        try {
+          await this.checkpointManager.createCheckpoint('Suspended: LLM Quota or Rate Limit reached', {
+            isTaskCheckpoint: true,
+            taskId: this.planManager.getActiveTask()?.id ? `task-${this.planManager.getActiveTask()?.id}` : undefined,
+          });
+        } catch {}
+
+        this.goalManager.pause(`LLM ${errClassification.kind}: ${errClassification.message}`);
+        session.append('goal/change', {
+          reason: 'suspended_quota_limit',
+          goal: this.goalManager.getState(),
+        });
+      } else {
+        this.goalManager.disarm();
+      }
+
       try {
         if (session.recoverInterrupted()) {
           await this.persistSession(session);
         }
       } catch {
-        // Keep the original failure as the rejection reason. Any successfully
-        // appended in-memory recovery events remain available for inspection.
+        // Keep the original failure as the rejection reason.
       }
-      this.setAgentStatus('error', session);
-      this.goalManager.disarm();
+
+      this.setAgentStatus(isQuotaOrRateLimit ? 'idle' : 'error', session);
       const detail = error instanceof Error ? error.message : String(error);
       try {
-        await CLI.renderExecutionStopped(
-          `Agent stopped because an unexpected execution error occurred: ${detail}`,
-          'EXECUTION_ERROR',
-        );
+        if (isQuotaOrRateLimit) {
+          const quotaAdvice = errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+            ? `LLM Quota Exceeded (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
+            : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`;
+          await CLI.renderExecutionStopped(
+            `Agent suspended: ${quotaAdvice}\nChi tiết: ${detail}`,
+            'CIRCUIT_BREAKER_TRIGGERED',
+          );
+        } else {
+          await CLI.renderExecutionStopped(
+            `Agent stopped because an unexpected execution error occurred: ${detail}`,
+            'EXECUTION_ERROR',
+          );
+        }
       } catch {
         // Rendering must never replace or hide the original execution error.
       }
@@ -313,6 +345,9 @@ export class AgentLoop {
     const effectiveMaxSteps = options?.maxSteps ?? (isGoal ? Infinity : this.maxSteps);
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
     this.planManager.beginTurn(turn, turnUserRequest);
+    if (isGoal && !this.planManager.hasPlan()) {
+      this.planManager.setPlanRequired(true, 'goal-mode-active');
+    }
     let consecutiveEmptyTurns = 0;
     let consecutiveIncompleteFinals = 0;
     let consecutivePlanCompletionRejects = 0;
@@ -450,7 +485,15 @@ export class AgentLoop {
       let response;
       // System Prompt 100% STATIC để tối đa hóa KV-Cache Hit Rate (>80%) theo chuẩn OpenAI Codex
       const assembledSystemPrompt = this.promptAssembler.assemble();
-      const dynamicExecutionContext = this.planManager.renderExecutionContext();
+      const rawPlanContext = this.planManager.renderExecutionContext();
+      const advicePrompt = this.toolAdvisor.formatAdvicePrompt({
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        hasErrors: this.lastToolExecution?.result?.error !== undefined,
+        activeTaskTitle: activeTask?.title,
+        activeTaskAcceptance: activeTask?.acceptanceCriteria,
+      });
+      const dynamicExecutionContext = [rawPlanContext, advicePrompt].filter(Boolean).join('\n\n');
 
       session.recordRequestHeader({
         turn,
@@ -833,6 +876,7 @@ export class AgentLoop {
           };
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
+          this.lastToolExecution = { toolName, result: executionResult.result };
           await this.persistSession(session);
           if (effect) {
             const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
@@ -912,7 +956,15 @@ export class AgentLoop {
             reason: 'submitted-solution-final-answer',
           });
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-          this.goalManager.disarm();
+          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+            try {
+              this.goalManager.complete(this.planManager);
+            } catch {
+              this.goalManager.disarm();
+            }
+          } else {
+            this.goalManager.disarm();
+          }
           return finalAnswer;
         }
 
@@ -1166,7 +1218,15 @@ export class AgentLoop {
         reason: 'final-answer',
       });
       await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-      this.goalManager.disarm();
+      if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+        try {
+          this.goalManager.complete(this.planManager);
+        } catch {
+          this.goalManager.disarm();
+        }
+      } else {
+        this.goalManager.disarm();
+      }
 
       return finalAnswer;
     }
