@@ -70,6 +70,9 @@ import { AdaptiveReasoningController } from './agent/adaptive-reasoning-controll
 import { CodeSearchEngine } from './search/code-search-engine.js';
 import { classifyLLMError, retryWithExponentialBackoff } from './llm/error-handling.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
+import { DreamManager } from './dream/dream-manager.js';
+import { CodestralDreamAgent } from './dream/codestral-dream-agent.js';
+import type { DreamAgent, DreamAgentInput, DreamProposal } from './dream/types.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
@@ -2040,6 +2043,171 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Model-authored memory without supporting tool provenance is never trusted automatically',
   );
   await fs.rm(memoryTrustDir, { recursive: true, force: true });
+
+  console.log('\n========================================');
+  console.log('🧪 13B. KIỂM THỬ DREAM MEMORY CONSOLIDATION');
+  console.log('========================================');
+
+  class LocalDreamEmbedding extends EmbeddingService {
+    async generateEmbedding(text: string): Promise<number[]> {
+      return this.generateLocalSubwordEmbedding(text);
+    }
+  }
+  class MockDreamAgent implements DreamAgent {
+    readonly model = 'codestral-latest';
+    calls = 0;
+    lastInput?: DreamAgentInput;
+    shouldFail = false;
+    proposals: DreamProposal[] = [];
+    isConfigured(): boolean { return true; }
+    async propose(input: DreamAgentInput): Promise<DreamProposal[]> {
+      this.calls++;
+      this.lastInput = input;
+      if (this.shouldFail) throw new Error('synthetic Dream provider failure');
+      return this.proposals;
+    }
+  }
+
+  const dreamDir = path.join(workspace.rootDir, 'temp', 'dream-memory-test');
+  await fs.rm(dreamDir, { recursive: true, force: true });
+  const dreamPersistence = new SessionPersistence(dreamDir);
+  const dreamSession = new Session('dream-source-session');
+  dreamSession.addUserMessage('Project convention: use pnpm for every package command. api_key=super-secret-value');
+  dreamSession.append('tool/call', {
+    toolName: 'read_file',
+    toolCallId: 'dream-package-read',
+    args: { path: 'package.json' },
+  });
+  dreamSession.addToolResultWithId('read_file', { path: 'package.json', content: '{"packageManager":"pnpm@10"}' }, 'dream-package-read');
+  dreamSession.addModelMessage({ text: 'Assistant-only hallucination must never become Dream evidence.' });
+  await dreamPersistence.save(dreamSession);
+
+  const dreamMemory = new ProjectMemoryManager(dreamDir, new LocalDreamEmbedding());
+  await dreamMemory.init(new Workspace(dreamDir));
+  await dreamMemory.saveInsight('protected_package_rule', 'Use npm for protected release jobs', 'rule', {
+    source: 'manual',
+    confidence: 1,
+  });
+  const contestedSession = new Session('dream-contested-session');
+  dreamMemory.bindSession(contestedSession);
+  await dreamMemory.saveInsight('duplicate_claim', 'Unverified duplicate', 'insight', { source: 'model', confidence: 0.9 });
+  await dreamMemory.saveInsight('duplicate_claim', 'Unverified duplicate', 'insight', { source: 'model', confidence: 0.9 });
+
+  const mockDream = new MockDreamAgent();
+  mockDream.proposals = [
+    {
+      action: 'remember',
+      key: 'package_manager',
+      insight: 'Use pnpm for package management commands.',
+      category: 'convention',
+      confidence: 0.9,
+      evidenceIds: ['dream-source-session:1', 'dream-source-session:3'],
+      tags: ['pnpm'],
+    },
+    {
+      action: 'remember',
+      key: 'protected_package_rule',
+      insight: 'Never use npm for release jobs.',
+      category: 'rule',
+      confidence: 0.95,
+      evidenceIds: ['dream-source-session:3'],
+    },
+  ];
+  const dreamManager = new DreamManager(dreamDir, dreamMemory, {
+    agent: mockDream,
+    config: {
+      enabled: true,
+      intervalMs: 7 * 24 * 60 * 60 * 1000,
+      maxSessions: 10,
+      maxEvents: 100,
+      maxInputChars: 20_000,
+      maxProposals: 10,
+      minEvidence: 1,
+      lockStaleMs: 60_000,
+    },
+  });
+
+  const dreamPreview = await dreamManager.run({ mode: 'preview', force: true });
+  assert(
+    dreamPreview.status === 'completed'
+      && dreamPreview.accepted === 1
+      && !dreamMemory.retrieve('package manager').some((item) => item.key === 'package_manager'),
+    'Dream preview validates proposals without mutating memory or advancing state',
+  );
+  const sentEvidence = mockDream.lastInput?.evidence.map((item) => item.text).join('\n') || '';
+  assert(
+    !sentEvidence.includes('super-secret-value')
+      && !sentEvidence.includes('Assistant-only hallucination')
+      && sentEvidence.includes('[REDACTED]'),
+    'Dream trajectory redacts secrets and excludes assistant-authored feedback loops',
+  );
+
+  let codestralRequestBody: any;
+  const codestralProbe = new CodestralDreamAgent({
+    apiKey: 'test-only-key',
+    fetchImpl: (async (_url: any, init?: RequestInit) => {
+      codestralRequestBody = JSON.parse(String(init?.body || '{}'));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ proposals: [mockDream.proposals[0]] }) } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch,
+  });
+  const codestralProbeResult = await codestralProbe.propose({
+    evidence: mockDream.lastInput?.evidence || [],
+    existingMemory: [],
+    maxProposals: 2,
+  });
+  assert(
+    codestralRequestBody.model === 'codestral-latest'
+      && codestralRequestBody.response_format?.type === 'json_object'
+      && codestralProbeResult[0]?.key === 'package_manager',
+    'Independent Dream agent uses mistral/codestral-latest with a strict validated JSON contract',
+  );
+
+  const dreamApplied = await dreamManager.run({ mode: 'apply', force: true });
+  const learnedPackageRule = dreamMemory.retrieve('pnpm package', { minConfidence: 0.7 }).find((item) => item.key === 'package_manager');
+  const protectedRule = dreamMemory.retrieve('protected release', { includeContested: true }).find((item) => item.key === 'protected_package_rule');
+  assert(
+    dreamApplied.status === 'completed'
+      && learnedPackageRule?.source === 'dream'
+      && learnedPackageRule.trustStatus === 'active'
+      && (learnedPackageRule.provenance?.length || 0) === 2,
+    'Dream applies only policy-verified memory with durable multi-event provenance',
+  );
+  assert(
+    protectedRule?.insight === 'Use npm for protected release jobs'
+      && protectedRule.trustStatus === 'active'
+      && dreamApplied.rejected === 1,
+    'Dream cannot overwrite stronger manual memory with weaker conflicting evidence',
+  );
+  assert(
+    dreamMemory.getMemoryData().learnedInsights.filter((item) => item.key === 'duplicate_claim').length === 1
+      && dreamApplied.pruned >= 1,
+    'Dream transaction deterministically prunes duplicate contested memories and rebuilds the vector index',
+  );
+
+  const callsAfterApply = mockDream.calls;
+  const scheduledDream = await dreamManager.runIfDue();
+  assert(
+    scheduledDream.status === 'skipped' && mockDream.calls === callsAfterApply,
+    'Dream scheduler respects the interval and avoids an unnecessary Codestral call',
+  );
+
+  const statePath = path.join(dreamDir, '.codingagent', 'dream', 'state.json');
+  const stateBeforeFailure = JSON.parse(await fs.readFile(statePath, 'utf8'));
+  const laterSession = new Session('dream-later-session');
+  laterSession.addUserMessage('A later event that must remain replayable after failure.');
+  await dreamPersistence.save(laterSession);
+  mockDream.shouldFail = true;
+  const failedDream = await dreamManager.run({ mode: 'apply', force: true });
+  const stateAfterFailure = JSON.parse(await fs.readFile(statePath, 'utf8'));
+  assert(
+    failedDream.status === 'failed'
+      && JSON.stringify(stateAfterFailure.cursors) === JSON.stringify(stateBeforeFailure.cursors)
+      && stateAfterFailure.lastRunAt === stateBeforeFailure.lastRunAt,
+    'Dream provider failures preserve watermarks so unprocessed evidence is replayable',
+  );
+  await fs.rm(dreamDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 14. KIỂM THỬ MEMORY TOOLS (save_memory & read_memory)');

@@ -493,7 +493,14 @@ export class AgentLoop {
         activeTaskTitle: activeTask?.title,
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
       });
-      const dynamicExecutionContext = [rawPlanContext, advicePrompt].filter(Boolean).join('\n\n');
+      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, 4);
+      const memoryPrompt = relevantMemory.length > 0
+        ? [
+            '[VERIFIED RELEVANT PROJECT MEMORY]',
+            ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
+          ].join('\n')
+        : '';
+      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, advicePrompt].filter(Boolean).join('\n\n');
 
       session.recordRequestHeader({
         turn,

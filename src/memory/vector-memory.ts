@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { writeFileAtomically } from './atomic-write.js';
 
 export interface VectorDocument {
   id: string;
@@ -20,6 +21,12 @@ export interface VectorSearchOptions {
   limit?: number;
   minSimilarity?: number;
   filter?: (doc: VectorDocument) => boolean;
+}
+
+export interface VectorReplacement {
+  id: string;
+  text: string;
+  metadata?: Record<string, any>;
 }
 
 /**
@@ -288,10 +295,41 @@ export class VectorMemoryStore {
     try {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const docsArray = Array.from(this.documents.values());
-      await fs.writeFile(this.filePath, JSON.stringify(docsArray, null, 2), 'utf-8');
+      await this.writeAtomically(JSON.stringify(docsArray, null, 2));
     } catch (err: any) {
       console.warn(`[VectorMemoryStore] Failed to persist vector store: ${err.message}`);
     }
+  }
+
+  /**
+   * Build a complete replacement index before making it visible. Dream uses
+   * this to prevent stale vectors from surviving a consolidation transaction.
+   */
+  async replaceAll(replacements: VectorReplacement[]): Promise<void> {
+    await this.init();
+    const now = new Date().toISOString();
+    const next = new Map<string, VectorDocument>();
+    for (const replacement of replacements) {
+      const existing = this.documents.get(replacement.id);
+      const vector = existing?.text === replacement.text && existing.vector?.length
+        ? existing.vector
+        : await this.embeddingService.generateEmbedding(replacement.text);
+      next.set(replacement.id, {
+        id: replacement.id,
+        text: replacement.text,
+        vector,
+        metadata: replacement.metadata || {},
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+      });
+    }
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    await this.writeAtomically(JSON.stringify(Array.from(next.values()), null, 2));
+    this.documents = next;
+  }
+
+  private async writeAtomically(content: string): Promise<void> {
+    await writeFileAtomically(this.filePath, content);
   }
 
   get size(): number {

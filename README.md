@@ -269,6 +269,7 @@ npm run dev
 - `/goal resume`: Khôi phục mục tiêu bị tạm dừng do cạn Quota.
 - `/clear`: Làm mới ngữ cảnh hội thoại.
 - `/session` & `/sessions`: Quản lý và kiểm tra lịch sử các phiên làm việc.
+- `/dream run|preview|status`: Chạy, xem trước hoặc kiểm tra Dream memory consolidation bằng agent độc lập `mistral/codestral-latest`.
 - `@<file_path>`: Đính kèm ngữ cảnh tệp tin/thư mục tự động theo thời gian thực.
 
 ---

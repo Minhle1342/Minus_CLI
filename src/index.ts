@@ -540,6 +540,12 @@ async function main() {
 
   let sessionCount = 0;
 
+  // Dream runs outside the interactive agent and is triggered only after a
+  // completed answer. It is silent in auto mode; /dream status exposes reports.
+  kernel.ctx.events.on('model:final_answer', () => {
+    void kernel.ctx.dream.runIfDue().catch(() => {});
+  });
+
   activeWorkspaceRef = workspace;
 
   const executeDurableGoal = async (objective?: string): Promise<void> => {
@@ -841,6 +847,42 @@ ${planPrompt}`;
 
       if (trimmed === '/memory') {
         CLI.renderMemory(agentLoop.memoryManager.getMemoryData());
+        continue;
+      }
+
+      if (trimmed === '/dream' || trimmed.startsWith('/dream ')) {
+        const action = trimmed.slice('/dream'.length).trim().toLowerCase() || 'run';
+        if (action === 'status') {
+          const status = await kernel.ctx.dream.status();
+          console.log(`\n${c.cyan}${c.bold}Dream memory consolidator${c.reset}`);
+          console.log(`  Model: ${c.brightCyan}${status.model}${c.reset}`);
+          console.log(`  Auto: ${status.enabled ? c.green + 'enabled' : c.yellow + 'disabled'}${c.reset} | API: ${status.configured ? c.green + 'configured' : c.red + 'missing key'}${c.reset}`);
+          console.log(`  Interval: ${status.intervalHours}h | Due: ${status.due ? 'yes' : 'no'} | Running: ${status.running ? 'yes' : 'no'}`);
+          console.log(`  Last run: ${status.lastRunAt || 'never'} | Session cursors: ${status.cursorCount}`);
+          if (status.lastReport) {
+            console.log(`  Last report: ${status.lastReport.status}; accepted=${status.lastReport.accepted}; pruned=${status.lastReport.pruned}${status.lastReport.reason ? `; reason=${status.lastReport.reason}` : ''}`);
+          }
+          console.log('');
+          continue;
+        }
+        if (!['run', 'preview'].includes(action)) {
+          console.log(`\n${c.yellow}Usage: /dream [run|preview|status]${c.reset}\n`);
+          continue;
+        }
+        console.log(`\n${c.magenta}${c.bold}Dream${c.reset} ${action === 'preview' ? 'is preparing a preview' : 'is consolidating memory'} with ${c.brightCyan}mistral/codestral-latest${c.reset}...`);
+        const report = await kernel.ctx.dream.run({ mode: action === 'preview' ? 'preview' : 'apply', force: true });
+        const color = report.status === 'completed' ? c.green : report.status === 'failed' ? c.red : c.yellow;
+        console.log(`${color}${report.status.toUpperCase()}${c.reset}: sessions=${report.scannedSessions}, events=${report.scannedEvents}, evidence=${report.evidenceCount}, proposals=${report.proposals}, accepted=${report.accepted}, rejected=${report.rejected}`);
+        if (report.mode !== 'preview') {
+          console.log(`  memory: upserted=${report.upserted}, superseded=${report.superseded}, pruned=${report.pruned}`);
+        }
+        if (report.reason) console.log(`  ${c.gray}${report.reason}${c.reset}`);
+        if (report.preview?.length) {
+          for (const item of report.preview) {
+            console.log(`  - ${item.action} ${item.key} (confidence=${item.confidence.toFixed(2)}, evidence=${item.evidence})`);
+          }
+        }
+        console.log('');
         continue;
       }
 

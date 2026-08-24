@@ -4,6 +4,7 @@ import { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
 import { MemoryCategory, MemoryQueryOptions, MemoryRecord, MemoryScope, MemorySource } from './types.js';
 import { VectorMemoryStore, EmbeddingService, cosineSimilarity } from './vector-memory.js';
+import { writeFileAtomically } from './atomic-write.js';
 
 export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insight' | 'category'>> {
   key: string;
@@ -22,6 +23,19 @@ export interface ProjectMemoryData {
   codingConventions: string[];
   learnedInsights: LearnedInsight[];
   lastIndexed: string;
+}
+
+export interface MemoryConsolidationPlan {
+  upserts: MemoryRecord[];
+  supersede: Array<{ id: string; supersededBy: string; reason: string }>;
+  pruneIds: string[];
+}
+
+export interface MemoryConsolidationResult {
+  upserted: number;
+  superseded: number;
+  pruned: number;
+  total: number;
 }
 
 /**
@@ -92,17 +106,18 @@ export class ProjectMemoryManager {
 
     // Khởi tạo và đồng bộ Vector Store (RAG)
     await this.vectorStore.init();
-    for (const item of this.memoryData.learnedInsights) {
-      const text = `${item.key}: ${item.insight} ${(item.tags || []).join(' ')}`;
-      await this.vectorStore.upsert(item.id || `memory-${item.key}`, text, {
+    await this.vectorStore.replaceAll(this.memoryData.learnedInsights.map((item) => ({
+      id: item.id || `memory-${item.key}`,
+      text: `${item.key}: ${item.insight} ${(item.tags || []).join(' ')}`,
+      metadata: {
         key: item.key,
         category: item.category,
         scope: item.scope,
         confidence: item.confidence,
         trustStatus: item.trustStatus,
         tags: item.tags,
-      });
-    }
+      },
+    })));
 
     return this.memoryData;
   }
@@ -308,7 +323,57 @@ export class ProjectMemoryManager {
    */
   async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
-    await fs.writeFile(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2), 'utf-8');
+    await writeFileAtomically(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2));
+  }
+
+  /**
+   * Apply a verified Dream plan as one memory snapshot and rebuild the vector
+   * projection from that same snapshot. The Dream model never calls this API
+   * directly; only the deterministic Dream policy can construct the plan.
+   */
+  async applyConsolidation(plan: MemoryConsolidationPlan): Promise<MemoryConsolidationResult> {
+    const now = new Date().toISOString();
+    const records = this.memoryData.learnedInsights.map((item) => this.normalizeInsight(item) as MemoryRecord);
+    const byId = new Map(records.map((item) => [item.id, item]));
+    let superseded = 0;
+    let pruned = 0;
+
+    for (const change of plan.supersede) {
+      const current = byId.get(change.id);
+      if (!current) continue;
+      byId.set(change.id, {
+        ...current,
+        trustStatus: 'superseded',
+        supersededBy: change.supersededBy,
+        conflictReason: change.reason,
+        updatedAt: now,
+      });
+      superseded++;
+    }
+    for (const id of new Set(plan.pruneIds)) {
+      if (byId.delete(id)) pruned++;
+    }
+    for (const item of plan.upserts) {
+      byId.set(item.id, this.normalizeInsight(item) as MemoryRecord);
+    }
+
+    const consolidated = Array.from(byId.values());
+    await this.vectorStore.replaceAll(consolidated.map((record) => ({
+      id: record.id,
+      text: `${record.key}: ${record.insight} ${(record.tags || []).join(' ')}`,
+      metadata: {
+        key: record.key,
+        category: record.category,
+        scope: record.scope,
+        confidence: record.confidence,
+        trustStatus: record.trustStatus,
+        tags: record.tags,
+      },
+    })));
+    this.memoryData.learnedInsights = consolidated;
+    this.memoryData.lastIndexed = now;
+    await this.save();
+    return { upserted: plan.upserts.length, superseded, pruned, total: consolidated.length };
   }
 
   /**

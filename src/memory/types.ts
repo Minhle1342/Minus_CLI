@@ -1,7 +1,15 @@
 export type MemoryScope = 'project' | 'session' | 'goal';
-export type MemorySource = 'manual' | 'workspace-index' | 'tool-result' | 'model';
+export type MemorySource = 'manual' | 'workspace-index' | 'tool-result' | 'model' | 'dream';
 export type MemoryCategory = 'convention' | 'architecture' | 'gotcha' | 'rule' | 'insight';
 export type MemoryTrustStatus = 'active' | 'contested' | 'superseded';
+
+export interface MemoryProvenance {
+  evidenceId: string;
+  sessionId: string;
+  eventSeq: number;
+  kind: string;
+  createdAt: string;
+}
 
 export interface MemoryRecord {
   id: string;
@@ -21,6 +29,9 @@ export interface MemoryRecord {
   sourceToolCallId?: string;
   expiresAt?: string;
   conflictReason?: string;
+  provenance?: MemoryProvenance[];
+  verifiedAt?: string;
+  supersededBy?: string;
 }
 
 export interface MemoryQueryOptions {

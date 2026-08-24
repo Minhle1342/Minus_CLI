@@ -77,6 +77,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
+  { command: '/dream', usage: '/dream [run|preview|status]', description: 'Hợp nhất bộ nhớ nền bằng mistral/codestral-latest', category: 'Memory' },
   { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
   { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (MINUS standard)', category: 'Telemetry', aliases: ['/prompt-cache'] },
   { command: '/status', description: 'Xem trạng thái phiên làm việc', category: 'Telemetry' },

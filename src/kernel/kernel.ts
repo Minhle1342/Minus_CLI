@@ -24,6 +24,7 @@ import { CriticGate } from '../agent/critic-gate.js';
 import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
+import { DreamManager } from '../dream/dream-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -99,6 +100,7 @@ export interface KernelContext {
   agents: AgentRegistry;
   sessions: SessionManager;
   memory: ProjectMemoryManager;
+  dream: DreamManager;
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
@@ -147,6 +149,7 @@ export class AgentKernel {
     const agents = new AgentRegistry();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
+    const dream = new DreamManager(workspace.rootDir, memory);
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
@@ -179,6 +182,7 @@ export class AgentKernel {
       agents,
       sessions,
       memory,
+      dream,
       checkpoints,
       compactor,
       reflection,
@@ -200,6 +204,7 @@ export class AgentKernel {
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
+        this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory);
         this.ctx.sessions.setWorkspace(newWs.rootDir);
         (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
         this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
