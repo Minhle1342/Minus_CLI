@@ -3,6 +3,7 @@ import { Session } from '../session/session.js';
 import { GeminiLLM, LLMRequestOptions, LLMResponse, StreamCallbacks } from './gemini.js';
 import { DeepseekLLM } from './deepseek.js';
 import { colors as c } from '../ui/cli-ui.js';
+import { TokenConfig, resolveTokenConfig } from './token-config.js';
 
 export interface ProviderTier {
   name: string;
@@ -25,9 +26,11 @@ export class FallbackRouterLLM {
   readonly modelName: string;
   private tiers: ProviderTier[];
   private activeIndex: number = 0;
+  private tokenConfig?: Partial<TokenConfig>;
 
-  constructor(modelName: string = 'auto-fallback', tiers: ProviderTier[]) {
+  constructor(modelName: string = 'auto-fallback', tiers: ProviderTier[], tokenConfig?: Partial<TokenConfig>) {
     this.modelName = modelName;
+    this.tokenConfig = tokenConfig;
     this.tiers = tiers.filter((t) => {
       try {
         t.createClient();
@@ -40,6 +43,17 @@ export class FallbackRouterLLM {
     if (this.tiers.length === 0) {
       throw new Error('Không có nhà cung cấp nào hợp lệ hoặc có API key khả dụng trong cấu hình Fallback Router.');
     }
+  }
+
+  getTokenConfig(): TokenConfig {
+    return resolveTokenConfig(this.modelName, this.tokenConfig);
+  }
+
+  setTokenConfig(config: Partial<TokenConfig>): void {
+    this.tokenConfig = {
+      ...this.tokenConfig,
+      ...config,
+    };
   }
 
   getActiveProvider(): ProviderTier {
@@ -57,6 +71,13 @@ export class FallbackRouterLLM {
   ): Promise<LLMResponse> {
     let lastError: any = null;
     const initialIndex = this.activeIndex;
+    const mergedRequest: LLMRequestOptions = {
+      ...request,
+      tokenConfig: {
+        ...this.tokenConfig,
+        ...request?.tokenConfig,
+      },
+    };
 
     for (let attempt = 0; attempt < this.tiers.length; attempt++) {
       const currentIndex = (initialIndex + attempt) % this.tiers.length;
@@ -64,12 +85,15 @@ export class FallbackRouterLLM {
 
       try {
         const client = currentTier.createClient();
+        if (this.tokenConfig && typeof (client as any).setTokenConfig === 'function') {
+          (client as any).setTokenConfig(this.tokenConfig);
+        }
 
         if (attempt > 0) {
           console.log(`\n${c.yellow}${c.bold}⚡ [AUTO-FALLBACK ACTIVATED]${c.reset} ${c.brightYellow}Chuyển sang Tier ${currentTier.tier}: ${c.bold}${currentTier.name}${c.reset} (${currentTier.provider})...`);
         }
 
-        const response = await client.generateStream(session, tools, callbacks, request);
+        const response = await client.generateStream(session, tools, callbacks, mergedRequest);
 
         // Thành công -> cập nhật activeIndex
         this.activeIndex = currentIndex;

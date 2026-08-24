@@ -26,6 +26,14 @@ import { createDelegateAgentTool, createGetAgentResultTool, createResumeAgentToo
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
+import { type LLMRequestOptions } from '../llm/gemini.js';
+import { HypothesisTracker } from './hypothesis-tracker.js';
+import { SpeculativeBranchManager } from './speculative-branch-manager.js';
+import { CriticGate } from './critic-gate.js';
+import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
+import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
+import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
+import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -63,6 +71,12 @@ export class AgentLoop {
   readonly verificationPolicy = new VerificationPolicy();
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
+  readonly hypothesisTracker = new HypothesisTracker();
+  readonly criticGate: CriticGate;
+  readonly speculativeManager: SpeculativeBranchManager;
+  readonly adaptiveReasoning = new AdaptiveReasoningController();
+  readonly rollbackOrchestrator: HypothesisRollbackOrchestrator;
+  readonly workspaceVerifier: WorkspaceStateVerifier;
   readonly kernel?: AgentKernel;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
@@ -71,12 +85,14 @@ export class AgentLoop {
   private drainScheduled = false;
   private runQueues = new Map<string, Promise<string>>();
   private activeSession?: Session;
+  private loopOptions?: AgentLoopOptions;
 
   constructor(
     kernelOrLLM: AgentKernel | any,
     toolRegistry?: ToolRegistry,
     options?: AgentLoopOptions
   ) {
+    this.loopOptions = options;
     if (kernelOrLLM instanceof AgentKernel) {
       this.kernel = kernelOrLLM;
       this.llm = this.kernel.ctx.llm;
@@ -98,8 +114,13 @@ export class AgentLoop {
       this.reflectionEngine = this.kernel.ctx.reflection;
       this.memoryManager = this.kernel.ctx.memory;
       this.effectLedger = new EffectLedger();
+      this.criticGate = new CriticGate(this.completionEvidenceGate);
+      this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
+      this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
+      this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.maxSteps = options?.maxSteps ?? 30;
       this.sessionPersistence = options?.sessionPersistence;
+      registerSubmitSolutionTool(this.toolRegistry, this._workspace);
       this.kernel.init().catch(() => {});
     } else {
       this.llm = kernelOrLLM;
@@ -120,15 +141,23 @@ export class AgentLoop {
       this.reflectionEngine = new ReflectionEngine();
       this.memoryManager = new ProjectMemoryManager(this._workspace.rootDir);
       this.effectLedger = new EffectLedger();
+      this.criticGate = new CriticGate(this.completionEvidenceGate);
+      this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
+      this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
+      this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
       this.toolRegistry.attachPlanManager(this.planManager);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
+      registerSubmitSolutionTool(this.toolRegistry, this._workspace);
 
       this.checkpointManager.init().catch(() => {});
       this.memoryManager.init(this._workspace).catch(() => {});
     }
+
+    // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
+    this.contextCompactor.setConfig({ preservePrefixCache: true });
 
     this.agentRegistry.register(this.agentId, this.agentId);
     this.subagentManager = new SubagentManager(
@@ -180,6 +209,28 @@ export class AgentLoop {
     if (this.kernel) {
       this.kernel.ctx.setLLM(llm, modelName);
     }
+    if (llm && typeof llm.getTokenConfig === 'function') {
+      const tokenConfig = llm.getTokenConfig();
+      if (tokenConfig?.maxInputTokens) {
+        this.contextCompactor.setMaxInputTokens(tokenConfig.maxInputTokens);
+      }
+    }
+  }
+
+  getTokenConfig(): import('../llm/token-config.js').TokenConfig | undefined {
+    if (this.llm && typeof this.llm.getTokenConfig === 'function') {
+      return this.llm.getTokenConfig();
+    }
+    return undefined;
+  }
+
+  setTokenConfig(config: Partial<import('../llm/token-config.js').TokenConfig>): void {
+    if (this.llm && typeof this.llm.setTokenConfig === 'function') {
+      this.llm.setTokenConfig(config);
+    }
+    if (config.maxInputTokens) {
+      this.contextCompactor.setMaxInputTokens(config.maxInputTokens);
+    }
   }
 
   /**
@@ -217,9 +268,9 @@ export class AgentLoop {
       this.goalManager.disarm();
       const detail = error instanceof Error ? error.message : String(error);
       try {
-        await CLI.renderFinalAnswer(
+        await CLI.renderExecutionStopped(
           `Agent stopped because an unexpected execution error occurred: ${detail}`,
-          { animate: false },
+          'EXECUTION_ERROR',
         );
       } catch {
         // Rendering must never replace or hide the original execution error.
@@ -283,7 +334,7 @@ export class AgentLoop {
     });
     if (!turnStartDecision.allow) {
       const rejectionMessage = `Agent turn rejected: ${turnStartDecision.reason || 'turn hook rejected execution.'}`;
-      await CLI.renderFinalAnswer(rejectionMessage, { animate: false });
+      await CLI.renderExecutionStopped(rejectionMessage, 'TURN_REJECTED');
       await this.endTurn(session, turn, effectiveMaxSteps, isGoal, turnStartDecision.reason || 'turn-rejected');
       this.goalManager.disarm();
       return rejectionMessage;
@@ -321,7 +372,7 @@ export class AgentLoop {
     for (let step = 1; step <= effectiveMaxSteps; step++) {
       if (options?.signal?.aborted) {
         const cancellationMessage = 'Agent stopped: cancellation requested.';
-        await CLI.renderFinalAnswer(cancellationMessage, { animate: false });
+        await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
         this.goalManager.disarm();
         return cancellationMessage;
@@ -346,7 +397,7 @@ export class AgentLoop {
           ...hookContext,
           reason: preStepDecision.reason || 'pre-step-rejected',
         });
-        await CLI.renderFinalAnswer(rejectionMessage, { animate: false });
+        await CLI.renderExecutionStopped(rejectionMessage, 'PRE_STEP_REJECTED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, preStepDecision.reason || 'pre-step-rejected');
         this.goalManager.disarm();
         return rejectionMessage;
@@ -371,14 +422,14 @@ export class AgentLoop {
           reason: requestDecision.reason || 'request-rejected',
         });
         CLI.renderStepFooter();
-        await CLI.renderFinalAnswer(rejectionMessage, { animate: false });
+        await CLI.renderExecutionStopped(rejectionMessage, 'REQUEST_REJECTED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, requestDecision.reason || 'request-rejected');
         this.goalManager.disarm();
         return rejectionMessage;
       }
 
       // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
-      // Dynamic Tool Retrieval (RATS): Truy xuất tập tool phù hợp nhất cho ngữ cảnh của bước này
+      // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
       const activeTask = this.planManager.getActiveTask();
       const activeStepQuery = [
         turnUserRequest,
@@ -387,12 +438,15 @@ export class AgentLoop {
         activeTask?.notes || '',
       ].filter(Boolean).join(' ');
 
-      const activeToolDeclarations = typeof (this.toolProvider as any).getRelevantTools === 'function'
+      const activeToolDeclarations = (this.loopOptions?.enableDynamicToolRetrieval && typeof (this.toolProvider as any).getRelevantTools === 'function')
         ? (this.toolProvider as any).getRelevantTools(activeStepQuery)
         : toolDeclarations;
 
       let response;
-      const assembledSystemPrompt = `${this.promptAssembler.assemble()}\n\n${this.planManager.renderExecutionContext()}`;
+      // System Prompt 100% STATIC để tối đa hóa KV-Cache Hit Rate (>80%) theo chuẩn OpenAI Codex
+      const assembledSystemPrompt = this.promptAssembler.assemble();
+      const dynamicExecutionContext = this.planManager.renderExecutionContext();
+
       session.recordRequestHeader({
         turn,
         step,
@@ -402,7 +456,13 @@ export class AgentLoop {
       });
       session.assertRuntimeInvariants({ allowOpenLifecycle: true });
       await this.persistSession(session);
-      const requestOptions = { systemPrompt: assembledSystemPrompt };
+      const requestOptions: LLMRequestOptions = {
+        systemPrompt: assembledSystemPrompt,
+        dynamicContext: dynamicExecutionContext,
+        sessionId: session.id,
+        promptCacheKey: session.id,
+        enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
+      };
       CLI.renderLLMThinking();
       if (typeof this.llm.generateStream === 'function') {
         response = await this.llm.generateStream(session, activeToolDeclarations, {
@@ -415,6 +475,12 @@ export class AgentLoop {
         }, requestOptions);
       } else {
         response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
+      }
+
+      // Giám sát và hiển thị Prompt Cache Hit Rate / Token Telemetry
+      if (response.usage) {
+        this.kernel?.ctx.events.emit('model:usage', response.usage);
+        CLI.renderCacheUsage(response.usage);
       }
 
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
@@ -481,7 +547,7 @@ export class AgentLoop {
           ...hookContext,
           reason: `${finishReason}-terminal`,
         });
-        await CLI.renderFinalAnswer(incompleteMessage, { animate: false });
+        await CLI.renderExecutionStopped(incompleteMessage, 'INCOMPLETE_RESPONSE');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, `${finishReason}-terminal`);
         this.goalManager.disarm();
         return incompleteMessage;
@@ -639,13 +705,13 @@ export class AgentLoop {
             { sessionId: session.id, agentId: this.agentId, turn },
           );
 
-          // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol)
+          // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol + LSP Diagnostics)
           const reflectionAnalysis = this.reflectionEngine.analyze({
             toolName,
             args: toolArgs,
             result: executionResult.result,
             durationMs: executionResult.durationMs,
-          });
+          }, this._workspace);
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result);
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text'].includes(toolName)) {
@@ -728,7 +794,7 @@ export class AgentLoop {
 
         if (toolBatchCancelled) {
           const cancellationMessage = 'Agent stopped: cancellation requested. Tool calls not yet dispatched were recorded as aborted.';
-          await CLI.renderFinalAnswer(cancellationMessage, { animate: false });
+          await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
           this.goalManager.disarm();
           return cancellationMessage;
@@ -739,7 +805,7 @@ export class AgentLoop {
           && consecutiveNoProgressStrategyChanges >= maxNoProgressStrategyChanges
         ) {
           const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
-          await CLI.renderFinalAnswer(noProgressMessage, { animate: false });
+          await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
           this.goalManager.disarm();
           return noProgressMessage;
@@ -861,7 +927,7 @@ export class AgentLoop {
         if (canRetryPlan) continue;
 
         const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
-        await CLI.renderFinalAnswer(incompletePlanMessage, { animate: false });
+        await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
         this.goalManager.disarm();
         return incompletePlanMessage;
@@ -882,6 +948,13 @@ export class AgentLoop {
         activeSkills.push('verification-before-completion');
       }
       const verificationDecision = this.verificationPolicy.canComplete(activeSkills);
+      const criticDecision = this.criticGate.evaluate({
+        finalAnswer,
+        session,
+        workspace: this._workspace,
+        hypothesisTracker: this.hypothesisTracker,
+        userRequest: turnUserRequest,
+      });
       const finalAnswerDecision = !policyDecision.allow
         ? policyDecision
         : !evidenceDecision.allow
@@ -889,6 +962,12 @@ export class AgentLoop {
             allow: false,
             reason: 'unverified-evidence' as const,
             continuationPrompt: evidenceDecision.continuationPrompt,
+          }
+        : !criticDecision.approved
+        ? {
+            allow: false,
+            reason: 'unverified-evidence' as const,
+            continuationPrompt: criticDecision.critiquePrompt,
           }
         : !verificationDecision.allowed
           ? {
@@ -901,6 +980,22 @@ export class AgentLoop {
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;
         const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
+        this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
+        const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt();
+
+        const actionMandate = [
+          `⛔ [CODEX ACTION MANDATE - MANDATORY TOOL CALL REQUIRED]`,
+          `Your response was REJECTED by the Completion Gate: ${finalAnswerDecision.reason || 'Missing empirical verification or tool execution'}.`,
+          `You MUST NOT return conversational progress text or unfulfilled promises.`,
+          `You MUST execute a concrete tool call in this step (e.g. run_command to run test/build, read_file to inspect, replace_text/apply_patch to edit, or submit_solution when all empirical proof is verified).`,
+        ].join('\n');
+
+        const fullContinuationPrompt = [
+          actionMandate,
+          finalAnswerDecision.continuationPrompt,
+          reasoningGuidance,
+        ].filter(Boolean).join('\n\n');
+
         CLI.renderReflectionAlert(
           consecutiveIncompleteFinals,
           canRetryIncompleteFinal
@@ -908,8 +1003,8 @@ export class AgentLoop {
             : 'Model liên tục trả về Final Answer không có đủ evidence, kết quả, hoặc blocker thực. Turn sẽ kết thúc với thông báo rõ ràng.',
         );
         session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-        if (canRetryIncompleteFinal && finalAnswerDecision.continuationPrompt) {
-          session.addUserMessage(finalAnswerDecision.continuationPrompt);
+        if (canRetryIncompleteFinal && fullContinuationPrompt) {
+          session.addUserMessage(fullContinuationPrompt);
         }
         await this.persistSession(session);
         CLI.renderStepFooter();
@@ -926,12 +1021,13 @@ export class AgentLoop {
         if (canRetryIncompleteFinal) continue;
 
         const incompleteFinalMessage = `Agent stopped: the model returned ${consecutiveIncompleteFinals} non-terminal progress updates instead of executing a tool, reporting evidence, or providing a concrete blocker.`;
-        await CLI.renderFinalAnswer(incompleteFinalMessage, { animate: false });
+        await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
         this.goalManager.disarm();
         return incompleteFinalMessage;
       }
       consecutiveIncompleteFinals = 0;
+      this.adaptiveReasoning.reset();
       
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
@@ -959,7 +1055,7 @@ export class AgentLoop {
       : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
-    await CLI.renderFinalAnswer(timeoutMessage, { animate: false });
+    await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
     await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
     

@@ -15,6 +15,8 @@ export interface AgentLoopOptions {
   agentId?: string;
   agentRegistry?: AgentRegistry;
   enableSubagents?: boolean;
+  enableDynamicToolRetrieval?: boolean;
+  enablePromptCaching?: boolean;
 }
 
 export type AgentState =

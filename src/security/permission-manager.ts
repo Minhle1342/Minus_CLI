@@ -157,7 +157,21 @@ export class PermissionManager {
     const timestamp = new Date().toISOString();
 
     if (toolName === 'apply_patch') {
-      const target = String(args.path || 'unified patch');
+      let target = args.path ? String(args.path).trim() : '';
+      if (!target && typeof args.patch === 'string') {
+        const fileMatches = Array.from(args.patch.matchAll(/^(?:---|\+\+\+)\s+[ab]?\/?([^\s\r\n]+)/gm))
+          .map((m: any) => m[1])
+          .filter((f: string) => f && f !== '/dev/null' && f !== 'dev/null');
+        const uniqueFiles = Array.from(new Set(fileMatches));
+        if (uniqueFiles.length === 1) {
+          target = uniqueFiles[0];
+        } else if (uniqueFiles.length > 1) {
+          target = `${uniqueFiles.slice(0, 2).join(', ')}${uniqueFiles.length > 2 ? ` (+${uniqueFiles.length - 2} files)` : ''}`;
+        }
+      }
+      if (!target) {
+        target = 'unified patch';
+      }
       return {
         id,
         toolName,

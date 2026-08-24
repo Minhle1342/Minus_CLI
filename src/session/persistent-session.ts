@@ -23,6 +23,7 @@ export interface SessionData {
   modelName?: string;
   workspacePath?: string;
   activeSessionId?: string;
+  tokenConfig?: import('../llm/token-config.js').TokenConfig;
   lastUpdated?: string;
 }
 

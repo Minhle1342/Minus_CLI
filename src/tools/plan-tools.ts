@@ -153,16 +153,41 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
       let updated;
       try {
         updated = planManager.updateTask(id, status, args.evidence || args.notes);
-      } catch (error) {
+      } catch (error: any) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        let hint = 'Execute a tool matching the task acceptance criteria before marking it complete.';
+        if (errorMsg.includes('inspection evidence')) {
+          hint = 'This step requires inspection evidence. Call inspection tools (e.g. read_file, search_codebase_fast, list_files, inspect_symbol) before marking COMPLETED.';
+        } else if (errorMsg.includes('mutation evidence')) {
+          hint = 'This step requires code mutation evidence. Call mutation tools (e.g. replace_text, apply_patch, create_file, write_file) before marking COMPLETED.';
+        } else if (errorMsg.includes('verification evidence')) {
+          hint = 'This step requires test/build verification evidence. Call run_command (to run tests or build) or get_diagnostics before marking COMPLETED.';
+        }
         return {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMsg,
           errorCode: 'PLAN_TRANSITION_REJECTED',
           retryable: true,
+          hint,
           activeTask: planManager.getActiveTask(),
         };
       }
       if (!updated) {
-        return { error: `No plan step with id ${id} exists.`, errorCode: 'PLAN_TASK_NOT_FOUND' };
+        if (!planManager.hasPlan()) {
+          return {
+            error: 'No execution plan has been created in this turn. Call "create_plan" first to define execution steps, or skip calling "update_plan_task" for simple single-step tasks.',
+            errorCode: 'NO_PLAN_EXISTS',
+            hint: 'Call create_plan first with a tasks array: [{ title: "Inspect code" }, { title: "Implement fix" }, { title: "Run verification" }].',
+          };
+        }
+        const existingTasks = planManager.getTasks();
+        const availableIds = existingTasks.map((t) => `#${t.id}: "${t.title}" (${t.status})`).join(', ');
+        const activeTask = planManager.getActiveTask();
+        return {
+          error: `No plan step with id ${id} exists. Available step IDs: [${availableIds}].`,
+          errorCode: 'PLAN_TASK_NOT_FOUND',
+          activeStepId: activeTask?.id,
+          hint: activeTask ? `Currently active step is #${activeTask.id} ("${activeTask.title}"). Pass id: ${activeTask.id}.` : 'No active step exists.',
+        };
       }
       return {
         message: `Updated step #${id} to ${status}.`,

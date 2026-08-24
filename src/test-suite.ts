@@ -11,16 +11,45 @@ import { searchTextTool } from './tools/search-text.js';
 import { replaceTextTool } from './tools/replace-text.js';
 import { applyPatchTool } from './tools/apply-patch.js';
 import { writeFileTool } from './tools/write-file.js';
+import { createFileTool } from './tools/create-file.js';
+import { deleteFileTool } from './tools/delete-file.js';
+import { moveFileTool } from './tools/move-file.js';
+import { inspectSymbolTool } from './tools/inspect-symbol.js';
+import { findReferencesTool } from './tools/find-references.js';
+import { getDiagnosticsTool } from './tools/get-diagnostics.js';
+import { analyzeImpactTool } from './tools/blast-radius.js';
+import { inspectImageTool, createInspectImageTool, extractImageDimensions, detectMimeType } from './tools/inspect-image.js';
+import { TypeScriptService } from './tools/typescript-service.js';
+import { MutationTransaction } from './workspace/mutation-transaction.js';
+import { computeWorkspaceDigest, computeDiffHash, computeFileHash, computeStringHash } from './workspace/workspace-digest.js';
+import { VerificationBaselineManager } from './skills/verification-baseline.js';
+import { VectorMemoryStore, EmbeddingService, cosineSimilarity } from './memory/vector-memory.js';
+import { executeRipgrepEmulation, parseRipgrepCommand } from './tools/rg-emulator.js';
+import { FileMentionEngine, PromptAttachmentProcessor } from './workspace/file-attachment.js';
+import { toolSuccess, toolError } from './tools/tool-result.js';
 import { runCommandTool } from './tools/run-command.js';
 import { PatchEngine } from './patch/patch-engine.js';
-import { Session } from './session/session.js';
+import { Session, SessionMessage } from './session/session.js';
 import { computeRequestDigest } from './session/session-invariants.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { SessionManager } from './session/session-manager.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { EffectLedger } from './agent/effect-ledger.js';
 import { GeminiLLM } from './llm/gemini.js';
+import { FallbackRouterLLM } from './llm/fallback-router.js';
 import { CheckpointManager } from './workspace/checkpoint.js';
+import {
+  TokenConfig,
+  getModelTokenProfile,
+  resolveTokenConfig,
+  TokenPresetTier,
+  TOKEN_TIER_DEFINITIONS,
+  getPresetTokenConfig,
+  resolveOutputTokensPreset,
+  resolveInputTokensPreset,
+  resolveThinkingTokensPreset,
+  normalizePresetTier,
+} from './llm/token-config.js';
 import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
 import { GoalManager } from './agent/goal-manager.js';
@@ -30,6 +59,14 @@ import { FinalAnswerGuard } from './agent/final-answer-guard.js';
 import { CompletionEvidenceGate } from './agent/completion-evidence.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
+import { HypothesisTracker } from './agent/hypothesis-tracker.js';
+import { SpeculativeBranchManager } from './agent/speculative-branch-manager.js';
+import { CriticGate } from './agent/critic-gate.js';
+import { createSubmitSolutionTool, registerSubmitSolutionTool } from './tools/submit-solution.js';
+import { WorkspaceStateVerifier } from './workspace/workspace-state-verifier.js';
+import { AuditLedger } from './agent/audit-ledger.js';
+import { HypothesisRollbackOrchestrator } from './agent/hypothesis-rollback-orchestrator.js';
+import { AdaptiveReasoningController } from './agent/adaptive-reasoning-controller.js';
 import { CodeSearchEngine } from './search/code-search-engine.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
 import { AgentKernel } from './kernel/kernel.js';
@@ -124,7 +161,9 @@ async function runUnitTests() {
   assert(workspace.isIgnoredDirectory('.codingagent'), 'Ẩn thư mục trạng thái nội bộ .codingagent khỏi thao tác khảo sát codebase');
   assert(workspace.isBinaryFile('image.png'), 'Nhận diện đúng file nhị phân: .png');
   assert(!workspace.isBinaryFile('index.ts'), 'Không nhận diện nhầm file code: .ts');
-  assert(workspace.isProtectedFile('.env'), 'Nhận diện đúng file bảo vệ: .env');
+  assert(!workspace.isProtectedFile('.env'), 'File .env không bị chặn mặc định để cho phép tạo/sửa cấu hình môi trường');
+  workspace.addProtectedFile('.env.vault');
+  assert(workspace.isProtectedFile('.env.vault'), 'Nhận diện đúng file bảo vệ đã cấu hình: .env.vault');
 
   console.log('\n========================================');
   console.log('🧪 2. KIỂM THỬ TOOL RUNNER & 5-STAGE PIPELINE');
@@ -143,8 +182,9 @@ async function runUnitTests() {
   assert(secRes.result.errorCode === 'SECURITY_VIOLATION', 'ToolRunner chặn truy cập ra ngoài workspace');
 
   // Test 2.4: Protected file modification block
-  const protectRes = await runner.run('replace_text', { path: '.env', oldText: 'A', newText: 'B' });
-  assert(protectRes.result.errorCode === 'SECURITY_VIOLATION', 'ToolRunner chặn sửa đổi file .env bảo vệ');
+  workspace.addProtectedFile('.protected_secret');
+  const protectRes = await runner.run('replace_text', { path: '.protected_secret', oldText: 'A', newText: 'B' });
+  assert(protectRes.result.errorCode === 'SECURITY_VIOLATION', 'ToolRunner chặn sửa đổi file trong danh sách bảo vệ');
 
   const contractRegistry = new ToolRegistry();
   contractRegistry.register({
@@ -278,7 +318,7 @@ async function runUnitTests() {
   });
   assert(
     versionIsNotVerification.allow === false
-      && versionIsNotVerification.reasons.some((reason) => reason.includes('No successful test/build')),
+      && versionIsNotVerification.reasons.some((reason: string) => reason.includes('No successful test/build')),
     'A successful environment probe such as node -v cannot masquerade as verification evidence',
   );
   evidenceSession.append('tool/call', {
@@ -1354,7 +1394,7 @@ async function runUnitTests() {
   assert(policySession.getEvents().some((event) => event.type === 'turn/end'), 'Turn bị policy chặn vẫn được đóng durable');
 
   assert(
-    policyOutput.some((line) => line.includes('FINAL ANSWER'))
+    policyOutput.some((line) => line.includes('FINAL ANSWER') || line.includes('AGENT EXECUTION STOPPED'))
       && policyOutput.some((line) => line.includes('approval-required')),
     'Policy rejection always renders a terminal notice instead of returning silently',
   );
@@ -1387,7 +1427,7 @@ async function runUnitTests() {
     'Provider exception closes append-only lifecycle and moves the agent to error state',
   );
   assert(
-    failedRunOutput.some((line) => line.includes('FINAL ANSWER'))
+    failedRunOutput.some((line) => line.includes('FINAL ANSWER') || line.includes('AGENT EXECUTION STOPPED'))
       && failedRunOutput.some((line) => line.includes('phase4-provider-stream-failure')),
     'Provider exception renders a clear terminal notice before rejecting the Promise',
   );
@@ -1647,8 +1687,9 @@ async function runUnitTests() {
     private call = 0;
     readonly prompts: string[] = [];
 
-    async generate(_session: Session, _tools: any[], request?: { systemPrompt?: string }): Promise<any> {
-      this.prompts.push(request?.systemPrompt || '');
+    async generate(_session: Session, _tools: any[], request?: { systemPrompt?: string; dynamicContext?: string }): Promise<any> {
+      const fullPrompt = `${request?.systemPrompt || ''}\n\n${request?.dynamicContext || ''}`;
+      this.prompts.push(fullPrompt);
       this.call++;
       if (this.call === 1) {
         return {
@@ -1769,7 +1810,7 @@ async function runUnitTests() {
     durationMs: 5,
   });
   assert(failAnalysis2.isFailure === true, 'Nhận diện đúng lỗi replace_text');
-  assert(failAnalysis2.reflectionPrompt?.includes('CẢNH BÁO') === true, 'Kích hoạt cảnh báo khi thất bại liên tiếp 2 lần');
+  assert(Boolean(failAnalysis2.reflectionPrompt?.includes('WARNING') || failAnalysis2.reflectionPrompt?.includes('CẢNH BÁO')), 'Kích hoạt cảnh báo khi thất bại liên tiếp 2 lần');
 
   console.log('\n========================================');
   console.log('🧪 11. KIỂM THỬ SEMANTIC SLICER & AST OUTLINE EXTRACTION');
@@ -2216,6 +2257,14 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Final-answer guard chặn deferred tool work bằng tiếng Anh',
   );
   assert(
+    finalAnswerGuard.evaluate('Tôi đã hoàn thành việc kiểm tra và hiểu rõ về các file Login.jsx, App.jsx, và tailwind.config.js. Bây giờ tôi sẽ tiến hành thiết kế lại giao diện đăng nhập với các tính năng tương tác cao cấp và phong cách thời trang cao cấp.').allow === false,
+    'Final-answer guard chặn lời hứa tiến hành thiết kế/code trong final answer',
+  );
+  assert(
+    finalAnswerGuard.evaluate('I have inspected the files. Now I will proceed to redesign the login component.').allow === false,
+    'Final-answer guard chặn lời hứa redesign/implement sau bước inspect',
+  );
+  assert(
     finalAnswerGuard.evaluate('Không thể chạy test vì SDK bắt buộc chưa có; lệnh dừng với COMMAND_NOT_FOUND và exit 127.').allow === true,
     'Final-answer guard vẫn cho phép báo cáo blocker trung thực có bằng chứng',
   );
@@ -2431,9 +2480,13 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(task.status === 'running', 'Trạng thái ban đầu là running');
   assert(task.pid !== undefined && task.pid > 0, 'Ghi nhận PID hợp lệ của subprocess');
 
-  // Đợi 300ms để process spawn và flush stdout
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const logs = taskManager.getTaskLogs(task.id);
+  // Đợi để process spawn và flush stdout (polling với timeout an toàn)
+  let logs = '';
+  for (let i = 0; i < 25; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    logs = taskManager.getTaskLogs(task.id);
+    if (logs.includes('server-heartbeat')) break;
+  }
   assert(logs.includes('server-heartbeat'), 'Đọc logs thời gian thực từ circular log buffer thành công');
 
   const stopped = await taskManager.stopTask(task.id);
@@ -3510,6 +3563,798 @@ Always write tests first!`;
   assert(spKernel.ctx.tools.get('request_review') !== undefined, 'SuperpowersPlugin đăng ký thành công request_review tool');
   assert((spKernel.ctx as any).skills instanceof SkillRegistry, 'SuperpowersPlugin gắn SkillRegistry vào KernelContext');
   assert((spKernel.ctx as any).capabilities instanceof CapabilityCatalog, 'SuperpowersPlugin gắn CapabilityCatalog vào KernelContext');
+
+  // ========================================
+  // 🧪 23. KIỂM THỬ SURGICAL, ATOMIC, EVIDENCE-GATED ARCHITECTURE
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 23. KIỂM THỬ SURGICAL, ATOMIC, EVIDENCE-GATED ARCHITECTURE');
+  console.log('========================================');
+
+  // 23.1. Workspace Digest & String Hashes
+  const testPkgHash = await computeFileHash(path.join(workspace.rootDir, 'package.json'));
+  assert(testPkgHash.startsWith('sha256:'), 'computeFileHash trả về SHA-256 hash chuẩn cho file có sẵn');
+  const absentHash = await computeFileHash(path.join(workspace.rootDir, 'non_existent_file_xyz.ts'));
+  assert(absentHash === 'sha256:absent', 'computeFileHash trả về sha256:absent cho file chưa tồn tại');
+
+  const strHash = computeStringHash('hello world');
+  assert(strHash.startsWith('sha256:'), 'computeStringHash trả về SHA-256 hash của chuỗi');
+
+  const wsDigest = await computeWorkspaceDigest(workspace);
+  assert(wsDigest.startsWith('sha256:'), 'computeWorkspaceDigest trả về hash đại diện toàn diện của workspace');
+
+  const diffHash = await computeDiffHash(workspace);
+  assert(diffHash.startsWith('sha256:'), 'computeDiffHash trả về hash đại diện của git diff');
+
+  // 23.2. MutationTransaction (In-memory Preflight, Commit & Compensating Rollback)
+  const tempTestFile = 'temp/tx-test-1.txt';
+  const tempTestFile2 = 'temp/tx-test-2.txt';
+
+  // Transaction 1: Staged Create + Preflight + Commit
+  const tx1 = new MutationTransaction(workspace);
+  tx1.stageCreate(tempTestFile, 'initial line 1\ninitial line 2\n');
+  const preflight1 = await tx1.preflight();
+  assert(preflight1.valid === true, 'MutationTransaction preflight thành công cho staged create');
+
+  const commit1 = await tx1.commit();
+  assert(commit1.success === true, 'MutationTransaction commit thành công ghi file xuống đĩa');
+  assert(commit1.changedFiles.length === 1 && commit1.changedFiles[0].operation === 'create', 'Commit ghi nhận đúng changedFiles');
+
+  const createdOnDisk = await fs.readFile(workspace.resolveSafePath(tempTestFile), 'utf8');
+  assert(createdOnDisk === 'initial line 1\ninitial line 2\n', 'Nội dung file sau commit hoàn toàn chính xác');
+
+  // Transaction 2: Staged Create trên file đã tồn tại -> Preflight Rejection (FILE_ALREADY_EXISTS)
+  const tx2 = new MutationTransaction(workspace);
+  tx2.stageCreate(tempTestFile, 'duplicate content', true);
+  const preflight2 = await tx2.preflight();
+  assert(
+    !preflight2.valid && (preflight2 as any).errorCode === 'FILE_ALREADY_EXISTS',
+    'MutationTransaction chặn ghi đè mù lên file đã tồn tại qua create_file (FILE_ALREADY_EXISTS)',
+  );
+
+  // Transaction 3: Staged Update với stale expectedFileHash -> Preflight Rejection (STALE_FILE_HASH)
+  const tx3 = new MutationTransaction(workspace);
+  tx3.stageUpdate(tempTestFile, 'new content', 'sha256:fake_stale_hash');
+  const preflight3 = await tx3.preflight();
+  assert(
+    !preflight3.valid && (preflight3 as any).errorCode === 'STALE_FILE_HASH',
+    'MutationTransaction chặn sửa đổi khi hash quan sát không khớp hash trên đĩa (STALE_FILE_HASH)',
+  );
+
+  // Transaction 4: Multi-file Staged Update + Move
+  const realCurrentHash = await computeFileHash(workspace.resolveSafePath(tempTestFile));
+  const tx4 = new MutationTransaction(workspace);
+  tx4.stageUpdate(tempTestFile, 'updated line 1\nupdated line 2\n', realCurrentHash);
+  tx4.stageCreate(tempTestFile2, 'file 2 content\n');
+  const commit4 = await tx4.commit();
+  assert(commit4.success === true && commit4.changedFiles.length === 2, 'Multi-file MutationTransaction commit thành công');
+
+  // 23.3. Hardened CRUD Tools (create_file, delete_file, move_file)
+  const crudCreatePath = 'temp/crud-create-test.txt';
+  const crudMovePath = 'temp/crud-moved-test.txt';
+
+  const crudCreateRes = await createFileTool.execute(
+    { path: crudCreatePath, content: 'create tool content' },
+    workspace,
+  );
+  assert(crudCreateRes.success === true && crudCreateRes.created === true, 'create_file tạo mới file thành công');
+  assert(Boolean(crudCreateRes.contentHash), 'create_file trả về contentHash của file vừa tạo');
+
+  const crudCreateDupRes = await createFileTool.execute(
+    { path: crudCreatePath, content: 'duplicate' },
+    workspace,
+  );
+  assert(
+    crudCreateDupRes.success === false && crudCreateDupRes.errorCode === 'FILE_ALREADY_EXISTS',
+    'create_file từ chối ghi đè lên file đã tồn tại',
+  );
+
+  const crudMoveRes = await moveFileTool.execute(
+    { sourcePath: crudCreatePath, targetPath: crudMovePath },
+    workspace,
+  );
+  assert(crudMoveRes.success === true && crudMoveRes.moved === true, 'move_file di chuyển và đổi tên file thành công');
+
+  const crudMoveBlocked = await moveFileTool.execute(
+    { sourcePath: tempTestFile2, targetPath: crudMovePath },
+    workspace,
+  );
+  assert(
+    crudMoveBlocked.success === false && crudMoveBlocked.errorCode === 'FILE_ALREADY_EXISTS',
+    'move_file chặn ghi đè lên file đích đã tồn tại',
+  );
+
+  const crudDeleteRes = await deleteFileTool.execute(
+    { path: crudMovePath, reason: 'Cleanup unit test fixture' },
+    workspace,
+  );
+  assert(crudDeleteRes.success === true && crudDeleteRes.deleted === true, 'delete_file xóa file an toàn khi có reason');
+
+  // Cleanup remaining temp test files
+  await fs.rm(workspace.resolveSafePath(tempTestFile), { force: true });
+  await fs.rm(workspace.resolveSafePath(tempTestFile2), { force: true });
+
+  // 23.4. Hardened replace_text (expectedOccurrences & ambiguous protection)
+  const ambigTestPath = 'temp/ambig-test.txt';
+  await fs.writeFile(workspace.resolveSafePath(ambigTestPath), 'repeat\nmiddle\nrepeat\n', 'utf8');
+
+  const ambigRes = await replaceTextTool.execute(
+    { path: ambigTestPath, oldText: 'repeat', newText: 'single', expectedOccurrences: 1 },
+    workspace,
+  );
+  assert(
+    ambigRes.success === false && (ambigRes.errorCode === 'TEXT_NOT_UNIQUE' || ambigRes.errorCode === 'AMBIGUOUS_REPLACEMENT'),
+    'replace_text từ chối thay thế khi số lần xuất hiện thực tế (2) khác expectedOccurrences (1)',
+  );
+
+  await fs.rm(workspace.resolveSafePath(ambigTestPath), { force: true });
+
+  // 23.5. Hardened apply_patch (Fuzz Level 3 Advisory Only Invariant)
+  const fuzz3Path = 'temp/fuzz3-test.txt';
+  await fs.writeFile(
+    workspace.resolveSafePath(fuzz3Path),
+    'let myTotlScore = 100;\nreturn myTotlScore;\n',
+    'utf8',
+  );
+
+  // Patch có sự sai lệch nhỏ ~10% (typo chữ myTotalScore vs myTotlScore, Fuzz 0, 1, 2 không khớp)
+  const fuzz3Patch = `--- a/${fuzz3Path}\n+++ b/${fuzz3Path}\n@@ -1,2 +1,2 @@\n let myTotalScore = 100;\n-return myTotalScore;\n+return myTotalScore * 2;\n`;
+
+  const fuzz3Res = await applyPatchTool.execute(
+    { patch: fuzz3Patch, fuzzLevel: 3 },
+    workspace,
+  );
+  assert(
+    fuzz3Res.success === false && fuzz3Res.errorCode === 'FUZZY_CANDIDATE_FOUND',
+    'apply_patch Fuzz Level 3 không tự động ghi đĩa mà trả về gợi ý FUZZY_CANDIDATE_FOUND',
+  );
+
+  // File trên đĩa phải giữ nguyên vẹn
+  const fuzz3Unchanged = await fs.readFile(workspace.resolveSafePath(fuzz3Path), 'utf8');
+  assert(fuzz3Unchanged.includes('let myTotlScore = 100;'), 'File trên đĩa không bị thay đổi bởi Fuzz Level 3');
+
+  await fs.rm(workspace.resolveSafePath(fuzz3Path), { force: true });
+
+  // 23.6. TypeScript Service & Semantic Tools (inspect_symbol, find_references, get_diagnostics, analyze_impact)
+  const tsService = new TypeScriptService(workspace);
+  const inspectSym = tsService.inspectSymbol('src/agent/agent-loop.ts', 'AgentLoop');
+  assert(inspectSym.found === true && inspectSym.kind === 'class', 'TypeScriptService inspectSymbol tìm thấy class AgentLoop');
+  assert(inspectSym.isExported === true, 'TypeScriptService xác nhận AgentLoop có thuộc tính exported');
+
+  const toolInspectRes = await inspectSymbolTool.execute(
+    { path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' },
+    workspace,
+  );
+  assert(toolInspectRes.success === true && toolInspectRes.name === 'AgentLoop', 'Tool inspect_symbol thực thi thành công');
+
+  const toolRefRes = await findReferencesTool.execute(
+    { path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop', limit: 10 },
+    workspace,
+  );
+  assert(toolRefRes.success === true && toolRefRes.totalReferences > 0, 'Tool find_references tìm thấy các vị trí tham chiếu thực tế');
+
+  const toolDiagRes = await getDiagnosticsTool.execute({ path: 'src/tools/types.ts' }, workspace);
+  assert(toolDiagRes.success === true && toolDiagRes.clean === true, 'Tool get_diagnostics trích xuất diagnostics thành công');
+
+  const toolImpactRes = await analyzeImpactTool.execute(
+    { path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' },
+    workspace,
+  );
+  assert(toolImpactRes.success === true && (toolImpactRes.risk === 'HIGH' || toolImpactRes.risk === 'MEDIUM'), 'Tool analyze_impact đánh giá đúng mức độ rủi ro của symbol');
+  assert(toolImpactRes.recommendedVerification.length > 0, 'analyze_impact đề xuất các bước verification tương ứng với mức rủi ro');
+
+  // 23.7. Verification Baseline & Differential Mode
+  const baselineMgr = new VerificationBaselineManager();
+  const capturedBaseline = await baselineMgr.captureBaseline(workspace, [
+    { id: 'pre-1', source: 'test', message: 'Pre-existing legacy test failure in old module' },
+  ]);
+  assert(capturedBaseline.isGreen === false, 'VerificationBaselineManager ghi nhận baseline có lỗi từ trước');
+
+  // Trường hợp 1: Chạy test lại gặp đúng lỗi cũ -> Không coi là lỗi mới
+  const diffEvaluation1 = baselineMgr.evaluateDifferential([
+    { id: 'pre-1', source: 'test', message: 'Pre-existing legacy test failure in old module' },
+  ]);
+  assert(diffEvaluation1.hasNewFailures === false, 'Differential mode bỏ qua lỗi đã tồn tại từ trước');
+  assert(diffEvaluation1.preExistingFailures.length === 1, 'Ghi nhận đúng danh sách pre-existing failures');
+
+  // Trường hợp 2: Agent gây ra thêm lỗi mới
+  const diffEvaluation2 = baselineMgr.evaluateDifferential([
+    { id: 'pre-1', source: 'test', message: 'Pre-existing legacy test failure in old module' },
+    { id: 'new-1', source: 'typecheck', message: 'Cannot find name missingVariable' },
+  ]);
+  assert(diffEvaluation2.hasNewFailures === true && diffEvaluation2.newFailures.length === 1, 'Differential mode phát hiện chính xác lỗi mới do Agent gây ra');
+
+  // 23.8. CheckpointManager TaskCheckpoint & Targeted Rollback
+  const cpMgr = new CheckpointManager(workspace.rootDir);
+  await cpMgr.init();
+  const taskCp = await cpMgr.createTaskCheckpoint('task_123', 'Task checkpoint before refactoring');
+  assert(taskCp !== null && taskCp.isTaskCheckpoint === true, 'CheckpointManager tạo TaskCheckpoint thành công');
+  assert(cpMgr.getTaskCheckpoints().length >= 1, 'getTaskCheckpoints liệt kê đúng các task checkpoint');
+
+  console.log('\n========================================');
+  console.log('🧪 24. KIỂM THỬ MULTI-MODEL TOKEN BUDGETING & ADJUSTMENT');
+  console.log('========================================');
+
+  // 24.1. getModelTokenProfile & resolveTokenConfig
+  const geminiProfile = getModelTokenProfile('gemini-3.5-pro');
+  assert(geminiProfile.provider === 'gemini', 'Profile Gemini nhận diện đúng provider gemini');
+  assert(geminiProfile.defaultMaxOutputTokens === 16384, 'Gemini 3.5 Pro có default max output tokens = 16384');
+  assert(geminiProfile.supportsThinkingBudget === true, 'Gemini 3.5 Pro hỗ trợ thinking budget');
+
+  const gpt5Profile = getModelTokenProfile('gpt-5.6-sol');
+  assert(gpt5Profile.provider === 'openai', 'Profile GPT-5.6 Sol nhận diện đúng provider openai');
+  assert(gpt5Profile.isReasoningModel === true, 'GPT-5.6 Sol nhận diện là reasoning model');
+  assert(gpt5Profile.supportsReasoningEffort === true, 'GPT-5.6 Sol hỗ trợ reasoning effort');
+
+  const deepseekProfile = getModelTokenProfile('deepseek-chat');
+  assert(deepseekProfile.provider === 'deepseek', 'Profile DeepSeek Chat nhận diện đúng provider deepseek');
+  assert(deepseekProfile.defaultMaxOutputTokens === 8192, 'DeepSeek Chat default output tokens = 8192');
+
+  const resolvedCustom = resolveTokenConfig('gemini-3.5-flash', {
+    maxOutputTokens: 32768,
+    maxInputTokens: 100000,
+    thinkingBudget: 2048,
+  });
+  assert(resolvedCustom.maxOutputTokens === 32768, 'resolveTokenConfig áp dụng chính xác custom maxOutputTokens');
+  assert(resolvedCustom.maxInputTokens === 100000, 'resolveTokenConfig áp dụng chính xác custom maxInputTokens');
+  assert(resolvedCustom.thinkingBudget === 2048, 'resolveTokenConfig áp dụng chính xác custom thinkingBudget');
+
+  // 24.2. GeminiLLM Token Config Get/Set
+  const testGeminiLLM = new GeminiLLM('test_api_key', 'gemini-3.5-flash', undefined, { maxOutputTokens: 12000 });
+  assert(testGeminiLLM.getTokenConfig().maxOutputTokens === 12000, 'GeminiLLM nhận và lưu maxOutputTokens trong constructor');
+  testGeminiLLM.setTokenConfig({ maxOutputTokens: 24000, thinkingBudget: 4096 });
+  assert(testGeminiLLM.getTokenConfig().maxOutputTokens === 24000, 'GeminiLLM setTokenConfig cập nhật maxOutputTokens thành công');
+  assert(testGeminiLLM.getTokenConfig().thinkingBudget === 4096, 'GeminiLLM setTokenConfig cập nhật thinkingBudget thành công');
+
+  // 24.3. DeepseekLLM Token Config Get/Set
+  const testDeepseekLLM = new DeepseekLLM('test_key', 'gpt-5.6-sol', undefined, 'https://api.openai.com/v1', undefined, { maxOutputTokens: 16000, reasoningEffort: 'high' });
+  assert(testDeepseekLLM.getTokenConfig().maxOutputTokens === 16000, 'DeepseekLLM nhận và lưu maxOutputTokens trong constructor');
+  assert(testDeepseekLLM.getTokenConfig().reasoningEffort === 'high', 'DeepseekLLM nhận reasoningEffort high');
+  testDeepseekLLM.setTokenConfig({ maxOutputTokens: 32000, reasoningEffort: 'medium' });
+  assert(testDeepseekLLM.getTokenConfig().maxOutputTokens === 32000, 'DeepseekLLM setTokenConfig cập nhật maxOutputTokens');
+  assert(testDeepseekLLM.getTokenConfig().reasoningEffort === 'medium', 'DeepseekLLM setTokenConfig cập nhật reasoningEffort');
+
+  // 24.4. FallbackRouterLLM Token Config
+  const testRouter = new FallbackRouterLLM('auto-fallback', [
+    {
+      name: 'test-gemini',
+      provider: 'Google',
+      tier: 1,
+      createClient: () => testGeminiLLM,
+    },
+  ], { maxOutputTokens: 8192 });
+  assert(testRouter.getTokenConfig().maxOutputTokens === 8192, 'FallbackRouterLLM khởi tạo token config thành công');
+  testRouter.setTokenConfig({ maxOutputTokens: 16384 });
+  assert(testRouter.getTokenConfig().maxOutputTokens === 16384, 'FallbackRouterLLM setTokenConfig cập nhật thành công');
+
+  // 24.5. ContextCompactor setMaxInputTokens
+  const testCompactor = new ContextCompactor({ maxTotalHistoryTokens: 10000 });
+  assert(testCompactor.getConfig().maxTotalHistoryTokens === 10000, 'ContextCompactor khởi tạo đúng maxTotalHistoryTokens');
+  testCompactor.setMaxInputTokens(64000);
+  assert(testCompactor.getConfig().maxTotalHistoryTokens === 64000, 'ContextCompactor setMaxInputTokens cập nhật giới hạn context window thành công');
+
+  // 24.6. AgentLoop Token Config Integration
+  const testLoop = new AgentLoop(testGeminiLLM, undefined, { workspace });
+  assert(testLoop.getTokenConfig()?.maxOutputTokens === 24000, 'AgentLoop getTokenConfig lấy đúng config từ LLM');
+  testLoop.setTokenConfig({ maxOutputTokens: 48000, maxInputTokens: 128000 });
+  assert(testLoop.getTokenConfig()?.maxOutputTokens === 48000, 'AgentLoop setTokenConfig cập nhật LLM token config');
+  assert(testLoop.contextCompactor.getConfig().maxTotalHistoryTokens === 128000, 'AgentLoop setTokenConfig tự động đồng bộ sang ContextCompactor maxInputTokens');
+
+  // 24.7. Token Preset Tiers (Low, Medium, High, Max)
+  assert(normalizePresetTier('low') === 'low' && normalizePresetTier('eco') === 'low' && normalizePresetTier('1') === 'low', 'normalizePresetTier nhận diện đúng tier low');
+  assert(normalizePresetTier('medium') === 'medium' && normalizePresetTier('balanced') === 'medium' && normalizePresetTier('2') === 'medium', 'normalizePresetTier nhận diện đúng tier medium');
+  assert(normalizePresetTier('high') === 'high' && normalizePresetTier('deep') === 'high' && normalizePresetTier('3') === 'high', 'normalizePresetTier nhận diện đúng tier high');
+  assert(normalizePresetTier('max') === 'max' && normalizePresetTier('unlimited') === 'max' && normalizePresetTier('4') === 'max', 'normalizePresetTier nhận diện đúng tier max');
+  assert(normalizePresetTier('invalid_string') === null, 'normalizePresetTier trả về null cho chuỗi không hợp lệ');
+
+  const testPresetProfile = getModelTokenProfile('gemini-3.5-pro');
+  const lowPreset = getPresetTokenConfig('low', testPresetProfile);
+  assert(lowPreset.maxOutputTokens === 2048 && lowPreset.maxInputTokens === 16000 && lowPreset.thinkingBudget === 2048 && lowPreset.reasoningEffort === 'low', 'getPresetTokenConfig tạo đúng gói LOW');
+
+  const medPreset = getPresetTokenConfig('medium', testPresetProfile);
+  assert(medPreset.maxOutputTokens === 8192 && medPreset.maxInputTokens === 64000 && medPreset.thinkingBudget === 8192 && medPreset.reasoningEffort === 'medium', 'getPresetTokenConfig tạo đúng gói MEDIUM');
+
+  const highPreset = getPresetTokenConfig('high', testPresetProfile);
+  assert(highPreset.maxOutputTokens === 16384 && highPreset.maxInputTokens === 128000 && highPreset.thinkingBudget === 24576 && highPreset.reasoningEffort === 'high', 'getPresetTokenConfig tạo đúng gói HIGH');
+
+  const maxPreset = getPresetTokenConfig('max', testPresetProfile);
+  assert(maxPreset.maxOutputTokens === testPresetProfile.maxSupportedOutputTokens && maxPreset.maxInputTokens === testPresetProfile.maxSupportedInputTokens && maxPreset.thinkingBudget === 64000 && maxPreset.reasoningEffort === 'max', 'getPresetTokenConfig tạo đúng gói MAX');
+
+  assert(resolveOutputTokensPreset('high', testPresetProfile) === 16384, 'resolveOutputTokensPreset giải mã đúng tier high');
+  assert(resolveOutputTokensPreset('max', testPresetProfile) === testPresetProfile.maxSupportedOutputTokens, 'resolveOutputTokensPreset giải mã đúng tier max');
+  assert(resolveInputTokensPreset('medium', testPresetProfile) === 64000, 'resolveInputTokensPreset giải mã đúng tier medium');
+  assert(resolveThinkingTokensPreset('off', testPresetProfile)?.thinkingBudget === 0, 'resolveThinkingTokensPreset hỗ trợ tắt thinking với off');
+  assert(resolveThinkingTokensPreset('high', testPresetProfile)?.thinkingBudget === 24576, 'resolveThinkingTokensPreset giải mã đúng thinking tier high');
+
+  console.log('\n========================================');
+  console.log('🧪 25. KIỂM THỬ SEMANTIC VECTOR MEMORY (RAG) & VISION MULTIMODAL PERCEPTION');
+  console.log('========================================');
+
+  // 25.1. EmbeddingService & Cosine Similarity
+  const embeddingService = new EmbeddingService();
+  const vec1 = await embeddingService.generateEmbedding('TypeScript compiler type check error');
+  const vec2 = await embeddingService.generateEmbedding('TS type check error in compiler module');
+  const vec3 = await embeddingService.generateEmbedding('Delicious chocolate cake baking recipe');
+
+  assert(vec1.length === 384, 'EmbeddingService tạo vector đúng 384 chiều');
+  const norm1 = Math.sqrt(vec1.reduce((sum, v) => sum + v * v, 0));
+  assert(Math.abs(norm1 - 1.0) < 0.001, 'Vector nhúng được chuẩn hoá L2 (norm = 1.0)');
+
+  const simIdentical = cosineSimilarity(vec1, vec1);
+  assert(Math.abs(simIdentical - 1.0) < 0.001, 'Cosine similarity của chuỗi giống hệt nhau = 1.0');
+
+  const simRelated = cosineSimilarity(vec1, vec2);
+  const simUnrelated = cosineSimilarity(vec1, vec3);
+  assert(simRelated > 0.45, `Chuỗi liên quan ngữ nghĩa có cosine similarity cao (${simRelated.toFixed(3)} > 0.45)`);
+  assert(simRelated > simUnrelated, `Chuỗi liên quan có similarity cao hơn chuỗi không liên quan (${simRelated.toFixed(3)} > ${simUnrelated.toFixed(3)})`);
+
+  // 25.2. VectorMemoryStore CRUD & Persistence
+  const vectorStorePath = path.join(workspace.rootDir, '.codingagent', 'test-vector-memory.json');
+  const vectorStore = new VectorMemoryStore(vectorStorePath, embeddingService);
+  await vectorStore.init();
+  await vectorStore.upsert('doc1', 'Always use replace_text for precise surgical edits', { rule: 'surgical' });
+  await vectorStore.upsert('doc2', 'Run test verification suite before concluding tasks', { rule: 'verify' });
+
+  assert(vectorStore.size === 2, 'VectorMemoryStore lưu trữ đúng 2 documents');
+  const searchResults = await vectorStore.search('surgical text edit tool');
+  assert(searchResults.length > 0 && searchResults[0].document.id === 'doc1', 'Vector search tìm chính xác document liên quan nhất');
+
+  // Kiểm tra lưu và nạp lại từ đĩa
+  const reloadedStore = new VectorMemoryStore(vectorStorePath, embeddingService);
+  await reloadedStore.init();
+  assert(reloadedStore.size === 2, 'VectorMemoryStore nạp lại thành công từ file JSON trên đĩa');
+
+  // 25.3. ProjectMemoryManager Hybrid Vector RAG Retrieval
+  const vectorMemManager = new ProjectMemoryManager(workspace.rootDir, embeddingService);
+  await vectorMemManager.init(workspace);
+  await vectorMemManager.saveInsight(
+    'db_timeout',
+    'Increase database connection timeout to 15000ms for integration tests',
+    'convention',
+    { tags: ['database', 'timeout', 'testing'] }
+  );
+
+  // Hybrid search
+  const hybridResults = vectorMemManager.retrieve('database connection slow timeout');
+  assert(hybridResults.some((r) => r.key === 'db_timeout'), 'Hybrid Vector Retrieval tìm thấy insight nhờ kết hợp từ khóa và cosine similarity');
+
+  // Pure semantic RAG search
+  const semanticResults = await vectorMemManager.retrieveSemantic('slow db query timeout in tests');
+  assert(semanticResults.some((r) => r.key === 'db_timeout'), 'retrieveSemantic tìm thấy insight qua thuần ngữ nghĩa vector');
+
+  // 25.4. Vision / Multimodal Perception Helpers
+  assert(detectMimeType('test.png') === 'image/png', 'detectMimeType nhận diện đúng PNG');
+  assert(detectMimeType('photo.jpg') === 'image/jpeg', 'detectMimeType nhận diện đúng JPEG');
+  assert(detectMimeType('graphic.webp') === 'image/webp', 'detectMimeType nhận diện đúng WebP');
+  assert(detectMimeType('icon.svg') === 'image/svg+xml', 'detectMimeType nhận diện đúng SVG');
+
+  // Tạo 1x1 PNG giả lập để kiểm tra dimension extraction
+  const sample1x1Png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  const dims = extractImageDimensions(sample1x1Png, 'image/png');
+  assert(dims.width === 1 && dims.height === 1, 'extractImageDimensions trích xuất đúng kích thước width/height của PNG');
+
+  // 25.5. inspect_image Tool Execution
+  const sampleImgPath = 'test-image.png';
+  await fs.writeFile(path.join(workspace.rootDir, sampleImgPath), sample1x1Png);
+
+  const testVisionSession = new Session();
+  const inspectToolWithSession = createInspectImageTool(() => testVisionSession);
+  const inspectResult = await inspectToolWithSession.execute(
+    { path: sampleImgPath, description: 'Test inspection of sample PNG' },
+    workspace
+  );
+  assert(inspectResult.success === true, 'inspect_image tool thực thi thành công');
+  assert(inspectResult.mimeType === 'image/png', 'inspect_image trả về MIME type chính xác');
+  assert(inspectResult.attachedToMultimodalContext === true, 'inspect_image đính kèm ảnh vào session multimodal context');
+
+  // 25.6. Multimodal Session Message & OpenAI Translation
+  testVisionSession.addMultimodalUserMessage(
+    'Please inspect this UI screenshot',
+    [{ mimeType: 'image/png', data: sample1x1Png.toString('base64'), description: 'UI wireframe' }]
+  );
+  const lastEvent = testVisionSession.lastEvent;
+  assert(lastEvent?.type === 'user/message', 'Session ghi nhận user/message event');
+  const inlinePart = lastEvent?.data.content?.parts?.find((p: any) => p.inlineData);
+  assert(inlinePart !== undefined && (inlinePart as any).inlineData?.mimeType === 'image/png', 'Session lưu trữ đúng inlineData part theo chuẩn Gemini');
+
+  const testVisionDeepseek = new DeepseekLLM('test_key', 'gpt-5.6-sol');
+  const convertedMessages = (testVisionDeepseek as any).convertHistoryToOpenAIMessages(testVisionSession);
+  const lastConvertedMsg = convertedMessages[convertedMessages.length - 1];
+  assert(lastConvertedMsg?.role === 'user', 'DeepseekLLM chuyển đổi đúng role user');
+  assert(Array.isArray(lastConvertedMsg?.content), 'DeepseekLLM chuyển đổi multimodal message thành mảng content parts');
+  const hasImageUrlPart = lastConvertedMsg?.content?.some((p: any) => p.type === 'image_url' && p.image_url?.url?.startsWith('data:image/png;base64,'));
+  assert(hasImageUrlPart === true, 'DeepseekLLM tạo đúng image_url part theo chuẩn OpenAI Vision');
+
+  console.log('\n========================================');
+  console.log('🧪 26. KIỂM THỬ RUN_COMMAND BUILT-IN RIPGREP & GREP EMULATION (ZERO-DEPENDENCY SEARCH)');
+  console.log('========================================');
+
+  // 26.1. parseRipgrepCommand
+  const parsed1 = parseRipgrepCommand("rg 'prompt catching' .");
+  assert(parsed1 !== null && parsed1.query === 'prompt catching' && parsed1.targetPaths[0] === '.', 'parseRipgrepCommand parse đúng query và target path có dấu nháy đơn');
+
+  const parsed2 = parseRipgrepCommand('rg -i -n -l "AgentLoop" src/');
+  assert(
+    parsed2 !== null &&
+    parsed2.query === 'AgentLoop' &&
+    parsed2.ignoreCase === true &&
+    parsed2.filesWithMatchesOnly === true &&
+    parsed2.targetPaths[0] === 'src/',
+    'parseRipgrepCommand parse đúng các cờ -i, -n, -l và target path'
+  );
+
+  const parsed3 = parseRipgrepCommand('grep -rn "function" src/');
+  assert(parsed3 !== null && parsed3.query === 'function' && parsed3.showLineNumbers === true, 'parseRipgrepCommand hỗ trợ cú pháp grep -rn');
+
+  // 26.2. executeRipgrepEmulation
+  const rgEmulated = await executeRipgrepEmulation("rg 'AgentLoop' src/agent/", workspace);
+  assert(rgEmulated.success === true && rgEmulated.exitCode === 0, 'executeRipgrepEmulation tìm kiếm thành công');
+  assert(rgEmulated.stdout.includes('src/agent/agent-loop.ts'), 'executeRipgrepEmulation trả về đúng đường dẫn file khớp');
+  assert(rgEmulated.stdout.includes(':'), 'executeRipgrepEmulation trả về định dạng chuẩn path:line:content');
+
+  // 26.3. executeRipgrepEmulation với cờ -l (files only)
+  const rgFilesOnly = await executeRipgrepEmulation("rg -l 'AgentLoop' src/agent/", workspace);
+  assert(rgFilesOnly.success === true && rgFilesOnly.stdout.includes('src/agent/agent-loop.ts'), 'executeRipgrepEmulation với cờ -l trả về đúng danh sách files');
+
+  // 26.4. run_command tool tự động fallback sang emulator khi binary không tồn tại
+  const runCmdResult = await runCommandTool.execute(
+    { command: "rg 'AgentLoop' src/agent/", execution_target: 'host' },
+    workspace
+  );
+  assert(runCmdResult.exitCode === 0, 'run_command tự động kích hoạt built-in rg emulator và trả về exitCode 0');
+  assert(runCmdResult.stdout.includes('src/agent/agent-loop.ts'), 'run_command trả về kết quả tìm kiếm đầy đủ thay vì lỗi 127');
+
+  console.log('\n========================================');
+  console.log('🧪 27. KIỂM THỬ OPENAI CODEX PROMPT CACHING ARCHITECTURE & TELEMETRY');
+  console.log('========================================');
+
+  // 27.1. Dynamic Context được đưa xuống đuôi message, giữ nguyên 100% Static System Prompt Prefix
+  const cacheSession = new Session('test-session-cache-123');
+  cacheSession.addUserMessage('Khởi tạo bài toán');
+  cacheSession.addModelMessage({ text: 'Đang chuẩn bị' });
+  cacheSession.addUserMessage('Tiếp tục bước 2');
+
+  const deepseekInstance = new DeepseekLLM('test_api_key', 'deepseek-chat', 'STATIC SYSTEM PROMPT CORE');
+  const convertedMsgs = (deepseekInstance as any).convertHistoryToOpenAIMessages(
+    cacheSession,
+    'STATIC SYSTEM PROMPT CORE',
+    'Plan Step 2 / 5 [In-Progress]',
+    true
+  );
+
+  assert(convertedMsgs[0].role === 'system', 'System message luôn ở vị trí messages[0]');
+  assert(convertedMsgs[0].content === 'STATIC SYSTEM PROMPT CORE', 'System prompt 100% static không bị nối dynamic context');
+  assert(!('prompt_cache_breakpoint' in convertedMsgs[0]), 'System message chuẩn OpenAI schema không chứa extra fields gây lỗi 422');
+  
+  const lastUser = convertedMsgs[convertedMsgs.length - 1];
+  assert(lastUser.role === 'user', 'Tin nhắn cuối cùng là user message');
+  assert(
+    lastUser.content.includes('[Execution Context & Plan Status]') && lastUser.content.includes('Plan Step 2 / 5 [In-Progress]'),
+    'Dynamic execution context được gắn an toàn vào đuôi tin nhắn user cuối cùng'
+  );
+
+  // 27.2. Deterministic Tool Ordering
+  const unsortedTools = [
+    { name: 'write_file', description: 'Write' },
+    { name: 'apply_patch', description: 'Patch' },
+    { name: 'read_file', description: 'Read' },
+    { name: 'delete_file', description: 'Delete' },
+  ];
+  const cachedToolsConverted = (deepseekInstance as any).convertToolsToOpenAI(unsortedTools);
+  const toolNames = cachedToolsConverted.map((t: any) => t.function.name);
+  assert(
+    JSON.stringify(toolNames) === JSON.stringify(['apply_patch', 'delete_file', 'read_file', 'write_file']),
+    'Tools luôn được sắp xếp theo thứ tự alphabet để giữ nguyên vẹn KV-Cache prefix'
+  );
+
+  // 27.3. ContextCompactor với preservePrefixCache bảo toàn lịch sử khi chưa vượt ngân sách
+  const prefixCompactor = new ContextCompactor({
+    maxCharactersPerToolResult: 100,
+    preserveLastNToolResults: 1,
+    maxTotalHistoryTokens: 10000,
+    preservePrefixCache: true,
+  });
+
+  const normalSession = new Session('normal-session');
+  normalSession.addUserMessage('Inspect repo');
+  normalSession.addModelMessage({ functionCalls: [{ name: 'read_file', args: { path: 'file.ts' } }] });
+  normalSession.addToolResult('read_file', { path: 'file.ts', content: 'A'.repeat(500) });
+
+  const prefixCompacted = prefixCompactor.compact(normalSession.getHistory());
+  assert(prefixCompacted.stats.charsSaved === 0, 'preservePrefixCache không sửa đổi lịch sử khi token chưa vượt budget');
+  assert((prefixCompacted.messages[2]?.parts?.[0] as any)?.functionResponse?.response?.content === 'A'.repeat(500), 'Nội dung tool response cũ được giữ nguyên vẹn để bảo vệ KV-cache');
+
+  // 27.4. CLI Render Cache Usage
+  let cacheOutputCaptured = '';
+  const originalLog = console.log;
+  console.log = (msg: string) => {
+    cacheOutputCaptured += msg + '\n';
+  };
+  CLI.renderCacheUsage({
+    promptTokens: 10000,
+    cachedTokens: 8000,
+    completionTokens: 500,
+    totalTokens: 10500,
+    cacheHitRate: 80.0,
+  });
+  console.log = originalLog;
+
+  assert(cacheOutputCaptured.includes('Prompt Cache'), 'CLI.renderCacheUsage hiển thị nhãn Prompt Cache');
+  assert(cacheOutputCaptured.includes('8,000'), 'CLI.renderCacheUsage hiển thị đúng số token đã cache');
+  assert(cacheOutputCaptured.includes('80% hit rate'), 'CLI.renderCacheUsage hiển thị chính xác tỉ lệ hit rate 80%');
+
+  console.log('\n========================================');
+  console.log('🧪 28. KIỂM THỬ WORKSPACE FILE & DIRECTORY ATTACHMENT & REAL-TIME MENTIONS (@)');
+  console.log('========================================');
+
+  // 28.1. FileMentionEngine.listWorkspaceEntries
+  const wsEntries = FileMentionEngine.listWorkspaceEntries(workspace);
+  assert(wsEntries.length > 0, 'listWorkspaceEntries quét thành công các mục trong workspace');
+  assert(wsEntries.some((e) => e.relativePath === 'package.json' && e.type === 'file'), 'listWorkspaceEntries tìm thấy package.json');
+  assert(wsEntries.some((e) => e.relativePath === 'src' && e.type === 'directory'), 'listWorkspaceEntries tìm thấy thư mục src');
+  assert(!wsEntries.some((e) => e.relativePath.includes('node_modules')), 'listWorkspaceEntries tự động loại bỏ thư mục node_modules');
+
+  // 28.2. FileMentionEngine.extractActiveMention
+  const m1 = FileMentionEngine.extractActiveMention('Hãy tối ưu @src/agent/agent-loop.ts');
+  assert(m1 !== null && m1.query === 'src/agent/agent-loop.ts', 'extractActiveMention trích xuất chính xác token @path ở cuối');
+
+  const m2 = FileMentionEngine.extractActiveMention('Xem @package và làm tiếp');
+  assert(m2 === null, 'extractActiveMention bỏ qua khi có khoảng trắng sau query');
+
+  const m3 = FileMentionEngine.extractActiveMention('user@email.com');
+  assert(m3 === null, 'extractActiveMention không nhầm lẫn email thành file mention');
+
+  const m4 = FileMentionEngine.extractActiveMention('test @');
+  assert(m4 !== null && m4.query === '', 'extractActiveMention nhận diện @ rỗng để mở danh mục gợi ý gốc');
+
+  // 28.3. FileMentionEngine.getFileSuggestions
+  const fileSugg = FileMentionEngine.getFileSuggestions('Sửa @package', workspace);
+  assert(fileSugg.length > 0, 'getFileSuggestions tìm thấy gợi ý cho @package');
+  assert(fileSugg.some((s) => s.fullPath === 'package.json'), 'getFileSuggestions gợi ý chính xác package.json');
+
+  const dirSugg = FileMentionEngine.getFileSuggestions('Xem @src/llm', workspace);
+  assert(dirSugg.length > 0, 'getFileSuggestions tìm thấy gợi ý cho @src/llm');
+  assert(dirSugg.some((s) => s.type === 'directory' && s.displayPath.startsWith('src/llm')), 'getFileSuggestions nhận diện đúng type directory');
+
+  // 28.4. FileMentionEngine.completeMention (Tab Completion)
+  const [tabCompletions] = FileMentionEngine.completeMention('Kiểm tra @pack', workspace);
+  assert(tabCompletions.length > 0 && tabCompletions[0].includes('@package.json'), 'completeMention hoàn thành chính xác @package.json khi nhấn Tab');
+
+  // 28.5. PromptAttachmentProcessor.extractMentionedPaths
+  const paths = PromptAttachmentProcessor.extractMentionedPaths('Kiểm tra @package.json và thư mục @src/llm/, sau đó chạy /add src/index.ts');
+  assert(paths.includes('package.json'), 'extractMentionedPaths trích xuất package.json');
+  assert(paths.includes('src/llm'), 'extractMentionedPaths trích xuất src/llm');
+  assert(paths.includes('src/index.ts'), 'extractMentionedPaths trích xuất cú pháp /add');
+
+  // 28.6. PromptAttachmentProcessor.resolveAndAttach
+  const attachResult = await PromptAttachmentProcessor.resolveAndAttach('Giải thích cấu trúc @package.json và @src/llm', workspace);
+  assert(attachResult.hasAttachments === true, 'resolveAndAttach ghi nhận có đính kèm');
+  assert(attachResult.attachments.length >= 2, 'resolveAndAttach nạp đủ 2 mục đính kèm');
+  assert(attachResult.expandedPrompt.includes('[User Attached Workspace Context]'), 'resolveAndAttach tạo header context đính kèm');
+  assert(attachResult.expandedPrompt.includes('mini-agent-loop'), 'resolveAndAttach nhúng nội dung thực tế của package.json');
+  assert(attachResult.expandedPrompt.includes('deepseek.ts'), 'resolveAndAttach tạo cây thư mục cho src/llm');
+
+  // 28.7. CLI.renderAttachmentSummary
+  let attachSummaryOutput = '';
+  const originalLog2 = console.log;
+  console.log = (msg: string) => {
+    attachSummaryOutput += msg + '\n';
+  };
+  CLI.renderAttachmentSummary(attachResult.attachments);
+  console.log = originalLog2;
+
+  assert(attachSummaryOutput.includes('ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH'), 'CLI.renderAttachmentSummary hiển thị banner đính kèm');
+  assert(attachSummaryOutput.includes('package.json'), 'CLI.renderAttachmentSummary hiển thị tên file đính kèm');
+
+  console.log('\n========================================');
+  console.log('🧪 29. KIỂM THỬ CODEX CLI REFLECTION & SELF-CRITIQUE ARCHITECTURE');
+  console.log('========================================');
+
+  // 29.1. HypothesisTracker
+  const hypothesisTracker = new HypothesisTracker();
+  const h1 = hypothesisTracker.formulate({
+    statement: 'Lỗi phát sinh do thiếu trường token trong payload',
+    falsificationTest: 'npm test -- -t "auth-test"',
+    targetFiles: ['src/auth/token.ts'],
+    blastRadius: 'MEDIUM',
+    proposedFix: 'Thêm token vào hàm createPayload',
+  });
+  assert(h1.id === 'H1', 'HypothesisTracker gán ID H1 chính xác');
+  assert(h1.status === 'formulated', 'HypothesisTracker khởi tạo trạng thái formulated');
+  assert(hypothesisTracker.getActiveHypothesis()?.id === 'H1', 'getActiveHypothesis trả về H1');
+
+  hypothesisTracker.markTesting('H1');
+  assert(hypothesisTracker.getActiveHypothesis()?.status === 'testing', 'markTesting cập nhật trạng thái testing');
+
+  hypothesisTracker.markFalsified('H1', 'Token đã tồn tại nhưng sai format');
+  assert(hypothesisTracker.getFalsifiedHypotheses().length === 1, 'markFalsified ghi nhận 1 giả thuyết bị bác bỏ');
+
+  const h2 = hypothesisTracker.formulate({
+    statement: 'Lỗi do JWT prefix Bearer bị thừa dấu cách',
+    falsificationTest: 'npm test -- -t "auth-test"',
+  });
+  hypothesisTracker.markValidated('H2', 'Fix thành công sau khi trim prefix');
+  assert(hypothesisTracker.getValidatedHypotheses().length === 1, 'markValidated ghi nhận 1 giả thuyết thành công');
+
+  const scratchpad = hypothesisTracker.toScratchpad();
+  assert(scratchpad.includes('H1') && scratchpad.includes('FALSIFIED'), 'toScratchpad bao gồm giả thuyết đã bị bác bỏ');
+  assert(scratchpad.includes('H2') && scratchpad.includes('VALIDATED'), 'toScratchpad bao gồm giả thuyết đã thành công');
+
+  const guidance = hypothesisTracker.toPromptGuidance();
+  assert(guidance.includes('H1 Rejected'), 'toPromptGuidance sinh cảnh báo không lặp lại giả thuyết H1');
+
+  // 29.2. ReflectionEngine with LSP Diagnostics Integration
+  const reflectionEngineCodex = new ReflectionEngine();
+  const testWorkspace = new Workspace(process.cwd());
+  const lspFeedback = {
+    toolName: 'run_command',
+    args: { command: 'npx tsc' },
+    result: {
+      exitCode: 1,
+      stderr: 'src/agent/test-model.ts(15,8): error TS2322: Type "string" is not assignable to type "number".\nsrc/agent/test-model.ts(20,5): error TS2304: Cannot find name "unknownVar".',
+    },
+    durationMs: 120,
+  };
+  const lspAnalysis = reflectionEngineCodex.analyze(lspFeedback, testWorkspace);
+  assert(lspAnalysis.isFailure === true, 'ReflectionEngine nhận diện lỗi biên dịch');
+  assert(Boolean(lspAnalysis.diagnostics !== undefined && lspAnalysis.diagnostics.length >= 2), 'ReflectionEngine trích xuất LSP diagnostics từ output');
+  assert(Boolean(lspAnalysis.reflectionPrompt?.includes('[LSP COMPILER & TYPE DIAGNOSTICS DETECTED]')), 'Reflection prompt chứa header LSP Diagnostics');
+  assert(Boolean(lspAnalysis.reflectionPrompt?.includes('TS2322')), 'Reflection prompt chứa mã lỗi TS2322');
+
+  // 29.3. SpeculativeBranchManager
+  const specManager = new SpeculativeBranchManager(process.cwd());
+  const specSession = await specManager.createSpeculative('H1');
+  assert(specSession.hypothesisId === 'H1', 'SpeculativeBranchManager tạo session cho H1');
+  assert(specSession.workspace !== undefined, 'SpeculativeBranchManager cấp phát isolated workspace');
+  assert(specManager.getSpeculative('H1') !== undefined, 'getSpeculative tìm thấy session đang hoạt động');
+
+  const abortSuccess = await specManager.abortSpeculative('H1');
+  assert(abortSuccess === true, 'abortSpeculative dọn dẹp worktree an toàn');
+  assert(specManager.getSpeculative('H1') === undefined, 'session đã bị xóa sau khi abort');
+
+  // 29.4. ContextCompactor - Distill Failed Hypotheses
+  const codexCompactor = new ContextCompactor();
+  const sessionForCompaction: SessionMessage[] = [
+    { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
+    { role: 'model', parts: [{ text: 'Trying fix...' }] },
+    { role: 'user', parts: [{ text: 'Error log with 1000 lines of stack trace...' }] },
+  ];
+  const distilled = codexCompactor.distillFailedHypotheses(sessionForCompaction, hypothesisTracker.getFalsifiedHypotheses());
+  assert(distilled.distilledSummary.includes('[DISTILLED LEARNED INVARIANTS - CODEX ARCHITECTURE]'), 'distillFailedHypotheses sinh header kiến thức nén');
+  assert(distilled.distilledSummary.includes('H1 Falsified'), 'distillFailedHypotheses ghi nhận giả thuyết H1 bị bác bỏ');
+
+  // 29.5. CriticGate Dual-Role Evaluation
+  const testCriticGate = new CriticGate();
+  const evalSession = new Session('critic-test-session');
+  const criticResult = testCriticGate.evaluate({
+    finalAnswer: 'I have fixed all the issues in the code.',
+    session: evalSession,
+    workspace: testWorkspace,
+    hypothesisTracker,
+    userRequest: 'Fix auth and verify with tests',
+  });
+  assert(criticResult.approved === false, 'CriticGate từ chối khi thiếu bằng chứng verification thực tế');
+  assert(criticResult.score < 80, 'CriticGate hạ điểm chất lượng khi chưa có verification');
+  assert(Boolean(criticResult.critiquePrompt?.includes('[CRITIC GATE REJECTION')), 'CriticGate sinh critiquePrompt chi tiết');
+
+  console.log('\n========================================');
+  console.log('🧪 30. KIỂM THỬ CODEX CLI 5 MAJOR ARCHITECTURAL UPGRADES');
+  console.log('========================================');
+
+  // 30.1. submit_solution tool
+  const submitSolutionTool = createSubmitSolutionTool(testWorkspace);
+  assert(submitSolutionTool.name === 'submit_solution', 'submit_solution tool được định nghĩa đúng tên');
+  assert(Boolean(submitSolutionTool.parameters?.required?.includes('summary')), 'submit_solution bắt buộc tham số summary');
+  assert(Boolean(submitSolutionTool.parameters?.required?.includes('verificationEvidence')), 'submit_solution bắt buộc tham số verificationEvidence');
+
+  const submitResult = await submitSolutionTool.execute({
+    summary: 'Refactored auth token refresh logic',
+    rootCause: 'Expired JWT token was not caught in interceptor',
+    filesModified: ['src/auth/jwt.ts', 'src/auth/interceptor.ts'],
+    verificationEvidence: 'npm test -> 42/42 tests passed, exit code 0',
+  }, testWorkspace);
+  assert(submitResult.success === true, 'submit_solution thực thi thành công');
+  assert(submitResult.submitted === true, 'submit_solution trả về submitted flag = true');
+  assert(submitResult.filesModified.length === 2, 'submit_solution ghi nhận đúng 2 file sửa đổi');
+
+  const customRegistry = new ToolRegistry();
+  registerSubmitSolutionTool(customRegistry, testWorkspace);
+  assert(customRegistry.has('submit_solution'), 'registerSubmitSolutionTool đăng ký thành công vào ToolRegistry');
+
+  // 30.2. WorkspaceStateVerifier
+  const wsVerifier = new WorkspaceStateVerifier(process.cwd());
+  const wsStatus = await wsVerifier.captureStatus();
+  assert(typeof wsStatus.isGitRepo === 'boolean', 'WorkspaceStateVerifier phát hiện đúng môi trường Git');
+  assert(typeof wsStatus.diffHash === 'string' && wsStatus.diffHash.length > 0, 'WorkspaceStateVerifier tạo SHA diffHash');
+
+  const cleanlinessCheck = await wsVerifier.checkCleanliness();
+  assert(typeof cleanlinessCheck.valid === 'boolean', 'checkCleanliness trả về kết quả hợp lệ');
+
+  // 30.3. AuditLedger
+  const auditLedger = new AuditLedger();
+  const testAuditSession = new Session('audit-ledger-test-session');
+  const auditRecord = auditLedger.record({
+    turn: 1,
+    summary: 'Fixed JWT token refresh',
+    rootCause: 'JWT expiration check missing',
+    filesModified: ['src/auth/jwt.ts'],
+    diffHash: 'a1b2c3d4e5f6',
+    verificationCommand: 'npm test',
+    verificationExitCode: 0,
+    critiqueScore: 95,
+    lspDiagnosticsCount: 0,
+    status: 'APPROVED',
+  }, testAuditSession);
+
+  assert(auditRecord.id.startsWith('audit_'), 'AuditLedger sinh ID hợp lệ');
+  assert(auditRecord.status === 'APPROVED', 'AuditLedger ghi nhận trạng thái APPROVED');
+  assert(auditLedger.getRecords().length === 1, 'AuditLedger lưu đúng 1 bản ghi');
+  assert(testAuditSession.getEvents().some((e) => e.type === 'audit/task-completion'), 'AuditLedger gắn sự kiện vào session events');
+  const auditReport = auditLedger.formatAuditReport(auditRecord);
+  assert(auditReport.includes('CODEX CLI AUDIT & VERIFICATION LEDGER'), 'formatAuditReport định dạng khung báo cáo chuẩn');
+
+  // 30.4. HypothesisRollbackOrchestrator
+  const testCpManager = new CheckpointManager(process.cwd());
+  await testCpManager.init();
+  const greenCp = await testCpManager.createCheckpoint('Green baseline before testing', { isTaskCheckpoint: true, taskId: 'task-test-1' });
+  const rollbackOrchestrator = new HypothesisRollbackOrchestrator(testCpManager, specManager);
+  if (greenCp) {
+    rollbackOrchestrator.markGreenCheckpoint(greenCp);
+    assert(rollbackOrchestrator.getGreenCheckpoint()?.id === greenCp.id, 'HypothesisRollbackOrchestrator ghi nhớ green checkpoint');
+  }
+
+  const rollbackOutcome = await rollbackOrchestrator.rollbackOnFalsifiedHypothesis('H1', hypothesisTracker);
+  assert(typeof rollbackOutcome.rolledBack === 'boolean', 'rollbackOnFalsifiedHypothesis thực thi an toàn');
+  assert(Boolean(rollbackOutcome.guidancePrompt?.includes('[AUTOMATIC ROLLBACK EXECUTED')), 'rollbackOutcome sinh prompt hướng dẫn clean slate');
+
+  // 30.5. AdaptiveReasoningController
+  const reasoningController = new AdaptiveReasoningController('medium');
+  assert(reasoningController.getCurrentTier() === 'medium', 'AdaptiveReasoningController khởi tạo tier medium');
+  assert(reasoningController.getBudget() === 8192, 'Tier medium cấp 8192 thinking tokens');
+
+  const escalatedTier1 = reasoningController.escalate('CriticGate rejected premature completion');
+  assert(escalatedTier1 === 'high', 'Lần reject đầu tiên nâng tier lên high');
+  assert(reasoningController.getBudget() === 16384, 'Tier high cấp 16384 thinking tokens');
+  assert(reasoningController.getRejectionCount() === 1, 'Bộ đếm rejection tăng lên 1');
+  assert(reasoningController.getGuidancePrompt().includes('ADAPTIVE REASONING ESCALATED'), 'Sinh guidance prompt System 2 tương ứng');
+
+  const escalatedTier2 = reasoningController.escalate('LSP errors detected');
+  assert(escalatedTier2 === 'max', 'Lần reject thứ hai nâng tier lên max');
+  assert(reasoningController.getBudget() === 32768, 'Tier max cấp 32768 thinking tokens');
+
+  reasoningController.reset();
+  assert(reasoningController.getCurrentTier() === 'medium', 'reset() đưa tier về lại baseline medium');
+  assert(reasoningController.getRejectionCount() === 0, 'reset() đưa rejection count về 0');
+
+  // 30.6. Patch Hunk #2 Failure Diagnostic & Recovery Protocol
+  const testPatchWithFailingHunk = `--- a/package.json
++++ b/package.json
+@@ -1,4 +1,4 @@
+ {
+-  "name": "mini-agent-loop",
++  "name": "mini-agent-loop-fixed",
+   "version": "1.0.0",
+@@ -99,4 +99,4 @@
+   "nonexistent_field_1": true,
+-  "nonexistent_field_2": false,
++  "nonexistent_field_2": true,
+   "nonexistent_field_3": true
+ }`;
+
+  const failingPatchRes = await applyPatchTool.execute({ patch: testPatchWithFailingHunk }, testWorkspace);
+  assert(failingPatchRes.success === false, 'apply_patch nhận diện thất bại ở hunk lỗi');
+  assert(failingPatchRes.failedHunkNumber === 2, 'apply_patch nhận diện chính xác Hunk #2 bị lỗi');
+  assert(failingPatchRes.suggestedRead !== undefined, 'apply_patch cung cấp suggestedRead để inspect dòng thực tế');
+  assert(failingPatchRes.recommendedFallback === 'replace_text', 'apply_patch đề xuất fallback sang replace_text');
+
+  const hunk2Reflection = reflectionEngineCodex.analyze({
+    toolName: 'apply_patch',
+    args: { patch: testPatchWithFailingHunk },
+    result: failingPatchRes,
+    durationMs: 40,
+  });
+  assert(Boolean(hunk2Reflection.reflectionPrompt?.includes('CODEX CLI HUNK RECOVERY PROTOCOL')), 'ReflectionEngine kích hoạt CODEX CLI HUNK RECOVERY PROTOCOL');
+  assert(Boolean(hunk2Reflection.reflectionPrompt?.includes('Hunk #2')), 'Reflection prompt chỉ rõ Hunk #2');
 
   console.log('\n========================================');
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

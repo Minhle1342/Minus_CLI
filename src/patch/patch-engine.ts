@@ -1,4 +1,4 @@
-﻿import fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 
@@ -413,6 +413,29 @@ export class PatchEngine {
         };
       }
 
+      // Fuzz 3 Advisory Invariant: Nếu match chỉ tìm thấy ở Fuzz 3 (Levenshtein >= 80%), không tự động ghi đè
+      if (matchRes.fuzzLevel >= 3) {
+        hunkResults.push({
+          hunkIndex: hIdx,
+          applied: false,
+          fuzzLevelUsed: 3,
+          matchedLineIndex: matchRes.matchLineIndex,
+          error: `FUZZY_CANDIDATE_FOUND: Found similar code near line ${matchRes.matchLineIndex + 1} (Fuzz Level 3). Per safety invariants, Fuzz Level 3 is advisory only and does not mutate disk. Use read_file to inspect exact content and recreate an exact patch.`,
+          closestMatches: matchRes.closestMatches,
+        });
+
+        return {
+          path: relPath,
+          type: 'modify',
+          success: false,
+          hunksTotal: filePatch.hunks.length,
+          hunksApplied: hIdx,
+          fuzzLevelUsed: 3,
+          hunkResults,
+          error: `FUZZY_CANDIDATE_FOUND: Found similar code near line ${matchRes.matchLineIndex + 1} (Fuzz Level 3). Re-read file with read_file and recreate an exact patch.`,
+        };
+      }
+
       // Áp dụng thay thế hunk tại vị trí matchLineIndex
       const matchedIdx = matchRes.matchLineIndex;
       const expectedLinesCount = matchRes.matchedLinesCount;
@@ -567,18 +590,51 @@ export class PatchEngine {
     }
 
     // ==============================================================
-    // Cấp độ 2: Context Reduction (Bỏ 1 dòng context trước hoặc sau)
+    // Cấp độ 2: Context Reduction (Thử bỏ dòng context đầu, cuối, hoặc cả hai)
     // ==============================================================
     if (expLen >= 3) {
-      // Thử bỏ 1 dòng context đầu và 1 dòng context cuối
-      const trimmedExp = expectedOldLines.slice(1, expLen - 1);
-      for (let i = 0; i <= targetLines.length - trimmedExp.length; i++) {
-        if (this.linesMatchNormalized(targetLines, trimmedExp, i)) {
-          const adaptedReplacement = this.adaptIndentation(targetLines[i], trimmedExp[0], replacementLines.slice(1, -1));
+      const candidates: Array<{
+        trimmedExp: string[];
+        trimmedRep: string[];
+        label: string;
+      }> = [
+        // 2a. Bỏ dòng context cuối (trailing context drift)
+        {
+          trimmedExp: expectedOldLines.slice(0, expLen - 1),
+          trimmedRep: replacementLines.slice(0, replacementLines.length - 1),
+          label: 'trailing-trimmed',
+        },
+        // 2b. Bỏ dòng context đầu (leading context drift)
+        {
+          trimmedExp: expectedOldLines.slice(1),
+          trimmedRep: replacementLines.slice(1),
+          label: 'leading-trimmed',
+        },
+        // 2c. Bỏ cả dòng context đầu và cuối
+        {
+          trimmedExp: expectedOldLines.slice(1, expLen - 1),
+          trimmedRep: replacementLines.slice(1, replacementLines.length - 1),
+          label: 'both-trimmed',
+        },
+      ];
+
+      for (const cand of candidates) {
+        if (cand.trimmedExp.length < 2) continue;
+        const matches: number[] = [];
+        for (let i = 0; i <= targetLines.length - cand.trimmedExp.length; i++) {
+          if (this.linesMatchNormalized(targetLines, cand.trimmedExp, i)) {
+            matches.push(i);
+          }
+        }
+
+        if (matches.length >= 1) {
+          matches.sort((a, b) => Math.abs(a - targetOldStart) - Math.abs(b - targetOldStart));
+          const matchedIdx = matches[0];
+          const adaptedReplacement = this.adaptIndentation(targetLines[matchedIdx], cand.trimmedExp[0], cand.trimmedRep);
           return {
             found: true,
-            matchLineIndex: i,
-            matchedLinesCount: trimmedExp.length,
+            matchLineIndex: matchedIdx,
+            matchedLinesCount: cand.trimmedExp.length,
             replacementLines: adaptedReplacement,
             fuzzLevel: 2,
           };

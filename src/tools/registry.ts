@@ -7,6 +7,14 @@ import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
 import { applyPatchTool } from './apply-patch.js';
 import { writeFileTool } from './write-file.js';
+import { createFileTool } from './create-file.js';
+import { deleteFileTool } from './delete-file.js';
+import { moveFileTool } from './move-file.js';
+import { inspectSymbolTool } from './inspect-symbol.js';
+import { findReferencesTool } from './find-references.js';
+import { getDiagnosticsTool } from './get-diagnostics.js';
+import { analyzeImpactTool } from './blast-radius.js';
+import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
@@ -45,13 +53,21 @@ export class ToolRegistry implements ToolProvider {
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
 
-    // Đăng ký mặc định các tool cốt lõi của Coding Agent (bao gồm apply_patch)
+    // Đăng ký mặc định các tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
     this.register(searchTextTool);
     this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
+    this.register(createFileTool);
+    this.register(deleteFileTool);
+    this.register(moveFileTool);
+    this.register(inspectSymbolTool);
+    this.register(findReferencesTool);
+    this.register(getDiagnosticsTool);
+    this.register(analyzeImpactTool);
+    this.register(inspectImageTool);
     this.register(runCommandTool);
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
@@ -66,6 +82,10 @@ export class ToolRegistry implements ToolProvider {
     if (memoryManager) {
       this.attachMemoryManager(memoryManager);
     }
+  }
+
+  attachSession(session: any): void {
+    this.register(createInspectImageTool(() => session));
   }
 
   attachPlanManager(planManager: PlanManager): void {
@@ -97,6 +117,10 @@ export class ToolRegistry implements ToolProvider {
   /**
    * Lấy tool theo tên
    */
+  has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
   get(name: string): ToolDefinition | undefined {
     return this.tools.get(name);
   }

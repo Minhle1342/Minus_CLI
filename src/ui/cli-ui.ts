@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { Workspace } from '../workspace/workspace.js';
+import { FileMentionEngine, AttachedItemSummary } from '../workspace/file-attachment.js';
 
 // ANSI escape codes for styling without external dependencies
 export const colors = {
@@ -65,6 +67,7 @@ export interface SlashCommandSuggestion extends SlashCommandDefinition {
 
 export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/model', usage: '/model [id|name]', description: 'Chọn mô hình LLM', category: 'Model & Routing', aliases: ['/modal'] },
+  { command: '/tokens', usage: '/tokens [low|medium|high|max|output|input|thinking|reset] [val]', description: 'Chọn gói cấu hình sẵn (low/medium/high/max) hoặc chỉnh token', category: 'Model & Routing', aliases: ['/token', '/token-budget'] },
   { command: '/workspace', usage: '/workspace [path]', description: 'Xem hoặc đổi workspace', category: 'Workspace', aliases: ['/cd'] },
   { command: '/session', description: 'Xem cấu hình session hiện tại', category: 'Session' },
   { command: '/sessions', usage: '/sessions [open|new|inspect]', description: 'Quản lý các session đã lưu', category: 'Session' },
@@ -75,6 +78,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/plan', description: 'Xem cây kế hoạch hiện tại', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
   { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
+  { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (OpenAI Codex)', category: 'Telemetry', aliases: ['/prompt-cache'] },
   { command: '/status', description: 'Xem trạng thái phiên làm việc', category: 'Telemetry' },
   { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent', category: 'Subagents' },
   { command: '/goal', usage: '/goal [on|off|status|resume|objective]', description: 'Điều khiển Goal Mode', category: 'Goal Mode' },
@@ -84,6 +88,12 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/permissions', usage: '/permissions [mode|reset]', description: 'Cấu hình quyền duyệt sửa file/lệnh (always_ask, ask_sensitive, auto_approve, read_only)', category: 'Security', aliases: ['/permission', '/perm'] },
   { command: '/undo', description: 'Hoàn tác checkpoint gần nhất', category: 'Shadow Git', aliases: ['/rollback'] },
   { command: '/checkpoints', description: 'Xem lịch sử checkpoint', category: 'Shadow Git' },
+  { command: '/diff', description: 'Xem unified diff của task hiện tại', category: 'Shadow Git' },
+  { command: '/evidence', description: 'Xem bằng chứng verification hiện tại', category: 'Telemetry' },
+  { command: '/impact', usage: '/impact [path] [symbol]', description: 'Phân tích phạm vi ảnh hưởng (Blast Radius)', category: 'Tools' },
+  { command: '/image', usage: '/image <path> [prompt]', description: 'Nạp và phân tích ảnh trực quan (Vision / Multimodal)', category: 'Vision', aliases: ['/vision', '/img'] },
+  { command: '/preview', description: 'Xem trước các thay đổi mutation pending', category: 'Shadow Git' },
+  { command: '/add', usage: '/add <path>', description: 'Đính kèm file hoặc thư mục vào ngữ cảnh', category: 'Context', aliases: ['/attach'] },
   { command: '/clear', description: 'Xoá màn hình terminal', category: 'General' },
   { command: '/help', description: 'Hiển thị hướng dẫn', category: 'General', aliases: ['/?'] },
   { command: '/exit', description: 'Thoát chương trình', category: 'General', aliases: ['/quit'] },
@@ -144,10 +154,50 @@ export class RealtimeSlashCommandHints {
   private visible = false;
   private renderKey?: string;
 
-  constructor(private readonly terminal: SlashHintTerminal) {}
+  constructor(
+    private readonly terminal: SlashHintTerminal,
+    private readonly getWorkspace?: () => Workspace | undefined,
+  ) {}
 
   update(line: string, cursorColumn = line.length + 2): void {
     if (!this.terminal.isTTY) return;
+
+    const workspace = this.getWorkspace ? this.getWorkspace() : undefined;
+
+    // 1. Kiểm tra nếu người dùng đang gõ @mention file / thư mục
+    if (workspace) {
+      const activeMention = FileMentionEngine.extractActiveMention(line, Math.max(0, cursorColumn - 2));
+      if (activeMention) {
+        const suggestions = FileMentionEngine.getFileSuggestions(line, workspace, Math.max(0, cursorColumn - 2), 5);
+        if (suggestions.length > 0) {
+          const width = Math.max(40, this.terminal.columns || 80);
+          const nextRenderKey = `@\u0000${line}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
+          if (this.visible && this.renderKey === nextRenderKey) return;
+
+          const rows = suggestions.map((item, index) => {
+            const icon = item.type === 'directory' ? '📁' : '📄';
+            const pathLabel = truncateDisplayText(item.displayPath, Math.floor(width * 0.55));
+            const sizeInfo = item.type === 'directory'
+              ? `${c.brightYellow}(Thư mục)${c.reset}`
+              : item.sizeBytes ? `${c.gray}(${(item.sizeBytes / 1024).toFixed(1)} KB)${c.reset}` : '';
+            const marker = index === 0 ? '›' : ' ';
+            return `${c.cyan}${marker}${c.reset} ${icon} ${c.brightCyan}${c.bold}${pathLabel}${c.reset} ${sizeInfo}`;
+          });
+
+          const footer = `${c.gray}  Tab: hoàn thành @path • Enter: gửi prompt đính kèm${c.reset}`;
+          this.renderBelowInput(
+            [`${c.cyan}${c.bold}📎 Gợi ý đính kèm File / Thư mục (@):${c.reset}`, ...rows, footer],
+            this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
+            cursorColumn,
+          );
+          this.visible = true;
+          this.renderKey = nextRenderKey;
+          return;
+        }
+      }
+    }
+
+    // 2. Kiểm tra nếu là Slash Command (/...)
     const suggestions = getSlashCommandSuggestions(line);
     if (suggestions.length === 0) {
       this.clear();
@@ -155,7 +205,7 @@ export class RealtimeSlashCommandHints {
     }
 
     const width = Math.max(40, this.terminal.columns || 80);
-    const nextRenderKey = `${line}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+    const nextRenderKey = `/\u0000${line}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
     if (this.visible && this.renderKey === nextRenderKey) return;
     const commandWidth = Math.min(
       Math.max(12, Math.floor(width * 0.45)),
@@ -1043,6 +1093,79 @@ export class CLI {
   }
 
   /**
+   * Hiển thị Prompt Caching Telemetry theo chuẩn OpenAI Codex
+   */
+  static renderCacheUsage(usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    cachedTokens?: number;
+    cacheHitRate?: number;
+  }): void {
+    if (!usage || (usage.promptTokens === undefined && usage.totalTokens === undefined)) return;
+    const promptTokens = usage.promptTokens ?? 0;
+    const cachedTokens = usage.cachedTokens ?? 0;
+    const completionTokens = usage.completionTokens ?? 0;
+    const hitRate = usage.cacheHitRate ?? (promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0);
+    
+    if (cachedTokens > 0) {
+      console.log(
+        `${c.blue}${c.bold}│${c.reset}  ${c.brightGreen}⚡ Prompt Cache:${c.reset} ${c.emerald}${cachedTokens.toLocaleString()}${c.reset} cached / ${promptTokens.toLocaleString()} prompt tokens (${c.brightGreen}${c.bold}${hitRate}% hit rate${c.reset}) ${c.dim}| Out: ${completionTokens.toLocaleString()} tok${c.reset}`
+      );
+    } else if (promptTokens > 0) {
+      console.log(
+        `${c.blue}${c.bold}│${c.reset}  ${c.dim}⚡ Prompt Cache: 0 cached / ${promptTokens.toLocaleString()} prompt tokens (0.0% - cold start) | Out: ${completionTokens.toLocaleString()} tok${c.reset}`
+      );
+    }
+  }
+
+  /**
+   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn OpenAI Codex
+   */
+  static renderPromptCacheDashboard(info: {
+    modelName: string;
+    preservePrefixCache: boolean;
+    sessionId?: string;
+    totalPromptTokens?: number;
+    totalCachedTokens?: number;
+    lastHitRate?: number;
+  }): void {
+    console.log(`\n${c.cyan}${c.bold}╭── ⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (OPENAI CODEX STANDARD) ──╮${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tool Declarations:${c.reset}      ${c.brightGreen}✔ Deterministic Alphabetical Ordering${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.brightGreen + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Affinity Routing:${c.reset}       ${c.brightGreen}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Observability:${c.reset}          ${c.brightGreen}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
+    if (info.sessionId) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Session Cache Key:${c.reset}      ${c.dim}${info.sessionId.slice(0, 32)}${c.reset}`);
+    }
+    if (info.lastHitRate !== undefined) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.brightYellow}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
+    }
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị bảng tổng hợp các File & Thư mục được đính kèm vào User Prompt (@mention)
+   */
+  static renderAttachmentSummary(attachments: AttachedItemSummary[]): void {
+    if (!attachments || attachments.length === 0) return;
+    console.log(`\n${c.cyan}${c.bold}╭── 📎 ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH (${attachments.length} mục) ──────────────────────────────────╮${c.reset}`);
+    for (const item of attachments) {
+      if (item.type === 'directory') {
+        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}📁 ${item.path}/${c.reset} ${c.dim}(Thư mục • ${item.fileCount || 0} mục)${c.reset}`);
+      } else {
+        const sizeStr = `${(item.sizeBytes / 1024).toFixed(1)} KB`;
+        const linesStr = item.lineCount !== undefined ? `${item.lineCount.toLocaleString()} dòng • ` : '';
+        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightGreen}📄 ${item.path}${c.reset} ${c.dim}(${linesStr}${sizeStr})${c.reset}`);
+      }
+    }
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
    * Cuối mỗi Step trong AgentLoop
    */
   static renderStepFooter(): void {
@@ -1080,9 +1203,6 @@ export class CLI {
     const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
     
     console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}🔍 Root cause analysis:${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}📝 Files modified:${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}✅ Test/build verification commands executed and confirmation of success:${c.reset}\n`);
     
     const formatted = CLI.formatMarkdownTerminal(content);
 
@@ -1093,6 +1213,17 @@ export class CLI {
       console.log(formatted);
     }
     console.log(`\n${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị thông báo dừng/lỗi thực thi chuẩn Codex CLI (Execution Stopped / Blocked Banner)
+   */
+  static async renderExecutionStopped(message: string, reason: string = 'STOPPED'): Promise<void> {
+    const content = message.trim();
+    console.log(`\n${c.crimson}${c.bold}╭── 🛑 AGENT EXECUTION STOPPED (${reason}) ──────────────────────────────────╮${c.reset}\n`);
+    const formatted = CLI.formatMarkdownTerminal(content);
+    console.log(formatted);
+    console.log(`\n${c.crimson}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
@@ -1233,6 +1364,52 @@ export class CLI {
     console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
     console.log(`${c.yellow}│${c.reset}  ${c.slate}Phím tắt: ${c.emerald}[y]${c.reset} Duyệt 1 lần • ${c.cyan}[a]${c.reset} Duyệt luôn trong phiên • ${c.red}[n]${c.reset} Từ chối • ${c.dim}[q] Hủy${c.reset}`);
     console.log(`${c.yellow}╰────────────────────────────────────────────────────────────────────────╯${c.reset}`);
+  }
+
+  /**
+   * Hiển thị bảng cấu hình Token của mô hình hiện tại kèm các gói đóng gói sẵn (Preset Tiers)
+   */
+  static renderTokenConfig(modelName: string, config: any, profile: any): void {
+    console.log(`\n${c.brightYellow}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+    console.log(`${c.brightYellow}${c.bold}║           📊 CẤU HÌNH TOKEN BUDGET & GÓI ĐÓNG GÓI SẴN (PRESETS)            ║${c.reset}`);
+    console.log(`${c.brightYellow}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+    console.log(`  ${c.dim}Mô hình hiện tại:${c.reset}          ${c.bold}${modelName}${c.reset} ${c.gray}(Provider: ${profile.provider.toUpperCase()})${c.reset}`);
+    console.log(`  ${c.dim}Max Output Tokens:${c.reset}         ${c.bold}${c.green}${config.maxOutputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedOutputTokens.toLocaleString()})${c.reset}`);
+    console.log(`  ${c.dim}Max Input Tokens (Context):${c.reset} ${c.bold}${c.cyan}${config.maxInputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedInputTokens.toLocaleString()})${c.reset}`);
+    
+    if (profile.supportsThinkingBudget || config.thinkingBudget !== undefined) {
+      const budgetStr = config.thinkingBudget === 0 ? 'TẮT (0)' : (config.thinkingBudget?.toLocaleString() ?? 'Tự động');
+      console.log(`  ${c.dim}Thinking Token Budget:${c.reset}     ${c.bold}${c.magenta}${budgetStr}${c.reset}`);
+    }
+    if (profile.supportsReasoningEffort || config.reasoningEffort) {
+      console.log(`  ${c.dim}Reasoning Effort:${c.reset}          ${c.bold}${c.yellow}${config.reasoningEffort ?? 'medium'}${c.reset}`);
+    }
+
+    console.log(`\n${c.cyan}${c.bold}📦 4 GÓI ĐÓNG GÓI SẴN (PRESET TIERS):${c.reset}`);
+    console.log(`  ${c.green}${c.bold}1. LOW (Eco / Tiết kiệm)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}2,048${c.reset} | Context: ${c.bold}16,000${c.reset} | Thinking: ${c.bold}2,048${c.reset} (effort: ${c.bold}low${c.reset})`);
+    console.log(`     ↳ ${c.gray}Tối ưu tốc độ phản hồi tức thì, tiết kiệm token và chi phí tối đa.${c.reset}`);
+
+    console.log(`  ${c.yellow}${c.bold}2. MEDIUM (Balanced / Tiêu chuẩn)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}8,192${c.reset} | Context: ${c.bold}64,000${c.reset} | Thinking: ${c.bold}8,192${c.reset} (effort: ${c.bold}medium${c.reset})`);
+    console.log(`     ↳ ${c.gray}Cân bằng hoàn hảo cho các tác vụ lập trình hàng ngày và debug thông thường.${c.reset}`);
+
+    console.log(`  ${c.brightYellow}${c.bold}3. HIGH (Deep / Chuyên sâu)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}16,384${c.reset} | Context: ${c.bold}128,000${c.reset} | Thinking: ${c.bold}24,576${c.reset} (effort: ${c.bold}high${c.reset})`);
+    console.log(`     ↳ ${c.gray}Phù hợp refactor dự án lớn, suy luận logic phức tạp và sinh code dài.${c.reset}`);
+
+    console.log(`  ${c.red}${c.bold}4. MAX (Unlimited / Tối đa)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}${profile.maxSupportedOutputTokens.toLocaleString()}${c.reset} | Context: ${c.bold}${profile.maxSupportedInputTokens.toLocaleString()}${c.reset} | Thinking: ${c.bold}64,000${c.reset} (effort: ${c.bold}max${c.reset})`);
+    console.log(`     ↳ ${c.gray}Khai thác 100% giới hạn phần cứng và context window tối đa của mô hình.${c.reset}`);
+
+    console.log(`\n${c.gray}⚡ Lệnh thao tác nhanh:${c.reset}`);
+    console.log(`  ${c.bold}/tokens low${c.reset} | ${c.bold}/tokens med${c.reset} | ${c.bold}/tokens high${c.reset} | ${c.bold}/tokens max${c.reset} : Chọn nhanh trọn gói preset`);
+    console.log(`  ${c.bold}/tokens output <low|med|high|max|số_token>${c.reset}           : Đặt riêng giới hạn token đầu ra`);
+    console.log(`  ${c.bold}/tokens input <low|med|high|max|số_token>${c.reset}            : Đặt riêng giới hạn context window`);
+    console.log(`  ${c.bold}/tokens thinking <off|low|med|high|max|số_token>${c.reset}     : Đặt riêng thinking budget (off để tắt)`);
+    console.log(`  ${c.bold}/tokens effort <low|med|high|max>${c.reset}                    : Đặt riêng mức độ suy luận`);
+    console.log(`  ${c.bold}/tokens reset${c.reset}                                        : Khôi phục về mặc định của mô hình\n`);
   }
 
   /**

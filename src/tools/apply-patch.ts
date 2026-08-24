@@ -1,7 +1,9 @@
-﻿import { Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { PatchEngine } from '../patch/patch-engine.js';
+import { computeFileHash, computeStringHash } from '../workspace/workspace-digest.js';
+import { toolError, toolSuccess } from './tool-result.js';
 
 /**
  * Tool apply_patch (Codex CLI Unified Patch Engine)
@@ -25,7 +27,11 @@ export const applyPatchTool: ToolDefinition = {
       },
       fuzzLevel: {
         type: Type.INTEGER,
-        description: 'Mức độ chấp nhận sai lệch (0: exact line/text, 1: normalize whitespace/indentation, 2: context reduction, 3: fuzzy similarity). Mặc định là 2.',
+        description: 'Mức độ chấp nhận sai lệch (0: exact line/text, 1: normalize whitespace/indentation, 2: context reduction, 3: fuzzy similarity advisory). Mặc định là 2.',
+      },
+      expectedFileHashes: {
+        type: Type.OBJECT,
+        description: 'Bản đồ đường dẫn file -> contentHash (lấy từ read_file) để ngăn ngừa ghi đè nội dung cũ (optimistic locking).',
       },
     },
     required: ['patch'],
@@ -34,9 +40,12 @@ export const applyPatchTool: ToolDefinition = {
     const rawPatch = String(args.patch || '').trim();
     const defaultPath = args.path ? String(args.path).trim() : undefined;
     const fuzzLevel = typeof args.fuzzLevel === 'number' ? Math.max(0, Math.min(3, args.fuzzLevel)) : 2;
+    const expectedFileHashes = (typeof args.expectedFileHashes === 'object' && args.expectedFileHashes !== null)
+      ? (args.expectedFileHashes as Record<string, string>)
+      : undefined;
 
     if (!rawPatch) {
-      return { error: 'Tham số "patch" không được để trống.' };
+      return toolError('Tham số "patch" không được để trống.', 'INVALID_ARGS');
     }
 
     try {
@@ -44,30 +53,35 @@ export const applyPatchTool: ToolDefinition = {
       const parsed = PatchEngine.parsePatch(rawPatch, defaultPath);
 
       if (parsed.files.length === 0) {
-        return {
-          error: 'Nội dung patch không chứa hunk hoặc file hợp lệ nào.',
-          errorCode: 'INVALID_PATCH',
-        };
+        return toolError('Nội dung patch không chứa hunk hoặc file hợp lệ nào.', 'INVALID_PATCH');
       }
 
-      // 2. Kiểm tra an toàn path và protected files cho tất cả các file trong patch
+      // 2. Kiểm tra an toàn path, protected files và expectedFileHashes cho tất cả các file
       for (const file of parsed.files) {
         const targetPath = file.newPath || file.oldPath || defaultPath;
         if (targetPath) {
+          let safePath: string;
           try {
-            workspace.resolveSafePath(targetPath);
+            safePath = workspace.resolveSafePath(targetPath);
           } catch (err: any) {
-            return {
-              error: `Đường dẫn "${targetPath}" vi phạm an toàn workspace: ${err.message}`,
-              errorCode: 'SECURITY_VIOLATION',
-            };
+            return toolError(`Đường dẫn "${targetPath}" vi phạm an toàn workspace: ${err.message}`, 'SECURITY_VIOLATION');
           }
 
-          if (workspace.isProtectedFile(targetPath)) {
-            return {
-              error: `Bảo mật: Không được phép chỉnh sửa hoặc xóa file cấu hình nhạy cảm "${targetPath}".`,
-              errorCode: 'SECURITY_VIOLATION',
-            };
+          if (workspace.isProtectedFile(safePath)) {
+            return toolError(`Security violation: Cannot modify or delete protected configuration file "${targetPath}".`, 'SECURITY_VIOLATION');
+          }
+
+          if (expectedFileHashes && expectedFileHashes[targetPath]) {
+            const currentHash = await computeFileHash(safePath);
+            const expectedHash = expectedFileHashes[targetPath];
+            if (currentHash !== expectedHash) {
+              return toolError(
+                `Content conflict (Stale File Hash) for "${targetPath}". On-disk hash (${currentHash}) does not match expected hash (${expectedHash}).`,
+                'STALE_FILE_HASH',
+                { path: targetPath, expectedHash, currentHash },
+                'Use read_file to inspect latest content and recreate the patch.',
+              );
+            }
           }
         }
       }
@@ -79,14 +93,37 @@ export const applyPatchTool: ToolDefinition = {
       });
 
       if (!result.success) {
+        const failedFile = result.fileResults.find((f) => !f.success);
+        const failedHunk = failedFile?.hunkResults.find((h) => !h.applied);
+        const failedHunkNumber = failedHunk ? failedHunk.hunkIndex + 1 : undefined;
+
+        let suggestedRead: { path: string; startLine: number; endLine: number } | undefined;
+        if (failedFile && failedFile.path && failedFile.path !== 'unknown') {
+          const hunkData = parsed.files.find((f) => (f.newPath || f.oldPath || defaultPath) === failedFile.path)?.hunks[failedHunk?.hunkIndex ?? 0];
+          const approxLine = hunkData?.oldStart || 1;
+          suggestedRead = {
+            path: failedFile.path,
+            startLine: Math.max(1, approxLine - 10),
+            endLine: approxLine + Math.max(20, hunkData?.oldLines || 10) + 10,
+          };
+        }
+
         return {
           success: false,
-          error: result.error || 'Áp dụng patch thất bại.',
-          errorCode: 'PATCH_APPLY_FAILED',
+          error: result.error || 'Failed to apply patch.',
+          errorCode: result.error?.includes('FUZZY_CANDIDATE_FOUND') ? 'FUZZY_CANDIDATE_FOUND' : 'PATCH_APPLY_FAILED',
+          failedFile: failedFile?.path,
+          failedHunkNumber,
+          suggestedRead,
+          recommendedFallback: 'replace_text',
+          suggestion: suggestedRead
+            ? `Use read_file with path: "${suggestedRead.path}", startLine: ${suggestedRead.startLine}, endLine: ${suggestedRead.endLine} to inspect exact line context, or switch to replace_text.`
+            : 'Use read_file to inspect latest content or switch to replace_text with exact strings.',
           fileResults: result.fileResults,
-          suggestion: 'Hãy đọc lại file bằng read_file để lấy nội dung mới nhất hoặc giảm bớt context trong khối hunk @@.',
         };
       }
+
+      const diffHash = computeStringHash(JSON.stringify(result.fileResults));
 
       return {
         success: true,
@@ -96,12 +133,10 @@ export const applyPatchTool: ToolDefinition = {
         totalHunks: result.totalHunks,
         hunksApplied: result.hunksApplied,
         fileResults: result.fileResults,
+        diffHash,
       };
     } catch (err: any) {
-      return {
-        error: `Lỗi xử lý patch: ${err.message}`,
-        errorCode: 'PATCH_ERROR',
-      };
+      return toolError(`Lỗi xử lý patch: ${err.message}`, 'PATCH_ERROR');
     }
   },
 };

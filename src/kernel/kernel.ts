@@ -19,6 +19,8 @@ import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
 import { PermissionManager } from '../security/permission-manager.js';
+import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
+import { CriticGate } from '../agent/critic-gate.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -36,6 +38,7 @@ export interface KernelEvents {
   'tool:error': (toolName: string, error: any) => void;
   'model:thought': (thought: string) => void;
   'model:token': (token: string) => void;
+  'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
@@ -96,6 +99,8 @@ export interface KernelContext {
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
+  hypothesis: HypothesisTracker;
+  critic: CriticGate;
   sandbox: SandboxManager;
   tasks: TaskManager;
   llm: any;
@@ -139,6 +144,8 @@ export class AgentKernel {
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
+    const hypothesis = new HypothesisTracker();
+    const critic = new CriticGate();
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
     const tools = new ToolRegistry(plan, memory);
@@ -162,6 +169,8 @@ export class AgentKernel {
       checkpoints,
       compactor,
       reflection,
+      hypothesis,
+      critic,
       sandbox,
       tasks,
       llm,

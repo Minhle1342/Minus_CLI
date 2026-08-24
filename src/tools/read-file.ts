@@ -146,18 +146,18 @@ export const readFileTool: ToolDefinition = {
         const suggestions = await findSimilarFiles(rawPath, workspace);
         return {
           path: rawPath,
-          error: `Không tìm thấy file "${rawPath}". (ENOENT: no such file or directory)`,
+          error: `File "${rawPath}" was not found. (ENOENT: no such file or directory)`,
           errorCode: 'FILE_NOT_FOUND',
           suggestions: suggestions.length > 0 ? suggestions : undefined,
           suggestionText: suggestions.length > 0
-            ? `File không tồn tại. Các file khả dụng trong cùng thư mục: ${suggestions.join(', ')}`
-            : 'File không tồn tại. Hãy dùng search_codebase_fast hoặc list_files để tìm đúng đường dẫn.',
+            ? `File does not exist. Available files in nearby directory: ${suggestions.join(', ')}`
+            : 'File does not exist. Use search_codebase_fast or list_files to locate the correct path.',
         };
       }
 
       return {
         path: rawPath,
-        error: `Không thể đọc file: ${err.message}`,
+        error: `Could not read file: ${err.message}`,
         errorCode: 'READ_ERROR',
       };
     }

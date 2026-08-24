@@ -1,7 +1,8 @@
 import { type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
-import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason } from './gemini.js';
+import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason, type LLMUsage } from './gemini.js';
+import { TokenConfig, resolveTokenConfig } from './token-config.js';
 
 export interface DeepseekLLMOptions {
   modelName?: string;
@@ -9,6 +10,7 @@ export interface DeepseekLLMOptions {
   baseURL?: string;
   systemPrompt?: string;
   extraHeaders?: Record<string, string>;
+  tokenConfig?: Partial<TokenConfig>;
 }
 
 /**
@@ -19,6 +21,7 @@ export interface DeepseekLLMOptions {
  * 2. Deterministic Tool Ordering để tối đa hóa KV-Cache hit rate (>80%).
  * 3. Real-time Streaming & SSE Chunk Parsing cho cả System 2 Thinking và System 1 Actions.
  * 4. Tự động hỗ trợ headers tùy chỉnh (như chatgpt-account-id cho ChatGPT Plus OAuth).
+ * 5. Tự động điều chỉnh Input, Output và Thinking/Reasoning Tokens cho từng nhà cung cấp.
  */
 export class DeepseekLLM {
   readonly modelName: string;
@@ -26,13 +29,15 @@ export class DeepseekLLM {
   readonly baseURL: string;
   readonly systemPrompt: string;
   readonly extraHeaders: Record<string, string>;
+  private tokenConfig: TokenConfig;
 
   constructor(
     apiKeyOrOptions?: string | DeepseekLLMOptions,
     modelName?: string,
     systemPrompt?: string,
     baseURL?: string,
-    extraHeaders?: Record<string, string>
+    extraHeaders?: Record<string, string>,
+    tokenConfig?: Partial<TokenConfig>
   ) {
     if (typeof apiKeyOrOptions === 'object' && apiKeyOrOptions !== null) {
       this.modelName = apiKeyOrOptions.modelName || 'deepseek-chat';
@@ -40,17 +45,30 @@ export class DeepseekLLM {
       this.baseURL = apiKeyOrOptions.baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
       this.systemPrompt = apiKeyOrOptions.systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
       this.extraHeaders = apiKeyOrOptions.extraHeaders || {};
+      this.tokenConfig = resolveTokenConfig(this.modelName, apiKeyOrOptions.tokenConfig, this.baseURL);
     } else {
       this.apiKey = apiKeyOrOptions || process.env.DEEPSEEK_API_KEY || '';
       this.modelName = modelName || 'deepseek-chat';
       this.systemPrompt = systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
       this.baseURL = baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
       this.extraHeaders = extraHeaders || {};
+      this.tokenConfig = resolveTokenConfig(this.modelName, tokenConfig, this.baseURL);
     }
 
     if (!this.apiKey) {
       throw new Error('API key không được để trống khi khởi tạo DeepseekLLM / OpenAI-compatible provider.');
     }
+  }
+
+  getTokenConfig(): TokenConfig {
+    return { ...this.tokenConfig };
+  }
+
+  setTokenConfig(config: Partial<TokenConfig>): void {
+    this.tokenConfig = resolveTokenConfig(this.modelName, {
+      ...this.tokenConfig,
+      ...config,
+    }, this.baseURL);
   }
 
   /**
@@ -115,16 +133,24 @@ export class DeepseekLLM {
 
   /**
    * Chuyển đổi Session History sang định dạng messages của OpenAI/DeepSeek
+   * Giữ System Prompt 100% STATIC để tối ưu hoá KV-Cache Prefix.
+   * Dynamic Execution Context được đặt ở phần đuôi (tail-end user message) để không làm vỡ cache prefix.
    */
-  private convertHistoryToOpenAIMessages(session: Session, systemPrompt: string): any[] {
+  private convertHistoryToOpenAIMessages(
+    session: Session,
+    systemPrompt: string,
+    dynamicContext?: string,
+    promptCacheBreakpoint?: boolean,
+  ): any[] {
     const history = session.getHistory();
     const rawMessages: any[] = [];
 
-    // 1. Luôn đưa System Prompt lên đầu tiên để cố định KV-Cache Prefix
-    rawMessages.push({
+    // 1. Luôn đưa Static System Prompt lên đầu tiên để cố định KV-Cache Prefix
+    const systemMessage: any = {
       role: 'system',
       content: systemPrompt,
-    });
+    };
+    rawMessages.push(systemMessage);
 
     let lastAssistantToolCalls: Array<{ id: string; name: string }> = [];
 
@@ -164,12 +190,35 @@ export class DeepseekLLM {
           });
         }
       } else if (item.role === 'user') {
-        const textParts = item.parts?.filter((p: any) => p.text).map((p: any) => p.text).join('\n') || '';
-        if (textParts || !item.parts || item.parts.length === 0) {
+        const hasInlineData = (item.parts || []).some((p: any) => p.inlineData);
+        if (hasInlineData) {
+          const contentParts: any[] = [];
+          for (const p of item.parts || []) {
+            if (p.text) {
+              contentParts.push({ type: 'text', text: p.text });
+            } else if (p.inlineData) {
+              const mime = p.inlineData.mimeType || 'image/png';
+              const base64 = p.inlineData.data;
+              contentParts.push({
+                type: 'image_url',
+                image_url: {
+                  url: `data:${mime};base64,${base64}`,
+                },
+              });
+            }
+          }
           rawMessages.push({
             role: 'user',
-            content: textParts,
+            content: contentParts,
           });
+        } else {
+          const textParts = item.parts?.filter((p: any) => p.text).map((p: any) => p.text).join('\n') || '';
+          if (textParts || !item.parts || item.parts.length === 0) {
+            rawMessages.push({
+              role: 'user',
+              content: textParts,
+            });
+          }
         }
         lastAssistantToolCalls = [];
       } else if (item.role === 'model') {
@@ -200,6 +249,26 @@ export class DeepseekLLM {
             content: textParts,
           });
         }
+      }
+    }
+
+    // 3. Dynamic Execution Context: Đính kèm vào tin nhắn User cuối cùng ở đuôi để bảo toàn tiền tố prefix
+    if (dynamicContext && dynamicContext.trim()) {
+      const lastUserMsg = [...rawMessages].reverse().find((m) => m.role === 'user');
+      if (lastUserMsg) {
+        if (typeof lastUserMsg.content === 'string') {
+          lastUserMsg.content = `${lastUserMsg.content}\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`;
+        } else if (Array.isArray(lastUserMsg.content)) {
+          lastUserMsg.content.push({
+            type: 'text',
+            text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+          });
+        }
+      } else {
+        rawMessages.push({
+          role: 'user',
+          content: `[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+        });
       }
     }
 
@@ -317,7 +386,12 @@ export class DeepseekLLM {
     callbacks?: StreamCallbacks,
     request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
-    const messages = this.convertHistoryToOpenAIMessages(session, request?.systemPrompt || this.systemPrompt);
+    const messages = this.convertHistoryToOpenAIMessages(
+      session,
+      request?.systemPrompt || this.systemPrompt,
+      request?.dynamicContext,
+      request?.promptCacheBreakpoint,
+    );
     const openAITools = tools.length > 0 ? this.convertToolsToOpenAI(tools) : undefined;
     const endpoint = `${this.baseURL.replace(/\/+$/, '')}/chat/completions`;
 
@@ -343,12 +417,54 @@ export class DeepseekLLM {
       effectiveModel.includes('reasoner') ||
       effectiveModel.includes('r1');
 
+    // Gửi session metadata và cache key qua HTTP Headers để hỗ trợ Sticky Affinity Routing trên Gateway/Proxy
+    const rawCacheKey = request?.promptCacheKey || request?.sessionId || session.id || 'coding-agent-session';
+    const promptCacheKey = rawCacheKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+
     const requestBody: any = {
       model: effectiveModel,
       messages,
       tools: openAITools,
       stream: true,
+      stream_options: {
+        include_usage: true,
+      },
     };
+
+    const effectiveTokenConfig = resolveTokenConfig(this.modelName, {
+      ...this.tokenConfig,
+      ...request?.tokenConfig,
+    }, this.baseURL);
+
+    // Cấu hình Output Tokens theo chuẩn OpenAI / DeepSeek / OpenRouter
+    if (effectiveTokenConfig.maxOutputTokens) {
+      if (
+        effectiveModel.startsWith('o1') ||
+        effectiveModel.startsWith('o3') ||
+        effectiveModel.startsWith('o4') ||
+        effectiveModel.startsWith('gpt-5.6-') ||
+        effectiveModel.includes('sol') ||
+        effectiveModel.includes('terra') ||
+        effectiveModel.includes('luna')
+      ) {
+        requestBody.max_completion_tokens = effectiveTokenConfig.maxOutputTokens;
+      } else {
+        requestBody.max_tokens = effectiveTokenConfig.maxOutputTokens;
+      }
+    }
+
+    // Cấu hình Reasoning Effort cho các reasoning models
+    if (isReasoningModel && effectiveTokenConfig.reasoningEffort) {
+      requestBody.reasoning_effort = effectiveTokenConfig.reasoningEffort;
+    }
+
+    // Cấu hình Thinking Budget cho OpenRouter / Anthropic nếu có
+    if (effectiveTokenConfig.thinkingBudget !== undefined && this.baseURL.includes('openrouter.ai')) {
+      requestBody.thinking = {
+        type: 'enabled',
+        budget_tokens: effectiveTokenConfig.thinkingBudget,
+      };
+    }
 
     // Chỉ đặt temperature cho model thông thường (reasoning models dùng mặc định)
     if (!isReasoningModel) {
@@ -362,6 +478,9 @@ export class DeepseekLLM {
         'Authorization': `Bearer ${this.apiKey}`,
         'HTTP-Referer': 'https://github.com/mini-agent-loop',
         'X-Title': 'Autonomous Coding Agent',
+        'session-id': promptCacheKey,
+        'X-Session-ID': promptCacheKey,
+        'prompt-cache-key': promptCacheKey,
         ...this.extraHeaders,
       },
       body: JSON.stringify(requestBody),
@@ -377,6 +496,7 @@ export class DeepseekLLM {
     const toolCallMap = new Map<number, { id: string; name: string; argsText: string }>();
     let rawFinishReason: string | undefined;
     let sawDoneMarker = false;
+    let parsedUsage: LLMUsage | undefined;
 
     const processSseLine = (line: string): void => {
       const trimmed = line.trim();
@@ -391,6 +511,31 @@ export class DeepseekLLM {
         json = JSON.parse(trimmed.slice(5).trim());
       } catch (error) {
         throw new Error('LLM stream contained a malformed SSE JSON payload.', { cause: error });
+      }
+
+      if (json.usage) {
+        const promptTokens = json.usage.prompt_tokens ?? 0;
+        const completionTokens = json.usage.completion_tokens ?? 0;
+        const totalTokens = json.usage.total_tokens ?? (promptTokens + completionTokens);
+        const cachedTokens = json.usage.prompt_tokens_details?.cached_tokens
+          ?? json.usage.prompt_cache_hit_tokens
+          ?? json.usage.cache_read_input_tokens
+          ?? 0;
+        const cacheCreationInputTokens = json.usage.prompt_tokens_details?.cache_creation_input_tokens
+          ?? json.usage.cache_creation_input_tokens
+          ?? 0;
+        const cacheReadInputTokens = cachedTokens;
+        const cacheHitRate = promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0;
+
+        parsedUsage = {
+          promptTokens,
+          completionTokens,
+          totalTokens,
+          cachedTokens,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
+          cacheHitRate,
+        };
       }
 
       const choice = json.choices?.[0];
@@ -478,6 +623,7 @@ export class DeepseekLLM {
       toolCalls,
       finishReason,
       rawFinishReason,
+      usage: parsedUsage,
     };
   }
 

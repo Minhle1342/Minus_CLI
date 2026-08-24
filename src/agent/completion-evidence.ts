@@ -2,11 +2,33 @@ import type { Session, SessionEvent } from '../session/session.js';
 
 export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'other';
 
-const MUTATION_TOOLS = new Set(['write_file', 'replace_text', 'apply_patch']);
-const INSPECTION_TOOLS = new Set([
-  'read_file', 'list_files', 'search_text', 'search_codebase_fast', 'read_compressed_code',
-  'pack_codebase', 'git_status', 'git_diff', 'read_memory', 'get_task_output',
+const MUTATION_TOOLS = new Set([
+  'write_file',
+  'create_file',
+  'replace_text',
+  'apply_patch',
+  'delete_file',
+  'move_file',
 ]);
+
+const INSPECTION_TOOLS = new Set([
+  'read_file',
+  'list_files',
+  'search_text',
+  'search_codebase_fast',
+  'read_compressed_code',
+  'pack_codebase',
+  'git_status',
+  'git_diff',
+  'read_memory',
+  'get_task_output',
+  'inspect_symbol',
+  'find_references',
+  'get_diagnostics',
+  'get_workspace_diff',
+  'analyze_impact',
+]);
+
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
 const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify))\b|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|tsc(?:\s|$)|make\s+(?:test|check))\b/i;
 
@@ -33,7 +55,7 @@ export function classifyToolEvidence(
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
   }
-  if (toolName === 'git_status' || toolName === 'git_diff') {
+  if (toolName === 'git_status' || toolName === 'git_diff' || toolName === 'get_workspace_diff') {
     return ['inspection', 'git'];
   }
   if (toolName === 'git_command') {
@@ -68,6 +90,8 @@ export interface CompletionEvidenceOptions {
   turn?: number;
   codeChangeRequired?: boolean;
   userRequest?: string;
+  expectedWorkspaceDigest?: string;
+  expectedDiffHash?: string;
 }
 
 function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): string {
@@ -112,7 +136,7 @@ export class CompletionEvidenceGate {
     const reasons: string[] = [];
 
     if (options.codeChangeRequired && mutations.length === 0) {
-      reasons.push('The request requires a code change, but no successful write_file/replace_text/apply_patch result exists in this turn.');
+      reasons.push('The request requires a code change, but no successful mutation result exists in this turn.');
     }
     if ((options.codeChangeRequired || mutations.length > 0) && verifications.length === 0) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');

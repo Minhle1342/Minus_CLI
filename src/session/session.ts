@@ -13,6 +13,13 @@ import { cloneJsonStrict } from '../tools/schema-validator.js';
 export type SessionMessage = Content;
 export type ContentPart = any;
 
+export interface ImageAttachment {
+  mimeType: string;
+  data: string; // Base64 encoded string
+  description?: string;
+  filePath?: string;
+}
+
 export type SessionEventType =
   | 'user/message'
   | 'assistant/message'
@@ -32,7 +39,8 @@ export type SessionEventType =
   | 'skill/change'
   | 'session/fork'
   | 'session/compaction'
-  | 'request/header';
+  | 'request/header'
+  | 'audit/task-completion';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
 
@@ -180,6 +188,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'session/fork',
     'session/compaction',
     'request/header',
+    'audit/task-completion',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);
   }
@@ -287,6 +296,37 @@ export class Session {
       content: {
         role: 'user',
         parts: [{ text }],
+      },
+    });
+  }
+
+  addMultimodalUserMessage(
+    text: string,
+    images: ImageAttachment[] = [],
+    source: 'human' | 'system' | 'injected' = 'human',
+    inputId?: string
+  ): void {
+    const parts: any[] = [];
+    if (text) {
+      parts.push({ text });
+    }
+    for (const img of images) {
+      parts.push({
+        inlineData: {
+          mimeType: img.mimeType || 'image/png',
+          data: img.data,
+        },
+      });
+      if (img.description) {
+        parts.push({ text: `[Visual attachment context: ${img.description}]` });
+      }
+    }
+    this.append('user/message', {
+      source,
+      inputId,
+      content: {
+        role: 'user',
+        parts,
       },
     });
   }

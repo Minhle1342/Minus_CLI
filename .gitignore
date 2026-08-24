@@ -6,6 +6,6 @@ dist/
 *.log
 .gemini/
 temp/
-.codingagent/project-memory.json
-.codingagent/session.json
-.codingagent/sessions/
+.codingagent/
+test-image.png
+CURRENT_MUTATION_INVARIANTS.md

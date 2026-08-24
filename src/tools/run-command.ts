@@ -5,6 +5,7 @@ import { Workspace } from '../workspace/workspace.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
 import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
+import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -246,6 +247,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
         const hostResult = await hostSandbox.exec(rawCommand, { cwd: workspace.rootDir, timeoutMs });
+
+        // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
+        if (hostResult.exitCode === 127 || hostResult.stderr.includes('not found') || hostResult.stderr.includes('not recognized')) {
+          const isRg = parseRipgrepCommand(rawCommand);
+          if (isRg) {
+            const emulated = await executeRipgrepEmulation(isRg, workspace);
+            return {
+              command: rawCommand,
+              stdout: truncateOutput(emulated.stdout),
+              stderr: '',
+              exitCode: emulated.exitCode,
+              durationMs: emulated.durationMs,
+              sandbox: 'local',
+              executionTarget: 'host',
+              success: emulated.success,
+              emulated: true,
+            };
+          }
+        }
+
         const hostDiagnosis = diagnoseCommandFailure(rawCommand, hostResult, hostSandbox.getStatus());
         return {
           command: rawCommand,
@@ -275,6 +296,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
           cwd: workspace.rootDir,
           timeoutMs,
         });
+
+        // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
+        if (res.exitCode === 127 || res.stderr.includes('not found') || res.stderr.includes('not recognized')) {
+          const isRg = parseRipgrepCommand(rawCommand);
+          if (isRg) {
+            const emulated = await executeRipgrepEmulation(isRg, workspace);
+            return {
+              command: rawCommand,
+              stdout: truncateOutput(emulated.stdout),
+              stderr: '',
+              exitCode: emulated.exitCode,
+              durationMs: emulated.durationMs,
+              sandbox: res.sandboxType,
+              executionTarget: 'auto',
+              success: emulated.success,
+              emulated: true,
+            };
+          }
+        }
+
         const diagnosis = res.errorCode
           ? undefined
           : diagnoseCommandFailure(rawCommand, res, sandboxManager.getStatus());
@@ -329,6 +370,28 @@ export function createRunCommandTool(sandboxManager?: SandboxManager): ToolDefin
               sandboxType: 'local' as const,
               success: exitCode === 0,
             };
+
+            // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu gặp lỗi 127
+            if (exitCode === 127 || stderr.includes('not found') || stderr.includes('not recognized')) {
+              const isRg = parseRipgrepCommand(rawCommand);
+              if (isRg) {
+                executeRipgrepEmulation(isRg, workspace).then((emulated) => {
+                  resolve({
+                    command: rawCommand,
+                    stdout: truncateOutput(emulated.stdout),
+                    stderr: '',
+                    exitCode: emulated.exitCode,
+                    durationMs: emulated.durationMs,
+                    sandboxType: 'local' as const,
+                    sandbox: 'local',
+                    success: emulated.success,
+                    emulated: true,
+                  });
+                });
+                return;
+              }
+            }
+
             resolve({
               ...rawResult,
               ...diagnoseCommandFailure(rawCommand, rawResult),

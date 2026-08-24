@@ -52,6 +52,10 @@ export const replaceTextTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Tuỳ chọn: contentHash do read_file trả về. Tool từ chối ghi nếu file đã thay đổi sau lần đọc.',
       },
+      expectedOccurrences: {
+        type: Type.INTEGER,
+        description: 'Số lượng vị trí oldText dự kiến xuất hiện (mặc định: 1).',
+      },
     },
     required: ['path', 'oldText', 'newText'],
   },
@@ -60,29 +64,41 @@ export const replaceTextTool: ToolDefinition = {
     const oldText = String(args.oldText ?? '');
     const newText = String(args.newText ?? '');
     const matchMode = args.matchMode === 'exact' ? 'exact' : 'auto';
+    const expectedOccurrences = typeof args.expectedOccurrences === 'number' ? args.expectedOccurrences : 1;
     const expectedFileHash = args.expectedFileHash === undefined
       ? undefined
       : String(args.expectedFileHash).trim();
 
     if (!rawPath) {
-      return { error: 'Tham số "path" là bắt buộc.' };
+      return { success: false, error: 'Tham số "path" là bắt buộc.', errorCode: 'INVALID_ARGS' };
     }
     if (!oldText) {
-      return { error: 'Tham số "oldText" không được để trống.' };
+      return { success: false, error: 'Tham số "oldText" không được để trống.', errorCode: 'INVALID_ARGS' };
     }
 
     try {
       const safePath = workspace.resolveSafePath(rawPath);
+
+      if (workspace.isProtectedFile(safePath)) {
+        return {
+          success: false,
+          path: rawPath,
+          error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          errorCode: 'SECURITY_VIOLATION',
+        };
+      }
+
       const stat = await fs.stat(safePath);
 
       if (!stat.isFile()) {
-        return { path: rawPath, error: `"${rawPath}" không phải là file.` };
+        return { success: false, path: rawPath, error: `"${rawPath}" không phải là file.`, errorCode: 'NOT_A_FILE' };
       }
 
       const content = await fs.readFile(safePath, 'utf-8');
       const observedFileHash = hashContent(content);
       if (expectedFileHash && expectedFileHash !== observedFileHash) {
         return {
+          success: false,
           path: rawPath,
           error: `File "${rawPath}" đã thay đổi sau lần đọc gần nhất; thao tác thay thế đã bị chặn để tránh ghi đè nội dung mới.`,
           errorCode: 'FILE_CONTENT_CHANGED',
@@ -99,6 +115,7 @@ export const replaceTextTool: ToolDefinition = {
           ? { path: rawPath, startLine: Math.max(1, candidates[0].line - 3), endLine: candidates[0].line + 6, includeLineNumbers: false }
           : { path: rawPath, includeLineNumbers: false };
         return {
+          success: false,
           path: rawPath,
           error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF và indentation an toàn.`,
           errorCode: 'TEXT_NOT_FOUND',
@@ -111,12 +128,15 @@ export const replaceTextTool: ToolDefinition = {
         };
       }
 
-      if (matches.length > 1) {
+      if (matches.length !== expectedOccurrences) {
         return {
+          success: false,
           path: rawPath,
-          error: `oldText khớp ${matches.length} vị trí trong "${rawPath}"; thao tác đã bị chặn để tránh sửa nhầm.`,
+          error: `oldText khớp ${matches.length} vị trí trong "${rawPath}" (kỳ vọng: ${expectedOccurrences}); thao tác đã bị chặn để tránh sửa nhầm.`,
           errorCode: 'TEXT_NOT_UNIQUE',
           occurrences: matches.length,
+          actualOccurrences: matches.length,
+          expectedOccurrences,
           candidateLines: matches.slice(0, 10).map((match) => match.line),
           observedFileHash,
           suggestion: 'Đọc lại một khoảng dòng hẹp và thêm ngữ cảnh duy nhất vào oldText.',
@@ -131,6 +151,7 @@ export const replaceTextTool: ToolDefinition = {
       const latestContent = await fs.readFile(safePath, 'utf-8');
       if (latestContent !== content) {
         return {
+          success: false,
           path: rawPath,
           error: `File "${rawPath}" thay đổi trong lúc replace_text đang xử lý; không có dữ liệu nào bị ghi đè.`,
           errorCode: 'FILE_CHANGED_DURING_EDIT',
@@ -153,8 +174,10 @@ export const replaceTextTool: ToolDefinition = {
       };
     } catch (err: any) {
       return {
+        success: false,
         path: rawPath,
         error: `Không thể thay thế nội dung file: ${err.message}`,
+        errorCode: 'EXECUTION_ERROR',
       };
     }
   },

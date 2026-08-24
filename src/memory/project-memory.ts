@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
 import { MemoryCategory, MemoryQueryOptions, MemoryRecord, MemoryScope, MemorySource } from './types.js';
+import { VectorMemoryStore, EmbeddingService, cosineSimilarity } from './vector-memory.js';
 
 export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insight' | 'category'>> {
   key: string;
@@ -26,20 +27,25 @@ export interface ProjectMemoryData {
 /**
  * ProjectMemoryManager - Quản lý Bộ nhớ dài hạn đa tầng (Tier 2: Long-term Project Knowledge Base)
  * 
- * Lưu trữ tại `.codingagent/project-memory.json`:
+ * Lưu trữ tại `.codingagent/project-memory.json` và `.codingagent/vector-memory.json`:
  * 1. Lưu sơ đồ cấu trúc repo, package scripts, framework conventions.
  * 2. Cung cấp "Project Digest" để "Warm-Start" Agent ngay khi khởi động.
- * 3. Tránh việc LLM phải tốn 5 steps khảo sát lại cấu trúc cơ bản mỗi lần chạy.
+ * 3. Hỗ trợ Semantic Vector Memory (RAG) với Cosine Similarity & Hybrid Lexical/Vector Ranking.
  */
 export class ProjectMemoryManager {
   private workspaceDir: string;
   private memoryFilePath: string;
   private memoryData: ProjectMemoryData;
   private session?: Session;
+  private vectorStore: VectorMemoryStore;
 
-  constructor(workspaceDir: string) {
+  constructor(workspaceDir: string, embeddingService?: EmbeddingService) {
     this.workspaceDir = path.resolve(workspaceDir);
     this.memoryFilePath = path.join(this.workspaceDir, '.codingagent', 'project-memory.json');
+    this.vectorStore = new VectorMemoryStore(
+      path.join(this.workspaceDir, '.codingagent', 'vector-memory.json'),
+      embeddingService
+    );
     this.memoryData = this.getDefaultMemory();
   }
 
@@ -61,6 +67,10 @@ export class ProjectMemoryManager {
     };
   }
 
+  getVectorStore(): VectorMemoryStore {
+    return this.vectorStore;
+  }
+
   /**
    * Khởi tạo bộ nhớ: Nạp từ đĩa hoặc tự động index nếu chưa tồn tại
    */
@@ -79,6 +89,21 @@ export class ProjectMemoryManager {
       await this.autoIndexWorkspace(workspace ?? new Workspace(this.workspaceDir));
       await this.save();
     }
+
+    // Khởi tạo và đồng bộ Vector Store (RAG)
+    await this.vectorStore.init();
+    for (const item of this.memoryData.learnedInsights) {
+      const text = `${item.key}: ${item.insight} ${(item.tags || []).join(' ')}`;
+      await this.vectorStore.upsert(item.id || `memory-${item.key}`, text, {
+        key: item.key,
+        category: item.category,
+        scope: item.scope,
+        confidence: item.confidence,
+        trustStatus: item.trustStatus,
+        tags: item.tags,
+      });
+    }
+
     return this.memoryData;
   }
 
@@ -165,6 +190,9 @@ export class ProjectMemoryManager {
   setWorkspace(workspaceDir: string): void {
     this.workspaceDir = path.resolve(workspaceDir);
     this.memoryFilePath = path.join(this.workspaceDir, '.codingagent', 'project-memory.json');
+    this.vectorStore = new VectorMemoryStore(
+      path.join(this.workspaceDir, '.codingagent', 'vector-memory.json')
+    );
     this.memoryData = this.getDefaultMemory();
     this.session = undefined;
   }
@@ -257,6 +285,17 @@ export class ProjectMemoryManager {
         this.memoryData.learnedInsights.push(record);
       }
       await this.save();
+
+      // Đồng bộ Vector Memory Store (RAG)
+      const textToVectorize = `${record.key}: ${record.insight} ${(record.tags || []).join(' ')}`;
+      await this.vectorStore.upsert(record.id, textToVectorize, {
+        key: record.key,
+        category: record.category,
+        scope: record.scope,
+        confidence: record.confidence,
+        trustStatus: record.trustStatus,
+        tags: record.tags,
+      });
     } else {
       this.session!.addMemoryRecord(record);
     }
@@ -310,6 +349,9 @@ export class ProjectMemoryManager {
     return lines.join('\n');
   }
 
+  /**
+   * Truy vấn bộ nhớ kết hợp Hybrid Search (0.4 Lexical Matching + 0.6 Semantic Vector Similarity)
+   */
   retrieve(query = '', options: MemoryQueryOptions = {}): MemoryRecord[] {
     const scopes = options.scopes || ['project', 'session', 'goal'];
     const minConfidence = options.minConfidence ?? 0;
@@ -328,19 +370,66 @@ export class ProjectMemoryManager {
     });
 
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const queryVector = query.trim() ? this.vectorStore.getEmbeddingService().generateLocalSubwordEmbedding(query) : null;
+
     const scored = candidates.map((item) => {
       const haystack = [item.key, item.insight, item.category, ...(item.tags || [])].join(' ').toLowerCase();
-      const score = terms.length === 0
-        ? 0
-        : terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
-      return { item, score };
+      const lexicalMatches = terms.length === 0 ? 0 : terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
+      const lexicalScore = terms.length > 0 ? (lexicalMatches / terms.length) : 0;
+
+      let vectorSimilarity = 0;
+      if (queryVector) {
+        const doc = this.vectorStore.get(item.id);
+        const docVec = doc?.vector || this.vectorStore.getEmbeddingService().generateLocalSubwordEmbedding(haystack);
+        vectorSimilarity = Math.max(0, cosineSimilarity(queryVector, docVec));
+      }
+
+      // Hybrid Scoring:
+      // - Nếu có từ khóa khớp (lexicalMatches > 0): kết hợp 0.4 Lexical + 0.6 Semantic
+      // - Nếu không có từ khóa nào khớp: chỉ chấp nhận khi vectorSimilarity rất cao (>= 0.6)
+      let score = 0;
+      if (terms.length === 0) {
+        score = 1;
+      } else if (lexicalMatches > 0) {
+        score = 0.4 * lexicalScore + 0.6 * vectorSimilarity;
+      } else if (vectorSimilarity >= 0.6) {
+        score = 0.6 * vectorSimilarity;
+      }
+      return { item, score, lexicalScore, vectorSimilarity };
     });
 
     return scored
-      .filter(({ score }) => terms.length === 0 || score > 0)
+      .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))
       .slice(0, options.limit ?? 8)
       .map(({ item }) => ({ ...item }));
+  }
+
+  /**
+   * Truy vấn thuần ngữ nghĩa Vector RAG bất đồng bộ
+   */
+  async retrieveSemantic(query: string, options: { limit?: number; minSimilarity?: number } = {}): Promise<MemoryRecord[]> {
+    const searchResults = await this.vectorStore.search(query, {
+      limit: options.limit ?? 8,
+      minSimilarity: options.minSimilarity ?? 0.1,
+    });
+    const candidateMap = new Map<string, MemoryRecord>();
+    for (const item of this.memoryData.learnedInsights) {
+      candidateMap.set(item.id || `memory-${item.key}`, this.normalizeInsight(item) as MemoryRecord);
+    }
+    if (this.session) {
+      for (const item of this.session.getMemoryRecords()) {
+        candidateMap.set(item.id, item);
+      }
+    }
+    const records: MemoryRecord[] = [];
+    for (const res of searchResults) {
+      const rec = candidateMap.get(res.document.id);
+      if (rec) {
+        records.push(rec);
+      }
+    }
+    return records;
   }
 
   getRelevantMemory(query: string, session?: Session, limit = 4): MemoryRecord[] {
