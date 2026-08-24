@@ -581,7 +581,11 @@ async function main() {
   });
 
   const rl = readline.createInterface({ input, output, completer });
-  const slashHints = new RealtimeSlashCommandHints(output, () => activeWorkspaceRef);
+  const getActiveModelInfo = () => ({
+    modelName,
+    effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
+  });
+  const slashHints = new RealtimeSlashCommandHints(output, () => activeWorkspaceRef, getActiveModelInfo);
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
     if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
@@ -627,7 +631,11 @@ async function main() {
    * Đọc User Prompt từ bàn phím, tự động gộp các dòng nếu người dùng dán (paste) đoạn văn bản nhiều dòng
    */
   async function readUserPrompt(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream, promptSymbol: string): Promise<string> {
+    setImmediate(() => {
+      slashHints.update((rlInterface as any).line || '', (rlInterface as any).cursor + 2);
+    });
     const firstLine = await rlInterface.question(promptSymbol);
+    slashHints.clear();
     const lines: string[] = [firstLine];
 
     // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây

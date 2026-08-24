@@ -17,6 +17,7 @@ export interface AgentLoopOptions {
   enableSubagents?: boolean;
   enableDynamicToolRetrieval?: boolean;
   enablePromptCaching?: boolean;
+  enableStepSummarization?: boolean;
 }
 
 export type AgentState =

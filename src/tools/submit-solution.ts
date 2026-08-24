@@ -80,7 +80,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         verificationEvidence,
         timestamp,
         nextAction: 'final_answer',
-        message: 'Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final answer and summary to the user.',
+        message: 'Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final comprehensive answer and summary to the user in the EXACT SAME LANGUAGE as the user\'s original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Present your findings, file paths, code logic, and verification proof clearly and professionally. Do not emit generic stubs or English placeholders.',
       };
     },
   };

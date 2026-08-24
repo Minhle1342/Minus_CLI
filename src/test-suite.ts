@@ -1485,10 +1485,7 @@ async function runUnitTests() {
   const delegationParentSession = new Session('delegation-parent-session');
   delegationParent.bindSession(delegationParentSession);
   const delegated = delegationParent.subagentManager.start('Kiểm tra nhanh bằng subagent', { maxSteps: 2 });
-  for (let attempt = 0; attempt < 50 && delegationParent.subagentManager.get(delegated.id)?.status === 'running'; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  const delegatedResult = delegationParent.subagentManager.get(delegated.id);
+  const delegatedResult = await delegationParent.subagentManager.waitFor(delegated.id, 5000).catch(() => delegationParent.subagentManager.get(delegated.id));
   assert(delegated.status === 'running' && delegatedResult?.status === 'completed', 'Subagent provider tạo child AgentLoop chạy nền và trả kết quả');
   assert(delegationParent.agentRegistry.get(delegated.id)?.status === 'idle', 'Subagent được phản ánh trong live AgentRegistry');
   assert(
@@ -1518,10 +1515,8 @@ async function runUnitTests() {
     'Delegation đang chạy được đánh dấu stopped an toàn sau process restart',
   );
   const resumed = recoveredDelegationLoop.subagentManager.resume('subagent-restarted-1', { maxSteps: 2 });
-  for (let attempt = 0; attempt < 50 && recoveredDelegationLoop.subagentManager.get('subagent-restarted-1')?.status === 'running'; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert(resumed?.status === 'running' && recoveredDelegationLoop.subagentManager.get('subagent-restarted-1')?.status === 'completed', 'Delegation chỉ resume khi explicit và hoàn tất được lần chạy mới');
+  const resumedResult = await recoveredDelegationLoop.subagentManager.waitFor('subagent-restarted-1', 5000).catch(() => recoveredDelegationLoop.subagentManager.get('subagent-restarted-1'));
+  assert(resumed?.status === 'running' && resumedResult?.status === 'completed', 'Delegation chỉ resume khi explicit và hoàn tất được lần chạy mới');
 
   console.log('\n========================================');
   console.log('🧪 7. KIỂM THỬ CHECKPOINT MANAGER & SHADOW ROLLBACK (/undo)');
@@ -3338,14 +3333,36 @@ Always write tests first!`;
     gitActivationRes.activeSkills.some((s) => s.id === 'finishing-a-development-branch'),
     'SkillActivator nhận diện yêu cầu commit/push tiếng Việt và kích hoạt workflow hoàn tất nhánh',
   );
-  const genericGitActivation = activator.evaluate({
+  assert(skillRegistry.get('system-architect') !== undefined, 'SkillRegistry nạp thành công system-architect');
+  assert(skillRegistry.get('api-design') !== undefined, 'SkillRegistry nạp thành công api-design');
+  assert(skillRegistry.get('backend-patterns') !== undefined, 'SkillRegistry nạp thành công backend-patterns');
+  assert(skillRegistry.get('design-patterns') !== undefined, 'SkillRegistry nạp thành công design-patterns');
+  assert(Boolean(skillRegistry.loadContent('system-architect')?.includes('Clean Architecture')), 'SkillRegistry loadContent trả về playbook chuẩn của system-architect');
+  assert(Boolean(skillRegistry.loadContent('design-patterns')?.includes('KISS & YAGNI Compliance')), 'SkillRegistry loadContent trả về playbook chuẩn của design-patterns với quy tắc chống over-engineering');
+
+  const archActivation = activator.evaluate({
     session: spTestSession,
-    userRequest: 'hãy git rebase develop',
+    userRequest: 'Thiết kế kiến trúc hệ thống và Clean Architecture cho module thanh toán',
   });
-  assert(
-    genericGitActivation.activeSkills.some((s) => s.id === 'git-operations'),
-    'SkillActivator kích hoạt Git Operations cho subcommand ngoài commit/push',
-  );
+  assert(archActivation.activeSkills.some((s) => s.id === 'system-architect'), 'SkillActivator kích hoạt system-architect khi gặp bài toán thiết kế kiến trúc');
+
+  const apiActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Thiết kế API RESTful và endpoint schema validation cho người dùng',
+  });
+  assert(apiActivation.activeSkills.some((s) => s.id === 'api-design'), 'SkillActivator kích hoạt api-design khi gặp yêu cầu thiết kế API');
+
+  const backendActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Tối ưu backend database queue worker xử lý sự kiện',
+  });
+  assert(backendActivation.activeSkills.some((s) => s.id === 'backend-patterns'), 'SkillActivator kích hoạt backend-patterns khi gặp bài toán backend data/queue');
+
+  const patternActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Hãy áp dụng Strategy pattern và refactor code theo chuẩn KISS',
+  });
+  assert(patternActivation.activeSkills.some((s) => s.id === 'design-patterns'), 'SkillActivator kích hoạt design-patterns khi gặp yêu cầu refactor/pattern');
   assert(
     detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
       && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,

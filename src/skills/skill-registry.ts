@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { SkillManifest } from './types.js';
 import { SkillLoader } from './skill-loader.js';
+import { BUILTIN_ARCHITECTURE_PLAYBOOKS } from './architecture-playbooks.js';
 
 export interface SkillRegistryOptions {
   workspaceRoot?: string;
@@ -65,7 +66,14 @@ export class SkillRegistry {
    */
   loadContent(id: string): string | null {
     const manifest = this.skills.get(id);
-    if (!manifest || !manifest.path) return null;
+    if (!manifest) return null;
+
+    // Ưu tiên nạp từ Built-in Architecture Playbooks nếu có
+    if (BUILTIN_ARCHITECTURE_PLAYBOOKS[id]) {
+      return BUILTIN_ARCHITECTURE_PLAYBOOKS[id];
+    }
+
+    if (!manifest.path) return null;
 
     if (!fs.existsSync(manifest.path)) {
       this.diagnostics.push({ id, path: manifest.path, error: 'Skill file not found on disk', timestamp: new Date().toISOString() });

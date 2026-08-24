@@ -2,9 +2,10 @@ import { spawn } from 'node:child_process';
 import { DockerSandbox } from '../sandbox/docker-sandbox.js';
 
 const COMPOSE_FILE = 'deploy/searxng/compose.yaml';
-const DOCKER_START_TIMEOUT_SECONDS = 120;
+const DOCKER_START_TIMEOUT_SECONDS = parseInt(process.env.DOCKER_START_TIMEOUT_SECONDS || '20', 10);
+const DOCKER_COMPOSE_TIMEOUT_MS = parseInt(process.env.DOCKER_COMPOSE_TIMEOUT_MS || '20000', 10);
 
-function runDockerCompose(): Promise<void> {
+function runDockerCompose(timeoutMs: number = DOCKER_COMPOSE_TIMEOUT_MS): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       'docker',
@@ -16,8 +17,19 @@ function runDockerCompose(): Promise<void> {
       },
     );
 
-    child.once('error', reject);
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGTERM');
+      } catch {}
+      reject(new Error(`docker compose timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.once('exit', (code, signal) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve();
         return;
@@ -38,16 +50,23 @@ async function main(): Promise<void> {
   }
 
   if (!dockerReady) {
-    throw new Error(
-      'Docker daemon is unavailable. Start Docker Desktop, wait until it reports that the engine is running, then retry `npm run dev`.',
+    console.warn(
+      `\n\x1b[33m⚠️  [search:up] Docker daemon không khởi động sau ${DOCKER_START_TIMEOUT_SECONDS}s. Tự động bỏ qua và tiếp tục chạy ứng dụng.\x1b[0m\n`,
     );
+    return;
   }
 
-  await runDockerCompose();
+  try {
+    await runDockerCompose();
+    console.log(`\x1b[32m✔ [search:up] SearXNG container đã khởi chạy thành công.\x1b[0m`);
+  } catch (composeError: any) {
+    console.warn(
+      `\n\x1b[33m⚠️  [search:up] Không thể khởi chạy SearXNG qua docker compose: ${composeError?.message || composeError}. Tự động bỏ qua.\x1b[0m\n`,
+    );
+  }
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`\n[search:up] ${message}`);
-  process.exitCode = 1;
+  console.warn(`\n\x1b[33m⚠️  [search:up] ${message}. Tự động bỏ qua.\x1b[0m\n`);
 });

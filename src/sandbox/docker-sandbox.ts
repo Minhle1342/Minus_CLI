@@ -3,9 +3,39 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
+import os from 'node:os';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+const DOCKER_FAIL_CACHE_PATH = path.join(os.tmpdir(), 'mini-agent-docker-unavail.timestamp');
+const DOCKER_FAIL_CACHE_TTL_MS = 30_000;
+
+export function markDockerUnavailable(): void {
+  try {
+    fs.writeFileSync(DOCKER_FAIL_CACHE_PATH, String(Date.now()), 'utf-8');
+  } catch {}
+}
+
+export function clearDockerUnavailable(): void {
+  try {
+    if (fs.existsSync(DOCKER_FAIL_CACHE_PATH)) {
+      fs.unlinkSync(DOCKER_FAIL_CACHE_PATH);
+    }
+  } catch {}
+}
+
+export function isDockerRecentlyFailed(): boolean {
+  try {
+    if (!fs.existsSync(DOCKER_FAIL_CACHE_PATH)) return false;
+    const content = fs.readFileSync(DOCKER_FAIL_CACHE_PATH, 'utf-8').trim();
+    const timestamp = parseInt(content, 10);
+    if (!timestamp || isNaN(timestamp)) return false;
+    return Date.now() - timestamp < DOCKER_FAIL_CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
 
 export interface DockerSandboxConfig {
   image?: string;
@@ -53,6 +83,7 @@ export class DockerSandbox implements ISandboxProvider {
   async isAvailable(): Promise<boolean> {
     try {
       await execFileAsync('docker', ['info'], { timeout: 4000 });
+      clearDockerUnavailable();
       return true;
     } catch {
       return false;
@@ -62,7 +93,10 @@ export class DockerSandbox implements ISandboxProvider {
   /**
    * Tự động khởi chạy Docker Desktop trên hệ điều hành và chờ Docker Daemon sẵn sàng
    */
-  async startDockerDaemon(maxWaitSeconds: number = 30): Promise<boolean> {
+  async startDockerDaemon(maxWaitSeconds: number = 20, force: boolean = false): Promise<boolean> {
+    if (!force && isDockerRecentlyFailed()) {
+      return false;
+    }
     const platform = process.platform;
     let launched = false;
 
@@ -113,6 +147,7 @@ export class DockerSandbox implements ISandboxProvider {
     }
 
     if (!launched) {
+      markDockerUnavailable();
       return false;
     }
 
@@ -126,6 +161,7 @@ export class DockerSandbox implements ISandboxProvider {
       try {
         await execFileAsync('docker', ['info'], { timeout: 3000 });
         console.log(`\n\x1b[32m✔ Docker Daemon đã sẵn sàng!\x1b[0m\n`);
+        clearDockerUnavailable();
         return true;
       } catch {
         process.stdout.write('.');
@@ -134,6 +170,7 @@ export class DockerSandbox implements ISandboxProvider {
     }
 
     console.log(`\n\x1b[33m⚠️  Docker Desktop chưa phản hồi sau ${maxWaitSeconds}s.\x1b[0m\n`);
+    markDockerUnavailable();
     return false;
   }
 

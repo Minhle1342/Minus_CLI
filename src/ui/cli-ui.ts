@@ -78,7 +78,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/plan', description: 'Xem cây kế hoạch hiện tại', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
   { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
-  { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (OpenAI Codex)', category: 'Telemetry', aliases: ['/prompt-cache'] },
+  { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (MINUS standard)', category: 'Telemetry', aliases: ['/prompt-cache'] },
   { command: '/status', description: 'Xem trạng thái phiên làm việc', category: 'Telemetry' },
   { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent', category: 'Subagents' },
   { command: '/goal', usage: '/goal [on|off|status|resume|objective]', description: 'Điều khiển Goal Mode', category: 'Goal Mode' },
@@ -157,6 +157,7 @@ export class RealtimeSlashCommandHints {
   constructor(
     private readonly terminal: SlashHintTerminal,
     private readonly getWorkspace?: () => Workspace | undefined,
+    private readonly getModelInfo?: () => { modelName: string; effort?: string },
   ) {}
 
   update(line: string, cursorColumn = line.length + 2): void {
@@ -197,34 +198,51 @@ export class RealtimeSlashCommandHints {
     }
 
     // 2. Kiểm tra nếu là Slash Command (/...)
-    const suggestions = getSlashCommandSuggestions(line);
-    if (suggestions.length === 0) {
-      this.clear(cursorColumn);
+    if (line.trimStart().startsWith('/')) {
+      const suggestions = getSlashCommandSuggestions(line);
+      if (suggestions.length > 0) {
+        const width = Math.max(40, this.terminal.columns || 80);
+        const nextRenderKey = `/\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+        if (this.visible && this.renderKey === nextRenderKey) return;
+        const commandWidth = Math.min(
+          Math.max(12, Math.floor(width * 0.45)),
+          Math.max(...suggestions.map((item) => (item.usage || item.command).length)),
+        );
+        const rows = suggestions.map((item, index) => {
+          const label = truncateDisplayText(item.usage || item.command, commandWidth).padEnd(commandWidth);
+          const alias = item.aliases?.length ? ` (${item.aliases.join(', ')})` : '';
+          const availableDescriptionWidth = Math.max(10, width - commandWidth - 6);
+          const description = truncateDisplayText(`${item.description}${alias}`, availableDescriptionWidth);
+          const marker = index === 0 ? '›' : ' ';
+          return `${c.cyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.dim}${description}${c.reset}`;
+        });
+        const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
+        this.renderBelowInput(
+          [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
+          cursorColumn,
+        );
+        this.visible = true;
+        this.renderKey = nextRenderKey;
+        return;
+      }
+    }
+
+    // 3. Hiển thị Model và Reasoning Effort bên dưới dòng input (Antigravity CLI Style)
+    const modelInfo = this.getModelInfo ? this.getModelInfo() : undefined;
+    if (modelInfo) {
+      const effortLabel = modelInfo.effort || 'medium';
+      const modelName = modelInfo.modelName || 'auto';
+      const nextRenderKey = `status\u0000${cursorColumn}\u0000${modelName}\u0000${effortLabel}`;
+      if (this.visible && this.renderKey === nextRenderKey) return;
+
+      const statusLine = `  ${c.gray}🤖 Model: ${c.brightCyan}${c.bold}${modelName}${c.reset}  ${c.gray}│  🧠 Effort: ${c.yellow}${c.bold}${effortLabel}${c.reset}  ${c.gray}│  ${c.dim}Gõ / để xem lệnh${c.reset}`;
+      this.renderBelowInput([statusLine], cursorColumn);
+      this.visible = true;
+      this.renderKey = nextRenderKey;
       return;
     }
 
-    const width = Math.max(40, this.terminal.columns || 80);
-    const nextRenderKey = `/\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
-    if (this.visible && this.renderKey === nextRenderKey) return;
-    const commandWidth = Math.min(
-      Math.max(12, Math.floor(width * 0.45)),
-      Math.max(...suggestions.map((item) => (item.usage || item.command).length)),
-    );
-    const rows = suggestions.map((item, index) => {
-      const label = truncateDisplayText(item.usage || item.command, commandWidth).padEnd(commandWidth);
-      const alias = item.aliases?.length ? ` (${item.aliases.join(', ')})` : '';
-      const availableDescriptionWidth = Math.max(10, width - commandWidth - 6);
-      const description = truncateDisplayText(`${item.description}${alias}`, availableDescriptionWidth);
-      const marker = index === 0 ? '›' : ' ';
-      return `${c.cyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.dim}${description}${c.reset}`;
-    });
-    const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
-    this.renderBelowInput(
-      [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
-      cursorColumn,
-    );
-    this.visible = true;
-    this.renderKey = nextRenderKey;
+    this.clear(cursorColumn);
   }
 
   clear(cursorColumn = 0): void {
@@ -328,6 +346,286 @@ export function formatToolArgumentPreview(value: unknown, maxLength = 180): stri
   return `${printable.slice(0, headLength)}…${printable.slice(-tailLength)}${metadata}`;
 }
 
+export type RGB = [number, number, number];
+
+export type CatMascotAction = 'coding' | 'waving' | 'coffee' | 'hacker' | 'rocket' | 'sleeping';
+
+export interface PixelSprite {
+  name: string;
+  badge: string;
+  width: number;
+  height: number;
+  palette: Record<string, RGB | null>;
+  rows: string[];
+}
+
+export interface CatMascotPose {
+  action: CatMascotAction;
+  name: string;
+  badge: string;
+  lines: string[];
+}
+
+/**
+ * Bảng màu TrueColor 24-bit RGB cho chú mèo Minus Cat:
+ * Mắt màu Electric Cyan / Emerald, Mũi & Miệng màu Ruby Coral nổi bật, Dễ quan sát
+ */
+export const CAT_PALETTE: Record<string, RGB | null> = {
+  '.': null,                     // Trong suốt (Transparent)
+  'O': [255, 145, 0],            // Lông cam vàng ấm áp (Golden Orange)
+  'D': [195, 90, 0],             // Đổ bóng lông cam đậm
+  'W': [255, 255, 255],          // Mõm & bụng trắng tinh (Crisp White)
+  'P': [255, 175, 205],          // Tai trong hồng phấn (Sakura Pink)
+  'E': [0, 240, 255],            // Mắt Cyan phát sáng cực rõ (Electric Cyan Eyes)
+  'G': [0, 255, 150],            // Mắt Emerald xanh lá (Emerald Green Eyes)
+  'N': [15, 25, 45],             // Đồng tử đen sâu (Navy Pupil)
+  'Y': [255, 255, 255],          // Điểm sáng lấp lánh trong mắt (Sparkle)
+  'M': [255, 45, 95],            // Mũi & Miệng màu Ruby Coral siêu nổi bật!
+  'V': [255, 120, 160],          // Lưỡi & viền môi tươi tắn
+  'K': [40, 45, 55],             // Khung Laptop xám đen
+  'L': [0, 255, 200],            // Màn hình Laptop phát sáng Cyan-Mint
+  'C': [245, 235, 215],          // Ly cà phê gốm sứ
+  'F': [125, 65, 25],            // Cà phê Espresso
+  'S': [130, 220, 255],          // Khói cà phê / Bong bóng Z / Ánh sao
+  'H': [25, 25, 30],             // Kính râm đen
+  'Q': [0, 255, 120],            // Ký tự Matrix Neon xanh lá trên kính
+  'R': [255, 50, 80],            // Lửa phản lực Turbo / Trái tim
+  'T': [0, 220, 170],            // Vòng cổ MINUS ngọc lục bảo
+};
+
+const SPRITE_CODING: PixelSprite = {
+  name: 'Minus Cat (Hacker / Coding)',
+  badge: '⚡ Coding Mode',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO....',
+    '...OPOO..OPOO...',
+    '..OOOOOOOOOOOO..',
+    '..OOOOOOOOOOOO..',
+    '.OOEEYOOEEYOOO..',
+    '.OOENEOOENEOOO..',
+    '.OOWWWMMWWWWOO..',
+    '..OWWVWWVWWO....',
+    '..OOWWWWWWOO....',
+    '..OKKKKKKKKO....',
+    '.OKLLLLLLLLKO...',
+    '.OKLLLLLLLLKO...',
+    '.OOWWKKKKWWOO...',
+    '..WWWW..WWWW....',
+  ],
+};
+
+const SPRITE_WAVING: PixelSprite = {
+  name: 'Minus Cat (Waving)',
+  badge: '🐾 Ready to code!',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO.SS.',
+    '...OPOO..OPO.SS.',
+    '..OOOOOOOOOOOO..',
+    '..OOOOOOOOOOOO..',
+    '.OOEEYOO.DDD.SS.',
+    '.OOENEOODDDDOO..',
+    '.OOWWWMMWWWWOO..',
+    '..OWWVMMVWWO.WW.',
+    '..OOWWWWWWOO.WW.',
+    '..OOTTTTTTOO....',
+    '..OOOOOOOOOO....',
+    '..OOWWWWWWOO....',
+    '..WWWW..WWWW....',
+    '..WWWW..WWWW....',
+  ],
+};
+
+const SPRITE_COFFEE: PixelSprite = {
+  name: 'Minus Cat (Coffee & Debug)',
+  badge: '☕ Fueled by Coffee',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO..S.',
+    '...OPOO..OPO.S..',
+    '..OOOOOOOOOOOO.S',
+    '..OOOOOOOOOOOO..',
+    '.OODDDOODDDOOO..',
+    '.OODDDOODDDOOO..',
+    '.OOWWWMMWWWWOO..',
+    '..OWWVMMVWWO....',
+    '..OOWWWWWWOO....',
+    '..OOWWCCCCWWOO..',
+    '..OOWCFFFFCWWO..',
+    '..OOWCCCCCCWWO..',
+    '..WWWW..WWWW....',
+    '..WWWW..WWWW....',
+  ],
+};
+
+const SPRITE_HACKER: PixelSprite = {
+  name: 'Minus Cat (Matrix Hacker)',
+  badge: '🕶️ Access Granted',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO....',
+    '...OPOO..OPOO...',
+    '..OOOOOOOOOOOO..',
+    '..OOOOOOOOOOOO..',
+    '.OOHHHHHHHHHHOO.',
+    '.OOHQHHHHQHHHOO.',
+    '.OOWWWMMWWWWOO..',
+    '..OWWWMMWWWO....',
+    '..OOWWWWWWOO....',
+    '..OOTTTTTTOO....',
+    '..OOOOOOOOOO....',
+    '..OOWWWWWWOO....',
+    '..WWWW..WWWW....',
+    '..WWWW..WWWW....',
+  ],
+};
+
+const SPRITE_ROCKET: PixelSprite = {
+  name: 'Minus Cat (Turbo Mode)',
+  badge: '🚀 Full Speed',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO.RR.',
+    '...OPOO..OPOORR.',
+    '..OOOOOOOOOOOO..',
+    '..OOOOOOOOOOOO..',
+    '.OOGGYOOGGYOOO..',
+    '.OOGNYOOGNYOOO..',
+    '.OOWWWMMWWWWOO..',
+    '..OWWVMMVWWO....',
+    '..OOWWWWWWOO....',
+    '..OORRRRRROO....',
+    '..OORRRRRROO....',
+    '..OOWWWWWWOO....',
+    '..WWWW..WWWW....',
+    '..WWWW..WWWW....',
+  ],
+};
+
+const SPRITE_SLEEPING: PixelSprite = {
+  name: 'Minus Cat (Cozy Standby)',
+  badge: '💤 Standby Mode',
+  width: 16,
+  height: 14,
+  palette: CAT_PALETTE,
+  rows: [
+    '....OO....OO..SS',
+    '...OPOO..OPO.SS.',
+    '..OOOOOOOOOOOO..',
+    '..OOOOOOOOOOOO..',
+    '.OODDDOODDDOOO..',
+    '.OODDDOODDDOOO..',
+    '.OOWWWMMWWWWOO..',
+    '..OWWWMMWWWO....',
+    '..OOWWWWWWOO....',
+    '..OOOOOOOOOO....',
+    '..OOWWWWWWOO....',
+    '..OOWWWWWWOO....',
+    '..WWWW..WWWW....',
+    '..WWWW..WWWW....',
+  ],
+};
+
+/**
+ * Render ma trận Pixel Art 2D thành các dòng ký tự Half-Block 24-bit TrueColor RGB
+ */
+export function renderPixelSpriteToAnsiLines(sprite: PixelSprite): string[] {
+  const lines: string[] = [];
+  const { width, height, palette, rows } = sprite;
+
+  for (let y = 0; y < height; y += 2) {
+    const topRow = rows[y] || '';
+    const bottomRow = rows[y + 1] || '';
+    let line = '';
+    let currentFg: RGB | null = null;
+    let currentBg: RGB | null = null;
+
+    for (let x = 0; x < width; x++) {
+      const topChar = topRow[x] || '.';
+      const bottomChar = bottomRow[x] || '.';
+      const topRgb = palette[topChar] || null;
+      const bottomRgb = palette[bottomChar] || null;
+
+      if (!topRgb && !bottomRgb) {
+        if (currentFg || currentBg) {
+          line += '\x1b[0m';
+          currentFg = null;
+          currentBg = null;
+        }
+        line += ' ';
+      } else if (topRgb && !bottomRgb) {
+        // Nửa trên có màu, nửa dưới trong suốt -> Upper Block '▀' với FG = topRgb
+        const fgCode = `\x1b[38;2;${topRgb[0]};${topRgb[1]};${topRgb[2]}m`;
+        if (currentBg) {
+          line += '\x1b[49m';
+          currentBg = null;
+        }
+        line += fgCode + '▀';
+        currentFg = topRgb;
+      } else if (!topRgb && bottomRgb) {
+        // Nửa trên trong suốt, nửa dưới có màu -> Lower Block '▄' với FG = bottomRgb
+        const fgCode = `\x1b[38;2;${bottomRgb[0]};${bottomRgb[1]};${bottomRgb[2]}m`;
+        if (currentBg) {
+          line += '\x1b[49m';
+          currentBg = null;
+        }
+        line += fgCode + '▄';
+        currentFg = bottomRgb;
+      } else if (topRgb && bottomRgb) {
+        // Cả hai nửa đều có màu -> Lower Block '▄' với FG = bottomRgb và BG = topRgb
+        const fgCode = `\x1b[38;2;${bottomRgb[0]};${bottomRgb[1]};${bottomRgb[2]}m`;
+        const bgCode = `\x1b[48;2;${topRgb[0]};${topRgb[1]};${topRgb[2]}m`;
+        line += fgCode + bgCode + '▄';
+        currentFg = bottomRgb;
+        currentBg = topRgb;
+      }
+    }
+
+    if (currentFg || currentBg) {
+      line += '\x1b[0m';
+    }
+    lines.push(line);
+  }
+
+  return lines;
+}
+
+/**
+ * Lấy Sprite linh vật Pixel TrueColor của Minus Cat theo hành động (hoặc ngẫu nhiên khi khởi động)
+ */
+export function getCatMascot(action?: CatMascotAction): CatMascotPose {
+  const spriteMap: Record<CatMascotAction, PixelSprite> = {
+    coding: SPRITE_CODING,
+    waving: SPRITE_WAVING,
+    coffee: SPRITE_COFFEE,
+    hacker: SPRITE_HACKER,
+    rocket: SPRITE_ROCKET,
+    sleeping: SPRITE_SLEEPING,
+  };
+
+  const actions: CatMascotAction[] = ['coding', 'waving', 'coffee', 'hacker', 'rocket', 'sleeping'];
+  const selectedAction = action || actions[Math.floor(Math.random() * actions.length)];
+  const sprite = spriteMap[selectedAction] || SPRITE_CODING;
+
+  return {
+    action: selectedAction,
+    name: sprite.name,
+    badge: sprite.badge,
+    lines: renderPixelSpriteToAnsiLines(sprite),
+  };
+}
+
 export interface BannerOptions {
   modelName: string;
   workspaceRoot: string;
@@ -335,6 +633,7 @@ export interface BannerOptions {
   tools: string[];
   sandboxStatus?: string;
   activeBranch?: string;
+  mascotAction?: CatMascotAction;
 }
 
 export interface StatusOptions {
@@ -585,70 +884,90 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
   },
 
-  // 11. OpenAI Codex CLI Models
+  // 11. MINUS CLI Models (OpenAI / ChatGPT Plus)
   {
     id: 'cs',
     name: 'codex/gpt-5.6-sol',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '☀️ GPT-5.6 Sol: Đỉnh cao suy luận, quy hoạch logic phức tạp & hoàn thiện code tối đa',
     recommended: true,
   },
   {
     id: 'ct',
     name: 'codex/gpt-5.6-terra',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '🌍 GPT-5.6 Terra: Mô hình chủ lực cân bằng tốc độ & chất lượng cho coding hàng ngày',
   },
   {
     id: 'cl',
     name: 'codex/gpt-5.6-luna',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '🌙 GPT-5.6 Luna: Siêu tốc độ, nhẹ, tối ưu cho tác vụ rõ ràng & lặp lại nhanh',
   },
   {
     id: 'c4',
     name: 'codex/o4-mini',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: 'o4-mini: Reasoning code thế hệ mới tối ưu cho coding agent',
   },
   {
     id: 'c3',
     name: 'codex/o3-mini',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: 'o3-mini: Suy luận chuyên sâu lập trình và giải quyết thuật toán hóc búa',
   },
   {
     id: 'cg',
     name: 'codex/gpt-4o',
-    provider: 'OpenAI Codex (ChatGPT Plus / API)',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: 'GPT-4o: Đa năng, xử lý ngữ cảnh lớn & sinh mã ổn định',
   },
 ];
 
+function stripAnsiForDisplay(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function padRightVisible(text: string, targetWidth: number): string {
+  const visibleLen = stripAnsiForDisplay(text).length;
+  const pad = Math.max(0, targetWidth - visibleLen);
+  return text + ' '.repeat(pad);
+}
+
 /**
- * Lớp điều khiển hiển thị Terminal UI/UX chuẩn 100% phong cách OpenAI Codex CLI.
+ * Lớp điều khiển hiển thị Terminal UI/UX chuẩn 100% phong cách MINUS CLI.
  */
 export class CLI {
   /**
-   * Hiển thị Banner mở đầu phong cách OpenAI Codex CLI
+   * Hiển thị Banner mở đầu phong cách MINUS CLI kèm Linh vật Mèo Pixel Minus Cat
    */
   static renderBanner(opts: BannerOptions): void {
+    const cat = getCatMascot(opts.mascotAction);
+    const catLines = cat.lines;
+
+    const infoLines: string[] = [
+      `${c.magenta}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`,
+      `${c.blue}📂 Workspace:${c.reset}  ${c.dim}${truncateDisplayText(opts.workspaceRoot, 34)}${c.reset}`,
+      `${c.indigo}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch || 'main'}${c.reset}`,
+      `${c.emerald}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus || `${c.green}Active (Local)${c.reset}`}`,
+      `${c.yellow}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`,
+      `${c.green}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.dim}${opts.tools.slice(0, 5).join(', ')}${opts.tools.length > 5 ? ` ... (+${opts.tools.length - 5})` : ''}${c.reset}`,
+      `${c.gray}💡 Lệnh nhanh:${c.reset}  Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để mở menu${c.reset}`,
+    ];
+
     console.log(`\n${c.cyan}${c.bold}╭────────────────────────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}${c.bold}⚡ OPENAI CODEX CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}${c.bold}⚡ MINUS CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}               ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}       ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.magenta}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.blue}📂 Workspace:${c.reset}  ${c.dim}${opts.workspaceRoot}${c.reset}`);
-    if (opts.activeBranch) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.indigo}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}├───────────────────────┬────────────────────────────────────────────────────┤${c.reset}`);
+
+    for (let i = 0; i < 7; i++) {
+      const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 21);
+      const rightCol = padRightVisible(infoLines[i] || '', 50);
+      console.log(`${c.cyan}${c.bold}│${c.reset} ${leftCol} ${c.cyan}${c.bold}│${c.reset}  ${rightCol} ${c.cyan}${c.bold}│${c.reset}`);
     }
-    if (opts.sandboxStatus) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus}`);
-    }
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.yellow}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.green}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.dim}${opts.tools.slice(0, 10).join(', ')}${opts.tools.length > 10 ? ` ... (+${opts.tools.length - 10} tools)` : ''}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.gray}Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để xem menu lệnh nhanh, ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}      ${c.cyan}${c.bold}│${c.reset}`);
+
+    console.log(`${c.cyan}${c.bold}├───────────────────────┴────────────────────────────────────────────────────┤${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}🐱 ${cat.name}:${c.reset} ${c.dim}${cat.badge}${c.reset} • ${c.gray}Nhập ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}            ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
@@ -656,7 +975,7 @@ export class CLI {
    * Hiển thị thanh gợi ý lệnh nhanh
    */
   static renderQuickCommands(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚡ CODEX SLASH COMMAND PALETTE ──────────────────────────────────────────╮${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}╭── ⚡ MINUS SLASH COMMAND PALETTE ──────────────────────────────────────────╮${c.reset}`);
     for (const cmd of SLASH_COMMANDS) {
       const aliasStr = cmd.aliases?.length ? ` (${cmd.aliases.join(', ')})` : '';
       const usageStr = (cmd.usage || cmd.command).padEnd(26);
@@ -697,7 +1016,7 @@ export class CLI {
    * Hiển thị bảng trợ giúp
    */
   static renderHelp(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── 📖 OPENAI CODEX CLI COMMAND CATALOG & GUIDE ─────────────────────────────╮${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}╭── 📖 MINUS CLI COMMAND CATALOG & GUIDE ────────────────────────────────────╮${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
     
     const byCategory = new Map<string, SlashCommandDefinition[]>();
@@ -869,9 +1188,6 @@ export class CLI {
     }
     console.log(`${c.blue}${c.bold}│${c.reset}`);
     console.log(`${c.blue}${c.bold}│${c.reset}  ${c.amber}${c.bold}⚠️ [Self-Correction Protocol Activated (Consecutive Failures: ${failures})]${c.reset}`);
-    if (advice) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ ${advice}${c.reset}`);
-    }
   }
 
   /**
@@ -1004,12 +1320,13 @@ export class CLI {
   }
 
   /**
-   * Hiển thị trạng thái System 2 trong lúc request tới LLM
+   * Hiển thị trạng thái Reasoning (System 2) - Tóm tắt hành vi/ý định suy luận của LLM
    */
-  static renderLLMThinking(): void {
+  static renderLLMThinking(summary?: string): void {
     console.log(`${c.blue}${c.bold}│${c.reset}`);
+    const text = summary && summary.trim() ? summary.trim() : 'LLM đang phân tích ngữ cảnh và xác định bước tiếp theo...';
     console.log(
-      `${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 Reasoning (System 2):${c.reset} ${c.dim}LLM đang phân tích ngữ cảnh và xác định bước tiếp theo...${c.reset}`,
+      `${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 Reasoning (System 2):${c.reset} ${c.dim}${text}${c.reset}`,
     );
   }
 
@@ -1095,21 +1412,18 @@ export class CLI {
       }
     } else if (result.message) {
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.brightGreen}${result.message}${c.reset}`);
-    } else {
-      const resStr = JSON.stringify(result);
-      const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${preview}${c.reset}`);
-    }
-    if (result.diagnostic) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.yellow}Diagnosis: ${result.diagnostic}${c.reset}`);
-    }
-    if (result.suggestion) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.cyan}Next: ${result.suggestion}${c.reset}`);
+    } else if (result.success === undefined || Object.keys(result).length > 1) {
+      const { diagnostic, suggestion, prompt, hint, suggestionText, ...rest } = result;
+      if (Object.keys(rest).length > 0) {
+        const resStr = JSON.stringify(rest);
+        const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;
+        console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${preview}${c.reset}`);
+      }
     }
   }
 
   /**
-   * Hiển thị Prompt Caching Telemetry theo chuẩn OpenAI Codex
+   * Hiển thị Prompt Caching Telemetry theo chuẩn MINUS
    */
   static renderCacheUsage(usage?: {
     promptTokens?: number;
@@ -1136,7 +1450,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn OpenAI Codex
+   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn MINUS
    */
   static renderPromptCacheDashboard(info: {
     modelName: string;
@@ -1146,7 +1460,7 @@ export class CLI {
     totalCachedTokens?: number;
     lastHitRate?: number;
   }): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (OPENAI CODEX STANDARD) ──╮${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}╭── ⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (MINUS STANDARD) ──────────╮${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
@@ -1356,7 +1670,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị khung yêu cầu phê duyệt Permission chuẩn OpenAI Codex CLI
+   * Hiển thị khung yêu cầu phê duyệt Permission chuẩn MINUS CLI
    */
   static renderPermissionPrompt(request: {
     toolName: string;
@@ -1368,7 +1682,7 @@ export class CLI {
   }): void {
     const riskColor = request.riskLevel === 'CRITICAL' ? `${c.crimson}${c.bold}` : request.riskLevel === 'HIGH' ? `${c.amber}${c.bold}` : `${c.yellow}${c.bold}`;
     console.log(`\n${c.yellow}╭────────────────────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.yellow}│${c.reset}  ${c.bold}⚠️  XÁC NHẬN CẤP QUYỀN THỰC THI (CODEX PERMISSION APPROVAL)${c.reset}        ${c.yellow}│${c.reset}`);
+    console.log(`${c.yellow}│${c.reset}  ${c.bold}⚠️  XÁC NHẬN CẤP QUYỀN THỰC THI (MINUS PERMISSION APPROVAL)${c.reset}        ${c.yellow}│${c.reset}`);
     console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
     console.log(`${c.yellow}│${c.reset}  ${c.dim}Công cụ:${c.reset}     ${c.bold}${request.toolName}${c.reset} (${request.category})`);
     console.log(`${c.yellow}│${c.reset}  ${c.dim}Mục tiêu:${c.reset}    ${c.brightCyan}${request.target}${c.reset}`);
@@ -1442,11 +1756,9 @@ export class CLI {
   }
 
   /**
-   * Dấu nhắc lệnh người dùng kèm theo Model và Reasoning Effort hiển thị bên trên dòng input
+   * Dấu nhắc lệnh người dùng (Prompt Symbol)
    */
-  static getPromptSymbol(modelName?: string, effort?: string): string {
-    if (!modelName) return `${c.brightCyan}${c.bold}❯${c.reset} `;
-    const effortLabel = effort || 'medium';
-    return `\n${c.gray}🤖 ${c.brightCyan}${c.bold}${modelName}${c.reset} ${c.gray}(effort: ${c.yellow}${c.bold}${effortLabel}${c.gray})${c.reset}\n${c.brightCyan}${c.bold}❯${c.reset} `;
+  static getPromptSymbol(): string {
+    return `${c.brightCyan}${c.bold}❯${c.reset} `;
   }
 }

@@ -1,6 +1,6 @@
 import { ISandboxProvider, SandboxExecutionResult, SandboxMode, SandboxOptions, SandboxStatus } from './types.js';
 import { LocalProcessSandbox } from './local-sandbox.js';
-import { DockerSandbox } from './docker-sandbox.js';
+import { DockerSandbox, isDockerRecentlyFailed } from './docker-sandbox.js';
 import {
   createCustomRuntimeProfile,
   detectWorkspaceRuntimeProfile,
@@ -31,6 +31,7 @@ export class SandboxManager {
   private autoSwitchRuntimes: boolean;
   private activeRuntimeProfile?: SandboxRuntimeProfile;
   private readonly dockerProviders = new Map<string, DockerSandbox>();
+  private isInitialized = false;
 
   constructor(config: SandboxManagerConfig) {
     this.mode = config.mode || (process.env.SANDBOX_MODE as SandboxMode) || 'auto';
@@ -49,6 +50,8 @@ export class SandboxManager {
    * Khởi tạo Sandbox phù hợp dựa trên chế độ cấu hình và môi trường máy chủ
    */
   async init(): Promise<void> {
+    if (this.isInitialized) return;
+
     if (this.mode === 'docker' || this.mode === 'auto') {
       const profile = this.explicitDockerImage
         ? createCustomRuntimeProfile(this.explicitDockerImage)
@@ -57,9 +60,10 @@ export class SandboxManager {
 
       let dockerAvailable = await dockerProvider.isAvailable();
 
-      // Nếu Docker chưa chạy, tự động kích hoạt Docker Desktop
-      if (!dockerAvailable) {
-        dockerAvailable = await dockerProvider.startDockerDaemon(25);
+      // Nếu Docker chưa chạy và chưa vừa bị timeout ở bước trước, tự động kích hoạt Docker Desktop
+      if (!dockerAvailable && !isDockerRecentlyFailed()) {
+        const timeoutSeconds = parseInt(process.env.DOCKER_START_TIMEOUT_SECONDS || '20', 10);
+        dockerAvailable = await dockerProvider.startDockerDaemon(timeoutSeconds);
       }
 
       if (dockerAvailable) {
@@ -68,6 +72,7 @@ export class SandboxManager {
           this.activeProvider = dockerProvider;
           this.activeRuntimeProfile = profile;
           this.dockerProviders.set(this.profileKey(profile), dockerProvider);
+          this.isInitialized = true;
           return;
         } catch (err: any) {
           // Khởi tạo Docker lỗi, fallback nếu ở chế độ auto hoặc docker
@@ -75,7 +80,7 @@ export class SandboxManager {
           console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS).\x1b[0m\n`);
         }
       } else if (this.mode === 'docker') {
-        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể tự động khởi chạy Docker Desktop hoặc Docker Daemon chưa sẵn sàng.\x1b[0m`);
+        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể kết nối Docker Daemon (chưa khởi động hoặc không khả dụng).\x1b[0m`);
         console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS với bộ lọc Allowlist).\x1b[0m`);
         console.warn(`\x1b[90m💡 Để chạy lệnh không giới hạn (Zero-Restriction), vui lòng kiểm tra Docker Desktop trên máy tính.\x1b[0m\n`);
       }
@@ -84,6 +89,7 @@ export class SandboxManager {
     // Fallback sang Local Process Sandbox
     this.activeProvider = new LocalProcessSandbox(this.workspacePath);
     await this.activeProvider.init();
+    this.isInitialized = true;
   }
 
   /**
@@ -166,6 +172,7 @@ export class SandboxManager {
     this.dockerProviders.clear();
     if (this.activeProvider.type !== 'docker') await this.activeProvider.dispose();
     this.activeRuntimeProfile = undefined;
+    this.isInitialized = false;
   }
 
   private createDockerProvider(profile: SandboxRuntimeProfile): DockerSandbox {

@@ -61,16 +61,24 @@ export class SkillActivator {
       const explicitlyEnabled = context.manualOverrides?.enabled?.includes(skill.id);
       const isAutoActivate = skill.autoActivate === true;
 
-      // Khớp từ khóa yêu cầu từ userRequest
+      // Khớp phân loại ngữ cảnh từ userRequest (Classification)
       let matchesContext = false;
       if (context.userRequest) {
         const lowerReq = context.userRequest.toLowerCase();
         const gitIntent = detectExplicitGitMutationIntent(context.userRequest);
         const gitCommands = detectExplicitGitCommandNames(context.userRequest);
         matchesContext =
-          skill.id.includes(lowerReq) ||
-          skill.name.toLowerCase().includes(lowerReq) ||
-          skill.tags?.some((t) => lowerReq.includes(t.toLowerCase())) ||
+          lowerReq.includes(skill.id.toLowerCase()) ||
+          lowerReq.includes(skill.name.toLowerCase()) ||
+          skill.tags?.some((t) => {
+            const tagLower = t.toLowerCase();
+            if (tagLower.length <= 3) {
+              // Dùng word boundary cho các tag ngắn (db, api, ui, tdd, git, sql) tránh khớp nhầm substring
+              const escaped = tagLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              return new RegExp(`(?:^|[^a-zA-Z0-9_])${escaped}(?:[^a-zA-Z0-9_]|$)`, 'i').test(lowerReq);
+            }
+            return lowerReq.includes(tagLower);
+          }) ||
           (skill.id === 'git-operations' && gitCommands.length > 0) ||
           (skill.id === 'finishing-a-development-branch' && (gitIntent.stage || gitIntent.commit || gitIntent.push)) ||
           false;
