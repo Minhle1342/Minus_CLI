@@ -35,6 +35,8 @@ import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
 import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
+import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
+import { createRecallRepositoryMemoryTool, createSaveRepositoryMemoryTool, createVerifyRepositoryMemoryTool } from './repository-memory-tools.js';
 import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
@@ -118,6 +120,12 @@ export class ToolRegistry implements ToolProvider {
   attachMemoryManager(memoryManager: ProjectMemoryManager): void {
     this.register(createSaveMemoryTool(memoryManager));
     this.register(createReadMemoryTool(memoryManager));
+  }
+
+  attachRepositoryMemory(memory: CitationValidatedRepositoryMemory): void {
+    this.register(createSaveRepositoryMemoryTool(memory));
+    this.register(createRecallRepositoryMemoryTool(memory));
+    this.register(createVerifyRepositoryMemoryTool(memory));
   }
 
   attachSandboxManager(sandboxManager: any): void {

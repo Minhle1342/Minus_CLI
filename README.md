@@ -169,6 +169,11 @@ Minus CLI tích hợp hơn 35 công cụ native mạnh mẽ, được tối ưu 
 - **`read_url_content`**: Bóc tách nội dung bài viết/tài liệu thành Markdown tinh gọn.
 - **`read_compressed_code` & `pack_codebase`**: Động cơ Repomix nén toàn bộ skeleton dự án cho Warm-Start.
 
+### 6. Citation-validated Repository Memory
+- **`save_repository_memory` / `recall_repository_memory` / `verify_repository_memory`**: Lưu, truy hồi và audit tri thức repository với citation SHA-256, session event, Git commit hoặc Compose completion có thể tái kiểm chứng.
+- AgentMemory được dùng như semantic mirror và nguồn xếp hạng bổ sung; local citation manifest vẫn là nguồn thẩm quyền, nên kết quả remote không có bằng chứng hợp lệ không bao giờ được inject vào prompt.
+- Xem [thiết kế và cấu hình Repository Memory](docs/architecture/CITATION_VALIDATED_REPOSITORY_MEMORY.md).
+
 ---
 
 ## 📂 Cấu Trúc Mã Nguồn (Project Structure)

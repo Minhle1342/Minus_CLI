@@ -38,6 +38,7 @@ import { summarizeStepWithCodestral, generateFallbackStepSummary } from './step-
 import { classifyLLMError } from '../llm/error-handling.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
+import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -92,6 +93,7 @@ export class AgentLoop {
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
   readonly repositoryMap: GraphRankedRepositoryMap;
+  readonly repositoryMemory: CitationValidatedRepositoryMemory;
   private lastToolExecution?: { toolName: string; result: any };
 
   constructor(
@@ -120,6 +122,7 @@ export class AgentLoop {
       this.agentId = options?.agentId || 'coding-agent';
       this.reflectionEngine = this.kernel.ctx.reflection;
       this.memoryManager = this.kernel.ctx.memory;
+      this.repositoryMemory = this.kernel.ctx.repositoryMemory;
       this.effectLedger = new EffectLedger();
       this.criticGate = new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
@@ -148,6 +151,7 @@ export class AgentLoop {
       this.agentId = options?.agentId || 'coding-agent';
       this.reflectionEngine = new ReflectionEngine();
       this.memoryManager = new ProjectMemoryManager(this._workspace.rootDir);
+      this.repositoryMemory = new CitationValidatedRepositoryMemory(this._workspace);
       this.effectLedger = new EffectLedger();
       this.criticGate = new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
@@ -159,10 +163,12 @@ export class AgentLoop {
       // Đăng ký các planning và memory tools vào toolRegistry
       this.toolRegistry.attachPlanManager(this.planManager);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
+      this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
 
       this.checkpointManager.init().catch(() => {});
       this.memoryManager.init(this._workspace).catch(() => {});
+      this.repositoryMemory.init().catch(() => {});
     }
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
@@ -199,6 +205,7 @@ export class AgentLoop {
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
     this.repositoryMap.setWorkspace(workspace);
+    this.repositoryMemory.setWorkspace(workspace);
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
       if (this.toolProvider === this.toolRegistry) {
@@ -213,6 +220,7 @@ export class AgentLoop {
       this.toolRegistry.attachMemoryManager(this.memoryManager);
       this.checkpointManager.init().catch(() => {});
       this.memoryManager.init(workspace).catch(() => {});
+      this.repositoryMemory.init().catch(() => {});
     }
   }
 
@@ -340,6 +348,7 @@ export class AgentLoop {
     this.planManager.bindSession(session);
     this.goalManager.bindSession(session);
     this.memoryManager.bindSession(session);
+    this.repositoryMemory.bindSession(session);
     this.subagentManager.bindSession(session);
     this.effectLedger.bindSession(session);
     this.reflectionEngine.reset();
@@ -505,6 +514,20 @@ export class AgentLoop {
             ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
           ].join('\n')
         : '';
+      let repositoryMemoryContext = '';
+      let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
+      if (this.loopOptions?.enableRepositoryMemory !== false) {
+        try {
+          const recalled = await this.repositoryMemory.recall(activeStepQuery, {
+            limit: 12,
+            maxTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
+          });
+          repositoryMemoryContext = recalled.rendered;
+          repositoryMemoryRecords = recalled.records;
+        } catch {
+          // Repository memory is an independent, fail-open context source.
+        }
+      }
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
       const composeState = this.kernel?.ctx.compose.getState();
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
@@ -514,6 +537,7 @@ export class AgentLoop {
           const repositoryQuery = [
             activeStepQuery,
             ...relevantMemory.map((item) => item.insight),
+            ...repositoryMemoryRecords.map((item) => item.statement),
           ].filter(Boolean).join('\n');
           repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
             maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
@@ -521,6 +545,7 @@ export class AgentLoop {
               ...(activeTask?.readSet || []),
               ...(activeTask?.writeSet || []),
               ...(composeState?.registeredFiles || []),
+              ...repositoryMemoryRecords.flatMap((item) => item.relatedFiles),
             ],
             seedSymbols: activeTask?.symbols || [],
           });
@@ -528,7 +553,7 @@ export class AgentLoop {
           repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
         }
       }
-      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
+      const dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
 
       session.recordRequestHeader({
         turn,
@@ -915,6 +940,9 @@ export class AgentLoop {
           };
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
+          if (this.loopOptions?.enableRepositoryMemory !== false) {
+            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => {});
+          }
           this.lastToolExecution = { toolName, result: executionResult.result };
           await this.persistSession(session);
           if (effect) {
@@ -1334,6 +1362,7 @@ export class AgentLoop {
     this.planManager.bindSession(session);
     this.goalManager.bindSession(session);
     this.memoryManager.bindSession(session);
+    this.repositoryMemory.bindSession(session);
     this.subagentManager.bindSession(session);
     this.effectLedger.bindSession(session);
     for (const input of session.getPendingInputs()) {

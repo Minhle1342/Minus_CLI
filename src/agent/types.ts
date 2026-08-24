@@ -22,6 +22,10 @@ export interface AgentLoopOptions {
   enableGraphRepositoryMap?: boolean;
   /** Maximum estimated tokens reserved for the graph-ranked repository map. */
   repositoryMapTokens?: number;
+  /** Disable citation-validated repository memory injection and observation capture. */
+  enableRepositoryMemory?: boolean;
+  /** Maximum estimated tokens reserved for validated repository memories. */
+  repositoryMemoryTokens?: number;
 }
 
 export type AgentState =

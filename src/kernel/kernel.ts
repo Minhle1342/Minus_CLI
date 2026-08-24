@@ -4,6 +4,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { ToolRunner } from '../tools/tool-runner.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
+import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { ContextCompactor } from '../agent/context-compactor.js';
 import { ReflectionEngine } from '../agent/reflection-engine.js';
@@ -103,6 +104,7 @@ export interface KernelContext {
   agents: AgentRegistry;
   sessions: SessionManager;
   memory: ProjectMemoryManager;
+  repositoryMemory: CitationValidatedRepositoryMemory;
   dream: DreamManager;
   compose: ComposeController;
   checkpoints: CheckpointManager;
@@ -153,7 +155,8 @@ export class AgentKernel {
     const agents = new AgentRegistry();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
-    const dream = new DreamManager(workspace.rootDir, memory);
+    const repositoryMemory = new CitationValidatedRepositoryMemory(workspace);
+    const dream = new DreamManager(workspace.rootDir, memory, { repositoryMemory });
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
@@ -166,6 +169,7 @@ export class AgentKernel {
     const sharedContext = new SharedContextService();
     const agentEvents = new AgentEventBus();
     const tools = new ToolRegistry(plan, memory);
+    tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
     tools.attachTaskManager(tasks);
     tools.attachScheduleManager(schedules);
@@ -187,6 +191,7 @@ export class AgentKernel {
       agents,
       sessions,
       memory,
+      repositoryMemory,
       dream,
       compose,
       checkpoints,
@@ -212,12 +217,14 @@ export class AgentKernel {
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, this.ctx.compose);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
-        this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory);
+        this.ctx.repositoryMemory.setWorkspace(newWs);
+        this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory, this.ctx.repositoryMemory);
         this.ctx.sessions.setWorkspace(newWs.rootDir);
         (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
         this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
         this.ctx.checkpoints.init().catch(() => {});
         this.ctx.memory.init(newWs).catch(() => {});
+        this.ctx.repositoryMemory.init().catch(() => {});
         this.ctx.events.emit('workspace:changed', oldPath, newWs.rootDir);
       },
       setLLM: (newLlm: any, newModelName?: string) => {
@@ -250,6 +257,7 @@ export class AgentKernel {
     if (this.isInitialized) return;
     await this.ctx.checkpoints.init();
     await this.ctx.memory.init(this.ctx.workspace);
+    await this.ctx.repositoryMemory.init();
     await this.ctx.compose.init();
 
     if (!this.plugins.has('superpowers')) {

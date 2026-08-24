@@ -71,6 +71,7 @@ import { AdaptiveReasoningController } from './agent/adaptive-reasoning-controll
 import { CodeSearchEngine } from './search/code-search-engine.js';
 import { classifyLLMError, retryWithExponentialBackoff } from './llm/error-handling.js';
 import { ProjectMemoryManager } from './memory/project-memory.js';
+import { CitationValidatedRepositoryMemory } from './memory/repository-memory.js';
 import { DreamManager } from './dream/dream-manager.js';
 import { CodestralDreamAgent } from './dream/codestral-dream-agent.js';
 import type { DreamAgent, DreamAgentInput, DreamProposal } from './dream/types.js';
@@ -2210,8 +2211,10 @@ export async function calculateTotal(items: any[]): Promise<number> {
       evidenceIds: ['dream-source-session:3'],
     },
   ];
+  const dreamRepositoryMemory = new CitationValidatedRepositoryMemory(dreamDir);
   const dreamManager = new DreamManager(dreamDir, dreamMemory, {
     agent: mockDream,
+    repositoryMemory: dreamRepositoryMemory,
     config: {
       enabled: true,
       intervalMs: 7 * 24 * 60 * 60 * 1000,
@@ -2270,6 +2273,11 @@ export async function calculateTotal(items: any[]): Promise<number> {
       && learnedPackageRule.trustStatus === 'active'
       && (learnedPackageRule.provenance?.length || 0) === 2,
     'Dream applies only policy-verified memory with durable multi-event provenance',
+  );
+  const promotedDreamMemory = await dreamRepositoryMemory.recall('pnpm package management');
+  assert(
+    promotedDreamMemory.records.some((item) => item.statement === 'Use pnpm for package management commands.' && item.source === 'dream'),
+    'Dream promotes accepted insights into the independent repository memory only with replayable citations',
   );
   assert(
     protectedRule?.insight === 'Use npm for protected release jobs'
@@ -2457,7 +2465,8 @@ export async function calculateTotal(items: any[]): Promise<number> {
 
   const composeMemory = new ProjectMemoryManager(composeDir, new LocalDreamEmbedding());
   await composeMemory.init(new Workspace(composeDir));
-  const composeDream = new DreamManager(composeDir, composeMemory, { agent: mockDream });
+  const composeRepositoryMemory = new CitationValidatedRepositoryMemory(composeDir);
+  const composeDream = new DreamManager(composeDir, composeMemory, { agent: mockDream, repositoryMemory: composeRepositoryMemory });
   mockDream.shouldFail = false;
   mockDream.proposals = [{
     action: 'remember', key: 'compose_verified_pattern', insight: 'Preserve spec locks and fresh acceptance evidence.',
@@ -2471,6 +2480,11 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(composeInsights.includes('mistral/codestral-latest'), 'Compose Dream insights record the independent model provenance');
   const composeLedger = await fs.readFile(path.join(composeDir, '.codingagent', 'dream', 'compose-completions.jsonl'), 'utf8');
   assert(JSON.parse(composeLedger.trim()).testEvidence.length === 1, 'Dream handoff writes machine-readable acceptance evidence');
+  const promotedComposeMemory = await composeRepositoryMemory.recall('spec locks acceptance evidence');
+  assert(
+    promotedComposeMemory.records.some((item) => item.source === 'compose' && item.citations.some((citation) => citation.kind === 'compose')),
+    'Compose Dream handoff promotes learned rules with a citation to the verified completion ledger',
+  );
 
   const completedReload = new ComposeController(composeDir);
   await completedReload.init();
@@ -2515,6 +2529,96 @@ export async function calculateTotal(items: any[]): Promise<number> {
     readRes.learnedInsights?.some((i: any) => i.key === 'auth_pattern' && i.trustStatus === 'contested'),
     'read_memory tool can explicitly audit contested model-authored memory by keyword',
   );
+
+  console.log('\n========================================');
+  console.log('CITATION-VALIDATED REPOSITORY MEMORY');
+  console.log('========================================');
+
+  const repositoryMemoryDir = await fs.mkdtemp(path.join(workspace.rootDir, '.repository-memory-test-'));
+  const repositoryMemoryWorkspace = new Workspace(repositoryMemoryDir);
+  const repositoryMemoryFile = path.join(repositoryMemoryDir, 'architecture.ts');
+  await fs.writeFile(repositoryMemoryFile, 'export const architecture = "event-sourced";\n', 'utf8');
+  const repositoryMemory = new CitationValidatedRepositoryMemory(repositoryMemoryWorkspace, {
+    agentMemory: { baseUrl: 'http://127.0.0.1:1', timeoutMs: 25 },
+  });
+  await repositoryMemory.init();
+  const fileCitation = await repositoryMemory.createFileCitation('architecture.ts');
+  const citedRecord = await repositoryMemory.remember({
+    statement: 'The architecture uses an event-sourced session log.',
+    category: 'architecture',
+    confidence: 0.94,
+    citations: [fileCitation],
+    concepts: ['architecture', 'event-sourced', 'session'],
+  });
+  const citedRecall = await repositoryMemory.recall('event sourced architecture');
+  assert(citedRecall.records.some((item) => item.id === citedRecord.id), 'Repository memory recalls a fact only after validating its file citation');
+  assert(citedRecall.rendered.includes('architecture.ts@sha256:'), 'Repository memory renders compact source citations into model context');
+  assert(citedRecall.remoteAvailable === false, 'Unavailable AgentMemory mirror degrades without breaking local recall');
+
+  await fs.writeFile(repositoryMemoryFile, 'export const architecture = "changed";\n', 'utf8');
+  const staleRecall = await repositoryMemory.recall('event sourced architecture');
+  assert(!staleRecall.records.some((item) => item.id === citedRecord.id), 'Changed source files automatically exclude stale repository memories');
+  assert(staleRecall.staleIds.includes(citedRecord.id), 'Staleness audit identifies the invalidated memory record');
+
+  const repositoryEvidenceSession = new Session('repository-memory-evidence');
+  repositoryEvidenceSession.addUserMessage('Inspect the build contract.');
+  repositoryEvidenceSession.addToolResultWithId('run_command', { success: true, exitCode: 0, stdout: 'tests passed' }, 'call-1');
+  repositoryMemory.bindSession(repositoryEvidenceSession);
+  const eventRecord = await repositoryMemory.remember({
+    statement: 'The verification command completed successfully.',
+    category: 'insight',
+    confidence: 0.9,
+    citations: [{
+      kind: 'session-event', sessionId: repositoryEvidenceSession.id, eventSeq: repositoryEvidenceSession.seq,
+      eventType: 'tool/result', toolName: 'run_command', outcome: 'success',
+    }],
+  });
+  assert((await repositoryMemory.verify(eventRecord.id)).valid, 'Durable tool outcome citations validate against an event-sourced session');
+
+  let remoteRecordId = '';
+  const hybridRepositoryMemory = new CitationValidatedRepositoryMemory(repositoryMemoryWorkspace, {
+    agentMemory: {
+      baseUrl: 'http://agentmemory.test',
+      fetchImpl: (async (url: any) => {
+        if (String(url).endsWith('/agentmemory/smart-search')) {
+          return new Response(JSON.stringify({ results: [{ content: `[minus-repository-memory:${remoteRecordId}] remote hit` }] }), {
+            status: 200, headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+  const hybridCitation = await hybridRepositoryMemory.createFileCitation('architecture.ts');
+  const hybridRecord = await hybridRepositoryMemory.remember({
+    statement: 'Opaque architectural knowledge selected by the semantic mirror.',
+    category: 'architecture', confidence: 0.91, citations: [hybridCitation], concepts: ['opaque-knowledge'],
+  });
+  remoteRecordId = hybridRecord.id;
+  const hybridRecall = await hybridRepositoryMemory.recall('remote-only-semantic-hit');
+  assert(
+    hybridRecall.remoteAvailable && hybridRecall.records.some((item) => item.id === hybridRecord.id),
+    'AgentMemory smart-search rank is fused with local retrieval while local citations remain the admission gate',
+  );
+
+  let missingCitationRejected = false;
+  try {
+    await repositoryMemory.remember({ statement: 'Unsupported claim.', citations: [] });
+  } catch {
+    missingCitationRejected = true;
+  }
+  assert(missingCitationRejected, 'Repository memory rejects uncited model claims');
+
+  await repositoryMemory.observeToolResult(repositoryEvidenceSession, 'run_command', { command: 'npm test' }, { success: true, exitCode: 0, stdout: 'tests passed' }, repositoryEvidenceSession.seq);
+  await repositoryMemory.observeToolResult(repositoryEvidenceSession, 'run_command', { command: 'npm test' }, { success: true, exitCode: 0, stdout: 'tests passed' }, repositoryEvidenceSession.seq);
+  await repositoryMemory.observeToolResult(repositoryEvidenceSession, 'read_file', { path: '.env' }, { success: true, content: 'MISTRAL_API_KEY=secret-value' }, repositoryEvidenceSession.seq);
+  const observations = (await fs.readFile(path.join(repositoryMemoryDir, '.codingagent', 'repository-memory', 'observations.jsonl'), 'utf8')).trim().split(/\r?\n/);
+  assert(observations.length === 1, 'Tool observation capture deduplicates repeated evidence and skips secret-bearing files');
+
+  const citationRegistry = new ToolRegistry();
+  citationRegistry.attachRepositoryMemory(repositoryMemory);
+  assert(Boolean(citationRegistry.get('save_repository_memory') && citationRegistry.get('recall_repository_memory') && citationRegistry.get('verify_repository_memory')), 'Repository memory exposes save, recall, and citation-audit tools');
+  await fs.rm(repositoryMemoryDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 15. KIỂM THỬ SYSTEM 1 VS SYSTEM 2 (COT DEEP REASONING SEPARATION)');

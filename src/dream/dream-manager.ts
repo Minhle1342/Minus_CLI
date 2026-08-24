@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ProjectMemoryManager, MemoryConsolidationPlan } from '../memory/project-memory.js';
+import type { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
+import type { RepositoryCitation } from '../memory/repository-memory-types.js';
 import type { MemoryProvenance, MemoryRecord } from '../memory/types.js';
 import { writeFileAtomically } from '../memory/atomic-write.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -109,6 +111,7 @@ export class DreamManager {
   private readonly agent: DreamAgent;
   private readonly reader: DreamTrajectoryReader;
   private readonly config: DreamConfig;
+  private repositoryMemory?: CitationValidatedRepositoryMemory;
   private currentRun?: Promise<DreamRunReport>;
 
   constructor(
@@ -118,6 +121,7 @@ export class DreamManager {
       agent?: DreamAgent;
       reader?: DreamTrajectoryReader;
       config?: Partial<DreamConfig>;
+      repositoryMemory?: CitationValidatedRepositoryMemory;
     } = {},
   ) {
     this.workspaceDir = path.resolve(workspaceDir);
@@ -125,13 +129,15 @@ export class DreamManager {
     this.agent = options.agent || new CodestralDreamAgent();
     this.reader = options.reader || new DreamTrajectoryReader(this.workspaceDir);
     this.config = resolveDreamConfig(options.config);
+    this.repositoryMemory = options.repositoryMemory;
     this.statePath = path.join(this.workspaceDir, '.codingagent', 'dream', 'state.json');
     this.lockPath = path.join(this.workspaceDir, '.codingagent', 'dream', 'dream.lock');
   }
 
-  setWorkspace(workspaceDir: string, memory: ProjectMemoryManager): void {
+  setWorkspace(workspaceDir: string, memory: ProjectMemoryManager, repositoryMemory?: CitationValidatedRepositoryMemory): void {
     this.workspaceDir = path.resolve(workspaceDir);
     this.memory = memory;
+    if (repositoryMemory) this.repositoryMemory = repositoryMemory;
     this.reader.setWorkspace(this.workspaceDir);
     this.statePath = path.join(this.workspaceDir, '.codingagent', 'dream', 'state.json');
     this.lockPath = path.join(this.workspaceDir, '.codingagent', 'dream', 'dream.lock');
@@ -214,6 +220,9 @@ export class DreamManager {
         const policy = this.verifyProposals(proposals, evidence);
         await this.memory.applyConsolidation(policy.plan);
         acceptedInsights = policy.accepted;
+        await this.promoteAcceptedMemories(acceptedInsights, evidence, {
+          kind: 'compose', composeId: completion.composeId, specHash: completion.specHash,
+        });
       } catch (error: any) {
         dreamError = error?.message || String(error);
       }
@@ -313,6 +322,7 @@ export class DreamManager {
       }
 
       const result = await this.memory.applyConsolidation(policy.plan);
+      await this.promoteAcceptedMemories(policy.accepted, scan.evidence);
       base.upserted = result.upserted;
       base.superseded = result.superseded;
       base.pruned = result.pruned;
@@ -476,6 +486,39 @@ export class DreamManager {
       for (const record of group) if (record.id !== keep.id) prune.add(record.id);
     }
     return Array.from(prune);
+  }
+
+  private async promoteAcceptedMemories(
+    memories: VerifiedDreamMemory[],
+    evidence: DreamEvidence[],
+    composeCitation?: RepositoryCitation,
+  ): Promise<void> {
+    if (!this.repositoryMemory || memories.length === 0) return;
+    const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+    for (const memory of memories) {
+      const citations: RepositoryCitation[] = composeCitation ? [composeCitation] : memory.provenance
+        .map((provenance) => evidenceById.get(provenance.evidenceId))
+        .filter((item): item is DreamEvidence => Boolean(item))
+        .map((item) => ({
+          kind: 'session-event' as const,
+          sessionId: item.sessionId,
+          eventSeq: item.eventSeq,
+          outcome: item.kind === 'tool-success' ? 'success' as const : item.kind === 'tool-failure' ? 'failure' as const : undefined,
+        }));
+      if (citations.length === 0) continue;
+      try {
+        await this.repositoryMemory.remember({
+          statement: memory.insight,
+          category: memory.category,
+          source: composeCitation ? 'compose' : 'dream',
+          confidence: memory.confidence,
+          citations,
+          concepts: memory.tags,
+        });
+      } catch {
+        // Dream remains successful when optional repository-memory promotion is unavailable.
+      }
+    }
   }
 
   private isDue(state: DreamState): boolean {
