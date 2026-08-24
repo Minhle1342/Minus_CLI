@@ -1405,9 +1405,6 @@ async function main() {
         break;
       }
 
-      // In hộp yêu cầu của User
-      CLI.renderUserRequest(trimmed, modelName, agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort);
-
       // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
       const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace);
       if (attachmentResult.hasAttachments) {

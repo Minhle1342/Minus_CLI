@@ -955,20 +955,16 @@ export class CLI {
       `${c.gray}💡 Lệnh nhanh:${c.reset}  Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để mở menu${c.reset}`,
     ];
 
-    console.log(`\n${c.cyan}${c.bold}╭────────────────────────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}${c.bold}⚡ MINUS CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}               ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}       ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}├───────────────────────┬────────────────────────────────────────────────────┤${c.reset}`);
+    console.log(`\n  ${c.emerald}${c.bold}⚡ MINUS CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}`);
+    console.log(`  ${c.dim}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}\n`);
 
     for (let i = 0; i < 7; i++) {
-      const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 21);
-      const rightCol = padRightVisible(infoLines[i] || '', 50);
-      console.log(`${c.cyan}${c.bold}│${c.reset} ${leftCol} ${c.cyan}${c.bold}│${c.reset}  ${rightCol} ${c.cyan}${c.bold}│${c.reset}`);
+      const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 22);
+      const rightCol = infoLines[i] || '';
+      console.log(`${leftCol}  ${rightCol}`);
     }
 
-    console.log(`${c.cyan}${c.bold}├───────────────────────┴────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}🐱 ${cat.name}:${c.reset} ${c.dim}${cat.badge}${c.reset} • ${c.gray}Nhập ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`\n  ${c.emerald}🐱 ${cat.name}:${c.reset} ${c.dim}${cat.badge}${c.reset} • ${c.gray}Nhập ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}\n`);
   }
 
   /**
@@ -1255,19 +1251,19 @@ export class CLI {
       ? `${c.brightGreen}${c.bold}ON (Unlimited steps ∞)${c.reset}`
       : `${c.yellow}OFF (${opts.maxSteps} steps)${c.reset}`;
 
-    console.log(`\n${c.magenta}${c.bold}╭── 📊 SESSION TELEMETRY & STATUS ───────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
+    console.log(`\n${c.magenta}${c.bold}📊 SESSION TELEMETRY & STATUS${c.reset}`);
+    console.log(`  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
+    console.log(`  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
     if (opts.sandboxStatus) {
-      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Sandbox:${c.reset}       ${opts.sandboxStatus}`);
+      console.log(`  ${c.bold}Sandbox:${c.reset}       ${opts.sandboxStatus}`);
     }
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
+    console.log(`  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
+    console.log(`  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
+    console.log(`  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
     if (opts.sessionFile) {
-      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Persisted in:${c.reset}  ${c.dim}${opts.sessionFile}${c.reset}`);
+      console.log(`  ${c.bold}Persisted in:${c.reset}  ${c.dim}${opts.sessionFile}${c.reset}`);
     }
-    console.log(`${c.magenta}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log('');
   }
 
   /**
@@ -1460,21 +1456,21 @@ export class CLI {
     totalCachedTokens?: number;
     lastHitRate?: number;
   }): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (MINUS STANDARD) ──────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tool Declarations:${c.reset}      ${c.brightGreen}✔ Deterministic Alphabetical Ordering${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.brightGreen + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Affinity Routing:${c.reset}       ${c.brightGreen}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Observability:${c.reset}          ${c.brightGreen}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (MINUS STANDARD)${c.reset}`);
+    console.log(`  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
+    console.log(`  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
+    console.log(`  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
+    console.log(`  ${c.bold}Tool Declarations:${c.reset}      ${c.brightGreen}✔ Deterministic Alphabetical Ordering${c.reset}`);
+    console.log(`  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.brightGreen + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
+    console.log(`  ${c.bold}Affinity Routing:${c.reset}       ${c.brightGreen}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
+    console.log(`  ${c.bold}Observability:${c.reset}          ${c.brightGreen}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
     if (info.sessionId) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Session Cache Key:${c.reset}      ${c.dim}${info.sessionId.slice(0, 32)}${c.reset}`);
+      console.log(`  ${c.bold}Session Cache Key:${c.reset}      ${c.dim}${info.sessionId.slice(0, 32)}${c.reset}`);
     }
     if (info.lastHitRate !== undefined) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.brightYellow}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
+      console.log(`  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.brightYellow}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
     }
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log('');
   }
 
   /**
@@ -1526,23 +1522,40 @@ export class CLI {
   }
 
   /**
-   * Hiển thị Final Answer chuẩn Codex CLI với Grapheme Typewriter Streaming
+   * Tự động loại bỏ các tiền tố quy tắc nội bộ / Verification Ladder thừa trước khi in ra màn hình
+   */
+  static cleanFinalAnswerContent(text: string): string {
+    let cleaned = text.trim();
+
+    // Xóa câu quy tắc thừa "Code changes must end with an explicit test/build verification step."
+    cleaned = cleaned.replace(/^\s*Code changes must end with an explicit test\/build verification step\.?\s*/i, '');
+
+    // Xóa khối "[Verification Ladder Result] ... [Final Result]" hoặc "[Verification Ladder Result] ..."
+    cleaned = cleaned.replace(/^\s*\[Verification Ladder Result\][\s\S]*?\[Final Result\]\s*/i, '');
+    cleaned = cleaned.replace(/^\s*\[Verification Ladder Result\][\s\S]*?(?=\n\n|\n[A-Z#Đ-Ưa-z])/i, '');
+    cleaned = cleaned.replace(/^\s*\[Final Result\]\s*/i, '');
+
+    return cleaned.trim();
+  }
+
+  /**
+   * Hiển thị Final Answer chuẩn Codex CLI (in trực tiếp nội dung LLM không kèm viền header)
    */
   static async renderFinalAnswer(answer: string, options: { animate?: boolean } = {}): Promise<void> {
-    const content = answer.trim();
-    const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
-    
-    console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
-    
-    const formatted = CLI.formatMarkdownTerminal(content);
+    const rawContent = CLI.cleanFinalAnswerContent(answer);
+    if (!rawContent) return;
 
+    const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
+    const formatted = CLI.formatMarkdownTerminal(rawContent);
+
+    console.log('');
     if (shouldAnimate) {
       await writeTypewriterText(formatted);
       process.stdout.write('\n');
     } else {
       console.log(formatted);
     }
-    console.log(`\n${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log('');
   }
 
   /**
@@ -1742,18 +1755,7 @@ export class CLI {
     console.log(`  ${c.bold}/tokens reset${c.reset}                                        : Khôi phục về mặc định của mô hình\n`);
   }
 
-  /**
-   * Hiển thị hộp yêu cầu của User kèm Model và Reasoning Effort đang được chọn bên dưới
-   */
-  static renderUserRequest(userPrompt: string, modelName: string, effort?: string): void {
-    const effortLabel = effort || 'medium';
-    console.log(`\n${c.cyan}${c.bold}┌── 💬 USER REQUEST ─────────────────────────────────────────────────────────┐${c.reset}`);
-    console.log(`${c.bold}${userPrompt}${c.reset}`);
-    const rawTagLength = `└── 🤖 ${modelName} (effort: ${effortLabel}) `.length;
-    const remainingDashes = Math.max(2, 77 - rawTagLength);
-    const border = '─'.repeat(remainingDashes) + '┘';
-    console.log(`${c.cyan}${c.bold}└── ${c.brightCyan}🤖 ${modelName}${c.reset} ${c.gray}(effort: ${c.yellow}${c.bold}${effortLabel}${c.gray})${c.cyan}${c.bold} ${border}${c.reset}`);
-  }
+
 
   /**
    * Dấu nhắc lệnh người dùng (Prompt Symbol)
