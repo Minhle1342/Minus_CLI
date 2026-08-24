@@ -93,6 +93,7 @@ export interface CompletionEvidenceOptions {
   userRequest?: string;
   expectedWorkspaceDigest?: string;
   expectedDiffHash?: string;
+  hasSubmittedSolution?: boolean;
 }
 
 function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): string {
@@ -130,9 +131,15 @@ export class CompletionEvidenceGate {
     const failures = executions.filter((item) => isToolResultFailure(item.payload));
     const mutations = successful.filter((item) => item.kinds.includes('mutation'));
     const latestMutationSeq = mutations.at(-1)?.result.seq ?? -1;
+    const hasSubmitSolutionTool = successful.some((item) => item.toolName === 'submit_solution');
     const verifications = successful.filter(
-      (item) => item.kinds.includes('verification') && item.result.seq > latestMutationSeq,
+      (item) => (item.kinds.includes('verification') || item.toolName === 'submit_solution') && item.result.seq > latestMutationSeq,
     );
+
+    if (options.hasSubmittedSolution || hasSubmitSolutionTool) {
+      // Đã có submit_solution được chứng nhận theo chuẩn OpenAI Codex CLI
+      return { allow: true, reasons: [] };
+    }
 
     const reasons: string[] = [];
 

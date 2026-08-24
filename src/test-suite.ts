@@ -2492,9 +2492,9 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(
     Boolean(slashHintWrites.at(-1)?.includes('/session')
       && slashHintWrites.at(-1)?.includes('/sessions')
-      && slashHintWrites.at(-1)?.includes('\n\n\n\n\n\n\n\x1b[7A')
-      && slashHintWrites.at(-1)?.includes('\x1b[s')
-      && slashHintWrites.at(-1)?.includes('\x1b[u')),
+      && slashHintWrites.at(-1)?.includes('\x1b[2K')
+      && slashHintWrites.at(-1)?.includes('\x1b[?25l')
+      && slashHintWrites.at(-1)?.includes('\x1b[?25h')),
     'Realtime slash hints render dưới input và khôi phục cursor readline',
   );
   const writesBeforeDuplicateUpdate = slashHintWrites.length;
@@ -2505,7 +2505,7 @@ export async function calculateTotal(items: any[]): Promise<number> {
   );
   slashHints.update('normal prompt');
   assert(
-    Boolean(slashHintWrites.at(-1)?.includes('\x1b[0J') && !slashHintWrites.at(-1)?.includes('/session')),
+    Boolean(slashHintWrites.at(-1)?.includes('\x1b[2K') && !slashHintWrites.at(-1)?.includes('/session')),
     'Realtime slash hints tự xoá khi input không còn là slash command',
   );
 
@@ -4274,6 +4274,16 @@ Always write tests first!`;
   assert(criticResult.score < 80, 'CriticGate hạ điểm chất lượng khi chưa có verification');
   assert(Boolean(criticResult.critiquePrompt?.includes('[CRITIC GATE REJECTION')), 'CriticGate sinh critiquePrompt chi tiết');
 
+  const criticApprovedResult = testCriticGate.evaluate({
+    finalAnswer: 'Tôi đã sửa xong lỗi và chạy npm test pass 100%.',
+    session: evalSession,
+    workspace: testWorkspace,
+    userRequest: 'Fix auth and verify with tests',
+    hasSubmittedSolution: true,
+  });
+  assert(criticApprovedResult.approved === true, 'CriticGate phê duyệt khi hasSubmittedSolution = true theo chuẩn Codex CLI');
+  assert(criticApprovedResult.score >= 80, 'CriticGate duy trì điểm cao khi đã submit solution');
+
   console.log('\n========================================');
   console.log('🧪 30. KIỂM THỬ CODEX CLI 5 MAJOR ARCHITECTURAL UPGRADES');
   console.log('========================================');
@@ -4303,6 +4313,14 @@ Always write tests first!`;
   // Kiểm thử classifyToolEvidence với submit_solution
   const submitEvidenceKinds = classifyToolEvidence('submit_solution', {}, { success: true, submitted: true });
   assert(submitEvidenceKinds.includes('verification'), 'classifyToolEvidence định danh submit_solution là verification evidence');
+
+  const evidenceGateWithSubmit = new CompletionEvidenceGate();
+  const evidenceDecisionWithSubmit = evidenceGateWithSubmit.evaluate('Tôi sẽ tóm tắt kết quả', evalSession, { hasSubmittedSolution: true });
+  assert(evidenceDecisionWithSubmit.allow === true, 'CompletionEvidenceGate chấp thuận khi hasSubmittedSolution = true');
+
+  const finalGuardWithSubmit = new FinalAnswerGuard();
+  const finalDecisionWithSubmit = finalGuardWithSubmit.evaluate('Bây giờ tôi sẽ tổng kết kết quả cho bạn', { hasSubmittedSolution: true });
+  assert(finalDecisionWithSubmit.allow === true, 'FinalAnswerGuard chấp thuận khi hasSubmittedSolution = true');
 
   // Kiểm thử LoopProgressGuard phát hiện vòng lặp xen kẽ (Alternating Loop Ping-Pong)
   const alternatingGuard = new LoopProgressGuard();

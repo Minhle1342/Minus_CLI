@@ -150,8 +150,8 @@ export interface SlashHintTerminal {
 
 /** Renders transient hints below readline's active input while preserving its cursor position. */
 export class RealtimeSlashCommandHints {
-  private static readonly RESERVED_ROWS = 7;
   private visible = false;
+  private renderedRows = 0;
   private renderKey?: string;
 
   constructor(
@@ -171,7 +171,7 @@ export class RealtimeSlashCommandHints {
         const suggestions = FileMentionEngine.getFileSuggestions(line, workspace, Math.max(0, cursorColumn - 2), 5);
         if (suggestions.length > 0) {
           const width = Math.max(40, this.terminal.columns || 80);
-          const nextRenderKey = `@\u0000${line}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
+          const nextRenderKey = `@\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
           if (this.visible && this.renderKey === nextRenderKey) return;
 
           const rows = suggestions.map((item, index) => {
@@ -187,7 +187,6 @@ export class RealtimeSlashCommandHints {
           const footer = `${c.gray}  Tab: hoàn thành @path • Enter: gửi prompt đính kèm${c.reset}`;
           this.renderBelowInput(
             [`${c.cyan}${c.bold}📎 Gợi ý đính kèm File / Thư mục (@):${c.reset}`, ...rows, footer],
-            this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
             cursorColumn,
           );
           this.visible = true;
@@ -200,12 +199,12 @@ export class RealtimeSlashCommandHints {
     // 2. Kiểm tra nếu là Slash Command (/...)
     const suggestions = getSlashCommandSuggestions(line);
     if (suggestions.length === 0) {
-      this.clear();
+      this.clear(cursorColumn);
       return;
     }
 
     const width = Math.max(40, this.terminal.columns || 80);
-    const nextRenderKey = `/\u0000${line}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+    const nextRenderKey = `/\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
     if (this.visible && this.renderKey === nextRenderKey) return;
     const commandWidth = Math.min(
       Math.max(12, Math.floor(width * 0.45)),
@@ -222,16 +221,15 @@ export class RealtimeSlashCommandHints {
     const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
     this.renderBelowInput(
       [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
-      this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
       cursorColumn,
     );
     this.visible = true;
     this.renderKey = nextRenderKey;
   }
 
-  clear(): void {
+  clear(cursorColumn = 0): void {
     if (!this.terminal.isTTY || !this.visible) return;
-    this.renderBelowInput([]);
+    this.renderBelowInput([], cursorColumn);
     this.visible = false;
     this.renderKey = undefined;
   }
@@ -240,12 +238,30 @@ export class RealtimeSlashCommandHints {
     this.clear();
   }
 
-  private renderBelowInput(lines: string[], reserveRows = 0, cursorColumn = 0): void {
-    const body = lines.length > 0 ? lines.join('\r\n') : '';
-    const reservation = reserveRows > 0
-      ? `${'\n'.repeat(reserveRows)}\x1b[${reserveRows}A\r${cursorColumn > 0 ? `\x1b[${cursorColumn}C` : ''}`
-      : '';
-    this.terminal.write(`\x1b[?25l${reservation}\x1b[s\x1b[1E\x1b[0J${body}\x1b[u\x1b[?25h`);
+  private renderBelowInput(lines: string[], cursorColumn = 0): void {
+    const prevRows = this.renderedRows;
+    const nextRows = lines.length;
+    const maxRows = Math.max(prevRows, nextRows);
+
+    if (maxRows === 0) return;
+
+    let buf = '\x1b[?25l'; // Ẩn con trỏ
+
+    // Ghi từng dòng hint kèm xóa sạch dòng cũ (Clear Line \x1b[2K)
+    for (let i = 0; i < maxRows; i++) {
+      const lineContent = i < nextRows ? lines[i] : '';
+      buf += `\r\n\x1b[2K${lineContent}`;
+    }
+
+    // Di chuyển con trỏ ngược lên lại dòng nhập liệu và phục hồi vị trí con trỏ ngang
+    buf += `\x1b[${maxRows}A\r`;
+    if (cursorColumn > 0) {
+      buf += `\x1b[${cursorColumn}C`;
+    }
+    buf += '\x1b[?25h'; // Hiện lại con trỏ
+
+    this.terminal.write(buf);
+    this.renderedRows = nextRows;
   }
 }
 
@@ -1413,9 +1429,24 @@ export class CLI {
   }
 
   /**
-   * Dấu nhắc lệnh người dùng
+   * Hiển thị hộp yêu cầu của User kèm Model và Reasoning Effort đang được chọn bên dưới
    */
-  static getPromptSymbol(): string {
-    return `${c.brightCyan}${c.bold}❯${c.reset} `;
+  static renderUserRequest(userPrompt: string, modelName: string, effort?: string): void {
+    const effortLabel = effort || 'medium';
+    console.log(`\n${c.cyan}${c.bold}┌── 💬 USER REQUEST ─────────────────────────────────────────────────────────┐${c.reset}`);
+    console.log(`${c.bold}${userPrompt}${c.reset}`);
+    const rawTagLength = `└── 🤖 ${modelName} (effort: ${effortLabel}) `.length;
+    const remainingDashes = Math.max(2, 77 - rawTagLength);
+    const border = '─'.repeat(remainingDashes) + '┘';
+    console.log(`${c.cyan}${c.bold}└── ${c.brightCyan}🤖 ${modelName}${c.reset} ${c.gray}(effort: ${c.yellow}${c.bold}${effortLabel}${c.gray})${c.cyan}${c.bold} ${border}${c.reset}`);
+  }
+
+  /**
+   * Dấu nhắc lệnh người dùng kèm theo Model và Reasoning Effort hiển thị bên trên dòng input
+   */
+  static getPromptSymbol(modelName?: string, effort?: string): string {
+    if (!modelName) return `${c.brightCyan}${c.bold}❯${c.reset} `;
+    const effortLabel = effort || 'medium';
+    return `\n${c.gray}🤖 ${c.brightCyan}${c.bold}${modelName}${c.reset} ${c.gray}(effort: ${c.yellow}${c.bold}${effortLabel}${c.gray})${c.reset}\n${c.brightCyan}${c.bold}❯${c.reset} `;
   }
 }

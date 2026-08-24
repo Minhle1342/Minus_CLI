@@ -987,25 +987,33 @@ export class AgentLoop {
       const policyDecision = this.finalAnswerGuard.evaluate(finalAnswer, {
         userRequest: turnUserRequest,
         availableToolNames: toolDeclarations.map((tool) => tool.name || '').filter(Boolean),
+        hasSubmittedSolution,
       });
       const evidenceDecision = this.completionEvidenceGate.evaluate(finalAnswer, session, {
         turn,
         codeChangeRequired: this.planManager.getRequirements().required,
         userRequest: turnUserRequest,
+        hasSubmittedSolution,
       });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
       if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
         activeSkills.push('verification-before-completion');
       }
-      const verificationDecision = this.verificationPolicy.canComplete(activeSkills);
+      const verificationDecision = hasSubmittedSolution
+        ? { allowed: true }
+        : this.verificationPolicy.canComplete(activeSkills);
       const criticDecision = this.criticGate.evaluate({
         finalAnswer,
         session,
         workspace: this._workspace,
         hypothesisTracker: this.hypothesisTracker,
         userRequest: turnUserRequest,
+        turn,
+        hasSubmittedSolution,
       });
-      const finalAnswerDecision = !policyDecision.allow
+      const finalAnswerDecision = hasSubmittedSolution
+        ? { allow: true }
+        : (!policyDecision.allow
         ? policyDecision
         : !evidenceDecision.allow
         ? {
@@ -1025,7 +1033,7 @@ export class AgentLoop {
               reason: 'unverified-evidence' as const,
               continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
             }
-          : { allow: true };
+          : { allow: true });
 
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;

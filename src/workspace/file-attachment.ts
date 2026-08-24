@@ -235,11 +235,11 @@ export class FileMentionEngine {
     const suggestions = this.getFileSuggestions(line, workspace, line.length, 10);
     if (suggestions.length === 0) return [[], line];
 
-    // Thay thế phần `@query` bằng `@displayPath`
+    // Thay thế phần `@query` bằng `@displayPath` của gợi ý khớp nhất
     const prefixBeforeAt = line.slice(0, mention.start);
     const completions = suggestions.map((s) => `${prefixBeforeAt}@${s.displayPath}`);
 
-    return [completions, line];
+    return [completions.slice(0, 1), line];
   }
 
   private static levenshtein(a: string, b: string): number {

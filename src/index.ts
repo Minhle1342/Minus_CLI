@@ -583,15 +583,19 @@ async function main() {
   const rl = readline.createInterface({ input, output, completer });
   const slashHints = new RealtimeSlashCommandHints(output, () => activeWorkspaceRef);
   let slashHintRefreshScheduled = false;
-  const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean }): void => {
+  const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
     if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
-      slashHints.clear();
+      slashHints.clear(rl.cursor + 2);
+      return;
+    }
+    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, Escape, v.v.) tránh vỡ UI
+    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'escape', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
       return;
     }
     const removesOnlySlash = rl.line === '/'
       && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
     if (removesOnlySlash) {
-      slashHints.clear();
+      slashHints.clear(rl.cursor + 2);
       return;
     }
     if (slashHintRefreshScheduled) return;
@@ -605,11 +609,66 @@ async function main() {
   // Character updates are deferred, so prepending does not read stale rl.line state.
   input.prependListener('keypress', handleInputKeypress);
 
+  /**
+   * Xả sạch mọi dữ liệu tồn đọng trong stdin stream và readline buffer
+   * Đảm bảo các prompt xác nhận quyền hoặc menu không bị nhận ký tự thừa từ lần nhập/dán trước.
+   */
+  function flushStdin(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream): void {
+    try {
+      while (inputStream.read() !== null) {}
+    } catch {}
+    try {
+      (rlInterface as any).line = '';
+      (rlInterface as any).cursor = 0;
+    } catch {}
+  }
+
+  /**
+   * Đọc User Prompt từ bàn phím, tự động gộp các dòng nếu người dùng dán (paste) đoạn văn bản nhiều dòng
+   */
+  async function readUserPrompt(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream, promptSymbol: string): Promise<string> {
+    const firstLine = await rlInterface.question(promptSymbol);
+    const lines: string[] = [firstLine];
+
+    // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây
+    while (true) {
+      const pendingLine = (rlInterface as any).line;
+      if (typeof pendingLine === 'string' && pendingLine.length > 0) {
+        lines.push(pendingLine);
+        (rlInterface as any).line = '';
+        (rlInterface as any).cursor = 0;
+        continue;
+      }
+
+      const hasMore = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 30);
+        const onLine = (extraLine: string) => {
+          clearTimeout(timer);
+          lines.push(extraLine);
+          resolve(true);
+        };
+        rlInterface.once('line', onLine);
+      });
+
+      if (!hasMore) {
+        break;
+      }
+    }
+
+    flushStdin(rlInterface, inputStream);
+    return lines.join('\n');
+  }
+
   // Đăng ký Permission Prompt Handler cho interactive CLI mode
   kernel.ctx.permissions.setPromptHandler(async (request) => {
     slashHints.clear();
+    // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
+    flushStdin(rl, input);
+
     CLI.renderPermissionPrompt(request);
     const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    flushStdin(rl, input);
+
     if (answer === 'y' || answer === 'yes' || answer === '') {
       return 'approve';
     }
@@ -621,7 +680,7 @@ async function main() {
 
   try {
     while (true) {
-      const userPrompt = await rl.question(CLI.getPromptSymbol());
+      const userPrompt = await readUserPrompt(rl, input, CLI.getPromptSymbol());
       const trimmed = userPrompt.trim();
 
       if (!trimmed) {
@@ -1339,9 +1398,7 @@ async function main() {
       }
 
       // In hộp yêu cầu của User
-      console.log(`\n${c.cyan}${c.bold}┌── 💬 USER REQUEST ─────────────────────────────────────────────────────────┐${c.reset}`);
-      console.log(`${c.bold}${trimmed}${c.reset}`);
-      console.log(`${c.cyan}${c.bold}└────────────────────────────────────────────────────────────────────────────┘${c.reset}`);
+      CLI.renderUserRequest(trimmed, modelName, agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort);
 
       // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
       const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace);

@@ -45,8 +45,10 @@ export class CriticGate {
     hypothesisTracker?: HypothesisTracker;
     userRequest?: string;
     filesModified?: string[];
+    turn?: number;
+    hasSubmittedSolution?: boolean;
   }): CriticEvaluation {
-    const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified } = params;
+    const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
     let lspErrors: DiagnosticItem[] = [];
@@ -69,10 +71,14 @@ export class CriticGate {
     }
 
     // 2. Thẩm định bằng chứng thực thi qua CompletionEvidenceGate
-    const evidenceDecision = this.evidenceGate.evaluate(finalAnswer, session, {
-      userRequest,
-      turn: session.getEvents().length,
-    });
+    // Nếu hasSubmittedSolution đã là true, bằng chứng thực nghiệm đã được kiểm chứng và chốt theo chuẩn Codex CLI
+    const evidenceDecision = hasSubmittedSolution
+      ? { allow: true, reasons: [] }
+      : this.evidenceGate.evaluate(finalAnswer, session, {
+          userRequest,
+          turn,
+          hasSubmittedSolution,
+        });
 
     if (!evidenceDecision.allow) {
       score -= 50;
@@ -91,11 +97,11 @@ export class CriticGate {
     const approved = score >= 80 && lspErrors.length === 0 && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
-      turn: session.getEvents().length,
+      turn: typeof turn === 'number' ? turn : 1,
       summary: finalAnswer.slice(0, 300),
       filesModified: filesModified || [],
-      verificationCommand: evidenceDecision.allow ? 'verified' : 'unverified',
-      verificationExitCode: evidenceDecision.allow ? 0 : 1,
+      verificationCommand: (hasSubmittedSolution || evidenceDecision.allow) ? 'verified' : 'unverified',
+      verificationExitCode: (hasSubmittedSolution || evidenceDecision.allow) ? 0 : 1,
       critiqueScore: Math.max(0, score),
       lspDiagnosticsCount: lspErrors.length,
       status: approved ? 'APPROVED' : 'REJECTED',

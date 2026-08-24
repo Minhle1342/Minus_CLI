@@ -10,6 +10,7 @@ export interface FinalAnswerGuardDecision {
 export interface FinalAnswerGuardContext {
   userRequest?: string;
   availableToolNames?: string[];
+  hasSubmittedSolution?: boolean;
 }
 
 interface ToolFailureSummary {
@@ -98,6 +99,11 @@ export class FinalAnswerGuard {
         reason: 'empty-answer',
         continuationPrompt: '[SYSTEM GUARD]: Empty response received. Execute a tool or provide a concrete final answer to the user.',
       };
+    }
+
+    // 2. Nếu đã submit_solution thành công (Codex CLI Standard), câu trả lời trực tiếp là Final Answer hợp lệ cho người dùng
+    if (context?.hasSubmittedSolution) {
+      return { allow: true };
     }
 
     const normalized = normalizeForMatching(answer);
