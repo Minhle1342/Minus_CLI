@@ -38,10 +38,51 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
     const acceptanceCriteria = typeof candidate.acceptanceCriteria === 'string'
       ? candidate.acceptanceCriteria.trim()
       : undefined;
+    const normalizeNumberArray = (value: unknown, field: string): number[] | undefined => {
+      if (value === undefined) return undefined;
+      if (!Array.isArray(value)) throw new Error(`tasks[${index}].${field} must be an array of positive task IDs.`);
+      const numbers = value.map(Number);
+      if (numbers.some((item) => !Number.isInteger(item) || item < 1)) {
+        throw new Error(`tasks[${index}].${field} must contain only positive task IDs.`);
+      }
+      return [...new Set(numbers)];
+    };
+    const normalizeStringArray = (value: unknown, field: string): string[] | undefined => {
+      if (value === undefined) return undefined;
+      if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim())) {
+        throw new Error(`tasks[${index}].${field} must contain only non-empty strings.`);
+      }
+      return [...new Set(value.map((item) => String(item).trim()))];
+    };
+    let dependsOn: number[] | undefined;
+    let readSet: string[] | undefined;
+    let writeSet: string[] | undefined;
+    let symbols: string[] | undefined;
+    try {
+      dependsOn = normalizeNumberArray(candidate.dependsOn, 'dependsOn');
+      readSet = normalizeStringArray(candidate.readSet, 'readSet');
+      writeSet = normalizeStringArray(candidate.writeSet, 'writeSet');
+      symbols = normalizeStringArray(candidate.symbols, 'symbols');
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    const parentId = candidate.parentId === undefined ? undefined : Number(candidate.parentId);
+    if (parentId !== undefined && (!Number.isInteger(parentId) || parentId < 1)) {
+      return { error: `tasks[${index}].parentId must be a positive task ID.` };
+    }
     tasks.push({
       ...(id === undefined ? {} : { id }),
       title: candidate.title.trim(),
       ...(acceptanceCriteria ? { acceptanceCriteria } : {}),
+      ...(dependsOn === undefined ? {} : { dependsOn }),
+      ...(parentId === undefined ? {} : { parentId }),
+      ...(readSet === undefined ? {} : { readSet }),
+      ...(writeSet === undefined ? {} : { writeSet }),
+      ...(symbols === undefined ? {} : { symbols }),
+      ...(typeof candidate.parallelizable === 'boolean' ? { parallelizable: candidate.parallelizable } : {}),
+      ...(Number.isFinite(candidate.priority) ? { priority: Number(candidate.priority) } : {}),
+      ...(Number.isFinite(candidate.estimatedCost) ? { estimatedCost: Number(candidate.estimatedCost) } : {}),
+      ...(typeof candidate.risk === 'string' ? { risk: candidate.risk.toUpperCase() as PlanTaskInput['risk'] } : {}),
     });
   }
 
@@ -52,7 +93,7 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
 export function createPlanTool(planManager: PlanManager): ToolDefinition {
   return {
     name: 'create_plan',
-    description: 'Create a 3-7 step execution plan for complex coding work. Each task must be atomic, must not repeat the user request, and code changes must end with an explicit test/build verification step.',
+    description: 'Create a dependency-aware task DAG for complex coding work. Tasks may declare dependencies, code read/write sets, symbols, risk, priority, and safe parallelism. Omitted dependsOn preserves sequential ordering.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -74,6 +115,19 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
                 type: Type.STRING,
                 description: 'Observable condition proving this step is complete. If omitted, the harness derives a conservative criterion from the title.',
               },
+              dependsOn: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: 'Task IDs that must complete first. Use [] for an independent root task; omit for legacy sequential ordering.',
+              },
+              parentId: { type: Type.NUMBER, description: 'Optional hierarchy-only parent task ID.' },
+              readSet: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Workspace files/directories this task expects to read.' },
+              writeSet: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Workspace files/directories this task expects to mutate.' },
+              symbols: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Code symbols anchoring task-specific repository context.' },
+              parallelizable: { type: Type.BOOLEAN, description: 'True only when the task may run beside other disjoint graph-ready tasks.' },
+              priority: { type: Type.NUMBER, description: 'Scheduler priority; higher values run first among ready tasks.' },
+              estimatedCost: { type: Type.NUMBER, description: 'Relative positive execution cost used for critical-path ranking.' },
+              risk: { type: Type.STRING, enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'], description: 'Change risk used by the scheduler and review policy.' },
             },
             required: ['title'],
           },
@@ -99,6 +153,7 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
         return {
           message: `Created an execution plan with ${tasks.length} steps.`,
           tasks,
+          graph: planManager.getTaskGraph(),
           requirements: planManager.getRequirements(),
         };
       } catch (error) {
@@ -113,11 +168,11 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
   };
 }
 
-/** Advance only the currently active task after observed execution evidence. */
+/** Advance graph-ready tasks after observed execution evidence. */
 export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefinition {
   return {
     name: 'update_plan_task',
-    description: 'Update only the active execution-plan task. COMPLETED requires successful tool evidence observed by the harness; FAILED/SKIPPED require a concrete explanation.',
+    description: 'Start or finish a graph-ready execution task. Dependencies and write-set conflicts are enforced; COMPLETED requires successful tool evidence observed by the harness.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -205,7 +260,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
 
         const existingTasks = planManager.getTasks();
         // If task ID is not found, dynamically register it if under limit (Codex/Antigravity dynamic expansion)
-        if (existingTasks.length < 7 && !existingTasks.some((t) => t.id === id)) {
+        if (existingTasks.length < planManager.getRequirements().maximumTasks && !existingTasks.some((t) => t.id === id)) {
           const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
             || (typeof args.notes === 'string' && args.notes.trim())
             || `Task #${id}`;
@@ -236,6 +291,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
         message: `Updated step #${id} to ${status}.`,
         task: updated,
         progress: planManager.getProgress(),
+        graph: planManager.getTaskGraph(),
       };
     },
   };

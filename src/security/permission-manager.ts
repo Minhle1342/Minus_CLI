@@ -114,6 +114,7 @@ export class PermissionManager {
         return {
           allowed: false,
           errorCode: 'APPROVAL_REQUIRED',
+          permissionRequestId: request.id,
           reason: `Lệnh "${request.target}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (MINUS PERMISSION APPROVAL) trực tiếp từ người dùng.`,
         };
       }
@@ -148,6 +149,7 @@ export class PermissionManager {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
+          permissionRequestId: request.id,
           reason: `Người dùng đã từ chối thực thi lệnh shell "${request.target}". Vui lòng chuyển sang sử dụng tool chuyên dụng được khuyến nghị: "${misuse.tool}" (${misuse.reason}).`,
           recommendedTool: misuse.tool,
           recommendedArgs: misuse.suggestedArgs,
@@ -157,12 +159,14 @@ export class PermissionManager {
       return {
         allowed: false,
         errorCode: 'PERMISSION_DENIED',
+        permissionRequestId: request.id,
         reason: `Người dùng đã từ chối thao tác "${request.summary}" (${request.toolName}: ${request.target}).`,
       };
     } catch (err: any) {
       return {
         allowed: false,
         errorCode: 'PERMISSION_ERROR',
+        permissionRequestId: request.id,
         reason: `Lỗi khi xử lý phê duyệt quyền: ${err.message}`,
       };
     }

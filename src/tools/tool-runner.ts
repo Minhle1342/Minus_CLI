@@ -10,6 +10,10 @@ export interface ToolExecutionResult {
   args: Record<string, any>;
   result: Record<string, any>;
   durationMs: number;
+  permission?: {
+    status: 'granted' | 'required' | 'denied' | 'error';
+    requestId?: string;
+  };
 }
 
 export interface ToolExecutionGuard {
@@ -63,6 +67,7 @@ export class ToolRunner {
   ): Promise<ToolExecutionResult> {
     const startTime = Date.now();
     let executionContext = context;
+    let permissionMetadata: ToolExecutionResult['permission'];
 
     // Stage 1: Tool Lookup
     const tool = this.registry.get(toolName);
@@ -172,9 +177,19 @@ export class ToolRunner {
           args: executionArgs,
           result: errorResult,
           durationMs: Date.now() - startTime,
+          permission: {
+            status: permCheck.errorCode === 'APPROVAL_REQUIRED'
+              ? 'required'
+              : permCheck.errorCode === 'PERMISSION_ERROR' ? 'error' : 'denied',
+            ...(permCheck.permissionRequestId ? { requestId: permCheck.permissionRequestId } : {}),
+          },
         };
       }
       if (permCheck.permissionGranted) {
+        permissionMetadata = {
+          status: 'granted',
+          ...(permCheck.permissionRequestId ? { requestId: permCheck.permissionRequestId } : {}),
+        };
         executionContext = {
           ...context,
           permissionGranted: true,
@@ -227,6 +242,7 @@ export class ToolRunner {
         args: executionArgs,
         result: deepFreeze(resultSnapshot),
         durationMs: Date.now() - startTime,
+        ...(permissionMetadata ? { permission: permissionMetadata } : {}),
       };
     } catch (err: any) {
       return {

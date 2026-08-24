@@ -106,6 +106,8 @@ export interface SessionEventData {
   planGoal?: string;
   planRequired?: boolean;
   planVerificationRequired?: boolean;
+  planEvidenceSeq?: number;
+  planLastMutationSeq?: number;
   plan?: Array<{
     id: number;
     title: string;
@@ -118,7 +120,20 @@ export interface SessionEventData {
       outcome: 'success' | 'failure';
       summary: string;
       recordedAt: string;
+      seq?: number;
+      permissionRequestId?: string;
     }>;
+    dependsOn?: number[];
+    parentId?: number;
+    readSet?: string[];
+    writeSet?: string[];
+    symbols?: string[];
+    parallelizable?: boolean;
+    priority?: number;
+    estimatedCost?: number;
+    risk?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    lastMutationSeq?: number;
+    permissionBlocker?: string;
   }>;
   goal?: GoalState | null;
   memory?: MemoryRecord | null;

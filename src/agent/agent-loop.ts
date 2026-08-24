@@ -1,6 +1,6 @@
 import { ToolRegistry } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
-import { ToolRunner } from '../tools/tool-runner.js';
+import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
 import { AgentLoopOptions } from './types.js';
@@ -37,6 +37,7 @@ import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js'
 import { summarizeStepWithCodestral, generateFallbackStepSummary } from './step-summarizer.js';
 import { classifyLLMError } from '../llm/error-handling.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
+import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -90,6 +91,7 @@ export class AgentLoop {
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
+  readonly repositoryMap: GraphRankedRepositoryMap;
   private lastToolExecution?: { toolName: string; result: any };
 
   constructor(
@@ -123,6 +125,7 @@ export class AgentLoop {
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
+      this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
       this.maxSteps = options?.maxSteps ?? 30;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
@@ -150,6 +153,7 @@ export class AgentLoop {
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
+      this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
@@ -194,6 +198,7 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
+    this.repositoryMap.setWorkspace(workspace);
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
       if (this.toolProvider === this.toolRegistry) {
@@ -501,7 +506,29 @@ export class AgentLoop {
           ].join('\n')
         : '';
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
-      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, composeContext, advicePrompt].filter(Boolean).join('\n\n');
+      const composeState = this.kernel?.ctx.compose.getState();
+      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      let repositoryContext = '';
+      if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel) {
+        try {
+          const repositoryQuery = [
+            activeStepQuery,
+            ...relevantMemory.map((item) => item.insight),
+          ].filter(Boolean).join('\n');
+          repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
+            maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+            seedFiles: [
+              ...(activeTask?.readSet || []),
+              ...(activeTask?.writeSet || []),
+              ...(composeState?.registeredFiles || []),
+            ],
+            seedSymbols: activeTask?.symbols || [],
+          });
+        } catch (error: any) {
+          repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
+        }
+      }
+      const dynamicExecutionContext = [memoryPrompt, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
 
       session.recordRequestHeader({
         turn,
@@ -793,7 +820,7 @@ export class AgentLoop {
 
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
           // Chặn các lệnh kiểm thử / submit dư thừa nếu nhiệm vụ đã được submit_solution hoàn tất và không có thay đổi file mới
-          let executionResult: { durationMs: number; result: Record<string, any> };
+          let executionResult: ToolExecutionResult;
           if (hasSubmittedSolution && (toolName === 'submit_solution' || (toolName === 'run_command' && isVerificationCommand(toolArgs.command)))) {
             const redundantPayload = {
               success: true,
@@ -802,7 +829,7 @@ export class AgentLoop {
               nextAction: 'final_answer',
               message: 'Solution has already been submitted and verified. No files have changed since submission. Do not execute further verification tools; conclude your turn with your final response to the user immediately.',
             };
-            executionResult = { durationMs: 0, result: redundantPayload };
+            executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else {
             // Chạy tool qua pipeline an toàn
             executionResult = await this.toolRunner.run(toolName, toolArgs, {
@@ -831,7 +858,11 @@ export class AgentLoop {
             durationMs: executionResult.durationMs,
           }, this._workspace);
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
-          this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result);
+          this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
+            granted: executionResult.permission?.status === 'granted',
+            requestId: executionResult.permission?.requestId,
+          });
+          this.repositoryMap.observeToolResult(toolName, toolArgs, executionResult.result);
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             this.verificationPolicy.recordModification(String(toolArgs.path || ''));
             hasSubmittedSolution = false;

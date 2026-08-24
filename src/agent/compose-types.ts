@@ -59,6 +59,21 @@ export interface ComposeGuardDecision {
   errorCode?: string;
 }
 
+export interface ComposeTaskGraphSummary {
+  nodes: Array<{
+    id: number;
+    title: string;
+    status: string;
+    dependsOn: number[];
+    readSet: string[];
+    writeSet: string[];
+    symbols: string[];
+    risk: string;
+  }>;
+  criticalPath: number[];
+  parallelBatches: number[][];
+}
+
 export interface ComposeAdvanceResult {
   state: ComposeState;
   message: string;
@@ -70,5 +85,6 @@ export interface ComposeAdvanceResult {
     specHash: string;
     testEvidence: string[];
     reviewSummary: string;
+    taskGraph?: ComposeTaskGraphSummary;
   };
 }

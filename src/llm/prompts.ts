@@ -150,6 +150,8 @@ Core Principles & Architectural Invariants:
       * PLAYBOOK C (Safe Mutation & Verification): \`get_symbol_context_360\` → \`replace_text\` / \`apply_patch\` → \`get_diagnostics\` → \`run_command(npm test)\`.
       * PLAYBOOK D (Long-Running & Interactive Tasks): \`run_command(WaitMsBeforeAsync=5000)\` → \`manage_task(send_input)\` if prompt → \`schedule(TimerCondition)\` to wait reactively without polling.
       * PLAYBOOK E (Multi-Agent Swarm & Shared Context): \`spawn_agent\` → \`write_shared_context(OCC versionHash)\` → \`publish_agent_event\` → \`wait_agent\`.
-      * PLAYBOOK F (Plan & Goal Lifecycle): \`create_plan\` → \`update_plan_task(status='IN_PROGRESS')\` → Execute/Verify → \`update_plan_task(status='COMPLETED')\` → \`submit_solution\`.`;
+      * PLAYBOOK F (Dependency-aware Plan & Goal Lifecycle): \`create_plan\` with explicit \`dependsOn\`, code read/write sets, symbols, risk, cost, and priority → execute only READY nodes → parallelize only independent tasks with disjoint write sets → verify after the last mutation → \`update_plan_task(status='COMPLETED')\` → \`submit_solution\`.
+      * Treat the injected GRAPH-RANKED REPOSITORY MAP as a compact navigation prior: inspect its high-ranked definitions and dependency/impact neighbors first, but confirm uncertain details with semantic tools before mutation.
+      * Permission-blocked DAG nodes are resumable operator gates, not tool failures. Preserve the permission request ID and wait for explicit user approval instead of bypassing or rewriting the command.`;
 
 

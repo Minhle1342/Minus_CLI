@@ -18,6 +18,10 @@ export interface AgentLoopOptions {
   enableDynamicToolRetrieval?: boolean;
   enablePromptCaching?: boolean;
   enableStepSummarization?: boolean;
+  /** Inject a task-personalized graph-ranked repository map into dynamic context. */
+  enableGraphRepositoryMap?: boolean;
+  /** Maximum estimated tokens reserved for the graph-ranked repository map. */
+  repositoryMapTokens?: number;
 }
 
 export type AgentState =

@@ -5,6 +5,7 @@ import type { ProjectMemoryManager, MemoryConsolidationPlan } from '../memory/pr
 import type { MemoryProvenance, MemoryRecord } from '../memory/types.js';
 import { writeFileAtomically } from '../memory/atomic-write.js';
 import { Workspace } from '../workspace/workspace.js';
+import type { ComposeTaskGraphSummary } from '../agent/compose-types.js';
 import { CodestralDreamAgent } from './codestral-dream-agent.js';
 import { DreamTrajectoryReader } from './trajectory-reader.js';
 import type {
@@ -97,6 +98,7 @@ export interface ComposeDreamCompletion {
   specHash: string;
   testEvidence: string[];
   reviewSummary: string;
+  taskGraph?: ComposeTaskGraphSummary;
 }
 
 export class DreamManager {
@@ -162,6 +164,18 @@ export class DreamManager {
       objective: redactComposeText(completion.objective),
       reviewSummary: redactComposeText(completion.reviewSummary),
       testEvidence: completion.testEvidence.map(redactComposeText),
+      ...(completion.taskGraph ? {
+        taskGraph: {
+          ...completion.taskGraph,
+          nodes: completion.taskGraph.nodes.map((node) => ({
+            ...node,
+            title: redactComposeText(node.title),
+            readSet: node.readSet.map(redactComposeText),
+            writeSet: node.writeSet.map(redactComposeText),
+            symbols: node.symbols.map(redactComposeText),
+          })),
+        },
+      } : {}),
     };
     const record = { ...safeCompletion, recordedAt };
     const ledgerPath = path.join(this.workspaceDir, '.codingagent', 'dream', 'compose-completions.jsonl');
@@ -180,6 +194,15 @@ export class DreamManager {
         { id: `compose:${completion.composeId}:objective`, sessionId: `compose:${completion.composeId}`, eventSeq: 1, createdAt: recordedAt, kind: 'human', text: safeCompletion.objective, verified: true },
         ...safeCompletion.testEvidence.map((item, index): DreamEvidence => ({ id: `compose:${completion.composeId}:test:${index + 1}`, sessionId: `compose:${completion.composeId}`, eventSeq: index + 2, createdAt: recordedAt, kind: 'tool-success', text: item, verified: true })),
         { id: `compose:${completion.composeId}:review`, sessionId: `compose:${completion.composeId}`, eventSeq: safeCompletion.testEvidence.length + 2, createdAt: recordedAt, kind: 'audit', text: safeCompletion.reviewSummary, verified: true },
+        ...(safeCompletion.taskGraph ? [{
+          id: `compose:${completion.composeId}:task-graph`,
+          sessionId: `compose:${completion.composeId}`,
+          eventSeq: safeCompletion.testEvidence.length + 3,
+          createdAt: recordedAt,
+          kind: 'plan' as const,
+          text: `Verified dependency graph: ${JSON.stringify(safeCompletion.taskGraph)}`,
+          verified: true,
+        }] : []),
       ];
       try {
         await this.memory.init(new Workspace(this.workspaceDir));
@@ -198,7 +221,10 @@ export class DreamManager {
     const learned = acceptedInsights.length > 0
       ? `- Codestral insights:\n${acceptedInsights.map((item) => `  - ${item.insight} (confidence=${item.confidence.toFixed(2)})`).join('\n')}\n`
       : `- Codestral insights: none accepted${dreamError ? ` (${redactComposeText(dreamError)})` : ''}\n`;
-    const section = `\n## ${safeCompletion.featureName} (${recordedAt})\n\n- Compose: \`${safeCompletion.composeId}\`\n- Spec SHA-256: \`${safeCompletion.specHash}\`\n- Independent Dream model: \`mistral/${this.agent.model}\`\n- Objective: ${safeCompletion.objective}\n- Review: ${safeCompletion.reviewSummary}\n- Evidence:\n${safeCompletion.testEvidence.map((item) => `  - ${item}`).join('\n')}\n${learned}`;
+    const graphSummary = safeCompletion.taskGraph
+      ? `- Task graph: ${safeCompletion.taskGraph.nodes.length} nodes; critical path \`${safeCompletion.taskGraph.criticalPath.join(' -> ') || 'none'}\`; ${safeCompletion.taskGraph.parallelBatches.length} safe parallel batch(es)\n`
+      : '';
+    const section = `\n## ${safeCompletion.featureName} (${recordedAt})\n\n- Compose: \`${safeCompletion.composeId}\`\n- Spec SHA-256: \`${safeCompletion.specHash}\`\n- Independent Dream model: \`mistral/${this.agent.model}\`\n- Objective: ${safeCompletion.objective}\n- Review: ${safeCompletion.reviewSummary}\n${graphSummary}- Evidence:\n${safeCompletion.testEvidence.map((item) => `  - ${item}`).join('\n')}\n${learned}`;
     await fs.mkdir(path.dirname(insightPath), { recursive: true });
     await writeFileAtomically(insightPath, `${markdown.trimEnd()}\n${section}`);
     return { model: `mistral/${this.agent.model}`, agentUsed: this.agent.isConfigured(), accepted: acceptedInsights.length, ...(dreamError ? { error: dreamError } : {}) };

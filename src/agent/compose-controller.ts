@@ -228,6 +228,21 @@ export class ComposeController {
       this.assertActiveWorkspace(workspace);
       if (!state.worktreePath || !state.branch || !state.specHash) throw new Error('Compose finalization metadata is incomplete.');
       const testEvidence = state.testMatrix.map((item) => `${item.id}: ${item.evidenceSummary || item.status}`);
+      const planGraph = this.plan?.getTaskGraph();
+      const taskGraph = planGraph ? {
+        nodes: planGraph.nodes.map((task) => ({
+          id: task.id,
+          title: task.title,
+          status: task.status,
+          dependsOn: task.dependsOn,
+          readSet: task.readSet,
+          writeSet: task.writeSet,
+          symbols: task.symbols,
+          risk: task.risk,
+        })),
+        criticalPath: planGraph.criticalPath,
+        parallelBatches: planGraph.parallelBatches,
+      } : undefined;
       await this.worktrees.mergeAndCleanup({ worktreePath: state.worktreePath, branch: state.branch, commitMessage: `compose: ${state.featureName}` });
       state.phase = 'COMPLETED';
       state.completionSummary = `Merged ${state.branch}; ${state.testMatrix.length} acceptance scenario(s) passed.`;
@@ -243,6 +258,7 @@ export class ComposeController {
           specHash: state.specHash,
           testEvidence,
           reviewSummary: state.reviewSummary || 'Diff audit passed.',
+          ...(taskGraph ? { taskGraph } : {}),
         },
       };
     }
@@ -366,7 +382,17 @@ export class ComposeController {
   private syncPlan(state: ComposeState): void {
     if (!this.plan) return;
     try {
-      this.plan.createPlan(state.implementationTasks.slice(0, 7).map((title) => ({ title, acceptanceCriteria: `Satisfy locked Compose spec ${state.id}.` })));
+      this.plan.createPlan(state.implementationTasks.slice(0, 20).map((title, index) => ({
+        id: index + 1,
+        title,
+        acceptanceCriteria: `Satisfy locked Compose spec ${state.id}.`,
+        dependsOn: index === 0 ? [] : [index],
+        readSet: state.registeredFiles,
+        writeSet: /implement|mutation|modify|write|fix|refactor/i.test(title) ? state.registeredFiles : [],
+        risk: /implement|mutation|modify|write|fix|refactor/i.test(title) ? 'HIGH' : 'MEDIUM',
+        estimatedCost: /implement|mutation|modify|write|fix|refactor/i.test(title) ? 3 : 1,
+        parallelizable: false,
+      })));
     } catch {}
   }
 

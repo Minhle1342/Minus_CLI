@@ -52,6 +52,7 @@ import {
 } from './llm/token-config.js';
 import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
+import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js';
 import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
@@ -756,13 +757,16 @@ async function runUnitTests() {
   const approvalRunner = new ToolRunner(approvalRegistry, workspace, installPermissionManager);
   const rejectedInstall = await approvalRunner.run('run_command', { command: 'npm install pyodbc' });
   assert(rejectedInstall.result.errorCode === 'PERMISSION_DENIED' && approvedInstallCommands.length === 0, 'Unknown command does not execute when the user rejects MINUS permission approval');
+  assert(rejectedInstall.permission?.status === 'denied' && Boolean(rejectedInstall.permission.requestId), 'Rejected command preserves its permission request ID for DAG evidence');
   assert(installPrompt?.riskLevel === 'HIGH' && installPrompt?.category === 'command_execution', 'npm install is classified HIGH and routed through MINUS permission approval');
   installDecision = 'approve';
   const approvedInstall = await approvalRunner.run('run_command', { command: 'npm install pyodbc' });
   assert(approvedInstall.result.exitCode === 0 && approvedInstallCommands[0] === 'npm install pyodbc', 'User approval grants run_command a one-call capability to bypass the host allowlist');
+  assert(approvedInstall.permission?.status === 'granted' && Boolean(approvedInstall.permission.requestId), 'Approved command exposes durable permission metadata to the scheduler');
   const headlessInstallRunner = new ToolRunner(approvalRegistry, workspace, new PermissionManager('ask_sensitive'));
   const headlessInstall = await headlessInstallRunner.run('run_command', { command: 'npm install pyodbc' });
   assert(headlessInstall.result.errorCode === 'APPROVAL_REQUIRED' && approvedInstallCommands.length === 1, 'Headless unknown commands wait for approval instead of executing or failing at a second allowlist gate');
+  assert(headlessInstall.permission?.status === 'required' && Boolean(headlessInstall.permission.requestId), 'Headless approval gate returns a resumable permission request ID');
 
   permManager.setMode('always_ask');
   simulatedDecision = 'reject';
@@ -1659,6 +1663,65 @@ async function runUnitTests() {
   console.log('\n========================================');
   console.log('🧪 9B. KIỂM THỬ DURABLE GOAL LIFECYCLE');
   console.log('========================================');
+
+  const dagPlan = new PlanManager();
+  dagPlan.beginTurn(1, 'Inspect two independent modules, integrate them, and verify the build');
+  dagPlan.createPlan([
+    { id: 1, title: 'Inspect module A', dependsOn: [], readSet: ['src/a.ts'], writeSet: ['src/a.ts'], parallelizable: true, priority: 10 },
+    { id: 2, title: 'Inspect module B', dependsOn: [], readSet: ['src/b.ts'], writeSet: ['src/b.ts'], parallelizable: true, priority: 9 },
+    { id: 3, title: 'Integrate modules', dependsOn: [1, 2], readSet: ['src/a.ts', 'src/b.ts'], writeSet: ['src/integration.ts'], risk: 'HIGH', estimatedCost: 3 },
+    { id: 4, title: 'Verify integrated build', dependsOn: [3], readSet: ['src/integration.ts'] },
+  ]);
+  assert(dagPlan.getActiveTask()?.id === 1 && dagPlan.getReadyTasks().some((task) => task.id === 2), 'Dependency DAG exposes an independent root as READY');
+  dagPlan.updateTask(2, 'IN_PROGRESS', 'Safe disjoint parallel branch');
+  assert(dagPlan.getActiveTasks().length === 2, 'Disjoint parallelizable DAG roots may execute concurrently');
+  const scheduledGraph = dagPlan.getTaskGraph();
+  assert(scheduledGraph.parallelBatches.some((batch) => batch.includes(1) && batch.includes(2)), 'DAG scheduler identifies a safe parallel batch');
+  let dependencyBlocked = false;
+  try { dagPlan.updateTask(3, 'IN_PROGRESS'); } catch (error: any) { dependencyBlocked = error.message.includes('blocked by dependencies'); }
+  assert(dependencyBlocked, 'A DAG node cannot start before all dependencies are satisfied');
+  dagPlan.recordToolEvidence('read_file', { path: 'src/a.ts' }, { content: 'export const a = 1;' });
+  dagPlan.updateTask(1, 'COMPLETED', 'Module A inspected');
+  dagPlan.recordToolEvidence('read_file', { path: 'src/b.ts' }, { content: 'export const b = 1;' });
+  dagPlan.updateTask(2, 'COMPLETED', 'Module B inspected');
+  assert(dagPlan.getActiveTask()?.id === 3, 'Join node activates only after both independent branches complete');
+  const taskGraph = dagPlan.getTaskGraph();
+  assert(taskGraph.edges.length === 3 && taskGraph.criticalPath.includes(3), 'DAG exposes dependency edges and a weighted critical path');
+  dagPlan.recordToolEvidence('run_command', { command: 'npm install pyodbc' }, {
+    error: 'Approval required', errorCode: 'APPROVAL_REQUIRED', permissionRequestId: 'perm-dag-1',
+  }, { requestId: 'perm-dag-1' });
+  assert(dagPlan.getBlockedTasks().some((item) => item.taskId === 3 && item.permissionBlocker), 'Permission approval becomes a resumable DAG blocker');
+  dagPlan.recordToolEvidence('run_command', { command: 'npm install pyodbc' }, { exitCode: 0 }, { granted: true, requestId: 'perm-dag-1' });
+  assert(!dagPlan.getBlockedTasks().some((item) => item.taskId === 3 && item.permissionBlocker), 'Granted permission clears the matching DAG blocker');
+  let cycleRejected = false;
+  try {
+    new PlanManager().createPlan([
+      { id: 1, title: 'Cycle A', dependsOn: [2] },
+      { id: 2, title: 'Cycle B', dependsOn: [1] },
+    ]);
+  } catch (error: any) { cycleRejected = error.message.toLowerCase().includes('cycle'); }
+  assert(cycleRejected, 'Dependency DAG rejects cycles before execution');
+
+  const repositoryMapDir = path.join(process.cwd(), 'temp', 'graph-ranked-repository-map-test');
+  await fs.rm(repositoryMapDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(repositoryMapDir, 'src'), { recursive: true });
+  await fs.writeFile(path.join(repositoryMapDir, 'src', 'ledger.ts'), 'export class PaymentLedger { recordPayment() { return true; } }\n', 'utf8');
+  await fs.writeFile(path.join(repositoryMapDir, 'src', 'service.ts'), "import { PaymentLedger } from './ledger.js';\nexport class PaymentService { constructor(private ledger = new PaymentLedger()) {} }\n", 'utf8');
+  await fs.writeFile(path.join(repositoryMapDir, 'src', 'api.ts'), "import { PaymentService } from './service.js';\nexport function paymentRoute() { return new PaymentService(); }\n", 'utf8');
+  await fs.writeFile(path.join(repositoryMapDir, 'src', 'unrelated.ts'), 'export const unrelatedUtility = 42;\n', 'utf8');
+  const repositoryMap = new GraphRankedRepositoryMap(new Workspace(repositoryMapDir));
+  const rankedMap = await repositoryMap.build('Change PaymentLedger and assess callers', {
+    maxTokens: 512, seedFiles: ['src/ledger.ts'], seedSymbols: ['PaymentLedger'], maxFiles: 10,
+  });
+  const rankedPaths = rankedMap.entries.map((entry) => entry.path);
+  assert(rankedPaths.includes('src/ledger.ts') && rankedPaths.includes('src/service.ts'), 'Repository map ranks the seed definition and its graph neighbor');
+  assert(rankedMap.graphEdges >= 2 && rankedMap.estimatedTokens <= rankedMap.tokenBudget, 'Repository map builds dependency edges within its token budget');
+  const cachedMap = await repositoryMap.build('PaymentLedger', { maxTokens: 512 });
+  assert(cachedMap.refreshed === false, 'Repository map reuses a fresh graph snapshot');
+  repositoryMap.observeToolResult('replace_text', { path: 'src/ledger.ts' }, { success: true });
+  const refreshedMap = await repositoryMap.build('PaymentLedger', { maxTokens: 512 });
+  assert(refreshedMap.refreshed === true, 'Successful mutation invalidates and refreshes repository graph state');
+  await fs.rm(repositoryMapDir, { recursive: true, force: true });
 
   const goalSession = new Session('goal-replay-test');
   const goalManager = new GoalManager();
