@@ -722,12 +722,43 @@ async function main() {
         continue;
       }
 
-      if (trimmed === '/plan') {
-        const tasks = agentLoop.planManager.getTasks();
-        if (tasks.length === 0) {
-          console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào được khởi tạo trong phiên này.${c.reset}\n`);
-        } else {
-          CLI.renderPlan(tasks);
+      if (trimmed === '/plan' || trimmed.startsWith('/plan ')) {
+        const planPrompt = trimmed.slice('/plan'.length).trim();
+        if (!planPrompt) {
+          const tasks = agentLoop.planManager.getTasks();
+          if (tasks.length === 0) {
+            console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào được khởi tạo trong phiên này.${c.reset}`);
+            console.log(`💡 ${c.brightCyan}Gợi ý:${c.reset} Gõ ${c.bold}/plan <yêu cầu>${c.reset} để kích hoạt Skill Lập kế hoạch và phân rã tác vụ lớn (Ví dụ: ${c.dim}/plan Tái cấu trúc module xác thực${c.reset})\n`);
+          } else {
+            CLI.renderPlan(tasks);
+          }
+          continue;
+        }
+
+        // Người dùng yêu cầu lập kế hoạch cho một nhiệm vụ cụ thể:
+        console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Đang kích hoạt Planning Skills (writing-plans, planning-with-files) cho tác vụ:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
+
+        const expandedPlanningPrompt = `[PLANNING MODE REQUEST]: The user requests an exhaustive, phased implementation plan and task decomposition before modifying code.
+Carefully research the relevant codebase files, dependencies, and architecture.
+Follow the Writing Plans & Planning with Files protocols:
+1. Decompose the task into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
+2. Maintain persistent working memory on disk (task_plan.md, findings.md, progress.md) if this is a multi-step workflow.
+3. Present the structured plan directly to the user in their language for alignment and review.
+
+User Goal / Task Description:
+${planPrompt}`;
+
+        // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
+        const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(planPrompt, workspace);
+        if (attachmentResult.hasAttachments) {
+          CLI.renderAttachmentSummary(attachmentResult.attachments);
+        }
+
+        sessionCount++;
+        try {
+          await agentLoop.submit(activeSession, expandedPlanningPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''));
+        } catch (err: any) {
+          console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Planning Loop:${c.reset}`, err.message);
         }
         continue;
       }

@@ -22,6 +22,66 @@ export interface ActivationResult {
   promptSections: { name: string; content: string; priority: number }[];
 }
 
+/**
+ * Nhận diện phân loại ý định lập kế hoạch cho tác vụ lớn / phức tạp (Planning Intent Classification)
+ */
+export function detectPlanningIntent(userRequest?: string): { isPlanning: boolean; isLargeTask: boolean; reason?: string } {
+  if (!userRequest || typeof userRequest !== 'string') {
+    return { isPlanning: false, isLargeTask: false };
+  }
+
+  const lower = userRequest.toLowerCase().trim();
+
+  // 1. Kiểm tra slash command /plan
+  if (lower.startsWith('/plan') || lower.includes('/plan ')) {
+    return { isPlanning: true, isLargeTask: true, reason: 'Slash command /plan invoked' };
+  }
+
+  // 2. Nhóm từ khóa lập kế hoạch tiếng Việt
+  const vnPlanningKeywords = [
+    'lập kế hoạch', 'lên kế hoạch', 'vạch kế hoạch', 'phác thảo kế hoạch',
+    'kế hoạch triển khai', 'kế hoạch thực hiện', 'kế hoạch chi tiết',
+    'phân rã task', 'phân rã tác vụ', 'phân rã công việc', 'chia nhỏ task',
+    'chia nhỏ công việc', 'lộ trình phát triển', 'lộ trình triển khai',
+    'chiến lược triển khai', 'quy trình từng bước', 'các bước triển khai',
+    'hướng giải quyết cho tác vụ', 'lập roadmap', 'vẽ roadmap', 'plan triển khai'
+  ];
+
+  // 3. Nhóm từ khóa lập kế hoạch tiếng Anh
+  const enPlanningKeywords = [
+    'write a plan', 'create a plan', 'make a plan', 'generate a plan',
+    'implementation plan', 'execution plan', 'action plan', 'step-by-step plan',
+    'task breakdown', 'decompose the task', 'decompose this', 'break down the task',
+    'break down into steps', 'planning', 'roadmap', 'architectural plan',
+    'migration plan', 'refactor plan', 'structured plan'
+  ];
+
+  // 4. Nhóm từ khóa chỉ quy mô lớn (Large Task / Complex Scope)
+  const largeTaskKeywords = [
+    'tác vụ lớn', 'dự án lớn', 'tính năng lớn', 'hệ thống lớn', 'refactor lớn',
+    'tái cấu trúc lớn', 'toàn bộ dự án', 'full-stack', 'toàn diện', 'phức tạp',
+    'quy mô lớn', 'nhiều bước', 'nhiều module', 'nhiều file', 'epic',
+    'large task', 'complex task', 'major feature', 'large-scale', 'monorepo',
+    'multi-step', 'multi-module', 'end-to-end', 'full refactor', 'system overhaul'
+  ];
+
+  const hasVnPlanning = vnPlanningKeywords.some((kw) => lower.includes(kw));
+  const hasEnPlanning = enPlanningKeywords.some((kw) => lower.includes(kw));
+  const hasLargeTask = largeTaskKeywords.some((kw) => lower.includes(kw));
+
+  // Kiểm tra nếu có từ "kế hoạch" hoặc "plan" đi kèm ngữ cảnh thực thi/xây dựng
+  const hasGeneralPlanWord = /\b(kế hoạch|plan|planning|roadmap)\b/i.test(lower);
+  const hasActionContext = /\b(làm|xây dựng|triển khai|viết|tạo|phát triển|refactor|build|implement|develop|create|execute)\b/i.test(lower);
+
+  const isPlanning = hasVnPlanning || hasEnPlanning || (hasGeneralPlanWord && (hasActionContext || hasLargeTask));
+
+  return {
+    isPlanning,
+    isLargeTask: hasLargeTask || isPlanning,
+    reason: isPlanning ? (hasLargeTask ? 'Explicit large-task planning request' : 'Planning request detected') : undefined,
+  };
+}
+
 export class SkillActivator {
   private registry: SkillRegistry;
   private capabilityCatalog?: CapabilityCatalog;
@@ -67,7 +127,12 @@ export class SkillActivator {
         const lowerReq = context.userRequest.toLowerCase();
         const gitIntent = detectExplicitGitMutationIntent(context.userRequest);
         const gitCommands = detectExplicitGitCommandNames(context.userRequest);
+        const planningIntent = detectPlanningIntent(context.userRequest);
+
+        const isPlanningSkill = ['writing-plans', 'planning-with-files', 'concise-planning', 'brainstorming'].includes(skill.id);
+
         matchesContext =
+          (isPlanningSkill && planningIntent.isPlanning) ||
           lowerReq.includes(skill.id.toLowerCase()) ||
           lowerReq.includes(skill.name.toLowerCase()) ||
           skill.tags?.some((t) => {

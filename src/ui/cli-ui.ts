@@ -75,7 +75,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
-  { command: '/plan', description: 'Xem cây kế hoạch hiện tại', category: 'Planning' },
+  { command: '/plan', usage: '/plan [yêu cầu tác vụ]', description: 'Kích hoạt Skill lập kế hoạch chi tiết hoặc xem cây kế hoạch', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
   { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
   { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (MINUS standard)', category: 'Telemetry', aliases: ['/prompt-cache'] },

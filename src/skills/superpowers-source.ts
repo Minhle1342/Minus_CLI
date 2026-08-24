@@ -29,13 +29,40 @@ export const SUPERPOWERS_BUILTIN_SKILLS: Omit<SkillManifest, 'path' | 'source'>[
   },
   {
     id: 'writing-plans',
-    name: 'Writing Plans',
+    name: 'Writing Plans & Task Decomposition',
     version: '1.0.0',
-    description: 'Decompose high-level goals into phased, testable, atomic task specifications with strict acceptance criteria.',
-    priority: 30,
-    requires: ['brainstorming'],
+    description: 'Decompose high-level goals and complex tasks into phased, testable, atomic task specifications with strict acceptance criteria, exact file paths, and verification steps.',
+    priority: 20,
     requiredCapabilities: ['plan.update', 'filesystem.read'],
-    tags: ['planning', 'decomposition', 'superpowers'],
+    tags: [
+      'planning', 'decomposition', 'plan', 'kế hoạch', 'lập kế hoạch', 'phân rã task',
+      'lên kế hoạch', 'vạch kế hoạch', 'roadmap', 'task-breakdown', 'implementation-plan',
+      'chia nhỏ task', 'tác vụ lớn', 'dự án lớn', 'complex-task', 'superpowers'
+    ],
+  },
+  {
+    id: 'planning-with-files',
+    name: 'Planning with Files (Persistent Memory on Disk)',
+    version: '1.0.0',
+    description: 'Manus-style persistent disk memory: maintain task_plan.md, findings.md, and progress.md in the project directory to prevent context loss across complex multi-step sessions.',
+    priority: 22,
+    requiredCapabilities: ['filesystem.read', 'filesystem.edit'],
+    tags: [
+      'planning', 'files', 'persistent-memory', 'task_plan', 'findings', 'progress',
+      'manus', 'lưu vết', 'ghi nhớ kế hoạch', 'bộ nhớ đĩa', 'state-tracking', 'superpowers'
+    ],
+  },
+  {
+    id: 'concise-planning',
+    name: 'Concise & Agile Checklist Planning',
+    version: '1.0.0',
+    description: 'Rapid, atomic checklist generation for medium-to-large coding tasks with phased checkboxes and verification checkpoints.',
+    priority: 25,
+    requiredCapabilities: ['plan.update', 'filesystem.read'],
+    tags: [
+      'checklist', 'agile', 'concise-planning', 'atomic-plan', 'danh sách công việc',
+      'danh sách tác vụ', 'các bước thực hiện', 'superpowers'
+    ],
   },
   {
     id: 'using-git-worktrees',

@@ -84,4 +84,57 @@ export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
 3. **POST-REFACTOR SIMPLICITY CRITIQUE:**
    - After implementing a pattern, ask: "Did this make the code easier to understand and test, or did it just add boilerplate classes?"
    - If complexity or indirection increased without tangible benefit, immediately refactor back to simpler primitives.`,
+
+  'writing-plans': `### IMPLEMENTATION PLANNING & ATOMIC DECOMPOSITION PROTOCOL (WRITING-PLANS)
+1. **Scope & Architectural Foundations (Before Touching Code):**
+   - Define the primary objective in one sentence, followed by architectural constraints, affected modules, and tech stack.
+   - Inspect existing files, interfaces, and dependencies with \`read_file\` / \`search_text\` before proposing any structural changes.
+   - Maintain strict non-destructive changes and backward compatibility.
+
+2. **Bite-Sized Atomic Task Granularity (2-5 Minute Execution Steps):**
+   - Break down complex requirements into discrete, sequential, testable units of work.
+   - For every task in the plan, specify:
+     * **Exact Target Files:** Full paths and relevant line ranges (e.g. \`src/services/auth.ts:45-80\`).
+     * **Concrete Code Specifications:** Precise functions, type signatures, and logic to modify or create (never use vague placeholders like "implement logic here").
+     * **Verification Step:** Exact test/build command (e.g. \`npm test -- tests/auth.test.ts\` or \`npx tsc --noEmit\`) and expected passing criteria.
+     * **Commit Point:** Atomic commit message describing the incremental change.
+
+3. **Verification Ladder Enforcement (TDD Red-Green-Refactor):**
+   - Step 1: Write or isolate the failing test / diagnostic reproduction.
+   - Step 2: Run verification to confirm the expected failure mode.
+   - Step 3: Implement minimal surgical solution to make test pass.
+   - Step 4: Run static typecheck / unit tests to confirm green status.
+   - Step 5: Cleanly refactor without adding speculative complexity.
+
+4. **Execution Handoff:**
+   - Present the comprehensive, phased implementation plan directly to the user in their preferred natural language.
+   - Use the plan as a guiding contract throughout execution.`,
+
+  'planning-with-files': `### PERSISTENT STATE & WORKING MEMORY ON DISK PROTOCOL (PLANNING-WITH-FILES)
+1. **The Core Invariant: Disk is Infinite, Context Window is Volatile:**
+   - LLM context window degrades over long, multi-turn interactions ("context rot").
+   - Persist critical architectural decisions, task roadmaps, and findings directly to markdown files in the workspace.
+
+2. **The 3-File Working Memory Architecture:**
+   - \`task_plan.md\`: Tracks project phases, active milestones, remaining items, and decisions.
+   - \`findings.md\`: Records technical discoveries, research insights, API contracts, and schema shapes.
+   - \`progress.md\`: Logs session audit trail, test results, and modified file registers.
+
+3. **The 2-Action Rule:**
+   - After every 2 search, inspection, or research operations, immediately summarize key discoveries into notes or plan files to avoid lost context.
+   - Re-read the plan file before major decisions to keep overall goals in sharp focus.
+
+4. **3-Strike Error Protocol:**
+   - Attempt 1: Diagnose root cause from stderr/diagnostics and apply surgical fix.
+   - Attempt 2: If the error persists, pivot to an alternative method or library. NEVER repeat the exact same failed tool arguments.
+   - Attempt 3: Re-evaluate fundamental assumptions, review plan, or ask user for strategic guidance.`,
+
+  'concise-planning': `### RAPID CHECKLIST & AGILE TASK PLANNING PROTOCOL (CONCISE-PLANNING)
+1. **Actionable Atomic Checklist:**
+   - Structure plans as clear markdown task lists with checkboxes (\`- [ ]\` and \`- [x]\`).
+   - Group tasks by logical phases (e.g. Phase 1: Investigation, Phase 2: Core Implementation, Phase 3: Verification & Integration).
+
+2. **Zero Overhead & Rapid Iteration:**
+   - Focus on what needs to be done, which files need edits, and how to verify.
+   - Eliminate fluff, boilerplate text, and unnecessary ceremony. Keep steps concise, sharp, and directly executable.`,
 };

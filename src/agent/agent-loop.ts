@@ -1042,7 +1042,7 @@ export class AgentLoop {
       }
       consecutivePlanCompletionRejects = 0;
 
-      const policyDecision = (isSubagent || isMockLLM)
+      const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
             userRequest: turnUserRequest,
@@ -1076,7 +1076,7 @@ export class AgentLoop {
             hasSubmittedSolution,
           });
       const finalAnswerDecision = (hasSubmittedSolution || isSubagent || isMockLLM)
-        ? { allow: true }
+        ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
         ? policyDecision
         : !evidenceDecision.allow

@@ -105,7 +105,7 @@ import { loadSession, saveSession, clearSession, getSessionFilePath } from './se
 import { SkillLoader } from './skills/skill-loader.js';
 import { SkillRegistry } from './skills/skill-registry.js';
 import { SuperpowersSource } from './skills/superpowers-source.js';
-import { SkillActivator } from './skills/skill-activator.js';
+import { SkillActivator, detectPlanningIntent } from './skills/skill-activator.js';
 import { SuperpowersWorkflowMap } from './skills/workflow-map.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
@@ -3363,6 +3363,35 @@ Always write tests first!`;
     userRequest: 'Hãy áp dụng Strategy pattern và refactor code theo chuẩn KISS',
   });
   assert(patternActivation.activeSkills.some((s) => s.id === 'design-patterns'), 'SkillActivator kích hoạt design-patterns khi gặp yêu cầu refactor/pattern');
+
+  // Kiểm tra nạp và kích hoạt bộ Planning Skills (writing-plans, planning-with-files, concise-planning)
+  assert(skillRegistry.get('writing-plans') !== undefined, 'SkillRegistry nạp thành công writing-plans');
+  assert(skillRegistry.get('planning-with-files') !== undefined, 'SkillRegistry nạp thành công planning-with-files');
+  assert(skillRegistry.get('concise-planning') !== undefined, 'SkillRegistry nạp thành công concise-planning');
+  assert(Boolean(skillRegistry.loadContent('writing-plans')?.includes('IMPLEMENTATION PLANNING & ATOMIC DECOMPOSITION PROTOCOL')), 'SkillRegistry loadContent trả về playbook chuẩn của writing-plans');
+  assert(Boolean(skillRegistry.loadContent('planning-with-files')?.includes('PERSISTENT STATE & WORKING MEMORY ON DISK PROTOCOL')), 'SkillRegistry loadContent trả về playbook chuẩn của planning-with-files');
+
+  const planIntentVn = detectPlanningIntent('Hãy lập kế hoạch và phân rã các bước triển khai cho tác vụ lớn này');
+  assert(planIntentVn.isPlanning === true && planIntentVn.isLargeTask === true, 'detectPlanningIntent nhận diện chính xác yêu cầu lập kế hoạch cho tác vụ lớn (Tiếng Việt)');
+
+  const planIntentEn = detectPlanningIntent('Please write a step-by-step implementation plan for this complex multi-module feature');
+  assert(planIntentEn.isPlanning === true && planIntentEn.isLargeTask === true, 'detectPlanningIntent nhận diện chính xác yêu cầu lập kế hoạch (Tiếng Anh)');
+
+  const planSlashIntent = detectPlanningIntent('/plan xây dựng hệ thống thanh toán');
+  assert(planSlashIntent.isPlanning === true, 'detectPlanningIntent nhận diện /plan slash command');
+
+  const planActivationVn = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Lập kế hoạch phân rã task cho tác vụ lớn tái cấu trúc toàn bộ module auth',
+  });
+  assert(
+    planActivationVn.activeSkills.some((s) => s.id === 'writing-plans'),
+    'SkillActivator tự động kích hoạt writing-plans khi người dùng yêu cầu lập kế hoạch cho tác vụ lớn',
+  );
+  assert(
+    planActivationVn.promptSections.some((p) => p.name.includes('writing-plans')),
+    'SkillActivator tạo prompt section cho writing-plans để nạp vào LLM',
+  );
   assert(
     detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
       && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,
