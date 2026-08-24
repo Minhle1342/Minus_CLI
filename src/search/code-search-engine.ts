@@ -1,4 +1,4 @@
-import MiniSearch, { SearchResult } from 'minisearch';
+import MiniSearch from 'minisearch';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -19,28 +19,41 @@ export interface CodeSearchHit {
   lineMatches: Array<{ line: number; text: string }>;
 }
 
+export interface CodeSearchDiagnostics {
+  indexedFiles: number;
+  builtAt?: string;
+  warnings: string[];
+}
+
+type FileManifest = Map<string, string>;
+
 const DEFAULT_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.json', '.md', '.py', '.go', '.rs', '.java',
-  '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.rb', '.sh', '.yaml', '.yml', '.toml'
+  '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.rb', '.sh', '.yaml', '.yml', '.toml',
 ]);
 
 const IGNORED_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'build', '.codingagent', '.next', '.cache', 'coverage', 'out'
+  'node_modules', '.git', 'dist', 'build', '.codingagent', '.next', '.cache', 'coverage', 'out',
 ]);
 
-/**
- * CodeSearchEngine - Bộ máy tìm kiếm toàn văn mã nguồn cục bộ (BM25 Local Search)
- * Tận dụng MiniSearch để đánh chỉ mục in-memory và tìm kiếm chính xác mà không tốn Token LLM.
- */
+/** In-memory BM25 index with freshness checks and literal-search fallback. */
 export class CodeSearchEngine {
-  private workspaceDir: string;
+  private readonly workspaceDir: string;
   private miniSearch: MiniSearch<CodeDocument>;
   private indexed = false;
   private fileDocMap = new Map<string, CodeDocument>();
+  private fileManifest: FileManifest = new Map();
+  private buildPromise?: Promise<number>;
+  private builtAt?: string;
+  private indexWarnings: string[] = [];
 
   constructor(workspaceDir: string) {
     this.workspaceDir = path.resolve(workspaceDir);
-    this.miniSearch = new MiniSearch({
+    this.miniSearch = this.createMiniSearch();
+  }
+
+  private createMiniSearch(): MiniSearch<CodeDocument> {
+    return new MiniSearch<CodeDocument>({
       fields: ['path', 'filename', 'symbols', 'content'],
       storeFields: ['path', 'filename', 'extension', 'symbols', 'content'],
       searchOptions: {
@@ -51,136 +64,238 @@ export class CodeSearchEngine {
     });
   }
 
-  /**
-   * Quét và lập chỉ mục toàn bộ các file code trong workspace
-   */
+  /** Build a new index atomically. Concurrent callers share the same build. */
   async buildIndex(): Promise<number> {
-    this.miniSearch.removeAll();
-    this.fileDocMap.clear();
+    if (this.buildPromise) return this.buildPromise;
+    this.buildPromise = this.rebuildIndex();
+    try {
+      return await this.buildPromise;
+    } finally {
+      this.buildPromise = undefined;
+    }
+  }
 
+  private async rebuildIndex(): Promise<number> {
     const docs: CodeDocument[] = [];
-    await this.scanDirectory(this.workspaceDir, docs);
+    const manifest: FileManifest = new Map();
+    const warnings: string[] = [];
+    await this.scanDirectory(this.workspaceDir, docs, manifest, warnings, true);
 
+    // Never expose a cleared/partially populated index to another search.
+    const nextMiniSearch = this.createMiniSearch();
+    const nextFileDocMap = new Map<string, CodeDocument>();
     if (docs.length > 0) {
-      this.miniSearch.addAll(docs);
-      for (const d of docs) {
-        this.fileDocMap.set(d.path, d);
-      }
+      nextMiniSearch.addAll(docs);
+      for (const document of docs) nextFileDocMap.set(document.path, document);
     }
 
+    this.miniSearch = nextMiniSearch;
+    this.fileDocMap = nextFileDocMap;
+    this.fileManifest = manifest;
+    this.indexWarnings = warnings;
+    this.builtAt = new Date().toISOString();
     this.indexed = true;
     return docs.length;
   }
 
-  private async scanDirectory(dir: string, docs: CodeDocument[]): Promise<void> {
-    let entries: string[] = [];
+  private async scanDirectory(
+    dir: string,
+    docs: CodeDocument[],
+    manifest: FileManifest,
+    warnings: string[],
+    isRoot = false,
+  ): Promise<void> {
+    let entries: string[];
     try {
       entries = await fs.readdir(dir);
-    } catch {
+      entries.sort((left, right) => left.localeCompare(right));
+    } catch (error: any) {
+      if (isRoot) {
+        throw new Error(`Cannot read code-search workspace "${this.workspaceDir}": ${error.message}`);
+      }
+      warnings.push(`Cannot scan directory ${this.relativePath(dir)}: ${error.message}`);
       return;
     }
 
     for (const entry of entries) {
       if (IGNORED_DIRS.has(entry) || entry.startsWith('.')) continue;
-
       const fullPath = path.join(dir, entry);
       try {
         const stat = await fs.stat(fullPath);
         if (stat.isDirectory()) {
-          await this.scanDirectory(fullPath, docs);
-        } else if (stat.isFile()) {
-          const ext = path.extname(entry).toLowerCase();
-          if (DEFAULT_EXTENSIONS.has(ext) && stat.size < 500 * 1024) {
-            // Đọc file < 500KB để đánh index
-            const content = await fs.readFile(fullPath, 'utf-8');
-            const relativePath = path.relative(this.workspaceDir, fullPath).replace(/\\/g, '/');
-            const symbols = this.extractSymbols(content);
-
-            docs.push({
-              id: relativePath,
-              path: relativePath,
-              filename: entry,
-              extension: ext,
-              symbols,
-              content,
-            });
-          }
+          await this.scanDirectory(fullPath, docs, manifest, warnings);
+          continue;
         }
-      } catch {}
+        const extension = path.extname(entry).toLowerCase();
+        if (!stat.isFile() || !DEFAULT_EXTENSIONS.has(extension) || stat.size >= 500 * 1024) continue;
+
+        const content = await fs.readFile(fullPath, 'utf-8');
+        const relativePath = this.relativePath(fullPath);
+        manifest.set(relativePath, this.manifestValue(stat.size, stat.mtimeMs, stat.ctimeMs));
+        docs.push({
+          id: relativePath,
+          path: relativePath,
+          filename: entry,
+          extension,
+          symbols: this.extractSymbols(content),
+          content,
+        });
+      } catch (error: any) {
+        warnings.push(`Cannot index ${this.relativePath(fullPath)}: ${error.message}`);
+      }
     }
   }
 
-  /**
-   * Trích xuất các biểu tượng code cơ bản (Function, Class, Interface, Type, Export, Const)
-   */
-  private extractSymbols(content: string): string {
-    const symbols: string[] = [];
-    const lines = content.split('\n');
-
-    for (const line of lines) {
-      const match = line.match(/(?:export\s+)?(?:class|interface|type|enum|function|const|let|var)\s+([A-Za-z0-9_$]+)/);
-      if (match && match[1]) {
-        symbols.push(match[1]);
+  /** Collect cheap size/mtime fingerprints so a long-lived engine cannot go stale. */
+  private async collectManifest(
+    dir: string,
+    manifest: FileManifest,
+    warnings: string[],
+    isRoot = false,
+  ): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+      entries.sort((left, right) => left.localeCompare(right));
+    } catch (error: any) {
+      if (isRoot) {
+        throw new Error(`Cannot read code-search workspace "${this.workspaceDir}": ${error.message}`);
       }
+      warnings.push(`Cannot scan directory ${this.relativePath(dir)}: ${error.message}`);
+      return;
     }
 
+    for (const entry of entries) {
+      if (IGNORED_DIRS.has(entry) || entry.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry);
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.isDirectory()) {
+          await this.collectManifest(fullPath, manifest, warnings);
+          continue;
+        }
+        const extension = path.extname(entry).toLowerCase();
+        if (stat.isFile() && DEFAULT_EXTENSIONS.has(extension) && stat.size < 500 * 1024) {
+          manifest.set(this.relativePath(fullPath), this.manifestValue(stat.size, stat.mtimeMs, stat.ctimeMs));
+        }
+      } catch (error: any) {
+        warnings.push(`Cannot inspect ${this.relativePath(fullPath)}: ${error.message}`);
+      }
+    }
+  }
+
+  private relativePath(target: string): string {
+    return path.relative(this.workspaceDir, target).replace(/\\/g, '/') || '.';
+  }
+
+  private manifestValue(size: number, mtimeMs: number, ctimeMs: number): string {
+    return `${size}:${mtimeMs}:${ctimeMs}`;
+  }
+
+  private manifestsEqual(left: FileManifest, right: FileManifest): boolean {
+    if (left.size !== right.size) return false;
+    for (const [filePath, fingerprint] of left) {
+      if (right.get(filePath) !== fingerprint) return false;
+    }
+    return true;
+  }
+
+  private async ensureFreshIndex(): Promise<void> {
+    if (!this.indexed) {
+      await this.buildIndex();
+      return;
+    }
+
+    const currentManifest: FileManifest = new Map();
+    const warnings: string[] = [];
+    await this.collectManifest(this.workspaceDir, currentManifest, warnings, true);
+    if (!this.manifestsEqual(this.fileManifest, currentManifest)) {
+      await this.buildIndex();
+      return;
+    }
+    this.indexWarnings = warnings;
+  }
+
+  private extractSymbols(content: string): string {
+    const symbols: string[] = [];
+    for (const line of content.split('\n')) {
+      const match = line.match(/(?:export\s+)?(?:class|interface|type|enum|function|const|let|var)\s+([A-Za-z0-9_$]+)/);
+      if (match?.[1]) symbols.push(match[1]);
+    }
     return symbols.join(' ');
   }
 
-  /**
-   * Tìm kiếm mã nguồn bằng BM25 & Fuzzy
-   */
   async search(query: string, options: { limit?: number; fuzzy?: boolean } = {}): Promise<CodeSearchHit[]> {
-    if (!this.indexed) {
-      await this.buildIndex();
-    }
+    await this.ensureFreshIndex();
 
-    const limit = options.limit ?? 10;
-    const isFuzzy = options.fuzzy !== false;
-
-    const results = this.miniSearch.search(query, {
-      fuzzy: isFuzzy ? 0.2 : false,
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return [];
+    const requestedLimit = options.limit ?? 10;
+    const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(100, requestedLimit)) : 10;
+    const results = this.miniSearch.search(normalizedQuery, {
+      fuzzy: options.fuzzy !== false ? 0.2 : false,
       prefix: true,
       boost: { symbols: 3, filename: 2, path: 1.5, content: 1 },
     });
 
     const hits: CodeSearchHit[] = [];
-
-    for (const res of results.slice(0, limit)) {
-      const doc = this.fileDocMap.get(res.id);
-      if (!doc) continue;
-
-      const lines = doc.content.split('\n');
-      const lowerQuery = query.toLowerCase();
-      const lineMatches: Array<{ line: number; text: string }> = [];
-
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].toLowerCase().includes(lowerQuery)) {
-          lineMatches.push({
-            line: i + 1,
-            text: lines[i].trim(),
-          });
-          if (lineMatches.length >= 5) break;
-        }
-      }
-
-      // Tạo snippet tóm tắt từ các dòng khớp hoặc 5 dòng đầu
-      let snippet = '';
-      if (lineMatches.length > 0) {
-        snippet = lineMatches.map((m) => `L${m.line}: ${m.text}`).join('\n');
-      } else {
-        snippet = lines.slice(0, 4).join('\n');
-      }
-
-      hits.push({
-        path: doc.path,
-        score: Math.round(res.score * 100) / 100,
-        matchTerms: res.terms,
-        snippet,
-        lineMatches,
-      });
+    for (const result of results) {
+      const document = this.fileDocMap.get(String(result.id));
+      if (!document) continue;
+      hits.push(this.toHit(
+        document,
+        normalizedQuery,
+        Math.round(result.score * 100) / 100,
+        result.terms,
+      ));
+      if (hits.length >= limit) break;
     }
 
+    // A literal occurrence is authoritative even if tokenization/BM25 misses it.
+    if (hits.length === 0) {
+      const lowerQuery = normalizedQuery.toLowerCase();
+      const documents = [...this.fileDocMap.values()].sort((left, right) => left.path.localeCompare(right.path));
+      for (const document of documents) {
+        const searchable = `${document.path}\n${document.filename}\n${document.symbols}\n${document.content}`.toLowerCase();
+        if (!searchable.includes(lowerQuery)) continue;
+        hits.push(this.toHit(document, normalizedQuery, 0.01, [normalizedQuery]));
+        if (hits.length >= limit) break;
+      }
+    }
+
+    if (hits.length === 0 && this.indexWarnings.length > 0) {
+      throw new Error(
+        `Code-search index is incomplete, so absence cannot be verified: ${this.indexWarnings.slice(0, 3).join('; ')}`,
+      );
+    }
     return hits;
+  }
+
+  getDiagnostics(): CodeSearchDiagnostics {
+    return {
+      indexedFiles: this.fileDocMap.size,
+      ...(this.builtAt ? { builtAt: this.builtAt } : {}),
+      warnings: [...this.indexWarnings],
+    };
+  }
+
+  private toHit(document: CodeDocument, query: string, score: number, matchTerms: string[]): CodeSearchHit {
+    const lines = document.content.split('\n');
+    const lowerQuery = query.toLowerCase();
+    const lineMatches: Array<{ line: number; text: string }> = [];
+    for (let index = 0; index < lines.length; index++) {
+      if (!lines[index].toLowerCase().includes(lowerQuery)) continue;
+      lineMatches.push({ line: index + 1, text: lines[index].trim() });
+      if (lineMatches.length >= 5) break;
+    }
+    return {
+      path: document.path,
+      score,
+      matchTerms,
+      snippet: lineMatches.length > 0
+        ? lineMatches.map((match) => `L${match.line}: ${match.text}`).join('\n')
+        : lines.slice(0, 4).join('\n'),
+      lineMatches,
+    };
   }
 }

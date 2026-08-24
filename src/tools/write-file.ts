@@ -3,6 +3,8 @@ import path from 'node:path';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
+import { computeStringHash } from '../workspace/workspace-digest.js';
+import { toolError, toolSuccess } from './tool-result.js';
 
 /**
  * Tool 5: write_file
@@ -31,12 +33,19 @@ export const writeFileTool: ToolDefinition = {
     const content = String(args.content ?? '');
 
     if (!rawPath) {
-      return { error: 'Tham số "path" là bắt buộc.' };
+      return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
     }
 
     try {
       const safePath = workspace.resolveSafePath(rawPath);
       
+      if (workspace.isProtectedFile(safePath)) {
+        return toolError(
+          `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          'SECURITY_VIOLATION',
+        );
+      }
+
       // Kiểm tra xem file đã tồn tại trước đó chưa
       let isExisting = false;
       try {
@@ -53,19 +62,20 @@ export const writeFileTool: ToolDefinition = {
       // Ghi nội dung file
       await fs.writeFile(safePath, content, 'utf-8');
 
-      return {
-        path: rawPath,
-        bytesWritten: Buffer.byteLength(content, 'utf-8'),
+      const bytesWritten = Buffer.byteLength(content, 'utf-8');
+      const contentHash = computeStringHash(content);
+
+      return toolSuccess({
+        path: workspace.toRelativePath(safePath),
+        bytesWritten,
+        contentHash,
         created: !isExisting,
         message: isExisting
           ? `Đã ghi đè thành công file "${rawPath}".`
           : `Đã tạo mới thành công file "${rawPath}".`,
-      };
+      });
     } catch (err: any) {
-      return {
-        path: rawPath,
-        error: `Không thể ghi file: ${err.message}`,
-      };
+      return toolError(`Không thể ghi file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
     }
   },
 };

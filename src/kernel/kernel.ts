@@ -18,6 +18,9 @@ import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
+import { PermissionManager } from '../security/permission-manager.js';
+import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
+import { CriticGate } from '../agent/critic-gate.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -25,13 +28,21 @@ export interface KernelEvents {
   'step:before': (step: number, maxSteps: number) => void;
   'step:after': (step: number) => void;
   'tool:before': (toolName: string, args: Record<string, any>) => void;
-  'tool:after': (toolName: string, result: Record<string, any>, durationMs: number) => void;
+  'tool:after': (
+    toolName: string,
+    result: Record<string, any>,
+    durationMs: number,
+    args: Record<string, any>,
+    context?: { sessionId?: string; agentId?: string; turn?: number },
+  ) => void;
   'tool:error': (toolName: string, error: any) => void;
   'model:thought': (thought: string) => void;
   'model:token': (token: string) => void;
+  'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
+  'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
   'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
 }
 
@@ -76,6 +87,7 @@ export interface KernelContext {
   workspace: Workspace;
   tools: ToolRegistry;
   toolRunner: ToolRunner;
+  permissions: PermissionManager;
   plan: PlanManager;
   goal: GoalManager;
   agentHooks: AgentHookRegistry;
@@ -87,6 +99,8 @@ export interface KernelContext {
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
+  hypothesis: HypothesisTracker;
+  critic: CriticGate;
   sandbox: SandboxManager;
   tasks: TaskManager;
   llm: any;
@@ -130,16 +144,20 @@ export class AgentKernel {
     const checkpoints = new CheckpointManager(workspace.rootDir);
     const compactor = new ContextCompactor();
     const reflection = new ReflectionEngine();
+    const hypothesis = new HypothesisTracker();
+    const critic = new CriticGate();
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
     const tools = new ToolRegistry(plan, memory);
     tools.attachSandboxManager(sandbox);
-    const toolRunner = new ToolRunner(tools, workspace);
+    const permissions = new PermissionManager();
+    const toolRunner = new ToolRunner(tools, workspace, permissions);
 
     this.ctx = {
       workspace,
       tools,
       toolRunner,
+      permissions,
       plan,
       goal,
       agentHooks,
@@ -151,6 +169,8 @@ export class AgentKernel {
       checkpoints,
       compactor,
       reflection,
+      hypothesis,
+      critic,
       sandbox,
       tasks,
       llm,
@@ -161,7 +181,7 @@ export class AgentKernel {
       setWorkspace: (newWs: Workspace) => {
         const oldPath = this.ctx.workspace.rootDir;
         this.ctx.workspace = newWs;
-        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs);
+        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
         this.ctx.sessions.setWorkspace(newWs.rootDir);

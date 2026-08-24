@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
 import { MemoryCategory, MemoryQueryOptions, MemoryRecord, MemoryScope, MemorySource } from './types.js';
+import { VectorMemoryStore, EmbeddingService, cosineSimilarity } from './vector-memory.js';
 
 export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insight' | 'category'>> {
   key: string;
@@ -26,20 +27,25 @@ export interface ProjectMemoryData {
 /**
  * ProjectMemoryManager - Quản lý Bộ nhớ dài hạn đa tầng (Tier 2: Long-term Project Knowledge Base)
  * 
- * Lưu trữ tại `.codingagent/project-memory.json`:
+ * Lưu trữ tại `.codingagent/project-memory.json` và `.codingagent/vector-memory.json`:
  * 1. Lưu sơ đồ cấu trúc repo, package scripts, framework conventions.
  * 2. Cung cấp "Project Digest" để "Warm-Start" Agent ngay khi khởi động.
- * 3. Tránh việc LLM phải tốn 5 steps khảo sát lại cấu trúc cơ bản mỗi lần chạy.
+ * 3. Hỗ trợ Semantic Vector Memory (RAG) với Cosine Similarity & Hybrid Lexical/Vector Ranking.
  */
 export class ProjectMemoryManager {
   private workspaceDir: string;
   private memoryFilePath: string;
   private memoryData: ProjectMemoryData;
   private session?: Session;
+  private vectorStore: VectorMemoryStore;
 
-  constructor(workspaceDir: string) {
+  constructor(workspaceDir: string, embeddingService?: EmbeddingService) {
     this.workspaceDir = path.resolve(workspaceDir);
     this.memoryFilePath = path.join(this.workspaceDir, '.codingagent', 'project-memory.json');
+    this.vectorStore = new VectorMemoryStore(
+      path.join(this.workspaceDir, '.codingagent', 'vector-memory.json'),
+      embeddingService
+    );
     this.memoryData = this.getDefaultMemory();
   }
 
@@ -61,6 +67,10 @@ export class ProjectMemoryManager {
     };
   }
 
+  getVectorStore(): VectorMemoryStore {
+    return this.vectorStore;
+  }
+
   /**
    * Khởi tạo bộ nhớ: Nạp từ đĩa hoặc tự động index nếu chưa tồn tại
    */
@@ -79,6 +89,21 @@ export class ProjectMemoryManager {
       await this.autoIndexWorkspace(workspace ?? new Workspace(this.workspaceDir));
       await this.save();
     }
+
+    // Khởi tạo và đồng bộ Vector Store (RAG)
+    await this.vectorStore.init();
+    for (const item of this.memoryData.learnedInsights) {
+      const text = `${item.key}: ${item.insight} ${(item.tags || []).join(' ')}`;
+      await this.vectorStore.upsert(item.id || `memory-${item.key}`, text, {
+        key: item.key,
+        category: item.category,
+        scope: item.scope,
+        confidence: item.confidence,
+        trustStatus: item.trustStatus,
+        tags: item.tags,
+      });
+    }
+
     return this.memoryData;
   }
 
@@ -128,6 +153,25 @@ export class ProjectMemoryManager {
       }
     } catch {}
 
+    // 3. Quét tệp chỉ dẫn dự án chuẩn: AGENTS.md, CODEX.md, CLAUDE.md
+    for (const docFile of ['AGENTS.md', 'CODEX.md', 'CLAUDE.md']) {
+      try {
+        const docPath = path.join(rootDir, docFile);
+        const content = await fs.readFile(docPath, 'utf-8');
+        if (content.trim()) {
+          const ruleLines = content
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.startsWith('-') || l.startsWith('*') || /^\d+\./.test(l))
+            .map((l) => l.replace(/^[-*]|\d+\.\s*/, '').trim());
+          if (ruleLines.length > 0) {
+            this.memoryData.codingConventions.push(...ruleLines.slice(0, 5));
+          }
+          break;
+        }
+      } catch {}
+    }
+
     this.memoryData.projectType = projectType;
     this.memoryData.packageManager = packageManager;
     this.memoryData.scripts = scripts;
@@ -146,6 +190,9 @@ export class ProjectMemoryManager {
   setWorkspace(workspaceDir: string): void {
     this.workspaceDir = path.resolve(workspaceDir);
     this.memoryFilePath = path.join(this.workspaceDir, '.codingagent', 'project-memory.json');
+    this.vectorStore = new VectorMemoryStore(
+      path.join(this.workspaceDir, '.codingagent', 'vector-memory.json')
+    );
     this.memoryData = this.getDefaultMemory();
     this.session = undefined;
   }
@@ -154,7 +201,14 @@ export class ProjectMemoryManager {
     key: string,
     insight: string,
     category: LearnedInsight['category'] = 'insight',
-    options: { scope?: MemoryScope; source?: MemorySource; confidence?: number; goalId?: string; tags?: string[] } = {},
+    options: {
+      scope?: MemoryScope;
+      source?: MemorySource;
+      confidence?: number;
+      goalId?: string;
+      tags?: string[];
+      expiresAt?: string;
+    } = {},
   ): Promise<MemoryRecord> {
     const scope = options.scope || 'project';
     if (scope !== 'project' && !this.session) {
@@ -162,32 +216,86 @@ export class ProjectMemoryManager {
     }
 
     const now = new Date().toISOString();
-    const existing = this.memoryData.learnedInsights.find((i) => i.key === key);
+    const existingRecords = scope === 'project'
+      ? this.memoryData.learnedInsights
+      : (this.session?.getMemoryRecords() || []);
+    const sameKeyRecords = existingRecords.filter((item) => item.key === key);
+    const existing = [...sameKeyRecords].reverse().find((item) => this.normalizeInsight(item).trustStatus === 'active')
+      || sameKeyRecords.at(-1);
+    const source = options.source || 'manual';
+    const latestObservedResult = this.session?.getEvents()
+      .filter((event) => event.type === 'tool/result')
+      .at(-1);
+    if (options.confidence !== undefined && (!Number.isFinite(options.confidence) || options.confidence < 0 || options.confidence > 1)) {
+      throw new Error('Memory confidence must be a finite number between 0 and 1.');
+    }
+    if (options.expiresAt && !Number.isFinite(Date.parse(options.expiresAt))) {
+      throw new Error('Memory expiresAt must be a valid ISO-8601 timestamp.');
+    }
+    const requestedConfidence = options.confidence ?? (source === 'model' ? 0.5 : 1);
+    const normalizedExistingInsight = existing?.insight.trim().toLowerCase();
+    const hasConflict = Boolean(existing && normalizedExistingInsight !== insight.trim().toLowerCase());
+    const lacksModelProvenance = source === 'model' && !latestObservedResult;
+    const existingIsUntrusted = Boolean(existing && this.normalizeInsight(existing).trustStatus !== 'active');
+    const trustStatus = source === 'model' && (hasConflict || lacksModelProvenance || existingIsUntrusted)
+      ? 'contested'
+      : 'active';
+    const modelExpiry = source === 'model'
+      ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      : undefined;
     const item: LearnedInsight = {
-      id: existing?.id || `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: trustStatus === 'contested'
+        ? `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        : existing?.id || `memory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       key,
       insight,
       category: category || 'insight',
       scope,
-      source: options.source || 'manual',
-      confidence: Math.max(0, Math.min(1, options.confidence ?? 1)),
-      createdAt: existing?.createdAt || now,
+      source,
+      confidence: Math.max(0, Math.min(1, trustStatus === 'contested'
+        ? Math.min(requestedConfidence, 0.35)
+        : requestedConfidence)),
+      trustStatus,
+      createdAt: trustStatus === 'contested' ? now : existing?.createdAt || now,
       updatedAt: now,
       sessionId: scope === 'project' ? undefined : this.session?.id,
       goalId: options.goalId,
       tags: options.tags,
+      sourceEventSeq: latestObservedResult?.seq,
+      sourceToolCallId: latestObservedResult?.data.toolCallId,
+      expiresAt: options.expiresAt || modelExpiry,
+      ...(trustStatus === 'contested'
+        ? {
+            conflictReason: hasConflict
+              ? `Model-authored value conflicts with the previous value for key "${key}".`
+              : `Model-authored value for key "${key}" has no supporting tool-result provenance.`,
+          }
+        : {}),
       recordedAt: now,
     };
 
     const record = this.normalizeInsight(item) as MemoryRecord;
     if (scope === 'project') {
-      const existingIndex = this.memoryData.learnedInsights.findIndex((i) => i.key === key);
+      const existingIndex = trustStatus === 'contested'
+        ? -1
+        : this.memoryData.learnedInsights.findIndex((i) => i.id === record.id);
       if (existingIndex >= 0) {
         this.memoryData.learnedInsights[existingIndex] = record;
       } else {
         this.memoryData.learnedInsights.push(record);
       }
       await this.save();
+
+      // Đồng bộ Vector Memory Store (RAG)
+      const textToVectorize = `${record.key}: ${record.insight} ${(record.tags || []).join(' ')}`;
+      await this.vectorStore.upsert(record.id, textToVectorize, {
+        key: record.key,
+        category: record.category,
+        scope: record.scope,
+        confidence: record.confidence,
+        trustStatus: record.trustStatus,
+        tags: record.tags,
+      });
     } else {
       this.session!.addMemoryRecord(record);
     }
@@ -199,12 +307,8 @@ export class ProjectMemoryManager {
    * Lưu toàn bộ dữ liệu trí nhớ xuống đĩa (.codingagent/project-memory.json)
    */
   async save(): Promise<void> {
-    try {
-      await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
-      await fs.writeFile(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2), 'utf-8');
-    } catch (err: any) {
-      console.error('Không thể lưu Project Memory:', err.message);
-    }
+    await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
+    await fs.writeFile(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2), 'utf-8');
   }
 
   /**
@@ -227,18 +331,31 @@ export class ProjectMemoryManager {
       lines.push(`- Cấu trúc thư mục: ${dirKeys.join(', ')}`);
     }
 
-    if (this.memoryData.learnedInsights.length > 0) {
+    const trustedInsights = this.memoryData.learnedInsights
+      .map((item) => this.normalizeInsight(item))
+      .filter((item) => this.isTrustedForAutomaticContext(item, 0.65))
+      .slice(-4);
+    if (trustedInsights.length > 0) {
       lines.push(`- Kinh nghiệm đã ghi nhớ:`);
-      for (const item of this.memoryData.learnedInsights.slice(-4)) {
+      for (const item of trustedInsights) {
         lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
       }
+    }
+
+    if (this.memoryData.codingConventions && this.memoryData.codingConventions.length > 0) {
+      lines.push(`- Chỉ dẫn dự án (AGENTS.md): ${this.memoryData.codingConventions.slice(0, 3).join('; ')}`);
     }
 
     return lines.join('\n');
   }
 
+  /**
+   * Truy vấn bộ nhớ kết hợp Hybrid Search (0.4 Lexical Matching + 0.6 Semantic Vector Similarity)
+   */
   retrieve(query = '', options: MemoryQueryOptions = {}): MemoryRecord[] {
     const scopes = options.scopes || ['project', 'session', 'goal'];
+    const minConfidence = options.minConfidence ?? 0;
+    const now = Date.now();
     const candidates = [
       ...this.memoryData.learnedInsights.map((item) => this.normalizeInsight(item) as MemoryRecord),
       ...(this.session?.getMemoryRecords() || []),
@@ -246,28 +363,78 @@ export class ProjectMemoryManager {
       if (!scopes.includes(item.scope)) return false;
       if (options.sessionId && item.sessionId !== options.sessionId) return false;
       if (options.goalId && item.goalId !== options.goalId) return false;
+      if (item.confidence < minConfidence) return false;
+      if (!options.includeContested && item.trustStatus !== 'active') return false;
+      if (!options.includeExpired && item.expiresAt && Date.parse(item.expiresAt) <= now) return false;
       return true;
     });
 
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const queryVector = query.trim() ? this.vectorStore.getEmbeddingService().generateLocalSubwordEmbedding(query) : null;
+
     const scored = candidates.map((item) => {
       const haystack = [item.key, item.insight, item.category, ...(item.tags || [])].join(' ').toLowerCase();
-      const score = terms.length === 0
-        ? 0
-        : terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
-      return { item, score };
+      const lexicalMatches = terms.length === 0 ? 0 : terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
+      const lexicalScore = terms.length > 0 ? (lexicalMatches / terms.length) : 0;
+
+      let vectorSimilarity = 0;
+      if (queryVector) {
+        const doc = this.vectorStore.get(item.id);
+        const docVec = doc?.vector || this.vectorStore.getEmbeddingService().generateLocalSubwordEmbedding(haystack);
+        vectorSimilarity = Math.max(0, cosineSimilarity(queryVector, docVec));
+      }
+
+      // Hybrid Scoring:
+      // - Nếu có từ khóa khớp (lexicalMatches > 0): kết hợp 0.4 Lexical + 0.6 Semantic
+      // - Nếu không có từ khóa nào khớp: chỉ chấp nhận khi vectorSimilarity rất cao (>= 0.6)
+      let score = 0;
+      if (terms.length === 0) {
+        score = 1;
+      } else if (lexicalMatches > 0) {
+        score = 0.4 * lexicalScore + 0.6 * vectorSimilarity;
+      } else if (vectorSimilarity >= 0.6) {
+        score = 0.6 * vectorSimilarity;
+      }
+      return { item, score, lexicalScore, vectorSimilarity };
     });
 
     return scored
-      .filter(({ score }) => terms.length === 0 || score > 0)
+      .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))
       .slice(0, options.limit ?? 8)
       .map(({ item }) => ({ ...item }));
   }
 
+  /**
+   * Truy vấn thuần ngữ nghĩa Vector RAG bất đồng bộ
+   */
+  async retrieveSemantic(query: string, options: { limit?: number; minSimilarity?: number } = {}): Promise<MemoryRecord[]> {
+    const searchResults = await this.vectorStore.search(query, {
+      limit: options.limit ?? 8,
+      minSimilarity: options.minSimilarity ?? 0.1,
+    });
+    const candidateMap = new Map<string, MemoryRecord>();
+    for (const item of this.memoryData.learnedInsights) {
+      candidateMap.set(item.id || `memory-${item.key}`, this.normalizeInsight(item) as MemoryRecord);
+    }
+    if (this.session) {
+      for (const item of this.session.getMemoryRecords()) {
+        candidateMap.set(item.id, item);
+      }
+    }
+    const records: MemoryRecord[] = [];
+    for (const res of searchResults) {
+      const rec = candidateMap.get(res.document.id);
+      if (rec) {
+        records.push(rec);
+      }
+    }
+    return records;
+  }
+
   getRelevantMemory(query: string, session?: Session, limit = 4): MemoryRecord[] {
     if (session) this.bindSession(session);
-    return this.retrieve(query, { limit });
+    return this.retrieve(query, { limit, minConfidence: 0.55 });
   }
 
   getMemoryData(): ProjectMemoryData {
@@ -279,16 +446,36 @@ export class ProjectMemoryManager {
 
   private normalizeInsight(item: LearnedInsight): LearnedInsight {
     const now = new Date().toISOString();
+    const source = item.source || 'manual';
+    const rawConfidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
+      ? item.confidence
+      : source === 'model' ? 0.5 : 1;
+    const validTrustStatuses = new Set(['active', 'contested', 'superseded']);
+    const invalidExpiry = Boolean(item.expiresAt && !Number.isFinite(Date.parse(item.expiresAt)));
+    const inferredTrustStatus = source === 'model' && !item.sourceEventSeq ? 'contested' : 'active';
+    const trustStatus = invalidExpiry
+      ? 'contested'
+      : validTrustStatuses.has(String(item.trustStatus))
+        ? item.trustStatus!
+        : inferredTrustStatus;
     return {
       ...item,
       id: item.id || `memory-${item.key}`,
       category: item.category || 'insight',
       scope: item.scope || 'project',
-      source: item.source || 'manual',
-      confidence: typeof item.confidence === 'number' ? item.confidence : 1,
+      source,
+      confidence: Math.max(0, Math.min(1, rawConfidence)),
+      trustStatus,
+      ...(invalidExpiry ? { conflictReason: 'Memory contains an invalid expiration timestamp.' } : {}),
       createdAt: item.createdAt || item.recordedAt || now,
       updatedAt: item.updatedAt || item.recordedAt || now,
       recordedAt: item.recordedAt || item.updatedAt || now,
     };
+  }
+
+  private isTrustedForAutomaticContext(item: LearnedInsight, minConfidence: number): boolean {
+    return (item.trustStatus || 'active') === 'active'
+      && (item.confidence ?? 0) >= minConfidence
+      && (!item.expiresAt || Date.parse(item.expiresAt) > Date.now());
   }
 }

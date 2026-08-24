@@ -84,6 +84,15 @@ export const SUPERPOWERS_BUILTIN_SKILLS: Omit<SkillManifest, 'path' | 'source'>[
     tags: ['git', 'version-control', 'repository'],
   },
   {
+    id: 'frontend-ui-engineering',
+    name: 'Frontend & UI Design Engineering',
+    version: '1.0.0',
+    description: 'Specialized frontend UI design and component engineering following Codex CLI standards: inspect theme/design tokens first, avoid generic design defaults, preserve reactivity hooks and state flow, apply surgical UI diffs, and verify with compiler/linter.',
+    priority: 65,
+    requiredCapabilities: ['filesystem.read', 'filesystem.edit', 'shell.verify'],
+    tags: ['frontend', 'ui', 'design', 'tailwind', 'css', 'react', 'vue', 'svelte', 'component', 'giao diện'],
+  },
+  {
     id: 'finishing-a-development-branch',
     name: 'Finishing a Development Branch',
     version: '1.0.0',

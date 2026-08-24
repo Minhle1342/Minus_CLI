@@ -24,18 +24,26 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         category: {
           type: Type.STRING,
           description: 'Phân loại: "convention", "architecture", "gotcha", "rule".',
+          enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight'],
         },
         scope: {
           type: Type.STRING,
           description: 'Phạm vi: project (mặc định), session, hoặc goal.',
+          enum: ['project', 'session', 'goal'],
         },
         confidence: {
           type: Type.NUMBER,
-          description: 'Độ tin cậy từ 0 đến 1 (mặc định 1).',
+          description: 'Độ tin cậy từ 0 đến 1. Memory do model tạo mặc định 0.5 và chỉ được tự động inject khi đủ ngưỡng.',
+          minimum: 0,
+          maximum: 1,
         },
         goalId: {
           type: Type.STRING,
           description: 'ID durable goal nếu memory thuộc scope goal.',
+        },
+        expiresAt: {
+          type: Type.STRING,
+          description: 'Thời điểm hết hạn ISO-8601 tùy chọn. Memory do model tạo mặc định hết hạn sau 30 ngày.',
         },
       },
       required: ['key', 'insight'],
@@ -53,6 +61,7 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         scope: args.scope || 'project',
         confidence: args.confidence,
         goalId: args.goalId,
+        expiresAt: args.expiresAt,
         source: 'model',
       });
       return {
@@ -81,10 +90,27 @@ export function createReadMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         scope: {
           type: Type.STRING,
           description: 'Lọc theo project, session, goal; bỏ trống để tìm tất cả scope.',
+          enum: ['project', 'session', 'goal'],
         },
         limit: {
           type: Type.NUMBER,
           description: 'Số memory tối đa trả về (mặc định 8).',
+          minimum: 1,
+          maximum: 100,
+        },
+        minConfidence: {
+          type: Type.NUMBER,
+          description: 'Ngưỡng độ tin cậy tối thiểu từ 0 đến 1.',
+          minimum: 0,
+          maximum: 1,
+        },
+        includeContested: {
+          type: Type.BOOLEAN,
+          description: 'Chỉ bật khi cần audit các memory đang tranh chấp; mặc định false.',
+        },
+        includeExpired: {
+          type: Type.BOOLEAN,
+          description: 'Chỉ bật khi cần audit memory đã hết hạn; mặc định false.',
         },
       },
     },
@@ -95,6 +121,9 @@ export function createReadMemoryTool(memoryManager: ProjectMemoryManager): ToolD
       const records = memoryManager.retrieve(query, {
         scopes: scope ? [scope as any] : undefined,
         limit: Number(args.limit) || 8,
+        minConfidence: args.minConfidence === undefined ? undefined : Number(args.minConfidence),
+        includeContested: args.includeContested === true,
+        includeExpired: args.includeExpired === true,
       });
 
       return {

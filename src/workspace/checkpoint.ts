@@ -12,16 +12,18 @@ export interface Checkpoint {
   description: string;
   commitHash?: string;
   diffSummary?: string;
+  isTaskCheckpoint?: boolean;
+  taskId?: string;
+  workspaceDigest?: string;
 }
 
 /**
- * CheckpointManager - Hệ thống tạo snapshot và khôi phục an toàn (Shadow Git Rollback)
+ * CheckpointManager - Hệ thống tạo snapshot và khôi phục an toàn (Shadow Git Task & Mutation Rollback)
  * 
  * Nguyên lý hoạt động:
- * 1. Trước mỗi hành động sửa đổi file (write_file, replace_text) hoặc chạy lệnh,
- *    hệ thống tự động ghi nhận một checkpoint.
- * 2. Lưu trữ diff trạng thái và cho phép người dùng hoàn tác (/undo) tức thì
- *    về trạng thái ổn định trước đó nếu Agent gây ra lỗi hoặc sửa sai.
+ * 1. Trước mutation đầu tiên của task hoặc mỗi turn/mutation, hệ thống tự động ghi nhận checkpoint.
+ * 2. Hỗ trợ cả mutation-level checkpoint và task-level checkpoint (`TaskCheckpoint`).
+ * 3. Cho phép hoàn tác (/undo) tức thì về checkpoint gần nhất hoặc rollback trọn vẹn task nếu verification thất bại.
  */
 export class CheckpointManager {
   private workspaceDir: string;
@@ -49,8 +51,10 @@ export class CheckpointManager {
   /**
    * Tạo checkpoint mới trước khi thực hiện hành động ghi/sửa file
    */
-  async createCheckpoint(description: string): Promise<Checkpoint | null> {
-    const id = `cp_${Date.now()}_${this.checkpoints.length + 1}`;
+  async createCheckpoint(description: string, options?: { isTaskCheckpoint?: boolean; taskId?: string; workspaceDigest?: string }): Promise<Checkpoint | null> {
+    const id = options?.isTaskCheckpoint
+      ? `task_cp_${Date.now()}_${this.checkpoints.length + 1}`
+      : `cp_${Date.now()}_${this.checkpoints.length + 1}`;
     const timestamp = new Date().toLocaleTimeString('vi-VN');
 
     let diffSummary = '';
@@ -71,7 +75,6 @@ export class CheckpointManager {
 
         commitHash = stashHash.trim();
       } catch (err: any) {
-        // Fallback nhẹ nếu git fail
         commitHash = '';
       }
     }
@@ -83,16 +86,30 @@ export class CheckpointManager {
       description,
       commitHash,
       diffSummary,
+      isTaskCheckpoint: options?.isTaskCheckpoint,
+      taskId: options?.taskId,
+      workspaceDigest: options?.workspaceDigest,
     };
 
     this.checkpoints.push(checkpoint);
 
-    // Giữ tối đa 20 checkpoints gần nhất
-    if (this.checkpoints.length > 20) {
+    // Giữ tối đa 30 checkpoints gần nhất
+    if (this.checkpoints.length > 30) {
       this.checkpoints.shift();
     }
 
     return checkpoint;
+  }
+
+  /**
+   * Tạo Task Checkpoint đặc thù cho toàn bộ task/turn
+   */
+  async createTaskCheckpoint(taskId: string, description: string, workspaceDigest?: string): Promise<Checkpoint | null> {
+    return this.createCheckpoint(description, {
+      isTaskCheckpoint: true,
+      taskId,
+      workspaceDigest,
+    });
   }
 
   /**
@@ -107,26 +124,49 @@ export class CheckpointManager {
     }
 
     const lastCp = this.checkpoints.pop()!;
+    return this.applyRollback(lastCp);
+  }
 
-    if (this.isGitRepo && lastCp.commitHash) {
+  /**
+   * Hoàn tác về một Task Checkpoint cụ thể
+   */
+  async rollbackToTaskCheckpoint(checkpointIdOrTaskId: string): Promise<{ success: boolean; message: string; checkpoint?: Checkpoint }> {
+    const targetIndex = this.checkpoints.findIndex(
+      (cp) => cp.id === checkpointIdOrTaskId || (cp.isTaskCheckpoint && cp.taskId === checkpointIdOrTaskId),
+    );
+
+    if (targetIndex === -1) {
+      return {
+        success: false,
+        message: `Không tìm thấy task checkpoint "${checkpointIdOrTaskId}" để rollback.`,
+      };
+    }
+
+    const targetCp = this.checkpoints[targetIndex];
+    // Cắt bỏ các checkpoint sau target
+    this.checkpoints = this.checkpoints.slice(0, targetIndex);
+
+    return this.applyRollback(targetCp);
+  }
+
+  private async applyRollback(targetCp: Checkpoint): Promise<{ success: boolean; message: string; checkpoint?: Checkpoint }> {
+    if (this.isGitRepo && targetCp.commitHash) {
       try {
-        // Khôi phục code từ commitHash đã lưu
-        await execAsync(`git restore --source=${lastCp.commitHash} --worktree .`, {
+        await execAsync(`git restore --source=${targetCp.commitHash} --worktree .`, {
           cwd: this.workspaceDir,
         });
         return {
           success: true,
-          message: `Đã hoàn tác thành công về Checkpoint #${lastCp.index} (${lastCp.timestamp}: "${lastCp.description}").`,
-          checkpoint: lastCp,
+          message: `Đã hoàn tác thành công về Checkpoint #${targetCp.index} (${targetCp.timestamp}: "${targetCp.description}").`,
+          checkpoint: targetCp,
         };
       } catch (err: any) {
-        // Nếu restore commitHash thất bại, thử git checkout / restore thông thường
         try {
           await execAsync('git restore .', { cwd: this.workspaceDir });
           return {
             success: true,
             message: `Đã hoàn tác các thay đổi chưa commit về trạng thái sạch gần nhất.`,
-            checkpoint: lastCp,
+            checkpoint: targetCp,
           };
         } catch (subErr: any) {
           return {
@@ -139,13 +179,17 @@ export class CheckpointManager {
 
     return {
       success: true,
-      message: `Đã loại bỏ Checkpoint #${lastCp.index} (${lastCp.description}).`,
-      checkpoint: lastCp,
+      message: `Đã hoàn tác Checkpoint #${targetCp.index} (${targetCp.description}).`,
+      checkpoint: targetCp,
     };
   }
 
   getHistory(): Checkpoint[] {
     return [...this.checkpoints];
+  }
+
+  getTaskCheckpoints(): Checkpoint[] {
+    return this.checkpoints.filter((cp) => cp.isTaskCheckpoint);
   }
 
   getLastCheckpoint(): Checkpoint | undefined {

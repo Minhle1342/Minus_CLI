@@ -1,9 +1,24 @@
 import type { Content, FunctionCall } from '@google/genai';
 import type { MemoryRecord } from '../memory/types.js';
 import type { SkillActivationDecision } from '../skills/types.js';
+import type { EvidenceKind } from '../agent/completion-evidence.js';
+import {
+  assertHistoryToolPairing,
+  assertSessionRuntimeInvariants,
+  computeRequestDigest,
+  type RecordedRequestHeader,
+} from './session-invariants.js';
+import { cloneJsonStrict } from '../tools/schema-validator.js';
 
 export type SessionMessage = Content;
 export type ContentPart = any;
+
+export interface ImageAttachment {
+  mimeType: string;
+  data: string; // Base64 encoded string
+  description?: string;
+  filePath?: string;
+}
 
 export type SessionEventType =
   | 'user/message'
@@ -23,7 +38,9 @@ export type SessionEventType =
   | 'effect/change'
   | 'skill/change'
   | 'session/fork'
-  | 'session/compaction';
+  | 'session/compaction'
+  | 'request/header'
+  | 'audit/task-completion';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
 
@@ -85,12 +102,30 @@ export interface SessionEventData {
   thoughtSignature?: string;
   args?: Record<string, any>;
   result?: Record<string, any>;
-  plan?: Array<{ id: number; title: string; status: string; notes?: string }>;
+  planTurn?: number;
+  planGoal?: string;
+  planRequired?: boolean;
+  planVerificationRequired?: boolean;
+  plan?: Array<{
+    id: number;
+    title: string;
+    acceptanceCriteria?: string;
+    status: string;
+    notes?: string;
+    evidence?: Array<{
+      toolName: string;
+      kind?: EvidenceKind;
+      outcome: 'success' | 'failure';
+      summary: string;
+      recordedAt: string;
+    }>;
+  }>;
   goal?: GoalState | null;
   memory?: MemoryRecord | null;
   delegation?: DelegationState | null;
   effect?: EffectState | null;
   skill?: SkillActivationDecision | null;
+  requestHeader?: RecordedRequestHeader;
 }
 
 export interface SessionEvent {
@@ -123,11 +158,9 @@ export interface SessionDiagnostics {
 }
 
 function cloneJson<T>(value: T): T {
-  try {
-    return structuredClone(value);
-  } catch {
-    return JSON.parse(JSON.stringify(value)) as T;
-  }
+  // Optional fields are canonically omitted, matching JSON object semantics;
+  // all other lossy/non-JSON values remain rejected.
+  return cloneJsonStrict(value, 'Session data', { omitUndefinedObjectProperties: true });
 }
 
 function assertEvent(event: SessionEvent, expectedSeq: number): void {
@@ -154,6 +187,8 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'skill/change',
     'session/fork',
     'session/compaction',
+    'request/header',
+    'audit/task-completion',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);
   }
@@ -209,6 +244,38 @@ export class Session {
     return cloneJson(event);
   }
 
+  recordRequestHeader(input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq'>): SessionEvent {
+    const withoutDigest = {
+      ...cloneJson(input),
+      sourceEventSeq: this.seq,
+    };
+    return this.append('request/header', {
+      requestHeader: {
+        ...withoutDigest,
+        digest: computeRequestDigest(withoutDigest),
+      },
+    });
+  }
+
+  assertRuntimeInvariants(options?: { allowOpenLifecycle?: boolean; allowPendingToolCalls?: boolean }): void {
+    const events = this.getEvents();
+    assertSessionRuntimeInvariants(events, options);
+    for (const event of events) {
+      const header = event.data.requestHeader;
+      if (event.type !== 'request/header' || !header) continue;
+      const historyAtBoundary = new Session(
+        `${this.id}:request-boundary`,
+        events.slice(0, header.sourceEventSeq),
+        this.createdAt,
+      ).getHistory();
+      const { digest, ...withoutDigest } = header;
+      const reconstructedDigest = computeRequestDigest({ ...withoutDigest, history: historyAtBoundary });
+      if (reconstructedDigest !== digest) {
+        throw new Error(`Invariant violation: request/header history cannot be reconstructed at seq ${event.seq}.`);
+      }
+    }
+  }
+
   get seq(): number {
     return this.eventLog.length;
   }
@@ -229,6 +296,37 @@ export class Session {
       content: {
         role: 'user',
         parts: [{ text }],
+      },
+    });
+  }
+
+  addMultimodalUserMessage(
+    text: string,
+    images: ImageAttachment[] = [],
+    source: 'human' | 'system' | 'injected' = 'human',
+    inputId?: string
+  ): void {
+    const parts: any[] = [];
+    if (text) {
+      parts.push({ text });
+    }
+    for (const img of images) {
+      parts.push({
+        inlineData: {
+          mimeType: img.mimeType || 'image/png',
+          data: img.data,
+        },
+      });
+      if (img.description) {
+        parts.push({ text: `[Visual attachment context: ${img.description}]` });
+      }
+    }
+    this.append('user/message', {
+      source,
+      inputId,
+      content: {
+        role: 'user',
+        parts,
       },
     });
   }
@@ -573,6 +671,7 @@ export class Session {
    * This is the first compaction seam; later phases can add typed policies.
    */
   setHistory(newHistory: Content[], reason = 'context-compaction'): void {
+    assertHistoryToolPairing(newHistory);
     this.append('session/compaction', {
       messages: newHistory,
       reason,

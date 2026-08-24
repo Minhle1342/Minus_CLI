@@ -168,11 +168,11 @@ export class DockerSandbox implements ISandboxProvider {
       this.containerId = (stdout || '').trim().slice(0, 12);
       this.isDockerReady = true;
 
-      // Cài đặt trước các công cụ thiết yếu (curl, git, bash, ca-certificates) nếu container chưa có
+      // Cài đặt trước các công cụ thiết yếu (curl, git, bash, ripgrep, ca-certificates) nếu container chưa có
       try {
         await execFileAsync(
           'docker',
-          ['exec', this.containerId, 'sh', '-c', 'command -v curl >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 || (apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true)'],
+          ['exec', this.containerId, 'sh', '-c', 'command -v curl >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 && (command -v rg >/dev/null 2>&1 || command -v ripgrep >/dev/null 2>&1) || (apk add --no-cache curl git bash ca-certificates ripgrep 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates ripgrep) 2>/dev/null || true)'],
           { timeout: 25000 }
         );
       } catch {
@@ -220,14 +220,16 @@ export class DockerSandbox implements ISandboxProvider {
         stderr.includes('curl: not found') ||
         stderr.includes('git: not found') ||
         stderr.includes('bash: not found') ||
-        stderr.includes('wget: not found');
+        stderr.includes('wget: not found') ||
+        stderr.includes('rg: not found') ||
+        stderr.includes('ripgrep: not found');
 
       // Tự động cài đặt gói bị thiếu và thực thi lại một lần (Self-healing Sandbox)
       if (isMissingUtility && this.containerId) {
         try {
           await execFileAsync(
             'docker',
-            ['exec', this.containerId, 'sh', '-c', 'apk add --no-cache curl git bash ca-certificates 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates) 2>/dev/null || true'],
+            ['exec', this.containerId, 'sh', '-c', 'apk add --no-cache curl git bash ca-certificates ripgrep 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates ripgrep) 2>/dev/null || true'],
             { timeout: 25000 }
           );
           const retried = await execFileAsync('docker', dockerExecArgs, {

@@ -1,8 +1,8 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
-import { PlanManager, TaskStatus } from '../agent/plan-manager.js';
+import { PlanManager, PlanTaskInput, TaskStatus } from '../agent/plan-manager.js';
 
-type PlanTaskInput = { id?: number; title: string };
+const ALLOWED_TASK_STATUSES = new Set<TaskStatus>(['IN_PROGRESS', 'COMPLETED', 'FAILED', 'SKIPPED']);
 
 function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; error?: string } {
   const tasks: PlanTaskInput[] = [];
@@ -12,63 +12,67 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
 
     if (typeof rawTask === 'string') {
       const title = rawTask.trim();
-      if (!title) {
-        return { error: `Phần tử tasks[${index}] phải là chuỗi không rỗng.` };
-      }
+      if (!title) return { error: `tasks[${index}] must be a non-empty string.` };
       tasks.push({ title });
       continue;
     }
 
     if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) {
-      return { error: `Phần tử tasks[${index}] phải là chuỗi hoặc object có title.` };
+      return { error: `tasks[${index}] must be a string or an object with a title.` };
     }
 
     const candidate = rawTask as Record<string, unknown>;
     if (typeof candidate.title !== 'string' || !candidate.title.trim()) {
-      return { error: `Phần tử tasks[${index}].title phải là chuỗi không rỗng.` };
+      return { error: `tasks[${index}].title must be a non-empty string.` };
     }
 
     let id: number | undefined;
     if (candidate.id !== undefined) {
       const parsedId = Number(candidate.id);
       if (!Number.isInteger(parsedId) || parsedId < 1) {
-        return { error: `Phần tử tasks[${index}].id phải là số nguyên dương.` };
+        return { error: `tasks[${index}].id must be a positive integer.` };
       }
       id = parsedId;
     }
 
-    tasks.push(id === undefined
-      ? { title: candidate.title.trim() }
-      : { id, title: candidate.title.trim() });
+    const acceptanceCriteria = typeof candidate.acceptanceCriteria === 'string'
+      ? candidate.acceptanceCriteria.trim()
+      : undefined;
+    tasks.push({
+      ...(id === undefined ? {} : { id }),
+      title: candidate.title.trim(),
+      ...(acceptanceCriteria ? { acceptanceCriteria } : {}),
+    });
   }
 
   return { tasks };
 }
 
-/**
- * Tool: create_plan
- * Cho phép LLM khởi tạo Plan Tree phân rã nhiệm vụ
- */
+/** Create a semantically validated execution plan for the current user turn. */
 export function createPlanTool(planManager: PlanManager): ToolDefinition {
   return {
     name: 'create_plan',
-    description: 'Tạo cây kế hoạch (Plan Tree) gồm danh sách các bước thực hiện có cấu trúc cho tác vụ coding phức tạp.',
+    description: 'Create a 3-7 step execution plan for complex coding work. Each task must be atomic, must not repeat the user request, and code changes must end with an explicit test/build verification step.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         tasks: {
           type: Type.ARRAY,
-          description: 'Danh sách các nhiệm vụ cụ thể theo thứ tự thực hiện.',
+          description: 'Ordered atomic tasks. Do not submit one task that merely restates the request.',
           items: {
             type: Type.OBJECT,
             properties: {
               id: {
                 type: Type.NUMBER,
-                description: 'Số thứ tự của bước (1, 2, 3,...)',
+                description: 'Stable positive step number.',
               },
               title: {
                 type: Type.STRING,
-                description: 'Tiêu đề ngắn gọn mô tả bước này (vd: "Phân tích file bug", "Viết Unit Test", "Sửa code", "Chạy npm test")',
+                description: 'Concrete action for this step, such as inspect affected files, reproduce the bug, implement the fix, or run relevant tests.',
+              },
+              acceptanceCriteria: {
+                type: Type.STRING,
+                description: 'Observable condition proving this step is complete. If omitted, the harness derives a conservative criterion from the title.',
               },
             },
             required: ['title'],
@@ -80,7 +84,7 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
     async execute(args) {
       if (!args.tasks || !Array.isArray(args.tasks) || args.tasks.length === 0) {
         return {
-          error: 'Tham số "tasks" phải là một mảng danh sách các nhiệm vụ.',
+          error: '"tasks" must be a non-empty array of execution steps.',
           errorCode: 'INVALID_ARGS',
         };
       }
@@ -90,37 +94,48 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
         return { error: normalized.error, errorCode: 'INVALID_ARGS' };
       }
 
-      const tasks = planManager.createPlan(normalized.tasks);
-      return {
-        message: `Đã khởi tạo kế hoạch thành công gồm ${tasks.length} bước.`,
-        tasks,
-      };
+      try {
+        const tasks = planManager.createPlan(normalized.tasks);
+        return {
+          message: `Created an execution plan with ${tasks.length} steps.`,
+          tasks,
+          requirements: planManager.getRequirements(),
+        };
+      } catch (error) {
+        return {
+          error: error instanceof Error ? error.message : String(error),
+          errorCode: 'PLAN_VALIDATION_FAILED',
+          retryable: true,
+          requirements: planManager.getRequirements(),
+        };
+      }
     },
   };
 }
 
-/**
- * Tool: update_plan_task
- * Cho phép LLM cập nhật tiến độ từng bước
- */
+/** Advance only the currently active task after observed execution evidence. */
 export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefinition {
   return {
     name: 'update_plan_task',
-    description: 'Cập nhật trạng thái của một bước trong kế hoạch (PENDING, IN_PROGRESS, COMPLETED, FAILED, SKIPPED).',
+    description: 'Update only the active execution-plan task. COMPLETED requires successful tool evidence observed by the harness; FAILED/SKIPPED require a concrete explanation.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         id: {
           type: Type.NUMBER,
-          description: 'ID số thứ tự của bước cần cập nhật.',
+          description: 'ID of the active step.',
         },
         status: {
           type: Type.STRING,
-          description: 'Trạng thái mới: "COMPLETED", "IN_PROGRESS", "FAILED", "SKIPPED".',
+          description: 'New status: IN_PROGRESS, COMPLETED, FAILED, or SKIPPED.',
         },
         notes: {
           type: Type.STRING,
-          description: 'Ghi chú bổ sung hoặc kết quả đạt được sau bước này.',
+          description: 'Concrete result, blocker, or skip reason.',
+        },
+        evidence: {
+          type: Type.STRING,
+          description: 'Concise explanation of the observed result. It annotates but cannot replace an actual tool result.',
         },
       },
       required: ['id', 'status'],
@@ -128,12 +143,54 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
     async execute(args) {
       const id = Number(args.id);
       const status = String(args.status).toUpperCase() as TaskStatus;
-      const updated = planManager.updateTask(id, status, args.notes);
+      if (!Number.isInteger(id) || id < 1 || !ALLOWED_TASK_STATUSES.has(status)) {
+        return {
+          error: 'id must be a positive integer and status must be IN_PROGRESS, COMPLETED, FAILED, or SKIPPED.',
+          errorCode: 'INVALID_ARGS',
+        };
+      }
+
+      let updated;
+      try {
+        updated = planManager.updateTask(id, status, args.evidence || args.notes);
+      } catch (error: any) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        let hint = 'Execute a tool matching the task acceptance criteria before marking it complete.';
+        if (errorMsg.includes('inspection evidence')) {
+          hint = 'This step requires inspection evidence. Call inspection tools (e.g. read_file, search_codebase_fast, list_files, inspect_symbol) before marking COMPLETED.';
+        } else if (errorMsg.includes('mutation evidence')) {
+          hint = 'This step requires code mutation evidence. Call mutation tools (e.g. replace_text, apply_patch, create_file, write_file) before marking COMPLETED.';
+        } else if (errorMsg.includes('verification evidence')) {
+          hint = 'This step requires test/build verification evidence. Call run_command (to run tests or build) or get_diagnostics before marking COMPLETED.';
+        }
+        return {
+          error: errorMsg,
+          errorCode: 'PLAN_TRANSITION_REJECTED',
+          retryable: true,
+          hint,
+          activeTask: planManager.getActiveTask(),
+        };
+      }
       if (!updated) {
-        return { error: `Không tìm thấy bước với ID = ${id} trong kế hoạch.` };
+        if (!planManager.hasPlan()) {
+          return {
+            error: 'No execution plan has been created in this turn. Call "create_plan" first to define execution steps, or skip calling "update_plan_task" for simple single-step tasks.',
+            errorCode: 'NO_PLAN_EXISTS',
+            hint: 'Call create_plan first with a tasks array: [{ title: "Inspect code" }, { title: "Implement fix" }, { title: "Run verification" }].',
+          };
+        }
+        const existingTasks = planManager.getTasks();
+        const availableIds = existingTasks.map((t) => `#${t.id}: "${t.title}" (${t.status})`).join(', ');
+        const activeTask = planManager.getActiveTask();
+        return {
+          error: `No plan step with id ${id} exists. Available step IDs: [${availableIds}].`,
+          errorCode: 'PLAN_TASK_NOT_FOUND',
+          activeStepId: activeTask?.id,
+          hint: activeTask ? `Currently active step is #${activeTask.id} ("${activeTask.title}"). Pass id: ${activeTask.id}.` : 'No active step exists.',
+        };
       }
       return {
-        message: `Đã cập nhật bước #${id} sang trạng thái "${status}".`,
+        message: `Updated step #${id} to ${status}.`,
         task: updated,
         progress: planManager.getProgress(),
       };

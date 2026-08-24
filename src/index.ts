@@ -12,7 +12,13 @@ import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { loadSession, saveSession, getSessionFilePath } from './session/persistent-session.js';
 import { Workspace } from './workspace/workspace.js';
-import { CLI, AVAILABLE_MODELS, colors as c } from './ui/cli-ui.js';
+import {
+  CLI,
+  AVAILABLE_MODELS,
+  RealtimeSlashCommandHints,
+  colors as c,
+  completeSlashCommand,
+} from './ui/cli-ui.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
@@ -23,6 +29,22 @@ import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
 import { SearchPlugin } from './kernel/plugins/search-plugin.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { getCodexCredentials, isCodexAuthenticated } from './llm/codex-auth.js';
+import {
+  FileMentionEngine,
+  PromptAttachmentProcessor,
+} from './workspace/file-attachment.js';
+import {
+  TokenConfig,
+  getModelTokenProfile,
+  resolveTokenConfig,
+  TokenPresetTier,
+  TOKEN_TIER_DEFINITIONS,
+  getPresetTokenConfig,
+  resolveOutputTokensPreset,
+  resolveInputTokensPreset,
+  resolveThinkingTokensPreset,
+  normalizePresetTier,
+} from './llm/token-config.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -44,38 +66,17 @@ const openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
 const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 30;
 
-// Hàm hoàn thành tự động khi người dùng nhấn Tab
+let activeWorkspaceRef: Workspace | undefined;
+
+// Hàm hoàn thành tự động khi người dùng nhấn Tab (Hỗ trợ Slash Commands và @ Mention File / Thư mục)
 function completer(line: string): [string[], string] {
-  const completions = [
-    '/model',
-    '/modal',
-    '/workspace',
-    '/cd',
-    '/session',
-    '/sessions',
-    '/new-session',
-    '/fork-session',
-    '/sandbox',
-    '/tasks',
-    '/plan',
-    '/memory',
-    '/tools',
-    '/status',
-    '/agents',
-    '/goal',
-    '/skills',
-    '/capabilities',
-    '/approvals',
-    '/undo',
-    '/rollback',
-    '/checkpoints',
-    '/clear',
-    '/help',
-    '/exit',
-    '/quit',
-  ];
-  const hits = completions.filter((c) => c.startsWith(line.toLowerCase()));
-  return [hits.length ? hits : completions, line];
+  if (line.includes('@') && activeWorkspaceRef) {
+    const mentionCompletions = FileMentionEngine.completeMention(line, activeWorkspaceRef);
+    if (mentionCompletions[0].length > 0) {
+      return mentionCompletions;
+    }
+  }
+  return completeSlashCommand(line);
 }
 
 // Phân tích tham số dòng lệnh CLI (--workspace, --model, --sandbox, positional workspace)
@@ -187,7 +188,7 @@ function getInitialModelName(savedModel?: string, cliModel?: string): string {
   return apiKey ? 'gemini-3.7-flash' : 'groq/llama-3.3-70b-versatile';
 }
 
-async function createLLM(model: string) {
+async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
   // 0. Smart Multi-Provider 3-Tier Fallback Router (Chống Rate-Limit & Quá tải)
   if (model === 'auto-fallback' || model === 'smart-router') {
     const tiers: ProviderTier[] = [];
@@ -198,13 +199,13 @@ async function createLLM(model: string) {
         name: 'gemini-3.7-flash',
         provider: 'Google AI Studio',
         tier: 1,
-        createClient: () => new GeminiLLM(apiKey, 'gemini-3.7-flash'),
+        createClient: () => new GeminiLLM(apiKey, 'gemini-3.7-flash', undefined, tokenConfig),
       });
       tiers.push({
         name: 'gemini-3.6-flash',
         provider: 'Google AI Studio',
         tier: 1,
-        createClient: () => new GeminiLLM(apiKey, 'gemini-3.6-flash'),
+        createClient: () => new GeminiLLM(apiKey, 'gemini-3.6-flash', undefined, tokenConfig),
       });
     }
 
@@ -214,7 +215,7 @@ async function createLLM(model: string) {
         name: 'groq/llama-3.3-70b-versatile',
         provider: 'Groq Cloud',
         tier: 2,
-        createClient: () => new DeepseekLLM(groqApiKey, 'llama-3.3-70b-versatile', undefined, 'https://api.groq.com/openai/v1'),
+        createClient: () => new DeepseekLLM(groqApiKey, 'llama-3.3-70b-versatile', undefined, 'https://api.groq.com/openai/v1', undefined, tokenConfig),
       });
     }
     if (cerebrasApiKey) {
@@ -222,7 +223,7 @@ async function createLLM(model: string) {
         name: 'cerebras/llama-3.3-70b',
         provider: 'Cerebras Cloud',
         tier: 2,
-        createClient: () => new DeepseekLLM(cerebrasApiKey, 'llama-3.3-70b', undefined, 'https://api.cerebras.ai/v1'),
+        createClient: () => new DeepseekLLM(cerebrasApiKey, 'llama-3.3-70b', undefined, 'https://api.cerebras.ai/v1', undefined, tokenConfig),
       });
     }
     if (sambanovaApiKey) {
@@ -230,7 +231,7 @@ async function createLLM(model: string) {
         name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
         provider: 'SambaNova Cloud',
         tier: 2,
-        createClient: () => new DeepseekLLM(sambanovaApiKey, 'Meta-Llama-3.3-70B-Instruct', undefined, 'https://api.sambanova.ai/v1'),
+        createClient: () => new DeepseekLLM(sambanovaApiKey, 'Meta-Llama-3.3-70B-Instruct', undefined, 'https://api.sambanova.ai/v1', undefined, tokenConfig),
       });
     }
 
@@ -240,7 +241,7 @@ async function createLLM(model: string) {
         name: 'mistral/codestral-latest',
         provider: 'Mistral AI',
         tier: 3,
-        createClient: () => new DeepseekLLM(mistralApiKey, 'codestral-latest', undefined, 'https://api.mistral.ai/v1'),
+        createClient: () => new DeepseekLLM(mistralApiKey, 'codestral-latest', undefined, 'https://api.mistral.ai/v1', undefined, tokenConfig),
       });
     }
     if (openrouterApiKey) {
@@ -248,7 +249,7 @@ async function createLLM(model: string) {
         name: 'openrouter/free',
         provider: 'OpenRouter Free',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1'),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
     }
     // Always attach Pollinations Zero-Key as ultimate fail-safe
@@ -256,10 +257,10 @@ async function createLLM(model: string) {
       name: 'pollinations/openai',
       provider: 'Pollinations Community (Zero-Key)',
       tier: 3,
-      createClient: () => new DeepseekLLM('dummy_key', 'openai', undefined, 'https://text.pollinations.ai/openai'),
+      createClient: () => new DeepseekLLM('dummy_key', 'openai', undefined, 'https://text.pollinations.ai/openai', undefined, tokenConfig),
     });
 
-    return new FallbackRouterLLM('auto-fallback', tiers);
+    return new FallbackRouterLLM('auto-fallback', tiers, tokenConfig);
   }
 
   // 0.1. 9Router Local Gateway (Proxy tại localhost:20128/v1)
@@ -267,7 +268,7 @@ async function createLLM(model: string) {
     const rawModel = model.replace(/^9router\//, '');
     const baseUrl = process.env.NINE_ROUTER_BASE_URL || 'http://localhost:20128/v1';
     const key = process.env.NINE_ROUTER_API_KEY || '123456';
-    return new DeepseekLLM(key, rawModel === 'auto' ? 'auto' : rawModel, undefined, baseUrl);
+    return new DeepseekLLM(key, rawModel === 'auto' ? 'auto' : rawModel, undefined, baseUrl, undefined, tokenConfig);
   }
 
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)
@@ -279,7 +280,7 @@ async function createLLM(model: string) {
     if (!apiKey) {
       throw new Error(`Chưa cấu hình GEMINI_API_KEY trong .env! Vui lòng lấy key miễn phí tại: https://aistudio.google.com/`);
     }
-    return new GeminiLLM(apiKey, rawModel);
+    return new GeminiLLM(apiKey, rawModel, undefined, tokenConfig);
   }
 
   // 2. Groq Cloud (Free Tier - Siêu tốc LPU)
@@ -295,7 +296,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình GROQ_API_KEY trong .env! Vui lòng lấy key miễn phí tại https://console.groq.com/keys hoặc dùng /model 1 (Gemini).`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://api.groq.com/openai/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://api.groq.com/openai/v1', undefined, tokenConfig);
   }
 
   // 3. Cerebras Cloud (Free Tier - 1M tokens/ngày, 1500+ tok/s)
@@ -305,7 +306,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình CEREBRAS_API_KEY trong file .env!\n👉 Vui lòng lấy API key miễn phí tại: https://cloud.cerebras.ai/ và dán vào CEREBRAS_API_KEY trong .env, hoặc chuyển sang model đã có sẵn key như /model 1 (Gemini) hoặc /model 4 (Groq).`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://api.cerebras.ai/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://api.cerebras.ai/v1', undefined, tokenConfig);
   }
 
   // 4. SambaNova Cloud (Free Tier - Llama 405B)
@@ -315,7 +316,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình SAMBANOVA_API_KEY trong file .env!\n👉 Vui lòng lấy key miễn phí tại: https://cloud.sambanova.ai/ và dán vào SAMBANOVA_API_KEY trong .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://api.sambanova.ai/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://api.sambanova.ai/v1', undefined, tokenConfig);
   }
 
   // 5. GitHub Models (Free Tier via GitHub Token)
@@ -325,7 +326,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình GITHUB_TOKEN trong file .env!\n👉 Vui lòng tạo Personal Access Token tại https://github.com/settings/tokens và dán vào GITHUB_TOKEN trong .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://models.inference.ai.azure.com');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://models.inference.ai.azure.com', undefined, tokenConfig);
   }
 
   // 6. SiliconFlow (Free Tier)
@@ -335,7 +336,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình SILICONFLOW_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://siliconflow.cn/ và dán vào .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://api.siliconflow.cn/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://api.siliconflow.cn/v1', undefined, tokenConfig);
   }
 
   // 7. Mistral AI (Codestral Free Tier)
@@ -345,13 +346,13 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình MISTRAL_API_KEY trong file .env!\n👉 Vui lòng lấy key miễn phí tại https://console.mistral.ai/ và dán vào .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://api.mistral.ai/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://api.mistral.ai/v1', undefined, tokenConfig);
   }
 
   // 8. Pollinations AI (Zero-Key Free Community - Không cần API Key)
   if (model.startsWith('pollinations/')) {
     const rawModel = model.replace(/^pollinations\//, '');
-    return new DeepseekLLM('dummy_key', rawModel, undefined, 'https://text.pollinations.ai/openai');
+    return new DeepseekLLM('dummy_key', rawModel, undefined, 'https://text.pollinations.ai/openai', undefined, tokenConfig);
   }
 
   // 9. OpenAI Codex CLI (GPT-5.6 Sol / Terra / Luna, o4-mini, o3-mini qua OpenAI API hoặc ChatGPT Plus OAuth)
@@ -368,7 +369,7 @@ async function createLLM(model: string) {
     // 1. Nếu có OPENAI_API_KEY trong .env -> Luôn ưu tiên dùng endpoint chính thức (tránh Cloudflare bot challenge)
     if (openaiApiKey) {
       const baseUrl = process.env.CODEX_BASE_URL || 'https://api.openai.com/v1';
-      return new DeepseekLLM(openaiApiKey, rawModel, undefined, baseUrl);
+      return new DeepseekLLM(openaiApiKey, rawModel, undefined, baseUrl, undefined, tokenConfig);
     }
 
     // 2. Nếu có token OAuth từ Codex CLI (~/.codex/auth.json)
@@ -379,7 +380,8 @@ async function createLLM(model: string) {
         rawModel,
         undefined,
         codexBaseUrl,
-        codexCreds.accountId ? { 'chatgpt-account-id': codexCreds.accountId } : undefined
+        codexCreds.accountId ? { 'chatgpt-account-id': codexCreds.accountId } : undefined,
+        tokenConfig
       );
     }
 
@@ -398,7 +400,7 @@ async function createLLM(model: string) {
       throw new Error(`Chưa cấu hình OPENAI_API_KEY trong file .env! Vui lòng dán key vào .env.`);
     }
     const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-    return new DeepseekLLM(key, rawModel, undefined, baseUrl);
+    return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
   }
 
   // 11. DeepSeek Direct (V3 / R1)
@@ -407,7 +409,7 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình DEEPSEEK_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://platform.deepseek.com/ và dán vào .env.`);
     }
-    return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com');
+    return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com', undefined, tokenConfig);
   }
 
   // 12. OpenRouter Free Models & Direct OpenRouter (Chỉ bắt các model có tiền tố openrouter/ hoặc :free)
@@ -417,17 +419,17 @@ async function createLLM(model: string) {
     if (!key) {
       throw new Error(`Chưa cấu hình OPENROUTER_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://openrouter.ai/keys và dán vào .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://openrouter.ai/api/v1');
+    return new DeepseekLLM(key, rawModel, undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig);
   }
 
   // Fallback mặc định
   if (apiKey) {
-    return new GeminiLLM(apiKey, model);
+    return new GeminiLLM(apiKey, model, undefined, tokenConfig);
   }
   if (groqApiKey) {
-    return new DeepseekLLM(groqApiKey, model, undefined, 'https://api.groq.com/openai/v1');
+    return new DeepseekLLM(groqApiKey, model, undefined, 'https://api.groq.com/openai/v1', undefined, tokenConfig);
   }
-  return new DeepseekLLM(deepseekApiKey || 'dummy_key', model);
+  return new DeepseekLLM(deepseekApiKey || 'dummy_key', model, undefined, undefined, undefined, tokenConfig);
 }
 
 async function main() {
@@ -470,7 +472,7 @@ async function main() {
   let modelName = getInitialModelName(savedSession.modelName, cliModel);
 
   let workspace = new Workspace(initialPath);
-  let llm = await createLLM(modelName);
+  let llm = await createLLM(modelName, savedSession.tokenConfig);
   let sessionPersistence = new SessionPersistence(workspace.rootDir);
   let activeSession = savedSession.activeSessionId
     ? await sessionPersistence.load(savedSession.activeSessionId)
@@ -532,8 +534,13 @@ async function main() {
   const toolRegistry = kernel.ctx.tools;
   const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence });
   agentLoop.bindSession(activeSession);
+  if (savedSession.tokenConfig) {
+    agentLoop.setTokenConfig(savedSession.tokenConfig);
+  }
 
   let sessionCount = 0;
+
+  activeWorkspaceRef = workspace;
 
   const executeDurableGoal = async (objective?: string): Promise<void> => {
     if (!activeSession) {
@@ -554,7 +561,11 @@ async function main() {
 
     CLI.renderGoalBanner(state.objective);
     if (objective) {
-      await agentLoop.submit(activeSession, objective, 'human', { isGoalMode: true });
+      const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(objective, workspace);
+      if (attachmentResult.hasAttachments) {
+        CLI.renderAttachmentSummary(attachmentResult.attachments);
+      }
+      await agentLoop.submit(activeSession, attachmentResult.expandedPrompt, 'human', { isGoalMode: true });
     } else {
       await agentLoop.run(activeSession, { isGoalMode: true });
     }
@@ -570,6 +581,43 @@ async function main() {
   });
 
   const rl = readline.createInterface({ input, output, completer });
+  const slashHints = new RealtimeSlashCommandHints(output, () => activeWorkspaceRef);
+  let slashHintRefreshScheduled = false;
+  const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean }): void => {
+    if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
+      slashHints.clear();
+      return;
+    }
+    const removesOnlySlash = rl.line === '/'
+      && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
+    if (removesOnlySlash) {
+      slashHints.clear();
+      return;
+    }
+    if (slashHintRefreshScheduled) return;
+    slashHintRefreshScheduled = true;
+    setImmediate(() => {
+      slashHintRefreshScheduled = false;
+      slashHints.update(rl.line, rl.cursor + 2);
+    });
+  };
+  // Clear transient rows before readline handles Enter and invokes the question callback.
+  // Character updates are deferred, so prepending does not read stale rl.line state.
+  input.prependListener('keypress', handleInputKeypress);
+
+  // Đăng ký Permission Prompt Handler cho interactive CLI mode
+  kernel.ctx.permissions.setPromptHandler(async (request) => {
+    slashHints.clear();
+    CLI.renderPermissionPrompt(request);
+    const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    if (answer === 'y' || answer === 'yes' || answer === '') {
+      return 'approve';
+    }
+    if (answer === 'a' || answer === 'all' || answer === 'always') {
+      return 'approve_all_session';
+    }
+    return 'reject';
+  });
 
   try {
     while (true) {
@@ -690,6 +738,15 @@ async function main() {
         } catch (err: any) {
           console.error(`\n${c.red}✖ Không thể fork session:${c.reset}`, err.message);
         }
+        continue;
+      }
+
+      if (trimmed === '/cache' || trimmed === '/prompt-cache') {
+        CLI.renderPromptCacheDashboard({
+          modelName,
+          preservePrefixCache: agentLoop.contextCompactor.getConfig().preservePrefixCache,
+          sessionId: activeSession.id,
+        });
         continue;
       }
 
@@ -888,6 +945,7 @@ async function main() {
           const oldPath = workspace.rootDir;
           await sessionPersistence.save(activeSession);
           workspace = new Workspace(resolvedPath);
+          activeWorkspaceRef = workspace;
           agentLoop.setWorkspace(workspace);
           sessionPersistence = new SessionPersistence(workspace.rootDir);
           agentLoop.setSessionPersistence(sessionPersistence);
@@ -931,13 +989,193 @@ async function main() {
         }
 
         try {
-          const newLLM = await createLLM(targetModel);
+          const currentTokens = agentLoop.getTokenConfig();
+          const newLLM = await createLLM(targetModel, currentTokens);
           agentLoop.setLLM(newLLM, targetModel);
           modelName = targetModel;
           saveSession({ modelName });
           console.log(`\n${c.green}✔ Đã kích hoạt mô hình:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Đã lưu cho các phiên sau)${c.reset}\n`);
         } catch (err: any) {
           console.error(`\n${c.red}✖ Lỗi khi đổi model:${c.reset}`, err.message);
+        }
+        continue;
+      }
+
+      // Xử lý lệnh điều chỉnh Token (/tokens)
+      if (
+        trimmed === '/tokens' ||
+        trimmed === '/token' ||
+        trimmed.startsWith('/tokens ') ||
+        trimmed.startsWith('/token ')
+      ) {
+        const parts = trimmed.split(' ');
+        const subCmd = parts[1]?.toLowerCase();
+        const val = parts[2];
+
+        const currentConfig = agentLoop.getTokenConfig() || resolveTokenConfig(modelName);
+        const profile = getModelTokenProfile(modelName);
+
+        if (!subCmd) {
+          CLI.renderTokenConfig(modelName, currentConfig, profile);
+          continue;
+        }
+
+        // 1. Chọn nhanh trọn gói cấu hình sẵn (Preset Tiers: low, medium, high, max, preset <tier>, profile <tier>)
+        const directTier = normalizePresetTier(subCmd);
+        const subTier = (subCmd === 'preset' || subCmd === 'profile' || subCmd === 'tier') && val ? normalizePresetTier(val) : null;
+        const targetTier = directTier || subTier;
+
+        if (targetTier) {
+          const presetConfig = getPresetTokenConfig(targetTier, profile);
+          const tierDef = TOKEN_TIER_DEFINITIONS[targetTier];
+
+          agentLoop.setTokenConfig(presetConfig);
+          saveSession({ tokenConfig: presetConfig });
+
+          console.log(`\n${c.green}✔ Đã áp dụng Gói Cấu hình Token:${c.reset} ${c.bold}${tierDef.badge} - ${tierDef.label}${c.reset}`);
+          console.log(`  ${c.gray}↳ ${tierDef.description}${c.reset}\n`);
+          CLI.renderTokenConfig(modelName, presetConfig, profile);
+          continue;
+        }
+
+        // 2. Cấu hình Output Tokens (chấp nhận: low | med | high | max | số nguyên)
+        if (subCmd === 'output' || subCmd === 'max_output' || subCmd === 'max_tokens' || subCmd === 'completion') {
+          if (!val) {
+            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens output <low|medium|high|max|số_token>${c.reset}\n`);
+            continue;
+          }
+          const resolvedOutput = resolveOutputTokensPreset(val, profile);
+          if (resolvedOutput === null || resolvedOutput <= 0) {
+            console.log(`\n${c.red}✖ Mức output không hợp lệ. Khả dụng: low (2K), medium (8K), high (16K), max (${profile.maxSupportedOutputTokens.toLocaleString()}) hoặc nhập số nguyên.${c.reset}\n`);
+            continue;
+          }
+          agentLoop.setTokenConfig({ maxOutputTokens: resolvedOutput });
+          const updated = agentLoop.getTokenConfig();
+          saveSession({ tokenConfig: updated });
+          console.log(`\n${c.green}✔ Đã cập nhật Max Output Tokens:${c.reset} ${c.bold}${resolvedOutput.toLocaleString()}${c.reset} ${c.gray}(Đã lưu cho các phiên sau)${c.reset}\n`);
+          continue;
+        }
+
+        // 3. Cấu hình Input Tokens / Context Window (chấp nhận: low | med | high | max | số nguyên)
+        if (subCmd === 'input' || subCmd === 'max_input' || subCmd === 'context') {
+          if (!val) {
+            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens input <low|medium|high|max|số_token>${c.reset}\n`);
+            continue;
+          }
+          const resolvedInput = resolveInputTokensPreset(val, profile);
+          if (resolvedInput === null || resolvedInput <= 0) {
+            console.log(`\n${c.red}✖ Mức context window không hợp lệ. Khả dụng: low (16K), medium (64K), high (128K), max (${profile.maxSupportedInputTokens.toLocaleString()}) hoặc nhập số nguyên.${c.reset}\n`);
+            continue;
+          }
+          agentLoop.setTokenConfig({ maxInputTokens: resolvedInput });
+          const updated = agentLoop.getTokenConfig();
+          saveSession({ tokenConfig: updated });
+          console.log(`\n${c.green}✔ Đã cập nhật Max Input Tokens (Context Window):${c.reset} ${c.bold}${resolvedInput.toLocaleString()}${c.reset} ${c.gray}(Đã cập nhật ContextCompactor)${c.reset}\n`);
+          continue;
+        }
+
+        // 4. Cấu hình Thinking Token Budget (chấp nhận: off | low | med | high | max | số nguyên)
+        if (subCmd === 'thinking' || subCmd === 'budget') {
+          if (!val) {
+            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens thinking <off|low|medium|high|max|số_token>${c.reset}\n`);
+            continue;
+          }
+          const resolvedThinking = resolveThinkingTokensPreset(val, profile);
+          if (resolvedThinking === null) {
+            console.log(`\n${c.red}✖ Mức thinking budget không hợp lệ. Khả dụng: off (0), low (2K), medium (8K), high (24K), max (64K) hoặc nhập số nguyên.${c.reset}\n`);
+            continue;
+          }
+          agentLoop.setTokenConfig({
+            thinkingBudget: resolvedThinking.thinkingBudget,
+            reasoningEffort: resolvedThinking.reasoningEffort,
+          });
+          const updated = agentLoop.getTokenConfig();
+          saveSession({ tokenConfig: updated });
+          const budgetLabel = resolvedThinking.thinkingBudget === 0
+            ? 'TẮT (0 tokens)'
+            : `${resolvedThinking.thinkingBudget?.toLocaleString()} tokens (effort: ${resolvedThinking.reasoningEffort})`;
+          console.log(`\n${c.green}✔ Đã cập nhật Thinking Token Budget:${c.reset} ${c.bold}${budgetLabel}${c.reset}\n`);
+          continue;
+        }
+
+        // 5. Cấu hình Reasoning Effort (chấp nhận: low | medium | high | max)
+        if (subCmd === 'effort' || subCmd === 'reasoning') {
+          const effortTier = normalizePresetTier(val);
+          if (!effortTier) {
+            console.log(`\n${c.red}✖ Reasoning effort hợp lệ: low | medium | high | max (ví dụ: /tokens effort high)${c.reset}\n`);
+            continue;
+          }
+          agentLoop.setTokenConfig({ reasoningEffort: effortTier });
+          const updated = agentLoop.getTokenConfig();
+          saveSession({ tokenConfig: updated });
+          console.log(`\n${c.green}✔ Đã cập nhật Reasoning Effort:${c.reset} ${c.bold}${effortTier}${c.reset}\n`);
+          continue;
+        }
+
+        // 6. Khôi phục mặc định (Reset)
+        if (subCmd === 'reset') {
+          const defaultConfig = resolveTokenConfig(modelName);
+          agentLoop.setTokenConfig(defaultConfig);
+          saveSession({ tokenConfig: defaultConfig });
+          console.log(`\n${c.green}✔ Đã khôi phục cấu hình token mặc định cho mô hình:${c.reset} ${c.bold}${modelName}${c.reset}\n`);
+          CLI.renderTokenConfig(modelName, defaultConfig, profile);
+          continue;
+        }
+
+        console.log(`\n${c.yellow}⚠️ Lệnh con không hợp lệ: "${subCmd}". Gõ /tokens để xem danh sách gói đóng gói sẵn và hướng dẫn.${c.reset}\n`);
+        continue;
+      }
+
+      // Lệnh nạp và phân tích ảnh trực quan (Vision / Multimodal: /image, /vision, /img)
+      if (
+        trimmed === '/image' ||
+        trimmed.startsWith('/image ') ||
+        trimmed === '/vision' ||
+        trimmed.startsWith('/vision ') ||
+        trimmed === '/img' ||
+        trimmed.startsWith('/img ')
+      ) {
+        const parts = trimmed.split(' ');
+        const imgPath = parts[1];
+        const userPrompt = parts.slice(2).join(' ').trim() || 'Hãy quan sát và phân tích chi tiết hình ảnh đính kèm này.';
+
+        if (!imgPath) {
+          console.log(`\n${c.red}✖ Cách dùng:${c.reset} ${c.bold}/image <đường_dẫn_ảnh> [câu hỏi / chỉ dẫn]${c.reset}`);
+          console.log(`${c.gray}Ví dụ: /image screenshots/ui.png Kiểm tra lỗi hiển thị nút bấm${c.reset}\n`);
+          continue;
+        }
+
+        try {
+          const resolvedPath = path.isAbsolute(imgPath) ? imgPath : path.resolve(workspace.rootDir, imgPath);
+          const stat = await fs.promises.stat(resolvedPath);
+          if (!stat.isFile()) {
+            console.log(`\n${c.red}✖ Đường dẫn "${imgPath}" không phải là tệp.${c.reset}\n`);
+            continue;
+          }
+
+          const buf = await fs.promises.readFile(resolvedPath);
+          const ext = path.extname(resolvedPath).toLowerCase();
+          const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : ext === '.svg' ? 'image/svg+xml' : 'image/png';
+          const base64 = buf.toString('base64');
+
+          console.log(`\n${c.green}✔ Đã tải ảnh:${c.reset} ${c.bold}${path.basename(resolvedPath)}${c.reset} ${c.gray}(${(stat.size / 1024).toFixed(1)} KB, ${mime})${c.reset}`);
+          console.log(`${c.cyan}👁️  Đang gửi ảnh cùng chỉ thị đến mô hình ${modelName}...${c.reset}\n`);
+
+          // In hộp yêu cầu của User
+          console.log(`\n${c.cyan}${c.bold}┌── 👁️ VISION / MULTIMODAL REQUEST ──────────────────────────────────────────┐${c.reset}`);
+          console.log(`${c.bold}[Ảnh: ${path.relative(workspace.rootDir, resolvedPath)}] ${userPrompt}${c.reset}`);
+          console.log(`${c.cyan}${c.bold}└────────────────────────────────────────────────────────────────────────────┘${c.reset}`);
+
+          activeSession.addMultimodalUserMessage(
+            userPrompt,
+            [{ mimeType: mime, data: base64, filePath: path.relative(workspace.rootDir, resolvedPath) }],
+            'human'
+          );
+
+          sessionCount++;
+          await agentLoop.run(activeSession);
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Lỗi khi đọc ảnh:${c.reset}`, err.message);
         }
         continue;
       }
@@ -976,10 +1214,51 @@ async function main() {
       }
 
       // Lệnh xem Capability Catalog (/capabilities)
-      if (trimmed === '/capabilities') {
+      if (trimmed === '/capabilities' || trimmed.startsWith('/capabilities ')) {
         const capabilitiesCatalog = (agentLoop.kernel?.ctx as any)?.capabilities;
         if (capabilitiesCatalog) {
-          CLI.renderCapabilities(capabilitiesCatalog.list());
+          const parts = trimmed.split(/\s+/).filter(Boolean);
+          const target = parts[1];
+          const subTarget = parts[2];
+
+          if (!target) {
+            CLI.renderCapabilities(capabilitiesCatalog.list());
+          } else if (target === 'inspect' && subTarget) {
+            const cap = capabilitiesCatalog.get(subTarget);
+            if (cap) {
+              CLI.renderCapabilities([cap]);
+            } else {
+              console.log(`\n${c.red}✖ Không tìm thấy capability: ${subTarget}${c.reset}\n`);
+            }
+          } else if (target === 'categories') {
+            const cats = capabilitiesCatalog.getCategories ? capabilitiesCatalog.getCategories() : [];
+            console.log(`\n${c.cyan}${c.bold}Các Capability Categories khả dụng:${c.reset}`);
+            for (const cat of cats) {
+              const count = capabilitiesCatalog.getByCategory(cat).length;
+              console.log(`  • ${c.yellow}${cat}${c.reset} (${count} capabilities)`);
+            }
+            console.log('');
+          } else {
+            const byName = capabilitiesCatalog.get(target);
+            if (byName) {
+              CLI.renderCapabilities([byName]);
+            } else {
+              const byCategory = capabilitiesCatalog.getByCategory(target as any);
+              if (byCategory.length > 0) {
+                CLI.renderCapabilities(byCategory);
+              } else {
+                const searchResults = capabilitiesCatalog.search ? capabilitiesCatalog.search(target) : [];
+                if (searchResults.length > 0) {
+                  CLI.renderCapabilities(searchResults);
+                } else {
+                  console.log(`\n${c.red}✖ Không tìm thấy capability hoặc category: ${target}${c.reset}`);
+                  if (capabilitiesCatalog.getCategories) {
+                    console.log(`${c.gray}Các category khả dụng: ${capabilitiesCatalog.getCategories().join(', ')}${c.reset}\n`);
+                  }
+                }
+              }
+            }
+          }
         } else {
           console.log(`\n${c.yellow}⚠️  Capability catalog chưa được khởi tạo.${c.reset}\n`);
         }
@@ -1018,6 +1297,42 @@ async function main() {
         continue;
       }
 
+      // Lệnh quản lý phân quyền (/permissions)
+      if (trimmed === '/permissions' || trimmed.startsWith('/permissions ') || trimmed === '/permission' || trimmed.startsWith('/permission ')) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const sub = parts[0]?.toLowerCase();
+        if (sub === 'reset') {
+          kernel.ctx.permissions.clearSessionApprovals();
+          console.log(`\n${c.green}✔ Đã reset toàn bộ danh mục auto-approved trong phiên này.${c.reset}\n`);
+        } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
+          kernel.ctx.permissions.setMode(sub as any);
+          console.log(`\n${c.green}✔ Đã chuyển chế độ phân quyền sang: ${c.bold}${sub}${c.reset}\n`);
+        } else {
+          CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);
+        }
+        continue;
+      }
+
+      // Lệnh đính kèm file/thư mục (/add hoặc /attach)
+      if (trimmed === '/add' || trimmed.startsWith('/add ') || trimmed === '/attach' || trimmed.startsWith('/attach ')) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const targetPath = parts.join(' ').trim();
+        if (!targetPath) {
+          console.log(`\n${c.red}✖ Cách dùng:${c.reset} ${c.bold}/add <đường_dẫn_file_hoặc_thư_mục>${c.reset}`);
+          console.log(`${c.gray}💡 Mẹo: Bạn có thể gõ trực tiếp @đường_dẫn ngay trong câu prompt (ví dụ: "Tối ưu @src/agent/agent-loop.ts")${c.reset}\n`);
+          continue;
+        }
+
+        const res = await PromptAttachmentProcessor.resolveAndAttach(`@${targetPath}`, workspace);
+        if (res.hasAttachments) {
+          CLI.renderAttachmentSummary(res.attachments);
+          console.log(`\n${c.green}✔ Đã đính kèm thành công:${c.reset} ${c.bold}${targetPath}${c.reset}\n`);
+        } else {
+          console.log(`\n${c.red}✖ Không tìm thấy file hoặc thư mục hợp lệ trong workspace:${c.reset} ${targetPath}\n`);
+        }
+        continue;
+      }
+
       if (trimmed.toLowerCase() === '/exit' || trimmed.toLowerCase() === '/quit' || trimmed.toLowerCase() === 'exit') {
         console.log(`\n${c.green}Tạm biệt! Chúc bạn lập trình vui vẻ! 👋${c.reset}\n`);
         break;
@@ -1028,11 +1343,17 @@ async function main() {
       console.log(`${c.bold}${trimmed}${c.reset}`);
       console.log(`${c.cyan}${c.bold}└────────────────────────────────────────────────────────────────────────────┘${c.reset}`);
 
+      // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
+      const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace);
+      if (attachmentResult.hasAttachments) {
+        CLI.renderAttachmentSummary(attachmentResult.attachments);
+      }
+
       // Các prompt tiếp tục cùng một session và được flush xuống JSONL.
       sessionCount++;
 
       try {
-        await agentLoop.submit(activeSession, trimmed);
+        await agentLoop.submit(activeSession, attachmentResult.expandedPrompt);
       } catch (err: any) {
         console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Agent Loop:${c.reset}`, err.message);
         if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
@@ -1051,6 +1372,8 @@ async function main() {
       }
     }
   } finally {
+    input.removeListener('keypress', handleInputKeypress);
+    slashHints.dispose();
     rl.close();
     try {
       await kernel.ctx.sandbox.dispose();

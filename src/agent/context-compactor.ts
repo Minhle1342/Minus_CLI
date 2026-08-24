@@ -1,10 +1,12 @@
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
+import { assertHistoryToolPairing } from '../session/session-invariants.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
   preserveLastNToolResults?: number;
   maxTotalHistoryTokens?: number;
+  preservePrefixCache?: boolean;
 }
 
 export interface CompactionStats {
@@ -20,10 +22,11 @@ export interface CompactionStats {
 /**
  * ContextCompactor - Động cơ Nén Ngữ Cảnh & Quản Lý Ngân Sách Token (Phase 3 - Production)
  * 
- * Áp dụng 3 kỹ thuật tiên tiến:
- * 1. Selective Sliding Window: Giữ nguyên 100% chi tiết của các bước mới nhất (Last N observations).
- * 2. AST-level Semantic Slicing: Nén các file code lớn cũ thành sơ đồ Outline các Symbols/Functions/Classes.
- * 3. Tail-Preserving Log Truncation: Giữ lại phần đuôi của Stack Trace lỗi thay vì cắt bừa bãi.
+ * Áp dụng các kỹ thuật:
+ * 1. Prefix-Safe KV-Cache Preservation: Bảo toàn tiền tố lịch sử tin nhắn tránh vỡ KV-Cache của OpenAI/Codex.
+ * 2. Selective Sliding Window: Giữ nguyên 100% chi tiết của các bước mới nhất (Last N observations).
+ * 3. AST-level Semantic Slicing: Nén các file code lớn cũ thành sơ đồ Outline các Symbols/Functions/Classes.
+ * 4. Tail-Preserving Log Truncation: Giữ lại phần đuôi của Stack Trace lỗi thay vì cắt bừa bãi.
  */
 export class ContextCompactor {
   private config: Required<CompactionConfig>;
@@ -33,7 +36,33 @@ export class ContextCompactor {
       maxCharactersPerToolResult: config?.maxCharactersPerToolResult ?? 1200,
       preserveLastNToolResults: config?.preserveLastNToolResults ?? 3,
       maxTotalHistoryTokens: config?.maxTotalHistoryTokens ?? 32000,
+      preservePrefixCache: config?.preservePrefixCache ?? false,
     };
+  }
+
+  getConfig(): Required<CompactionConfig> {
+    return { ...this.config };
+  }
+
+  setMaxInputTokens(tokens: number): void {
+    if (tokens > 0) {
+      this.config.maxTotalHistoryTokens = tokens;
+    }
+  }
+
+  setConfig(config: Partial<CompactionConfig>): void {
+    if (config.maxCharactersPerToolResult !== undefined) {
+      this.config.maxCharactersPerToolResult = config.maxCharactersPerToolResult;
+    }
+    if (config.preserveLastNToolResults !== undefined) {
+      this.config.preserveLastNToolResults = config.preserveLastNToolResults;
+    }
+    if (config.maxTotalHistoryTokens !== undefined) {
+      this.config.maxTotalHistoryTokens = config.maxTotalHistoryTokens;
+    }
+    if (config.preservePrefixCache !== undefined) {
+      this.config.preservePrefixCache = config.preservePrefixCache;
+    }
   }
 
   /**
@@ -44,9 +73,12 @@ export class ContextCompactor {
   }
 
   /**
-   * Thực hiện nén và tối ưu hoá danh sách tin nhắn trong Session
+   * Thực hiện nén và tối ưu hoá danh sách tin nhắn trong Session.
+   * Nếu preservePrefixCache bật và token chưa chạm ngân sách maxTotalHistoryTokens,
+   * giữ nguyên vẹn 100% tin nhắn để tránh vỡ KV-Cache của OpenAI Codex.
    */
-  compact(messages: SessionMessage[]): { messages: SessionMessage[]; stats: CompactionStats } {
+  compact(messages: SessionMessage[], options?: { force?: boolean }): { messages: SessionMessage[]; stats: CompactionStats } {
+    assertHistoryToolPairing(messages);
     let originalLength = 0;
     let compactedLength = 0;
     let prunedPartsCount = 0;
@@ -58,6 +90,24 @@ export class ContextCompactor {
         if (part.functionResponse) originalLength += JSON.stringify(part.functionResponse).length;
         if (part.functionCall) originalLength += JSON.stringify(part.functionCall).length;
       }
+    }
+
+    const originalTokens = ContextCompactor.estimateTokens(' '.repeat(originalLength));
+
+    // Nếu cấu hình bảo vệ Prefix Cache và dung lượng token chưa vượt ngưỡng ngân sách (maxTotalHistoryTokens)
+    if (this.config.preservePrefixCache && !options?.force && originalTokens <= this.config.maxTotalHistoryTokens) {
+      return {
+        messages,
+        stats: {
+          originalTokens,
+          compactedTokens: originalTokens,
+          tokensSaved: 0,
+          originalLength,
+          compactedLength: originalLength,
+          charsSaved: 0,
+          prunedPartsCount: 0,
+        },
+      };
     }
 
     // 2. Tìm các index của tool responses gần nhất
@@ -176,7 +226,6 @@ export class ContextCompactor {
     }
 
     const charsSaved = Math.max(0, originalLength - compactedLength);
-    const originalTokens = ContextCompactor.estimateTokens(' '.repeat(originalLength));
     const compactedTokens = ContextCompactor.estimateTokens(' '.repeat(compactedLength));
     const tokensSaved = Math.max(0, originalTokens - compactedTokens);
 
@@ -190,6 +239,43 @@ export class ContextCompactor {
       prunedPartsCount,
     };
 
+    assertHistoryToolPairing(compactedMessages);
     return { messages: compactedMessages, stats };
+  }
+
+  /**
+   * Tự động nén và đúc kết các chuỗi thử - sai thất bại thành Distilled Learnings (Codex CLI Standard)
+   * 
+   * Thay thế các stack traces và error logs khổng lồ của các giả thuyết bị bác bỏ bằng các bài học súc tích,
+   * giữ cho context window luôn sạch sẽ và tránh hiện tượng Agent bị lú lẫn do đọc lại lỗi cũ.
+   */
+  distillFailedHypotheses(
+    messages: SessionMessage[],
+    falsifiedHypotheses: Array<{ id: string; statement: string; rejectionReason?: string; learning?: string }>,
+  ): { messages: SessionMessage[]; distilledSummary: string } {
+    if (falsifiedHypotheses.length === 0) {
+      return { messages, distilledSummary: '' };
+    }
+
+    const summaryLines = falsifiedHypotheses.map(
+      (h) => `• [${h.id} Falsified]: "${h.statement}" ➔ ${h.rejectionReason || 'Failed verification'} (Bài học: ${h.learning || 'Cần đổi chiến lược'})`,
+    );
+    const distilledSummary = [
+      `\n🧠 [DISTILLED LEARNED INVARIANTS - CODEX ARCHITECTURE]:`,
+      ...summaryLines,
+    ].join('\n');
+
+    // Chèn hoặc cập nhật tin nhắn hệ thống tóm tắt ngắn gọn
+    const updatedMessages: SessionMessage[] = messages.map((msg) => {
+      if (msg.role === 'user' && msg.parts?.some((p) => p.text?.includes('[DISTILLED LEARNED INVARIANTS]'))) {
+        return {
+          role: 'user',
+          parts: [{ text: distilledSummary }],
+        };
+      }
+      return msg;
+    });
+
+    return { messages: updatedMessages, distilledSummary };
   }
 }

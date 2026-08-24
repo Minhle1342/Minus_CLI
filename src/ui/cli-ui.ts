@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { Workspace } from '../workspace/workspace.js';
+import { FileMentionEngine, AttachedItemSummary } from '../workspace/file-attachment.js';
 
 // ANSI escape codes for styling without external dependencies
 export const colors = {
@@ -7,6 +9,7 @@ export const colors = {
   dim: '\x1b[2m',
   italic: '\x1b[3m',
   underline: '\x1b[4m',
+  strikethrough: '\x1b[9m',
 
   // Foreground colors
   black: '\x1b[30m',
@@ -22,6 +25,17 @@ export const colors = {
   brightGreen: '\x1b[92m',
   brightYellow: '\x1b[93m',
   brightMagenta: '\x1b[95m',
+  brightRed: '\x1b[91m',
+  brightBlue: '\x1b[94m',
+
+  // Codex signature palette tokens
+  emerald: '\x1b[38;5;48m',
+  teal: '\x1b[38;5;50m',
+  slate: '\x1b[38;5;244m',
+  amber: '\x1b[38;5;214m',
+  crimson: '\x1b[38;5;196m',
+  purple: '\x1b[38;5;141m',
+  indigo: '\x1b[38;5;75m',
 
   // Background colors
   bgCyan: '\x1b[46m',
@@ -29,12 +43,231 @@ export const colors = {
   bgMagenta: '\x1b[45m',
   bgBlack: '\x1b[40m',
   bgDarkGray: '\x1b[100m',
+  bgGreenDark: '\x1b[48;5;22m',
+  bgRedDark: '\x1b[48;5;52m',
 };
 
 const c = colors;
 
 const BASE_TYPEWRITER_DELAY_MS = 8;
 export const FINAL_ANSWER_CHARACTER_DELAY_MS = BASE_TYPEWRITER_DELAY_MS / 2;
+
+export interface SlashCommandDefinition {
+  command: string;
+  usage?: string;
+  description: string;
+  category?: string;
+  aliases?: string[];
+}
+
+export interface SlashCommandSuggestion extends SlashCommandDefinition {
+  matchedBy: 'exact' | 'prefix' | 'contains' | 'fuzzy';
+  score: number;
+}
+
+export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  { command: '/model', usage: '/model [id|name]', description: 'Chọn mô hình LLM', category: 'Model & Routing', aliases: ['/modal'] },
+  { command: '/tokens', usage: '/tokens [low|medium|high|max|output|input|thinking|reset] [val]', description: 'Chọn gói cấu hình sẵn (low/medium/high/max) hoặc chỉnh token', category: 'Model & Routing', aliases: ['/token', '/token-budget'] },
+  { command: '/workspace', usage: '/workspace [path]', description: 'Xem hoặc đổi workspace', category: 'Workspace', aliases: ['/cd'] },
+  { command: '/session', description: 'Xem cấu hình session hiện tại', category: 'Session' },
+  { command: '/sessions', usage: '/sessions [open|new|inspect]', description: 'Quản lý các session đã lưu', category: 'Session' },
+  { command: '/new-session', description: 'Tạo session hội thoại mới', category: 'Session' },
+  { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
+  { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
+  { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
+  { command: '/plan', description: 'Xem cây kế hoạch hiện tại', category: 'Planning' },
+  { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
+  { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
+  { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (OpenAI Codex)', category: 'Telemetry', aliases: ['/prompt-cache'] },
+  { command: '/status', description: 'Xem trạng thái phiên làm việc', category: 'Telemetry' },
+  { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent', category: 'Subagents' },
+  { command: '/goal', usage: '/goal [on|off|status|resume|objective]', description: 'Điều khiển Goal Mode', category: 'Goal Mode' },
+  { command: '/skills', usage: '/skills [inspect] [id]', description: 'Xem Superpowers skills', category: 'Superpowers' },
+  { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Xem capability catalog', category: 'Superpowers' },
+  { command: '/approvals', usage: '/approvals [approve|reject] [id]', description: 'Xử lý yêu cầu phê duyệt', category: 'Security' },
+  { command: '/permissions', usage: '/permissions [mode|reset]', description: 'Cấu hình quyền duyệt sửa file/lệnh (always_ask, ask_sensitive, auto_approve, read_only)', category: 'Security', aliases: ['/permission', '/perm'] },
+  { command: '/undo', description: 'Hoàn tác checkpoint gần nhất', category: 'Shadow Git', aliases: ['/rollback'] },
+  { command: '/checkpoints', description: 'Xem lịch sử checkpoint', category: 'Shadow Git' },
+  { command: '/diff', description: 'Xem unified diff của task hiện tại', category: 'Shadow Git' },
+  { command: '/evidence', description: 'Xem bằng chứng verification hiện tại', category: 'Telemetry' },
+  { command: '/impact', usage: '/impact [path] [symbol]', description: 'Phân tích phạm vi ảnh hưởng (Blast Radius)', category: 'Tools' },
+  { command: '/image', usage: '/image <path> [prompt]', description: 'Nạp và phân tích ảnh trực quan (Vision / Multimodal)', category: 'Vision', aliases: ['/vision', '/img'] },
+  { command: '/preview', description: 'Xem trước các thay đổi mutation pending', category: 'Shadow Git' },
+  { command: '/add', usage: '/add <path>', description: 'Đính kèm file hoặc thư mục vào ngữ cảnh', category: 'Context', aliases: ['/attach'] },
+  { command: '/clear', description: 'Xoá màn hình terminal', category: 'General' },
+  { command: '/help', description: 'Hiển thị hướng dẫn', category: 'General', aliases: ['/?'] },
+  { command: '/exit', description: 'Thoát chương trình', category: 'General', aliases: ['/quit'] },
+] as const;
+
+/** Rank prefix and typo-tolerant slash-command suggestions without matching command arguments. */
+export function getSlashCommandSuggestions(input: string, limit = 5): SlashCommandSuggestion[] {
+  const normalized = input.trimStart().toLowerCase();
+  if (!normalized.startsWith('/') || /\s/.test(normalized)) return [];
+  const query = normalized;
+  if (query === '/') {
+    return SLASH_COMMANDS.slice(0, Math.max(0, limit)).map((definition, index) => ({
+      ...definition,
+      matchedBy: 'prefix',
+      score: index,
+    }));
+  }
+  const suggestions = SLASH_COMMANDS.flatMap((definition, catalogIndex) => {
+    let best: Pick<SlashCommandSuggestion, 'matchedBy' | 'score'> | undefined;
+    for (const candidate of [definition.command, ...(definition.aliases || [])]) {
+      const value = candidate.toLowerCase();
+      let ranked: Pick<SlashCommandSuggestion, 'matchedBy' | 'score'> | undefined;
+      if (value === query) {
+        ranked = { matchedBy: 'exact', score: catalogIndex / 1000 };
+      } else if (value.startsWith(query)) {
+        ranked = { matchedBy: 'prefix', score: 10 + value.length - query.length + catalogIndex / 1000 };
+      } else if (query.length > 1 && value.includes(query.slice(1))) {
+        ranked = { matchedBy: 'contains', score: 30 + value.indexOf(query.slice(1)) + catalogIndex / 1000 };
+      } else if (query.length >= 3) {
+        const distance = levenshteinDistance(query, value);
+        const maxDistance = query.length <= 5 ? 2 : 3;
+        if (distance <= maxDistance) ranked = { matchedBy: 'fuzzy', score: 50 + distance * 5 + catalogIndex / 1000 };
+      }
+      if (ranked && (!best || ranked.score < best.score)) best = ranked;
+    }
+    return best ? [{ ...definition, ...best }] : [];
+  });
+  const ranked = suggestions.sort((left, right) => left.score - right.score);
+  const exact = ranked.filter((suggestion) => suggestion.matchedBy === 'exact');
+  return (exact.length > 0 ? exact : ranked).slice(0, Math.max(0, limit));
+}
+
+export function completeSlashCommand(line: string): [string[], string] {
+  const best = getSlashCommandSuggestions(line, 1)[0];
+  if (best && line.trimStart().toLowerCase() === best.command.toLowerCase()) return [[], line];
+  return [best ? [best.command] : [], line];
+}
+
+export interface SlashHintTerminal {
+  isTTY?: boolean;
+  columns?: number;
+  write(chunk: string): unknown;
+}
+
+/** Renders transient hints below readline's active input while preserving its cursor position. */
+export class RealtimeSlashCommandHints {
+  private static readonly RESERVED_ROWS = 7;
+  private visible = false;
+  private renderKey?: string;
+
+  constructor(
+    private readonly terminal: SlashHintTerminal,
+    private readonly getWorkspace?: () => Workspace | undefined,
+  ) {}
+
+  update(line: string, cursorColumn = line.length + 2): void {
+    if (!this.terminal.isTTY) return;
+
+    const workspace = this.getWorkspace ? this.getWorkspace() : undefined;
+
+    // 1. Kiểm tra nếu người dùng đang gõ @mention file / thư mục
+    if (workspace) {
+      const activeMention = FileMentionEngine.extractActiveMention(line, Math.max(0, cursorColumn - 2));
+      if (activeMention) {
+        const suggestions = FileMentionEngine.getFileSuggestions(line, workspace, Math.max(0, cursorColumn - 2), 5);
+        if (suggestions.length > 0) {
+          const width = Math.max(40, this.terminal.columns || 80);
+          const nextRenderKey = `@\u0000${line}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
+          if (this.visible && this.renderKey === nextRenderKey) return;
+
+          const rows = suggestions.map((item, index) => {
+            const icon = item.type === 'directory' ? '📁' : '📄';
+            const pathLabel = truncateDisplayText(item.displayPath, Math.floor(width * 0.55));
+            const sizeInfo = item.type === 'directory'
+              ? `${c.brightYellow}(Thư mục)${c.reset}`
+              : item.sizeBytes ? `${c.gray}(${(item.sizeBytes / 1024).toFixed(1)} KB)${c.reset}` : '';
+            const marker = index === 0 ? '›' : ' ';
+            return `${c.cyan}${marker}${c.reset} ${icon} ${c.brightCyan}${c.bold}${pathLabel}${c.reset} ${sizeInfo}`;
+          });
+
+          const footer = `${c.gray}  Tab: hoàn thành @path • Enter: gửi prompt đính kèm${c.reset}`;
+          this.renderBelowInput(
+            [`${c.cyan}${c.bold}📎 Gợi ý đính kèm File / Thư mục (@):${c.reset}`, ...rows, footer],
+            this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
+            cursorColumn,
+          );
+          this.visible = true;
+          this.renderKey = nextRenderKey;
+          return;
+        }
+      }
+    }
+
+    // 2. Kiểm tra nếu là Slash Command (/...)
+    const suggestions = getSlashCommandSuggestions(line);
+    if (suggestions.length === 0) {
+      this.clear();
+      return;
+    }
+
+    const width = Math.max(40, this.terminal.columns || 80);
+    const nextRenderKey = `/\u0000${line}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+    if (this.visible && this.renderKey === nextRenderKey) return;
+    const commandWidth = Math.min(
+      Math.max(12, Math.floor(width * 0.45)),
+      Math.max(...suggestions.map((item) => (item.usage || item.command).length)),
+    );
+    const rows = suggestions.map((item, index) => {
+      const label = truncateDisplayText(item.usage || item.command, commandWidth).padEnd(commandWidth);
+      const alias = item.aliases?.length ? ` (${item.aliases.join(', ')})` : '';
+      const availableDescriptionWidth = Math.max(10, width - commandWidth - 6);
+      const description = truncateDisplayText(`${item.description}${alias}`, availableDescriptionWidth);
+      const marker = index === 0 ? '›' : ' ';
+      return `${c.cyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.dim}${description}${c.reset}`;
+    });
+    const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
+    this.renderBelowInput(
+      [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
+      this.visible ? 0 : RealtimeSlashCommandHints.RESERVED_ROWS,
+      cursorColumn,
+    );
+    this.visible = true;
+    this.renderKey = nextRenderKey;
+  }
+
+  clear(): void {
+    if (!this.terminal.isTTY || !this.visible) return;
+    this.renderBelowInput([]);
+    this.visible = false;
+    this.renderKey = undefined;
+  }
+
+  dispose(): void {
+    this.clear();
+  }
+
+  private renderBelowInput(lines: string[], reserveRows = 0, cursorColumn = 0): void {
+    const body = lines.length > 0 ? lines.join('\r\n') : '';
+    const reservation = reserveRows > 0
+      ? `${'\n'.repeat(reserveRows)}\x1b[${reserveRows}A\r${cursorColumn > 0 ? `\x1b[${cursorColumn}C` : ''}`
+      : '';
+    this.terminal.write(`\x1b[?25l${reservation}\x1b[s\x1b[1E\x1b[0J${body}\x1b[u\x1b[?25h`);
+  }
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    for (let index = 0; index < current.length; index++) previous[index] = current[index];
+  }
+  return previous[right.length];
+}
+
+function truncateDisplayText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(1, maxLength - 1))}…`;
+}
 
 export interface TypewriterOptions {
   delayMs?: number;
@@ -65,12 +298,27 @@ export function isToolResultFailure(result: Record<string, any>): boolean {
   );
 }
 
+/** Keep tool-call logs readable without implying that the actual argument was truncated. */
+export function formatToolArgumentPreview(value: unknown, maxLength = 180): string {
+  const serialized = JSON.stringify(value);
+  const printable = serialized ?? String(value);
+  if (printable.length <= maxLength) return printable;
+  const headLength = Math.max(20, Math.floor((maxLength - 1) * 0.65));
+  const tailLength = Math.max(12, maxLength - headLength - 1);
+  const lineCount = typeof value === 'string' ? value.split(/\r?\n/).length : undefined;
+  const metadata = typeof value === 'string'
+    ? ` [preview only; full argument sent: ${value.length} chars, ${lineCount} lines]`
+    : ` [preview only; full argument sent: ${printable.length} chars]`;
+  return `${printable.slice(0, headLength)}…${printable.slice(-tailLength)}${metadata}`;
+}
+
 export interface BannerOptions {
   modelName: string;
   workspaceRoot: string;
   maxSteps: number;
   tools: string[];
   sandboxStatus?: string;
+  activeBranch?: string;
 }
 
 export interface StatusOptions {
@@ -92,7 +340,7 @@ export interface ModelOption {
 }
 
 export const AVAILABLE_MODELS: ModelOption[] = [
-  // 0. Smart 3-Tier Fallback Router & 9Router Gateway (Chống Rate-Limit khi Mid-Coding)
+  // 0. Smart 3-Tier Fallback Router & 9Router Gateway
   {
     id: '0',
     name: 'auto-fallback',
@@ -107,7 +355,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Định tuyến qua 9Router Proxy (localhost:20128/v1) với RTK Token Saver & 40+ providers',
   },
 
-  // 1. Google AI Studio (Free Tier: 1.500 req/ngày, 1M Context - Đã kiểm tra hoạt động 100%)
+  // 1. Google AI Studio
   {
     id: '1',
     name: 'gemini-3.7-flash',
@@ -179,7 +427,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Google Gemma 2 9B chạy trên Groq LPU',
   },
 
-  // 3. Cerebras Cloud (Free Tier: 1.000.000 tokens/ngày, 1.500+ tokens/s)
+  // 3. Cerebras Cloud
   {
     id: '12',
     name: 'cerebras/llama-3.3-70b',
@@ -193,7 +441,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Llama 3.1 8B siêu tốc ~2.000 tok/s, 1M tokens/ngày',
   },
 
-  // 4. SambaNova Cloud (Free Tier: Model Llama 405B Siêu Lớn)
+  // 4. SambaNova Cloud
   {
     id: '14',
     name: 'sambanova/Meta-Llama-3.1-405B-Instruct',
@@ -213,7 +461,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'DeepSeek R1 70B reasoning trên hạ tầng SambaNova',
   },
 
-  // 5. GitHub Models (Free Tier: Dùng GitHub Token)
+  // 5. GitHub Models
   {
     id: '17',
     name: 'github/gpt-4o',
@@ -233,7 +481,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Mistral Large 128k context qua GitHub Models',
   },
 
-  // 6. SiliconFlow / SiliconCloud (Free Tier)
+  // 6. SiliconFlow
   {
     id: '20',
     name: 'siliconflow/deepseek-ai/DeepSeek-V3',
@@ -253,7 +501,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Qwen 2.5 Coder 32B chuyên gia lập trình hàng đầu',
   },
 
-  // 7. Mistral AI (Codestral Free Tier)
+  // 7. Mistral AI
   {
     id: '23',
     name: 'mistral/codestral-latest',
@@ -267,7 +515,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Mistral Large mô hình mạnh nhất của Mistral',
   },
 
-  // 8. OpenRouter (Free Router & Free Models)
+  // 8. OpenRouter
   {
     id: '25',
     name: 'openrouter/free',
@@ -293,7 +541,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
   },
 
-  // 9. Pollinations AI (Zero-Key Free: Không cần tạo API Key)
+  // 9. Pollinations AI
   {
     id: '29',
     name: 'pollinations/openai',
@@ -307,7 +555,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Mistral miễn phí 100%, không cần đăng ký tài khoản hay API key',
   },
 
-  // 10. DeepSeek Direct (Chính thức)
+  // 10. DeepSeek Direct
   {
     id: '31',
     name: 'deepseek-chat',
@@ -321,7 +569,7 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
   },
 
-  // 11. OpenAI Codex CLI Models (GPT-5.6 Series qua ChatGPT Plus OAuth hoặc OpenAI API)
+  // 11. OpenAI Codex CLI Models
   {
     id: 'cs',
     name: 'codex/gpt-5.6-sol',
@@ -361,51 +609,43 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   },
 ];
 
+/**
+ * Lớp điều khiển hiển thị Terminal UI/UX chuẩn 100% phong cách OpenAI Codex CLI.
+ */
 export class CLI {
   /**
-   * Hiển thị Banner mở đầu phong cách chuyên nghiệp
+   * Hiển thị Banner mở đầu phong cách OpenAI Codex CLI
    */
   static renderBanner(opts: BannerOptions): void {
     console.log(`\n${c.cyan}${c.bold}╭────────────────────────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}⚡ AUTONOMOUS CODING AGENT${c.reset} ${c.gray}v2.0${c.reset}                                    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Minimalist AI Pair Programmer (TypeScript + Node.js)${c.reset}                 ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}${c.bold}⚡ OPENAI CODEX CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}     ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}       ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.magenta}🤖 Model:${c.reset}     ${c.bold}${opts.modelName}${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.blue}📂 Workspace:${c.reset} ${c.dim}${opts.workspaceRoot}${c.reset}`);
-    if (opts.sandboxStatus) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightGreen}🛡️  Sandbox:${c.reset}   ${opts.sandboxStatus}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.magenta}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.blue}📂 Workspace:${c.reset}  ${c.dim}${opts.workspaceRoot}${c.reset}`);
+    if (opts.activeBranch) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.indigo}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch}${c.reset}`);
     }
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.yellow}⚡ Max Steps:${c.reset} ${c.bold}${opts.maxSteps}${c.reset} steps per request`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.green}🛠️  Tools (${opts.tools.length}):${c.reset} ${c.dim}${opts.tools.join(', ')}${c.reset}`);
+    if (opts.sandboxStatus) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.emerald}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus}`);
+    }
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.yellow}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.green}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.dim}${opts.tools.slice(0, 10).join(', ')}${opts.tools.length > 10 ? ` ... (+${opts.tools.length - 10} tools)` : ''}${c.reset}`);
     console.log(`${c.cyan}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.gray}Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để xem gợi ý lệnh nhanh, ${c.brightCyan}/model${c.gray} để đổi model.${c.reset}    ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.gray}Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để xem menu lệnh nhanh, ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}      ${c.cyan}${c.bold}│${c.reset}`);
     console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
-   * Hiển thị thanh gợi ý lệnh nhanh khi người dùng nhập "/"
+   * Hiển thị thanh gợi ý lệnh nhanh
    */
   static renderQuickCommands(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚡ GỢI Ý CÂU LỆNH NHANH (SLASH COMMANDS) ────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/goal <mục tiêu>${c.reset}  ${c.gray}Thực thi tự trị không giới hạn số bước (Step limit = ∞)          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/model${c.reset}          ${c.gray}Danh sách và chọn mô hình LLM (Gemini, Groq, Cerebras,...) [Auto-saved]${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/workspace${c.reset}      ${c.gray}Xem hoặc đổi thư mục workspace (/cd <path>) [Auto-saved]         ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/session${c.reset}        ${c.gray}Xem thông tin cấu hình phiên làm việc đã lưu (.codingagent)      ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sessions${c.reset}       ${c.gray}Liệt kê/mở/tạo các event-sourced session                    ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/new-session${c.reset}   ${c.gray}Tạo session hội thoại mới                                      ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/fork-session [seq]${c.reset} ${c.gray}Tạo branch session từ boundary event chỉ định                 ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/sandbox${c.reset}        ${c.gray}Xem trạng thái môi trường cô lập Sandbox (Docker/Local)          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tasks${c.reset}          ${c.gray}Xem danh sách background tasks & subprocesses đang chạy          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/plan${c.reset}           ${c.gray}Xem cây kế hoạch thực thi hiện tại (Plan Tree)                   ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/memory${c.reset}         ${c.gray}Xem bộ nhớ dài hạn của dự án (.codingagent/ memory)              ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/undo${c.reset}           ${c.gray}Hoàn tác (Rollback) các thay đổi file của bước gần nhất          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/checkpoints${c.reset}    ${c.gray}Xem lịch sử các điểm snapshot đã lưu tự động                     ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/tools${c.reset}          ${c.gray}Xem chi tiết 16 công cụ khảo sát, nén code, tìm kiếm, sửa & nhớ  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/status${c.reset}         ${c.gray}Xem thống kê trạng thái phiên làm việc                           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/agents${c.reset}         ${c.gray}Xem, stop hoặc explicit resume các subagent                   ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/clear${c.reset}          ${c.gray}Xoá màn hình terminal                                            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/help${c.reset}           ${c.gray}Xem toàn bộ hướng dẫn & ví dụ tác vụ                             ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}/exit${c.reset}           ${c.gray}Thoát chương trình                                               ${c.cyan}${c.bold}│${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}╭── ⚡ CODEX SLASH COMMAND PALETTE ──────────────────────────────────────────╮${c.reset}`);
+    for (const cmd of SLASH_COMMANDS) {
+      const aliasStr = cmd.aliases?.length ? ` (${cmd.aliases.join(', ')})` : '';
+      const usageStr = (cmd.usage || cmd.command).padEnd(26);
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${usageStr}${c.reset} ${c.gray}${cmd.description}${aliasStr}${c.reset}`);
+    }
     console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
@@ -441,51 +681,42 @@ export class CLI {
    * Hiển thị bảng trợ giúp
    */
   static renderHelp(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── 📖 CODING AGENT COMMANDS & HELP ────────────────────────────────────────╮${c.reset}`);
+    console.log(`\n${c.cyan}${c.bold}╭── 📖 OPENAI CODEX CLI COMMAND CATALOG & GUIDE ─────────────────────────────╮${c.reset}`);
     console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}SLASH COMMANDS:${c.reset}                                                           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/help${c.reset}               Hiển thị bảng trợ giúp này                          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/goal <mục tiêu>${c.reset}    Thực thi tự trị không giới hạn bước cho tới khi xong ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/goal on/off${c.reset}        Bật/Tắt chế độ Goal Mode vĩnh viễn cho các lệnh sau  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model${c.reset}              Hiển thị danh sách và chọn mô hình LLM (Tự động lưu) ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/model <name>${c.reset}       Chuyển đổi trực tiếp sang mô hình chỉ định          ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace${c.reset}          Xem đường dẫn thư mục workspace hiện tại            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/workspace <path>${c.reset}   Chuyển workspace sang thư mục mới (Tự động lưu)     ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/session${c.reset}            Xem thông tin model và workspace lưu từ phiên trước  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sessions${c.reset}           Liệt kê, mở hoặc tạo session event-sourced           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/new-session${c.reset}     Tạo session hội thoại mới và bắt đầu context sạch       ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/fork-session [seq]${c.reset} Fork session từ event boundary đã chọn                  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/sandbox${c.reset}            Xem trạng thái môi trường cô lập Sandbox            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tasks${c.reset}              Xem danh sách background tasks & subprocesses       ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/plan${c.reset}               Xem cây kế hoạch thực thi hiện tại (Plan Tree)      ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/memory${c.reset}             Xem bộ nhớ dài hạn của dự án (.codingagent)         ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/undo${c.reset}               Hoàn tác (Rollback) về checkpoint trước khi sửa     ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/checkpoints${c.reset}        Xem danh sách các điểm khôi phục snapshot           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/tools${c.reset}              Liệt kê chi tiết 13 công cụ và thông số             ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/status${c.reset}             Xem thông tin trạng thái phiên làm việc             ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/clear${c.reset}              Xoá màn hình terminal                               ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}/exit${c.reset}, ${c.brightCyan}/quit${c.reset}        Thoát chương trình                                  ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}VÍ DỤ TÁC VỤ THỰC TẾ:${c.reset}                                                     ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Tìm trong src xem class AgentLoop ở file nào${c.reset}                         ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Đọc package.json và giải thích các scripts${c.reset}                           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Kiểm tra xem có bug nào trong src/tools/read-file.ts không${c.reset}           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Sửa file test và chạy npm test để kiểm chứng${c.reset}                           ${c.cyan}${c.bold}│${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    
+    const byCategory = new Map<string, SlashCommandDefinition[]>();
+    for (const cmd of SLASH_COMMANDS) {
+      const cat = cmd.category || 'General';
+      const list = byCategory.get(cat) || [];
+      list.push(cmd);
+      byCategory.set(cat, list);
+    }
+
+    for (const [category, cmds] of byCategory.entries()) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}${category.toUpperCase()}:${c.reset}`);
+      for (const item of cmds) {
+        const usage = (item.usage || item.command).padEnd(28);
+        console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}${usage}${c.reset} ${item.description}`);
+      }
+      console.log(`${c.cyan}${c.bold}│${c.reset}`);
+    }
+
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}VÍ DỤ TÁC VỤ THỰC TẾ:${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Tìm trong src xem class AgentLoop ở file nào${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Đọc package.json và giải thích các scripts${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Sửa lỗi trong src/tools/read-file.ts và chạy npm test để kiểm chứng${c.reset}`);
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
    * Liệt kê danh mục Tool
    */
   static renderTools(toolList: Array<{ name: string; description: string }>): void {
-    console.log(`\n${c.green}${c.bold}╭── 🛠️  REGISTERED TOOL CATALOG (${toolList.length} Tools) ───────────────────────────────╮${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}                                                                            ${c.green}${c.bold}│${c.reset}`);
+    console.log(`\n${c.green}${c.bold}╭── 🛠️  REGISTERED TOOL CATALOG (${toolList.length} Tools) ──────────────────────────╮${c.reset}`);
     for (const tool of toolList) {
-      console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}◆ ${tool.name}${c.reset}`);
-      console.log(`${c.green}${c.bold}│${c.reset}    ${c.dim}${tool.description}${c.reset}`);
-      console.log(`${c.green}${c.bold}│${c.reset}`);
+      console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${tool.name.padEnd(24)}${c.reset} ${c.dim}${tool.description.slice(0, 70)}${c.reset}`);
     }
-    console.log(`${c.green}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
@@ -513,7 +744,6 @@ export class CLI {
    */
   static renderCheckpoints(checkpoints: Array<{ index: number; timestamp: string; description: string }>): void {
     console.log(`\n${c.yellow}${c.bold}╭── 🛡️  SHADOW GIT CHECKPOINTS HISTORY (${checkpoints.length} Snapshots) ────────────────╮${c.reset}`);
-    console.log(`${c.yellow}${c.bold}│${c.reset}                                                                            ${c.yellow}${c.bold}│${c.reset}`);
     if (checkpoints.length === 0) {
       console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.dim}Chưa có checkpoint nào được tạo trong phiên làm việc này.${c.reset}`);
     } else {
@@ -521,59 +751,115 @@ export class CLI {
         console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.brightCyan}#${cp.index}${c.reset} [${c.gray}${cp.timestamp}${c.reset}] ${c.bold}${cp.description}${c.reset}`);
       }
     }
-    console.log(`${c.yellow}${c.bold}│${c.reset}                                                                            ${c.yellow}${c.bold}│${c.reset}`);
-    console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.gray}Dùng lệnh ${c.brightCyan}/undo${c.gray} để hoàn tác về checkpoint gần nhất.${c.reset}                   ${c.yellow}${c.bold}│${c.reset}`);
+    console.log(`${c.yellow}${c.bold}│${c.reset}`);
+    console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.gray}Dùng lệnh ${c.brightCyan}/undo${c.gray} để hoàn tác về checkpoint gần nhất.${c.reset}`);
     console.log(`${c.yellow}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
-   * Hiển thị Cây kế hoạch động (Dynamic Plan Tree)
+   * Hiển thị Cây kế hoạch động với Progress Bar chuẩn Codex CLI
    */
-  static renderPlan(tasks: Array<{ id: number; title: string; status: string; notes?: string }>): void {
-    console.log(`\n${c.brightCyan}${c.bold}╭── 📋 DYNAMIC EXECUTION PLAN (${tasks.length} Steps) ──────────────────────────────╮${c.reset}`);
-    console.log(`${c.brightCyan}${c.bold}│${c.reset}                                                                            ${c.brightCyan}${c.bold}│${c.reset}`);
+  static renderPlan(tasks: Array<{
+    id: number;
+    title: string;
+    acceptanceCriteria?: string;
+    status: string;
+    notes?: string;
+    evidence?: Array<{ toolName: string; outcome: string }>;
+  }>): void {
+    if (tasks.length === 0) return;
+
+    const completed = tasks.filter((t) => t.status === 'COMPLETED').length;
+    const total = tasks.length;
+    const percent = Math.round((completed / total) * 100);
+    const barWidth = 20;
+    const filledWidth = Math.round((percent / 100) * barWidth);
+    const progressBar = `${c.emerald}${'█'.repeat(filledWidth)}${c.slate}${'░'.repeat(barWidth - filledWidth)}${c.reset}`;
+
+    console.log(`\n${c.brightCyan}${c.bold}╭── 📋 DYNAMIC PLAN PROGRESS [${progressBar}] ${c.emerald}${percent}%${c.brightCyan} (${completed}/${total} Steps) ──────╮${c.reset}`);
+    console.log(`${c.brightCyan}${c.bold}│${c.reset}`);
     
     for (const t of tasks) {
       let icon = `${c.dim}[ ]${c.reset}`;
       let titleStyle = c.dim;
 
       if (t.status === 'COMPLETED') {
-        icon = `${c.brightGreen}[✔]${c.reset}`;
+        icon = `${c.emerald}${c.bold}[✔]${c.reset}`;
         titleStyle = `${c.green}${c.bold}`;
       } else if (t.status === 'IN_PROGRESS') {
-        icon = `${c.brightYellow}[⚡]${c.reset}`;
+        icon = `${c.amber}${c.bold}[⚡]${c.reset}`;
         titleStyle = `${c.brightYellow}${c.bold}`;
       } else if (t.status === 'FAILED') {
-        icon = `${c.red}[✖]${c.reset}`;
+        icon = `${c.crimson}${c.bold}[✖]${c.reset}`;
         titleStyle = `${c.red}${c.bold}`;
       } else if (t.status === 'SKIPPED') {
-        icon = `${c.gray}[⊘]${c.reset}`;
-        titleStyle = c.gray;
+        icon = `${c.slate}[⊘]${c.reset}`;
+        titleStyle = `${c.slate}${c.strikethrough}`;
       }
 
       console.log(`${c.brightCyan}${c.bold}│${c.reset}  ${icon} ${c.bold}${t.id}.${c.reset} ${titleStyle}${t.title}${c.reset}`);
+      if (t.status === 'IN_PROGRESS' && t.acceptanceCriteria) {
+        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.amber}↳ Criteria:${c.reset} ${c.dim}${t.acceptanceCriteria}${c.reset}`);
+      }
+      if (t.evidence?.length) {
+        const evidence = t.evidence.map((item) => `${c.cyan}${item.toolName}${c.reset}:${c.emerald}${item.outcome}${c.reset}`).join(', ');
+        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.slate}↳ Evidence:${c.reset} ${evidence}`);
+      }
       if (t.notes) {
         console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ ${t.notes}${c.reset}`);
       }
     }
 
-    console.log(`${c.brightCyan}${c.bold}│${c.reset}                                                                            ${c.brightCyan}${c.bold}│${c.reset}`);
+    console.log(`${c.brightCyan}${c.bold}│${c.reset}`);
     console.log(`${c.brightCyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị Unified Diff Highlighted Renderer chuẩn Codex CLI
+   */
+  static renderDiff(diffText: string, options: { filePath?: string; status?: 'MODIFIED' | 'CREATED' | 'DELETED' } = {}): void {
+    const lines = diffText.trim().split('\n');
+    const headerTitle = options.filePath ? `📝 ${options.status || 'MODIFIED'}: ${options.filePath}` : '📝 UNIFIED DIFF PATCH';
+    
+    console.log(`${c.blue}${c.bold}│${c.reset}`);
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}${c.bold}╭── ${headerTitle} ─────────────────────────────╮${c.reset}`);
+    
+    for (const line of lines.slice(0, 30)) {
+      if (line.startsWith('+++') || line.startsWith('---')) {
+        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}${line}${c.reset}`);
+      } else if (line.startsWith('@@')) {
+        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.brightCyan}${line}${c.reset}`);
+      } else if (line.startsWith('+')) {
+        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.emerald}+ ${line.slice(1)}${c.reset}`);
+      } else if (line.startsWith('-')) {
+        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.crimson}- ${line.slice(1)}${c.reset}`);
+      } else {
+        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.dim}  ${line}${c.reset}`);
+      }
+    }
+
+    if (lines.length > 30) {
+      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}... (+${lines.length - 30} lines diff)${c.reset}`);
+    }
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}╰────────────────────────────────────────────────────────╯${c.reset}`);
   }
 
   /**
    * Hiển thị cảnh báo Self-Reflection & Debugging Protocol
    */
   static renderReflectionAlert(failures: number, advice?: string): void {
+    if (failures < 3) {
+      return;
+    }
     console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightYellow}⚠️  [SELF-REFLECTION TRIGGERED]${c.reset} ${c.yellow}Phát hiện lỗi (Thất bại liên tiếp: ${failures})${c.reset}`);
+    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.amber}${c.bold}⚠️ [Self-Correction Protocol Activated (Consecutive Failures: ${failures})]${c.reset}`);
     if (advice) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ Hướng dẫn: ${advice}${c.reset}`);
+      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}↳ ${advice}${c.reset}`);
     }
   }
 
   /**
-   * Hiển thị Bộ nhớ dài hạn của dự án (Project Knowledge Base)
+   * Hiển thị Bộ nhớ dài hạn của dự án
    */
   static renderMemory(data: any): void {
     console.log(`\n${c.magenta}${c.bold}╭── 🧠 PROJECT KNOWLEDGE BASE (.codingagent/project-memory.json) ───────────╮${c.reset}`);
@@ -653,7 +939,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị thông tin cấu hình phiên làm việc đã lưu trữ (.codingagent/session.json)
+   * Hiển thị thông tin cấu hình phiên làm việc đã lưu trữ
    */
   static renderSessionInfo(data: { modelName?: string; workspacePath?: string; activeSessionId?: string; lastUpdated?: string }, sessionFile: string): void {
     console.log(`\n${c.magenta}${c.bold}╭── 💾 PERSISTED SESSION CONFIG (.codingagent/session.json) ────────────────╮${c.reset}`);
@@ -664,23 +950,21 @@ export class CLI {
       console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Cập nhật lúc:${c.reset}     ${c.gray}${data.lastUpdated}${c.reset}`);
     }
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Tệp lưu trữ:${c.reset}      ${c.dim}${sessionFile}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}💡 Tự động nạp lại khi khởi động 'npm run dev' tiếp theo.${c.reset}`);
     console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
-   * Hiển thị banner khi khởi chạy nhiệm vụ Goal Mode không giới hạn bước
+   * Hiển thị banner khi khởi chạy nhiệm vụ Goal Mode
    */
   static renderGoalBanner(goalText: string): void {
-    console.log(`\n${c.magenta}${c.bold}╭── 🎯 AUTONOMOUS GOAL MODE (UNLIMITED STEPS) ───────────────────────────────╮${c.reset}`);
+    console.log(`\n${c.magenta}${c.bold}╭── 🎯 AUTONOMOUS GOAL MODE (UNLIMITED STEPS ∞) ─────────────────────────────╮${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}MỤC TIÊU:${c.reset} ${c.bold}${goalText}${c.reset}`);
     console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}Chế độ tự trị không giới hạn số bước (Step limit = ∞) cho tới khi hoàn tất.${c.reset}`);
     console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}`);
   }
 
   /**
-   * Hiển thị trạng thái Goal Mode hiện tại (Bật/Tắt)
+   * Hiển thị trạng thái Goal Mode
    */
   static renderGoalStatus(enabled: boolean): void {
     const statusText = enabled ? `${c.brightGreen}${c.bold}BẬT (ON - Unlimited Steps ∞)${c.reset}` : `${c.yellow}${c.bold}TẮT (OFF - Mặc định 30 bước)${c.reset}`;
@@ -704,9 +988,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị ngay trạng thái System 2 trong lúc request tới LLM đang chờ phản hồi.
-   * Dùng một dòng tĩnh thay cho spinner để log không bị ghi đè khi output được
-   * redirect, chạy trong CI hoặc nhiều agent cùng ghi ra terminal.
+   * Hiển thị trạng thái System 2 trong lúc request tới LLM
    */
   static renderLLMThinking(): void {
     console.log(`${c.blue}${c.bold}│${c.reset}`);
@@ -745,7 +1027,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị Tool Call
+   * Hiển thị Tool Call chuẩn Codex CLI với Diff Preview nếu là tool sửa file
    */
   static renderToolCall(name: string, args: Record<string, any>): void {
     console.log(`${c.blue}${c.bold}│${c.reset}`);
@@ -755,9 +1037,14 @@ export class CLI {
     entries.forEach(([k, v], idx) => {
       const isLast = idx === entries.length - 1;
       const prefix = isLast ? '└─' : '├─';
-      const valStr = typeof v === 'string' && v.length > 80 ? `${v.slice(0, 77)}...` : JSON.stringify(v);
+      const valStr = formatToolArgumentPreview(v);
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.gray}${prefix}${c.reset} ${c.cyan}${k}:${c.reset} ${c.dim}${valStr}${c.reset}`);
     });
+
+    // Nếu là apply_patch có chứa diff hunk, render trực quan diff
+    if (name === 'apply_patch' && typeof args.patch === 'string') {
+      CLI.renderDiff(args.patch, { filePath: args.filePath });
+    }
   }
 
   /**
@@ -770,7 +1057,6 @@ export class CLI {
     console.log(`${c.blue}${c.bold}│${c.reset}`);
     console.log(`${c.blue}${c.bold}│${c.reset}  ${c.gray}📥 Result for ${c.bold}${name}${c.reset} [${badge}${c.reset}${c.gray} in ${durationMs}ms]:${c.reset}`);
 
-    // Định dạng nội dung tóm tắt
     if (result.error) {
       console.log(`${c.blue}${c.bold}│${c.reset}     ${c.red}${result.error}${c.reset}`);
     } else if (result.content !== undefined) {
@@ -807,6 +1093,79 @@ export class CLI {
   }
 
   /**
+   * Hiển thị Prompt Caching Telemetry theo chuẩn OpenAI Codex
+   */
+  static renderCacheUsage(usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    cachedTokens?: number;
+    cacheHitRate?: number;
+  }): void {
+    if (!usage || (usage.promptTokens === undefined && usage.totalTokens === undefined)) return;
+    const promptTokens = usage.promptTokens ?? 0;
+    const cachedTokens = usage.cachedTokens ?? 0;
+    const completionTokens = usage.completionTokens ?? 0;
+    const hitRate = usage.cacheHitRate ?? (promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0);
+    
+    if (cachedTokens > 0) {
+      console.log(
+        `${c.blue}${c.bold}│${c.reset}  ${c.brightGreen}⚡ Prompt Cache:${c.reset} ${c.emerald}${cachedTokens.toLocaleString()}${c.reset} cached / ${promptTokens.toLocaleString()} prompt tokens (${c.brightGreen}${c.bold}${hitRate}% hit rate${c.reset}) ${c.dim}| Out: ${completionTokens.toLocaleString()} tok${c.reset}`
+      );
+    } else if (promptTokens > 0) {
+      console.log(
+        `${c.blue}${c.bold}│${c.reset}  ${c.dim}⚡ Prompt Cache: 0 cached / ${promptTokens.toLocaleString()} prompt tokens (0.0% - cold start) | Out: ${completionTokens.toLocaleString()} tok${c.reset}`
+      );
+    }
+  }
+
+  /**
+   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn OpenAI Codex
+   */
+  static renderPromptCacheDashboard(info: {
+    modelName: string;
+    preservePrefixCache: boolean;
+    sessionId?: string;
+    totalPromptTokens?: number;
+    totalCachedTokens?: number;
+    lastHitRate?: number;
+  }): void {
+    console.log(`\n${c.cyan}${c.bold}╭── ⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (OPENAI CODEX STANDARD) ──╮${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tool Declarations:${c.reset}      ${c.brightGreen}✔ Deterministic Alphabetical Ordering${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.brightGreen + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Affinity Routing:${c.reset}       ${c.brightGreen}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
+    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Observability:${c.reset}          ${c.brightGreen}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
+    if (info.sessionId) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Session Cache Key:${c.reset}      ${c.dim}${info.sessionId.slice(0, 32)}${c.reset}`);
+    }
+    if (info.lastHitRate !== undefined) {
+      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.brightYellow}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
+    }
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị bảng tổng hợp các File & Thư mục được đính kèm vào User Prompt (@mention)
+   */
+  static renderAttachmentSummary(attachments: AttachedItemSummary[]): void {
+    if (!attachments || attachments.length === 0) return;
+    console.log(`\n${c.cyan}${c.bold}╭── 📎 ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH (${attachments.length} mục) ──────────────────────────────────╮${c.reset}`);
+    for (const item of attachments) {
+      if (item.type === 'directory') {
+        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}📁 ${item.path}/${c.reset} ${c.dim}(Thư mục • ${item.fileCount || 0} mục)${c.reset}`);
+      } else {
+        const sizeStr = `${(item.sizeBytes / 1024).toFixed(1)} KB`;
+        const linesStr = item.lineCount !== undefined ? `${item.lineCount.toLocaleString()} dòng • ` : '';
+        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightGreen}📄 ${item.path}${c.reset} ${c.dim}(${linesStr}${sizeStr})${c.reset}`);
+      }
+    }
+    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
    * Cuối mỗi Step trong AgentLoop
    */
   static renderStepFooter(): void {
@@ -814,19 +1173,78 @@ export class CLI {
   }
 
   /**
-   * Hiển thị Final Answer
+   * Format Markdown cơ bản sang Terminal ANSI styling
+   */
+  static formatMarkdownTerminal(text: string): string {
+    return text
+      // Headers
+      .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
+      .replace(/^## (.*$)/gm, `\n${c.brightYellow}${c.bold}❖ $1${c.reset}`)
+      .replace(/^# (.*$)/gm, `\n${c.cyan}${c.bold}══════════ $1 ══════════${c.reset}\n`)
+      // Bold & Italic
+      .replace(/\*\*(.*?)\*\*/g, `${c.bold}$1${c.reset}`)
+      .replace(/\*(.*?)\*/g, `${c.italic}$1${c.reset}`)
+      // Inline Code
+      .replace(/`([^`]+)`/g, `${c.brightCyan}$1${c.reset}`)
+      // Bullet points
+      .replace(/^\s*[-*]\s+/gm, `  ${c.emerald}•${c.reset} `)
+      .replace(/^\s*\d+\.\s+/gm, `  ${c.yellow}$1.${c.reset} `)
+      // Blockquotes & Alerts
+      .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.blue}ℹ NOTE:${c.reset} $1`)
+      .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.amber}⚡ IMPORTANT:${c.reset} $1`)
+      .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.red}⚠️ WARNING:${c.reset} $1`);
+  }
+
+  /**
+   * Hiển thị Final Answer chuẩn Codex CLI với Grapheme Typewriter Streaming
    */
   static async renderFinalAnswer(answer: string, options: { animate?: boolean } = {}): Promise<void> {
     const content = answer.trim();
     const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
+    
     console.log(`\n${c.green}${c.bold}╭── ✨ FINAL ANSWER ─────────────────────────────────────────────────────────╮${c.reset}\n`);
+    
+    const formatted = CLI.formatMarkdownTerminal(content);
+
     if (shouldAnimate) {
-      await writeTypewriterText(content);
+      await writeTypewriterText(formatted);
       process.stdout.write('\n');
     } else {
-      console.log(content);
+      console.log(formatted);
     }
     console.log(`\n${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị thông báo dừng/lỗi thực thi chuẩn Codex CLI (Execution Stopped / Blocked Banner)
+   */
+  static async renderExecutionStopped(message: string, reason: string = 'STOPPED'): Promise<void> {
+    const content = message.trim();
+    console.log(`\n${c.crimson}${c.bold}╭── 🛑 AGENT EXECUTION STOPPED (${reason}) ──────────────────────────────────╮${c.reset}\n`);
+    const formatted = CLI.formatMarkdownTerminal(content);
+    console.log(formatted);
+    console.log(`\n${c.crimson}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị Telemetry kết thúc lượt thực thi (Turn Execution Summary)
+   */
+  static renderTurnSummary(telemetry: {
+    durationMs: number;
+    stepsCount: number;
+    filesModified?: string[];
+    testsPassed?: boolean;
+    sandboxMode?: string;
+  }): void {
+    const durationSec = (telemetry.durationMs / 1000).toFixed(2);
+    const testBadge = telemetry.testsPassed !== undefined
+      ? telemetry.testsPassed ? `${c.emerald}✔ PASSED` : `${c.crimson}✖ FAILED`
+      : `${c.slate}N/A`;
+    const filesCount = telemetry.filesModified?.length || 0;
+
+    console.log(`${c.slate}${c.bold}╭── 📊 TURN TELEMETRY ────────────────────────────────────────────────────────╮${c.reset}`);
+    console.log(`${c.slate}${c.bold}│${c.reset}  ⏱️  Duration: ${c.bold}${durationSec}s${c.reset}  │  ⚡ Steps: ${c.bold}${telemetry.stepsCount}${c.reset}  │  📝 Mutated: ${c.bold}${filesCount} file(s)${c.reset}  │  🧪 Tests: ${testBadge}${c.reset}`);
+    console.log(`${c.slate}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
   /**
@@ -888,7 +1306,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị danh sách yêu cầu phê duyệt (Approvals)
+   * Hiển thị danh sách yêu cầu phê duyệt
    */
   static renderApprovals(approvals: any[]): void {
     console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
@@ -905,6 +1323,93 @@ export class CLI {
       console.log(`     ${c.dim}${req.description}${c.reset}`);
       console.log(`     ${c.gray}Requested at: ${req.requestedAt}${c.reset}\n`);
     }
+  }
+
+  /**
+   * Hiển thị thông tin trạng thái Permission Policy
+   */
+  static renderPermissionStatus(mode: string, approvedCount: number): void {
+    console.log(`\n${c.brightYellow}${c.bold}🔐 CẤU HÌNH PHÂN QUYỀN (PERMISSION GATEWAY)${c.reset}`);
+    console.log(`  ${c.dim}Chế độ hiện tại:${c.reset} ${c.bold}${c.brightCyan}${mode}${c.reset}`);
+    console.log(`  ${c.dim}Danh mục đã auto-approve trong phiên:${c.reset} ${c.bold}${approvedCount}${c.reset}`);
+    console.log(`  ${c.gray}Các chế độ khả dụng:${c.reset}`);
+    console.log(`    - ${c.bold}ask_sensitive${c.reset}  : Hỏi ý kiến khi chỉnh sửa file hoặc chạy lệnh nguy hiểm (Khuyên dùng)`);
+    console.log(`    - ${c.bold}always_ask${c.reset}     : Luôn hỏi ý kiến trước mọi thao tác ghi/chạy lệnh`);
+    console.log(`    - ${c.bold}auto_approve${c.reset}   : Tự động cho phép tất cả (Không khuyến nghị)`);
+    console.log(`    - ${c.bold}read_only${c.reset}      : Chặn hoàn toàn mọi thao tác chỉnh sửa file và chạy lệnh\n`);
+  }
+
+  /**
+   * Hiển thị khung yêu cầu phê duyệt Permission chuẩn OpenAI Codex CLI
+   */
+  static renderPermissionPrompt(request: {
+    toolName: string;
+    category: string;
+    target: string;
+    summary: string;
+    riskLevel: string;
+    details?: Record<string, any>;
+  }): void {
+    const riskColor = request.riskLevel === 'CRITICAL' ? `${c.crimson}${c.bold}` : request.riskLevel === 'HIGH' ? `${c.amber}${c.bold}` : `${c.yellow}${c.bold}`;
+    console.log(`\n${c.yellow}╭────────────────────────────────────────────────────────────────────────╮${c.reset}`);
+    console.log(`${c.yellow}│${c.reset}  ${c.bold}⚠️  XÁC NHẬN CẤP QUYỀN THỰC THI (CODEX PERMISSION APPROVAL)${c.reset}        ${c.yellow}│${c.reset}`);
+    console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
+    console.log(`${c.yellow}│${c.reset}  ${c.dim}Công cụ:${c.reset}     ${c.bold}${request.toolName}${c.reset} (${request.category})`);
+    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mục tiêu:${c.reset}    ${c.brightCyan}${request.target}${c.reset}`);
+    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mô tả:${c.reset}       ${request.summary}`);
+    if (request.details?.misuse) {
+      console.log(`${c.yellow}│${c.reset}  ${c.brightMagenta}${c.bold}Gợi ý:${c.reset}       Bấm ${c.bold}'n'${c.reset} để từ chối và ép LLM dùng tool: ${c.brightCyan}${request.details.misuse.tool}${c.reset}`);
+    }
+    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mức rủi ro:${c.reset}  ${riskColor}[${request.riskLevel}]${c.reset}`);
+    console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
+    console.log(`${c.yellow}│${c.reset}  ${c.slate}Phím tắt: ${c.emerald}[y]${c.reset} Duyệt 1 lần • ${c.cyan}[a]${c.reset} Duyệt luôn trong phiên • ${c.red}[n]${c.reset} Từ chối • ${c.dim}[q] Hủy${c.reset}`);
+    console.log(`${c.yellow}╰────────────────────────────────────────────────────────────────────────╯${c.reset}`);
+  }
+
+  /**
+   * Hiển thị bảng cấu hình Token của mô hình hiện tại kèm các gói đóng gói sẵn (Preset Tiers)
+   */
+  static renderTokenConfig(modelName: string, config: any, profile: any): void {
+    console.log(`\n${c.brightYellow}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
+    console.log(`${c.brightYellow}${c.bold}║           📊 CẤU HÌNH TOKEN BUDGET & GÓI ĐÓNG GÓI SẴN (PRESETS)            ║${c.reset}`);
+    console.log(`${c.brightYellow}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+    console.log(`  ${c.dim}Mô hình hiện tại:${c.reset}          ${c.bold}${modelName}${c.reset} ${c.gray}(Provider: ${profile.provider.toUpperCase()})${c.reset}`);
+    console.log(`  ${c.dim}Max Output Tokens:${c.reset}         ${c.bold}${c.green}${config.maxOutputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedOutputTokens.toLocaleString()})${c.reset}`);
+    console.log(`  ${c.dim}Max Input Tokens (Context):${c.reset} ${c.bold}${c.cyan}${config.maxInputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedInputTokens.toLocaleString()})${c.reset}`);
+    
+    if (profile.supportsThinkingBudget || config.thinkingBudget !== undefined) {
+      const budgetStr = config.thinkingBudget === 0 ? 'TẮT (0)' : (config.thinkingBudget?.toLocaleString() ?? 'Tự động');
+      console.log(`  ${c.dim}Thinking Token Budget:${c.reset}     ${c.bold}${c.magenta}${budgetStr}${c.reset}`);
+    }
+    if (profile.supportsReasoningEffort || config.reasoningEffort) {
+      console.log(`  ${c.dim}Reasoning Effort:${c.reset}          ${c.bold}${c.yellow}${config.reasoningEffort ?? 'medium'}${c.reset}`);
+    }
+
+    console.log(`\n${c.cyan}${c.bold}📦 4 GÓI ĐÓNG GÓI SẴN (PRESET TIERS):${c.reset}`);
+    console.log(`  ${c.green}${c.bold}1. LOW (Eco / Tiết kiệm)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}2,048${c.reset} | Context: ${c.bold}16,000${c.reset} | Thinking: ${c.bold}2,048${c.reset} (effort: ${c.bold}low${c.reset})`);
+    console.log(`     ↳ ${c.gray}Tối ưu tốc độ phản hồi tức thì, tiết kiệm token và chi phí tối đa.${c.reset}`);
+
+    console.log(`  ${c.yellow}${c.bold}2. MEDIUM (Balanced / Tiêu chuẩn)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}8,192${c.reset} | Context: ${c.bold}64,000${c.reset} | Thinking: ${c.bold}8,192${c.reset} (effort: ${c.bold}medium${c.reset})`);
+    console.log(`     ↳ ${c.gray}Cân bằng hoàn hảo cho các tác vụ lập trình hàng ngày và debug thông thường.${c.reset}`);
+
+    console.log(`  ${c.brightYellow}${c.bold}3. HIGH (Deep / Chuyên sâu)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}16,384${c.reset} | Context: ${c.bold}128,000${c.reset} | Thinking: ${c.bold}24,576${c.reset} (effort: ${c.bold}high${c.reset})`);
+    console.log(`     ↳ ${c.gray}Phù hợp refactor dự án lớn, suy luận logic phức tạp và sinh code dài.${c.reset}`);
+
+    console.log(`  ${c.red}${c.bold}4. MAX (Unlimited / Tối đa)${c.reset}`);
+    console.log(`     ↳ Output: ${c.bold}${profile.maxSupportedOutputTokens.toLocaleString()}${c.reset} | Context: ${c.bold}${profile.maxSupportedInputTokens.toLocaleString()}${c.reset} | Thinking: ${c.bold}64,000${c.reset} (effort: ${c.bold}max${c.reset})`);
+    console.log(`     ↳ ${c.gray}Khai thác 100% giới hạn phần cứng và context window tối đa của mô hình.${c.reset}`);
+
+    console.log(`\n${c.gray}⚡ Lệnh thao tác nhanh:${c.reset}`);
+    console.log(`  ${c.bold}/tokens low${c.reset} | ${c.bold}/tokens med${c.reset} | ${c.bold}/tokens high${c.reset} | ${c.bold}/tokens max${c.reset} : Chọn nhanh trọn gói preset`);
+    console.log(`  ${c.bold}/tokens output <low|med|high|max|số_token>${c.reset}           : Đặt riêng giới hạn token đầu ra`);
+    console.log(`  ${c.bold}/tokens input <low|med|high|max|số_token>${c.reset}            : Đặt riêng giới hạn context window`);
+    console.log(`  ${c.bold}/tokens thinking <off|low|med|high|max|số_token>${c.reset}     : Đặt riêng thinking budget (off để tắt)`);
+    console.log(`  ${c.bold}/tokens effort <low|med|high|max>${c.reset}                    : Đặt riêng mức độ suy luận`);
+    console.log(`  ${c.bold}/tokens reset${c.reset}                                        : Khôi phục về mặc định của mô hình\n`);
   }
 
   /**

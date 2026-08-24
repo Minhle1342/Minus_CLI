@@ -26,7 +26,13 @@ Unlike conventional implementations that attempt to translate raw markdown instr
 ### 2.3 Worktrees & Isolation (`src/workspace/worktree-manager.ts`)
 - Provides safe, sandboxed Git worktree creation under `.codingagent/worktrees/` to prevent contamination of the main branch during feature development.
 
-### 2.4 Subagent Lifecycle & Review Gates (`src/agent/`)
+### 2.4 Complete Git CLI Surface (`src/tools/git-tools.ts`)
+- **`git_list_commands`** discovers the union of documented, external, transport, and helper commands supported by the installed Git runtime. User-defined shell aliases are deliberately excluded.
+- **`git_command`** executes every discovered subcommand using `spawn("git", argv)` with no shell interpolation, bounded stdin/output, workspace-scoped `cwd`, secret redaction, and per-turn read/write/network/destructive authorization.
+- **Convenience tools** `git_status`, `git_diff`, `git_add`, `git_commit`, and `git_push` provide stronger schemas for the most common workflows.
+- All Git calls from the LLM go through these tools; `run_command` rejects Git so it cannot bypass Git policy.
+
+### 2.5 Subagent Lifecycle & Review Gates (`src/agent/`)
 - **`SubagentManager`**: Supports clean-context subagent spawning (`spawn_agent`), synchronous non-polling wait (`wait_agent`), cancellation, and recovery across restarts.
 - **`ReviewManager`**: Enforces spec-compliance and architecture/quality reviews before marking tasks completed.
 - **`VerificationPolicy`**: Enforces the *verification-before-completion* contract, preventing premature final answers if code modifications have not passed automated test suites.

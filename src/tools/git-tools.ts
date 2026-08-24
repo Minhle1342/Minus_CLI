@@ -1,7 +1,6 @@
 import { ToolDefinition, ToolExecutionContext } from './types.js';
 import { Type } from '@google/genai';
-import { execFile } from 'node:child_process';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
@@ -11,12 +10,7 @@ import {
   isGitMutationAuthorized,
   GitMutationOperation,
 } from './git-intent.js';
-import {
-  classifyGitCommand,
-  isGitCommandAuthorized,
-  validateGitCommandScope,
-  GitCommandRisk,
-} from './git-command-policy.js';
+import { classifyGitCommand, isGitCommandAuthorized, validateGitCommandScope } from './git-command-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,7 +22,7 @@ interface GitCommandResult {
 interface InstalledGitCommand {
   name: string;
   description: string;
-  source: 'builtin' | 'external';
+  source: 'builtin' | 'external' | 'helper';
 }
 
 export function createGitTools(workspace: Workspace): ToolDefinition[] {
@@ -58,15 +52,20 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
 
   const getInstalledCommands = async (): Promise<InstalledGitCommand[]> => {
     if (!installedCommandsPromise) {
-      installedCommandsPromise = runGit(['help', '-a', '--external-commands', '--no-aliases'])
-        .then(({ stdout }) => parseInstalledGitCommands(stdout));
+      installedCommandsPromise = Promise.all([
+        runGit(['help', '-a', '--external-commands', '--no-aliases']),
+        runGit(['--list-cmds=main,others']),
+      ]).then(([helpResult, runtimeResult]) => mergeInstalledGitCommands(
+        parseInstalledGitCommands(helpResult.stdout),
+        runtimeResult.stdout,
+      ));
     }
     return installedCommandsPromise;
   };
 
   const gitListCommandsTool: ToolDefinition = {
     name: 'git_list_commands',
-    description: 'List every built-in and installed external Git subcommand that git_command can invoke, including its runtime risk classification.',
+    description: 'List every built-in and installed external Git subcommand that git_command can invoke, with its runtime risk classification.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -78,10 +77,7 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
         const query = String(args.query || '').trim().toLowerCase();
         const commands = (await getInstalledCommands())
           .filter((command) => !query || command.name.includes(query) || command.description.toLowerCase().includes(query))
-          .map((command) => ({
-            ...command,
-            risk: classifyGitCommand(command.name).risk,
-          }));
+          .map((command) => ({ ...command, risk: classifyGitCommand(command.name).risk }));
         return { success: true, count: commands.length, commands };
       } catch (err: any) {
         return gitFailure(err, 'GIT_COMMAND_DISCOVERY_FAILED');
@@ -91,42 +87,30 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
 
   const gitCommandTool: ToolDefinition = {
     name: 'git_command',
-    description: 'Run any installed Git subcommand without a shell. Pass the subcommand and argv separately. Read-only commands are always available; write, network, and destructive commands require a matching explicit user request in the current turn. Use git_list_commands to discover the complete runtime command set.',
+    description: 'Run any installed Git subcommand without a shell. Read-only commands are always available; write, network, and destructive commands require a matching explicit user request. Use git_list_commands to discover all available commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        subcommand: {
-          type: Type.STRING,
-          description: 'Git subcommand name without the "git" prefix, for example log, branch, switch, fetch, merge, rebase, stash, tag, worktree, update-ref, or lfs.',
-        },
+        subcommand: { type: Type.STRING, description: 'Git subcommand without the "git" prefix.' },
         args: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
           description: 'Exact argv items passed after the subcommand. Shell syntax is not evaluated.',
         },
-        cwd: {
-          type: Type.STRING,
-          description: 'Optional workspace-relative working directory. It cannot escape the workspace.',
-        },
-        stdin: {
-          type: Type.STRING,
-          description: 'Optional standard input for commands such as hash-object --stdin or apply -.',
-        },
-        timeout_ms: {
-          type: Type.NUMBER,
-          description: 'Timeout in milliseconds (default 120000, range 1000-300000).',
-        },
+        cwd: { type: Type.STRING, description: 'Optional workspace-relative working directory.' },
+        stdin: { type: Type.STRING, description: 'Optional standard input for the Git process.' },
+        timeout_ms: { type: Type.NUMBER, description: 'Timeout in milliseconds (1000-300000).' },
         output_encoding: {
           type: Type.STRING,
           enum: ['utf8', 'base64'],
-          description: 'Output encoding. Use base64 only for binary Git output.',
+          description: 'Use base64 only when binary output is required.',
         },
       },
       required: ['subcommand'],
     },
     execute: async (args: Record<string, any>, _workspace: Workspace, context?: ToolExecutionContext) => {
       const subcommand = String(args.subcommand || '').trim().toLowerCase();
-      if (!/^[a-z0-9][a-z0-9-]*$/.test(subcommand)) {
+      if (!/^[a-z0-9][a-z0-9._-]*$/.test(subcommand) || subcommand.includes('..')) {
         return { error: `Invalid Git subcommand: "${subcommand}".`, errorCode: 'GIT_INVALID_SUBCOMMAND' };
       }
       const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
@@ -144,10 +128,9 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           return {
             error: `Git subcommand "${subcommand}" is not installed or is only configured as a shell alias.`,
             errorCode: 'GIT_SUBCOMMAND_NOT_AVAILABLE',
-            suggestion: 'Call git_list_commands to inspect the available built-in and external commands.',
+            suggestion: 'Call git_list_commands to inspect available commands.',
           };
         }
-
         const cwd = args.cwd ? workspace.resolveSafePath(String(args.cwd)) : workspace.rootDir;
         const scopeDecision = validateGitCommandScope(subcommand, commandArgs, workspace.rootDir, cwd);
         if (!scopeDecision.allowed) return scopeDecision;
@@ -160,10 +143,9 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
               ? 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
               : 'GIT_OPERATION_NOT_AUTHORIZED',
             risk: classification.risk,
-            suggestion: `Ask the user to explicitly request git ${subcommand}${classification.risk === 'destructive' ? ' and the destructive behavior/flags' : ''}.`,
+            suggestion: `Ask the user to explicitly request git ${subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}.`,
           };
         }
-
         if (subcommand === 'push') {
           const requestedBranch = extractRequestedGitBranch(context?.userRequest);
           if (requestedBranch && !pushArgsTargetBranch(commandArgs, requestedBranch)) {
@@ -184,11 +166,10 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           timeoutMs,
           outputEncoding,
         });
-        const safeArgs = redactGitArguments(commandArgs);
         const response = {
           success: result.exitCode === 0 && !result.timedOut,
           subcommand,
-          args: safeArgs,
+          args: redactGitArguments(commandArgs),
           risk: classification.risk,
           exitCode: result.exitCode,
           stdout: redactGitOutput(result.stdout),
@@ -198,15 +179,13 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           durationMs: result.durationMs,
           outputEncoding,
         };
-        return response.success
-          ? response
-          : {
-              ...response,
-              error: result.timedOut
-                ? `git ${subcommand} timed out after ${timeoutMs}ms.`
-                : redactGitOutput(result.stderr || result.stdout || `git ${subcommand} exited with code ${result.exitCode}.`),
-              errorCode: result.timedOut ? 'GIT_COMMAND_TIMEOUT' : 'GIT_COMMAND_FAILED',
-            };
+        return response.success ? response : {
+          ...response,
+          error: result.timedOut
+            ? `git ${subcommand} timed out after ${timeoutMs}ms.`
+            : redactGitOutput(result.stderr || result.stdout || `git ${subcommand} exited with code ${result.exitCode}.`),
+          errorCode: result.timedOut ? 'GIT_COMMAND_TIMEOUT' : 'GIT_COMMAND_FAILED',
+        };
       } catch (err: any) {
         return gitFailure(err, 'GIT_COMMAND_FAILED');
       }
@@ -418,15 +397,7 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
     },
   };
 
-  return [
-    gitListCommandsTool,
-    gitCommandTool,
-    gitStatusTool,
-    gitDiffTool,
-    gitAddTool,
-    gitCommitTool,
-    gitPushTool,
-  ];
+  return [gitListCommandsTool, gitCommandTool, gitStatusTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool];
 }
 
 function parseInstalledGitCommands(helpOutput: string): InstalledGitCommand[] {
@@ -440,12 +411,28 @@ function parseInstalledGitCommands(helpOutput: string): InstalledGitCommand[] {
       continue;
     }
     if (!includeSection) continue;
-    const match = line.match(/^\s{3}([a-z0-9][a-z0-9-]*)(?:\s{2,}(.+))?$/i);
+    const match = line.match(/^\s{3}([a-z0-9][a-z0-9._-]*)(?:\s{2,}(.+))?$/i);
     if (!match) continue;
     commands.set(match[1], {
       name: match[1],
       description: match[2]?.trim() || `Installed external Git command: ${match[1]}`,
       source,
+    });
+  }
+  return [...commands.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function mergeInstalledGitCommands(
+  documentedCommands: InstalledGitCommand[],
+  runtimeOutput: string,
+): InstalledGitCommand[] {
+  const commands = new Map(documentedCommands.map((command) => [command.name, command]));
+  for (const name of runtimeOutput.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name) || name.includes('..') || commands.has(name)) continue;
+    commands.set(name, {
+      name,
+      description: `Installed Git runtime/helper command: ${name}`,
+      source: 'helper',
     });
   }
   return [...commands.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -486,7 +473,6 @@ async function executeGitProcess(
     let truncated = false;
     let timedOut = false;
     let settled = false;
-
     const capture = (target: Buffer[], chunk: Buffer) => {
       if (capturedBytes >= maxCaptureBytes) {
         truncated = true;
@@ -500,18 +486,15 @@ async function executeGitProcess(
     };
     child.stdout.on('data', (chunk: Buffer) => capture(stdoutChunks, chunk));
     child.stderr.on('data', (chunk: Buffer) => capture(stderrChunks, chunk));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, options.timeoutMs);
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({
-        exitCode: 1,
-        stdout: '',
-        stderr: error.message,
-        timedOut: false,
-        truncated,
-        durationMs: Date.now() - startedAt,
-      });
+      resolve({ exitCode: 1, stdout: '', stderr: error.message, timedOut: false, truncated, durationMs: Date.now() - startedAt });
     });
     child.on('close', (code) => {
       if (settled) return;
@@ -530,18 +513,14 @@ async function executeGitProcess(
         durationMs: Date.now() - startedAt,
       });
     });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, options.timeoutMs);
     child.stdin.end(options.stdin || '');
   });
 }
 
 function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
   const positional = args.filter((arg) => !arg.startsWith('-'));
-  if (positional.length < 2) return false;
-  return positional.slice(1).some((refspec) => refspec === requestedBranch || refspec.endsWith(`:${requestedBranch}`));
+  return positional.length >= 2
+    && positional.slice(1).some((refspec) => refspec === requestedBranch || refspec.endsWith(`:${requestedBranch}`));
 }
 
 function redactGitOutput(value: string): string {
