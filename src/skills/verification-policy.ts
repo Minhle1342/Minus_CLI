@@ -1,5 +1,6 @@
 import { isVerificationCommand } from '../agent/completion-evidence.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
+import type { ControlRisk } from '../control/classification-types.js';
 
 export type VerificationLadderTier =
   | 'structural'
@@ -28,6 +29,7 @@ export class VerificationPolicy {
   private repairCycles: number = 0;
   private readonly maxRepairCycles: number = 3;
   private baselineManager: VerificationBaselineManager = new VerificationBaselineManager();
+  private requiredRisk: ControlRisk = 'R0';
 
   private requiredSkills: Set<string> = new Set([
     'test-driven-development',
@@ -59,6 +61,15 @@ export class VerificationPolicy {
     this.hasUnverifiedModifications = true;
   }
 
+  hasPendingModifications(): boolean {
+    return this.hasUnverifiedModifications;
+  }
+
+  setRequiredRisk(risk: ControlRisk): void {
+    const rank: ControlRisk[] = ['R0', 'R1', 'R2', 'R3', 'R4', 'R5'];
+    if (rank.indexOf(risk) > rank.indexOf(this.requiredRisk)) this.requiredRisk = risk;
+  }
+
   /**
    * Ghi nhận kết quả chạy lệnh kiểm thử / verify (run_command)
    */
@@ -79,7 +90,7 @@ export class VerificationPolicy {
       exitCode,
       digest,
       diffHash: options?.diffHash,
-      tier: options?.tier || 'targeted_test',
+      tier: options?.tier || this.inferTier(command),
       hasNewFailures: options?.hasNewFailures,
     };
 
@@ -113,6 +124,22 @@ export class VerificationPolicy {
       };
     }
 
+
+    if (mandatesVerification && this.lastVerification) {
+      const tierRank: VerificationLadderTier[] = ['structural', 'diff', 'diagnostics', 'typecheck', 'targeted_test', 'full_test', 'build'];
+      const minimum = this.requiredRisk === 'R0' ? 'structural'
+        : this.requiredRisk === 'R1' ? 'diagnostics'
+          : this.requiredRisk === 'R2' ? 'typecheck'
+            : 'full_test';
+      if (tierRank.indexOf(this.lastVerification.tier || 'structural') < tierRank.indexOf(minimum)) {
+        return {
+          allowed: false,
+          reason: `VERIFICATION_TIER_REQUIRED: Risk ${this.requiredRisk} requires ${minimum} or stronger evidence.`,
+          errorCode: 'VERIFICATION_TIER_REQUIRED',
+        };
+      }
+    }
+
     return { allowed: true };
   }
 
@@ -130,5 +157,16 @@ export class VerificationPolicy {
     this.verificationHistory = [];
     this.repairCycles = 0;
     this.baselineManager.reset();
+    this.requiredRisk = 'R0';
+  }
+
+  private inferTier(command: string): VerificationLadderTier {
+    if (/\b(?:build|compile)\b/i.test(command)) return 'build';
+    if (/\b(?:test|pytest|cargo\s+test|dotnet\s+test)\b/i.test(command)) {
+      return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-])/i.test(command) ? 'targeted_test' : 'full_test';
+    }
+    if (/\b(?:tsc|typecheck)\b/i.test(command)) return 'typecheck';
+    if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';
+    return 'structural';
   }
 }

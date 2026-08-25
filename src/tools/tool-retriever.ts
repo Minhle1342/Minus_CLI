@@ -104,6 +104,7 @@ export class ToolRetriever {
    */
   retrieve(query: string, allTools?: ToolDefinition[]): FunctionDeclaration[] {
     const pool = allTools || Array.from(this.toolsMap.values());
+    const poolMap = new Map(pool.map((tool) => [tool.name, tool]));
 
     // Nếu tắt Dynamic Retrieval hoặc tổng số tool chưa vượt ngưỡng -> Trả về toàn bộ
     if (!this.config.enabled || pool.length <= this.config.activationThreshold) {
@@ -114,7 +115,7 @@ export class ToolRetriever {
 
     // 1. Luôn bảo lưu các Core Anchor Tools
     for (const anchor of this.config.alwaysInclude) {
-      if (this.toolsMap.has(anchor)) {
+      if (poolMap.has(anchor)) {
         selectedToolNames.add(anchor);
       }
     }
@@ -127,7 +128,7 @@ export class ToolRetriever {
         let dynamicAdded = 0;
         for (const hit of searchHits) {
           if (dynamicAdded >= this.config.topK) break;
-          if (hit.score >= this.config.minScore && this.toolsMap.has(hit.id)) {
+          if (hit.score >= this.config.minScore && poolMap.has(hit.id)) {
             if (!selectedToolNames.has(hit.id)) {
               selectedToolNames.add(hit.id);
               dynamicAdded++;
@@ -148,7 +149,7 @@ export class ToolRetriever {
     }
 
     const retrievedTools = Array.from(selectedToolNames)
-      .map((name) => this.toolsMap.get(name))
+      .map((name) => poolMap.get(name))
       .filter((t): t is ToolDefinition => Boolean(t));
 
     return this.formatDeclarations(retrievedTools);

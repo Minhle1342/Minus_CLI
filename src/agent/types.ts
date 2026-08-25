@@ -4,6 +4,7 @@ import type { ContextCompactor } from './context-compactor.js';
 import type { SessionPersistence } from '../session/session-persistence.js';
 import type { ToolScope } from '../tools/registry.js';
 import type { AgentRegistry } from './agent-registry.js';
+import type { ToolControlMode } from '../control/classification-types.js';
 
 export interface AgentLoopOptions {
   maxSteps?: number;
@@ -26,6 +27,8 @@ export interface AgentLoopOptions {
   enableRepositoryMemory?: boolean;
   /** Maximum estimated tokens reserved for validated repository memories. */
   repositoryMemoryTokens?: number;
+  /** Per-turn classification and runtime tool authorization rollout mode. */
+  toolControlMode?: ToolControlMode;
 }
 
 export type AgentState =

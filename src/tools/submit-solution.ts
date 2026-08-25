@@ -1,6 +1,7 @@
 import type { ToolRegistry } from './registry.js';
 import type { ToolDefinition } from './types.js';
 import type { Workspace } from '../workspace/workspace.js';
+import type { ToolExecutionContext } from './types.js';
 
 export interface SubmitSolutionArgs {
   summary: string;
@@ -54,7 +55,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       },
       required: ['summary', 'verificationEvidence'],
     } as any,
-    execute: async (args: Record<string, any>, workspace: Workspace): Promise<SubmitSolutionResult> => {
+    execute: async (args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<SubmitSolutionResult> => {
       const summary = (args.summary || '').trim();
       const verificationEvidence = (args.verificationEvidence || '').trim();
       const filesModified = Array.isArray(args.filesModified)
@@ -67,6 +68,14 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       }
       if (!verificationEvidence) {
         throw new Error('Missing required argument: "verificationEvidence" is mandatory. Provide the test/build command and its passing result.');
+      }
+      if (context?.completionEvidenceVerified !== true) {
+        return {
+          success: false,
+          submitted: false,
+          error: 'submit_solution requires durable session-backed mutation and verification evidence; prose evidence is not trusted.',
+          errorCode: 'UNVERIFIED_SUBMISSION',
+        } as any;
       }
 
       const timestamp = new Date().toISOString();

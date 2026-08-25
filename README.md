@@ -285,3 +285,5 @@ npm run dev
 2. **Zero Disk Pollution on Failure:** Mọi thao tác sửa code đều được tiền kiểm tra trên RAM (`MutationTransaction`), giữ workspace luôn sạch sẽ khi có lỗi.
 3. **Deterministic Cache-Friendly Architecture:** Toàn bộ System Prompt và thứ tự Tool schemas được cố định tuyệt đối, đảm bảo tỷ lệ trúng KV-Cache $\ge 85\%$.
 4. **Resilient Suspension & Resumption:** Tự động bảo toàn 100% tiến độ của Kế hoạch khi gặp Rate Limit/Quota Exhaustion và sẵn sàng chạy tiếp chỉ với 1 lệnh.
+
+Per-turn tool control uses `MINUS_TOOL_CONTROL_MODE=shadow` by default. Set it to `enforce` to bind the deterministic task/phase classification, capability gate, RATS selection, and runtime `ToolScope` to the same hashed allowlist; set it to `off` only for compatibility diagnostics.

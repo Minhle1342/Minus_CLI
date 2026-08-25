@@ -96,7 +96,10 @@ import { createSearchCodebaseFastTool } from './tools/search-code-tool.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
 import { TaskManager } from './tasks/task-manager.js';
-import { createRunCommandTool, isAllowedCommand, detectFileCommandMisuse } from './tools/run-command.js';
+import { createRunCommandTool, isAllowedCommand, isAllowedShellCommand, detectFileCommandMisuse } from './tools/run-command.js';
+import { analyzeShellCommand } from './security/shell-segmenter.js';
+import { ClassificationEngine } from './control/classification-engine.js';
+import { ThisTurnToolGate, hashAllowedToolSet } from './control/this-turn-tool-gate.js';
 import { diagnoseCommandFailure } from './sandbox/command-diagnostics.js';
 import { detectWorkspaceRuntimeProfile, inferCommandRuntime } from './sandbox/runtime-profiles.js';
 import {
@@ -904,12 +907,54 @@ async function runUnitTests() {
   assert(deniedScopedTool.result.errorCode === 'UNKNOWN_TOOL', 'ToolRunner enforce tool scope khi agent gọi capability ngoài allowlist');
 
   // Kiểm thử Dynamic Tool Retrieval (RATS)
+  const classifier = new ClassificationEngine();
+  const exploreDecision = classifier.classify({ request: 'Inspect and explain the current architecture' });
+  assert(exploreDecision.phase === 'explore' && exploreDecision.risk === 'R0', 'ClassificationEngine recognizes read-only exploration fast path');
+  const implementationDecision = classifier.classify({ request: 'Implement a refactor across the whole architecture', hasPlan: true });
+  assert(implementationDecision.phase === 'implement' && implementationDecision.risk === 'R3', 'ClassificationEngine raises risk for a large architectural refactor');
+  assert(implementationDecision.requiredCapabilities.includes('delegate'), 'Large tasks retain the existing parallel delegation strength');
+
+  const turnGate = new ThisTurnToolGate();
+  const gatedDecision = turnGate.decide(exploreDecision, registry.getAll());
+  assert(!gatedDecision.allowedToolNames.includes('apply_patch') && gatedDecision.allowedToolNames.includes('read_file'), 'ThisTurnToolGate removes mutation tools from explore phase');
+  assert(gatedDecision.allowedToolNames.includes('discover_tools'), 'Explore phase preserves progressive tool discovery without exposing mutations');
+  const boundScope = registry.createScope('bound-turn', gatedDecision.allowedToolNames);
+  const boundRunner = new ToolRunner(boundScope, workspace);
+  const rejectedBoundCall = await boundRunner.run('apply_patch', { patch: 'invalid' }, {
+    decisionId: gatedDecision.id,
+    allowedToolNames: gatedDecision.allowedToolNames,
+    allowedToolSetHash: gatedDecision.allowedToolSetHash,
+  });
+  assert(rejectedBoundCall.result.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN', 'ToolRunner rejects a tool outside the bound allowlist');
+  const invalidBinding = await boundRunner.run('read_file', { path: 'package.json' }, {
+    decisionId: gatedDecision.id,
+    allowedToolNames: gatedDecision.allowedToolNames,
+    allowedToolSetHash: hashAllowedToolSet(['tampered']),
+  });
+  assert(invalidBinding.result.errorCode === 'INVALID_TOOL_DECISION_BINDING', 'ToolRunner detects a tampered allowlist hash');
+  const budgetContext = {
+    decisionId: gatedDecision.id,
+    allowedToolNames: gatedDecision.allowedToolNames,
+    allowedToolSetHash: gatedDecision.allowedToolSetHash,
+    maxToolCalls: 1,
+  };
+  const budgetedRunner = new ToolRunner(boundScope, workspace);
+  const firstBudgetedCall = await budgetedRunner.run('read_file', { path: 'package.json' }, budgetContext);
+  const exhaustedBudgetCall = await budgetedRunner.run('read_file', { path: 'package.json' }, budgetContext);
+  assert(!firstBudgetedCall.result.error && exhaustedBudgetCall.result.errorCode === 'TOOL_CALL_BUDGET_EXHAUSTED', 'Bound runtime enforces the per-turn call budget');
+
+  const segmented = analyzeShellCommand('npm test && npm install unsafe-package');
+  assert(segmented.segments.length === 2, 'Shell segmenter evaluates every chained command');
+  assert(!isAllowedShellCommand('npm test && npm install unsafe-package'), 'Shell allowlist cannot be bypassed by a safe first segment');
+
   const fullRegistry = new ToolRegistry();
   fullRegistry.attachPlanManager(new PlanManager());
   fullRegistry.attachMemoryManager(new ProjectMemoryManager(workspace.rootDir));
   fullRegistry.register(createSearchCodebaseFastTool());
 
   const retriever = fullRegistry.getRetriever();
+  const isolatedRetrieval = retriever.retrieve('write and execute', [readFileTool]);
+  assert(isolatedRetrieval.every((tool) => tool.name === 'read_file'), 'RATS cannot reintroduce anchors excluded by the candidate pool');
   assert(Boolean(retriever), 'ToolRegistry khởi tạo ToolRetriever thành công');
 
   // Test retrieval theo planning query
@@ -932,6 +977,8 @@ async function runUnitTests() {
   console.log('========================================');
 
   const session = new Session('test-session');
+  session.append('control/decision', { controlDecision: { mode: 'shadow', classificationId: exploreDecision.id } });
+  assert(session.getEvents().some((event) => event.type === 'control/decision'), 'Session persists per-turn control decisions as replayable telemetry');
   session.addUserMessage('Kiểm tra và sửa code');
   session.addModelMessage({
     functionCalls: [{ name: 'replace_text', args: { path: 'test.ts', oldText: 'a', newText: 'b' } }],
@@ -4923,12 +4970,18 @@ Always write tests first!`;
     rootCause: 'Expired JWT token was not caught in interceptor',
     filesModified: ['src/auth/jwt.ts', 'src/auth/interceptor.ts'],
     verificationEvidence: 'npm test -> 42/42 tests passed, exit code 0',
-  }, testWorkspace);
+  }, testWorkspace, { completionEvidenceVerified: true });
   assert(submitResult.success === true, 'submit_solution thực thi thành công');
   assert(submitResult.submitted === true, 'submit_solution trả về submitted flag = true');
   assert(submitResult.filesModified.length === 2, 'submit_solution ghi nhận đúng 2 file sửa đổi');
   assert(submitResult.nextAction === 'final_answer', 'submit_solution trả về nextAction = final_answer');
   assert(Boolean(submitResult.message.includes('COMPLETE')), 'submit_solution thông báo task đã COMPLETE');
+
+  const unverifiedSubmit = await submitSolutionTool.execute({
+    summary: 'Claim only',
+    verificationEvidence: 'npm test passed',
+  }, testWorkspace);
+  assert(unverifiedSubmit.errorCode === 'UNVERIFIED_SUBMISSION', 'submit_solution rejects prose-only verification evidence');
 
   const customRegistry = new ToolRegistry();
   registerSubmitSolutionTool(customRegistry, testWorkspace);
@@ -5247,6 +5300,13 @@ Always write tests first!`;
 
   // 2. Kiểm thử run_command với WaitMsBeforeAsync (Unified Async Dispatch)
   const agyRunCommand = createRunCommandTool(undefined, agyTaskMgr);
+  const tasksBeforeRejectedDispatch = agyTaskMgr.listTasks().length;
+  const rejectedAsyncDispatch = await agyRunCommand.execute({
+    command: 'node -v && definitely_not_allowlisted',
+    WaitMsBeforeAsync: 100,
+  }, workspace);
+  assert(rejectedAsyncDispatch.errorCode === 'COMMAND_NOT_ALLOWED', 'Async run_command validates every shell segment before dispatch');
+  assert(agyTaskMgr.listTasks().length === tasksBeforeRejectedDispatch, 'Rejected async command never starts a background process');
   
   // 2a. Lệnh chạy nhanh (< WaitMsBeforeAsync): trả về kết quả đồng bộ ngay
   const syncCmdRes = await agyRunCommand.execute({

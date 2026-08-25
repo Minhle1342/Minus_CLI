@@ -243,7 +243,7 @@ export class ToolScope implements ToolProvider {
 
   constructor(
     readonly id: string,
-    private readonly base: ToolRegistry,
+    private readonly base: ToolProvider,
     allowedToolNames?: string[],
   ) {
     this.allowed = allowedToolNames ? new Set(allowedToolNames) : undefined;

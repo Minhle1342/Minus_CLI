@@ -40,6 +40,7 @@ export type SessionEventType =
   | 'session/fork'
   | 'session/compaction'
   | 'request/header'
+  | 'control/decision'
   | 'audit/task-completion';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
@@ -141,6 +142,7 @@ export interface SessionEventData {
   effect?: EffectState | null;
   skill?: SkillActivationDecision | null;
   requestHeader?: RecordedRequestHeader;
+  controlDecision?: Record<string, any>;
 }
 
 export interface SessionEvent {
@@ -203,6 +205,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'session/fork',
     'session/compaction',
     'request/header',
+    'control/decision',
     'audit/task-completion',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);

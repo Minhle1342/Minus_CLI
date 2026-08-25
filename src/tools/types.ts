@@ -10,6 +10,15 @@ export interface ToolExecutionContext {
   /** Internal capability set by ToolRunner only after PermissionManager approval. */
   permissionGranted?: boolean;
   permissionRequestId?: string;
+  /** Durable binding between the model-visible tool set and runtime authority. */
+  decisionId?: string;
+  allowedToolNames?: string[];
+  allowedToolSetHash?: string;
+  classificationPhase?: string;
+  classificationRisk?: string;
+  /** Set only by the orchestrator after checking session-backed evidence. */
+  completionEvidenceVerified?: boolean;
+  maxToolCalls?: number;
 }
 
 /**

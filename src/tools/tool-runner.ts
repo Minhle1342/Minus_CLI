@@ -4,6 +4,7 @@ import type { ToolExecutionContext } from './types.js';
 import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
 import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
+import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 
 export interface ToolExecutionResult {
   toolName: string;
@@ -40,6 +41,7 @@ export class ToolRunner {
   private workspace: Workspace;
   private permissionManager?: PermissionManager;
   private executionGuard?: ToolExecutionGuard;
+  private scopedCallCount = 0;
 
   constructor(registry: ToolProvider, workspace: Workspace, permissionManager?: PermissionManager, executionGuard?: ToolExecutionGuard) {
     this.registry = registry;
@@ -60,6 +62,10 @@ export class ToolRunner {
     return this.permissionManager;
   }
 
+  createScoped(provider: ToolProvider): ToolRunner {
+    return new ToolRunner(provider, this.workspace, this.permissionManager, this.executionGuard);
+  }
+
   async run(
     toolName: string,
     args: Record<string, any>,
@@ -68,6 +74,36 @@ export class ToolRunner {
     const startTime = Date.now();
     let executionContext = context;
     let permissionMetadata: ToolExecutionResult['permission'];
+
+    // Stage 0: bind runtime authority to the exact tool set shown to the model.
+    if (context?.allowedToolNames || context?.allowedToolSetHash) {
+      const names = context.allowedToolNames || [];
+      if (!context.decisionId || !context.allowedToolSetHash || hashAllowedToolSet(names) !== context.allowedToolSetHash) {
+        return {
+          toolName,
+          args,
+          result: { error: 'The per-turn tool authorization binding is missing or invalid.', errorCode: 'INVALID_TOOL_DECISION_BINDING' },
+          durationMs: Date.now() - startTime,
+        };
+      }
+      if (!names.includes(toolName)) {
+        return {
+          toolName,
+          args,
+          result: { error: `Tool "${toolName}" is not authorized by decision ${context.decisionId}.`, errorCode: 'TOOL_NOT_ALLOWED_THIS_TURN' },
+          durationMs: Date.now() - startTime,
+        };
+      }
+      if (context.maxToolCalls !== undefined && this.scopedCallCount >= context.maxToolCalls) {
+        return {
+          toolName,
+          args,
+          result: { error: `Per-turn tool call budget (${context.maxToolCalls}) exhausted.`, errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED' },
+          durationMs: Date.now() - startTime,
+        };
+      }
+      this.scopedCallCount++;
+    }
 
     // Stage 1: Tool Lookup
     const tool = this.registry.get(toolName);

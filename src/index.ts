@@ -532,7 +532,11 @@ async function main() {
   };
 
   const toolRegistry = kernel.ctx.tools;
-  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence });
+  const configuredToolControlMode = process.env.MINUS_TOOL_CONTROL_MODE;
+  const toolControlMode = configuredToolControlMode === 'off' || configuredToolControlMode === 'enforce'
+    ? configuredToolControlMode
+    : 'shadow';
+  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence, toolControlMode });
   agentLoop.bindSession(activeSession);
   if (savedSession.tokenConfig) {
     agentLoop.setTokenConfig(savedSession.tokenConfig);

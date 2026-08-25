@@ -7,6 +7,7 @@ import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
 import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
 import { TaskManager } from '../tasks/task-manager.js';
+import { analyzeShellCommand } from '../security/shell-segmenter.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -105,6 +106,11 @@ export function isAllowedCommand(command: string): boolean {
     const exact = prefix.trim();
     return trimmed === exact || (prefix.endsWith(' ') && trimmed.startsWith(prefix));
   });
+}
+
+export function isAllowedShellCommand(command: string): boolean {
+  const analysis = analyzeShellCommand(command);
+  return !analysis.error && !analysis.complex && analysis.segments.every(isAllowedCommand);
 }
 
 /** All Git commands use argv-based Git tools so aliases/shell text cannot bypass policy. */
@@ -229,6 +235,34 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
       }
 
+      // Parse and authorize the entire command before any synchronous or background dispatch.
+      const shellAnalysis = analyzeShellCommand(rawCommand);
+      if (shellAnalysis.error || (shellAnalysis.complex && !hasExplicitPermission)) {
+        return {
+          command: rawCommand,
+          error: shellAnalysis.error || 'Complex shell grouping/substitution requires explicit permission.',
+          errorCode: 'COMMAND_PARSE_REJECTED',
+        };
+      }
+      const gitSubcommandBeforeDispatch = findGitSubcommand(rawCommand);
+      if (gitSubcommandBeforeDispatch) {
+        return {
+          command: rawCommand,
+          error: `Git ${gitSubcommandBeforeDispatch} phải được thực thi bằng git_command hoặc tool Git chuyên dụng.`,
+          errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
+          suggestion: `Use git_command with subcommand "${gitSubcommandBeforeDispatch}" and a separate args array so workspace scope and per-turn authorization can be verified.`,
+        };
+      }
+      if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
+        const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
+        return {
+          command: rawCommand,
+          error: `One or more shell segments are not allowlisted: ${deniedSegments.join(', ')}`,
+          errorCode: 'COMMAND_NOT_ALLOWED',
+          deniedSegments,
+        };
+      }
+
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
       const waitMsBeforeAsync = typeof args.WaitMsBeforeAsync === 'number'
         ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
@@ -275,18 +309,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
 
-      const gitSubcommand = findGitSubcommand(rawCommand);
-      if (gitSubcommand) {
-        return {
-          command: rawCommand,
-          error: `Git ${gitSubcommand} phải được thực thi bằng git_command hoặc tool Git chuyên dụng.`,
-          errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-          suggestion: `Use git_command with subcommand "${gitSubcommand}" and a separate args array so workspace scope and per-turn authorization can be verified.`,
-        };
-      }
-
       if (executionTarget === 'host') {
-        if (!isAllowedCommand(rawCommand) && !hasExplicitPermission) {
+        if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" không nằm trong allowlist để thực thi trên Host.`,
@@ -333,7 +357,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const status = sandboxManager.getStatus();
         
         // Nếu không ở trong môi trường Docker Container cô lập, vẫn áp dụng allowlist bảo vệ máy chủ
-        if (!status.isIsolated && !isAllowedCommand(rawCommand) && !hasExplicitPermission) {
+        if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép trên Host. (Bật Docker Sandbox để chạy lệnh không giới hạn).`,
@@ -389,7 +413,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Fallback mặc định
-      if (!isAllowedCommand(rawCommand) && !hasExplicitPermission) {
+      if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
         return {
           command: rawCommand,
           error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép.`,

@@ -1,5 +1,6 @@
 import type { ToolExecutionContext } from '../tools/types.js';
 import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-command.js';
+import { analyzeShellCommand } from './shell-segmenter.js';
 
 export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
 
@@ -236,6 +237,7 @@ export class PermissionManager {
     if (toolName === 'run_command') {
       const cmd = String(args.command || '').trim();
       const lower = cmd.toLowerCase();
+      const shellAnalysis = analyzeShellCommand(cmd);
 
       // 1. Phân loại lệnh nguy hiểm (Destructive) -> CRITICAL
       if (/\b(rm\s+-rf|del\s+\/f|rmdir\s+\/s|Remove-Item|erase|format|mkfs|dd|kill|taskkill|shutdown)\b/i.test(lower)) {
@@ -261,6 +263,20 @@ export class PermissionManager {
           summary: `Thực thi lệnh cấu hình / cài đặt: "${cmd}"`,
           riskLevel: 'HIGH',
           details: args,
+          timestamp,
+        };
+      }
+
+      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|env|printenv|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
+      if (shellAnalysis.error || shellAnalysis.complex || shellAnalysis.segments.some((segment) => !safeSegment.test(segment.trim()))) {
+        return {
+          id,
+          toolName,
+          category: 'command_execution',
+          target: cmd,
+          summary: `Thực thi chuỗi lệnh terminal cần phê duyệt: "${cmd}"`,
+          riskLevel: 'MEDIUM',
+          details: { ...args, shellAnalysis },
           timestamp,
         };
       }

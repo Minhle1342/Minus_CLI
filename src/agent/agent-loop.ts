@@ -1,4 +1,4 @@
-import { ToolRegistry } from '../tools/registry.js';
+import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -39,6 +39,12 @@ import { classifyLLMError } from '../llm/error-handling.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
 import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
+import { ClassificationEngine } from '../control/classification-engine.js';
+import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
+import { ThisTurnToolGate, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
+import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
+import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -95,6 +101,9 @@ export class AgentLoop {
   readonly repositoryMap: GraphRankedRepositoryMap;
   readonly repositoryMemory: CitationValidatedRepositoryMemory;
   private lastToolExecution?: { toolName: string; result: any };
+  readonly classificationEngine = new ClassificationEngine();
+  readonly thisTurnToolGate = new ThisTurnToolGate();
+  readonly toolControlTelemetry = new ToolControlTelemetry();
 
   constructor(
     kernelOrLLM: AgentKernel | any,
@@ -337,7 +346,6 @@ export class AgentLoop {
 
   private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
     this.activeSession = session;
-    const toolDeclarations = this.toolProvider.getFunctionDeclarations();
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
     );
@@ -369,6 +377,21 @@ export class AgentLoop {
     let consecutiveNoProgressStrategyChanges = 0;
     let hasSubmittedSolution = false;
     let submittedSolutionSummary: string | undefined;
+    let previousClassification: ClassificationDecision | undefined;
+    const configuredControlMode = this.loopOptions?.toolControlMode || process.env.MINUS_TOOL_CONTROL_MODE || 'shadow';
+    const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
+      ? configuredControlMode as ToolControlMode
+      : 'shadow';
+    if (toolControlMode === 'enforce') {
+      const baselineDiagnostics = this.collectVerificationDiagnostics();
+      if (baselineDiagnostics) {
+        try {
+          await this.verificationPolicy.getBaselineManager().captureBaseline(this._workspace, baselineDiagnostics);
+        } catch {
+          // Baseline enrichment must not make the main control plane unavailable.
+        }
+      }
+    }
     const maxEmptyRetries = 2;
     const maxIncompleteFinishRetries = 3;
     const maxIncompleteFinalRetries = 3;
@@ -491,10 +514,52 @@ export class AgentLoop {
         activeTask?.acceptanceCriteria || '',
         activeTask?.notes || '',
       ].filter(Boolean).join(' ');
-
-      const activeToolDeclarations = (this.loopOptions?.enableDynamicToolRetrieval && typeof (this.toolProvider as any).getRelevantTools === 'function')
-        ? (this.toolProvider as any).getRelevantTools(activeStepQuery)
-        : toolDeclarations;
+      const classification = this.classificationEngine.classify({
+        request: turnUserRequest,
+        activeTask: activeTask?.title,
+        activeAcceptance: activeTask?.acceptanceCriteria,
+        hasPlan: this.planManager.hasPlan(),
+        hasUnverifiedChanges: this.verificationPolicy.hasPendingModifications(),
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolFailed: Boolean(this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})),
+        previous: previousClassification,
+      });
+      previousClassification = classification;
+      this.verificationPolicy.setRequiredRisk(classification.risk);
+      const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
+      this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
+      const candidateProvider = toolControlMode === 'enforce'
+        ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, recommendedToolDecision.allowedToolNames)
+        : this.toolProvider;
+      const dynamicRetrievalEnabled = toolControlMode === 'enforce' || this.loopOptions?.enableDynamicToolRetrieval === true;
+      const activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
+        ? candidateProvider.getRelevantTools(activeStepQuery)
+        : candidateProvider.getFunctionDeclarations();
+      const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
+      const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
+      const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
+      const stepToolProvider = toolControlMode === 'enforce'
+        ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, visibleToolNames)
+        : this.toolProvider;
+      const stepToolRunner = toolControlMode === 'enforce'
+        ? this.toolRunner.createScoped(stepToolProvider)
+        : this.toolRunner;
+      if (toolControlMode !== 'off') {
+        session.append('control/decision', {
+          turn,
+          step,
+          controlDecision: {
+            mode: toolControlMode,
+            classification,
+            toolDecision: {
+              ...recommendedToolDecision,
+              id: activeDecisionId,
+              visibleToolNames,
+              allowedToolSetHash: activeToolSetHash,
+            },
+          },
+        });
+      }
 
       let response;
       // System Prompt 100% STATIC để tối đa hóa KV-Cache Hit Rate (>80%) theo chuẩn OpenAI Codex
@@ -811,7 +876,11 @@ export class AgentLoop {
           const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
             write_file: { reversible: true, checkpoint: true },
             replace_text: { reversible: true, checkpoint: true },
-            run_command: { reversible: true, checkpoint: true },
+            apply_patch: { reversible: true, checkpoint: true },
+            create_file: { reversible: true, checkpoint: true },
+            delete_file: { reversible: true, checkpoint: true },
+            move_file: { reversible: true, checkpoint: true },
+            run_command: { reversible: false, checkpoint: false },
             git_add: { reversible: true, checkpoint: true },
             git_commit: { reversible: true, checkpoint: true },
             git_push: { reversible: false, checkpoint: false },
@@ -857,12 +926,36 @@ export class AgentLoop {
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else {
             // Chạy tool qua pipeline an toàn
-            executionResult = await this.toolRunner.run(toolName, toolArgs, {
+            const completionEvidence = toolName === 'submit_solution'
+              ? this.completionEvidenceGate.evaluate('', session, {
+                  turn,
+                  codeChangeRequired: this.verificationPolicy.hasPendingModifications()
+                    || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
+                })
+              : undefined;
+            const policyCompletion = toolName === 'submit_solution'
+              ? this.verificationPolicy.canComplete()
+              : undefined;
+            executionResult = await stepToolRunner.run(toolName, toolArgs, {
               sessionId: session.id,
               agentId: this.agentId,
               turn,
               userRequest: turnUserRequest,
+              ...(toolControlMode === 'enforce' ? {
+                decisionId: activeDecisionId,
+                allowedToolNames: visibleToolNames,
+                allowedToolSetHash: activeToolSetHash,
+                classificationPhase: classification.phase,
+                classificationRisk: classification.risk,
+                maxToolCalls: recommendedToolDecision.maxToolCalls,
+              } : {}),
+              ...(toolName === 'submit_solution' ? {
+                completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
+              } : {}),
             });
+            if (executionResult.result.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN') {
+              this.toolControlTelemetry.recordDeniedCall();
+            }
           }
 
           CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
@@ -893,11 +986,19 @@ export class AgentLoop {
             hasSubmittedSolution = false;
           }
           if (toolName === 'run_command') {
+            let differential: { hasNewFailures: boolean } | undefined;
+            if (toolControlMode === 'enforce' && isVerificationCommand(toolArgs.command)) {
+              const postDiagnostics = this.collectVerificationDiagnostics();
+              if (postDiagnostics) {
+                differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
+              }
+            }
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
               !isToolResultFailure(executionResult.result),
               String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
               executionResult.result.exitCode,
+              { hasNewFailures: differential?.hasNewFailures },
             );
           }
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
@@ -1165,7 +1266,7 @@ export class AgentLoop {
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
             userRequest: turnUserRequest,
-            availableToolNames: toolDeclarations.map((tool) => tool.name || '').filter(Boolean),
+            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
             hasSubmittedSolution,
           });
       const evidenceDecision = (isSubagent || isMockLLM)
@@ -1394,6 +1495,22 @@ export class AgentLoop {
     } finally {
       this.drainingInbox = false;
       this.drainingSessionId = undefined;
+    }
+  }
+
+  private collectVerificationDiagnostics(): VerificationFailureItem[] | undefined {
+    try {
+      return getOrCreateTypeScriptService(this._workspace).getDiagnostics()
+        .filter((item) => item.category === 'error')
+        .map((item): VerificationFailureItem => ({
+          id: `ts-${item.code}-${item.file}-${item.line}`,
+          source: 'diagnostics',
+          file: item.file,
+          line: item.line,
+          message: item.message,
+        }));
+    } catch {
+      return undefined;
     }
   }
 
