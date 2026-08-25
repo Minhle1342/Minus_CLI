@@ -17,6 +17,10 @@ export interface LLMUsage {
   cacheCreationInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheHitRate?: number;
+  /** Provider-neutral wall time measured around the complete request. */
+  requestDurationMs?: number;
+  /** Time until the first streamed content or reasoning token, when available. */
+  timeToFirstTokenMs?: number;
 }
 
 export interface LLMRequestOptions {

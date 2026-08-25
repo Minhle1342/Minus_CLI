@@ -3046,8 +3046,8 @@ export async function calculateTotal(items: any[]): Promise<number> {
     console.log = originalConsoleLog;
   }
   const stepOutputIndex = thinkingOutput.findIndex((line) => line.includes('STEP 1/3'));
-  const reasoningOutputIndex = thinkingOutput.findIndex((line) => line.includes('LLM đang phân tích ngữ cảnh'));
-  const resultOutputIndex = thinkingOutput.findIndex((line) => line.includes('Completed'));
+  const reasoningOutputIndex = thinkingOutput.findIndex((line) => line.includes('[REASONING]'));
+  const resultOutputIndex = thinkingOutput.findIndex((line) => line.includes('[COMPLETED]'));
   assert(
     stepOutputIndex >= 0 && reasoningOutputIndex > stepOutputIndex && resultOutputIndex > reasoningOutputIndex,
     'CLI hiển thị STEP → trạng thái LLM suy luận → kết quả, không để step trống trong lúc chờ model',

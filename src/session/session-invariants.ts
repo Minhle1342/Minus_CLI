@@ -7,7 +7,11 @@ export interface RecordedRequestHeader {
   step: number;
   systemPrompt: string;
   tools: unknown[];
-  history: Content[];
+  /** Legacy exact snapshot. New events use historyDigest to avoid quadratic JSONL growth. */
+  history?: Content[];
+  historyDigest?: string;
+  historyMessages?: number;
+  historyCharacters?: number;
   sourceEventSeq: number;
   digest: string;
 }
@@ -21,6 +25,10 @@ function stableStringify(value: unknown): string {
 
 export function computeRequestDigest(header: Omit<RecordedRequestHeader, 'digest'>): string {
   return createHash('sha256').update(stableStringify(header)).digest('hex');
+}
+
+export function computeRequestValueDigest(value: unknown): string {
+  return createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
 export function assertHistoryToolPairing(messages: Content[]): void {

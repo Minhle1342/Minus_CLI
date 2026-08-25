@@ -19,6 +19,20 @@ export interface AgentLoopOptions {
   enableDynamicToolRetrieval?: boolean;
   enablePromptCaching?: boolean;
   enableStepSummarization?: boolean;
+  /** Enable provider-neutral prompt-based soft latency coordination. */
+  enableLatencyOptimization?: boolean;
+  /** Soft target used only to steer the next model request; it never aborts an active request. */
+  softStepTargetMs?: number;
+  /** Fraction of usable model input budget that triggers proactive request compaction. */
+  requestCompactionRatio?: number;
+  /** Finalize directly from a verified submit_solution summary instead of adding another model round trip. */
+  enableSubmitAutoFinalization?: boolean;
+  /** Run consecutive allow-listed read-only tools concurrently. */
+  enableConcurrentReadTools?: boolean;
+  /** Flush a read-only tool batch to session storage in one durable write. */
+  enableBatchSessionPersistence?: boolean;
+  /** Reuse repository map/memory context until a workspace mutation invalidates it. */
+  enableDynamicContextCache?: boolean;
   /** Inject a task-personalized graph-ranked repository map into dynamic context. */
   enableGraphRepositoryMap?: boolean;
   /** Maximum estimated tokens reserved for the graph-ranked repository map. */

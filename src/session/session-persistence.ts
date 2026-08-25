@@ -9,6 +9,11 @@ interface SessionFileHeader {
   createdAt: string;
 }
 
+interface PersistedSessionState {
+  persistedSeq: number;
+  fileSize: number;
+}
+
 /**
  * Append-only JSONL persistence for sessions.
  *
@@ -19,6 +24,7 @@ interface SessionFileHeader {
 export class SessionPersistence {
   readonly sessionsDir: string;
   private saveQueues = new Map<string, Promise<void>>();
+  private persistedState = new Map<string, PersistedSessionState>();
 
   constructor(workspaceDir: string) {
     this.sessionsDir = path.join(path.resolve(workspaceDir), '.codingagent', 'sessions');
@@ -48,19 +54,29 @@ export class SessionPersistence {
   private async saveInternal(session: Session): Promise<void> {
     await fs.mkdir(this.sessionsDir, { recursive: true });
     const filePath = this.getSessionPath(session.id);
-    const existing = await this.readFile(filePath);
+    let state = this.persistedState.get(session.id);
+    if (state) {
+      try {
+        const stat = await fs.stat(filePath);
+        if (stat.size !== state.fileSize) state = undefined;
+      } catch (error: any) {
+        if (error?.code === 'ENOENT') state = undefined;
+        else throw error;
+      }
+    }
+    const existing = state ? undefined : await this.readFile(filePath);
 
     if (existing && existing.header.id !== session.id) {
       throw new Error(`Session file identity mismatch for ${session.id}.`);
     }
 
-    const persistedSeq = existing?.events.at(-1)?.seq || 0;
+    const persistedSeq = state?.persistedSeq ?? existing?.events.at(-1)?.seq ?? 0;
     if (persistedSeq > session.seq) {
       throw new Error(`Persisted session is ahead of in-memory session: ${persistedSeq} > ${session.seq}.`);
     }
 
     const lines: string[] = [];
-    if (!existing) {
+    if (!state && !existing) {
       const header: SessionFileHeader = {
         kind: 'session',
         version: 1,
@@ -70,12 +86,22 @@ export class SessionPersistence {
       lines.push(JSON.stringify(header));
     }
 
-    for (const event of session.getEvents().filter((candidate) => candidate.seq > persistedSeq)) {
+    for (const event of session.getEventsAfter(persistedSeq)) {
       lines.push(JSON.stringify(event));
     }
 
     if (lines.length > 0) {
-      await fs.appendFile(filePath, `${lines.join('\n')}\n`, 'utf8');
+      const payload = `${lines.join('\n')}\n`;
+      await fs.appendFile(filePath, payload, 'utf8');
+      this.persistedState.set(session.id, {
+        persistedSeq: session.seq,
+        fileSize: (state?.fileSize ?? existing?.fileSize ?? 0) + Buffer.byteLength(payload, 'utf8'),
+      });
+    } else if (!state && existing) {
+      this.persistedState.set(session.id, {
+        persistedSeq,
+        fileSize: existing.fileSize,
+      });
     }
   }
 
@@ -90,6 +116,10 @@ export class SessionPersistence {
       events: parsed.events,
     };
     const session = Session.fromSnapshot(snapshot);
+    this.persistedState.set(session.id, {
+      persistedSeq: session.seq,
+      fileSize: parsed.fileSize,
+    });
     if (session.recoverInterrupted()) {
       (session as any).wasInterruptedAndRecovered = true;
       await this.save(session);
@@ -208,13 +238,15 @@ export class SessionPersistence {
   async remove(sessionId: string): Promise<boolean> {
     try {
       await fs.unlink(this.getSessionPath(sessionId));
+      this.persistedState.delete(sessionId);
       return true;
     } catch {
+      this.persistedState.delete(sessionId);
       return false;
     }
   }
 
-  private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[] } | undefined> {
+  private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[]; fileSize: number } | undefined> {
     try {
       const raw = await fs.readFile(filePath, 'utf8');
       const lines = raw.split(/\r?\n/).filter(Boolean);
@@ -232,7 +264,7 @@ export class SessionPersistence {
         }
       }
 
-      return { header, events };
+      return { header, events, fileSize: Buffer.byteLength(raw, 'utf8') };
     } catch (error: any) {
       if (error?.code === 'ENOENT') return undefined;
       throw error;

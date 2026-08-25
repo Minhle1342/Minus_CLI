@@ -1783,11 +1783,11 @@ export class CLI {
 
     const progressMeter = renderContextProgressBar(promptTokens, maxCtx, 12);
     const hitBadge = cachedTokens > 0
-      ? `${c.emerald}${c.bold}${hitRate}% hit${c.reset}`
+      ? `${c.emerald}${c.bold}${hitRate}% hit rate${c.reset}`
       : `${c.slate}0% (cold)${c.reset}`;
 
     console.log(
-      `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiCyan}⚡ [TELEMETRY]${c.reset} Context: [${progressMeter}] ${c.slate}(${promptTokens.toLocaleString()} tok)${c.reset} │ Cache: [${hitBadge}] │ Out: ${c.yellow}${completionTokens.toLocaleString()}${c.reset} tok`
+      `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiCyan}⚡ [TELEMETRY]${c.reset} Context: [${progressMeter}] ${c.slate}(${promptTokens.toLocaleString()} tok)${c.reset} │ Prompt Cache: ${cachedTokens.toLocaleString()} tok [${hitBadge}] │ Out: ${c.yellow}${completionTokens.toLocaleString()}${c.reset} tok`
     );
   }
 

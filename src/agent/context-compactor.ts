@@ -17,6 +17,16 @@ export interface CompactionStats {
   compactedLength: number;
   charsSaved: number;
   prunedPartsCount: number;
+  requestOverheadTokens: number;
+  outputReserveTokens: number;
+  effectiveHistoryBudgetTokens: number;
+}
+
+export interface CompactionOptions {
+  force?: boolean;
+  requestOverheadTokens?: number;
+  outputReserveTokens?: number;
+  triggerRatio?: number;
 }
 
 /**
@@ -77,7 +87,7 @@ export class ContextCompactor {
    * Nếu preservePrefixCache bật và token chưa chạm ngân sách maxTotalHistoryTokens,
    * giữ nguyên vẹn 100% tin nhắn để tránh vỡ KV-Cache của OpenAI Codex.
    */
-  compact(messages: SessionMessage[], options?: { force?: boolean }): { messages: SessionMessage[]; stats: CompactionStats } {
+  compact(messages: SessionMessage[], options?: CompactionOptions): { messages: SessionMessage[]; stats: CompactionStats } {
     assertHistoryToolPairing(messages);
     let originalLength = 0;
     let compactedLength = 0;
@@ -93,9 +103,16 @@ export class ContextCompactor {
     }
 
     const originalTokens = ContextCompactor.estimateTokens(' '.repeat(originalLength));
+    const requestOverheadTokens = Math.max(0, options?.requestOverheadTokens || 0);
+    const outputReserveTokens = Math.max(0, options?.outputReserveTokens || 0);
+    const triggerRatio = Math.min(1, Math.max(0.5, options?.triggerRatio ?? 1));
+    const effectiveHistoryBudgetTokens = Math.max(
+      0,
+      Math.floor(this.config.maxTotalHistoryTokens * triggerRatio) - requestOverheadTokens - outputReserveTokens,
+    );
 
     // Nếu cấu hình bảo vệ Prefix Cache và dung lượng token chưa vượt ngưỡng ngân sách (maxTotalHistoryTokens)
-    if (this.config.preservePrefixCache && !options?.force && originalTokens <= this.config.maxTotalHistoryTokens) {
+    if (this.config.preservePrefixCache && !options?.force && originalTokens <= effectiveHistoryBudgetTokens) {
       return {
         messages,
         stats: {
@@ -106,6 +123,9 @@ export class ContextCompactor {
           compactedLength: originalLength,
           charsSaved: 0,
           prunedPartsCount: 0,
+          requestOverheadTokens,
+          outputReserveTokens,
+          effectiveHistoryBudgetTokens,
         },
       };
     }
@@ -237,6 +257,9 @@ export class ContextCompactor {
       compactedLength,
       charsSaved,
       prunedPartsCount,
+      requestOverheadTokens,
+      outputReserveTokens,
+      effectiveHistoryBudgetTokens,
     };
 
     assertHistoryToolPairing(compactedMessages);

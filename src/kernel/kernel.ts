@@ -47,6 +47,28 @@ export interface KernelEvents {
   'model:thought': (thought: string) => void;
   'model:token': (token: string) => void;
   'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
+  'model:request_telemetry': (telemetry: {
+    turn: number;
+    step: number;
+    requestDurationMs: number;
+    timeToFirstTokenMs?: number;
+    requestFootprint: import('../agent/latency-orchestrator.js').RequestFootprint;
+    modelName: string;
+    latencyProfile: import('../agent/latency-orchestrator.js').ModelLatencyProfile;
+    taskPhase: import('../control/classification-types.js').TaskPhase;
+    dynamicContextCacheHit: boolean;
+  }) => void;
+  'tools:batch': (telemetry: {
+    mode: string;
+    executionMode: string;
+    count: number;
+    toolCallIds: string[];
+    originalIndexes: number[];
+    durationMs: number;
+    estimatedSerialDurationMs: number;
+    savedMs: number;
+    persistenceWrites: number;
+  }) => void;
   'model:final_answer': (answer: string) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;

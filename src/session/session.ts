@@ -6,6 +6,7 @@ import {
   assertHistoryToolPairing,
   assertSessionRuntimeInvariants,
   computeRequestDigest,
+  computeRequestValueDigest,
   type RecordedRequestHeader,
 } from './session-invariants.js';
 import { cloneJsonStrict } from '../tools/schema-validator.js';
@@ -262,11 +263,22 @@ export class Session {
     return cloneJson(event);
   }
 
-  recordRequestHeader(input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq'>): SessionEvent {
-    const withoutDigest = {
-      ...cloneJson(input),
+  recordRequestHeader(
+    input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq' | 'historyDigest' | 'historyMessages' | 'historyCharacters'> & { history: Content[] },
+    options: { compactHistory?: boolean } = {},
+  ): SessionEvent {
+    const cloned = cloneJson(input);
+    const history = cloned.history || [];
+    const withoutDigest: Omit<RecordedRequestHeader, 'digest'> = {
+      ...cloned,
       sourceEventSeq: this.seq,
     };
+    if (options.compactHistory) {
+      delete withoutDigest.history;
+      withoutDigest.historyDigest = computeRequestValueDigest(history);
+      withoutDigest.historyMessages = history.length;
+      withoutDigest.historyCharacters = JSON.stringify(history).length;
+    }
     return this.append('request/header', {
       requestHeader: {
         ...withoutDigest,
@@ -275,10 +287,20 @@ export class Session {
     });
   }
 
-  assertRuntimeInvariants(options?: { allowOpenLifecycle?: boolean; allowPendingToolCalls?: boolean }): void {
+  assertRuntimeInvariants(options?: {
+    allowOpenLifecycle?: boolean;
+    allowPendingToolCalls?: boolean;
+    verifyRequestReplay?: 'all' | 'latest' | 'none';
+  }): void {
     const events = this.getEvents();
     assertSessionRuntimeInvariants(events, options);
-    for (const event of events) {
+    const requestEvents = events.filter((event) => event.type === 'request/header' && event.data.requestHeader);
+    const replayEvents = options?.verifyRequestReplay === 'none'
+      ? []
+      : options?.verifyRequestReplay === 'latest'
+        ? requestEvents.slice(-1)
+        : requestEvents;
+    for (const event of replayEvents) {
       const header = event.data.requestHeader;
       if (event.type !== 'request/header' || !header) continue;
       const historyAtBoundary = new Session(
@@ -287,8 +309,10 @@ export class Session {
         this.createdAt,
       ).getHistory();
       const { digest, ...withoutDigest } = header;
-      const reconstructedDigest = computeRequestDigest({ ...withoutDigest, history: historyAtBoundary });
-      if (reconstructedDigest !== digest) {
+      const replayMatches = header.historyDigest
+        ? computeRequestValueDigest(historyAtBoundary) === header.historyDigest
+        : computeRequestDigest({ ...withoutDigest, history: historyAtBoundary }) === digest;
+      if (!replayMatches) {
         throw new Error(`Invariant violation: request/header history cannot be reconstructed at seq ${event.seq}.`);
       }
     }
@@ -305,6 +329,11 @@ export class Session {
 
   getEvents(): SessionEvent[] {
     return this.eventLog.map((event) => cloneJson(event));
+  }
+
+  getEventsAfter(sequence: number): SessionEvent[] {
+    const boundary = Math.max(0, Math.floor(sequence));
+    return this.eventLog.slice(boundary).map((event) => cloneJson(event));
   }
 
   addUserMessage(text: string, source: 'human' | 'system' | 'injected' = 'human', inputId?: string): void {

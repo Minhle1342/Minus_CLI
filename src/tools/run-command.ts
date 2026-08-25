@@ -322,10 +322,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const hostResult = await hostSandbox.exec(rawCommand, { cwd: workspace.rootDir, timeoutMs });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
-        if (hostResult.exitCode === 127 || hostResult.stderr.includes('not found') || hostResult.stderr.includes('not recognized')) {
-          const isRg = parseRipgrepCommand(rawCommand);
-          if (isRg) {
-            const emulated = await executeRipgrepEmulation(isRg, workspace);
+        const parsedSearch = parseRipgrepCommand(rawCommand);
+        if (parsedSearch && hostResult.exitCode !== 0) {
+          const emulated = await executeRipgrepEmulation(parsedSearch, workspace);
+          const nativeCommandMissing = hostResult.exitCode === 127
+            || hostResult.stderr.includes('not found')
+            || hostResult.stderr.includes('not recognized');
+          // Recover both a missing binary and shell-quoting differences when
+          // the deterministic emulator can satisfy the search.
+          if (emulated.success || nativeCommandMissing) {
             return {
               command: rawCommand,
               stdout: truncateOutput(emulated.stdout),

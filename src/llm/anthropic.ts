@@ -90,6 +90,11 @@ export class AnthropicLLM {
       tools: tools.length > 0 ? this.convertTools(tools) : undefined,
       temperature: 0.2,
     };
+    if (request?.enablePromptCaching !== false) {
+      // Anthropic automatic caching advances the breakpoint with the growing
+      // conversation while keeping tools -> system -> messages prefix order.
+      body.cache_control = { type: 'ephemeral' };
+    }
 
     const response = await fetch(`${this.baseURL.replace(/\/+$/, '')}/messages`, {
       method: 'POST',
@@ -127,9 +132,25 @@ export class AnthropicLLM {
         throw new Error('Anthropic stream contained a malformed SSE JSON payload.', { cause: error });
       }
 
-      if (event.type === 'message_start') {
-        const inputTokens = event.message?.usage?.input_tokens ?? 0;
-        usage = { promptTokens: inputTokens, completionTokens: 0, totalTokens: inputTokens };
+      if (event.type === 'error') {
+        const errorType = event.error?.type || 'stream_error';
+        const errorMessage = event.error?.message || 'Anthropic streaming request failed.';
+        throw new Error(`Anthropic stream error (${errorType}): ${errorMessage}`);
+      } else if (event.type === 'message_start') {
+        const eventUsage = event.message?.usage || {};
+        const uncachedInputTokens = eventUsage.input_tokens ?? 0;
+        const cacheCreationInputTokens = eventUsage.cache_creation_input_tokens ?? 0;
+        const cacheReadInputTokens = eventUsage.cache_read_input_tokens ?? 0;
+        const promptTokens = uncachedInputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+        usage = {
+          promptTokens,
+          completionTokens: eventUsage.output_tokens ?? 0,
+          totalTokens: promptTokens + (eventUsage.output_tokens ?? 0),
+          cachedTokens: cacheReadInputTokens,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
+          cacheHitRate: promptTokens > 0 ? Number(((cacheReadInputTokens / promptTokens) * 100).toFixed(1)) : 0,
+        };
       } else if (event.type === 'content_block_start') {
         const block = event.content_block;
         if (block?.type === 'tool_use') {
@@ -156,6 +177,7 @@ export class AnthropicLLM {
         const inputTokens = usage?.promptTokens ?? 0;
         const outputTokens = event.usage?.output_tokens ?? 0;
         usage = {
+          ...usage,
           promptTokens: inputTokens,
           completionTokens: outputTokens,
           totalTokens: inputTokens + outputTokens,

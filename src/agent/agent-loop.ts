@@ -51,6 +51,24 @@ import { ThisTurnToolGate, hashAllowedToolSet } from '../control/this-turn-tool-
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
+import { LatencyOrchestrator } from './latency-orchestrator.js';
+import { DynamicContextCache } from './dynamic-context-cache.js';
+import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
+
+function envFeatureEnabled(name: string, defaultValue = true): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return defaultValue;
+  return !['0', 'false', 'off', 'disabled'].includes(value);
+}
+
+function envFiniteNumber(name: string): number | undefined {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function isComprehensiveSubmissionSummary(value: string): boolean {
+  return value.trim().length >= 80 && value.trim().split(/\s+/).length >= 12;
+}
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
@@ -110,6 +128,12 @@ export class AgentLoop {
   readonly classificationEngine = new ClassificationEngine();
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
+  readonly latencyOrchestrator: LatencyOrchestrator;
+  readonly dynamicContextCache = new DynamicContextCache<{
+    repositoryMemoryContext: string;
+    repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'];
+    repositoryContext: string;
+  }>();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
 
@@ -202,6 +226,14 @@ export class AgentLoop {
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
     this.contextCompactor.setConfig({ preservePrefixCache: true });
+    this.latencyOrchestrator = new LatencyOrchestrator({
+      enabled: options?.enableLatencyOptimization
+        ?? envFeatureEnabled('MINUS_LATENCY_OPTIMIZATION'),
+      softStepTargetMs: options?.softStepTargetMs
+        ?? envFiniteNumber('MINUS_SOFT_STEP_TARGET_MS'),
+      requestBudgetRatio: options?.requestCompactionRatio
+        ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO'),
+    });
 
     this.agentRegistry.register(this.agentId, this.agentId);
     this.subagentManager = new SubagentManager(
@@ -233,6 +265,7 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
+    this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
     if (this.kernel) {
@@ -431,6 +464,7 @@ export class AgentLoop {
     const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
     let turnUserGoal: string | undefined = turnUserRequest;
     const turnStartTime = Date.now();
+    this.latencyOrchestrator.resetTurn();
     const turnFilesModified = new Set<string>();
     let turnTestsPassed: boolean | undefined = undefined;
     const turnStepRecords: TurnSummaryStepInfo[] = [];
@@ -518,12 +552,6 @@ export class AgentLoop {
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
 
       // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
-      const compactionResult = this.contextCompactor.compact(session.getHistory());
-      if (compactionResult.stats.charsSaved > 0) {
-        session.setHistory(compactionResult.messages);
-        await this.persistSession(session);
-      }
-
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
         const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
@@ -614,46 +642,138 @@ export class AgentLoop {
             ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
           ].join('\n')
         : '';
-      let repositoryMemoryContext = '';
-      let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
-      if (this.loopOptions?.enableRepositoryMemory !== false) {
-        try {
-          const recalled = await this.repositoryMemory.recall(activeStepQuery, {
-            limit: 12,
-            maxTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
-          });
-          repositoryMemoryContext = recalled.rendered;
-          repositoryMemoryRecords = recalled.records;
-        } catch {
-          // Repository memory is an independent, fail-open context source.
-        }
-      }
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
       const composeState = this.kernel?.ctx.compose.getState();
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      let repositoryMemoryContext = '';
+      let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
       let repositoryContext = '';
-      if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel) {
-        try {
-          const repositoryQuery = [
-            activeStepQuery,
-            ...relevantMemory.map((item) => item.insight),
-            ...repositoryMemoryRecords.map((item) => item.statement),
-          ].filter(Boolean).join('\n');
-          repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
-            maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
-            seedFiles: [
-              ...(activeTask?.readSet || []),
-              ...(activeTask?.writeSet || []),
-              ...(composeState?.registeredFiles || []),
-              ...repositoryMemoryRecords.flatMap((item) => item.relatedFiles),
-            ],
-            seedSymbols: activeTask?.symbols || [],
+      const dynamicCacheEnabled = this.loopOptions?.enableDynamicContextCache
+        ?? envFeatureEnabled('MINUS_DYNAMIC_CONTEXT_CACHE');
+      const dynamicCacheKey = JSON.stringify({
+        workspace: this._workspace.rootDir,
+        activeStepQuery,
+        activeTask: activeTask ? {
+          id: activeTask.id,
+          readSet: activeTask.readSet,
+          writeSet: activeTask.writeSet,
+          symbols: activeTask.symbols,
+        } : undefined,
+        relevantMemory: relevantMemory.map((item) => [item.key, item.confidence, item.insight]),
+        registeredFiles: composeState?.registeredFiles || [],
+        repositoryMemoryEnabled: this.loopOptions?.enableRepositoryMemory !== false,
+        repositoryMemoryTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
+        repositoryMapEnabled: this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel,
+        repositoryMapTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+      });
+      const cachedDynamicContext = dynamicCacheEnabled
+        ? this.dynamicContextCache.get(dynamicCacheKey)
+        : undefined;
+      if (cachedDynamicContext) {
+        repositoryMemoryContext = cachedDynamicContext.repositoryMemoryContext;
+        repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
+        repositoryContext = cachedDynamicContext.repositoryContext;
+      } else {
+        if (this.loopOptions?.enableRepositoryMemory !== false) {
+          try {
+            const recalled = await this.repositoryMemory.recall(activeStepQuery, {
+              limit: 12,
+              maxTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
+            });
+            repositoryMemoryContext = recalled.rendered;
+            repositoryMemoryRecords = recalled.records;
+          } catch {
+            // Repository memory is an independent, fail-open context source.
+          }
+        }
+        if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel) {
+          try {
+            const repositoryQuery = [
+              activeStepQuery,
+              ...relevantMemory.map((item) => item.insight),
+              ...repositoryMemoryRecords.map((item) => item.statement),
+            ].filter(Boolean).join('\n');
+            repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
+              maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+              seedFiles: [
+                ...(activeTask?.readSet || []),
+                ...(activeTask?.writeSet || []),
+                ...(composeState?.registeredFiles || []),
+                ...repositoryMemoryRecords.flatMap((item) => item.relatedFiles),
+              ],
+              seedSymbols: activeTask?.symbols || [],
+            });
+          } catch (error: any) {
+            repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
+          }
+        }
+        if (dynamicCacheEnabled) {
+          this.dynamicContextCache.set(dynamicCacheKey, {
+            repositoryMemoryContext,
+            repositoryMemoryRecords,
+            repositoryContext,
           });
-        } catch (error: any) {
-          repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
         }
       }
-      const dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
+      let dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
+      const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
+        ? (this.llm.getTokenConfig() || {})
+        : {};
+      const activeModelName = this.llm?.getActiveProvider?.()?.name
+        || this.llm?.modelName
+        || this.llm?.constructor?.name
+        || 'unknown';
+      const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
+      let requestFootprint = this.latencyOrchestrator.estimateRequest({
+        systemPrompt: assembledSystemPrompt,
+        tools: activeToolDeclarations,
+        history: session.getHistory(),
+        dynamicContext: dynamicExecutionContext,
+        maxInputTokens: activeTokenConfig.maxInputTokens,
+        maxOutputTokens: activeTokenConfig.maxOutputTokens,
+      });
+      const latencyGuidance = this.latencyOrchestrator.buildGuidance({
+        step,
+        footprint: requestFootprint,
+        modelName: activeModelName,
+        tokenConfig: activeTokenConfig,
+        phase: classification.phase,
+        verificationReady: this.verificationPolicy.canComplete().allowed
+          && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
+      });
+      if (latencyGuidance) {
+        dynamicExecutionContext = [dynamicExecutionContext, latencyGuidance].filter(Boolean).join('\n\n');
+        requestFootprint = this.latencyOrchestrator.estimateRequest({
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          history: session.getHistory(),
+          dynamicContext: dynamicExecutionContext,
+          maxInputTokens: activeTokenConfig.maxInputTokens,
+          maxOutputTokens: activeTokenConfig.maxOutputTokens,
+        });
+      }
+
+      // Budget the complete model-visible request, not history alone. This is
+      // proactive compaction at a safe provider-turn boundary, not a timeout.
+      const compactionResult = this.contextCompactor.compact(session.getHistory(), {
+        requestOverheadTokens: requestFootprint.nonHistoryTokens,
+        outputReserveTokens: requestFootprint.outputReserveTokens,
+        triggerRatio: this.loopOptions?.requestCompactionRatio
+          ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
+          ?? 0.82,
+      });
+      if (compactionResult.stats.charsSaved > 0) {
+        session.setHistory(compactionResult.messages);
+        await this.persistSession(session);
+        requestFootprint = this.latencyOrchestrator.estimateRequest({
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          history: session.getHistory(),
+          dynamicContext: dynamicExecutionContext,
+          maxInputTokens: activeTokenConfig.maxInputTokens,
+          maxOutputTokens: activeTokenConfig.maxOutputTokens,
+        });
+      }
 
       session.recordRequestHeader({
         turn,
@@ -661,8 +781,8 @@ export class AgentLoop {
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
         history: session.getHistory(),
-      });
-      session.assertRuntimeInvariants({ allowOpenLifecycle: true });
+      }, { compactHistory: true });
+      session.assertRuntimeInvariants({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
       await this.persistSession(session);
       const requestOptions: LLMRequestOptions = {
         systemPrompt: assembledSystemPrompt,
@@ -671,18 +791,65 @@ export class AgentLoop {
         promptCacheKey: session.id,
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
       };
+      const requestStartedAt = Date.now();
+      let firstTokenAt: number | undefined;
       if (typeof this.llm.generateStream === 'function') {
         response = await this.llm.generateStream(session, activeToolDeclarations, {
           onThoughtToken: (token: string) => {
+            firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:thought', token);
           },
           onContentToken: (token: string) => {
+            firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:token', token);
           },
         }, requestOptions);
       } else {
         response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
       }
+      const requestDurationMs = Date.now() - requestStartedAt;
+      const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
+      response.usage = {
+        ...(response.usage || {}),
+        requestDurationMs,
+        ...(timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs }),
+      };
+      this.latencyOrchestrator.record({
+        durationMs: requestDurationMs,
+        timeToFirstTokenMs,
+        promptTokens: response.usage.promptTokens,
+        cachedTokens: response.usage.cachedTokens,
+        profile: latencyProfile,
+      });
+      session.append('control/decision', {
+        turn,
+        step,
+        controlDecision: {
+          mode: 'soft-latency',
+          requestDurationMs,
+          timeToFirstTokenMs,
+          estimatedInputTokens: requestFootprint.estimatedInputTokens,
+          requestPressureRatio: requestFootprint.pressureRatio,
+          modelName: activeModelName,
+          latencyTier: latencyProfile.tier,
+          softStepTargetMs: latencyProfile.targetMs,
+          taskPhase: classification.phase,
+          dynamicContextCache: this.dynamicContextCache.getStats(),
+          dynamicContextCacheHit: Boolean(cachedDynamicContext),
+          hardTimeoutApplied: false,
+        },
+      });
+      this.kernel?.ctx.events.emit('model:request_telemetry', {
+        turn,
+        step,
+        requestDurationMs,
+        timeToFirstTokenMs,
+        requestFootprint,
+        modelName: activeModelName,
+        latencyProfile,
+        taskPhase: classification.phase,
+        dynamicContextCacheHit: Boolean(cachedDynamicContext),
+      });
 
       // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
       const isRootAgent = this.agentId === 'main'
@@ -836,12 +1003,95 @@ export class AgentLoop {
         const responseFunctionCallParts = (response.rawContent?.parts || [])
           .filter((part: any) => part.functionCall);
 
+        const scheduledToolCalls: ScheduledToolCall[] = normalizedToolCalls.map((call: any, callIndex: number) => ({
+          index: callIndex,
+          id: toolCallIds[callIndex],
+          name: call.name || '__invalid_tool_call__',
+          args: (call.args as Record<string, unknown>) || {},
+        }));
+        const concurrentReadsEnabled = this.loopOptions?.enableConcurrentReadTools
+          ?? envFeatureEnabled('MINUS_CONCURRENT_READ_TOOLS');
+        const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
+          ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
+        const toolPartitions = partitionToolCalls(scheduledToolCalls, concurrentReadsEnabled);
+        const readPartitionByIndex = new Map<number, ToolCallPartition>();
+        for (const partition of toolPartitions) {
+          if (partition.mode === 'sequential') continue;
+          for (const scheduled of partition.calls) readPartitionByIndex.set(scheduled.index, partition);
+        }
+        const preexecutedReadResults = new Map<number, ToolExecutionResult>();
+        const startedConcurrentPartitions = new Set<number>();
+        const readBatchDurationMs = new Map<number, number>();
+        const readBatchToolDurationMs = new Map<number, number>();
+
         let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
         let toolBatchCancelled = false;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
         for (const [callIndex, call] of normalizedToolCalls.entries()) {
-          if (options?.signal?.aborted) {
+          const readPartition = readPartitionByIndex.get(callIndex);
+          const partitionStartIndex = readPartition?.calls[0]?.index;
+          const partitionEndIndex = readPartition?.calls.at(-1)?.index;
+          const deferReadPersistence = Boolean(
+            batchPersistenceEnabled && readPartition && readPartition.calls.length > 1,
+          );
+
+          if (
+            readPartition?.mode === 'concurrent-read'
+            && partitionStartIndex === callIndex
+            && !startedConcurrentPartitions.has(callIndex)
+          ) {
+            startedConcurrentPartitions.add(callIndex);
+            for (const scheduled of readPartition.calls) {
+              session.append('tool/call', {
+                turn,
+                step,
+                toolName: scheduled.name,
+                toolCallId: scheduled.id,
+                assistantSeq,
+                args: scheduled.args,
+                thoughtSignature: responseFunctionCallParts[scheduled.index]?.thoughtSignature,
+              });
+              this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
+              CLI.renderToolCall(scheduled.name, scheduled.args);
+            }
+
+            const batchStartedAt = Date.now();
+            const settled = await Promise.allSettled(readPartition.calls.map((scheduled) => (
+              stepToolRunner.run(scheduled.name, scheduled.args, {
+                sessionId: session.id,
+                agentId: this.agentId,
+                turn,
+                userRequest: turnUserRequest,
+                ...(toolControlMode === 'enforce' ? {
+                  decisionId: activeDecisionId,
+                  allowedToolNames: visibleToolNames,
+                  allowedToolSetHash: activeToolSetHash,
+                  classificationPhase: classification.phase,
+                  classificationRisk: classification.risk,
+                  maxToolCalls: recommendedToolDecision.maxToolCalls,
+                } : {}),
+              })
+            )));
+            readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
+            settled.forEach((outcome, resultIndex) => {
+              const scheduled = readPartition.calls[resultIndex];
+              preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
+                ? outcome.value
+                : {
+                    toolName: scheduled.name,
+                    args: scheduled.args,
+                    durationMs: 0,
+                    result: {
+                      error: outcome.reason?.message || String(outcome.reason),
+                      errorCode: 'TOOL_EXECUTION_REJECTED',
+                      retryable: true,
+                    },
+                  });
+            });
+          }
+
+          if (options?.signal?.aborted && !preexecutedReadResults.has(callIndex)) {
             // The assistant message already declared the entire batch. Record
             // explicit results for every call that will not be dispatched so
             // history remains valid and no call can look silently abandoned.
@@ -883,16 +1133,20 @@ export class AgentLoop {
           const toolArgs = (call.args as Record<string, any>) || {};
 
           const toolCallId = toolCallIds[callIndex];
-          session.append('tool/call', {
-            turn,
-            step,
-            toolName,
-            toolCallId,
-            assistantSeq,
-            args: toolArgs,
-            thoughtSignature: responseFunctionCallParts[callIndex]?.thoughtSignature,
-          });
-          await this.persistSession(session);
+          if (readPartition?.mode !== 'concurrent-read') {
+            session.append('tool/call', {
+              turn,
+              step,
+              toolName,
+              toolCallId,
+              assistantSeq,
+              args: toolArgs,
+              thoughtSignature: responseFunctionCallParts[callIndex]?.thoughtSignature,
+            });
+          }
+          if (!deferReadPersistence && readPartition?.mode !== 'concurrent-read') {
+            await this.persistSession(session);
+          }
 
           if (toolName === '__invalid_tool_call__') {
             const invalidResult = {
@@ -901,7 +1155,7 @@ export class AgentLoop {
               retryable: true,
             };
             session.addToolResultWithId(toolName, invalidResult, toolCallId, 'invalid-tool-call');
-            await this.persistSession(session);
+            if (!deferReadPersistence) await this.persistSession(session);
             this.kernel?.ctx.events.emit('tool:error', toolName, invalidResult);
             continue;
           }
@@ -913,10 +1167,10 @@ export class AgentLoop {
             create_file: { reversible: true, checkpoint: true },
             delete_file: { reversible: true, checkpoint: true },
             move_file: { reversible: true, checkpoint: true },
-            run_command: { reversible: false, checkpoint: false },
+            run_command: { reversible: false, checkpoint: true },
             git_add: { reversible: true, checkpoint: true },
             git_commit: { reversible: true, checkpoint: true },
-            git_push: { reversible: false, checkpoint: false },
+            git_push: { reversible: false, checkpoint: true },
           };
           let sideEffect: { reversible: boolean; checkpoint: boolean } | undefined = sideEffectConfig[toolName];
           if (toolName === 'git_command') {
@@ -927,7 +1181,7 @@ export class AgentLoop {
             sideEffect = gitRisk === 'read'
               ? undefined
               : gitRisk === 'network'
-                ? { reversible: false, checkpoint: false }
+                ? { reversible: false, checkpoint: true }
                 : { reversible: true, checkpoint: true };
           }
           const effect = sideEffect
@@ -942,13 +1196,18 @@ export class AgentLoop {
             await this.persistSession(session);
           }
 
-          this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
-          CLI.renderToolCall(toolName, toolArgs);
+          const preexecutedReadResult = preexecutedReadResults.get(callIndex);
+          if (!preexecutedReadResult) {
+            this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
+            CLI.renderToolCall(toolName, toolArgs);
+          }
 
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
           // Chặn các lệnh kiểm thử / submit dư thừa nếu nhiệm vụ đã được submit_solution hoàn tất và không có thay đổi file mới
           let executionResult: ToolExecutionResult;
-          if (hasSubmittedSolution && (toolName === 'submit_solution' || (toolName === 'run_command' && isVerificationCommand(toolArgs.command)))) {
+          if (preexecutedReadResult) {
+            executionResult = preexecutedReadResult;
+          } else if (hasSubmittedSolution && (toolName === 'submit_solution' || (toolName === 'run_command' && isVerificationCommand(toolArgs.command)))) {
             const redundantPayload = {
               success: true,
               submitted: true,
@@ -1014,6 +1273,9 @@ export class AgentLoop {
             requestId: executionResult.permission?.requestId,
           });
           this.repositoryMap.observeToolResult(toolName, toolArgs, executionResult.result);
+          if (sideEffect && !isToolResultFailure(executionResult.result)) {
+            this.dynamicContextCache.invalidate();
+          }
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             const mutatedPath = String(toolArgs.path || toolArgs.filePath || '');
             if (mutatedPath) turnFilesModified.add(mutatedPath);
@@ -1083,7 +1345,34 @@ export class AgentLoop {
             await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => {});
           }
           this.lastToolExecution = { toolName, result: executionResult.result };
-          await this.persistSession(session);
+          if (readPartition && partitionStartIndex !== undefined) {
+            readBatchToolDurationMs.set(
+              partitionStartIndex,
+              (readBatchToolDurationMs.get(partitionStartIndex) || 0) + executionResult.durationMs,
+            );
+          }
+          if (readPartition && partitionEndIndex === callIndex && partitionStartIndex !== undefined) {
+            const measuredBatchDurationMs = readPartition.mode === 'concurrent-read'
+              ? (readBatchDurationMs.get(partitionStartIndex) || 0)
+              : (readBatchToolDurationMs.get(partitionStartIndex) || 0);
+            const estimatedSerialDurationMs = readBatchToolDurationMs.get(partitionStartIndex) || measuredBatchDurationMs;
+            const batchTelemetry = {
+              mode: 'read-tool-batch',
+              executionMode: readPartition.mode,
+              count: readPartition.calls.length,
+              toolCallIds: readPartition.calls.map((item) => item.id),
+              originalIndexes: readPartition.calls.map((item) => item.index),
+              durationMs: measuredBatchDurationMs,
+              estimatedSerialDurationMs,
+              savedMs: Math.max(0, estimatedSerialDurationMs - measuredBatchDurationMs),
+              persistenceWrites: deferReadPersistence ? 1 : readPartition.calls.length,
+            };
+            session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
+            this.kernel?.ctx.events.emit('tools:batch', batchTelemetry);
+          }
+          if (!deferReadPersistence || partitionEndIndex === callIndex) {
+            await this.persistSession(session);
+          }
           if (effect) {
             const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
             this.effectLedger.commit(effect.id, outcome);
@@ -1141,6 +1430,42 @@ export class AgentLoop {
           });
           this.goalManager.disarm();
           return cancellationMessage;
+        }
+
+        // submit_solution already contains a comprehensive, evidence-backed
+        // summary. Reusing it avoids an otherwise redundant provider request
+        // whose only purpose is to restate the same result.
+        if (
+          hasSubmittedSolution
+          && isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
+          && (this.loopOptions?.enableSubmitAutoFinalization
+            ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION'))
+        ) {
+          const finalAnswer = submittedSolutionSummary!;
+          CLI.renderModelAction('final_answer');
+          await CLI.renderFinalAnswer(finalAnswer);
+          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
+          session.addModelMessage({ text: finalAnswer });
+          await this.persistSession(session);
+          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+            try {
+              this.goalManager.complete(this.planManager);
+            } catch {
+              this.goalManager.disarm();
+            }
+          } else {
+            this.goalManager.disarm();
+          }
+          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
+            turnStartTime,
+            turnSteps: step,
+            turnFilesModified,
+            turnTestsPassed,
+            turnStepRecords,
+            userGoal: turnUserGoal,
+            isSubagent,
+          });
+          return finalAnswer;
         }
 
         if (
