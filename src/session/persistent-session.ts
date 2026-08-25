@@ -3,9 +3,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Lấy đường dẫn file cấu hình session an toàn và cố định theo project root
+ * Lấy đường dẫn file cấu hình session an toàn, ưu tiên theo thư mục workspace cụ thể
  */
-export function getSessionFilePath(): string {
+export function getSessionFilePath(workspaceDirOrPath?: string): string {
+  if (workspaceDirOrPath) {
+    if (workspaceDirOrPath.endsWith('.json')) {
+      return path.resolve(workspaceDirOrPath);
+    }
+    return path.join(path.resolve(workspaceDirOrPath), '.codingagent', 'session.json');
+  }
   try {
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
@@ -30,8 +36,8 @@ export interface SessionData {
 /**
  * Tải thông tin cấu hình phiên làm việc trước đó (.codingagent/session.json)
  */
-export function loadSession(customPath?: string): SessionData {
-  const filePath = customPath || SESSION_FILE;
+export function loadSession(workspaceDirOrPath?: string): SessionData {
+  const filePath = getSessionFilePath(workspaceDirOrPath);
   try {
     if (fs.existsSync(filePath)) {
       const content = fs.readFileSync(filePath, 'utf-8');
@@ -48,8 +54,8 @@ export function loadSession(customPath?: string): SessionData {
 /**
  * Lưu thông tin cấu hình phiên làm việc (merge với dữ liệu cũ)
  */
-export function saveSession(data: Partial<SessionData>, customPath?: string): void {
-  const filePath = customPath || SESSION_FILE;
+export function saveSession(data: Partial<SessionData>, workspaceDirOrPath?: string): void {
+  const filePath = getSessionFilePath(workspaceDirOrPath);
   try {
     const current = loadSession(filePath);
     const updated: SessionData = {
@@ -70,8 +76,8 @@ export function saveSession(data: Partial<SessionData>, customPath?: string): vo
 /**
  * Xóa thông tin phiên đã lưu
  */
-export function clearSession(customPath?: string): boolean {
-  const filePath = customPath || SESSION_FILE;
+export function clearSession(workspaceDirOrPath?: string): boolean {
+  const filePath = getSessionFilePath(workspaceDirOrPath);
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);

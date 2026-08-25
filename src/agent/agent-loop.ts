@@ -4,8 +4,8 @@ import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
 import { AgentLoopOptions } from './types.js';
-import { CLI } from '../ui/cli-ui.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
+import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
@@ -34,7 +34,13 @@ import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
 import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
-import { summarizeStepWithCodestral, generateFallbackStepSummary } from './step-summarizer.js';
+import {
+  summarizeStepWithCodestral,
+  generateFallbackStepSummary,
+  summarizeTurnWithCodestral,
+  generateFallbackTurnSummary,
+  TurnSummaryStepInfo,
+} from './step-summarizer.js';
 import { classifyLLMError } from '../llm/error-handling.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
@@ -104,6 +110,20 @@ export class AgentLoop {
   readonly classificationEngine = new ClassificationEngine();
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
+  private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
+  private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
+
+  get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
+    return this._latestReasoning;
+  }
+
+  get collapsePreferences(): UICollapsePreferences {
+    return this._collapsePreferences;
+  }
+
+  setCollapsePreferences(prefs: Partial<UICollapsePreferences>): void {
+    this._collapsePreferences = { ...this._collapsePreferences, ...prefs };
+  }
 
   constructor(
     kernelOrLLM: AgentKernel | any,
@@ -366,7 +386,8 @@ export class AgentLoop {
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const effectiveMaxSteps = options?.maxSteps ?? (isGoal ? Infinity : this.maxSteps);
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
-    this.planManager.beginTurn(turn, turnUserRequest);
+    const isContinuationOrGoal = isGoal || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
+    this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
     }
@@ -399,6 +420,20 @@ export class AgentLoop {
     const maxNoProgressStrategyChanges = 3;
 
     this.setAgentStatus('running', session, turn);
+
+    const isRootAgent = this.agentId === 'root'
+      || this.agentId === 'main'
+      || this.agentId === 'primary'
+      || this.agentId === 'interactive-agent'
+      || this.agentId === 'coding-agent'
+      || this.agentId === 'delegation-parent'
+      || this.agentId === 'delegation-recovery-parent';
+    const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
+    let turnUserGoal: string | undefined = turnUserRequest;
+    const turnStartTime = Date.now();
+    const turnFilesModified = new Set<string>();
+    let turnTestsPassed: boolean | undefined = undefined;
+    const turnStepRecords: TurnSummaryStepInfo[] = [];
 
     session.append('turn/start', { turn });
     await this.persistSession(session);
@@ -674,25 +709,17 @@ export class AgentLoop {
           }
         }
       }
-
-      let stepSummary: string;
-      if (isSubagent || isMockLLM || this.loopOptions?.enableStepSummarization === false) {
-        stepSummary = generateFallbackStepSummary({
-          step,
-          userGoal,
-          text: response.text,
-          reasoningContent: response.reasoningContent,
-          toolCalls: response.toolCalls,
-        });
-      } else {
-        stepSummary = await summarizeStepWithCodestral({
-          step,
-          userGoal,
-          text: response.text,
-          reasoningContent: response.reasoningContent,
-          toolCalls: response.toolCalls,
-        });
+      if (userGoal) {
+        turnUserGoal = userGoal;
       }
+
+      const stepSummary = generateFallbackStepSummary({
+        step,
+        userGoal,
+        text: response.text,
+        reasoningContent: response.reasoningContent,
+        toolCalls: response.toolCalls,
+      });
 
       if (!isSubagent) {
         CLI.renderLLMThinking(stepSummary);
@@ -706,7 +733,13 @@ export class AgentLoop {
 
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
       if (response.reasoningContent) {
-        CLI.renderReasoning(response.reasoningContent);
+        this._latestReasoning = {
+          thought: response.reasoningContent,
+          timestamp: new Date().toLocaleTimeString(),
+          step,
+          turn: (session as any).turnsCount || 1,
+        };
+        CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking });
         this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
       }
 
@@ -982,7 +1015,9 @@ export class AgentLoop {
           });
           this.repositoryMap.observeToolResult(toolName, toolArgs, executionResult.result);
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
-            this.verificationPolicy.recordModification(String(toolArgs.path || ''));
+            const mutatedPath = String(toolArgs.path || toolArgs.filePath || '');
+            if (mutatedPath) turnFilesModified.add(mutatedPath);
+            this.verificationPolicy.recordModification(mutatedPath);
             hasSubmittedSolution = false;
           }
           if (toolName === 'run_command') {
@@ -992,6 +1027,9 @@ export class AgentLoop {
               if (postDiagnostics) {
                 differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
               }
+            }
+            if (isVerificationCommand(toolArgs.command)) {
+              turnTestsPassed = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
             }
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
@@ -1075,6 +1113,13 @@ export class AgentLoop {
         CLI.renderStepFooter();
         this.kernel?.ctx.events.emit('step:after', step);
 
+        turnStepRecords.push({
+          step,
+          toolCalls: response.toolCalls,
+          reasoningSnippet: response.reasoningContent,
+          textSnippet: response.text,
+        });
+
         if (strategyChangeRequired) {
           CLI.renderReflectionAlert(
             consecutiveNoProgressStrategyChanges,
@@ -1085,7 +1130,15 @@ export class AgentLoop {
         if (toolBatchCancelled) {
           const cancellationMessage = 'Agent stopped: cancellation requested. Tool calls not yet dispatched were recorded as aborted.';
           await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
+          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'cancelled', cancellationMessage, {
+            turnStartTime,
+            turnSteps: step,
+            turnFilesModified,
+            turnTestsPassed,
+            turnStepRecords,
+            userGoal: turnUserGoal,
+            isSubagent,
+          });
           this.goalManager.disarm();
           return cancellationMessage;
         }
@@ -1096,9 +1149,22 @@ export class AgentLoop {
         ) {
           const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
           await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
+          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal', noProgressMessage, {
+            turnStartTime,
+            turnSteps: step,
+            turnFilesModified,
+            turnTestsPassed,
+            turnStepRecords,
+            userGoal: turnUserGoal,
+            isSubagent,
+          });
           this.goalManager.disarm();
           return noProgressMessage;
+        }
+
+        if (!isMockLLM && process.env.NODE_ENV !== 'test' && this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})) {
+          // Pacing delay on tool failure to mitigate LLM API burst rate limiting (429)
+          await new Promise((resolve) => setTimeout(resolve, 600));
         }
 
         // Quay lại đầu vòng lặp để LLM xử lý kết quả
@@ -1123,7 +1189,11 @@ export class AgentLoop {
             ...hookContext,
             reason: 'submitted-solution-final-answer',
           });
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+          turnStepRecords.push({
+            step,
+            reasoningSnippet: response.reasoningContent,
+            textSnippet: finalAnswer,
+          });
           if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
             try {
               this.goalManager.complete(this.planManager);
@@ -1133,6 +1203,15 @@ export class AgentLoop {
           } else {
             this.goalManager.disarm();
           }
+          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
+            turnStartTime,
+            turnSteps: step,
+            turnFilesModified,
+            turnTestsPassed,
+            turnStepRecords,
+            userGoal: turnUserGoal,
+            isSubagent,
+          });
           return finalAnswer;
         }
 
@@ -1209,8 +1288,29 @@ export class AgentLoop {
             ...hookContext,
             reason: 'fallback-answer',
           });
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-          this.goalManager.disarm();
+          turnStepRecords.push({
+            step,
+            reasoningSnippet: response.reasoningContent,
+            textSnippet: fallbackAnswer,
+          });
+          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+            try {
+              this.goalManager.complete(this.planManager);
+            } catch {
+              this.goalManager.disarm();
+            }
+          } else {
+            this.goalManager.disarm();
+          }
+          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', fallbackAnswer, {
+            turnStartTime,
+            turnSteps: step,
+            turnFilesModified,
+            turnTestsPassed,
+            turnStepRecords,
+            userGoal: turnUserGoal,
+            isSubagent,
+          });
           return fallbackAnswer;
         }
       }
@@ -1256,7 +1356,15 @@ export class AgentLoop {
 
         const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
         await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
+        await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal', incompletePlanMessage, {
+          turnStartTime,
+          turnSteps: step,
+          turnFilesModified,
+          turnTestsPassed,
+          turnStepRecords,
+          userGoal: turnUserGoal,
+          isSubagent,
+        });
         this.goalManager.disarm();
         return incompletePlanMessage;
       }
@@ -1364,7 +1472,15 @@ export class AgentLoop {
 
         const incompleteFinalMessage = `Agent stopped: the model returned ${consecutiveIncompleteFinals} non-terminal progress updates instead of executing a tool, reporting evidence, or providing a concrete blocker.`;
         await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
+        await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal', incompleteFinalMessage, {
+          turnStartTime,
+          turnSteps: step,
+          turnFilesModified,
+          turnTestsPassed,
+          turnStepRecords,
+          userGoal: turnUserGoal,
+          isSubagent,
+        });
         this.goalManager.disarm();
         return incompleteFinalMessage;
       }
@@ -1385,7 +1501,11 @@ export class AgentLoop {
         ...hookContext,
         reason: 'final-answer',
       });
-      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+      turnStepRecords.push({
+        step,
+        reasoningSnippet: response.reasoningContent,
+        textSnippet: finalAnswer,
+      });
       if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
         try {
           this.goalManager.complete(this.planManager);
@@ -1395,6 +1515,15 @@ export class AgentLoop {
       } else {
         this.goalManager.disarm();
       }
+      await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
+        turnStartTime,
+        turnSteps: step,
+        turnFilesModified,
+        turnTestsPassed,
+        turnStepRecords,
+        userGoal: turnUserGoal,
+        isSubagent,
+      });
 
       return finalAnswer;
     }
@@ -1406,7 +1535,15 @@ export class AgentLoop {
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
     await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
-    await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
+    await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached', timeoutMessage, {
+      turnStartTime,
+      turnSteps: effectiveMaxSteps,
+      turnFilesModified,
+      turnTestsPassed,
+      turnStepRecords,
+      userGoal: turnUserGoal,
+      isSubagent,
+    });
     this.goalManager.disarm();
     
     return timeoutMessage;
@@ -1511,6 +1648,62 @@ export class AgentLoop {
         }));
     } catch {
       return undefined;
+    }
+  }
+
+  private async finishTurnWithSummary(
+    session: Session,
+    turn: number,
+    effectiveMaxSteps: number,
+    isGoal: boolean,
+    reason: string,
+    finalResult: string,
+    telemetryData: {
+      turnStartTime: number;
+      turnSteps: number;
+      turnFilesModified: Set<string>;
+      turnTestsPassed?: boolean;
+      turnStepRecords: TurnSummaryStepInfo[];
+      userGoal?: string;
+      isSubagent: boolean;
+    },
+  ): Promise<void> {
+    await this.endTurn(session, turn, effectiveMaxSteps, isGoal, reason);
+
+    if (!telemetryData.isSubagent && this.loopOptions?.enableStepSummarization !== false) {
+      const durationMs = Date.now() - telemetryData.turnStartTime;
+      const filesModified = Array.from(telemetryData.turnFilesModified);
+      let summaryAi: string | undefined;
+
+      try {
+        summaryAi = await summarizeTurnWithCodestral({
+          turn,
+          userGoal: telemetryData.userGoal,
+          steps: telemetryData.turnStepRecords,
+          finalAnswer: finalResult,
+          durationMs,
+          filesModified,
+          testsPassed: telemetryData.turnTestsPassed,
+        });
+      } catch {
+        summaryAi = generateFallbackTurnSummary({
+          turn,
+          userGoal: telemetryData.userGoal,
+          steps: telemetryData.turnStepRecords,
+          finalAnswer: finalResult,
+          durationMs,
+          filesModified,
+          testsPassed: telemetryData.turnTestsPassed,
+        });
+      }
+
+      CLI.renderTurnSummary({
+        durationMs,
+        stepsCount: telemetryData.turnSteps,
+        filesModified,
+        testsPassed: telemetryData.turnTestsPassed,
+        summaryAi,
+      });
     }
   }
 

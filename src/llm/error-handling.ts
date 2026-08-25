@@ -35,34 +35,18 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     ? error.response.status
     : undefined;
 
-  // 1. Kiểm tra Hard Quota Exhausted (Cạn hạn mức / Hết tiền / Vượt giới hạn ngày)
-  const isHardQuota =
-    rawMessage.includes('quota exceeded')
-    || rawMessage.includes('insufficient_quota')
-    || rawMessage.includes('credit_balance_too_low')
-    || rawMessage.includes('daily_limit_reached')
-    || rawMessage.includes('exceeded your current quota')
-    || rawMessage.includes('check your plan and billing details')
-    || (rawMessage.includes('resource_exhausted') && (rawMessage.includes('quota') || rawMessage.includes('limit: 0')));
-
-  if (isHardQuota) {
-    return {
-      kind: 'HARD_QUOTA_EXHAUSTED',
-      message: error.message || 'LLM API Quota Exceeded. Please check your billing or switch models.',
-      retryable: false,
-      statusCode: statusCode || 429,
-    };
-  }
-
-  // 2. Kiểm tra Transient Rate Limit (429 Too Many Requests / Burst Limit / Resource Exhausted tạm thời)
+  // 1. Kiểm tra Transient Rate Limit (429 Too Many Requests / Burst Limit / Resource Exhausted tạm thời / Quota per minute)
   const isTransientRateLimit =
-    statusCode === 429
-    || rawMessage.includes('rate limit')
+    rawMessage.includes('rate limit')
     || rawMessage.includes('rate_limit_exceeded')
     || rawMessage.includes('too many requests')
-    || rawMessage.includes('resource_exhausted')
+    || rawMessage.includes('per minute')
+    || rawMessage.includes('per_minute')
+    || rawMessage.includes('requests per minute')
+    || rawMessage.includes('tokens per minute')
     || rawMessage.includes('tpm limit')
-    || rawMessage.includes('rpm limit');
+    || rawMessage.includes('rpm limit')
+    || (statusCode === 429 && !rawMessage.includes('daily_limit_reached') && !rawMessage.includes('check your plan and billing details') && !rawMessage.includes('insufficient_quota') && !rawMessage.includes('credit_balance_too_low') && !rawMessage.includes('limit: 0'));
 
   if (isTransientRateLimit) {
     // Trích xuất retry-after nếu có trong header hoặc message (vd: "Please retry in 5.2s")
@@ -81,6 +65,25 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
       retryable: true,
       statusCode: statusCode || 429,
       retryAfterMs,
+    };
+  }
+
+  // 2. Kiểm tra Hard Quota Exhausted (Cạn hạn mức / Hết tiền / Vượt giới hạn ngày)
+  const isHardQuota =
+    rawMessage.includes('quota exceeded')
+    || rawMessage.includes('insufficient_quota')
+    || rawMessage.includes('credit_balance_too_low')
+    || rawMessage.includes('daily_limit_reached')
+    || rawMessage.includes('exceeded your current quota')
+    || rawMessage.includes('check your plan and billing details')
+    || (rawMessage.includes('resource_exhausted') && (rawMessage.includes('quota') || rawMessage.includes('limit: 0')));
+
+  if (isHardQuota) {
+    return {
+      kind: 'HARD_QUOTA_EXHAUSTED',
+      message: error.message || 'LLM API Quota Exceeded. Please check your billing or switch models.',
+      retryable: false,
+      statusCode: statusCode || 429,
     };
   }
 

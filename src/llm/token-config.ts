@@ -23,7 +23,7 @@ export interface TokenConfig {
 
 export interface ModelTokenProfile {
   name: string;
-  provider: 'gemini' | 'openai' | 'deepseek' | 'groq' | 'cerebras' | 'sambanova' | 'mistral' | 'other';
+  provider: 'gemini' | 'openai' | 'deepseek' | 'groq' | 'cerebras' | 'sambanova' | 'mistral' | 'anthropic' | 'other';
   defaultMaxOutputTokens: number;
   defaultMaxInputTokens: number;
   maxSupportedOutputTokens: number;
@@ -260,13 +260,116 @@ const MODEL_TOKEN_PROFILES: Record<string, Partial<ModelTokenProfile>> = {
     supportsReasoningEffort: false,
     isReasoningModel: false,
   },
+
+  // Anthropic Claude API active models (model limits verified from Anthropic's
+  // model overview and deprecation tables; dated IDs are pinned snapshots).
+  'claude-fable-5': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-opus-5': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-opus-4-8': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-opus-4-7': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-opus-4-6': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-opus-4-5-20251101': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 64000,
+    maxSupportedInputTokens: 200000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-sonnet-5': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 128000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-sonnet-4-6': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 1000000,
+    maxSupportedOutputTokens: 64000,
+    maxSupportedInputTokens: 1000000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-sonnet-4-5-20250929': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 64000,
+    maxSupportedInputTokens: 200000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'claude-haiku-4-5-20251001': {
+    provider: 'anthropic',
+    defaultMaxOutputTokens: 8192,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 64000,
+    maxSupportedInputTokens: 200000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
 };
 
 /**
  * Lấy Profile Token mặc định cho một mô hình bất kỳ
  */
 export function getModelTokenProfile(modelName: string, baseURL?: string): ModelTokenProfile {
-  const normalized = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex)\//, '');
+  const normalized = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex|anthropic)\//, '');
 
   let matchedKey = Object.keys(MODEL_TOKEN_PROFILES).find((key) => key.toLowerCase() === normalized);
   if (!matchedKey) {
@@ -283,6 +386,7 @@ export function getModelTokenProfile(modelName: string, baseURL?: string): Model
   else if (normalized.includes('llama') && baseURL?.includes('cerebras')) provider = 'cerebras';
   else if (normalized.includes('llama') && baseURL?.includes('sambanova')) provider = 'sambanova';
   else if (normalized.includes('codestral') || normalized.includes('mistral')) provider = 'mistral';
+  else if (normalized.startsWith('claude-')) provider = 'anthropic';
 
   const isReasoning = Boolean(
     profile?.isReasoningModel ||

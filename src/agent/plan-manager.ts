@@ -222,8 +222,8 @@ export class PlanManager {
     return false;
   }
 
-  /** Start a fresh plan boundary for a new user turn while preserving old events. */
-  beginTurn(turn: number, userRequest: string): void {
+  /** Start a fresh plan boundary or continue an existing in-flight plan. */
+  beginTurn(turn: number, userRequest: string, options?: { preserveIncompletePlan?: boolean }): void {
     const goal = userRequest.trim();
     if (this.activeTurn === turn && this.goal === goal) return;
 
@@ -231,6 +231,17 @@ export class PlanManager {
     this.goal = goal;
     this.planRequired = this.inferPlanRequirement(goal);
     this.verificationRequired = this.inferVerificationRequirement(goal);
+
+    if (options?.preserveIncompletePlan) {
+      if (this.tasks.length === 0) {
+        this.rehydrateFromSession();
+      }
+      if (this.tasks.length > 0 && !this.isAllTasksCompleted()) {
+        this.persist('turn-continued');
+        return;
+      }
+    }
+
     this.tasks = [];
     this.evidenceSeq = 0;
     this.lastMutationSeq = 0;

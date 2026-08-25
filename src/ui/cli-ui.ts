@@ -1,6 +1,22 @@
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import { FileMentionEngine, AttachedItemSummary } from '../workspace/file-attachment.js';
+import { TreeScanResult, TreeNode, getFileExtensionBadge } from '../workspace/tree-explorer.js';
+import { ContextInspectionReport } from '../context/context-inspector.js';
+
+export interface UICollapsePreferences {
+  thinking: boolean;    // Thu gọn suy luận System 2 (CoT)
+  tools: boolean;       // Thu gọn kết quả tool dài
+  diff: boolean;        // Thu gọn diff patch dài
+  treeDepth: number;    // Độ sâu mặc định khi explore cây thư mục
+}
+
+export const DEFAULT_COLLAPSE_PREFERENCES: UICollapsePreferences = {
+  thinking: true,
+  tools: true,
+  diff: false,
+  treeDepth: 3,
+};
 
 // ANSI escape codes for styling without external dependencies
 export const colors = {
@@ -28,7 +44,7 @@ export const colors = {
   brightRed: '\x1b[91m',
   brightBlue: '\x1b[94m',
 
-  // Codex signature palette tokens
+  // Codex & Antigravity signature palette tokens
   emerald: '\x1b[38;5;48m',
   teal: '\x1b[38;5;50m',
   slate: '\x1b[38;5;244m',
@@ -36,6 +52,17 @@ export const colors = {
   crimson: '\x1b[38;5;196m',
   purple: '\x1b[38;5;141m',
   indigo: '\x1b[38;5;75m',
+
+  // Google Antigravity & DeepMind signature TrueColor palette
+  geminiCyan: '\x1b[38;2;36;200;219m',
+  geminiBlue: '\x1b[38;2;66;133;244m',
+  geminiPurple: '\x1b[38;2;161;110;255m',
+  geminiAmber: '\x1b[38;2;251;188;4m',
+  geminiGreen: '\x1b[38;2;52;168;83m',
+  geminiRed: '\x1b[38;2;234;67;53m',
+  subtleBorder: '\x1b[38;2;75;85;99m',
+  mutedText: '\x1b[38;2;156;163;175m',
+  cardBg: '\x1b[48;2;30;35;45m',
 
   // Background colors
   bgCyan: '\x1b[46m',
@@ -77,6 +104,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
+  { command: '/resume', description: 'Tiếp tục thông minh tác vụ/kế hoạch/goal bị gián đoạn (One-Click Resume)', category: 'Execution', aliases: ['/continue'] },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
   { command: '/dream', usage: '/dream [run|preview|status]', description: 'Hợp nhất bộ nhớ nền bằng mistral/codestral-latest', category: 'Memory' },
@@ -95,8 +123,10 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/evidence', description: 'Xem bằng chứng verification hiện tại', category: 'Telemetry' },
   { command: '/impact', usage: '/impact [path] [symbol]', description: 'Phân tích phạm vi ảnh hưởng (Blast Radius)', category: 'Tools' },
   { command: '/image', usage: '/image <path> [prompt]', description: 'Nạp và phân tích ảnh trực quan (Vision / Multimodal)', category: 'Vision', aliases: ['/vision', '/img'] },
-  { command: '/preview', description: 'Xem trước các thay đổi mutation pending', category: 'Shadow Git' },
-  { command: '/add', usage: '/add <path>', description: 'Đính kèm file hoặc thư mục vào ngữ cảnh', category: 'Context', aliases: ['/attach'] },
+  { command: '/collapse', usage: '/collapse [thinking|tools|diff|on|off|status]', description: 'Quản lý thu gọn/mở rộng các khối suy luận CoT và tool outputs (Antigravity Style)', category: 'UI & Display', aliases: ['/fold'] },
+  { command: '/explore', usage: '/explore [tree|context|reasoning|memory|tools|tasks] [args]', description: 'Khám phá sâu cây thư mục, ngữ cảnh tác nhân, hoặc chuỗi suy luận', category: 'Exploration', aliases: ['/inspect'] },
+  { command: '/tree', usage: '/tree [path] [depth]', description: 'Xem cây cấu trúc thư mục dự án phân cấp với kích thước tệp', category: 'Workspace', aliases: ['/dirtree'] },
+  { command: '/context', usage: '/context [inspect|prune|compact]', description: 'Kiểm soát và phân tích các tầng token trong Context Window', category: 'Context', aliases: ['/ctx'] },
   { command: '/clear', description: 'Xoá màn hình terminal', category: 'General' },
   { command: '/help', description: 'Hiển thị hướng dẫn', category: 'General', aliases: ['/?'] },
   { command: '/exit', description: 'Thoát chương trình', category: 'General', aliases: ['/quit'] },
@@ -188,9 +218,9 @@ export class RealtimeSlashCommandHints {
             return `${c.cyan}${marker}${c.reset} ${icon} ${c.brightCyan}${c.bold}${pathLabel}${c.reset} ${sizeInfo}`;
           });
 
-          const footer = `${c.gray}  Tab: hoàn thành @path • Enter: gửi prompt đính kèm${c.reset}`;
+          const footer = `${c.slate}  ${c.teal}[Tab]${c.slate} Hoàn thành @path • ${c.teal}[Enter]${c.slate} Gửi đính kèm • ${c.teal}[Esc]${c.slate} Đóng${c.reset}`;
           this.renderBelowInput(
-            [`${c.cyan}${c.bold}📎 Gợi ý đính kèm File / Thư mục (@):${c.reset}`, ...rows, footer],
+            [`${c.geminiCyan}${c.bold}📎 GỢI Ý ĐÍNH KÈM FILE / THƯ MỤC (@):${c.reset}`, ...rows, footer],
             cursorColumn,
           );
           this.visible = true;
@@ -217,11 +247,11 @@ export class RealtimeSlashCommandHints {
           const availableDescriptionWidth = Math.max(10, width - commandWidth - 6);
           const description = truncateDisplayText(`${item.description}${alias}`, availableDescriptionWidth);
           const marker = index === 0 ? '›' : ' ';
-          return `${c.cyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.dim}${description}${c.reset}`;
+          return `${c.geminiCyan}${marker}${c.reset} ${c.brightCyan}${c.bold}${label}${c.reset} ${c.mutedText}${description}${c.reset}`;
         });
-        const footer = `${c.gray}  Tab: hoàn thành • Enter: thực thi${c.reset}`;
+        const footer = `${c.slate}  ${c.teal}[Tab]${c.slate} Hoàn thành • ${c.teal}[Enter]${c.slate} Thực thi • ${c.teal}[↑/↓]${c.slate} Lịch sử • ${c.teal}[/help]${c.slate} Trợ giúp${c.reset}`;
         this.renderBelowInput(
-          [`${c.gray}Gợi ý slash command gần nhất:${c.reset}`, ...rows, footer],
+          [`${c.geminiCyan}${c.bold}⚡ GỢI Ý LỆNH NHANH (SLASH COMMANDS):${c.reset}`, ...rows, footer],
           cursorColumn,
         );
         this.visible = true;
@@ -230,7 +260,7 @@ export class RealtimeSlashCommandHints {
       }
     }
 
-    // 3. Hiển thị Model và Reasoning Effort bên dưới dòng input (Antigravity CLI Style)
+    // 3. Hiển thị Model và Reasoning Effort bên dưới dòng input (Antigravity CLI Docked Status)
     const modelInfo = this.getModelInfo ? this.getModelInfo() : undefined;
     if (modelInfo) {
       const effortLabel = modelInfo.effort || 'medium';
@@ -238,7 +268,7 @@ export class RealtimeSlashCommandHints {
       const nextRenderKey = `status\u0000${cursorColumn}\u0000${modelName}\u0000${effortLabel}`;
       if (this.visible && this.renderKey === nextRenderKey) return;
 
-      const statusLine = `  ${c.gray}🤖 Model: ${c.brightCyan}${c.bold}${modelName}${c.reset}  ${c.gray}│  🧠 Effort: ${c.yellow}${c.bold}${effortLabel}${c.reset}  ${c.gray}│  ${c.dim}Gõ / để xem lệnh${c.reset}`;
+      const statusLine = `  ${c.slate}🤖 Model:${c.reset} ${c.brightCyan}${c.bold}${modelName}${c.reset}  ${c.slate}│  🧠 Reasoning:${c.reset} ${c.geminiAmber}${c.bold}${effortLabel}${c.reset}  ${c.slate}│  ${c.mutedText}Nhập ${c.brightCyan}/${c.mutedText} xem lệnh • ${c.brightCyan}@${c.mutedText} đính kèm file${c.reset}`;
       this.renderBelowInput([statusLine], cursorColumn);
       this.visible = true;
       this.renderKey = nextRenderKey;
@@ -842,18 +872,25 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   },
   {
     id: '26',
+    name: 'openrouter/stealth/ox-alpha',
+    provider: 'OpenRouter (Stealth)',
+    desc: 'Ox Alpha (0x Alpha): Reasoning coding model ẩn danh, 1M context (Miễn phí preview)',
+    recommended: true,
+  },
+  {
+    id: '27',
     name: 'openrouter/meta-llama/llama-3.3-70b-instruct:free',
     provider: 'OpenRouter (Free)',
     desc: 'Llama 3.3 70B miễn phí qua OpenRouter',
   },
   {
-    id: '27',
+    id: '28',
     name: 'openrouter/deepseek/deepseek-r1:free',
     provider: 'OpenRouter (Free)',
     desc: 'DeepSeek R1 miễn phí qua OpenRouter',
   },
   {
-    id: '28',
+    id: '29',
     name: 'openrouter/google/gemini-2.0-flash-exp:free',
     provider: 'OpenRouter (Free)',
     desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
@@ -861,13 +898,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 9. Pollinations AI
   {
-    id: '29',
+    id: '30',
     name: 'pollinations/openai',
     provider: 'Pollinations.ai (Zero-Key)',
     desc: 'GPT-4o-mini miễn phí 100%, không cần đăng ký tài khoản hay API key',
   },
   {
-    id: '30',
+    id: '31',
     name: 'pollinations/mistral',
     provider: 'Pollinations.ai (Zero-Key)',
     desc: 'Mistral miễn phí 100%, không cần đăng ký tài khoản hay API key',
@@ -875,19 +912,82 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 10. DeepSeek Direct
   {
-    id: '31',
+    id: '32',
     name: 'deepseek-chat',
     provider: 'DeepSeek Direct',
     desc: 'DeepSeek V3 chính thức (cần key platform.deepseek.com)',
   },
   {
-    id: '32',
+    id: '33',
     name: 'deepseek-reasoner',
     provider: 'DeepSeek Direct',
     desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
   },
 
-  // 11. MINUS CLI Models (OpenAI / ChatGPT Plus)
+  // 11. Anthropic Claude API (active models)
+  {
+    id: '34',
+    name: 'claude-fable-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Fable 5: model Anthropic mạnh nhất cho agent chạy dài và tác vụ phức tạp',
+    recommended: true,
+  },
+  {
+    id: '35',
+    name: 'claude-opus-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 5: suy luận và coding agentic cao cấp',
+  },
+  {
+    id: '36',
+    name: 'claude-opus-4-8',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.8: coding agentic và enterprise work phức tạp',
+  },
+  {
+    id: '37',
+    name: 'claude-opus-4-7',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.7: Opus mạnh cho reasoning và coding',
+  },
+  {
+    id: '38',
+    name: 'claude-opus-4-6',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.6: năng lực cao cho tác vụ dài và nhiều bước',
+  },
+  {
+    id: '39',
+    name: 'claude-opus-4-5-20251101',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.5: snapshot ổn định cho coding agent',
+  },
+  {
+    id: '40',
+    name: 'claude-sonnet-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 5: cân bằng tốc độ, chất lượng và coding agentic',
+  },
+  {
+    id: '41',
+    name: 'claude-sonnet-4-6',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 4.6: nhanh, mạnh và phù hợp cho coding hằng ngày',
+  },
+  {
+    id: '42',
+    name: 'claude-sonnet-4-5-20250929',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 4.5: snapshot ổn định cho coding và automation',
+  },
+  {
+    id: '43',
+    name: 'claude-haiku-4-5-20251001',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Haiku 4.5: phản hồi nhanh và tiết kiệm cho tác vụ nhẹ',
+  },
+
+  // 12. MINUS CLI Models (OpenAI / ChatGPT Plus)
   {
     id: 'cs',
     name: 'codex/gpt-5.6-sol',
@@ -937,86 +1037,124 @@ function padRightVisible(text: string, targetWidth: number): string {
   return text + ' '.repeat(pad);
 }
 
+export function getTerminalWidth(defaultWidth = 80, minWidth = 60, maxWidth = 120): number {
+  const cols = process.stdout.columns || defaultWidth;
+  return Math.max(minWidth, Math.min(maxWidth, cols));
+}
+
+export function createBoxHeader(title: string, color = c.subtleBorder, width?: number): string {
+  const targetWidth = width || getTerminalWidth();
+  const cleanTitle = stripAnsiForDisplay(title);
+  const leftLen = 3;
+  const remaining = Math.max(2, targetWidth - leftLen - cleanTitle.length - 2);
+  return `${color}╭── ${title} ${color}${'─'.repeat(remaining)}╮${c.reset}`;
+}
+
+export function createBoxDivider(color = c.subtleBorder, width?: number): string {
+  const targetWidth = width || getTerminalWidth();
+  return `${color}├${'─'.repeat(Math.max(2, targetWidth - 2))}┤${c.reset}`;
+}
+
+export function createBoxFooter(color = c.subtleBorder, width?: number): string {
+  const targetWidth = width || getTerminalWidth();
+  return `${color}╰${'─'.repeat(Math.max(2, targetWidth - 2))}╯${c.reset}`;
+}
+
+export function renderContextProgressBar(usedTokens: number, maxTokens: number, barWidth = 14): string {
+  if (maxTokens <= 0) return '';
+  const percent = Math.min(100, Math.round((usedTokens / maxTokens) * 100));
+  const filled = Math.round((percent / 100) * barWidth);
+  const barColor = percent > 85 ? c.crimson : percent > 65 ? c.amber : c.emerald;
+  return `${barColor}${'█'.repeat(filled)}${c.slate}${'░'.repeat(Math.max(0, barWidth - filled))}${c.reset} ${c.bold}${percent}%${c.reset}`;
+}
+
 /**
- * Lớp điều khiển hiển thị Terminal UI/UX chuẩn 100% phong cách MINUS CLI.
+ * Lớp điều khiển hiển thị Terminal UI/UX chuẩn phong cách Google Antigravity & MINUS CLI.
  */
 export class CLI {
   /**
-   * Hiển thị Banner mở đầu phong cách MINUS CLI kèm Linh vật Mèo Pixel Minus Cat
+   * Hiển thị Banner mở đầu phong cách Google Antigravity & MINUS CLI kèm Linh vật Mèo Pixel Minus Cat
    */
   static renderBanner(opts: BannerOptions): void {
+    const width = getTerminalWidth();
     const cat = getCatMascot(opts.mascotAction);
     const catLines = cat.lines;
 
+    const availablePathWidth = Math.max(20, width - 42);
     const infoLines: string[] = [
-      `${c.magenta}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`,
-      `${c.blue}📂 Workspace:${c.reset}  ${c.dim}${truncateDisplayText(opts.workspaceRoot, 34)}${c.reset}`,
-      `${c.indigo}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch || 'main'}${c.reset}`,
-      `${c.emerald}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus || `${c.green}Active (Local)${c.reset}`}`,
-      `${c.yellow}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`,
-      `${c.green}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.dim}${opts.tools.slice(0, 5).join(', ')}${opts.tools.length > 5 ? ` ... (+${opts.tools.length - 5})` : ''}${c.reset}`,
-      `${c.gray}💡 Lệnh nhanh:${c.reset}  Nhập ${c.brightCyan}/${c.gray} hoặc ${c.brightCyan}/help${c.gray} để mở menu${c.reset}`,
+      `${c.geminiPurple}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`,
+      `${c.geminiBlue}📂 Workspace:${c.reset}  ${c.mutedText}${truncateDisplayText(opts.workspaceRoot, availablePathWidth)}${c.reset}`,
+      `${c.geminiCyan}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch || 'main'}${c.reset}`,
+      `${c.geminiGreen}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus || `${c.emerald}Active (Local)${c.reset}`}`,
+      `${c.geminiAmber}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`,
+      `${c.teal}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.mutedText}${opts.tools.slice(0, 4).join(', ')}${opts.tools.length > 4 ? ` ... (+${opts.tools.length - 4})` : ''}${c.reset}`,
+      `${c.slate}💡 Lệnh nhanh:${c.reset}  Nhập ${c.brightCyan}/${c.slate} hoặc ${c.brightCyan}/help${c.slate} để mở menu${c.reset}`,
     ];
 
-    console.log(`\n  ${c.emerald}${c.bold}⚡ MINUS CLI AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}`);
-    console.log(`  ${c.dim}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}\n`);
+    console.log(`\n  ${c.geminiCyan}${c.bold}⚡ MINUS / ANTIGRAVITY AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}`);
+    console.log(`  ${c.mutedText}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}\n`);
 
-    for (let i = 0; i < 7; i++) {
+    const maxRows = Math.max(catLines.length, infoLines.length);
+    for (let i = 0; i < maxRows; i++) {
       const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 22);
       const rightCol = infoLines[i] || '';
       console.log(`${leftCol}  ${rightCol}`);
     }
 
-    console.log(`\n  ${c.emerald}🐱 ${cat.name}:${c.reset} ${c.dim}${cat.badge}${c.reset} • ${c.gray}Nhập ${c.brightCyan}/model${c.gray} để đổi LLM model.${c.reset}\n`);
+    console.log(`\n  ${c.geminiGreen}🐱 ${cat.name}:${c.reset} ${c.slate}${cat.badge}${c.reset} • ${c.mutedText}Nhập ${c.brightCyan}/model${c.mutedText} để đổi LLM model.${c.reset}\n`);
   }
 
   /**
-   * Hiển thị thanh gợi ý lệnh nhanh
+   * Hiển thị thanh gợi ý lệnh nhanh (Responsive Antigravity Palette)
    */
   static renderQuickCommands(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚡ MINUS SLASH COMMAND PALETTE ──────────────────────────────────────────╮${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('⚡ MINUS / ANTIGRAVITY COMMAND PALETTE', c.geminiCyan, width)}`);
     for (const cmd of SLASH_COMMANDS) {
-      const aliasStr = cmd.aliases?.length ? ` (${cmd.aliases.join(', ')})` : '';
+      const aliasStr = cmd.aliases?.length ? ` ${c.slate}(${cmd.aliases.join(', ')})${c.reset}` : '';
       const usageStr = (cmd.usage || cmd.command).padEnd(26);
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${usageStr}${c.reset} ${c.gray}${cmd.description}${aliasStr}${c.reset}`);
+      const catBadge = cmd.category ? `${c.geminiPurple}[${cmd.category}]${c.reset} ` : '';
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${usageStr}${c.reset} ${catBadge}${c.mutedText}${cmd.description}${aliasStr}${c.reset}`);
     }
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
    * Hiển thị danh sách các model có sẵn để người dùng chọn
    */
   static renderModelSelector(currentModel: string): void {
-    console.log(`\n${c.magenta}${c.bold}╭── 🤖 DANH SÁCH MÔ HÌNH KHẢ DỤNG (SELECT MODEL) ───────────────────────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}                                                                            ${c.magenta}${c.bold}│${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🤖 DANH SÁCH MÔ HÌNH KHẢ DỤNG (SELECT MODEL)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
     
     let lastProvider = '';
     for (const m of AVAILABLE_MODELS) {
       if (m.provider !== lastProvider) {
         lastProvider = m.provider;
-        console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}❖ ${m.provider.toUpperCase()}${c.reset}`);
+        console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}❖ ${m.provider.toUpperCase()}${c.reset}`);
       }
 
       const isCurrent = m.name === currentModel;
-      const marker = isCurrent ? ` ${c.brightGreen}${c.bold}* [ACTIVE]${c.reset}` : '';
-      const recBadge = m.recommended ? ` ${c.brightYellow}(Recommended)${c.reset}` : '';
+      const marker = isCurrent ? ` ${c.emerald}${c.bold}* [ACTIVE]${c.reset}` : '';
+      const recBadge = m.recommended ? ` ${c.geminiAmber}(Recommended)${c.reset}` : '';
       
-      console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}${c.bold}[${m.id.padStart(2, ' ')}]${c.reset} ${c.bold}${m.name}${c.reset}${recBadge}${marker}`);
-      console.log(`${c.magenta}${c.bold}│${c.reset}         ${c.dim}${m.desc}${c.reset}`);
-      console.log(`${c.magenta}${c.bold}│${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}${c.bold}[${m.id.padStart(2, ' ')}]${c.reset} ${c.bold}${m.name}${c.reset}${recBadge}${marker}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}         ${c.mutedText}${m.desc}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
     }
 
-    console.log(`${c.magenta}${c.bold}├────────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}👉 Nhập số thứ tự ${c.brightCyan}[1-${AVAILABLE_MODELS.length}]${c.gray} hoặc ${c.brightCyan}tên model bất kỳ${c.gray} để đổi mô hình:${c.reset}         ${c.magenta}${c.bold}│${c.reset}`);
-    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxDivider(c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}👉 Nhập số thứ tự ${c.brightCyan}[1-${AVAILABLE_MODELS.length}]${c.slate} hoặc ${c.brightCyan}tên model bất kỳ${c.slate} để đổi mô hình:${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
-   * Hiển thị bảng trợ giúp
+   * Hiển thị bảng trợ giúp (Antigravity Command Catalog)
    */
   static renderHelp(): void {
-    console.log(`\n${c.cyan}${c.bold}╭── 📖 MINUS CLI COMMAND CATALOG & GUIDE ────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}                                                                            ${c.cyan}${c.bold}│${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('📖 MINUS CLI COMMAND CATALOG & GUIDE', c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
     
     const byCategory = new Map<string, SlashCommandDefinition[]>();
     for (const cmd of SLASH_COMMANDS) {
@@ -1027,71 +1165,76 @@ export class CLI {
     }
 
     for (const [category, cmds] of byCategory.entries()) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}${category.toUpperCase()}:${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}❖ ${category.toUpperCase()}:${c.reset}`);
       for (const item of cmds) {
         const usage = (item.usage || item.command).padEnd(28);
-        console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.brightCyan}${usage}${c.reset} ${item.description}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}    ${c.brightCyan}${usage}${c.reset} ${c.mutedText}${item.description}${c.reset}`);
       }
-      console.log(`${c.cyan}${c.bold}│${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
     }
 
-    console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}VÍ DỤ TÁC VỤ THỰC TẾ:${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Tìm trong src xem class AgentLoop ở file nào${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Đọc package.json và giải thích các scripts${c.reset}`);
-    console.log(`${c.cyan}${c.bold}│${c.reset}    ${c.gray}> Sửa lỗi trong src/tools/read-file.ts và chạy npm test để kiểm chứng${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}VÍ DỤ TÁC VỤ THỰC TẾ:${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}    ${c.slate}> Tìm trong src xem class AgentLoop ở file nào${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}    ${c.slate}> Đọc package.json và giải thích các scripts${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}    ${c.slate}> Sửa lỗi trong src/tools/read-file.ts và chạy npm test để kiểm chứng${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
-   * Liệt kê danh mục Tool
+   * Liệt kê danh mục Tool (Antigravity Tool Registry)
    */
   static renderTools(toolList: Array<{ name: string; description: string }>): void {
-    console.log(`\n${c.green}${c.bold}╭── 🛠️  REGISTERED TOOL CATALOG (${toolList.length} Tools) ──────────────────────────╮${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader(`🛠️  REGISTERED TOOL CATALOG (${toolList.length} Tools)`, c.geminiGreen, width)}`);
     for (const tool of toolList) {
-      console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${tool.name.padEnd(24)}${c.reset} ${c.dim}${tool.description.slice(0, 70)}${c.reset}`);
+      const descSnippet = truncateDisplayText(tool.description, Math.max(20, width - 32));
+      console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}${tool.name.padEnd(24)}${c.reset} ${c.mutedText}${descSnippet}${c.reset}`);
     }
-    console.log(`${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiGreen, width)}\n`);
   }
 
   /**
    * Hiển thị thông tin workspace hiện tại
    */
   static renderWorkspaceInfo(workspaceRoot: string): void {
-    console.log(`\n${c.blue}${c.bold}╭── 📂 ACTIVE WORKSPACE ─────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.bold}Đường dẫn:${c.reset} ${c.brightCyan}${workspaceRoot}${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.gray}Để đổi thư mục, dùng: ${c.cyan}/workspace <đường_dẫn_mới>${c.gray} hoặc ${c.cyan}/cd <path>${c.reset}`);
-    console.log(`${c.blue}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('📂 ACTIVE WORKSPACE', c.geminiBlue, width)}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.bold}Đường dẫn:${c.reset} ${c.brightCyan}${workspaceRoot}${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.slate}Để đổi thư mục, dùng: ${c.brightCyan}/workspace <đường_dẫn_mới>${c.slate} hoặc ${c.brightCyan}/cd <path>${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiBlue, width)}\n`);
   }
 
   /**
    * Hiển thị thông báo khi thay đổi workspace thành công
    */
   static renderWorkspaceChanged(oldPath: string, newPath: string): void {
-    console.log(`\n${c.green}${c.bold}╭── 📂 ĐỔI WORKSPACE THÀNH CÔNG ─────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.gray}Thư mục cũ:${c.reset} ${c.dim}${oldPath}${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.brightGreen}${c.bold}Thư mục mới:${c.reset} ${c.brightCyan}${c.bold}${newPath}${c.reset}`);
-    console.log(`${c.green}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('📂 ĐỔI WORKSPACE THÀNH CÔNG', c.geminiGreen, width)}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.slate}Thư mục cũ:${c.reset} ${c.dim}${oldPath}${c.reset}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.emerald}${c.bold}Thư mục mới:${c.reset} ${c.brightCyan}${c.bold}${newPath}${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiGreen, width)}\n`);
   }
 
   /**
    * Hiển thị danh sách các Shadow Git Checkpoints đã lưu
    */
   static renderCheckpoints(checkpoints: Array<{ index: number; timestamp: string; description: string }>): void {
-    console.log(`\n${c.yellow}${c.bold}╭── 🛡️  SHADOW GIT CHECKPOINTS HISTORY (${checkpoints.length} Snapshots) ────────────────╮${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader(`🛡️  SHADOW GIT CHECKPOINTS HISTORY (${checkpoints.length} Snapshots)`, c.geminiAmber, width)}`);
     if (checkpoints.length === 0) {
-      console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.dim}Chưa có checkpoint nào được tạo trong phiên làm việc này.${c.reset}`);
+      console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.mutedText}Chưa có checkpoint nào được tạo trong phiên làm việc này.${c.reset}`);
     } else {
       for (const cp of checkpoints) {
-        console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.brightCyan}#${cp.index}${c.reset} [${c.gray}${cp.timestamp}${c.reset}] ${c.bold}${cp.description}${c.reset}`);
+        console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.brightCyan}#${cp.index}${c.reset} [${c.slate}${cp.timestamp}${c.reset}] ${c.bold}${cp.description}${c.reset}`);
       }
     }
-    console.log(`${c.yellow}${c.bold}│${c.reset}`);
-    console.log(`${c.yellow}${c.bold}│${c.reset}  ${c.gray}Dùng lệnh ${c.brightCyan}/undo${c.gray} để hoàn tác về checkpoint gần nhất.${c.reset}`);
-    console.log(`${c.yellow}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Dùng lệnh ${c.brightCyan}/undo${c.slate} để hoàn tác về checkpoint gần nhất.${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiAmber, width)}\n`);
   }
 
   /**
-   * Hiển thị Cây kế hoạch động với Progress Bar chuẩn Codex CLI
+   * Hiển thị Cây kế hoạch động với Progress Bar chuẩn Codex & Antigravity CLI
    */
   static renderPlan(tasks: Array<{
     id: number;
@@ -1103,19 +1246,21 @@ export class CLI {
   }>): void {
     if (tasks.length === 0) return;
 
+    const width = getTerminalWidth();
     const completed = tasks.filter((t) => t.status === 'COMPLETED').length;
     const total = tasks.length;
     const percent = Math.round((completed / total) * 100);
-    const barWidth = 20;
+    const barWidth = Math.min(24, Math.max(10, Math.floor(width * 0.22)));
     const filledWidth = Math.round((percent / 100) * barWidth);
-    const progressBar = `${c.emerald}${'█'.repeat(filledWidth)}${c.slate}${'░'.repeat(barWidth - filledWidth)}${c.reset}`;
+    const progressBar = `${c.emerald}${'█'.repeat(filledWidth)}${c.slate}${'░'.repeat(Math.max(0, barWidth - filledWidth))}${c.reset}`;
 
-    console.log(`\n${c.brightCyan}${c.bold}╭── 📋 DYNAMIC PLAN PROGRESS [${progressBar}] ${c.emerald}${percent}%${c.brightCyan} (${completed}/${total} Steps) ──────╮${c.reset}`);
-    console.log(`${c.brightCyan}${c.bold}│${c.reset}`);
+    const title = `📋 DYNAMIC PLAN PROGRESS [${progressBar}] ${c.emerald}${percent}%${c.reset} (${completed}/${total} Tasks)`;
+    console.log(`\n${createBoxHeader(title, c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
     
     for (const t of tasks) {
-      let icon = `${c.dim}[ ]${c.reset}`;
-      let titleStyle = c.dim;
+      let icon = `${c.slate}[ ]${c.reset}`;
+      let titleStyle = c.mutedText;
 
       if (t.status === 'COMPLETED') {
         icon = `${c.emerald}${c.bold}[✔]${c.reset}`;
@@ -1131,51 +1276,52 @@ export class CLI {
         titleStyle = `${c.slate}${c.strikethrough}`;
       }
 
-      console.log(`${c.brightCyan}${c.bold}│${c.reset}  ${icon} ${c.bold}${t.id}.${c.reset} ${titleStyle}${t.title}${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${icon} ${c.bold}${t.id}.${c.reset} ${titleStyle}${t.title}${c.reset}`);
       if (t.status === 'IN_PROGRESS' && t.acceptanceCriteria) {
-        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.amber}↳ Criteria:${c.reset} ${c.dim}${t.acceptanceCriteria}${c.reset}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}      ${c.geminiAmber}↳ Criteria:${c.reset} ${c.mutedText}${t.acceptanceCriteria}${c.reset}`);
       }
       if (t.evidence?.length) {
-        const evidence = t.evidence.map((item) => `${c.cyan}${item.toolName}${c.reset}:${c.emerald}${item.outcome}${c.reset}`).join(', ');
-        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.slate}↳ Evidence:${c.reset} ${evidence}`);
+        const evidence = t.evidence.map((item) => `${c.teal}${item.toolName}${c.reset}:${c.emerald}${item.outcome}${c.reset}`).join(', ');
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}      ${c.slate}↳ Evidence:${c.reset} ${evidence}`);
       }
       if (t.notes) {
-        console.log(`${c.brightCyan}${c.bold}│${c.reset}      ${c.dim}↳ ${t.notes}${c.reset}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}      ${c.slate}↳ ${t.notes}${c.reset}`);
       }
     }
 
-    console.log(`${c.brightCyan}${c.bold}│${c.reset}`);
-    console.log(`${c.brightCyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
-   * Hiển thị Unified Diff Highlighted Renderer chuẩn Codex CLI
+   * Hiển thị Unified Diff Highlighted Renderer chuẩn Antigravity / Codex CLI
    */
   static renderDiff(diffText: string, options: { filePath?: string; status?: 'MODIFIED' | 'CREATED' | 'DELETED' } = {}): void {
     const lines = diffText.trim().split('\n');
+    const width = getTerminalWidth();
     const headerTitle = options.filePath ? `📝 ${options.status || 'MODIFIED'}: ${options.filePath}` : '📝 UNIFIED DIFF PATCH';
     
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}${c.bold}╭── ${headerTitle} ─────────────────────────────╮${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${createBoxHeader(headerTitle, c.teal, Math.max(40, width - 6))}`);
     
     for (const line of lines.slice(0, 30)) {
       if (line.startsWith('+++') || line.startsWith('---')) {
-        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}${line}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}${line}${c.reset}`);
       } else if (line.startsWith('@@')) {
-        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.brightCyan}${line}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.brightCyan}${line}${c.reset}`);
       } else if (line.startsWith('+')) {
-        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.emerald}+ ${line.slice(1)}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.emerald}+ ${line.slice(1)}${c.reset}`);
       } else if (line.startsWith('-')) {
-        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.crimson}- ${line.slice(1)}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.crimson}- ${line.slice(1)}${c.reset}`);
       } else {
-        console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.dim}  ${line}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.mutedText}  ${line}${c.reset}`);
       }
     }
 
     if (lines.length > 30) {
-      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}... (+${lines.length - 30} lines diff)${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.teal}│${c.reset} ${c.slate}... (+${lines.length - 30} lines diff)${c.reset}`);
     }
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.teal}╰────────────────────────────────────────────────────────╯${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${createBoxFooter(c.teal, Math.max(40, width - 6))}`);
   }
 
   /**
@@ -1185,192 +1331,385 @@ export class CLI {
     if (failures < 3) {
       return;
     }
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.amber}${c.bold}⚠️ [Self-Correction Protocol Activated (Consecutive Failures: ${failures})]${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}⚠️ [Self-Correction Protocol Activated (Consecutive Failures: ${failures})]${c.reset}`);
+    if (advice) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.mutedText}↳ ${advice}${c.reset}`);
+    }
   }
 
   /**
    * Hiển thị Bộ nhớ dài hạn của dự án
    */
   static renderMemory(data: any): void {
-    console.log(`\n${c.magenta}${c.bold}╭── 🧠 PROJECT KNOWLEDGE BASE (.codingagent/project-memory.json) ───────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Dự án:${c.reset}       ${c.brightCyan}${data.projectName}${c.reset} (${c.dim}${data.projectType}${c.reset})`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Package Mgr:${c.reset} ${c.yellow}${data.packageManager}${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🧠 PROJECT KNOWLEDGE BASE (.codingagent/project-memory.json)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Dự án:${c.reset}       ${c.brightCyan}${data.projectName}${c.reset} (${c.slate}${data.projectType}${c.reset})`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Package Mgr:${c.reset} ${c.yellow}${data.packageManager}${c.reset}`);
     
     const scriptKeys = Object.keys(data.scripts || {});
     if (scriptKeys.length > 0) {
-      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Scripts:${c.reset}     ${c.dim}${scriptKeys.map((k: string) => `${k} (npm run ${k})`).slice(0, 4).join(', ')}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Scripts:${c.reset}     ${c.mutedText}${scriptKeys.map((k: string) => `${k} (npm run ${k})`).slice(0, 4).join(', ')}${c.reset}`);
     }
 
     const insights = data.learnedInsights || [];
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Kinh nghiệm:${c.reset} ${c.brightGreen}${insights.length} quy ước đã ghi nhớ${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Kinh nghiệm:${c.reset} ${c.emerald}${insights.length} quy ước đã ghi nhớ${c.reset}`);
     if (insights.length > 0) {
       for (const item of insights.slice(-4)) {
-        console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightYellow}◆ [${item.key}]${c.reset} ${c.dim}${item.insight}${c.reset}`);
+        console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.geminiAmber}◆ [${item.key}]${c.reset} ${c.mutedText}${item.insight}${c.reset}`);
       }
     }
 
-    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
    * Hiển thị trạng thái môi trường Sandbox
    */
   static renderSandbox(status: any): void {
-    console.log(`\n${c.green}${c.bold}╭── 🛡️  EXECUTION SANDBOX STATUS ───────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Provider:${c.reset}        ${c.brightCyan}${status.activeProvider}${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Chế độ:${c.reset}          ${c.yellow}${status.mode.toUpperCase()}${c.reset}`);
-    console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Cách ly (Isolated):${c.reset} ${status.isIsolated ? `${c.brightGreen}✔ CÔ LẬP HOÀN TOÀN (Docker)` : `${c.yellow}⚠ HOST OS (Có bộ lọc Allowlist)`}${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🛡️  EXECUTION SANDBOX STATUS', c.geminiGreen, width)}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}Provider:${c.reset}        ${c.brightCyan}${status.activeProvider}${c.reset}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}Chế độ:${c.reset}          ${c.yellow}${status.mode.toUpperCase()}${c.reset}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}Cách ly (Isolated):${c.reset} ${status.isIsolated ? `${c.emerald}✔ CÔ LẬP HOÀN TOÀN (Docker)` : `${c.amber}⚠ HOST OS (Có bộ lọc Allowlist)`}${c.reset}`);
     if (status.containerId) {
-      console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Container ID:${c.reset}    ${c.dim}${status.containerId}${c.reset}`);
-      console.log(`${c.green}${c.bold}│${c.reset}  ${c.bold}Docker Image:${c.reset}    ${c.dim}${status.image}${c.reset}`);
+      console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}Container ID:${c.reset}    ${c.slate}${status.containerId}${c.reset}`);
+      console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}Docker Image:${c.reset}    ${c.slate}${status.image}${c.reset}`);
     }
-    console.log(`${c.green}${c.bold}╰───────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiGreen, width)}\n`);
   }
 
   /**
    * Hiển thị danh sách các Background Tasks đang chạy
    */
   static renderTasks(tasks: Array<{ id: string; command: string; status: string; startedAt: string; pid?: number }>): void {
-    console.log(`\n${c.cyan}${c.bold}╭── ⚙️  BACKGROUND PROCESSES & TASKS (${tasks.length}) ────────────────────────╮${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader(`⚙️  BACKGROUND PROCESSES & TASKS (${tasks.length})`, c.geminiCyan, width)}`);
     if (tasks.length === 0) {
-      console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.dim}Không có background task nào đang chạy.${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.mutedText}Không có background task nào đang chạy.${c.reset}`);
     } else {
       for (const t of tasks) {
         const statusBadge = t.status === 'running'
-          ? `${c.brightGreen}RUNNING (PID: ${t.pid || 'N/A'})${c.reset}`
-          : `${c.gray}STOPPED${c.reset}`;
-        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.bold}[${t.id}]${c.reset} ${c.brightCyan}${t.command}${c.reset} ── ${statusBadge} ${c.dim}(Khởi chạy lúc: ${t.startedAt})${c.reset}`);
+          ? `${c.emerald}RUNNING (PID: ${t.pid || 'N/A'})${c.reset}`
+          : `${c.slate}STOPPED${c.reset}`;
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}[${t.id}]${c.reset} ${c.brightCyan}${t.command}${c.reset} ── ${statusBadge} ${c.slate}(Khởi chạy lúc: ${t.startedAt})${c.reset}`);
       }
     }
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
-   * Hiển thị trạng thái hiện tại
+   * Hiển thị trạng thái hiện tại (Antigravity Telemetry HUD)
    */
   static renderStatus(opts: StatusOptions): void {
+    const width = getTerminalWidth();
     const goalStatus = opts.isGoalMode
-      ? `${c.brightGreen}${c.bold}ON (Unlimited steps ∞)${c.reset}`
+      ? `${c.emerald}${c.bold}ON (Unlimited steps ∞)${c.reset}`
       : `${c.yellow}OFF (${opts.maxSteps} steps)${c.reset}`;
 
-    console.log(`\n${c.magenta}${c.bold}📊 SESSION TELEMETRY & STATUS${c.reset}`);
-    console.log(`  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
-    console.log(`  ${c.bold}Workspace:${c.reset}     ${c.dim}${opts.workspaceRoot}${c.reset}`);
+    console.log(`\n${createBoxHeader('📊 SESSION TELEMETRY & STATUS', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Model:${c.reset}         ${c.brightCyan}${opts.modelName}${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Workspace:${c.reset}     ${c.slate}${opts.workspaceRoot}${c.reset}`);
     if (opts.sandboxStatus) {
-      console.log(`  ${c.bold}Sandbox:${c.reset}       ${opts.sandboxStatus}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Sandbox:${c.reset}       ${opts.sandboxStatus}`);
     }
-    console.log(`  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
-    console.log(`  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
-    console.log(`  ${c.bold}Session Turns:${c.reset} ${c.green}${opts.sessionTurns} completed${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Goal Mode:${c.reset}     ${goalStatus}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Max Steps:${c.reset}     ${c.yellow}${opts.maxSteps} steps${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Session Turns:${c.reset} ${c.emerald}${opts.sessionTurns} completed${c.reset}`);
     if (opts.sessionFile) {
-      console.log(`  ${c.bold}Persisted in:${c.reset}  ${c.dim}${opts.sessionFile}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Persisted in:${c.reset}  ${c.slate}${opts.sessionFile}${c.reset}`);
     }
-    console.log('');
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
    * Hiển thị thông tin cấu hình phiên làm việc đã lưu trữ
    */
   static renderSessionInfo(data: { modelName?: string; workspacePath?: string; activeSessionId?: string; lastUpdated?: string }, sessionFile: string): void {
-    console.log(`\n${c.magenta}${c.bold}╭── 💾 PERSISTED SESSION CONFIG (.codingagent/session.json) ────────────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Model đã lưu:${c.reset}     ${c.brightCyan}${data.modelName || 'Chưa đặt'}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Workspace đã lưu:${c.reset} ${c.dim}${data.workspacePath || 'Chưa đặt'}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Session đang dùng:${c.reset} ${c.brightCyan}${data.activeSessionId || 'Chưa tạo'}${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('💾 PERSISTED SESSION CONFIG (.codingagent/session.json)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Model đã lưu:${c.reset}     ${c.brightCyan}${data.modelName || 'Chưa đặt'}${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Workspace đã lưu:${c.reset} ${c.slate}${data.workspacePath || 'Chưa đặt'}${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Session đang dùng:${c.reset} ${c.brightCyan}${data.activeSessionId || 'Chưa tạo'}${c.reset}`);
     if (data.lastUpdated) {
-      console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Cập nhật lúc:${c.reset}     ${c.gray}${data.lastUpdated}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Cập nhật lúc:${c.reset}     ${c.slate}${data.lastUpdated}${c.reset}`);
     }
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Tệp lưu trữ:${c.reset}      ${c.dim}${sessionFile}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Tệp lưu trữ:${c.reset}      ${c.slate}${sessionFile}${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
-   * Hiển thị banner khi khởi chạy nhiệm vụ Goal Mode
+   * Hiển thị cảnh báo phiên làm việc bị gián đoạn/tạm dừng dở dang (chỉ hiển thị khi thực sự còn task chưa xong)
+   */
+  static renderInterruptedSessionNotice(data: {
+    interruptionType: string;
+    activeDetail?: string;
+    blocker?: string;
+    isGoal?: boolean;
+    isPlan?: boolean;
+  }): void {
+    console.log(`\n${c.amber}${c.bold}⚠️  [PHÁT HIỆN PHIÊN BỊ TẠM DỪNG / GIÁN ĐOẠN TRƯỚC ĐÓ]${c.reset}`);
+    console.log(`   ${c.slate}Loại tiến trình:${c.reset} ${c.geminiPurple}${data.interruptionType}${c.reset}`);
+    if (data.blocker) {
+      console.log(`   ${c.slate}Lý do dừng:${c.reset} ${c.amber}${data.blocker}${c.reset}`);
+    }
+    if (data.activeDetail) {
+      console.log(`   ${c.slate}Tiến độ hiện tại:${c.reset} ${c.brightCyan}${data.activeDetail}${c.reset}`);
+    }
+    console.log(`   💡 ${c.emerald}${c.bold}Chỉ cần gõ ${c.brightCyan}/resume${c.emerald}${c.bold} để tiếp tục thực thi chính xác từ bước này.${c.reset}`);
+    console.log(`   💡 ${c.slate}Gõ ${c.bold}/model${c.reset} ${c.slate}nếu bạn muốn đổi provider/model trước khi tiếp tục.${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị banner khi khởi chạy nhiệm vụ Goal Mode (Antigravity Autonomous Goal)
    */
   static renderGoalBanner(goalText: string): void {
-    console.log(`\n${c.magenta}${c.bold}╭── 🎯 AUTONOMOUS GOAL MODE (UNLIMITED STEPS ∞) ─────────────────────────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.brightYellow}${c.bold}MỤC TIÊU:${c.reset} ${c.bold}${goalText}${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}Chế độ tự trị không giới hạn số bước (Step limit = ∞) cho tới khi hoàn tất.${c.reset}`);
-    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🎯 AUTONOMOUS GOAL MODE (UNLIMITED STEPS ∞)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}MỤC TIÊU:${c.reset} ${c.bold}${goalText}${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.mutedText}Chế độ tự trị không giới hạn số bước (Step limit = ∞) cho tới khi hoàn tất.${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}`);
   }
 
   /**
    * Hiển thị trạng thái Goal Mode
    */
   static renderGoalStatus(enabled: boolean): void {
-    const statusText = enabled ? `${c.brightGreen}${c.bold}BẬT (ON - Unlimited Steps ∞)${c.reset}` : `${c.yellow}${c.bold}TẮT (OFF - Mặc định 30 bước)${c.reset}`;
-    console.log(`\n${c.magenta}${c.bold}╭── 🎯 TRẠNG THÁI CHẾ ĐỘ GOAL (GOAL MODE) ───────────────────────────────────╮${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.bold}Trạng thái hiện tại:${c.reset} ${statusText}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}  ${c.gray}Cách dùng:${c.reset}`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal <nội dung mục tiêu>${c.reset} : Chạy ngay mục tiêu không giới hạn bước`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal on${c.reset}                 : Bật chế độ không giới hạn cho mọi yêu cầu`);
-    console.log(`${c.magenta}${c.bold}│${c.reset}    ${c.brightCyan}/goal off${c.reset}                : Tắt chế độ không giới hạn (về 30 bước)`);
-    console.log(`${c.magenta}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    const width = getTerminalWidth();
+    const statusText = enabled ? `${c.emerald}${c.bold}BẬT (ON - Unlimited Steps ∞)${c.reset}` : `${c.yellow}${c.bold}TẮT (OFF - Mặc định 30 bước)${c.reset}`;
+    console.log(`\n${createBoxHeader('🎯 TRẠNG THÁI CHẾ ĐỘ GOAL (GOAL MODE)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}Trạng thái hiện tại:${c.reset} ${statusText}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Cách dùng:${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/goal <nội dung mục tiêu>${c.reset} : Chạy ngay mục tiêu không giới hạn bước`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/goal on${c.reset}                 : Bật chế độ không giới hạn cho mọi yêu cầu`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/goal off${c.reset}                : Tắt chế độ không giới hạn (về 30 bước)`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
-   * Đầu mỗi Step trong AgentLoop
+   * Đầu mỗi Step trong AgentLoop (Antigravity Responsive Step Header)
    */
   static renderStepHeader(step: number, maxSteps: number): void {
+    const width = getTerminalWidth();
     const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
-    const progress = isUnlimited ? `${step}/∞ [GOAL MODE]` : `${step}/${maxSteps}`;
-    const bar = '─'.repeat(Math.max(10, 58 - progress.length));
-    console.log(`\n${c.blue}${c.bold}╭── ⚡ STEP ${progress} ${bar}${c.reset}`);
+    const progress = isUnlimited ? `${step}/∞ [AUTONOMOUS GOAL]` : `${step}/${maxSteps}`;
+    const title = `⚡ STEP ${progress}`;
+    const barLen = Math.max(4, width - title.length - 6);
+    console.log(`\n${c.geminiBlue}${c.bold}╭── ${c.brightCyan}${title}${c.geminiBlue} ${'─'.repeat(barLen)}${c.reset}`);
   }
 
   /**
    * Hiển thị trạng thái Reasoning (System 2) - Tóm tắt hành vi/ý định suy luận của LLM
    */
   static renderLLMThinking(summary?: string): void {
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    const text = summary && summary.trim() ? summary.trim() : 'LLM đang phân tích ngữ cảnh và xác định bước tiếp theo...';
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    const text = summary && summary.trim() ? summary.trim() : 'Analyzing context & deciding next action...';
     console.log(
-      `${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 Reasoning (System 2):${c.reset} ${c.dim}${text}${c.reset}`,
+      `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}🧠 [REASONING]${c.reset} ${c.mutedText}${text}${c.reset}`,
     );
   }
 
   /**
    * Hiển thị luồng suy luận nội tâm sâu (System 2 Deep Reasoning / CoT)
+   * Hỗ trợ cơ chế thu gọn (Collapse / Folded) phong cách Antigravity CLI
    */
-  static renderReasoning(thoughtText: string): void {
+  static renderReasoning(thoughtText: string, options: { collapsed?: boolean } = {}): void {
     if (!thoughtText || !thoughtText.trim()) return;
     const lines = thoughtText.trim().split('\n');
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.magenta}${c.bold}💭 INTERNAL MONOLOGUE (System 2 Deep Reasoning):${c.reset}`);
-    for (const line of lines.slice(0, 10)) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${c.italic}${line}${c.reset}`);
+    const charCount = thoughtText.length;
+
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    if (options.collapsed) {
+      const preview = lines[0]?.slice(0, 60) || '';
+      console.log(
+        `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}🧠 [REASONING]${c.reset} ${c.slate}▾ (${charCount.toLocaleString()} chars, ${lines.length} lines)${c.reset} ${c.mutedText}${preview}...${c.reset} ${c.slate}[/explore reasoning để mở rộng]${c.reset}`
+      );
+      return;
     }
-    if (lines.length > 10) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.gray}... (+${lines.length - 10} dòng suy luận CoT)${c.reset}`);
+
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}🧠 [DEEP REASONING - CoT]:${c.reset}`);
+    for (const line of lines.slice(0, 12)) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.slate}${c.italic}${line}${c.reset}`);
+    }
+    if (lines.length > 12) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.gray}... (+${lines.length - 12} dòng suy luận • Nhập /explore reasoning để xem toàn bộ)${c.reset}`);
     }
   }
 
   /**
-   * Thông báo hành động model
+   * Hiển thị trạng thái thu gọn UI (Collapse Preferences)
+   */
+  static renderCollapseStatus(prefs: UICollapsePreferences): void {
+    const width = getTerminalWidth();
+    const thinkingBadge = prefs.thinking ? `${c.emerald}${c.bold}[✔ THU GỌN (Folded)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Expanded)]${c.reset}`;
+    const toolsBadge = prefs.tools ? `${c.emerald}${c.bold}[✔ THU GỌN (Preview)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Full Raw)]${c.reset}`;
+    const diffBadge = prefs.diff ? `${c.emerald}${c.bold}[✔ THU GỌN (>20 lines)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Full Patch)]${c.reset}`;
+
+    console.log(`\n${createBoxHeader('🗂️  CẤU HÌNH THU GỌN GIAO DIỆN (UI COLLAPSE PREFERENCES)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}1. Suy luận System 2 (Thinking / CoT):${c.reset} ${thinkingBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}2. Kết quả Tool lớn (Tool Outputs):${c.reset}    ${toolsBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}3. Khối Diff Patches (Diffs):${c.reset}          ${diffBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}4. Độ sâu cây thư mục mặc định:${c.reset}       ${c.brightCyan}${prefs.treeDepth} tầng${c.reset}`);
+    console.log(`${createBoxDivider(c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Lệnh chuyển đổi nhanh:${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse on${c.reset} | ${c.brightCyan}/collapse off${c.reset}       : Bật / tắt chế độ thu gọn toàn bộ`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse thinking on|off${c.reset}   : Bật / tắt thu gọn suy luận CoT`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse tools on|off${c.reset}      : Bật / tắt thu gọn kết quả tool`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse diff on|off${c.reset}       : Bật / tắt thu gọn diff code`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
+  }
+
+  /**
+   * Hiển thị Menu Khám phá Antigravity Explorer
+   */
+  static renderExploreMenu(): void {
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🧭 ANTIGRAVITY EXPLORER HUB (KHÁM PHÁ HỆ THỐNG)', c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Các không gian khám phá khả dụng:${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.brightYellow}🌳 /explore tree [path] [depth]${c.reset}     ${c.mutedText}: Khám phá cây thư mục dự án & kích thước tệp tin${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.brightCyan}🔍 /explore context${c.reset}                 ${c.mutedText}: Phân tích chi tiết các tầng token trong Context Window${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiPurple}🧠 /explore reasoning${c.reset}               ${c.mutedText}: Mở rộng toàn bộ luồng suy luận nội tâm System 2 CoT${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.emerald}🧠 /explore memory${c.reset}                  ${c.mutedText}: Xem quy ước dự án và các bài học agent đã ghi nhớ${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.teal}🛠️  /explore tools${c.reset}                   ${c.mutedText}: Xem danh mục và kích thước schema của các Tool${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.slate}⚙️  /explore tasks${c.reset}                   ${c.mutedText}: Kiểm tra các tiến trình nền và subagents đang chạy${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
+  }
+
+  /**
+   * Hiển thị cây thư mục dự án theo cấu trúc phân cấp Antigravity
+   */
+  static renderWorkspaceTree(scanResult: TreeScanResult, options: { maxLines?: number } = {}): void {
+    const width = getTerminalWidth();
+    const maxLines = options.maxLines || 60;
+    const title = `🌳 WORKSPACE DIRECTORY TREE (${scanResult.totalFiles} files, ${scanResult.totalDirectories} dirs • ${(scanResult.totalSizeBytes / 1024).toFixed(1)} KB)`;
+
+    console.log(`\n${createBoxHeader(title, c.geminiGreen, width)}`);
+    console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.bold}${c.brightYellow}📂 ${path.basename(scanResult.rootPath) || scanResult.rootPath}/${c.reset}`);
+
+    const lines: string[] = [];
+
+    function traverse(node: TreeNode, prefix: string, isTail: boolean) {
+      if (lines.length >= maxLines) return;
+      if (node.depth > 0) {
+        const connector = isTail ? '└── ' : '├── ';
+        const childPrefix = prefix + (isTail ? '    ' : '│   ');
+
+        if (node.isDirectory) {
+          const countStr = node.fileCount ? ` ${c.slate}(${node.fileCount} files)${c.reset}` : '';
+          lines.push(`${c.geminiGreen}${c.bold}│${c.reset}  ${prefix}${connector}${c.brightYellow}📁 ${node.name}/${c.reset}${countStr}`);
+          const children = node.children || [];
+          children.forEach((child, index) => {
+            traverse(child, childPrefix, index === children.length - 1);
+          });
+        } else {
+          const badgeInfo = getFileExtensionBadge(node.extension || '');
+          const color = (c as any)[badgeInfo.colorKey] || c.mutedText;
+          const sizeStr = node.sizeBytes !== undefined ? ` ${c.slate}(${(node.sizeBytes / 1024).toFixed(1)} KB)${c.reset}` : '';
+          lines.push(`${c.geminiGreen}${c.bold}│${c.reset}  ${prefix}${connector}${badgeInfo.icon} ${color}${node.name}${c.reset}${sizeStr}`);
+        }
+      } else {
+        const children = node.children || [];
+        children.forEach((child, index) => {
+          traverse(child, '', index === children.length - 1);
+        });
+      }
+    }
+
+    traverse(scanResult.rootNode, '', true);
+
+    for (const line of lines) {
+      console.log(line);
+    }
+
+    if (scanResult.totalFiles + scanResult.totalDirectories > lines.length) {
+      console.log(`${c.geminiGreen}${c.bold}│${c.reset}  ${c.slate}... (Hiển thị ${lines.length} mục • Dùng /tree <path> [depth] để khám phá sâu hơn)${c.reset}`);
+    }
+
+    console.log(`${createBoxFooter(c.geminiGreen, width)}\n`);
+  }
+
+  /**
+   * Hiển thị bảng kiểm tra và phân tích chi tiết Context Window của Agent
+   */
+  static renderContextInspection(report: ContextInspectionReport): void {
+    const width = getTerminalWidth();
+    const gauge = renderContextProgressBar(report.totalEstimatedTokens, report.maxInputTokens, 16);
+    const title = '🔍 AGENT CONTEXT INSPECTOR & TOKEN BREAKDOWN';
+
+    console.log(`\n${createBoxHeader(title, c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Mô hình:${c.reset}        ${c.brightCyan}${report.modelName}${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Context Budget:${c.reset} [${gauge}] ${c.bold}${report.totalEstimatedTokens.toLocaleString()}${c.reset} / ${report.maxInputTokens.toLocaleString()} tokens (${report.utilizationPercent}%)`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Phiên làm việc:${c.reset} ${c.slate}${report.sessionId}${c.reset} (${report.turnCount} turns, ${report.messageCount} messages)`);
+    console.log(`${createBoxDivider(c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}❖ PHÂN TẦNG DUNG LƯỢNG NGỮ CẢNH (CONTEXT LAYERS):${c.reset}`);
+
+    for (let i = 0; i < report.layers.length; i++) {
+      const layer = report.layers[i];
+      const percentStr = `${layer.percentage}%`.padStart(5, ' ');
+      const tokenStr = `${layer.estimatedTokens.toLocaleString()} tok`.padStart(11, ' ');
+      console.log(
+        `${c.geminiCyan}${c.bold}│${c.reset}    ${c.brightCyan}${i + 1}.${c.reset} ${c.bold}${layer.name.padEnd(30)}${c.reset} : ${c.geminiAmber}${tokenStr}${c.reset} (${c.emerald}${percentStr}${c.reset}) ── ${c.mutedText}${layer.description}${c.reset}`
+      );
+    }
+
+    console.log(`${createBoxDivider(c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiGreen}${c.bold}❖ ĐÁNH GIÁ SỨC KHỎE NGỮ CẢNH & KHUYẾN NGHỊ (HEALTH & ADVICE):${c.reset}`);
+    for (const rec of report.recommendations) {
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}    ${c.mutedText}${rec}${c.reset}`);
+    }
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
+  }
+
+  /**
+   * Hiển thị chi tiết toàn bộ chuỗi suy luận System 2 Deep Reasoning
+   */
+  static renderReasoningInspection(data: { thought: string; timestamp?: string; step?: number; turn?: number }): void {
+    const width = getTerminalWidth();
+    const timeStr = data.timestamp ? ` • ${data.timestamp}` : '';
+    const turnStr = data.turn ? `Turn ${data.turn}` : 'Current Turn';
+    const stepStr = data.step ? ` • Step ${data.step}` : '';
+    const title = `🧠 DEEP REASONING EXPLORER (${turnStr}${stepStr}${timeStr})`;
+
+    console.log(`\n${createBoxHeader(title, c.geminiPurple, width)}`);
+    if (!data.thought || !data.thought.trim()) {
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.mutedText}Chưa có chuỗi suy luận nào được ghi nhận trong lượt này.${c.reset}`);
+    } else {
+      const lines = data.thought.trim().split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const lineNum = `${i + 1}`.padStart(3, ' ');
+        console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}${lineNum} │${c.reset} ${c.mutedText}${lines[i]}${c.reset}`);
+      }
+    }
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
+  }
+
+  /**
+   * Thông báo hành động model (Antigravity System 1 Action Badge)
    */
   static renderModelAction(action: 'tool_call' | 'final_answer' | 'max_steps', detail?: string): void {
     if (action === 'tool_call') {
-      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightCyan}⚙️  Action (System 1):${c.reset} ${c.italic}${detail || 'Requesting tool execution...'}${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiCyan}⚙️  [ACTION]${c.reset} ${c.mutedText}${detail || 'Requesting tool execution...'}${c.reset}`);
     } else if (action === 'final_answer') {
-      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.green}✨ Completed:${c.reset} Ready to provide final response.`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.emerald}✨ [COMPLETED]${c.reset} Ready to provide final response.`);
     } else {
-      console.log(`${c.blue}${c.bold}│${c.reset}  ${c.red}⚠️ Circuit Breaker:${c.reset} Max steps reached.`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.crimson}⚠️ [CIRCUIT BREAKER]${c.reset} Max steps reached.`);
     }
   }
 
   /**
-   * Hiển thị Tool Call chuẩn Codex CLI với Diff Preview nếu là tool sửa file
+   * Hiển thị Tool Call chuẩn Antigravity / Codex CLI với Diff Preview nếu là tool sửa file
    */
   static renderToolCall(name: string, args: Record<string, any>): void {
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.brightYellow}🔧 Calling Tool:${c.reset} ${c.bold}${name}${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}⚙️  [TOOL CALL]${c.reset} ${c.bold}${c.brightCyan}${name}${c.reset}`);
 
     const entries = Object.entries(args);
     entries.forEach(([k, v], idx) => {
       const isLast = idx === entries.length - 1;
       const prefix = isLast ? '└─' : '├─';
       const valStr = formatToolArgumentPreview(v);
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.gray}${prefix}${c.reset} ${c.cyan}${k}:${c.reset} ${c.dim}${valStr}${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.slate}${prefix}${c.reset} ${c.teal}${k}:${c.reset} ${c.mutedText}${valStr}${c.reset}`);
     });
 
     // Nếu là apply_patch có chứa diff hunk, render trực quan diff
@@ -1380,49 +1719,52 @@ export class CLI {
   }
 
   /**
-   * Hiển thị Tool Result
+   * Hiển thị Tool Result (Antigravity Tool Output Visualizer)
    */
   static renderToolResult(name: string, durationMs: number, result: Record<string, any>): void {
     const isError = isToolResultFailure(result);
-    const badge = isError ? `${c.red}✖ ERROR` : `${c.green}✔ OK`;
+    const badge = isError
+      ? `${c.crimson}${c.bold}✖ ERROR${c.reset}`
+      : `${c.emerald}${c.bold}✔ OK${c.reset}`;
+    const durationBadge = durationMs > 0 ? `${c.slate}(${durationMs}ms)${c.reset}` : '';
 
-    console.log(`${c.blue}${c.bold}│${c.reset}`);
-    console.log(`${c.blue}${c.bold}│${c.reset}  ${c.gray}📥 Result for ${c.bold}${name}${c.reset} [${badge}${c.reset}${c.gray} in ${durationMs}ms]:${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.slate}📥 [RESULT]${c.reset} ${c.bold}${name}${c.reset} ➔ [${badge}] ${durationBadge}`);
 
     if (result.error) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.red}${result.error}${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.crimson}${result.error}${c.reset}`);
     } else if (result.content !== undefined) {
       const lines = String(result.content).split('\n');
-      const preview = lines.slice(0, 4).map(l => `     ${c.dim}${l}${c.reset}`).join('\n');
-      const more = lines.length > 4 ? `\n     ${c.gray}... (+${lines.length - 4} dòng)${c.reset}` : '';
+      const preview = lines.slice(0, 4).map(l => `     ${c.mutedText}${l}${c.reset}`).join('\n');
+      const more = lines.length > 4 ? `\n     ${c.slate}... (+${lines.length - 4} lines)${c.reset}` : '';
       console.log(preview + more);
     } else if (result.matches !== undefined) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.green}Tìm thấy ${result.totalMatches || result.matches.length} kết quả khớp.${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.emerald}✔ Found ${result.totalMatches || result.matches.length} matching occurrences.${c.reset}`);
     } else if (result.stdout !== undefined || result.stderr !== undefined) {
-      const codeStr = result.exitCode === 0 ? `${c.green}exit: 0` : `${c.red}exit: ${result.exitCode}`;
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.bold}[${codeStr}${c.reset}${c.bold}]${c.reset}`);
+      const codeStr = result.exitCode === 0 ? `${c.emerald}exit: 0${c.reset}` : `${c.crimson}exit: ${result.exitCode}${c.reset}`;
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     [${codeStr}]`);
       if (result.stdout) {
         const outLines = result.stdout.trim().split('\n').slice(0, 3);
-        outLines.forEach((l: string) => console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${l}${c.reset}`));
+        outLines.forEach((l: string) => console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.mutedText}${l}${c.reset}`));
       }
       if (result.stderr) {
         const errLines = result.stderr.trim().split('\n').slice(0, 3);
-        errLines.forEach((l: string) => console.log(`${c.blue}${c.bold}│${c.reset}     ${c.red}${l}${c.reset}`));
+        errLines.forEach((l: string) => console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.crimson}${l}${c.reset}`));
       }
     } else if (result.message) {
-      console.log(`${c.blue}${c.bold}│${c.reset}     ${c.brightGreen}${result.message}${c.reset}`);
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.emerald}${result.message}${c.reset}`);
     } else if (result.success === undefined || Object.keys(result).length > 1) {
       const { diagnostic, suggestion, prompt, hint, suggestionText, ...rest } = result;
       if (Object.keys(rest).length > 0) {
         const resStr = JSON.stringify(rest);
         const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;
-        console.log(`${c.blue}${c.bold}│${c.reset}     ${c.dim}${preview}${c.reset}`);
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.mutedText}${preview}${c.reset}`);
       }
     }
   }
 
   /**
-   * Hiển thị Prompt Caching Telemetry theo chuẩn MINUS
+   * Hiển thị Prompt Caching & Token Telemetry theo chuẩn Antigravity HUD
    */
   static renderCacheUsage(usage?: {
     promptTokens?: number;
@@ -1430,26 +1772,27 @@ export class CLI {
     totalTokens?: number;
     cachedTokens?: number;
     cacheHitRate?: number;
+    maxContextTokens?: number;
   }): void {
     if (!usage || (usage.promptTokens === undefined && usage.totalTokens === undefined)) return;
     const promptTokens = usage.promptTokens ?? 0;
     const cachedTokens = usage.cachedTokens ?? 0;
     const completionTokens = usage.completionTokens ?? 0;
     const hitRate = usage.cacheHitRate ?? (promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0);
-    
-    if (cachedTokens > 0) {
-      console.log(
-        `${c.blue}${c.bold}│${c.reset}  ${c.brightGreen}⚡ Prompt Cache:${c.reset} ${c.emerald}${cachedTokens.toLocaleString()}${c.reset} cached / ${promptTokens.toLocaleString()} prompt tokens (${c.brightGreen}${c.bold}${hitRate}% hit rate${c.reset}) ${c.dim}| Out: ${completionTokens.toLocaleString()} tok${c.reset}`
-      );
-    } else if (promptTokens > 0) {
-      console.log(
-        `${c.blue}${c.bold}│${c.reset}  ${c.dim}⚡ Prompt Cache: 0 cached / ${promptTokens.toLocaleString()} prompt tokens (0.0% - cold start) | Out: ${completionTokens.toLocaleString()} tok${c.reset}`
-      );
-    }
+    const maxCtx = usage.maxContextTokens || 128000;
+
+    const progressMeter = renderContextProgressBar(promptTokens, maxCtx, 12);
+    const hitBadge = cachedTokens > 0
+      ? `${c.emerald}${c.bold}${hitRate}% hit${c.reset}`
+      : `${c.slate}0% (cold)${c.reset}`;
+
+    console.log(
+      `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiCyan}⚡ [TELEMETRY]${c.reset} Context: [${progressMeter}] ${c.slate}(${promptTokens.toLocaleString()} tok)${c.reset} │ Cache: [${hitBadge}] │ Out: ${c.yellow}${completionTokens.toLocaleString()}${c.reset} tok`
+    );
   }
 
   /**
-   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn MINUS
+   * Hiển thị bảng điều khiển & chẩn đoán Prompt Caching theo chuẩn Antigravity
    */
   static renderPromptCacheDashboard(info: {
     modelName: string;
@@ -1459,21 +1802,22 @@ export class CLI {
     totalCachedTokens?: number;
     lastHitRate?: number;
   }): void {
-    console.log(`\n${c.cyan}${c.bold}⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS (MINUS STANDARD)${c.reset}`);
-    console.log(`  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
-    console.log(`  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.brightGreen}✔ Immutable Static System Prompt at index 0${c.reset}`);
-    console.log(`  ${c.bold}Dynamic Context:${c.reset}        ${c.brightGreen}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
-    console.log(`  ${c.bold}Tool Declarations:${c.reset}      ${c.brightGreen}✔ Deterministic Alphabetical Ordering${c.reset}`);
-    console.log(`  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.brightGreen + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
-    console.log(`  ${c.bold}Affinity Routing:${c.reset}       ${c.brightGreen}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
-    console.log(`  ${c.bold}Observability:${c.reset}          ${c.brightGreen}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('⚡ PROMPT CACHING ARCHITECTURE & DIAGNOSTICS', c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Mô hình hiện tại:${c.reset}       ${c.brightCyan}${info.modelName}${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Kiến trúc tiền tố:${c.reset}      ${c.emerald}✔ Immutable Static System Prompt at index 0${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Dynamic Context:${c.reset}        ${c.emerald}✔ Tail-End User Message Injection (Non-destructive)${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Tool Declarations:${c.reset}      ${c.emerald}✔ Deterministic Alphabetical Ordering${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Context Compactor:${c.reset}      ${info.preservePrefixCache ? c.emerald + '✔ KV-Cache Preservation Mode (Append-Only)' : c.yellow + '⚠ In-place Pruning (May invalidate cache)'}${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Affinity Routing:${c.reset}       ${c.emerald}✔ Session-ID & Prompt-Cache-Key HTTP Headers${c.reset}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Observability:${c.reset}          ${c.emerald}✔ Real-time Token Details & Hit Rate Telemetry${c.reset}`);
     if (info.sessionId) {
-      console.log(`  ${c.bold}Session Cache Key:${c.reset}      ${c.dim}${info.sessionId.slice(0, 32)}${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Session Cache Key:${c.reset}      ${c.slate}${info.sessionId.slice(0, 32)}${c.reset}`);
     }
     if (info.lastHitRate !== undefined) {
-      console.log(`  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.brightYellow}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}Tỉ lệ Hit gần nhất:${c.reset}     ${c.geminiAmber}${c.bold}${info.lastHitRate}% hit rate${c.reset}`);
     }
-    console.log('');
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
@@ -1481,35 +1825,37 @@ export class CLI {
    */
   static renderAttachmentSummary(attachments: AttachedItemSummary[]): void {
     if (!attachments || attachments.length === 0) return;
-    console.log(`\n${c.cyan}${c.bold}╭── 📎 ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH (${attachments.length} mục) ──────────────────────────────────╮${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader(`📎 ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH (${attachments.length} mục)`, c.geminiCyan, width)}`);
     for (const item of attachments) {
       if (item.type === 'directory') {
-        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightYellow}📁 ${item.path}/${c.reset} ${c.dim}(Thư mục • ${item.fileCount || 0} mục)${c.reset}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}📁 ${item.path}/${c.reset} ${c.slate}(Thư mục • ${item.fileCount || 0} mục)${c.reset}`);
       } else {
         const sizeStr = `${(item.sizeBytes / 1024).toFixed(1)} KB`;
         const linesStr = item.lineCount !== undefined ? `${item.lineCount.toLocaleString()} dòng • ` : '';
-        console.log(`${c.cyan}${c.bold}│${c.reset}  ${c.brightGreen}📄 ${item.path}${c.reset} ${c.dim}(${linesStr}${sizeStr})${c.reset}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.emerald}📄 ${item.path}${c.reset} ${c.slate}(${linesStr}${sizeStr})${c.reset}`);
       }
     }
-    console.log(`${c.cyan}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
    * Cuối mỗi Step trong AgentLoop
    */
   static renderStepFooter(): void {
-    console.log(`${c.blue}${c.bold}╰────────────────────────────────────────────────────────────────────────────${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`${c.geminiBlue}${c.bold}╰${'─'.repeat(Math.max(10, width - 2))}${c.reset}`);
   }
 
   /**
-   * Format Markdown cơ bản sang Terminal ANSI styling
+   * Format Markdown cơ bản sang Terminal ANSI styling phong cách Antigravity
    */
   static formatMarkdownTerminal(text: string): string {
     return text
       // Headers
-      .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
-      .replace(/^## (.*$)/gm, `\n${c.brightYellow}${c.bold}❖ $1${c.reset}`)
-      .replace(/^# (.*$)/gm, `\n${c.cyan}${c.bold}══════════ $1 ══════════${c.reset}\n`)
+      .replace(/^### (.*$)/gm, `${c.geminiCyan}${c.bold}❯ $1${c.reset}`)
+      .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}❖ $1${c.reset}`)
+      .replace(/^# (.*$)/gm, `\n${c.geminiCyan}${c.bold}══════════ $1 ══════════${c.reset}\n`)
       // Bold & Italic
       .replace(/\*\*(.*?)\*\*/g, `${c.bold}$1${c.reset}`)
       .replace(/\*(.*?)\*/g, `${c.italic}$1${c.reset}`)
@@ -1517,11 +1863,13 @@ export class CLI {
       .replace(/`([^`]+)`/g, `${c.brightCyan}$1${c.reset}`)
       // Bullet points
       .replace(/^\s*[-*]\s+/gm, `  ${c.emerald}•${c.reset} `)
-      .replace(/^\s*\d+\.\s+/gm, `  ${c.yellow}$1.${c.reset} `)
+      .replace(/^\s*(\d+)\.\s+/gm, `  ${c.geminiAmber}$1.${c.reset} `)
       // Blockquotes & Alerts
-      .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.blue}ℹ NOTE:${c.reset} $1`)
-      .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.amber}⚡ IMPORTANT:${c.reset} $1`)
-      .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.red}⚠️ WARNING:${c.reset} $1`);
+      .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.geminiBlue}ℹ NOTE:${c.reset} $1`)
+      .replace(/^>\s*\[!TIP\]\s*(.*$)/gm, `  ${c.geminiGreen}💡 TIP:${c.reset} $1`)
+      .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
+      .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
+      .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
   }
 
   /**
@@ -1573,7 +1921,7 @@ export class CLI {
   }
 
   /**
-   * Hiển thị Telemetry kết thúc lượt thực thi (Turn Execution Summary)
+   * Hiển thị Tóm tắt AI và Telemetry kết thúc lượt thực thi (Turn Execution & AI Summary - Antigravity HUD)
    */
   static renderTurnSummary(telemetry: {
     durationMs: number;
@@ -1581,25 +1929,42 @@ export class CLI {
     filesModified?: string[];
     testsPassed?: boolean;
     sandboxMode?: string;
+    summaryAi?: string;
   }): void {
+    const width = getTerminalWidth();
     const durationSec = (telemetry.durationMs / 1000).toFixed(2);
     const testBadge = telemetry.testsPassed !== undefined
       ? telemetry.testsPassed ? `${c.emerald}✔ PASSED` : `${c.crimson}✖ FAILED`
       : `${c.slate}N/A`;
     const filesCount = telemetry.filesModified?.length || 0;
 
-    console.log(`${c.slate}${c.bold}╭── 📊 TURN TELEMETRY ────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.slate}${c.bold}│${c.reset}  ⏱️  Duration: ${c.bold}${durationSec}s${c.reset}  │  ⚡ Steps: ${c.bold}${telemetry.stepsCount}${c.reset}  │  📝 Mutated: ${c.bold}${filesCount} file(s)${c.reset}  │  🧪 Tests: ${testBadge}${c.reset}`);
-    console.log(`${c.slate}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+    console.log(`\n${createBoxHeader('📊 TURN SUMMARY & TELEMETRY', c.geminiCyan, width)}`);
+    if (telemetry.summaryAi && telemetry.summaryAi.trim()) {
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}🤖 Summary (AI):${c.reset} ${c.white}${telemetry.summaryAi.trim()}${c.reset}`);
+      console.log(`${createBoxDivider(c.geminiCyan, width)}`);
+    }
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ⏱️  Duration: ${c.bold}${durationSec}s${c.reset}  │  ⚡ Steps: ${c.bold}${telemetry.stepsCount}${c.reset}  │  📝 Mutated: ${c.bold}${filesCount} file(s)${c.reset}  │  🧪 Tests: ${testBadge}${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
+  }
+
+  /**
+   * Hiển thị Tóm tắt AI chuyên biệt ngay sau khi kết thúc turn
+   */
+  static renderTurnAiSummary(summary: string): void {
+    if (!summary || !summary.trim()) return;
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🤖 TURN SUMMARY (AI)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.white}${summary.trim()}${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
    * Hiển thị danh sách Skills và trạng thái kích hoạt
    */
   static renderSkills(skills: any[], activeDecisions: any[] = []): void {
-    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
-    console.log(`${c.cyan}${c.bold}║                       🛠️  SUPERPOWERS SKILL REGISTRY                       ║${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🛠️  SUPERPOWERS SKILL REGISTRY', c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
 
     const activeMap = new Map(activeDecisions.map((d: any) => [d.skillId, d]));
 
@@ -1607,29 +1972,29 @@ export class CLI {
       const active = activeMap.get(skill.id);
       const statusBadge = active
         ? active.decision === 'activated'
-          ? `${c.green}${c.bold}[ACTIVE]${c.reset}`
-          : `${c.yellow}${c.bold}[${active.decision.toUpperCase()}]${c.reset}`
-        : `${c.gray}[INSTALLED]${c.reset}`;
+          ? `${c.emerald}${c.bold}[ACTIVE]${c.reset}`
+          : `${c.geminiAmber}${c.bold}[${active.decision.toUpperCase()}]${c.reset}`
+        : `${c.slate}[INSTALLED]${c.reset}`;
 
-      console.log(`  ${statusBadge} ${c.bold}${c.brightCyan}${skill.id}${c.reset} ${c.gray}(v${skill.version})${c.reset} - ${c.white}${skill.name}${c.reset}`);
-      console.log(`     ${c.dim}${skill.description}${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${statusBadge} ${c.bold}${c.brightCyan}${skill.id}${c.reset} ${c.slate}(v${skill.version})${c.reset} - ${c.white}${skill.name}${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}     ${c.mutedText}${skill.description}${c.reset}`);
       if (skill.requires && skill.requires.length > 0) {
-        console.log(`     ${c.blue}Requires:${c.reset} ${skill.requires.join(', ')}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}     ${c.teal}Requires:${c.reset} ${skill.requires.join(', ')}`);
       }
       if (skill.requiredCapabilities && skill.requiredCapabilities.length > 0) {
-        console.log(`     ${c.magenta}Capabilities:${c.reset} ${skill.requiredCapabilities.join(', ')}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}     ${c.geminiPurple}Capabilities:${c.reset} ${skill.requiredCapabilities.join(', ')}`);
       }
-      console.log('');
     }
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
    * Hiển thị danh mục Capabilities
    */
   static renderCapabilities(capabilities: any[]): void {
-    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
-    console.log(`${c.cyan}${c.bold}║                       ⚡  CAPABILITY CATALOG                               ║${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('⚡ CAPABILITY CATALOG', c.geminiCyan, width)}`);
+    console.log(`${c.geminiCyan}${c.bold}│${c.reset}`);
 
     const byCat = new Map<string, any[]>();
     for (const cap of capabilities) {
@@ -1639,54 +2004,56 @@ export class CLI {
     }
 
     for (const [cat, items] of byCat.entries()) {
-      console.log(`  ${c.bold}${c.yellow}📂 ${cat.toUpperCase()}${c.reset}`);
+      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.bold}${c.geminiAmber}📂 ${cat.toUpperCase()}${c.reset}`);
       for (const cap of items) {
-        const sideEffectColor = cap.sideEffect === 'none' ? c.green : c.red;
-        const approvalBadge = cap.requiresApproval ? ` ${c.yellow}[APPROVAL REQUIRED]${c.reset}` : '';
-        console.log(`    • ${c.bold}${c.brightCyan}${cap.name}${c.reset} -> ${c.dim}${cap.toolName || 'system'}${c.reset}${approvalBadge}`);
-        console.log(`      ${c.gray}Side-effect: ${sideEffectColor}${cap.sideEffect}${c.gray} | Reversible: ${cap.reversible} | Retryable: ${cap.retryable}${c.reset}`);
-        console.log(`      ${c.dim}${cap.description}${c.reset}`);
+        const sideEffectColor = cap.sideEffect === 'none' ? c.emerald : c.crimson;
+        const approvalBadge = cap.requiresApproval ? ` ${c.geminiAmber}[APPROVAL REQUIRED]${c.reset}` : '';
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}    • ${c.bold}${c.brightCyan}${cap.name}${c.reset} -> ${c.slate}${cap.toolName || 'system'}${c.reset}${approvalBadge}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}      ${c.slate}Side-effect: ${sideEffectColor}${cap.sideEffect}${c.slate} | Reversible: ${cap.reversible} | Retryable: ${cap.retryable}${c.reset}`);
+        console.log(`${c.geminiCyan}${c.bold}│${c.reset}      ${c.mutedText}${cap.description}${c.reset}`);
       }
-      console.log('');
     }
+    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
   }
 
   /**
    * Hiển thị danh sách yêu cầu phê duyệt
    */
   static renderApprovals(approvals: any[]): void {
-    console.log(`\n${c.cyan}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
-    console.log(`${c.cyan}${c.bold}║                       🛡️  PENDING APPROVALS                                ║${c.reset}`);
-    console.log(`${c.cyan}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🛡️  PENDING APPROVALS', c.geminiAmber, width)}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}`);
 
     if (approvals.length === 0) {
-      console.log(`  ${c.green}✔ Không có yêu cầu phê duyệt nào đang chờ.${c.reset}\n`);
-      return;
+      console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.emerald}✔ Không có yêu cầu phê duyệt nào đang chờ.${c.reset}`);
+    } else {
+      for (const req of approvals) {
+        console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}⏳ [${req.id}]${c.reset} Action: ${c.bold}${req.action}${c.reset}`);
+        console.log(`${c.geminiAmber}${c.bold}│${c.reset}     ${c.mutedText}${req.description}${c.reset}`);
+        console.log(`${c.geminiAmber}${c.bold}│${c.reset}     ${c.slate}Requested at: ${req.requestedAt}${c.reset}`);
+      }
     }
-
-    for (const req of approvals) {
-      console.log(`  ${c.yellow}${c.bold}⏳ [${req.id}]${c.reset} Action: ${c.bold}${req.action}${c.reset}`);
-      console.log(`     ${c.dim}${req.description}${c.reset}`);
-      console.log(`     ${c.gray}Requested at: ${req.requestedAt}${c.reset}\n`);
-    }
+    console.log(`${createBoxFooter(c.geminiAmber, width)}\n`);
   }
 
   /**
    * Hiển thị thông tin trạng thái Permission Policy
    */
   static renderPermissionStatus(mode: string, approvedCount: number): void {
-    console.log(`\n${c.brightYellow}${c.bold}🔐 CẤU HÌNH PHÂN QUYỀN (PERMISSION GATEWAY)${c.reset}`);
-    console.log(`  ${c.dim}Chế độ hiện tại:${c.reset} ${c.bold}${c.brightCyan}${mode}${c.reset}`);
-    console.log(`  ${c.dim}Danh mục đã auto-approve trong phiên:${c.reset} ${c.bold}${approvedCount}${c.reset}`);
-    console.log(`  ${c.gray}Các chế độ khả dụng:${c.reset}`);
-    console.log(`    - ${c.bold}ask_sensitive${c.reset}  : Hỏi ý kiến khi chỉnh sửa file hoặc chạy lệnh nguy hiểm (Khuyên dùng)`);
-    console.log(`    - ${c.bold}always_ask${c.reset}     : Luôn hỏi ý kiến trước mọi thao tác ghi/chạy lệnh`);
-    console.log(`    - ${c.bold}auto_approve${c.reset}   : Tự động cho phép tất cả (Không khuyến nghị)`);
-    console.log(`    - ${c.bold}read_only${c.reset}      : Chặn hoàn toàn mọi thao tác chỉnh sửa file và chạy lệnh\n`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🔐 CẤU HÌNH PHÂN QUYỀN (PERMISSION GATEWAY)', c.geminiAmber, width)}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Chế độ hiện tại:${c.reset} ${c.bold}${c.brightCyan}${mode}${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Danh mục đã auto-approve trong phiên:${c.reset} ${c.bold}${approvedCount}${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Các chế độ khả dụng:${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}    - ${c.bold}ask_sensitive${c.reset}  : Hỏi ý kiến khi chỉnh sửa file hoặc chạy lệnh nguy hiểm (Khuyên dùng)`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}    - ${c.bold}always_ask${c.reset}     : Luôn hỏi ý kiến trước mọi thao tác ghi/chạy lệnh`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}    - ${c.bold}auto_approve${c.reset}   : Tự động cho phép tất cả (Không khuyến nghị)`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}    - ${c.bold}read_only${c.reset}      : Chặn hoàn toàn mọi thao tác chỉnh sửa file và chạy lệnh`);
+    console.log(`${createBoxFooter(c.geminiAmber, width)}\n`);
   }
 
   /**
-   * Hiển thị khung yêu cầu phê duyệt Permission chuẩn MINUS CLI
+   * Hiển thị khung yêu cầu phê duyệt Permission chuẩn Antigravity
    */
   static renderPermissionPrompt(request: {
     toolName: string;
@@ -1696,66 +2063,50 @@ export class CLI {
     riskLevel: string;
     details?: Record<string, any>;
   }): void {
-    const riskColor = request.riskLevel === 'CRITICAL' ? `${c.crimson}${c.bold}` : request.riskLevel === 'HIGH' ? `${c.amber}${c.bold}` : `${c.yellow}${c.bold}`;
-    console.log(`\n${c.yellow}╭────────────────────────────────────────────────────────────────────────╮${c.reset}`);
-    console.log(`${c.yellow}│${c.reset}  ${c.bold}⚠️  XÁC NHẬN CẤP QUYỀN THỰC THI (MINUS PERMISSION APPROVAL)${c.reset}        ${c.yellow}│${c.reset}`);
-    console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.yellow}│${c.reset}  ${c.dim}Công cụ:${c.reset}     ${c.bold}${request.toolName}${c.reset} (${request.category})`);
-    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mục tiêu:${c.reset}    ${c.brightCyan}${request.target}${c.reset}`);
-    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mô tả:${c.reset}       ${request.summary}`);
+    const width = getTerminalWidth();
+    const riskColor = request.riskLevel === 'CRITICAL' ? `${c.crimson}${c.bold}` : request.riskLevel === 'HIGH' ? `${c.geminiAmber}${c.bold}` : `${c.yellow}${c.bold}`;
+    console.log(`\n${createBoxHeader('⚠️  XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL)', c.geminiAmber, width)}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Công cụ:${c.reset}     ${c.bold}${request.toolName}${c.reset} (${request.category})`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Mục tiêu:${c.reset}    ${c.brightCyan}${request.target}${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Mô tả:${c.reset}       ${request.summary}`);
     if (request.details?.misuse) {
-      console.log(`${c.yellow}│${c.reset}  ${c.brightMagenta}${c.bold}Gợi ý:${c.reset}       Bấm ${c.bold}'n'${c.reset} để từ chối và ép LLM dùng tool: ${c.brightCyan}${request.details.misuse.tool}${c.reset}`);
+      console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}Gợi ý:${c.reset}       Bấm ${c.bold}'n'${c.reset} để từ chối và ép LLM dùng tool: ${c.brightCyan}${request.details.misuse.tool}${c.reset}`);
     }
-    console.log(`${c.yellow}│${c.reset}  ${c.dim}Mức rủi ro:${c.reset}  ${riskColor}[${request.riskLevel}]${c.reset}`);
-    console.log(`${c.yellow}├────────────────────────────────────────────────────────────────────────┤${c.reset}`);
-    console.log(`${c.yellow}│${c.reset}  ${c.slate}Phím tắt: ${c.emerald}[y]${c.reset} Duyệt 1 lần • ${c.cyan}[a]${c.reset} Duyệt luôn trong phiên • ${c.red}[n]${c.reset} Từ chối • ${c.dim}[q] Hủy${c.reset}`);
-    console.log(`${c.yellow}╰────────────────────────────────────────────────────────────────────────╯${c.reset}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Mức rủi ro:${c.reset}  ${riskColor}[${request.riskLevel}]${c.reset}`);
+    console.log(`${createBoxDivider(c.geminiAmber, width)}`);
+    console.log(`${c.geminiAmber}${c.bold}│${c.reset}  ${c.slate}Phím tắt: ${c.emerald}[y]${c.reset} Duyệt 1 lần • ${c.cyan}[a]${c.reset} Duyệt luôn trong phiên • ${c.crimson}[n]${c.reset} Từ chối • ${c.dim}[q] Hủy${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiAmber, width)}`);
   }
 
   /**
    * Hiển thị bảng cấu hình Token của mô hình hiện tại kèm các gói đóng gói sẵn (Preset Tiers)
    */
   static renderTokenConfig(modelName: string, config: any, profile: any): void {
-    console.log(`\n${c.brightYellow}${c.bold}╔════════════════════════════════════════════════════════════════════════════╗${c.reset}`);
-    console.log(`${c.brightYellow}${c.bold}║           📊 CẤU HÌNH TOKEN BUDGET & GÓI ĐÓNG GÓI SẴN (PRESETS)            ║${c.reset}`);
-    console.log(`${c.brightYellow}${c.bold}╚════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
-
-    console.log(`  ${c.dim}Mô hình hiện tại:${c.reset}          ${c.bold}${modelName}${c.reset} ${c.gray}(Provider: ${profile.provider.toUpperCase()})${c.reset}`);
-    console.log(`  ${c.dim}Max Output Tokens:${c.reset}         ${c.bold}${c.green}${config.maxOutputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedOutputTokens.toLocaleString()})${c.reset}`);
-    console.log(`  ${c.dim}Max Input Tokens (Context):${c.reset} ${c.bold}${c.cyan}${config.maxInputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.gray}(Hỗ trợ tối đa: ${profile.maxSupportedInputTokens.toLocaleString()})${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('📊 CẤU HÌNH TOKEN BUDGET & GÓI ĐÓNG GÓI SẴN (PRESETS)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Mô hình hiện tại:${c.reset}          ${c.bold}${modelName}${c.reset} ${c.slate}(Provider: ${profile.provider.toUpperCase()})${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Max Output Tokens:${c.reset}         ${c.bold}${c.emerald}${config.maxOutputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.slate}(Hỗ trợ tối đa: ${profile.maxSupportedOutputTokens.toLocaleString()})${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Max Input Tokens (Context):${c.reset} ${c.bold}${c.brightCyan}${config.maxInputTokens?.toLocaleString() ?? 'Mặc định'}${c.reset} ${c.slate}(Hỗ trợ tối đa: ${profile.maxSupportedInputTokens.toLocaleString()})${c.reset}`);
     
     if (profile.supportsThinkingBudget || config.thinkingBudget !== undefined) {
       const budgetStr = config.thinkingBudget === 0 ? 'TẮT (0)' : (config.thinkingBudget?.toLocaleString() ?? 'Tự động');
-      console.log(`  ${c.dim}Thinking Token Budget:${c.reset}     ${c.bold}${c.magenta}${budgetStr}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Thinking Token Budget:${c.reset}     ${c.bold}${c.geminiPurple}${budgetStr}${c.reset}`);
     }
     if (profile.supportsReasoningEffort || config.reasoningEffort) {
-      console.log(`  ${c.dim}Reasoning Effort:${c.reset}          ${c.bold}${c.yellow}${config.reasoningEffort ?? 'medium'}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Reasoning Effort:${c.reset}          ${c.bold}${c.geminiAmber}${config.reasoningEffort ?? 'medium'}${c.reset}`);
     }
 
-    console.log(`\n${c.cyan}${c.bold}📦 4 GÓI ĐÓNG GÓI SẴN (PRESET TIERS):${c.reset}`);
-    console.log(`  ${c.green}${c.bold}1. LOW (Eco / Tiết kiệm)${c.reset}`);
-    console.log(`     ↳ Output: ${c.bold}2,048${c.reset} | Context: ${c.bold}16,000${c.reset} | Thinking: ${c.bold}2,048${c.reset} (effort: ${c.bold}low${c.reset})`);
-    console.log(`     ↳ ${c.gray}Tối ưu tốc độ phản hồi tức thì, tiết kiệm token và chi phí tối đa.${c.reset}`);
-
-    console.log(`  ${c.yellow}${c.bold}2. MEDIUM (Balanced / Tiêu chuẩn)${c.reset}`);
-    console.log(`     ↳ Output: ${c.bold}8,192${c.reset} | Context: ${c.bold}64,000${c.reset} | Thinking: ${c.bold}8,192${c.reset} (effort: ${c.bold}medium${c.reset})`);
-    console.log(`     ↳ ${c.gray}Cân bằng hoàn hảo cho các tác vụ lập trình hàng ngày và debug thông thường.${c.reset}`);
-
-    console.log(`  ${c.brightYellow}${c.bold}3. HIGH (Deep / Chuyên sâu)${c.reset}`);
-    console.log(`     ↳ Output: ${c.bold}16,384${c.reset} | Context: ${c.bold}128,000${c.reset} | Thinking: ${c.bold}24,576${c.reset} (effort: ${c.bold}high${c.reset})`);
-    console.log(`     ↳ ${c.gray}Phù hợp refactor dự án lớn, suy luận logic phức tạp và sinh code dài.${c.reset}`);
-
-    console.log(`  ${c.red}${c.bold}4. MAX (Unlimited / Tối đa)${c.reset}`);
-    console.log(`     ↳ Output: ${c.bold}${profile.maxSupportedOutputTokens.toLocaleString()}${c.reset} | Context: ${c.bold}${profile.maxSupportedInputTokens.toLocaleString()}${c.reset} | Thinking: ${c.bold}64,000${c.reset} (effort: ${c.bold}max${c.reset})`);
-    console.log(`     ↳ ${c.gray}Khai thác 100% giới hạn phần cứng và context window tối đa của mô hình.${c.reset}`);
-
-    console.log(`\n${c.gray}⚡ Lệnh thao tác nhanh:${c.reset}`);
-    console.log(`  ${c.bold}/tokens low${c.reset} | ${c.bold}/tokens med${c.reset} | ${c.bold}/tokens high${c.reset} | ${c.bold}/tokens max${c.reset} : Chọn nhanh trọn gói preset`);
-    console.log(`  ${c.bold}/tokens output <low|med|high|max|số_token>${c.reset}           : Đặt riêng giới hạn token đầu ra`);
-    console.log(`  ${c.bold}/tokens input <low|med|high|max|số_token>${c.reset}            : Đặt riêng giới hạn context window`);
-    console.log(`  ${c.bold}/tokens thinking <off|low|med|high|max|số_token>${c.reset}     : Đặt riêng thinking budget (off để tắt)`);
-    console.log(`  ${c.bold}/tokens effort <low|med|high|max>${c.reset}                    : Đặt riêng mức độ suy luận`);
-    console.log(`  ${c.bold}/tokens reset${c.reset}                                        : Khôi phục về mặc định của mô hình\n`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}📦 4 GÓI ĐÓNG GÓI SẴN (PRESET TIERS):${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.emerald}${c.bold}1. LOW (Eco / Tiết kiệm)${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}       ↳ Output: ${c.bold}2,048${c.reset} | Context: ${c.bold}16,000${c.reset} | Thinking: ${c.bold}2,048${c.reset} (effort: ${c.bold}low${c.reset})`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.geminiAmber}${c.bold}2. MEDIUM (Balanced / Tiêu chuẩn)${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}       ↳ Output: ${c.bold}8,192${c.reset} | Context: ${c.bold}64,000${c.reset} | Thinking: ${c.bold}8,192${c.reset} (effort: ${c.bold}medium${c.reset})`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightYellow}${c.bold}3. HIGH (Deep / Chuyên sâu)${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}       ↳ Output: ${c.bold}16,384${c.reset} | Context: ${c.bold}128,000${c.reset} | Thinking: ${c.bold}24,576${c.reset} (effort: ${c.bold}high${c.reset})`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.crimson}${c.bold}4. MAX (Unlimited / Tối đa)${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}       ↳ Output: ${c.bold}${profile.maxSupportedOutputTokens.toLocaleString()}${c.reset} | Context: ${c.bold}${profile.maxSupportedInputTokens.toLocaleString()}${c.reset} | Thinking: ${c.bold}64,000${c.reset} (effort: ${c.bold}max${c.reset})`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
 

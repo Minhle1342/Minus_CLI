@@ -24,8 +24,24 @@ export class GoalManager {
       .getEvents()
       .filter((event) => event.type === 'goal/change' && event.data.goal !== undefined)
       .at(-1);
-    if (latest?.data.goal) {
-      this.state = cloneGoal(latest.data.goal);
+    if (latest) {
+      this.state = latest.data.goal ? cloneGoal(latest.data.goal) : undefined;
+    }
+
+    // Auto-reconciliation: Nếu phiên đã có turn hoàn tất hoặc toàn bộ plan đã hoàn thành, goal tự động reconcile sang 'complete'
+    if (this.state && (this.state.phase === 'active' || this.state.phase === 'paused')) {
+      const planEvent = this.session.getEvents().filter((e) => e.type === 'plan/change' && Array.isArray(e.data.plan)).at(-1);
+      const tasks = planEvent?.data.plan || [];
+      const hasPlan = tasks.length > 0;
+      const allTasksCompleted = hasPlan && tasks.every((t: any) => ['COMPLETED', 'SKIPPED'].includes(t.status));
+
+      const lastTurnEnd = this.session.getEvents().filter((e) => e.type === 'turn/end').at(-1);
+      const isTurnCompleted = lastTurnEnd?.data.reason === 'completed';
+
+      if (allTasksCompleted || (isTurnCompleted && (!hasPlan || allTasksCompleted))) {
+        this.state.phase = 'complete';
+        this.armed = false;
+      }
     }
   }
 

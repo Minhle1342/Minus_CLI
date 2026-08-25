@@ -91,6 +91,7 @@ export class SessionPersistence {
     };
     const session = Session.fromSnapshot(snapshot);
     if (session.recoverInterrupted()) {
+      (session as any).wasInterruptedAndRecovered = true;
       await this.save(session);
     }
     return session;
@@ -106,6 +107,102 @@ export class SessionPersistence {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Quét và tìm phiên làm việc dở dang gần nhất trong workspace (phục vụ tự động phát hiện khi mất activeSessionId)
+   */
+  async findLatestInterruptedSession(): Promise<{
+    sessionId: string;
+    updatedAt: string;
+    goal?: string;
+    phase?: string;
+    incompleteTask?: string;
+    reason?: string;
+  } | undefined> {
+    const sessionIds = await this.list();
+    if (sessionIds.length === 0) return undefined;
+
+    const candidates: Array<{
+      sessionId: string;
+      updatedAt: string;
+      goal?: string;
+      phase?: string;
+      incompleteTask?: string;
+      reason?: string;
+      score: number;
+    }> = [];
+
+    for (const sessionId of sessionIds) {
+      try {
+        const parsed = await this.readFile(this.getSessionPath(sessionId));
+        if (!parsed || parsed.events.length === 0) continue;
+
+        const latestEvent = parsed.events.at(-1);
+        const updatedAt = latestEvent?.createdAt || parsed.header.createdAt;
+
+        // Check goal
+        const goalEvent = parsed.events.filter((e) => e.type === 'goal/change' && e.data.goal).at(-1);
+        let goalState = goalEvent?.data.goal;
+
+        // Check plan
+        const planEvent = parsed.events.filter((e) => e.type === 'plan/change' && Array.isArray(e.data.plan)).at(-1);
+        const tasks = planEvent?.data.plan || [];
+        const hasPlan = tasks.length > 0;
+        const incompleteTask = tasks.find((t: any) => !['COMPLETED', 'FAILED', 'SKIPPED'].includes(t.status));
+        const isAllPlanCompleted = hasPlan && !incompleteTask;
+
+        // Check if there was an open turn or interrupted turn
+        const lastTurnEnd = parsed.events.filter((e) => e.type === 'turn/end').at(-1);
+        const wasTurnCompleted = lastTurnEnd?.data.reason === 'completed';
+        const wasInterrupted = lastTurnEnd?.data.reason === 'interrupted' || (latestEvent?.type !== 'turn/end' && !wasTurnCompleted);
+
+        // Auto-reconciliation: Nếu toàn bộ task trong plan đã hoàn tất hoặc turn cuối cùng đã completed bình thường không còn task dở dang
+        if (goalState && (goalState.phase === 'active' || goalState.phase === 'paused')) {
+          if (isAllPlanCompleted || (wasTurnCompleted && !incompleteTask)) {
+            goalState = { ...goalState, phase: 'complete' };
+          }
+        }
+
+        const isPausedGoal = (goalState?.phase === 'paused' || goalState?.phase === 'active') && !isAllPlanCompleted;
+        const hasIncompletePlan = Boolean(incompleteTask);
+
+        // Tuyệt đối không đánh dấu phiên gián đoạn nếu toàn bộ plan đã hoàn thành hoặc turn đã kết thúc thành công và không có task dở dang
+        if ((isPausedGoal || hasIncompletePlan || wasInterrupted) && !isAllPlanCompleted && (!wasTurnCompleted || hasIncompletePlan)) {
+          let score = 1;
+          if (isPausedGoal) score += 10;
+          if (hasIncompletePlan) score += 10;
+          if (wasInterrupted) score += 5;
+
+          candidates.push({
+            sessionId,
+            updatedAt,
+            goal: goalState?.objective,
+            phase: goalState?.phase,
+            incompleteTask: incompleteTask ? `Task #${incompleteTask.id} "${incompleteTask.title}"` : undefined,
+            reason: goalState?.blocker || (wasInterrupted ? 'Turn interrupted before normal completion' : undefined),
+            score,
+          });
+        }
+      } catch {}
+    }
+
+    if (candidates.length === 0) return undefined;
+
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+
+    const best = candidates[0];
+    return {
+      sessionId: best.sessionId,
+      updatedAt: best.updatedAt,
+      goal: best.goal,
+      phase: best.phase,
+      incompleteTask: best.incompleteTask,
+      reason: best.reason,
+    };
   }
 
   async remove(sessionId: string): Promise<boolean> {

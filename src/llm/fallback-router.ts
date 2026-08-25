@@ -2,6 +2,7 @@ import { FunctionDeclaration, FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { GeminiLLM, LLMRequestOptions, LLMResponse, StreamCallbacks } from './gemini.js';
 import { DeepseekLLM } from './deepseek.js';
+import { AnthropicLLM } from './anthropic.js';
 import { colors as c } from '../ui/cli-ui.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
 
@@ -9,7 +10,7 @@ export interface ProviderTier {
   name: string;
   provider: string;
   tier: 1 | 2 | 3;
-  createClient: () => GeminiLLM | DeepseekLLM;
+  createClient: () => GeminiLLM | DeepseekLLM | AnthropicLLM;
 }
 
 /**
@@ -108,7 +109,15 @@ export class FallbackRouterLLM {
           msg.includes('UNAVAILABLE') ||
           msg.includes('high demand') ||
           msg.includes('Rate limit') ||
-          msg.includes('quota') ||
+          msg.toLowerCase().includes('quota') ||
+          msg.toLowerCase().includes('insufficient_quota') ||
+          msg.toLowerCase().includes('credit balance') ||
+          msg.toLowerCase().includes('out of credits') ||
+          msg.toLowerCase().includes('billing') ||
+          msg.toLowerCase().includes('invalid api key') ||
+          msg.toLowerCase().includes('unauthorized') ||
+          msg.includes('401') ||
+          msg.includes('403') ||
           msg.includes('fetch failed');
 
         if (isRateLimitOrOverload && attempt < this.tiers.length - 1) {

@@ -62,9 +62,27 @@ export interface ToolExecutionContext {
   turn?: number;
   /** Original human request for the current turn, before guard prompts. */
   userRequest?: string;
+  /** Internal capability set by ToolRunner only after PermissionManager approval. */
+  permissionGranted?: boolean;
+  permissionRequestId?: string;
+  /** Durable binding between the model-visible tool set and runtime authority. */
+  decisionId?: string;
+  allowedToolNames?: string[];
+  allowedToolSetHash?: string;
+  classificationPhase?: string;
+  classificationRisk?: string;
+  /** Set only by the orchestrator after checking session-backed evidence. */
+  completionEvidenceVerified?: boolean;
+  maxToolCalls?: number;
 }
 ⋮----
 /** Original human request for the current turn, before guard prompts. */
+⋮----
+/** Internal capability set by ToolRunner only after PermissionManager approval. */
+⋮----
+/** Durable binding between the model-visible tool set and runtime authority. */
+⋮----
+/** Set only by the orchestrator after checking session-backed evidence. */
 ⋮----
 /**
  * Định nghĩa chuẩn cho một Tool trong hệ thống Coding Agent.

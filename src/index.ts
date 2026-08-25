@@ -5,6 +5,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
 import { GeminiLLM } from './llm/gemini.js';
 import { DeepseekLLM } from './llm/deepseek.js';
+import { AnthropicLLM } from './llm/anthropic.js';
 import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
@@ -18,6 +19,7 @@ import {
   RealtimeSlashCommandHints,
   colors as c,
   completeSlashCommand,
+  UICollapsePreferences,
 } from './ui/cli-ui.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
@@ -33,6 +35,8 @@ import {
   FileMentionEngine,
   PromptAttachmentProcessor,
 } from './workspace/file-attachment.js';
+import { exploreDirectoryTree } from './workspace/tree-explorer.js';
+import { inspectContext } from './context/context-inspector.js';
 import {
   TokenConfig,
   getModelTokenProfile,
@@ -64,6 +68,11 @@ const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || '';
 const mistralApiKey = process.env.MISTRAL_API_KEY || '';
 const openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
+const anthropicApiKeys = Array.from(new Set([
+  process.env.ANTHROPIC_API_KEY,
+  ...Array.from({ length: 9 }, (_, index) => process.env[`ANTHROPIC_API_KEY_${index + 2}`]),
+].filter((key): key is string => Boolean(key?.trim()))));
+const anthropicApiKey = anthropicApiKeys[0] || '';
 const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 30;
 
 let activeWorkspaceRef: Workspace | undefined;
@@ -246,6 +255,12 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
     if (openrouterApiKey) {
       tiers.push({
+        name: 'openrouter/stealth/ox-alpha',
+        provider: 'OpenRouter (Ox Alpha)',
+        tier: 3,
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'stealth/ox-alpha', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+      });
+      tiers.push({
         name: 'openrouter/free',
         provider: 'OpenRouter Free',
         tier: 3,
@@ -403,7 +418,27 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
   }
 
-  // 11. DeepSeek Direct (V3 / R1)
+  // 11. Anthropic Claude Messages API (native streaming + tool use)
+  if (model.startsWith('claude-') || model.startsWith('anthropic/')) {
+    const rawModel = model.replace(/^anthropic\//, '');
+    if (anthropicApiKeys.length === 0) {
+      throw new Error(`ChÆ°a cáº¥u hÃ¬nh ANTHROPIC_API_KEY trong file .env! Vui lÃ²ng láº¥y key táº¡i https://console.anthropic.com/settings/keys.`);
+    }
+    const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1';
+    if (anthropicApiKeys.length === 1) {
+      return new AnthropicLLM(anthropicApiKeys[0], rawModel, undefined, baseUrl, undefined, tokenConfig);
+    }
+
+    const tiers: ProviderTier[] = anthropicApiKeys.map((key, index) => ({
+      name: `${rawModel} (Anthropic API key #${index + 1})`,
+      provider: 'Anthropic Claude API',
+      tier: 1,
+      createClient: () => new AnthropicLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig),
+    }));
+    return new FallbackRouterLLM(model, tiers, tokenConfig);
+  }
+
+  // 12. DeepSeek Direct (V3 / R1)
   if (model === 'deepseek-chat' || model === 'deepseek-reasoner') {
     const key = deepseekApiKey;
     if (!key) {
@@ -412,9 +447,18 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com', undefined, tokenConfig);
   }
 
-  // 12. OpenRouter Free Models & Direct OpenRouter (Chỉ bắt các model có tiền tố openrouter/ hoặc :free)
-  if (model.startsWith('openrouter/') || model.endsWith(':free')) {
-    const rawModel = model.replace(/^openrouter\//, '');
+  // 12. OpenRouter Models (openrouter/*, :free, stealth/*, ox-alpha, 0x-alpha)
+  if (
+    model.startsWith('openrouter/') ||
+    model.endsWith(':free') ||
+    model.startsWith('stealth/') ||
+    model === 'ox-alpha' ||
+    model === '0x-alpha'
+  ) {
+    let rawModel = model.replace(/^openrouter\//, '');
+    if (rawModel === 'ox-alpha' || rawModel === '0x-alpha' || rawModel === 'stealth/0x-alpha') {
+      rawModel = 'stealth/ox-alpha';
+    }
     const key = openrouterApiKey || deepseekApiKey;
     if (!key) {
       throw new Error(`Chưa cấu hình OPENROUTER_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://openrouter.ai/keys và dán vào .env.`);
@@ -445,6 +489,7 @@ async function main() {
     mistralApiKey ||
     openrouterApiKey ||
     openaiApiKey ||
+    anthropicApiKey ||
     hasCodexAuth;
 
   if (!hasAnyKey) {
@@ -458,6 +503,7 @@ async function main() {
     console.error(`     ${c.cyan}SAMBANOVA_API_KEY=...${c.reset} (SambaNova Cloud)`);
     console.error(`     ${c.cyan}GITHUB_TOKEN=ghp_...${c.reset} (GitHub Models)`);
     console.error(`     ${c.cyan}OPENAI_API_KEY=sk-...${c.reset} (OpenAI API)\n`);
+    console.error(`     ${c.cyan}ANTHROPIC_API_KEY=sk-ant-...${c.reset} (Anthropic Claude API)\n`);
     process.exit(1);
   }
 
@@ -466,23 +512,41 @@ async function main() {
   if (cliSandbox) {
     process.env.SANDBOX_MODE = cliSandbox;
   }
-  const savedSession = loadSession();
+  const globalSavedSession = loadSession();
 
-  const initialPath = getInitialWorkspacePath(savedSession.workspacePath, cliWorkspace);
-  let modelName = getInitialModelName(savedSession.modelName, cliModel);
+  const initialPath = getInitialWorkspacePath(globalSavedSession.workspacePath, cliWorkspace);
+  let modelName = getInitialModelName(globalSavedSession.modelName, cliModel);
 
   let workspace = new Workspace(initialPath);
-  let llm = await createLLM(modelName, savedSession.tokenConfig);
+  const savedSession = loadSession(workspace.rootDir);
+  if (savedSession.modelName && !cliModel) {
+    modelName = savedSession.modelName;
+  }
+  let llm = await createLLM(modelName, savedSession.tokenConfig || globalSavedSession.tokenConfig);
   let sessionPersistence = new SessionPersistence(workspace.rootDir);
-  let activeSession = savedSession.activeSessionId
+  let loadedSession = savedSession.activeSessionId
     ? await sessionPersistence.load(savedSession.activeSessionId)
     : undefined;
-  if (!activeSession) {
-    activeSession = new Session();
+
+  // Nếu không tìm thấy activeSession theo ID lưu, tự động quét tìm phiên dở dang gần nhất trong workspace
+  if (!loadedSession) {
+    const latestInterrupted = await sessionPersistence.findLatestInterruptedSession();
+    if (latestInterrupted) {
+      loadedSession = await sessionPersistence.load(latestInterrupted.sessionId);
+    }
+  }
+
+  let activeSession: Session = loadedSession || new Session();
+  if (!loadedSession) {
     await sessionPersistence.save(activeSession);
   }
 
-  // Tự động lưu cấu hình phiên làm việc hiện tại
+  // Tự động lưu cấu hình phiên làm việc hiện tại cho cả workspace và global
+  saveSession({
+    modelName,
+    workspacePath: workspace.rootDir,
+    activeSessionId: activeSession.id,
+  }, workspace.rootDir);
   saveSession({
     modelName,
     workspacePath: workspace.rootDir,
@@ -518,9 +582,11 @@ async function main() {
 
   // Lắng nghe sự kiện thay đổi workspace hoặc model từ Kernel để tự động đồng bộ xuống đĩa
   kernel.ctx.events.on('workspace:changed', (_oldPath: string, newPath: string) => {
+    saveSession({ workspacePath: newPath }, workspace.rootDir);
     saveSession({ workspacePath: newPath });
   });
   kernel.ctx.events.on('model:changed', (newModel: string) => {
+    saveSession({ modelName: newModel }, workspace.rootDir);
     saveSession({ modelName: newModel });
   });
 
@@ -606,16 +672,48 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
     }
 
-    // Kiểm tra sau khi turn kết thúc: nếu tất cả task đã xong thì hoàn tất Goal
+    checkAndAutoCompleteGoal();
+  };
+
+  const checkAndAutoCompleteGoal = (): void => {
     if (agentLoop.planManager.hasPlan() && agentLoop.planManager.isAllTasksCompleted()) {
       try {
-        agentLoop.goalManager.complete(agentLoop.planManager);
-        console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
+        const goalState = agentLoop.goalManager.getState();
+        if (goalState?.phase === 'active' || goalState?.phase === 'paused') {
+          agentLoop.goalManager.complete(agentLoop.planManager);
+          if (activeSession) {
+            sessionPersistence.save(activeSession).catch(() => {});
+          }
+          console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
+        }
       } catch {
         // keep active
       }
     }
   };
+
+  // Đăng ký hook Graceful Shutdown để tự động lưu trạng thái khi tắt đột ngột (Ctrl+C / SIGINT / SIGTERM)
+  let isShuttingDown = false;
+  const handleGracefulShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    try {
+      if (agentLoop.goalManager.getState()?.phase === 'active') {
+        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
+      }
+      if (activeSession) {
+        await sessionPersistence.save(activeSession).catch(() => {});
+      }
+      saveSession({
+        modelName,
+        workspacePath: workspace.rootDir,
+        activeSessionId: activeSession?.id,
+      }, workspace.rootDir);
+    } catch {}
+    process.exit(0);
+  };
+  process.once('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+  process.once('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
 
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
@@ -626,18 +724,53 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     sandboxStatus: getSandboxStatusLabel(),
   });
 
-  // Kiểm tra phiên gián đoạn / Quota suspension trước đó để hỗ trợ One-Click Resume
+  // Kiểm tra phiên gián đoạn / Quota suspension / Crash recovery trước đó để hỗ trợ One-Click Resume
+  // NẾU TẤT CẢ TASK CỦA PLAN HOẶC GOAL ĐÃ HOÀN THÀNH -> TUYỆT ĐỐI KHÔNG HIỂN THỊ CẢNH BÁO
+  checkAndAutoCompleteGoal();
   const existingGoalState = agentLoop.goalManager.getState();
   const nextIncomplete = agentLoop.planManager.getNextIncompleteTask();
-  if (existingGoalState?.phase === 'paused' || (agentLoop.planManager.hasPlan() && nextIncomplete)) {
-    const activeTaskTitle = nextIncomplete ? `Task #${nextIncomplete.id} "${nextIncomplete.title}"` : existingGoalState?.objective;
-    console.log(`\n${c.yellow}${c.bold}⚠️  [PHÁT HIỆN PHIÊN BỊ TẠM DỪNG / GIÁN ĐOẠN TRƯỚC ĐÓ]${c.reset}`);
-    if (existingGoalState?.blocker) {
-      console.log(`   ${c.dim}Lý do dừng:${c.reset} ${c.yellow}${existingGoalState.blocker}${c.reset}`);
+  const isComposeActive = kernel.ctx.compose && kernel.ctx.compose.isActive();
+  const wasCrashedAndRecovered = Boolean((activeSession as any)?.wasInterruptedAndRecovered);
+
+  const isPlanCompleted = agentLoop.planManager.hasPlan() && agentLoop.planManager.isAllTasksCompleted();
+  const isGoalIncomplete = (existingGoalState?.phase === 'paused' || existingGoalState?.phase === 'active')
+    && !isPlanCompleted
+    && (!agentLoop.planManager.hasPlan() || Boolean(nextIncomplete));
+  const isPlanIncomplete = agentLoop.planManager.hasPlan() && !isPlanCompleted && Boolean(nextIncomplete);
+
+  if (
+    isGoalIncomplete ||
+    isPlanIncomplete ||
+    isComposeActive ||
+    wasCrashedAndRecovered
+  ) {
+    let interruptionType = 'Phiên làm việc';
+    let activeDetail = '';
+
+    if (isComposeActive) {
+      const composeState = kernel.ctx.compose.getState();
+      interruptionType = 'MIMO Compose Pipeline';
+      activeDetail = `Tính năng: "${composeState?.featureName}" [Phase: ${composeState?.phase}]`;
+    } else if (isGoalIncomplete) {
+      interruptionType = 'Durable Goal Mode';
+      activeDetail = nextIncomplete
+        ? `Task #${nextIncomplete.id} "${nextIncomplete.title}" (Mục tiêu: ${existingGoalState.objective})`
+        : `Mục tiêu: "${existingGoalState.objective}"`;
+    } else if (isPlanIncomplete && nextIncomplete) {
+      interruptionType = 'Execution Plan';
+      activeDetail = `Task #${nextIncomplete.id} "${nextIncomplete.title}"`;
+    } else if (wasCrashedAndRecovered) {
+      interruptionType = 'Crash Recovered';
+      activeDetail = 'Đã tự động đóng an toàn các tool call dở dang';
     }
-    console.log(`   ${c.dim}Tiến độ hiện tại:${c.reset} ${c.brightCyan}${activeTaskTitle}${c.reset}`);
-    console.log(`   💡 ${c.brightGreen}Gõ ${c.bold}/goal resume${c.reset} ${c.brightGreen}hoặc ${c.bold}/plan resume${c.reset} ${c.brightGreen}để tiếp tục thực thi chính xác từ bước này.${c.reset}`);
-    console.log(`   💡 ${c.dim}Gõ ${c.bold}/model${c.reset} ${c.dim}nếu bạn muốn đổi provider/model trước khi tiếp tục.${c.reset}\n`);
+
+    CLI.renderInterruptedSessionNotice({
+      interruptionType,
+      activeDetail,
+      blocker: existingGoalState?.blocker,
+      isGoal: isGoalIncomplete,
+      isPlan: isPlanIncomplete,
+    });
   }
 
   const rl = readline.createInterface({ input, output, completer });
@@ -846,6 +979,66 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/tasks') {
         CLI.renderTasks(kernel.ctx.tasks.listTasks());
+        continue;
+      }
+
+      // Xử lý lệnh /resume hoặc /continue: Tự động tiếp tục thông minh (Unified Smart Resume)
+      if (trimmed === '/resume' || trimmed.startsWith('/resume ') || trimmed === '/continue') {
+        // 1. Nếu có Compose feature đang active
+        if (kernel.ctx.compose && kernel.ctx.compose.isActive()) {
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING COMPOSE FEATURE]${c.reset} ${c.dim}Tiếp tục Compose pipeline...${c.reset}\n`);
+          try {
+            await applyComposeResult(await kernel.ctx.compose.advance(workspace));
+          } catch (err: any) {
+            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Compose:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        // 2. Nếu có Goal Mode (paused hoặc active)
+        const goalState = agentLoop.goalManager.getState();
+        if (goalState && (goalState.phase === 'paused' || goalState.phase === 'active')) {
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING GOAL MODE]${c.reset} ${c.dim}Tiếp tục Durable Goal:${c.reset} ${c.bold}${goalState.objective}${c.reset}\n`);
+          agentLoop.goalManager.resume();
+          try {
+            await executeDurableGoal();
+          } catch (err: any) {
+            agentLoop.goalManager.block(err.message || 'Goal execution failed.');
+            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Goal:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        // 3. Nếu có Plan Task dở dang
+        const nextTask = agentLoop.planManager.getNextIncompleteTask();
+        if (nextTask) {
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING IN-FLIGHT PLAN]${c.reset} ${c.dim}Tiếp tục Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
+          const resumePrompt = `[RESUME INCOMPLETE PLAN]:
+Continue executing the in-flight plan.
+Next Target Task #${nextTask.id}: ${nextTask.title}
+Acceptance Criteria: ${nextTask.acceptanceCriteria}
+
+Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
+          sessionCount++;
+          try {
+            await agentLoop.submit(activeSession, resumePrompt, 'system');
+          } catch (err: any) {
+            console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        // 4. Nếu có Subagents bị dừng do restart
+        const stoppedAgents = (kernel.ctx as any)?.subagents?.getHandles
+          ? (kernel.ctx as any).subagents.getHandles().filter((h: any) => h.status === 'stopped')
+          : [];
+        if (stoppedAgents.length > 0) {
+          console.log(`\n${c.yellow}ℹ Phát hiện ${stoppedAgents.length} subagent bị dừng do restart. Dùng /agents resume <id> để khởi động lại.${c.reset}\n`);
+          continue;
+        }
+
+        console.log(`\n${c.yellow}ℹ Không phát hiện tác vụ, kế hoạch hoặc mục tiêu dở dang nào cần phục hồi.${c.reset}`);
+        console.log(`💡 ${c.brightCyan}Gợi ý: Bạn có thể bắt đầu tác vụ mới bằng cách nhập yêu cầu, hoặc dùng ${c.bold}/goal <mục tiêu>${c.reset}${c.brightCyan}, ${c.bold}/plan <yêu cầu>${c.reset}${c.brightCyan}, ${c.bold}/compose <tính năng>${c.reset}${c.brightCyan}.${c.reset}\n`);
         continue;
       }
 
@@ -1250,11 +1443,21 @@ ${planPrompt}`;
           agentLoop.setWorkspace(workspace);
           sessionPersistence = new SessionPersistence(workspace.rootDir);
           agentLoop.setSessionPersistence(sessionPersistence);
-          activeSession = new Session();
+          const savedInNewWs = loadSession(workspace.rootDir);
+          let loadedInWs = savedInNewWs.activeSessionId ? await sessionPersistence.load(savedInNewWs.activeSessionId) : undefined;
+          if (!loadedInWs) {
+            const latestInterrupted = await sessionPersistence.findLatestInterruptedSession();
+            if (latestInterrupted) {
+              loadedInWs = await sessionPersistence.load(latestInterrupted.sessionId);
+            }
+          }
+          activeSession = loadedInWs || new Session();
+          if (!loadedInWs) {
+            await sessionPersistence.save(activeSession);
+          }
           agentLoop.bindSession(activeSession);
-          await sessionPersistence.save(activeSession);
-          saveSession({ activeSessionId: activeSession.id });
-          saveSession({ workspacePath: workspace.rootDir });
+          saveSession({ activeSessionId: activeSession.id, workspacePath: workspace.rootDir }, workspace.rootDir);
+          saveSession({ activeSessionId: activeSession.id, workspacePath: workspace.rootDir });
           CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
         } catch (err: any) {
           console.error(`\n${c.red}✖ Lỗi khi chuyển workspace:${c.reset}`, err.message);
@@ -1294,8 +1497,23 @@ ${planPrompt}`;
           const newLLM = await createLLM(targetModel, currentTokens);
           agentLoop.setLLM(newLLM, targetModel);
           modelName = targetModel;
+          saveSession({ modelName }, workspace.rootDir);
           saveSession({ modelName });
           console.log(`\n${c.green}✔ Đã kích hoạt mô hình:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Đã lưu cho các phiên sau)${c.reset}\n`);
+
+          // Kiểm tra an toàn Token Budget Context Window
+          try {
+            const profile = getModelTokenProfile(modelName);
+            const history = activeSession?.getHistory() || [];
+            const historyChars = history.reduce((sum, msg) => {
+              return sum + (msg.parts || []).reduce((pSum: number, part: any) => pSum + (typeof part?.text === 'string' ? part.text.length : 0), 0);
+            }, 0);
+            const approxTokens = Math.ceil(historyChars / 3.5);
+            if (approxTokens > profile.maxSupportedInputTokens * 0.75) {
+              console.log(`${c.yellow}⚠️  [CẢNH BÁO CONTEXT]: Lịch sử hội thoại (~${approxTokens.toLocaleString()} tokens) chiếm hơn 75% giới hạn ngữ cảnh của ${modelName} (${profile.maxSupportedInputTokens.toLocaleString()} tokens).`);
+              console.log(`💡 ${c.dim}AgentLoop sẽ tự động kích hoạt Context Compactor để nén an toàn lịch sử trước khi gửi yêu cầu.${c.reset}\n`);
+            }
+          } catch {}
         } catch (err: any) {
           console.error(`\n${c.red}✖ Lỗi khi đổi model:${c.reset}`, err.message);
         }
@@ -1634,6 +1852,214 @@ ${planPrompt}`;
         continue;
       }
 
+      // Lệnh quản lý cơ chế Thu gọn / Mở rộng UI (/collapse hoặc /fold)
+      if (
+        trimmed === '/collapse' ||
+        trimmed.startsWith('/collapse ') ||
+        trimmed === '/fold' ||
+        trimmed.startsWith('/fold ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const subCmd = parts[0]?.toLowerCase();
+        const val = parts[1]?.toLowerCase();
+
+        const currentPrefs = agentLoop.collapsePreferences;
+
+        if (!subCmd || subCmd === 'status') {
+          CLI.renderCollapseStatus(currentPrefs);
+          continue;
+        }
+
+        if (subCmd === 'on' || subCmd === 'enable' || subCmd === 'all') {
+          agentLoop.setCollapsePreferences({ thinking: true, tools: true, diff: true });
+          console.log(`\n${c.green}✔ Đã bật chế độ Thu gọn (Collapse Mode) cho toàn bộ suy luận và tool outputs.${c.reset}\n`);
+          CLI.renderCollapseStatus(agentLoop.collapsePreferences);
+          continue;
+        }
+
+        if (subCmd === 'off' || subCmd === 'disable' || subCmd === 'expand') {
+          agentLoop.setCollapsePreferences({ thinking: false, tools: false, diff: false });
+          console.log(`\n${c.yellow}✔ Đã tắt chế độ Thu gọn. Toàn bộ suy luận CoT và tool outputs sẽ hiển thị đầy đủ.${c.reset}\n`);
+          CLI.renderCollapseStatus(agentLoop.collapsePreferences);
+          continue;
+        }
+
+        if (subCmd === 'thinking' || subCmd === 'reasoning' || subCmd === 'cot') {
+          const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.thinking);
+          agentLoop.setCollapsePreferences({ thinking: isTurnOn });
+          const statusText = isTurnOn ? `${c.green}BẬT (Folded)${c.reset}` : `${c.yellow}TẮT (Expanded)${c.reset}`;
+          console.log(`\n${c.green}✔ Đã cập nhật thu gọn suy luận System 2:${c.reset} ${statusText}\n`);
+          continue;
+        }
+
+        if (subCmd === 'tools' || subCmd === 'tool') {
+          const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.tools);
+          agentLoop.setCollapsePreferences({ tools: isTurnOn });
+          const statusText = isTurnOn ? `${c.green}BẬT (Preview)${c.reset}` : `${c.yellow}TẮT (Full Raw)${c.reset}`;
+          console.log(`\n${c.green}✔ Đã cập nhật thu gọn Tool Outputs:${c.reset} ${statusText}\n`);
+          continue;
+        }
+
+        if (subCmd === 'diff' || subCmd === 'diffs' || subCmd === 'patch') {
+          const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.diff);
+          agentLoop.setCollapsePreferences({ diff: isTurnOn });
+          const statusText = isTurnOn ? `${c.green}BẬT (>20 lines)${c.reset}` : `${c.yellow}TẮT (Full Patch)${c.reset}`;
+          console.log(`\n${c.green}✔ Đã cập nhật thu gọn Diff Patches:${c.reset} ${statusText}\n`);
+          continue;
+        }
+
+        if (subCmd === 'depth' && val) {
+          const parsedDepth = parseInt(val, 10);
+          if (!isNaN(parsedDepth) && parsedDepth > 0) {
+            agentLoop.setCollapsePreferences({ treeDepth: parsedDepth });
+            console.log(`\n${c.green}✔ Đã đặt độ sâu cây thư mục mặc định:${c.reset} ${parsedDepth} tầng\n`);
+            continue;
+          }
+        }
+
+        console.log(`\n${c.yellow}⚠️ Cú pháp chưa đúng. Gõ /collapse để xem hướng dẫn.${c.reset}\n`);
+        continue;
+      }
+
+      // Lệnh Khám phá hệ thống (/explore hoặc /inspect)
+      if (
+        trimmed === '/explore' ||
+        trimmed.startsWith('/explore ') ||
+        trimmed === '/inspect' ||
+        trimmed.startsWith('/inspect ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const domain = parts[0]?.toLowerCase();
+        const arg1 = parts[1];
+        const arg2 = parts[2];
+
+        if (!domain) {
+          CLI.renderExploreMenu();
+          continue;
+        }
+
+        if (domain === 'tree' || domain === 'dir' || domain === 'files') {
+          const targetDir = arg1 ? (path.isAbsolute(arg1) ? arg1 : path.resolve(workspace.rootDir, arg1)) : workspace.rootDir;
+          const depth = arg2 ? parseInt(arg2, 10) : (arg1 && !isNaN(parseInt(arg1, 10)) ? parseInt(arg1, 10) : agentLoop.collapsePreferences.treeDepth);
+          try {
+            const scanResult = await exploreDirectoryTree(targetDir, { maxDepth: isNaN(depth) ? 3 : depth });
+            CLI.renderWorkspaceTree(scanResult);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi quét cây thư mục:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (domain === 'context' || domain === 'ctx' || domain === 'tokens') {
+          try {
+            const report = inspectContext(activeSession, agentLoop, modelName);
+            CLI.renderContextInspection(report);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi kiểm tra ngữ cảnh:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (domain === 'reasoning' || domain === 'thinking' || domain === 'cot') {
+          const latest = agentLoop.latestReasoning;
+          if (latest) {
+            CLI.renderReasoningInspection(latest);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Chưa có chuỗi suy luận nào được ghi nhận gần đây.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        if (domain === 'memory' || domain === 'mem') {
+          const records = activeSession.getMemoryRecords ? activeSession.getMemoryRecords() : [];
+          CLI.renderMemory(records);
+          continue;
+        }
+
+        if (domain === 'tools' || domain === 'tool') {
+          CLI.renderTools(toolRegistry.getAll());
+          continue;
+        }
+
+        if (domain === 'tasks' || domain === 'agents' || domain === 'subagents') {
+          const agents = (agentLoop.agentRegistry?.list?.() || []).map((a: any) => ({
+            id: a.id,
+            command: a.name || a.role || a.objective || 'subagent',
+            status: a.status || 'idle',
+            startedAt: a.createdAt || new Date().toISOString(),
+          }));
+          CLI.renderTasks(agents);
+          continue;
+        }
+
+        console.log(`\n${c.yellow}⚠️ Không tìm thấy không gian khám phá "${domain}". Gõ /explore để xem danh mục.${c.reset}\n`);
+        continue;
+      }
+
+      // Lệnh xem cây thư mục Workspace (/tree hoặc /dirtree)
+      if (
+        trimmed === '/tree' ||
+        trimmed.startsWith('/tree ') ||
+        trimmed === '/dirtree' ||
+        trimmed.startsWith('/dirtree ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        let targetDir = workspace.rootDir;
+        let depth = agentLoop.collapsePreferences.treeDepth || 3;
+
+        if (parts.length === 1) {
+          if (!isNaN(parseInt(parts[0], 10))) {
+            depth = parseInt(parts[0], 10);
+          } else {
+            targetDir = path.isAbsolute(parts[0]) ? parts[0] : path.resolve(workspace.rootDir, parts[0]);
+          }
+        } else if (parts.length >= 2) {
+          targetDir = path.isAbsolute(parts[0]) ? parts[0] : path.resolve(workspace.rootDir, parts[0]);
+          depth = parseInt(parts[1], 10) || depth;
+        }
+
+        try {
+          const scanResult = await exploreDirectoryTree(targetDir, { maxDepth: depth });
+          CLI.renderWorkspaceTree(scanResult);
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Lỗi khi quét cây thư mục:${c.reset}`, err.message);
+        }
+        continue;
+      }
+
+      // Lệnh kiểm soát và phân tích ngữ cảnh (/context hoặc /ctx)
+      if (
+        trimmed === '/context' ||
+        trimmed.startsWith('/context ') ||
+        trimmed === '/ctx' ||
+        trimmed.startsWith('/ctx ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const sub = parts[0]?.toLowerCase();
+
+        if (sub === 'compact' || sub === 'prune' || sub === 'compress') {
+          try {
+            console.log(`\n${c.cyan}🧹 Đang kích hoạt Context Compactor để nén ngữ cảnh an toàn...${c.reset}`);
+            const compactRes = await agentLoop.contextCompactor.compact(activeSession.getHistory());
+            if (compactRes && compactRes.stats.tokensSaved > 0) {
+              console.log(`${c.green}✔ Đã nén thành công ngữ cảnh: Tiết kiệm ${compactRes.stats.tokensSaved.toLocaleString()} tokens.${c.reset}\n`);
+            } else {
+              console.log(`${c.yellow}⚠️ Ngữ cảnh hiện tại vẫn trong ngưỡng tối ưu, chưa cần nén.${c.reset}\n`);
+            }
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi nén ngữ cảnh:${c.reset}`, err.message);
+          }
+        }
+
+        try {
+          const report = inspectContext(activeSession, agentLoop, modelName);
+          CLI.renderContextInspection(report);
+        } catch (err: any) {
+          console.error(`\n${c.red}✖ Lỗi khi phân tích ngữ cảnh:${c.reset}`, err.message);
+        }
+        continue;
+      }
+
       if (trimmed.toLowerCase() === '/exit' || trimmed.toLowerCase() === '/quit' || trimmed.toLowerCase() === 'exit') {
         console.log(`\n${c.green}Tạm biệt! Chúc bạn lập trình vui vẻ! 👋${c.reset}\n`);
         break;
@@ -1650,6 +2076,7 @@ ${planPrompt}`;
 
       try {
         await agentLoop.submit(activeSession, attachmentResult.expandedPrompt);
+        checkAndAutoCompleteGoal();
       } catch (err: any) {
         console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Agent Loop:${c.reset}`, err.message);
         if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
