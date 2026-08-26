@@ -5,6 +5,7 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { computeStringHash } from '../workspace/workspace-digest.js';
 import { toolError, toolSuccess } from './tool-result.js';
+import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
 /**
  * Tool 5: write_file
@@ -65,6 +66,18 @@ export const writeFileTool: ToolDefinition = {
       const bytesWritten = Buffer.byteLength(content, 'utf-8');
       const contentHash = computeStringHash(content);
 
+      let diagnosticWarning: string | undefined;
+      let syntaxErrors: any[] | undefined;
+      try {
+        const diags = await CodeSyntaxValidator.validateFile(rawPath, workspace);
+        if (diags.length > 0) {
+          syntaxErrors = diags;
+          diagnosticWarning = `⚠️ LINTER ALERT (${diags.length} unresolved syntax / missing import issue(s)):\n` +
+            diags.map((d) => `  • Line ${d.line}: ${d.message}`).join('\n') +
+            `\n👉 ACTION REQUIRED: Add the missing import statement at the top of "${rawPath}" or fix the syntax error now.`;
+        }
+      } catch {}
+
       return toolSuccess({
         path: workspace.toRelativePath(safePath),
         bytesWritten,
@@ -73,6 +86,7 @@ export const writeFileTool: ToolDefinition = {
         message: isExisting
           ? `Đã ghi đè thành công file "${rawPath}".`
           : `Đã tạo mới thành công file "${rawPath}".`,
+        ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {
       return toolError(`Không thể ghi file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });

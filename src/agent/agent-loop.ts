@@ -894,7 +894,7 @@ export class AgentLoop {
           step,
           turn: (session as any).turnsCount || 1,
         };
-        CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking });
+        CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
         this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
       }
 
@@ -1187,7 +1187,9 @@ export class AgentLoop {
           const preexecutedReadResult = preexecutedReadResults.get(callIndex);
           if (!preexecutedReadResult) {
             this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
-            CLI.renderToolCall(toolName, toolArgs);
+            if (!this._collapsePreferences.compactSteps) {
+              CLI.renderToolCall(toolName, toolArgs);
+            }
           }
 
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
@@ -1238,7 +1240,11 @@ export class AgentLoop {
             }
           }
 
-          CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
+          if (this._collapsePreferences.compactSteps) {
+            CLI.renderCompactStepLine(toolName, toolArgs, executionResult.durationMs, executionResult.result);
+          } else {
+            CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
+          }
           this.kernel?.ctx.events.emit(
             'tool:after',
             toolName,
@@ -1454,6 +1460,31 @@ export class AgentLoop {
         // Post-Submission Graceful Auto-Finalization (Codex CLI Standard):
         // Nếu đã submit_solution thành công và có summary đầy đủ mà model sinh turn rỗng/chỉ reasoning, chốt Final Answer ngay lập tức
         if (hasSubmittedSolution && submittedSolutionSummary) {
+          const earlyCritic = this.criticGate.evaluate({
+            finalAnswer: submittedSolutionSummary,
+            session,
+            workspace: this._workspace,
+            turn,
+            hasSubmittedSolution: true,
+          });
+          if (!earlyCritic.approved) {
+            CLI.renderReflectionAlert(
+              1,
+              `Post-submission syntax or missing import check failed. Continuing turn to fix compiler issues...`,
+            );
+            session.addUserMessage(earlyCritic.critiquePrompt || 'Please fix syntax / missing import errors before completing.', 'system');
+            await this.persistSession(session);
+            CLI.renderStepFooter();
+            session.append('step/end', { turn, step, reason: 'unresolved-syntax-error' });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: 'unresolved-syntax-error',
+            });
+            this.kernel?.ctx.events.emit('step:after', step);
+            continue;
+          }
+
           const finalAnswer = submittedSolutionSummary;
           CLI.renderModelAction('final_answer');
           CLI.renderStepFooter();
@@ -1647,23 +1678,23 @@ export class AgentLoop {
             turn,
             hasSubmittedSolution,
           });
-      const finalAnswerDecision = (hasSubmittedSolution || isSubagent || isMockLLM)
+      const finalAnswerDecision = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
         ? policyDecision
-        : !evidenceDecision.allow
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: evidenceDecision.continuationPrompt,
-          }
         : !criticDecision.approved
         ? {
             allow: false,
             reason: 'unverified-evidence' as const,
             continuationPrompt: criticDecision.critiquePrompt,
           }
-        : !verificationDecision.allowed
+        : (!hasSubmittedSolution && !evidenceDecision.allow)
+        ? {
+            allow: false,
+            reason: 'unverified-evidence' as const,
+            continuationPrompt: evidenceDecision.continuationPrompt,
+          }
+        : (!hasSubmittedSolution && !verificationDecision.allowed)
         ? {
             allow: false,
             reason: 'unverified-evidence' as const,

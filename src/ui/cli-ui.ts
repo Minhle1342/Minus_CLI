@@ -9,6 +9,7 @@ export interface UICollapsePreferences {
   tools: boolean;       // Thu gọn kết quả tool dài
   diff: boolean;        // Thu gọn diff patch dài
   treeDepth: number;    // Độ sâu mặc định khi explore cây thư mục
+  compactSteps?: boolean; // Thu gọn toàn bộ step thành 1 line duy nhất (Antigravity Ctrl+O)
 }
 
 export const DEFAULT_COLLAPSE_PREFERENCES: UICollapsePreferences = {
@@ -16,6 +17,7 @@ export const DEFAULT_COLLAPSE_PREFERENCES: UICollapsePreferences = {
   tools: true,
   diff: false,
   treeDepth: 3,
+  compactSteps: false,
 };
 
 // ANSI escape codes for styling without external dependencies
@@ -1602,21 +1604,26 @@ export class CLI {
    */
   static renderCollapseStatus(prefs: UICollapsePreferences): void {
     const width = getTerminalWidth();
+    const compactBadge = prefs.compactSteps ? `${c.emerald}${c.bold}[✔ THU GỌN 1-LINE]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Expanded)]${c.reset}`;
     const thinkingBadge = prefs.thinking ? `${c.emerald}${c.bold}[✔ THU GỌN (Folded)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Expanded)]${c.reset}`;
     const toolsBadge = prefs.tools ? `${c.emerald}${c.bold}[✔ THU GỌN (Preview)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Full Raw)]${c.reset}`;
     const diffBadge = prefs.diff ? `${c.emerald}${c.bold}[✔ THU GỌN (>20 lines)]${c.reset}` : `${c.yellow}${c.bold}[MỞ RỘNG (Full Patch)]${c.reset}`;
 
     console.log(`\n${createBoxHeader('🗂️  CẤU HÌNH THU GỌN GIAO DIỆN (UI COLLAPSE PREFERENCES)', c.geminiPurple, width)}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}1. Suy luận System 2 (Thinking / CoT):${c.reset} ${thinkingBadge}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}2. Kết quả Tool lớn (Tool Outputs):${c.reset}    ${toolsBadge}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}3. Khối Diff Patches (Diffs):${c.reset}          ${diffBadge}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}4. Độ sâu cây thư mục mặc định:${c.reset}       ${c.brightCyan}${prefs.treeDepth} tầng${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}1. Chế độ Step 1-Line (Compact Steps):${c.reset}  ${compactBadge} ${c.slate}(Bấm ${c.brightYellow}Ctrl+O${c.slate} để toggle)${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}2. Suy luận System 2 (Thinking / CoT):${c.reset} ${thinkingBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}3. Kết quả Tool lớn (Tool Outputs):${c.reset}    ${toolsBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}4. Khối Diff Patches (Diffs):${c.reset}          ${diffBadge}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.bold}5. Độ sâu cây thư mục mặc định:${c.reset}       ${c.brightCyan}${prefs.treeDepth} tầng${c.reset}`);
     console.log(`${createBoxDivider(c.geminiPurple, width)}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Lệnh chuyển đổi nhanh:${c.reset}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse on${c.reset} | ${c.brightCyan}/collapse off${c.reset}       : Bật / tắt chế độ thu gọn toàn bộ`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse thinking on|off${c.reset}   : Bật / tắt thu gọn suy luận CoT`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse tools on|off${c.reset}      : Bật / tắt thu gọn kết quả tool`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse diff on|off${c.reset}       : Bật / tắt thu gọn diff code`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}Phím tắt & Lệnh chuyển đổi:${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightYellow}Ctrl + O${c.reset}                             : ${c.bold}Mở rộng (Expand) / Thu gọn (Shrink) 1-line step tức thì${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse on${c.reset} | ${c.brightCyan}/shrink${c.reset}             : Bật chế độ thu gọn toàn bộ step thành 1 dòng`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse off${c.reset} | ${c.brightCyan}/expand${c.reset}            : Mở rộng hiển thị chi tiết toàn bộ`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse steps on|off${c.reset}           : Bật / tắt thu gọn các step thành 1 line`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse thinking on|off${c.reset}        : Bật / tắt thu gọn suy luận CoT`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse tools on|off${c.reset}           : Bật / tắt thu gọn kết quả tool`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}/collapse diff on|off${c.reset}            : Bật / tắt thu gọn diff code`);
     console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
@@ -1821,6 +1828,65 @@ export class CLI {
         const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;
         console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.mutedText}${preview}${c.reset}`);
       }
+    }
+  }
+
+  /**
+   * Hiển thị Step đã thực thi thành 1 line duy nhất (Antigravity Compact / Shrunk Step Mode)
+   * Kích hoạt hoặc chuyển đổi thông qua tổ hợp phím Ctrl + O
+   */
+  static renderCompactStepLine(name: string, args: Record<string, any>, durationMs: number, result: Record<string, any>): void {
+    const isError = isToolResultFailure(result);
+    const badge = isError
+      ? `${c.crimson}${c.bold}✖ ERR${c.reset}`
+      : `${c.emerald}${c.bold}✔ OK${c.reset}`;
+    const durationBadge = durationMs > 0
+      ? (durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`)
+      : '0ms';
+
+    // Tạo tóm tắt ngắn gọn của đối số
+    let argSummary = '';
+    if (args.path || args.filePath) argSummary = `"${args.path || args.filePath}"`;
+    else if (args.command) argSummary = `"${String(args.command).slice(0, 35)}${String(args.command).length > 35 ? '...' : ''}"`;
+    else if (args.query) argSummary = `"${String(args.query).slice(0, 30)}"`;
+    else if (args.symbol) argSummary = `"${args.symbol}"`;
+    else if (args.summary) argSummary = `"${String(args.summary).slice(0, 30)}..."`;
+    else if (Object.keys(args).length > 0) {
+      const firstKey = Object.keys(args)[0];
+      const firstVal = String(args[firstKey]).slice(0, 25);
+      argSummary = `${firstKey}=${firstVal}`;
+    }
+
+    // Tóm tắt kết quả
+    let resultSummary = '';
+    if (result.error) {
+      resultSummary = `${c.crimson}${String(result.error).slice(0, 45)}${c.reset}`;
+    } else if (result.created) {
+      resultSummary = `${c.emerald}created${c.reset}`;
+    } else if (result.hunksApplied !== undefined) {
+      resultSummary = `${c.emerald}${result.hunksApplied} hunk(s) applied${c.reset}`;
+    } else if (result.matches !== undefined) {
+      resultSummary = `${c.emerald}${result.totalMatches || result.matches.length} match(es)${c.reset}`;
+    } else if (result.stdout !== undefined) {
+      resultSummary = result.exitCode === 0 ? `${c.slate}exit: 0${c.reset}` : `${c.crimson}exit: ${result.exitCode}${c.reset}`;
+    } else if (result.message) {
+      resultSummary = `${c.mutedText}${String(result.message).slice(0, 40)}${c.reset}`;
+    }
+
+    const summaryParts = [resultSummary, durationBadge].filter(Boolean).join(', ');
+    console.log(
+      `${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiCyan}⚙️ ${c.bold}${name}${c.reset}${argSummary ? `(${c.slate}${argSummary}${c.reset})` : ''} ➔ [${badge}] ${c.slate}(${summaryParts})${c.reset}`
+    );
+  }
+
+  /**
+   * Hiển thị Toast thông báo trạng thái phím tắt Ctrl + O (Antigravity Expand / Shrink Step Switch)
+   */
+  static renderCtrlOToggleToast(isCompact: boolean): void {
+    if (isCompact) {
+      console.log(`\n  ${c.brightYellow}${c.bold}⚡ [Ctrl+O] Đã THU GỌN các step (1-line compact mode)${c.reset} ${c.slate}— Bấm Ctrl+O để mở rộng chi tiết${c.reset}\n`);
+    } else {
+      console.log(`\n  ${c.brightCyan}${c.bold}📖 [Ctrl+O] Đã MỞ RỘNG các step (Full verbose details mode)${c.reset} ${c.slate}— Bấm Ctrl+O để thu gọn thành 1 dòng${c.reset}\n`);
     }
   }
 

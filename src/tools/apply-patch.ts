@@ -4,6 +4,7 @@ import { Workspace } from '../workspace/workspace.js';
 import { PatchEngine } from '../patch/patch-engine.js';
 import { computeFileHash, computeStringHash } from '../workspace/workspace-digest.js';
 import { toolError, toolSuccess } from './tool-result.js';
+import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
 /**
  * Tool apply_patch (Codex CLI Unified Patch Engine)
@@ -128,6 +129,19 @@ export const applyPatchTool: ToolDefinition = {
 
       const diffHash = computeStringHash(JSON.stringify(result.fileResults));
 
+      let diagnosticWarning: string | undefined;
+      let syntaxErrors: any[] | undefined;
+      try {
+        const touched = [...(result.filesModified || []), ...(result.filesCreated || [])];
+        const diags = await CodeSyntaxValidator.validateFiles(touched, workspace);
+        if (diags.length > 0) {
+          syntaxErrors = diags;
+          diagnosticWarning = `⚠️ LINTER ALERT (${diags.length} unresolved syntax / missing import issue(s)):\n` +
+            diags.map((d) => `  • [${d.file}] Line ${d.line}: ${d.message}`).join('\n') +
+            `\n👉 ACTION REQUIRED: Add the missing import statement at the top of the file(s) or fix the syntax error now.`;
+        }
+      } catch {}
+
       return {
         success: true,
         filesModified: result.filesModified,
@@ -137,6 +151,7 @@ export const applyPatchTool: ToolDefinition = {
         hunksApplied: result.hunksApplied,
         fileResults: result.fileResults,
         diffHash,
+        ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
     } catch (err: any) {
       return toolError(`Lỗi xử lý patch: ${err.message}`, 'PATCH_ERROR');

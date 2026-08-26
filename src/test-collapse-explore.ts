@@ -171,6 +171,21 @@ describe('Antigravity CLI Collapse & Explore Mechanism', () => {
       agentLoop.setCollapsePreferences({ thinking: false, treeDepth: 4 });
       assert.strictEqual(agentLoop.collapsePreferences.thinking, false);
       assert.strictEqual(agentLoop.collapsePreferences.treeDepth, 4);
+
+      agentLoop.setCollapsePreferences({ compactSteps: true });
+      assert.strictEqual(agentLoop.collapsePreferences.compactSteps, true);
+    });
+
+    it('should render compact step line and Ctrl+O toast without throwing', () => {
+      assert.doesNotThrow(() => {
+        CLI.renderCompactStepLine('read_file', { path: 'src/agent.ts' }, 15, { success: true, content: 'export class ...' });
+        CLI.renderCompactStepLine('replace_text', { path: 'src/main.py' }, 22, { success: true, hunksApplied: 1 });
+        CLI.renderCompactStepLine('run_command', { command: 'cargo test' }, 1200, { success: true, stdout: 'test result: ok', exitCode: 0 });
+        CLI.renderCompactStepLine('run_command', { command: 'npm test' }, 450, { success: false, error: 'Command failed', exitCode: 1 });
+        CLI.renderCtrlOToggleToast(true);
+        CLI.renderCtrlOToggleToast(false);
+      });
     });
   });
 });
+

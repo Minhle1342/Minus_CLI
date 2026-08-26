@@ -796,6 +796,26 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   );
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
+    // Phím tắt Ctrl + O: Chuyển đổi giữa Thu gọn (1-line step) và Mở rộng chi tiết (Full verbose)
+    const isCtrlO = (key?.ctrl && (key?.name === 'o' || _sequence === '\x0f')) || _sequence === '\x0f';
+    if (isCtrlO) {
+      if (typeof (rl as any).line === 'string') {
+        (rl as any).line = (rl as any).line.replace(/\x0f/g, '');
+      }
+      const isCurrentlyCompact = agentLoop.collapsePreferences.compactSteps ?? false;
+      const newCompact = !isCurrentlyCompact;
+      agentLoop.setCollapsePreferences({
+        compactSteps: newCompact,
+        thinking: newCompact,
+        tools: newCompact,
+        diff: newCompact,
+      });
+      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
+      CLI.renderCtrlOToggleToast(newCompact);
+      (rl as any)._refreshLine?.();
+      return;
+    }
+
     if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
       slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
@@ -1865,15 +1885,20 @@ ${planPrompt}`;
         continue;
       }
 
-      // Lệnh quản lý cơ chế Thu gọn / Mở rộng UI (/collapse hoặc /fold)
+      // Lệnh quản lý cơ chế Thu gọn / Mở rộng UI (/collapse, /fold, /shrink, /expand)
       if (
         trimmed === '/collapse' ||
         trimmed.startsWith('/collapse ') ||
         trimmed === '/fold' ||
-        trimmed.startsWith('/fold ')
+        trimmed.startsWith('/fold ') ||
+        trimmed === '/shrink' ||
+        trimmed.startsWith('/shrink ') ||
+        trimmed === '/expand' ||
+        trimmed.startsWith('/expand ')
       ) {
+        const isExpandCmd = trimmed.startsWith('/expand');
         const parts = trimmed.split(/\s+/).slice(1);
-        const subCmd = parts[0]?.toLowerCase();
+        const subCmd = isExpandCmd ? 'off' : parts[0]?.toLowerCase();
         const val = parts[1]?.toLowerCase();
 
         const currentPrefs = agentLoop.collapsePreferences;
@@ -1883,17 +1908,25 @@ ${planPrompt}`;
           continue;
         }
 
-        if (subCmd === 'on' || subCmd === 'enable' || subCmd === 'all') {
-          agentLoop.setCollapsePreferences({ thinking: true, tools: true, diff: true });
-          console.log(`\n${c.green}✔ Đã bật chế độ Thu gọn (Collapse Mode) cho toàn bộ suy luận và tool outputs.${c.reset}\n`);
+        if (subCmd === 'on' || subCmd === 'enable' || subCmd === 'all' || trimmed === '/shrink') {
+          agentLoop.setCollapsePreferences({ compactSteps: true, thinking: true, tools: true, diff: true });
+          console.log(`\n${c.green}✔ Đã bật chế độ Thu gọn (1-line step compact mode). Bấm Ctrl+O để mở rộng/thu gọn nhanh.${c.reset}\n`);
           CLI.renderCollapseStatus(agentLoop.collapsePreferences);
           continue;
         }
 
-        if (subCmd === 'off' || subCmd === 'disable' || subCmd === 'expand') {
-          agentLoop.setCollapsePreferences({ thinking: false, tools: false, diff: false });
-          console.log(`\n${c.yellow}✔ Đã tắt chế độ Thu gọn. Toàn bộ suy luận CoT và tool outputs sẽ hiển thị đầy đủ.${c.reset}\n`);
+        if (subCmd === 'off' || subCmd === 'disable' || subCmd === 'expand' || isExpandCmd) {
+          agentLoop.setCollapsePreferences({ compactSteps: false, thinking: false, tools: false, diff: false });
+          console.log(`\n${c.yellow}✔ Đã tắt chế độ Thu gọn (Full Verbose Mode). Toàn bộ chi tiết step sẽ hiển thị đầy đủ.${c.reset}\n`);
           CLI.renderCollapseStatus(agentLoop.collapsePreferences);
+          continue;
+        }
+
+        if (subCmd === 'steps' || subCmd === 'step') {
+          const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.compactSteps);
+          agentLoop.setCollapsePreferences({ compactSteps: isTurnOn });
+          const statusText = isTurnOn ? `${c.green}BẬT (1-line per step)${c.reset}` : `${c.yellow}TẮT (Full step)${c.reset}`;
+          console.log(`\n${c.green}✔ Đã cập nhật thu gọn các Step:${c.reset} ${statusText}\n`);
           continue;
         }
 

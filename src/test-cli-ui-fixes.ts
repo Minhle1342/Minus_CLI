@@ -204,4 +204,233 @@ describe('Antigravity CLI UI & Input Bug Fixes', () => {
       assert.ok(result.errors.some((err: string) => err.includes('$.inventedProperty is not declared')));
     });
   });
+
+  describe('7. Hard-Gated Critic Invariant & Missing Import Diagnostics', () => {
+    it('should detect missing RedirectResponse import in Python code', async () => {
+      const { CodeSyntaxValidator } = await import('./workspace/syntax-diagnostics.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+
+      const workspace = new Workspace(process.cwd());
+      const testPyPath = path.join(process.cwd(), 'temp_test_redirect.py');
+      const pyCode = `
+def login_route():
+    # User forgot to import RedirectResponse
+    return RedirectResponse(url="/dashboard")
+`;
+      await fs.writeFile(testPyPath, pyCode, 'utf8');
+      try {
+        const diags = await CodeSyntaxValidator.validateFile('temp_test_redirect.py', workspace);
+        assert.ok(diags.length > 0, 'Must detect at least 1 missing import diagnostic');
+        assert.ok(diags.some((d) => d.message.includes('RedirectResponse') && d.message.includes('from fastapi.responses import RedirectResponse')));
+      } finally {
+        await fs.unlink(testPyPath).catch(() => {});
+      }
+    });
+
+    it('should pass validation when RedirectResponse is properly imported', async () => {
+      const { CodeSyntaxValidator } = await import('./workspace/syntax-diagnostics.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+
+      const workspace = new Workspace(process.cwd());
+      const testPyPath = path.join(process.cwd(), 'temp_test_valid_redirect.py');
+      const pyCode = `
+from fastapi.responses import RedirectResponse
+
+def login_route():
+    return RedirectResponse(url="/dashboard")
+`;
+      await fs.writeFile(testPyPath, pyCode, 'utf8');
+      try {
+        const diags = await CodeSyntaxValidator.validateFile('temp_test_valid_redirect.py', workspace);
+        assert.strictEqual(diags.length, 0, 'No diagnostics should be reported for properly imported symbol');
+      } finally {
+        await fs.unlink(testPyPath).catch(() => {});
+      }
+    });
+
+    it('should hard-reject final answer in CriticGate when code has missing imports', async () => {
+      const { CriticGate } = await import('./agent/critic-gate.js');
+      const { Session } = await import('./session/session.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+
+      const workspace = new Workspace(process.cwd());
+      const testPyPath = path.join(process.cwd(), 'temp_test_broken.py');
+      const pyCode = `
+def main_handler():
+    raise HTTPException(status_code=404, detail="Item not found")
+`;
+      await fs.writeFile(testPyPath, pyCode, 'utf8');
+      try {
+        const critic = new CriticGate();
+        const session = new Session('test-critic-session');
+        const evaluation = await critic.evaluateAsync({
+          finalAnswer: 'I have finished creating the route handler.',
+          session,
+          workspace,
+          filesModified: ['temp_test_broken.py'],
+          hasSubmittedSolution: true,
+        });
+
+        assert.strictEqual(evaluation.approved, false, 'CriticGate must HARD REJECT code with missing imports');
+        assert.strictEqual(evaluation.score, 0, 'Score must be 0 for invariant violation');
+        assert.ok(evaluation.critiquePrompt?.includes('HTTPException'));
+        assert.ok(evaluation.critiquePrompt?.includes('from fastapi import HTTPException'));
+      } finally {
+        await fs.unlink(testPyPath).catch(() => {});
+      }
+    });
+  });
+
+  describe('8. Multi-Ecosystem Auto-Detection in ProjectMemoryManager', () => {
+    it('should detect Rust Cargo project and populate standard cargo test/check scripts', async () => {
+      const { ProjectMemoryManager } = await import('./memory/project-memory.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const os = await import('node:os');
+
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-rust-proj-'));
+      try {
+        const cargoToml = `
+[package]
+name = "my_rust_service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+axum = "0.7"
+`;
+        await fs.writeFile(path.join(tempDir, 'Cargo.toml'), cargoToml, 'utf8');
+        const workspace = new Workspace(tempDir);
+        const manager = new ProjectMemoryManager(tempDir);
+        await manager.autoIndexWorkspace(workspace);
+        const memory = (manager as any).memoryData;
+
+        assert.strictEqual(memory.projectName, 'my_rust_service');
+        assert.strictEqual(memory.projectType, 'Rust (Cargo)');
+        assert.strictEqual(memory.packageManager, 'cargo');
+        assert.strictEqual(memory.scripts['test'], 'cargo test');
+        assert.strictEqual(memory.scripts['check'], 'cargo check');
+        assert.strictEqual(memory.scripts['clippy'], 'cargo clippy');
+        assert.ok(memory.dependenciesSummary.includes('tokio'));
+        assert.ok(memory.dependenciesSummary.includes('axum'));
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+
+    it('should detect Python FastAPI project with uv.lock and populate pytest', async () => {
+      const { ProjectMemoryManager } = await import('./memory/project-memory.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const os = await import('node:os');
+
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-python-proj-'));
+      try {
+        const pyproject = `
+[project]
+name = "api_gateway"
+version = "1.0.0"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0"
+]
+`;
+        await fs.writeFile(path.join(tempDir, 'pyproject.toml'), pyproject, 'utf8');
+        await fs.writeFile(path.join(tempDir, 'uv.lock'), '', 'utf8');
+        const workspace = new Workspace(tempDir);
+        const manager = new ProjectMemoryManager(tempDir);
+        await manager.autoIndexWorkspace(workspace);
+        const memory = (manager as any).memoryData;
+
+        assert.strictEqual(memory.projectName, 'api_gateway');
+        assert.strictEqual(memory.projectType, 'Python (FastAPI)');
+        assert.strictEqual(memory.packageManager, 'uv');
+        assert.strictEqual(memory.scripts['test'], 'pytest');
+        assert.strictEqual(memory.scripts['run'], 'uvicorn main:app --reload');
+        assert.strictEqual(memory.scripts['lint'], 'ruff check .');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+
+    it('should detect Golang module and populate go test ./...', async () => {
+      const { ProjectMemoryManager } = await import('./memory/project-memory.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const os = await import('node:os');
+
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-go-proj-'));
+      try {
+        const goMod = `
+module github.com/example/orderservice
+
+go 1.22
+`;
+        await fs.writeFile(path.join(tempDir, 'go.mod'), goMod, 'utf8');
+        const workspace = new Workspace(tempDir);
+        const manager = new ProjectMemoryManager(tempDir);
+        await manager.autoIndexWorkspace(workspace);
+        const memory = (manager as any).memoryData;
+
+        assert.strictEqual(memory.projectName, 'orderservice');
+        assert.strictEqual(memory.projectType, 'Go Module');
+        assert.strictEqual(memory.packageManager, 'go');
+        assert.strictEqual(memory.scripts['test'], 'go test ./...');
+        assert.strictEqual(memory.scripts['build'], 'go build ./...');
+        assert.strictEqual(memory.scripts['vet'], 'go vet ./...');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+
+    it('should detect Java Maven Spring Boot project and populate mvn test', async () => {
+      const { ProjectMemoryManager } = await import('./memory/project-memory.js');
+      const { Workspace } = await import('./workspace/workspace.js');
+      const fs = await import('node:fs/promises');
+      const path = await import('node:path');
+      const os = await import('node:os');
+
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-java-proj-'));
+      try {
+        const pomXml = `
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>payment-service</artifactId>
+    <version>1.0.0</version>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+    </parent>
+</project>
+`;
+        await fs.writeFile(path.join(tempDir, 'pom.xml'), pomXml, 'utf8');
+        const workspace = new Workspace(tempDir);
+        const manager = new ProjectMemoryManager(tempDir);
+        await manager.autoIndexWorkspace(workspace);
+        const memory = (manager as any).memoryData;
+
+        assert.strictEqual(memory.projectName, 'payment-service');
+        assert.strictEqual(memory.projectType, 'Java (Spring Boot / Maven)');
+        assert.strictEqual(memory.packageManager, 'mvn');
+        assert.strictEqual(memory.scripts['test'], 'mvn test');
+        assert.strictEqual(memory.scripts['build'], 'mvn clean package');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+  });
 });
+
+

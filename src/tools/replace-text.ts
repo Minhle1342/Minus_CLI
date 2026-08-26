@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
+import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
 type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation';
 
@@ -163,6 +164,18 @@ export const replaceTextTool: ToolDefinition = {
 
       await fs.writeFile(safePath, updatedContent, 'utf-8');
 
+      let diagnosticWarning: string | undefined;
+      let syntaxErrors: any[] | undefined;
+      try {
+        const diags = await CodeSyntaxValidator.validateFile(rawPath, workspace);
+        if (diags.length > 0) {
+          syntaxErrors = diags;
+          diagnosticWarning = `⚠️ LINTER ALERT (${diags.length} unresolved syntax / missing import issue(s)):\n` +
+            diags.map((d) => `  • Line ${d.line}: ${d.message}`).join('\n') +
+            `\n👉 ACTION REQUIRED: Add the missing import statement at the top of "${rawPath}" or fix the syntax error now.`;
+        }
+      } catch {}
+
       return {
         path: rawPath,
         success: true,
@@ -171,6 +184,7 @@ export const replaceTextTool: ToolDefinition = {
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
         message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
     } catch (err: any) {
       return {

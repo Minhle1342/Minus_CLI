@@ -123,25 +123,44 @@ export class ProjectMemoryManager {
   }
 
   /**
-   * Tự động quét cấu trúc repo để lập chỉ mục trí nhớ
+   * Tự động quét cấu trúc repo để lập chỉ mục trí nhớ đa hệ sinh thái (Node.js, Rust, Python, Go, Java, .NET, v.v.)
    */
   async autoIndexWorkspace(workspace: Workspace): Promise<void> {
     const rootDir = workspace.rootDir;
 
+    let projectName = path.basename(rootDir);
     let projectType = 'Generic';
     let packageManager = 'npm';
     const scripts: Record<string, string> = {};
     const dependenciesSummary: string[] = [];
     const keyDirectories: Record<string, string> = {};
 
-    // 1. Quét package.json (Node / TypeScript)
+    // 1. Quét package.json (Node.js / TypeScript / JavaScript)
     try {
       const pkgPath = path.join(rootDir, 'package.json');
       const rawPkg = await fs.readFile(pkgPath, 'utf-8');
       const pkg = JSON.parse(rawPkg);
 
-      this.memoryData.projectName = pkg.name || path.basename(rootDir);
+      if (pkg.name) projectName = pkg.name;
       projectType = pkg.devDependencies?.typescript || pkg.dependencies?.typescript ? 'Node.js / TypeScript' : 'Node.js / JavaScript';
+
+      // Nhận diện Framework JS/TS phổ biến
+      const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      if (allDeps['next']) projectType = 'Next.js (React)';
+      else if (allDeps['react']) projectType = 'React App';
+      else if (allDeps['vue'] || allDeps['nuxt']) projectType = 'Vue / Nuxt';
+      else if (allDeps['@nestjs/core']) projectType = 'NestJS';
+      else if (allDeps['express']) projectType = 'Express.js';
+      else if (allDeps['hono']) projectType = 'Hono';
+
+      // Nhận diện Package Manager
+      try {
+        const entries = await fs.readdir(rootDir);
+        if (entries.includes('pnpm-lock.yaml')) packageManager = 'pnpm';
+        else if (entries.includes('yarn.lock')) packageManager = 'yarn';
+        else if (entries.includes('bun.lockb') || entries.includes('bun.lock')) packageManager = 'bun';
+        else if (entries.includes('package-lock.json')) packageManager = 'npm';
+      } catch {}
 
       if (pkg.scripts && typeof pkg.scripts === 'object') {
         Object.assign(scripts, pkg.scripts);
@@ -155,20 +174,168 @@ export class ProjectMemoryManager {
       }
     } catch {}
 
-    // 2. Quét các thư mục chính trong repo
+    // 2. Quét Cargo.toml (Rust)
+    try {
+      const cargoPath = path.join(rootDir, 'Cargo.toml');
+      const cargoContent = await fs.readFile(cargoPath, 'utf-8');
+      projectType = 'Rust (Cargo)';
+      packageManager = 'cargo';
+
+      const nameMatch = cargoContent.match(/name\s*=\s*"([^"]+)"/);
+      if (nameMatch && nameMatch[1]) projectName = nameMatch[1];
+
+      // Thêm các lệnh test và build chuẩn của Rust
+      scripts['test'] = scripts['test'] || 'cargo test';
+      scripts['check'] = scripts['check'] || 'cargo check';
+      scripts['build'] = scripts['build'] || 'cargo build';
+      scripts['clippy'] = scripts['clippy'] || 'cargo clippy';
+      scripts['run'] = scripts['run'] || 'cargo run';
+
+      // Quét dependencies cơ bản từ Cargo.toml
+      const depMatches = Array.from(cargoContent.matchAll(/^([a-zA-Z0-9_-]+)\s*=\s*(?:"[^"]+"|\{[^}]+\})/gm));
+      for (const m of depMatches.slice(0, 10)) {
+        if (m[1] && !['package', 'dependencies', 'dev-dependencies', 'workspace'].includes(m[1])) {
+          dependenciesSummary.push(m[1]);
+        }
+      }
+    } catch {}
+
+    // 3. Quét Python (pyproject.toml, requirements.txt, Pipfile, setup.py, manage.py)
+    try {
+      const entries = await fs.readdir(rootDir);
+      const isPython = entries.some((e) => ['pyproject.toml', 'requirements.txt', 'Pipfile', 'setup.py', 'manage.py'].includes(e))
+        || entries.some((e) => e.endsWith('.py'));
+
+      if (isPython) {
+        projectType = 'Python Application';
+        packageManager = 'pip';
+
+        if (entries.includes('uv.lock')) packageManager = 'uv';
+        else if (entries.includes('poetry.lock')) packageManager = 'poetry';
+        else if (entries.includes('Pipfile')) packageManager = 'pipenv';
+
+        // Đọc pyproject.toml hoặc requirements.txt để phân tích framework
+        let pyContent = '';
+        if (entries.includes('pyproject.toml')) {
+          pyContent = await fs.readFile(path.join(rootDir, 'pyproject.toml'), 'utf-8');
+          const nameMatch = pyContent.match(/name\s*=\s*"([^"]+)"/);
+          if (nameMatch && nameMatch[1]) projectName = nameMatch[1];
+        } else if (entries.includes('requirements.txt')) {
+          pyContent = await fs.readFile(path.join(rootDir, 'requirements.txt'), 'utf-8');
+        }
+
+        if (/fastapi/i.test(pyContent)) projectType = 'Python (FastAPI)';
+        else if (/django/i.test(pyContent) || entries.includes('manage.py')) projectType = 'Python (Django)';
+        else if (/flask/i.test(pyContent)) projectType = 'Python (Flask)';
+        else if (/torch|tensorflow|transformers/i.test(pyContent)) projectType = 'Python (AI / ML)';
+
+        // Tự động điền các lệnh test chuẩn Python
+        if (entries.includes('manage.py')) {
+          scripts['test'] = scripts['test'] || 'python manage.py test';
+          scripts['run'] = scripts['run'] || 'python manage.py runserver';
+        } else if (projectType.includes('FastAPI')) {
+          scripts['test'] = scripts['test'] || 'pytest';
+          scripts['run'] = scripts['run'] || 'uvicorn main:app --reload';
+        } else {
+          scripts['test'] = scripts['test'] || 'pytest';
+          scripts['run'] = scripts['run'] || (entries.includes('main.py') ? 'python main.py' : 'python app.py');
+        }
+        scripts['lint'] = scripts['lint'] || 'ruff check .';
+        scripts['typecheck'] = scripts['typecheck'] || 'mypy .';
+      }
+    } catch {}
+
+    // 4. Quét go.mod (Golang)
+    try {
+      const goModPath = path.join(rootDir, 'go.mod');
+      const goContent = await fs.readFile(goModPath, 'utf-8');
+      projectType = 'Go Module';
+      packageManager = 'go';
+
+      const modMatch = goContent.match(/module\s+([^\s\r\n]+)/);
+      if (modMatch && modMatch[1]) projectName = path.basename(modMatch[1]);
+
+      scripts['test'] = scripts['test'] || 'go test ./...';
+      scripts['build'] = scripts['build'] || 'go build ./...';
+      scripts['vet'] = scripts['vet'] || 'go vet ./...';
+      scripts['run'] = scripts['run'] || 'go run .';
+    } catch {}
+
+    // 5. Quét pom.xml hoặc build.gradle (Java / Kotlin)
+    try {
+      const entries = await fs.readdir(rootDir);
+      if (entries.includes('pom.xml')) {
+        const pomContent = await fs.readFile(path.join(rootDir, 'pom.xml'), 'utf-8');
+        projectType = pomContent.includes('spring-boot') ? 'Java (Spring Boot / Maven)' : 'Java (Maven)';
+        packageManager = 'mvn';
+
+        const artMatch = pomContent.match(/<artifactId>([^<]+)<\/artifactId>/);
+        if (artMatch && artMatch[1]) projectName = artMatch[1];
+
+        scripts['test'] = scripts['test'] || 'mvn test';
+        scripts['build'] = scripts['build'] || 'mvn clean package';
+        scripts['compile'] = scripts['compile'] || 'mvn compile';
+      } else if (entries.includes('build.gradle') || entries.includes('build.gradle.kts')) {
+        projectType = entries.includes('build.gradle.kts') ? 'Kotlin / Java (Gradle)' : 'Java (Gradle)';
+        packageManager = 'gradle';
+        scripts['test'] = scripts['test'] || 'gradle test';
+        scripts['build'] = scripts['build'] || 'gradle build';
+      }
+    } catch {}
+
+    // 6. Quét .csproj / .sln (C# / .NET)
+    try {
+      const entries = await fs.readdir(rootDir);
+      const csProj = entries.find((e) => e.endsWith('.csproj') || e.endsWith('.sln'));
+      if (csProj) {
+        projectName = csProj.replace(/\.(csproj|sln)$/, '');
+        projectType = 'C# / .NET Application';
+        packageManager = 'dotnet';
+        scripts['test'] = scripts['test'] || 'dotnet test';
+        scripts['build'] = scripts['build'] || 'dotnet build';
+        scripts['run'] = scripts['run'] || 'dotnet run';
+      }
+    } catch {}
+
+    // 7. Quét composer.json (PHP)
+    try {
+      const composerPath = path.join(rootDir, 'composer.json');
+      const composerContent = await fs.readFile(composerPath, 'utf-8');
+      const comp = JSON.parse(composerContent);
+      projectName = comp.name ? comp.name.split('/')[1] || comp.name : projectName;
+      projectType = comp.require?.['laravel/framework'] ? 'PHP (Laravel)' : 'PHP (Composer)';
+      packageManager = 'composer';
+      scripts['test'] = scripts['test'] || 'composer test';
+    } catch {}
+
+    // 8. Quét pubspec.yaml (Flutter / Dart)
+    try {
+      const pubspecPath = path.join(rootDir, 'pubspec.yaml');
+      const pubspecContent = await fs.readFile(pubspecPath, 'utf-8');
+      const nameMatch = pubspecContent.match(/name:\s*([^\s\r\n]+)/);
+      if (nameMatch && nameMatch[1]) projectName = nameMatch[1];
+      projectType = pubspecContent.includes('flutter:') ? 'Flutter (Dart)' : 'Dart Application';
+      packageManager = 'flutter';
+      scripts['test'] = scripts['test'] || (projectType.includes('Flutter') ? 'flutter test' : 'dart test');
+      scripts['run'] = scripts['run'] || (projectType.includes('Flutter') ? 'flutter run' : 'dart run');
+    } catch {}
+
+    // 9. Quét các thư mục chính trong repo
     try {
       const entries = await fs.readdir(rootDir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory() && !['node_modules', '.git', 'dist', '.codingagent'].includes(entry.name)) {
+        if (entry.isDirectory() && !['node_modules', '.git', 'dist', 'target', 'build', '.codingagent', '__pycache__', '.pytest_cache'].includes(entry.name)) {
           if (entry.name === 'src') keyDirectories['src/'] = 'Mã nguồn chính của dự án';
           else if (entry.name === 'test' || entry.name === 'tests') keyDirectories[entry.name + '/'] = 'Thư mục kiểm thử';
           else if (entry.name === 'docs') keyDirectories['docs/'] = 'Tài liệu hướng dẫn';
+          else if (entry.name === 'app' || entry.name === 'pages' || entry.name === 'components') keyDirectories[entry.name + '/'] = 'Giao diện & Thành phần ứng dụng';
+          else if (entry.name === 'api' || entry.name === 'routes' || entry.name === 'controllers') keyDirectories[entry.name + '/'] = 'API & Bộ định tuyến';
           else keyDirectories[entry.name + '/'] = 'Thư mục module';
         }
       }
     } catch {}
 
-    // 3. Quét tệp chỉ dẫn dự án chuẩn: AGENTS.md, CODEX.md, CLAUDE.md
+    // 10. Quét tệp chỉ dẫn dự án chuẩn: AGENTS.md, CODEX.md, CLAUDE.md
     for (const docFile of ['AGENTS.md', 'CODEX.md', 'CLAUDE.md']) {
       try {
         const docPath = path.join(rootDir, docFile);
@@ -187,6 +354,7 @@ export class ProjectMemoryManager {
       } catch {}
     }
 
+    this.memoryData.projectName = projectName;
     this.memoryData.projectType = projectType;
     this.memoryData.packageManager = packageManager;
     this.memoryData.scripts = scripts;
