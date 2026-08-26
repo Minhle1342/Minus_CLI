@@ -172,6 +172,14 @@ export class AnthropicLLM {
           const block = toolBlocks.get(event.index);
           if (block) block.inputJson += delta.partial_json;
         }
+      } else if (event.type === 'content_block_stop') {
+        const block = toolBlocks.get(event.index);
+        if (block && callbacks?.onToolCallEarly) {
+          try {
+            const parsedArgs = block.inputJson ? JSON.parse(block.inputJson) : {};
+            callbacks.onToolCallEarly({ id: block.id, name: block.name, args: parsedArgs });
+          } catch {}
+        }
       } else if (event.type === 'message_delta') {
         stopReason = event.delta?.stop_reason || stopReason;
         const inputTokens = usage?.promptTokens ?? 0;

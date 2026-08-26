@@ -1860,17 +1860,22 @@ export class CLI {
     // Tóm tắt kết quả
     let resultSummary = '';
     if (result.error) {
-      resultSummary = `${c.crimson}${String(result.error).slice(0, 45)}${c.reset}`;
+      resultSummary = `${c.crimson}${String(result.error).slice(0, 40)}${c.reset}`;
     } else if (result.created) {
       resultSummary = `${c.emerald}created${c.reset}`;
     } else if (result.hunksApplied !== undefined) {
       resultSummary = `${c.emerald}${result.hunksApplied} hunk(s) applied${c.reset}`;
+    } else if (name === 'replace_text' && result.success) {
+      resultSummary = `${c.emerald}1 match replaced${c.reset}`;
+    } else if (name === 'write_file' && result.success) {
+      resultSummary = `${c.emerald}written${c.reset}`;
     } else if (result.matches !== undefined) {
       resultSummary = `${c.emerald}${result.totalMatches || result.matches.length} match(es)${c.reset}`;
     } else if (result.stdout !== undefined) {
       resultSummary = result.exitCode === 0 ? `${c.slate}exit: 0${c.reset}` : `${c.crimson}exit: ${result.exitCode}${c.reset}`;
     } else if (result.message) {
-      resultSummary = `${c.mutedText}${String(result.message).slice(0, 40)}${c.reset}`;
+      const cleanMsg = String(result.message).replace(/\s+/g, ' ').trim();
+      resultSummary = `${c.mutedText}${cleanMsg.length > 35 ? cleanMsg.slice(0, 32) + '...' : cleanMsg}${c.reset}`;
     }
 
     const summaryParts = [resultSummary, durationBadge].filter(Boolean).join(', ');

@@ -108,10 +108,19 @@ const COMMON_FRAMEWORK_IMPORTS: Record<string, string> = {
  * và các lỗi compiler/LSP trên toàn bộ các ngôn ngữ (TypeScript, JavaScript, Python, JSON).
  */
 export class CodeSyntaxValidator {
+  private static speculativeCache = new Map<string, { mtime: number; contentHash?: string; diagnostics: DiagnosticItem[] }>();
+
   /**
-   * Thẩm định 1 file duy nhất và trả về danh sách lỗi nếu có
+   * Chạy suy đoán ngầm (Speculative Diagnostics) trong RAM ngay sau mutation
    */
-  static async validateFile(filePath: string, workspace: Workspace): Promise<DiagnosticItem[]> {
+  static async speculativeValidate(filePath: string, workspace: Workspace): Promise<DiagnosticItem[]> {
+    return this.validateFile(filePath, workspace, true);
+  }
+
+  /**
+   * Thẩm định 1 file duy nhất và trả về danh sách lỗi nếu có (hỗ trợ Cache Hit tức thì)
+   */
+  static async validateFile(filePath: string, workspace: Workspace, forceRefresh = false): Promise<DiagnosticItem[]> {
     const ext = path.extname(filePath).toLowerCase();
     let safePath: string;
     try {
@@ -121,17 +130,32 @@ export class CodeSyntaxValidator {
     }
 
     try {
+      const stats = await fs.stat(safePath).catch(() => null);
+      if (stats && !forceRefresh) {
+        const cached = this.speculativeCache.get(safePath);
+        if (cached && cached.mtime === stats.mtimeMs) {
+          return cached.diagnostics;
+        }
+      }
+
+      let diags: DiagnosticItem[] = [];
+
       if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
-        return this.validateTypeScript(filePath, workspace);
+        diags = this.validateTypeScript(filePath, workspace);
+      } else if (ext === '.py') {
+        diags = await this.validatePython(filePath, safePath);
+      } else if (ext === '.json') {
+        diags = await this.validateJSON(filePath, safePath);
       }
 
-      if (ext === '.py') {
-        return await this.validatePython(filePath, safePath);
+      if (stats) {
+        this.speculativeCache.set(safePath, {
+          mtime: stats.mtimeMs,
+          diagnostics: diags,
+        });
       }
 
-      if (ext === '.json') {
-        return await this.validateJSON(filePath, safePath);
-      }
+      return diags;
     } catch {
       // Ignore unparseable or inaccessible file errors
     }

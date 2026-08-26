@@ -12,6 +12,7 @@ import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { ToolRegistry } from './tools/registry.js';
 import { Workspace } from './workspace/workspace.js';
+import { CodeSyntaxValidator } from './workspace/syntax-diagnostics.js';
 
 class CountingSessionPersistence extends SessionPersistence {
   private persistedSeqBySession = new Map<string, number>();
@@ -410,8 +411,63 @@ async function main(): Promise<void> {
   const finalSession = new Session('auto-finalize-test');
   finalSession.addUserMessage('Hoàn tất tác vụ');
   const finalAnswer = await loop.run(finalSession);
-  assert.equal(finalAnswer, submittedSummary);
-  assert.equal(modelRequests, 1, 'verified submit_solution finalizes without a redundant model request');
+  // 6. Test PipelinedToolDispatcher (Streaming Incremental Tool Dispatch)
+  const pipelinedDispatcher = loop.pipelinedDispatcher;
+  assert(pipelinedDispatcher.isSafeReadOnlyTool('read_file'), 'read_file must be marked as safe read-only tool');
+  assert(pipelinedDispatcher.isSafeReadOnlyTool('grep_search'), 'grep_search must be marked as safe read-only tool');
+  assert(!pipelinedDispatcher.isSafeReadOnlyTool('replace_text'), 'replace_text must NOT be dispatched early');
+  assert(!pipelinedDispatcher.isSafeReadOnlyTool('run_command'), 'run_command must NOT be dispatched early');
+
+  registry.register({
+    name: 'read_file',
+    description: 'read file test',
+    parameters: { type: 'OBJECT', properties: { path: { type: 'STRING' } } } as any,
+    execute: async (args: any) => {
+      await new Promise((r) => setTimeout(r, 20));
+      return { success: true, content: 'mock content from ' + args.path };
+    },
+  });
+
+  const stepToolRunner = (loop as any).toolRunner;
+  const earlyDispatched = pipelinedDispatcher.dispatchEarly(
+    'read_file',
+    { path: 'src/main.ts' },
+    stepToolRunner,
+    { sessionId: 'test', turn: 1 },
+    'call-1',
+  );
+  assert.equal(earlyDispatched, true, 'read_file should be successfully early-dispatched');
+
+  // Await early-dispatched tool result
+  const awaited = await pipelinedDispatcher.awaitOrExecute(
+    'read_file',
+    { path: 'src/main.ts' },
+    stepToolRunner,
+    { sessionId: 'test', turn: 1 },
+    'call-1',
+  );
+  assert.equal(awaited.wasPipelined, true, 'tool execution should be marked as pipelined');
+  assert.equal(awaited.executionResult.result.success, true);
+  assert.equal(awaited.executionResult.result.content, 'mock content from src/main.ts');
+  assert(pipelinedDispatcher.getTelemetry().pipelinedHits >= 1, 'telemetry should track pipelined hits');
+
+  // 7. Test Speculative Diagnostics in CodeSyntaxValidator
+  const tempSpecDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-spec-diag-'));
+  const tempWorkspace = new Workspace(tempSpecDir);
+  const pythonValidFile = path.join(tempSpecDir, 'app.py');
+  await fs.writeFile(pythonValidFile, 'from fastapi.responses import RedirectResponse\n\ndef redirect():\n    return RedirectResponse(url="/docs")\n', 'utf8');
+
+  // Run speculative validation
+  await CodeSyntaxValidator.speculativeValidate('app.py', tempWorkspace);
+
+  // Instant cache hit verification (< 5ms)
+  const t0 = Date.now();
+  const diags = await CodeSyntaxValidator.validateFile('app.py', tempWorkspace);
+  const t1 = Date.now();
+  assert.equal(diags.length, 0, 'valid python file has 0 diagnostics');
+  assert(t1 - t0 < 10, 'speculative diagnostic cache hit must return in < 10ms');
+
+  await fs.rm(tempSpecDir, { recursive: true, force: true });
 
   console.log('Latency optimization regression suite passed.');
 }

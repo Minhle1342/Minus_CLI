@@ -7,6 +7,7 @@ import { retryWithExponentialBackoff } from './error-handling.js';
 export interface StreamCallbacks {
   onThoughtToken?: (token: string) => void;
   onContentToken?: (token: string) => void;
+  onToolCallEarly?: (toolCall: { id?: string; name: string; args: Record<string, any> }) => void;
 }
 
 export interface LLMUsage {
@@ -173,6 +174,15 @@ export class GeminiLLM {
 
       if (chunk.functionCalls && chunk.functionCalls.length > 0) {
         toolCalls.push(...chunk.functionCalls);
+        if (callbacks?.onToolCallEarly) {
+          for (const fc of chunk.functionCalls) {
+            callbacks.onToolCallEarly({
+              id: (fc as any).id,
+              name: fc.name || '',
+              args: (fc.args as Record<string, any>) || {},
+            });
+          }
+        }
       }
 
       if (candidate?.content?.parts) {

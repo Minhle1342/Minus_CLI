@@ -50,6 +50,7 @@ import type { VerificationFailureItem } from '../skills/verification-baseline.js
 import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
+import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
@@ -130,6 +131,7 @@ export class AgentLoop {
     repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'];
     repositoryContext: string;
   }>();
+  readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
 
@@ -794,6 +796,23 @@ export class AgentLoop {
             firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:token', token);
           },
+          onToolCallEarly: (earlyCall) => {
+            if (this.loopOptions?.enableStreamingDispatch !== false) {
+              const runContext = {
+                sessionId: session.id,
+                agentId: this.agentId,
+                turn,
+                userRequest: turnUserRequest,
+              };
+              this.pipelinedDispatcher.dispatchEarly(
+                earlyCall.name,
+                earlyCall.args,
+                this.toolRunner,
+                runContext,
+                earlyCall.id,
+              );
+            }
+          },
         }, requestOptions);
       } else {
         response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
@@ -1218,23 +1237,30 @@ export class AgentLoop {
             const policyCompletion = toolName === 'submit_solution'
               ? this.verificationPolicy.canComplete()
               : undefined;
-            executionResult = await stepToolRunner.run(toolName, toolArgs, {
-              sessionId: session.id,
-              agentId: this.agentId,
-              turn,
-              userRequest: turnUserRequest,
-              ...(toolControlMode === 'enforce' ? {
-                decisionId: activeDecisionId,
-                allowedToolNames: visibleToolNames,
-                allowedToolSetHash: activeToolSetHash,
-                classificationPhase: classification.phase,
-                classificationRisk: classification.risk,
-                maxToolCalls: recommendedToolDecision.maxToolCalls,
-              } : {}),
-              ...(toolName === 'submit_solution' ? {
-                completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
-              } : {}),
-            });
+            const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+              toolName,
+              toolArgs,
+              stepToolRunner,
+              {
+                sessionId: session.id,
+                agentId: this.agentId,
+                turn,
+                userRequest: turnUserRequest,
+                ...(toolControlMode === 'enforce' ? {
+                  decisionId: activeDecisionId,
+                  allowedToolNames: visibleToolNames,
+                  allowedToolSetHash: activeToolSetHash,
+                  classificationPhase: classification.phase,
+                  classificationRisk: classification.risk,
+                  maxToolCalls: recommendedToolDecision.maxToolCalls,
+                } : {}),
+                ...(toolName === 'submit_solution' ? {
+                  completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
+                } : {}),
+              },
+              toolCallId,
+            );
+            executionResult = pipelinedOutcome.executionResult;
             if (executionResult.result.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN') {
               this.toolControlTelemetry.recordDeniedCall();
             }
@@ -1271,9 +1297,12 @@ export class AgentLoop {
             this.dynamicContextCache.invalidate();
           }
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
-            const mutatedPath = String(toolArgs.path || toolArgs.filePath || '');
+            const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || '');
             this.verificationPolicy.recordModification(mutatedPath);
             hasSubmittedSolution = false;
+            if (mutatedPath) {
+              this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);
+            }
           }
           if (toolName === 'run_command') {
             let differential: { hasNewFailures: boolean } | undefined;
