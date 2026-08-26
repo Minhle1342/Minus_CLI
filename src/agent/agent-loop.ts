@@ -35,11 +35,7 @@ import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
 import {
-  summarizeStepWithCodestral,
   generateFallbackStepSummary,
-  summarizeTurnWithCodestral,
-  generateFallbackTurnSummary,
-  TurnSummaryStepInfo,
 } from './step-summarizer.js';
 import { classifyLLMError } from '../llm/error-handling.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
@@ -462,12 +458,7 @@ export class AgentLoop {
       || this.agentId === 'delegation-parent'
       || this.agentId === 'delegation-recovery-parent';
     const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
-    let turnUserGoal: string | undefined = turnUserRequest;
-    const turnStartTime = Date.now();
     this.latencyOrchestrator.resetTurn();
-    const turnFilesModified = new Set<string>();
-    let turnTestsPassed: boolean | undefined = undefined;
-    const turnStepRecords: TurnSummaryStepInfo[] = [];
 
     session.append('turn/start', { turn });
     await this.persistSession(session);
@@ -876,9 +867,6 @@ export class AgentLoop {
           }
         }
       }
-      if (userGoal) {
-        turnUserGoal = userGoal;
-      }
 
       const stepSummary = generateFallbackStepSummary({
         step,
@@ -1278,7 +1266,6 @@ export class AgentLoop {
           }
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             const mutatedPath = String(toolArgs.path || toolArgs.filePath || '');
-            if (mutatedPath) turnFilesModified.add(mutatedPath);
             this.verificationPolicy.recordModification(mutatedPath);
             hasSubmittedSolution = false;
           }
@@ -1289,9 +1276,6 @@ export class AgentLoop {
               if (postDiagnostics) {
                 differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
               }
-            }
-            if (isVerificationCommand(toolArgs.command)) {
-              turnTestsPassed = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
             }
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
@@ -1402,13 +1386,6 @@ export class AgentLoop {
         CLI.renderStepFooter();
         this.kernel?.ctx.events.emit('step:after', step);
 
-        turnStepRecords.push({
-          step,
-          toolCalls: response.toolCalls,
-          reasoningSnippet: response.reasoningContent,
-          textSnippet: response.text,
-        });
-
         if (strategyChangeRequired) {
           CLI.renderReflectionAlert(
             consecutiveNoProgressStrategyChanges,
@@ -1419,15 +1396,7 @@ export class AgentLoop {
         if (toolBatchCancelled) {
           const cancellationMessage = 'Agent stopped: cancellation requested. Tool calls not yet dispatched were recorded as aborted.';
           await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
-          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'cancelled', cancellationMessage, {
-            turnStartTime,
-            turnSteps: step,
-            turnFilesModified,
-            turnTestsPassed,
-            turnStepRecords,
-            userGoal: turnUserGoal,
-            isSubagent,
-          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
           this.goalManager.disarm();
           return cancellationMessage;
         }
@@ -1456,15 +1425,7 @@ export class AgentLoop {
           } else {
             this.goalManager.disarm();
           }
-          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
-            turnStartTime,
-            turnSteps: step,
-            turnFilesModified,
-            turnTestsPassed,
-            turnStepRecords,
-            userGoal: turnUserGoal,
-            isSubagent,
-          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
           return finalAnswer;
         }
 
@@ -1474,15 +1435,7 @@ export class AgentLoop {
         ) {
           const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
           await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
-          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal', noProgressMessage, {
-            turnStartTime,
-            turnSteps: step,
-            turnFilesModified,
-            turnTestsPassed,
-            turnStepRecords,
-            userGoal: turnUserGoal,
-            isSubagent,
-          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
           this.goalManager.disarm();
           return noProgressMessage;
         }
@@ -1514,11 +1467,6 @@ export class AgentLoop {
             ...hookContext,
             reason: 'submitted-solution-final-answer',
           });
-          turnStepRecords.push({
-            step,
-            reasoningSnippet: response.reasoningContent,
-            textSnippet: finalAnswer,
-          });
           if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
             try {
               this.goalManager.complete(this.planManager);
@@ -1528,15 +1476,7 @@ export class AgentLoop {
           } else {
             this.goalManager.disarm();
           }
-          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
-            turnStartTime,
-            turnSteps: step,
-            turnFilesModified,
-            turnTestsPassed,
-            turnStepRecords,
-            userGoal: turnUserGoal,
-            isSubagent,
-          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
           return finalAnswer;
         }
 
@@ -1613,11 +1553,6 @@ export class AgentLoop {
             ...hookContext,
             reason: 'fallback-answer',
           });
-          turnStepRecords.push({
-            step,
-            reasoningSnippet: response.reasoningContent,
-            textSnippet: fallbackAnswer,
-          });
           if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
             try {
               this.goalManager.complete(this.planManager);
@@ -1627,15 +1562,7 @@ export class AgentLoop {
           } else {
             this.goalManager.disarm();
           }
-          await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', fallbackAnswer, {
-            turnStartTime,
-            turnSteps: step,
-            turnFilesModified,
-            turnTestsPassed,
-            turnStepRecords,
-            userGoal: turnUserGoal,
-            isSubagent,
-          });
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
           return fallbackAnswer;
         }
       }
@@ -1681,15 +1608,7 @@ export class AgentLoop {
 
         const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
         await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
-        await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal', incompletePlanMessage, {
-          turnStartTime,
-          turnSteps: step,
-          turnFilesModified,
-          turnTestsPassed,
-          turnStepRecords,
-          userGoal: turnUserGoal,
-          isSubagent,
-        });
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
         this.goalManager.disarm();
         return incompletePlanMessage;
       }
@@ -1797,15 +1716,7 @@ export class AgentLoop {
 
         const incompleteFinalMessage = `Agent stopped: the model returned ${consecutiveIncompleteFinals} non-terminal progress updates instead of executing a tool, reporting evidence, or providing a concrete blocker.`;
         await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
-        await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal', incompleteFinalMessage, {
-          turnStartTime,
-          turnSteps: step,
-          turnFilesModified,
-          turnTestsPassed,
-          turnStepRecords,
-          userGoal: turnUserGoal,
-          isSubagent,
-        });
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
         this.goalManager.disarm();
         return incompleteFinalMessage;
       }
@@ -1826,11 +1737,6 @@ export class AgentLoop {
         ...hookContext,
         reason: 'final-answer',
       });
-      turnStepRecords.push({
-        step,
-        reasoningSnippet: response.reasoningContent,
-        textSnippet: finalAnswer,
-      });
       if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
         try {
           this.goalManager.complete(this.planManager);
@@ -1840,15 +1746,7 @@ export class AgentLoop {
       } else {
         this.goalManager.disarm();
       }
-      await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'completed', finalAnswer, {
-        turnStartTime,
-        turnSteps: step,
-        turnFilesModified,
-        turnTestsPassed,
-        turnStepRecords,
-        userGoal: turnUserGoal,
-        isSubagent,
-      });
+      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
 
       return finalAnswer;
     }
@@ -1860,15 +1758,7 @@ export class AgentLoop {
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
     await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
-    await this.finishTurnWithSummary(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached', timeoutMessage, {
-      turnStartTime,
-      turnSteps: effectiveMaxSteps,
-      turnFilesModified,
-      turnTestsPassed,
-      turnStepRecords,
-      userGoal: turnUserGoal,
-      isSubagent,
-    });
+    await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
     
     return timeoutMessage;
@@ -1973,62 +1863,6 @@ export class AgentLoop {
         }));
     } catch {
       return undefined;
-    }
-  }
-
-  private async finishTurnWithSummary(
-    session: Session,
-    turn: number,
-    effectiveMaxSteps: number,
-    isGoal: boolean,
-    reason: string,
-    finalResult: string,
-    telemetryData: {
-      turnStartTime: number;
-      turnSteps: number;
-      turnFilesModified: Set<string>;
-      turnTestsPassed?: boolean;
-      turnStepRecords: TurnSummaryStepInfo[];
-      userGoal?: string;
-      isSubagent: boolean;
-    },
-  ): Promise<void> {
-    await this.endTurn(session, turn, effectiveMaxSteps, isGoal, reason);
-
-    if (!telemetryData.isSubagent && this.loopOptions?.enableStepSummarization !== false) {
-      const durationMs = Date.now() - telemetryData.turnStartTime;
-      const filesModified = Array.from(telemetryData.turnFilesModified);
-      let summaryAi: string | undefined;
-
-      try {
-        summaryAi = await summarizeTurnWithCodestral({
-          turn,
-          userGoal: telemetryData.userGoal,
-          steps: telemetryData.turnStepRecords,
-          finalAnswer: finalResult,
-          durationMs,
-          filesModified,
-          testsPassed: telemetryData.turnTestsPassed,
-        });
-      } catch {
-        summaryAi = generateFallbackTurnSummary({
-          turn,
-          userGoal: telemetryData.userGoal,
-          steps: telemetryData.turnStepRecords,
-          finalAnswer: finalResult,
-          durationMs,
-          filesModified,
-          testsPassed: telemetryData.turnTestsPassed,
-        });
-      }
-
-      CLI.renderTurnSummary({
-        durationMs,
-        stepsCount: telemetryData.turnSteps,
-        filesModified,
-        testsPassed: telemetryData.turnTestsPassed,
-        summaryAi,
-      });
     }
   }
 

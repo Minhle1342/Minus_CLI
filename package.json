@@ -13,6 +13,7 @@
     "build": "tsc",
     "search:up": "tsx src/scripts/start-searxng.ts",
     "search:down": "docker compose -f deploy/searxng/compose.yaml down",
+    "sandbox:build": "docker build -t minus-sandbox:latest -f deploy/sandbox/Dockerfile .",
     "9router": "node scripts/start-9router.js",
     "start": "node dist/index.js"
   },

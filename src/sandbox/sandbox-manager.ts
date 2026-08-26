@@ -36,7 +36,7 @@ export class SandboxManager {
   constructor(config: SandboxManagerConfig) {
     this.mode = config.mode || (process.env.SANDBOX_MODE as SandboxMode) || 'auto';
     this.workspacePath = config.workspacePath;
-    this.explicitDockerImage = config.dockerImage || process.env.SANDBOX_DOCKER_IMAGE || undefined;
+    this.explicitDockerImage = config.dockerImage || process.env.SANDBOX_DOCKER_IMAGE || process.env.DOCKER_IMAGE || undefined;
     this.memoryLimitMb = config.memoryLimitMb || 1024;
     this.cpuLimit = config.cpuLimit || 2.0;
     this.autoSwitchRuntimes = config.autoSwitchRuntimes

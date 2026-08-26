@@ -20,6 +20,7 @@ import {
   colors as c,
   completeSlashCommand,
   UICollapsePreferences,
+  getVisibleWidth,
 } from './ui/cli-ui.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
@@ -255,10 +256,10 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
     if (openrouterApiKey) {
       tiers.push({
-        name: 'openrouter/stealth/ox-alpha',
-        provider: 'OpenRouter (Ox Alpha)',
+        name: 'openrouter/z-ai/glm-5.3-flash',
+        provider: 'OpenRouter (Z.ai GLM-5.3 Flash)',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'stealth/ox-alpha', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'z-ai/glm-5.3-flash', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
       tiers.push({
         name: 'openrouter/free',
@@ -447,17 +448,25 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com', undefined, tokenConfig);
   }
 
-  // 12. OpenRouter Models (openrouter/*, :free, stealth/*, ox-alpha, 0x-alpha)
+  // 12. OpenRouter Models (openrouter/*, :free, z-ai/*, glm-5.3-flash, stealth/*, ox-alpha, 0x-alpha)
   if (
     model.startsWith('openrouter/') ||
     model.endsWith(':free') ||
+    model.startsWith('z-ai/') ||
     model.startsWith('stealth/') ||
+    model === 'glm-5.3-flash' ||
     model === 'ox-alpha' ||
     model === '0x-alpha'
   ) {
     let rawModel = model.replace(/^openrouter\//, '');
-    if (rawModel === 'ox-alpha' || rawModel === '0x-alpha' || rawModel === 'stealth/0x-alpha') {
-      rawModel = 'stealth/ox-alpha';
+    if (
+      rawModel === 'ox-alpha' ||
+      rawModel === '0x-alpha' ||
+      rawModel === 'stealth/ox-alpha' ||
+      rawModel === 'stealth/0x-alpha' ||
+      rawModel === 'glm-5.3-flash'
+    ) {
+      rawModel = 'z-ai/glm-5.3-flash';
     }
     const key = openrouterApiKey || deepseekApiKey;
     if (!key) {
@@ -778,11 +787,17 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
   });
-  const slashHints = new RealtimeSlashCommandHints(output, () => activeWorkspaceRef, getActiveModelInfo);
+  const promptWidth = getVisibleWidth(CLI.getPromptSymbol());
+  const slashHints = new RealtimeSlashCommandHints(
+    output,
+    () => activeWorkspaceRef,
+    getActiveModelInfo,
+    () => promptWidth,
+  );
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
     if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
-      slashHints.clear(rl.cursor + 2);
+      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
     }
     // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, Escape, v.v.) tránh vỡ UI
@@ -792,14 +807,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     const removesOnlySlash = rl.line === '/'
       && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
     if (removesOnlySlash) {
-      slashHints.clear(rl.cursor + 2);
+      slashHints.clear(promptWidth);
       return;
     }
     if (slashHintRefreshScheduled) return;
     slashHintRefreshScheduled = true;
     setImmediate(() => {
       slashHintRefreshScheduled = false;
-      slashHints.update(rl.line, rl.cursor + 2);
+      slashHints.update(rl.line, rl.cursor);
     });
   };
   // Clear transient rows before readline handles Enter and invokes the question callback.
@@ -824,11 +839,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
    * Đọc User Prompt từ bàn phím, tự động gộp các dòng nếu người dùng dán (paste) đoạn văn bản nhiều dòng
    */
   async function readUserPrompt(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream, promptSymbol: string): Promise<string> {
-    setImmediate(() => {
-      slashHints.update((rlInterface as any).line || '', (rlInterface as any).cursor + 2);
-    });
+    const promptLen = getVisibleWidth(promptSymbol);
     const firstLine = await rlInterface.question(promptSymbol);
-    slashHints.clear();
+    slashHints.clear(promptLen + getVisibleWidth(firstLine));
     const lines: string[] = [firstLine];
 
     // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây

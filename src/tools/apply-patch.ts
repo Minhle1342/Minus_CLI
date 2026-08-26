@@ -32,7 +32,10 @@ export const applyPatchTool: ToolDefinition = {
       expectedFileHashes: {
         type: Type.OBJECT,
         description: 'Bản đồ đường dẫn file -> contentHash (lấy từ read_file) để ngăn ngừa ghi đè nội dung cũ (optimistic locking).',
-      },
+        additionalProperties: {
+          type: Type.STRING,
+        },
+      } as any,
     },
     required: ['patch'],
   },

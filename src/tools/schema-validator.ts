@@ -41,6 +41,9 @@ export function validateSchemaValue(
         errors.push(`${path} must be an object`);
         break;
       }
+      const hasExplicitProperties = Boolean(
+        schema.properties && typeof schema.properties === 'object' && Object.keys(schema.properties).length > 0,
+      );
       const properties = (schema.properties || {}) as Record<string, JsonSchema>;
       for (const required of schema.required || []) {
         if (!Object.prototype.hasOwnProperty.call(value, required)) {
@@ -48,9 +51,17 @@ export function validateSchemaValue(
         }
       }
       for (const [key, child] of Object.entries(value)) {
-        const propertySchema = properties[key];
+        const propertySchema = properties[key]
+          || (typeof schema.additionalProperties === 'object' && schema.additionalProperties !== null
+            ? schema.additionalProperties
+            : undefined);
+
         if (!propertySchema) {
-          if (schema.additionalProperties === false || options.rejectUnknownProperties) {
+          const isFreeFormMap = !hasExplicitProperties && schema.additionalProperties !== false;
+          if (
+            schema.additionalProperties === false
+            || (options.rejectUnknownProperties && !isFreeFormMap && schema.additionalProperties !== true)
+          ) {
             errors.push(`${path}.${key} is not declared by the tool schema`);
           }
           continue;

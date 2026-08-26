@@ -163,24 +163,6 @@ async function runRecoveryTests() {
   const detectedAtTurn2 = await testCompletedPersistence.findLatestInterruptedSession();
   assert(detectedAtTurn2 === undefined, 'Sau khi hoàn thành task cuối ở Turn 2, scanner không còn coi phiên này là gián đoạn');
 
-  // 7. Kiểm thử Turn AI Summary & Fallback
-  console.log('\n7. Kiểm thử Turn AI Summary & Telemetry Render');
-  const { summarizeTurnWithCodestral, generateFallbackTurnSummary } = await import('./agent/step-summarizer.js');
-  const fallbackTurnSummary = generateFallbackTurnSummary({
-    turn: 1,
-    userGoal: 'Sửa lỗi giao diện CLI',
-    steps: [
-      { step: 1, toolCalls: [{ name: 'read_file', args: { path: 'src/ui/cli-ui.ts' } }] as any },
-      { step: 2, toolCalls: [{ name: 'replace_text', args: { path: 'src/ui/cli-ui.ts' } }] as any },
-    ],
-    filesModified: ['src/ui/cli-ui.ts'],
-    testsPassed: true,
-  });
-
-  assert(fallbackTurnSummary.includes('Turn #1'), 'Tóm tắt Turn fallback có chứa số turn');
-  assert(fallbackTurnSummary.includes('src/ui/cli-ui.ts') || fallbackTurnSummary.includes('1 tệp'), 'Tóm tắt Turn có chứa số tệp sửa đổi');
-  assert(fallbackTurnSummary.includes('kiểm thử đạt chuẩn'), 'Tóm tắt Turn có chứa trạng thái kiểm thử');
-
   // 8. Kiểm thử Auto-Reconciliation cho Durable Goal Mode đã hoàn thành
   console.log('\n8. Kiểm thử Goal Auto-Reconciliation khi turn đã hoàn thành');
   const wsGoalReconcile = path.join(os.tmpdir(), `test-goal-reconcile-${Date.now()}`);

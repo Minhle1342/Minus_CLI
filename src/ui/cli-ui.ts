@@ -191,21 +191,28 @@ export class RealtimeSlashCommandHints {
     private readonly terminal: SlashHintTerminal,
     private readonly getWorkspace?: () => Workspace | undefined,
     private readonly getModelInfo?: () => { modelName: string; effort?: string },
+    private readonly getPromptWidth: () => number = () => 2,
   ) {}
 
-  update(line: string, cursorColumn = line.length + 2): void {
+  update(line: string, cursorIndex?: number, cursorColumn?: number): void {
     if (!this.terminal.isTTY) return;
+
+    const charIndex = cursorIndex !== undefined ? cursorIndex : line.length;
+    const promptWidth = this.getPromptWidth();
+    const activeColumn = cursorColumn !== undefined
+      ? cursorColumn
+      : promptWidth + getVisibleWidth(line.slice(0, charIndex));
 
     const workspace = this.getWorkspace ? this.getWorkspace() : undefined;
 
     // 1. Kiểm tra nếu người dùng đang gõ @mention file / thư mục
     if (workspace) {
-      const activeMention = FileMentionEngine.extractActiveMention(line, Math.max(0, cursorColumn - 2));
+      const activeMention = FileMentionEngine.extractActiveMention(line, charIndex);
       if (activeMention) {
-        const suggestions = FileMentionEngine.getFileSuggestions(line, workspace, Math.max(0, cursorColumn - 2), 5);
+        const suggestions = FileMentionEngine.getFileSuggestions(line, workspace, charIndex, 5);
         if (suggestions.length > 0) {
           const width = Math.max(40, this.terminal.columns || 80);
-          const nextRenderKey = `@\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
+          const nextRenderKey = `@\u0000${line}\u0000${charIndex}\u0000${width}\u0000${suggestions.map((s) => s.displayPath).join(',')}`;
           if (this.visible && this.renderKey === nextRenderKey) return;
 
           const rows = suggestions.map((item, index) => {
@@ -221,7 +228,7 @@ export class RealtimeSlashCommandHints {
           const footer = `${c.slate}  ${c.teal}[Tab]${c.slate} Hoàn thành @path • ${c.teal}[Enter]${c.slate} Gửi đính kèm • ${c.teal}[Esc]${c.slate} Đóng${c.reset}`;
           this.renderBelowInput(
             [`${c.geminiCyan}${c.bold}📎 GỢI Ý ĐÍNH KÈM FILE / THƯ MỤC (@):${c.reset}`, ...rows, footer],
-            cursorColumn,
+            activeColumn,
           );
           this.visible = true;
           this.renderKey = nextRenderKey;
@@ -235,7 +242,7 @@ export class RealtimeSlashCommandHints {
       const suggestions = getSlashCommandSuggestions(line);
       if (suggestions.length > 0) {
         const width = Math.max(40, this.terminal.columns || 80);
-        const nextRenderKey = `/\u0000${line}\u0000${cursorColumn}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
+        const nextRenderKey = `/\u0000${line}\u0000${charIndex}\u0000${width}\u0000${suggestions.map((item) => item.command).join(',')}`;
         if (this.visible && this.renderKey === nextRenderKey) return;
         const commandWidth = Math.min(
           Math.max(12, Math.floor(width * 0.45)),
@@ -252,7 +259,7 @@ export class RealtimeSlashCommandHints {
         const footer = `${c.slate}  ${c.teal}[Tab]${c.slate} Hoàn thành • ${c.teal}[Enter]${c.slate} Thực thi • ${c.teal}[↑/↓]${c.slate} Lịch sử • ${c.teal}[/help]${c.slate} Trợ giúp${c.reset}`;
         this.renderBelowInput(
           [`${c.geminiCyan}${c.bold}⚡ GỢI Ý LỆNH NHANH (SLASH COMMANDS):${c.reset}`, ...rows, footer],
-          cursorColumn,
+          activeColumn,
         );
         this.visible = true;
         this.renderKey = nextRenderKey;
@@ -260,22 +267,8 @@ export class RealtimeSlashCommandHints {
       }
     }
 
-    // 3. Hiển thị Model và Reasoning Effort bên dưới dòng input (Antigravity CLI Docked Status)
-    const modelInfo = this.getModelInfo ? this.getModelInfo() : undefined;
-    if (modelInfo) {
-      const effortLabel = modelInfo.effort || 'medium';
-      const modelName = modelInfo.modelName || 'auto';
-      const nextRenderKey = `status\u0000${cursorColumn}\u0000${modelName}\u0000${effortLabel}`;
-      if (this.visible && this.renderKey === nextRenderKey) return;
-
-      const statusLine = `  ${c.slate}🤖 Model:${c.reset} ${c.brightCyan}${c.bold}${modelName}${c.reset}  ${c.slate}│  🧠 Reasoning:${c.reset} ${c.geminiAmber}${c.bold}${effortLabel}${c.reset}  ${c.slate}│  ${c.mutedText}Nhập ${c.brightCyan}/${c.mutedText} xem lệnh • ${c.brightCyan}@${c.mutedText} đính kèm file${c.reset}`;
-      this.renderBelowInput([statusLine], cursorColumn);
-      this.visible = true;
-      this.renderKey = nextRenderKey;
-      return;
-    }
-
-    this.clear(cursorColumn);
+    // 3. Nếu không phải lệnh Slash (/) hoặc @mention, dọn sạch hàng gợi ý để trả lại input sạch cho readline
+    this.clear(activeColumn);
   }
 
   clear(cursorColumn = 0): void {
@@ -297,6 +290,8 @@ export class RealtimeSlashCommandHints {
     if (maxRows === 0) return;
 
     let buf = '\x1b[?25l'; // Ẩn con trỏ
+    // Lưu vị trí con trỏ ban đầu (ANSI DEC/SCO)
+    buf += '\x1b7\x1b[s';
 
     // Ghi từng dòng hint kèm xóa sạch dòng cũ (Clear Line \x1b[2K)
     for (let i = 0; i < maxRows; i++) {
@@ -304,10 +299,13 @@ export class RealtimeSlashCommandHints {
       buf += `\r\n\x1b[2K${lineContent}`;
     }
 
-    // Di chuyển con trỏ ngược lên lại dòng nhập liệu và phục hồi vị trí con trỏ ngang
-    buf += `\x1b[${maxRows}A\r`;
+    // Di chuyển con trỏ ngược lên lại số dòng đã xuống để chống trôi dòng khi terminal scroll ở đáy viewport
+    buf += `\x1b[${maxRows}A`;
+    // Khôi phục vị trí con trỏ ban đầu
+    buf += '\x1b8\x1b[u';
+    // Đảm bảo vị trí cột ngang chính xác
     if (cursorColumn > 0) {
-      buf += `\x1b[${cursorColumn}C`;
+      buf += `\r\x1b[${cursorColumn}C`;
     }
     buf += '\x1b[?25h'; // Hiện lại con trỏ
 
@@ -592,7 +590,7 @@ export function renderPixelSpriteToAnsiLines(sprite: PixelSprite): string[] {
 
       if (!topRgb && !bottomRgb) {
         if (currentFg || currentBg) {
-          line += '\x1b[0m';
+          line += '\x1b[39;49m';
           currentFg = null;
           currentBg = null;
         }
@@ -872,9 +870,9 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   },
   {
     id: '26',
-    name: 'openrouter/stealth/ox-alpha',
-    provider: 'OpenRouter (Stealth)',
-    desc: 'Ox Alpha (0x Alpha): Reasoning coding model ẩn danh, 1M context (Miễn phí preview)',
+    name: 'openrouter/z-ai/glm-5.3-flash',
+    provider: 'OpenRouter (Z.ai)',
+    desc: 'GLM-5.3 Flash (Z.ai - cựu Ox Alpha): Multimodal reasoning coding model, 1M context',
     recommended: true,
   },
   {
@@ -1027,12 +1025,63 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   },
 ];
 
-function stripAnsiForDisplay(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*m/g, '');
+// Regex for stripping ANSI escape codes (including SGR, 24-bit TrueColor, 256 colors, cursor positioning, OSC codes)
+const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+
+export function stripAnsiForDisplay(text: string): string {
+  return text.replace(ANSI_REGEX, '');
 }
 
-function padRightVisible(text: string, targetWidth: number): string {
-  const visibleLen = stripAnsiForDisplay(text).length;
+/**
+ * Tính toán độ rộng hiển thị thực tế (terminal column width) của chuỗi ký tự,
+ * hỗ trợ chuẩn Unicode East-Asian Width (Emoji = 2 cột, CJK = 2 cột, combining mark = 0 cột).
+ */
+export function getVisibleWidth(text: string): number {
+  const clean = stripAnsiForDisplay(text);
+  let width = 0;
+
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  for (const { segment } of segmenter.segment(clean)) {
+    const codePoint = segment.codePointAt(0);
+    if (codePoint === undefined) continue;
+
+    // Combining marks, variation selectors (\uFE0F), zero width joiner (\u200D)
+    if (
+      (codePoint >= 0x0300 && codePoint <= 0x036F) || // Combining Diacritical Marks
+      (codePoint >= 0x1DC0 && codePoint <= 0x1DFF) ||
+      (codePoint >= 0x20D0 && codePoint <= 0x20FF) ||
+      (codePoint >= 0xFE00 && codePoint <= 0xFE0F) || // Variation Selectors
+      codePoint === 0x200B || // Zero Width Space
+      codePoint === 0x200C || // Zero Width Non-Joiner
+      codePoint === 0x200D    // Zero Width Joiner
+    ) {
+      continue;
+    }
+
+    // Emoji & Extended Pictographic symbols (độ rộng 2 cột trên terminal)
+    // CJK ideographs / Fullwidth forms
+    if (
+      /\p{Extended_Pictographic}/u.test(segment) ||
+      (codePoint >= 0x1100 && codePoint <= 0x115F) || // Hangul Jamo
+      (codePoint >= 0x2E80 && codePoint <= 0x9FFF) || // CJK Radicals, Ideographs
+      (codePoint >= 0xAC00 && codePoint <= 0xD7A3) || // Hangul Syllables
+      (codePoint >= 0xF900 && codePoint <= 0xFAFF) || // CJK Compatibility Ideographs
+      (codePoint >= 0xFE10 && codePoint <= 0xFE19) || // Vertical forms
+      (codePoint >= 0xFE30 && codePoint <= 0xFE6F) || // CJK Compatibility Forms
+      (codePoint >= 0xFF00 && codePoint <= 0xFF60) || // Fullwidth Forms
+      (codePoint >= 0xFFE0 && codePoint <= 0xFFE6) ||
+      (codePoint >= 0x1F000 && codePoint <= 0x1FAFF)  // Symbols, Pictographs, Supplemental
+    ) {
+      width += 2;
+    } else {
+      width += 1;
+    }
+  }
+  return width;
+}
+
+export function padRightVisible(text: string, targetWidth: number): string {
+  const visibleLen = getVisibleWidth(text);
   const pad = Math.max(0, targetWidth - visibleLen);
   return text + ' '.repeat(pad);
 }
@@ -1044,9 +1093,9 @@ export function getTerminalWidth(defaultWidth = 80, minWidth = 60, maxWidth = 12
 
 export function createBoxHeader(title: string, color = c.subtleBorder, width?: number): string {
   const targetWidth = width || getTerminalWidth();
-  const cleanTitle = stripAnsiForDisplay(title);
-  const leftLen = 3;
-  const remaining = Math.max(2, targetWidth - leftLen - cleanTitle.length - 2);
+  const titleWidth = getVisibleWidth(title);
+  // '╭── ' = 4 cols, ' ' after title = 1 col, '╮' = 1 col => tổng ký tự khung biên = 6 cols
+  const remaining = Math.max(2, targetWidth - 6 - titleWidth);
   return `${color}╭── ${title} ${color}${'─'.repeat(remaining)}╮${c.reset}`;
 }
 
@@ -1080,25 +1129,37 @@ export class CLI {
     const cat = getCatMascot(opts.mascotAction);
     const catLines = cat.lines;
 
-    const availablePathWidth = Math.max(20, width - 42);
+    const availableRightWidth = Math.max(25, width - 28);
+    const toolsPreview = opts.tools.slice(0, 4).join(', ') + (opts.tools.length > 4 ? ` ... (+${opts.tools.length - 4})` : '');
+
     const infoLines: string[] = [
       `${c.geminiPurple}🤖 Model:${c.reset}      ${c.bold}${opts.modelName}${c.reset}`,
-      `${c.geminiBlue}📂 Workspace:${c.reset}  ${c.mutedText}${truncateDisplayText(opts.workspaceRoot, availablePathWidth)}${c.reset}`,
+      `${c.geminiBlue}📂 Workspace:${c.reset}  ${c.mutedText}${truncateDisplayText(opts.workspaceRoot, Math.max(15, availableRightWidth - 14))}${c.reset}`,
       `${c.geminiCyan}🌿 Branch:${c.reset}     ${c.brightCyan}${opts.activeBranch || 'main'}${c.reset}`,
       `${c.geminiGreen}🛡️  Sandbox:${c.reset}    ${opts.sandboxStatus || `${c.emerald}Active (Local)${c.reset}`}`,
       `${c.geminiAmber}⚡ Max Steps:${c.reset}  ${c.bold}${opts.maxSteps}${c.reset} steps per turn budget`,
-      `${c.teal}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.mutedText}${opts.tools.slice(0, 4).join(', ')}${opts.tools.length > 4 ? ` ... (+${opts.tools.length - 4})` : ''}${c.reset}`,
+      `${c.teal}🛠️  Tools (${opts.tools.length}):${c.reset}  ${c.mutedText}${truncateDisplayText(toolsPreview, Math.max(15, availableRightWidth - 14))}${c.reset}`,
       `${c.slate}💡 Lệnh nhanh:${c.reset}  Nhập ${c.brightCyan}/${c.slate} hoặc ${c.brightCyan}/help${c.slate} để mở menu${c.reset}`,
     ];
 
     console.log(`\n  ${c.geminiCyan}${c.bold}⚡ MINUS / ANTIGRAVITY AGENT${c.reset} ${c.slate}v2.5 (Autonomous Pair Programmer)${c.reset}`);
     console.log(`  ${c.mutedText}Evidence-First • Unified Patch Engine • Closed-Loop Verification${c.reset}\n`);
 
-    const maxRows = Math.max(catLines.length, infoLines.length);
-    for (let i = 0; i < maxRows; i++) {
-      const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 22);
-      const rightCol = infoLines[i] || '';
-      console.log(`${leftCol}  ${rightCol}`);
+    if (width < 72) {
+      for (const line of catLines) {
+        console.log(`  ${line}`);
+      }
+      console.log('');
+      for (const info of infoLines) {
+        console.log(`  ${info}`);
+      }
+    } else {
+      const maxRows = Math.max(catLines.length, infoLines.length);
+      for (let i = 0; i < maxRows; i++) {
+        const leftCol = padRightVisible(catLines[i] ? `  ${catLines[i]}` : '', 22);
+        const rightCol = infoLines[i] || '';
+        console.log(`${leftCol}  ${rightCol}`);
+      }
     }
 
     console.log(`\n  ${c.geminiGreen}🐱 ${cat.name}:${c.reset} ${c.slate}${cat.badge}${c.reset} • ${c.mutedText}Nhập ${c.brightCyan}/model${c.mutedText} để đổi LLM model.${c.reset}\n`);
@@ -1144,7 +1205,7 @@ export class CLI {
     }
 
     console.log(`${createBoxDivider(c.geminiPurple, width)}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}👉 Nhập số thứ tự ${c.brightCyan}[1-${AVAILABLE_MODELS.length}]${c.slate} hoặc ${c.brightCyan}tên model bất kỳ${c.slate} để đổi mô hình:${c.reset}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}👉 Nhập ID model (ví dụ: ${c.brightCyan}0${c.slate}, ${c.brightCyan}1${c.slate}, ${c.brightCyan}9r${c.slate}, ${c.brightCyan}26${c.slate}, ${c.brightCyan}cs${c.slate}...) hoặc ${c.brightCyan}tên model bất kỳ${c.slate} để đổi mô hình:${c.reset}`);
     console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
@@ -1851,25 +1912,47 @@ export class CLI {
    * Format Markdown cơ bản sang Terminal ANSI styling phong cách Antigravity
    */
   static formatMarkdownTerminal(text: string): string {
-    return text
-      // Headers
-      .replace(/^### (.*$)/gm, `${c.geminiCyan}${c.bold}❯ $1${c.reset}`)
-      .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}❖ $1${c.reset}`)
-      .replace(/^# (.*$)/gm, `\n${c.geminiCyan}${c.bold}══════════ $1 ══════════${c.reset}\n`)
-      // Bold & Italic
-      .replace(/\*\*(.*?)\*\*/g, `${c.bold}$1${c.reset}`)
-      .replace(/\*(.*?)\*/g, `${c.italic}$1${c.reset}`)
-      // Inline Code
-      .replace(/`([^`]+)`/g, `${c.brightCyan}$1${c.reset}`)
-      // Bullet points
-      .replace(/^\s*[-*]\s+/gm, `  ${c.emerald}•${c.reset} `)
-      .replace(/^\s*(\d+)\.\s+/gm, `  ${c.geminiAmber}$1.${c.reset} `)
-      // Blockquotes & Alerts
-      .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.geminiBlue}ℹ NOTE:${c.reset} $1`)
-      .replace(/^>\s*\[!TIP\]\s*(.*$)/gm, `  ${c.geminiGreen}💡 TIP:${c.reset} $1`)
-      .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
-      .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
-      .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
+    // Tách các khối fenced code blocks (```...```) để không format nhầm comment code # hoặc toán tử *
+    const parts = text.split(/(```[\s\S]*?```)/g);
+
+    return parts
+      .map((part) => {
+        // Nếu là khối code fenced
+        if (part.startsWith('```') && part.endsWith('```')) {
+          const lines = part.split('\n');
+          const firstLine = lines[0];
+          const lang = firstLine.slice(3).trim();
+          const codeLines = lines.slice(1, -1);
+          const langTag = lang ? ` ${c.slate}[${lang}]${c.reset}` : '';
+          const header = `\n  ${c.teal}╭─── Code${langTag} ${c.teal}${'─'.repeat(Math.max(10, 48 - (lang ? lang.length + 3 : 0)))}╮${c.reset}`;
+          const body = codeLines.map((l) => `  ${c.teal}│${c.reset} ${c.brightCyan}${l}${c.reset}`).join('\n');
+          const footer = `  ${c.teal}╰${'─'.repeat(Math.max(18, 56))}╯${c.reset}\n`;
+          return `${header}\n${body}\n${footer}`;
+        }
+
+        // Format văn bản thông thường
+        return part
+          // Headers (chỉ khi có khoảng trắng sau dấu # ở đầu dòng)
+          .replace(/^### (.*$)/gm, `${c.geminiCyan}${c.bold}❯ $1${c.reset}`)
+          .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}❖ $1${c.reset}`)
+          .replace(/^# (.*$)/gm, `\n${c.geminiCyan}${c.bold}══════════ $1 ══════════${c.reset}`)
+          // Bold (**text**)
+          .replace(/\*\*([^*]+)\*\*/g, `${c.bold}$1${c.reset}`)
+          // Italic (*text* - tránh dính vào phép toán hoặc file glob như *.ts)
+          .replace(/(^|\s)\*([^* \n][^*\n]*[^* \n])\*(\s|$)/g, `$1${c.italic}$2${c.reset}$3`)
+          // Inline Code (`code`)
+          .replace(/`([^`\n]+)`/g, `${c.brightCyan}$1${c.reset}`)
+          // Bullet points
+          .replace(/^(\s*)[-*]\s+/gm, `$1${c.emerald}•${c.reset} `)
+          .replace(/^(\s*)(\d+)\.\s+/gm, `$1${c.geminiAmber}$2.${c.reset} `)
+          // Blockquotes & Alerts
+          .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.geminiBlue}ℹ NOTE:${c.reset} $1`)
+          .replace(/^>\s*\[!TIP\]\s*(.*$)/gm, `  ${c.geminiGreen}💡 TIP:${c.reset} $1`)
+          .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
+          .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
+          .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
+      })
+      .join('');
   }
 
   /**
@@ -1896,7 +1979,7 @@ export class CLI {
     const rawContent = CLI.cleanFinalAnswerContent(answer);
     if (!rawContent) return;
 
-    const shouldAnimate = options.animate !== false && Boolean(process.stdout.isTTY);
+    const shouldAnimate = options.animate === true;
     const formatted = CLI.formatMarkdownTerminal(rawContent);
 
     console.log('');
@@ -1920,43 +2003,6 @@ export class CLI {
     console.log(`\n${c.crimson}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
-  /**
-   * Hiển thị Tóm tắt AI và Telemetry kết thúc lượt thực thi (Turn Execution & AI Summary - Antigravity HUD)
-   */
-  static renderTurnSummary(telemetry: {
-    durationMs: number;
-    stepsCount: number;
-    filesModified?: string[];
-    testsPassed?: boolean;
-    sandboxMode?: string;
-    summaryAi?: string;
-  }): void {
-    const width = getTerminalWidth();
-    const durationSec = (telemetry.durationMs / 1000).toFixed(2);
-    const testBadge = telemetry.testsPassed !== undefined
-      ? telemetry.testsPassed ? `${c.emerald}✔ PASSED` : `${c.crimson}✖ FAILED`
-      : `${c.slate}N/A`;
-    const filesCount = telemetry.filesModified?.length || 0;
-
-    console.log(`\n${createBoxHeader('📊 TURN SUMMARY & TELEMETRY', c.geminiCyan, width)}`);
-    if (telemetry.summaryAi && telemetry.summaryAi.trim()) {
-      console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}🤖 Summary (AI):${c.reset} ${c.white}${telemetry.summaryAi.trim()}${c.reset}`);
-      console.log(`${createBoxDivider(c.geminiCyan, width)}`);
-    }
-    console.log(`${c.geminiCyan}${c.bold}│${c.reset}  ⏱️  Duration: ${c.bold}${durationSec}s${c.reset}  │  ⚡ Steps: ${c.bold}${telemetry.stepsCount}${c.reset}  │  📝 Mutated: ${c.bold}${filesCount} file(s)${c.reset}  │  🧪 Tests: ${testBadge}${c.reset}`);
-    console.log(`${createBoxFooter(c.geminiCyan, width)}\n`);
-  }
-
-  /**
-   * Hiển thị Tóm tắt AI chuyên biệt ngay sau khi kết thúc turn
-   */
-  static renderTurnAiSummary(summary: string): void {
-    if (!summary || !summary.trim()) return;
-    const width = getTerminalWidth();
-    console.log(`\n${createBoxHeader('🤖 TURN SUMMARY (AI)', c.geminiPurple, width)}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.white}${summary.trim()}${c.reset}`);
-    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
-  }
 
   /**
    * Hiển thị danh sách Skills và trạng thái kích hoạt
@@ -2118,3 +2164,6 @@ export class CLI {
     return `${c.brightCyan}${c.bold}❯${c.reset} `;
   }
 }
+
+export const formatMarkdownTerminal = CLI.formatMarkdownTerminal;
+
