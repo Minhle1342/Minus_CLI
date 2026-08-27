@@ -6058,6 +6058,203 @@ Always write tests first!`;
     await fs.rm(dirPagingRoot, { recursive: true, force: true });
   }
 
+  // ========================================
+  // 🧪 42. KIỂM THỬ HARDENED PATCH ENGINE & NGĂN CHẶN LỖI HUNK REJECTION (CUMULATIVE DRIFT, FUZZY WS, CONTEXT REDUCTION)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 42. KIỂM THỬ HARDENED PATCH ENGINE & NGĂN CHẶN LỖI HUNK REJECTION (CUMULATIVE DRIFT, FUZZY WS, CONTEXT REDUCTION)');
+  console.log('========================================');
+
+  const patchTargetFile = path.join(workspace.rootDir, 'src', 'pages', 'AdminPage.jsx');
+  await fs.mkdir(path.dirname(patchTargetFile), { recursive: true });
+
+  const adminPageOriginalLines = [
+    'import React, { useState } from "react";',
+    '',
+    'export function AdminPage() {',
+    '  const [status, setStatus] = useState("idle");',
+    '  const [users, setUsers] = useState([]);',
+    '',
+    '  // SECTION 1: HEADER CONTROLS',
+    '  function handleRefresh() {',
+    '    console.log("Refreshing data...");',
+    '  }',
+    '',
+    '  // Filler lines to separate sections',
+    ...Array.from({ length: 40 }, (_, idx) => `  const item_${idx} = ${idx};`),
+    '',
+    '  // SECTION 2: FOOTER CONTROLS',
+    '  function handleSave() {',
+    '    setStatus("saved");',
+    '  }',
+    '',
+    '  return (',
+    '    <div className="admin-page">',
+    '      <h1>Admin Dashboard</h1>',
+    '    </div>',
+    '  );',
+    '}',
+  ];
+
+  await fs.writeFile(patchTargetFile, adminPageOriginalLines.join('\n'), 'utf8');
+
+  try {
+    // 1. Kiểm thử Dynamic Cumulative Line Offset (Hunk #1 thêm 10 dòng, Hunk #2 trượt theo)
+    const multiHunkPatch = `--- a/src/pages/AdminPage.jsx
++++ b/src/pages/AdminPage.jsx
+@@ -8,3 +8,11 @@
+   function handleRefresh() {
+-    console.log("Refreshing data...");
++    console.log("Refreshing data v2...");
++    console.log("Extra line 1");
++    console.log("Extra line 2");
++    console.log("Extra line 3");
++    console.log("Extra line 4");
++    console.log("Extra line 5");
++    console.log("Extra line 6");
++    console.log("Extra line 7");
++    console.log("Extra line 8");
+   }
+@@ -54,3 +62,3 @@
+   function handleSave() {
+-    setStatus("saved");
++    setStatus("saved_v2_confirmed");
+   }
+`;
+
+    const patchRes = await applyPatchTool.execute({
+      patch: multiHunkPatch,
+      path: 'src/pages/AdminPage.jsx',
+      fuzzLevel: 2,
+    }, workspace);
+
+    assert(patchRes.success === true, 'apply_patch áp dụng thành công Multi-Hunk Patch với Dynamic Cumulative Line Offset');
+    assert(patchRes.totalHunks === 2, 'Tổng số hunks là 2');
+    assert(patchRes.hunksApplied === 2, 'Cả 2 hunks đều được áp dụng hoàn hảo (Hunk #2 không bị trượt dòng)');
+
+    const updatedContent = await fs.readFile(patchTargetFile, 'utf8');
+    assert(updatedContent.includes('Refreshing data v2...'), 'Hunk #1 đã cập nhật đúng');
+    assert(updatedContent.includes('saved_v2_confirmed'), 'Hunk #2 đã cập nhật đúng dòng đích sau độ trượt');
+
+    // 2. Kiểm thử Fuzzy Whitespace & Native Indentation Adaptation trong Patch
+    const whitespaceDiffPatch = `--- a/src/pages/AdminPage.jsx
++++ b/src/pages/AdminPage.jsx
+@@ -20,4 +28,4 @@
+   return (
+-    <div className="admin-page">
++    <div   className="admin-page-v2" >
+       <h1>Admin Dashboard</h1>
+     </div>
+`;
+
+    const wsPatchRes = await applyPatchTool.execute({
+      patch: whitespaceDiffPatch,
+      path: 'src/pages/AdminPage.jsx',
+      fuzzLevel: 2,
+    }, workspace);
+
+    assert(wsPatchRes.success === true, 'apply_patch xử lý chuẩn xác lệch khoảng trắng và căn lề JSX');
+    const wsContent = await fs.readFile(patchTargetFile, 'utf8');
+    assert(wsContent.includes('admin-page-v2'), 'Nội dung JSX mới đã được áp dụng chuẩn xác');
+
+    // 3. Kiểm thử Core Deletion Matching khi các dòng context xung quanh bị trượt
+    const coreDeletionPatch = `--- a/src/pages/AdminPage.jsx
++++ b/src/pages/AdminPage.jsx
+@@ -1,4 +1,4 @@
+  // Completely hallucinated leading context line
+-  const [status, setStatus] = useState("idle");
++  const [status, setStatus] = useState("active_live");
+  // Completely hallucinated trailing context line
+`;
+
+    const coreDelRes = await applyPatchTool.execute({
+      patch: coreDeletionPatch,
+      path: 'src/pages/AdminPage.jsx',
+      fuzzLevel: 2,
+    }, workspace);
+
+    assert(coreDelRes.success === true, 'apply_patch áp dụng thành công nhờ Core Deletion Matching khi context bị hallucinated');
+    const coreDelContent = await fs.readFile(patchTargetFile, 'utf8');
+    assert(coreDelContent.includes('useState("active_live")'), 'Giá trị status đã được cập nhật thành active_live');
+  } finally {
+    await fs.rm(patchTargetFile, { force: true });
+  }
+
+  // ========================================
+  // 🧪 43. KIỂM THỬ HARDENED SEARCH_TEXT (DIRECT FILE SEARCH, SAFE ENOENT & NOT_A_DIRECTORY GUARDS)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 43. KIỂM THỬ HARDENED SEARCH_TEXT (DIRECT FILE SEARCH, SAFE ENOENT & NOT_A_DIRECTORY GUARDS)');
+  console.log('========================================');
+
+  const adminSearchFile = path.join(workspace.rootDir, 'src', 'pages', 'AdminPage.jsx');
+  await fs.mkdir(path.dirname(adminSearchFile), { recursive: true });
+  await fs.writeFile(
+    adminSearchFile,
+    [
+      'import React from "react";',
+      'export function AdminPage({ activeTab }) {',
+      '  if (activeTab === \'coupons\') {',
+      '    return <div>Coupon Management</div>;',
+      '  }',
+      '  return <div>Default Dashboard</div>;',
+      '}',
+    ].join('\n'),
+    'utf8'
+  );
+
+  try {
+    // 1. Tìm kiếm trực tiếp trong một file cụ thể (ngăn chặn hoàn toàn lỗi ENOTDIR)
+    const directFileRes = await searchTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        query: "activeTab === 'coupons'",
+        outputMode: 'content',
+      },
+      workspace
+    );
+
+    assert(directFileRes.totalMatches === 1, 'search_text tìm kiếm trực tiếp trong file thành công mà không phát sinh lỗi ENOTDIR');
+    assert(directFileRes.totalFiles === 1, 'Đếm đúng 1 file');
+    assert(directFileRes.matches.length === 1, 'Trả về đúng 1 kết quả khớp');
+    assert(directFileRes.matches[0].line === 3, 'Khớp chính xác tại dòng 3');
+    assert(directFileRes.matches[0].text.includes("activeTab === 'coupons'"), 'Nội dung dòng khớp đúng');
+
+    // 2. Tìm kiếm trong file với outputMode="count"
+    const fileCountRes = await searchTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        query: 'return',
+        outputMode: 'count',
+      },
+      workspace
+    );
+    assert(fileCountRes.totalMatches === 2, 'search_text outputMode="count" đếm đúng 2 kết quả trong file');
+
+    // 3. Đường dẫn không tồn tại -> Trả về PATH_NOT_FOUND êm dịu kèm gợi ý
+    const notFoundRes = await searchTextTool.execute(
+      {
+        path: 'src/pages/NonExistentComponent.jsx',
+        query: 'test',
+      },
+      workspace
+    );
+    assert(notFoundRes.errorCode === 'PATH_NOT_FOUND', 'search_text trả về mã lỗi PATH_NOT_FOUND khi đường dẫn không tồn tại');
+    assert(Boolean(notFoundRes.suggestion), 'search_text cung cấp gợi ý kiểm tra lại file bằng list_files');
+
+    // 4. list_files nhận đường dẫn file -> Báo lỗi NOT_A_DIRECTORY kèm gợi ý dùng read_file
+    const listFileOnTarget = await listFilesTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+      },
+      workspace
+    );
+    assert(listFileOnTarget.errorCode === 'NOT_A_DIRECTORY', 'list_files từ chối đường dẫn file an toàn với NOT_A_DIRECTORY');
+    assert(Boolean(listFileOnTarget.suggestion?.includes('read_file')), 'list_files gợi ý chuyển sang dùng read_file');
+  } finally {
+    await fs.rm(adminSearchFile, { force: true });
+  }
+
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   if (failureList.length > 0) {

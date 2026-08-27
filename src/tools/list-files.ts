@@ -36,10 +36,28 @@ export const listFilesTool: ToolDefinition = {
 
     try {
       const safePath = workspace.resolveSafePath(rawPath);
-      const stat = await fs.stat(safePath);
+      let stat;
+      try {
+        stat = await fs.stat(safePath);
+      } catch (statErr: any) {
+        if (statErr.code === 'ENOENT' || String(statErr.message).includes('ENOENT')) {
+          return {
+            path: rawPath,
+            error: `Thư mục "${rawPath}" không tồn tại (ENOENT: no such file or directory).`,
+            errorCode: 'PATH_NOT_FOUND',
+            suggestion: 'Dùng list_files với path="." để xem cấu trúc thư mục gốc.',
+          };
+        }
+        throw statErr;
+      }
 
       if (!stat.isDirectory()) {
-        return { path: rawPath, error: `Đường dẫn "${rawPath}" không phải là thư mục.`, errorCode: 'NOT_A_DIRECTORY' };
+        return {
+          path: rawPath,
+          error: `Đường dẫn "${rawPath}" là tệp tin, không phải thư mục.`,
+          errorCode: 'NOT_A_DIRECTORY',
+          suggestion: `Dùng read_file với path="${rawPath}" để xem nội dung tệp tin này.`,
+        };
       }
 
       const entries = await fs.readdir(safePath, { withFileTypes: true });

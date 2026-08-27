@@ -385,11 +385,12 @@ export class PatchEngine {
     // Chuẩn hóa dòng thành LF để xử lý
     let currentLines = originalContent.replace(/\r\n/g, '\n').split('\n');
     let maxFuzzUsed = 0;
+    let cumulativeOffset = 0; // Dynamic Cumulative Line Offset (SWE-agent & Aider standard)
 
-    // Áp dụng từng hunk
+    // Áp dụng từng hunk với Dynamic Offset Tracking
     for (let hIdx = 0; hIdx < filePatch.hunks.length; hIdx++) {
       const hunk = filePatch.hunks[hIdx];
-      const matchRes = this.findHunkMatch(currentLines, hunk, maxFuzzLevel);
+      const matchRes = this.findHunkMatch(currentLines, hunk, maxFuzzLevel, cumulativeOffset);
 
       if (!matchRes.found || matchRes.matchLineIndex === undefined) {
         hunkResults.push({
@@ -443,6 +444,11 @@ export class PatchEngine {
 
       currentLines.splice(matchedIdx, expectedLinesCount, ...newReplacementLines);
 
+      // Cập nhật Dynamic Cumulative Line Offset để bù trừ độ trượt dòng cho các Hunk kế tiếp
+      const lineDelta = newReplacementLines.length - expectedLinesCount;
+      const originalTargetStart = Math.max(0, hunk.oldStart - 1 + cumulativeOffset);
+      cumulativeOffset += lineDelta + (matchedIdx - originalTargetStart);
+
       maxFuzzUsed = Math.max(maxFuzzUsed, matchRes.fuzzLevel);
       hunkResults.push({
         hunkIndex: hIdx,
@@ -468,12 +474,13 @@ export class PatchEngine {
   }
 
   /**
-   * Tìm vị trí khớp Hunk với Fuzz Matching (Cấp 0 -> 3)
+   * Tìm vị trí khớp Hunk với Fuzz Matching (Cấp 0 -> 3) kết hợp Dynamic Cumulative Line Offset
    */
   private static findHunkMatch(
     targetLines: string[],
     hunk: PatchHunk,
     maxFuzz: number,
+    cumulativeOffset: number = 0,
   ): {
     found: boolean;
     matchLineIndex?: number;
@@ -485,12 +492,18 @@ export class PatchEngine {
   } {
     const expectedOldLines: string[] = [];
     const replacementLines: string[] = [];
+    const deletionOnlyLines: string[] = [];
+    const additionOnlyLines: string[] = [];
 
     for (const line of hunk.lines) {
       if (line.startsWith('-')) {
-        expectedOldLines.push(line.slice(1));
+        const text = line.slice(1);
+        expectedOldLines.push(text);
+        deletionOnlyLines.push(text);
       } else if (line.startsWith('+')) {
-        replacementLines.push(line.slice(1));
+        const text = line.slice(1);
+        replacementLines.push(text);
+        additionOnlyLines.push(text);
       } else {
         // Context line
         const content = line.startsWith(' ') ? line.slice(1) : line;
@@ -501,7 +514,7 @@ export class PatchEngine {
 
     if (expectedOldLines.length === 0) {
       // Insertion hunk tại dòng cụ thể
-      const targetPos = Math.min(Math.max(0, hunk.oldStart - 1), targetLines.length);
+      const targetPos = Math.min(Math.max(0, hunk.oldStart - 1 + cumulativeOffset), targetLines.length);
       return {
         found: true,
         matchLineIndex: targetPos,
@@ -512,12 +525,13 @@ export class PatchEngine {
     }
 
     const expLen = expectedOldLines.length;
-    const targetOldStart = Math.max(0, hunk.oldStart - 1);
+    // Điểm mỏ neo tìm kiếm được bù trừ độ trượt dòng tích lũy (SWE-agent & Aider standard)
+    const targetOldStart = Math.max(0, hunk.oldStart - 1 + cumulativeOffset);
 
     // ==============================================================
     // Cấp độ 0: Exact match tại vị trí hoặc quét toàn bộ file (Slide Window)
     // ==============================================================
-    // 0a. Thử đúng dòng ghi trên header @@
+    // 0a. Thử đúng dòng được bù trừ theo cumulativeOffset
     if (this.linesMatchExact(targetLines, expectedOldLines, targetOldStart)) {
       return {
         found: true,
@@ -561,7 +575,7 @@ export class PatchEngine {
     }
 
     // ==============================================================
-    // Cấp độ 1: Normalized Indentation & Whitespace Tolerance
+    // Cấp độ 1: Normalized Indentation & Whitespace Tolerance (Cursor & SWE-agent)
     // ==============================================================
     const normMatches: number[] = [];
     for (let i = 0; i <= targetLines.length - expLen; i++) {
@@ -590,7 +604,7 @@ export class PatchEngine {
     }
 
     // ==============================================================
-    // Cấp độ 2: Context Reduction (Thử bỏ dòng context đầu, cuối, hoặc cả hai)
+    // Cấp độ 2: Context Reduction Cascade & Core Deletion Matching (GNU Patch Fuzz 2)
     // ==============================================================
     if (expLen >= 3) {
       const candidates: Array<{
@@ -602,21 +616,40 @@ export class PatchEngine {
         {
           trimmedExp: expectedOldLines.slice(0, expLen - 1),
           trimmedRep: replacementLines.slice(0, replacementLines.length - 1),
-          label: 'trailing-trimmed',
+          label: 'trailing-trimmed-1',
         },
         // 2b. Bỏ dòng context đầu (leading context drift)
         {
           trimmedExp: expectedOldLines.slice(1),
           trimmedRep: replacementLines.slice(1),
-          label: 'leading-trimmed',
+          label: 'leading-trimmed-1',
         },
         // 2c. Bỏ cả dòng context đầu và cuối
         {
           trimmedExp: expectedOldLines.slice(1, expLen - 1),
           trimmedRep: replacementLines.slice(1, replacementLines.length - 1),
-          label: 'both-trimmed',
+          label: 'both-trimmed-1',
         },
       ];
+
+      // Thêm giảm 2 dòng nếu context đủ dài
+      if (expLen >= 5) {
+        candidates.push({
+          trimmedExp: expectedOldLines.slice(0, expLen - 2),
+          trimmedRep: replacementLines.slice(0, replacementLines.length - 2),
+          label: 'trailing-trimmed-2',
+        });
+        candidates.push({
+          trimmedExp: expectedOldLines.slice(2),
+          trimmedRep: replacementLines.slice(2),
+          label: 'leading-trimmed-2',
+        });
+        candidates.push({
+          trimmedExp: expectedOldLines.slice(2, expLen - 2),
+          trimmedRep: replacementLines.slice(2, replacementLines.length - 2),
+          label: 'both-trimmed-2',
+        });
+      }
 
       for (const cand of candidates) {
         if (cand.trimmedExp.length < 2) continue;
@@ -639,6 +672,29 @@ export class PatchEngine {
             fuzzLevel: 2,
           };
         }
+      }
+    }
+
+    // 2d. Core Deletion Matching: Nếu các dòng context xung quanh bị lệch hoàn toàn, tìm theo khối dòng bị xóa (-)
+    if (deletionOnlyLines.length > 0) {
+      const delMatches: number[] = [];
+      for (let i = 0; i <= targetLines.length - deletionOnlyLines.length; i++) {
+        if (this.linesMatchNormalized(targetLines, deletionOnlyLines, i)) {
+          delMatches.push(i);
+        }
+      }
+
+      if (delMatches.length >= 1) {
+        delMatches.sort((a, b) => Math.abs(a - targetOldStart) - Math.abs(b - targetOldStart));
+        const matchedIdx = delMatches[0];
+        const adaptedReplacement = this.adaptIndentation(targetLines[matchedIdx], deletionOnlyLines[0], additionOnlyLines);
+        return {
+          found: true,
+          matchLineIndex: matchedIdx,
+          matchedLinesCount: deletionOnlyLines.length,
+          replacementLines: adaptedReplacement,
+          fuzzLevel: 2,
+        };
       }
     }
 
@@ -701,11 +757,18 @@ export class PatchEngine {
     return true;
   }
 
+  private static normalizeLine(line: string): string {
+    return (line || '')
+      .replace(/\t/g, '  ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   private static linesMatchNormalized(targetLines: string[], expLines: string[], startIdx: number): boolean {
     if (startIdx + expLines.length > targetLines.length || startIdx < 0) return false;
     for (let j = 0; j < expLines.length; j++) {
-      const t = targetLines[startIdx + j].trim();
-      const e = expLines[j].trim();
+      const t = this.normalizeLine(targetLines[startIdx + j]);
+      const e = this.normalizeLine(expLines[j]);
       if (t !== e) {
         return false;
       }
@@ -736,7 +799,7 @@ export class PatchEngine {
     if (targetBlock.length !== expBlock.length || targetBlock.length === 0) return 0;
     let totalScore = 0;
     for (let i = 0; i < targetBlock.length; i++) {
-      totalScore += lineSimilarity(targetBlock[i].trim(), expBlock[i].trim());
+      totalScore += lineSimilarity(this.normalizeLine(targetBlock[i]), this.normalizeLine(expBlock[i]));
     }
     return totalScore / targetBlock.length;
   }

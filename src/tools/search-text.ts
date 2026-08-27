@@ -23,7 +23,7 @@ export interface FileMatchSummary {
  */
 export const searchTextTool: ToolDefinition = {
   name: 'search_text',
-  description: 'Tìm kiếm chuỗi văn bản trong các file của một thư mục. Hỗ trợ outputMode ("content", "files_with_matches", "count") và cơ chế Two-Stage Capping chống ngộ độc context.',
+  description: 'Tìm kiếm chuỗi văn bản trong một thư mục hoặc một tệp tin cụ thể trong workspace. Hỗ trợ outputMode ("content", "files_with_matches", "count") và cơ chế Two-Stage Capping chống ngộ độc context.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -33,7 +33,7 @@ export const searchTextTool: ToolDefinition = {
       },
       path: {
         type: Type.STRING,
-        description: 'Thư mục bắt đầu tìm kiếm (mặc định là ".")',
+        description: 'Thư mục hoặc tệp tin cụ thể để tìm kiếm (mặc định là ".")',
       },
       outputMode: {
         type: Type.STRING,
@@ -66,10 +66,60 @@ export const searchTextTool: ToolDefinition = {
 
     try {
       const safeRoot = workspace.resolveSafePath(rawPath);
+      let stat;
+      try {
+        stat = await fs.stat(safeRoot);
+      } catch (statErr: any) {
+        if (statErr.code === 'ENOENT' || String(statErr.message).includes('ENOENT')) {
+          return {
+            error: `Đường dẫn "${rawPath}" không tồn tại (ENOENT: no such file or directory).`,
+            errorCode: 'PATH_NOT_FOUND',
+            suggestion: 'Hãy kiểm tra lại đường dẫn tệp hoặc thư mục bằng list_files hoặc search_codebase_fast.',
+          };
+        }
+        throw statErr;
+      }
+
       const allMatches: MatchItem[] = [];
       const fileSummaryMap = new Map<string, number>();
       const hardMaxMatches = 200; // Cắt cứng quét để tránh treo I/O
       let isScanCapped = false;
+
+      async function searchInFile(fullPath: string) {
+        if (workspace.isBinaryFile(path.basename(fullPath))) {
+          return;
+        }
+
+        try {
+          const fileContent = await fs.readFile(fullPath, 'utf-8');
+          const lines = fileContent.split(/\r?\n/);
+
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const matched = caseSensitive
+              ? line.includes(searchQuery)
+              : line.toLowerCase().includes(searchQuery);
+
+            if (matched) {
+              const relativeFilePath = workspace.toRelativePath(fullPath).replace(/\\/g, '/');
+              fileSummaryMap.set(relativeFilePath, (fileSummaryMap.get(relativeFilePath) || 0) + 1);
+
+              allMatches.push({
+                file: relativeFilePath,
+                line: i + 1,
+                text: line.trim(),
+              });
+
+              if (allMatches.length >= hardMaxMatches) {
+                isScanCapped = true;
+                break;
+              }
+            }
+          }
+        } catch {
+          // Bỏ qua nếu file không đọc được dạng utf-8
+        }
+      }
 
       async function walk(currentDir: string) {
         if (allMatches.length >= hardMaxMatches) {
@@ -93,44 +143,21 @@ export const searchTextTool: ToolDefinition = {
             }
             await walk(fullPath);
           } else if (entry.isFile()) {
-            if (workspace.isBinaryFile(entry.name)) {
-              continue;
-            }
-
-            try {
-              const fileContent = await fs.readFile(fullPath, 'utf-8');
-              const lines = fileContent.split('\n');
-
-              for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                const matched = caseSensitive
-                  ? line.includes(searchQuery)
-                  : line.toLowerCase().includes(searchQuery);
-
-                if (matched) {
-                  const relativeFilePath = workspace.toRelativePath(fullPath);
-                  fileSummaryMap.set(relativeFilePath, (fileSummaryMap.get(relativeFilePath) || 0) + 1);
-
-                  allMatches.push({
-                    file: relativeFilePath,
-                    line: i + 1,
-                    text: line.trim(),
-                  });
-
-                  if (allMatches.length >= hardMaxMatches) {
-                    isScanCapped = true;
-                    break;
-                  }
-                }
-              }
-            } catch {
-              // Bỏ qua nếu file không đọc được dạng utf-8
-            }
+            await searchInFile(fullPath);
           }
         }
       }
 
-      await walk(safeRoot);
+      if (stat.isFile()) {
+        await searchInFile(safeRoot);
+      } else if (stat.isDirectory()) {
+        await walk(safeRoot);
+      } else {
+        return {
+          error: `Đường dẫn "${rawPath}" không phải là tệp tin hoặc thư mục hợp lệ.`,
+          errorCode: 'INVALID_PATH',
+        };
+      }
 
       const fileSummaries: FileMatchSummary[] = Array.from(fileSummaryMap.entries()).map(
         ([file, matchCount]) => ({ file, matchCount }),
@@ -140,6 +167,7 @@ export const searchTextTool: ToolDefinition = {
       if (outputMode === 'count') {
         return {
           query: rawQuery,
+          path: rawPath,
           totalMatches: allMatches.length,
           totalFiles: fileSummaries.length,
           isScanCapped,
@@ -150,6 +178,7 @@ export const searchTextTool: ToolDefinition = {
       if (outputMode === 'files_with_matches') {
         return {
           query: rawQuery,
+          path: rawPath,
           totalMatches: allMatches.length,
           totalFiles: fileSummaries.length,
           files: fileSummaries,
@@ -166,6 +195,7 @@ export const searchTextTool: ToolDefinition = {
 
       return {
         query: rawQuery,
+        path: rawPath,
         outputMode: 'content',
         totalMatches: allMatches.length,
         totalFiles: fileSummaries.length,
