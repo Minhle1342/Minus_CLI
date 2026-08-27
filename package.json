@@ -7,7 +7,7 @@
   "scripts": {
     "predev": "npm run search:up",
     "dev": "tsx src/index.ts",
-    "test": "tsx src/test-suite.ts",
+    "test": "node --max-old-space-size=4096 node_modules/tsx/dist/cli.mjs src/test-suite.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "test:latency": "tsx src/test-latency-optimization.ts",
     "build": "tsc",

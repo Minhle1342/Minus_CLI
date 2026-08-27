@@ -5,7 +5,7 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
-type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation';
+type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'fuzzy_whitespace';
 
 interface TextMatch {
   start: number;
@@ -236,7 +236,10 @@ function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact
   }));
   if (eolEquivalent.length > 0) return eolEquivalent;
 
-  return findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
+  const indentMatches = findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
+  if (indentMatches.length > 0) return indentMatches;
+
+  return findFuzzyWhitespaceMatches(content, normalizedContent, normalizedOldText);
 }
 
 function findIndentationEquivalentMatches(
@@ -270,16 +273,72 @@ function findIndentationEquivalentMatches(
   return matches.filter((match) => match.start <= match.end && match.end <= originalContent.length);
 }
 
+function findFuzzyWhitespaceMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const oldHasTrailingEol = normalizedOldText.endsWith('\n');
+  const oldLines = normalizedOldText.split('\n');
+  if (oldHasTrailingEol) oldLines.pop();
+  if (oldLines.length === 0) return [];
+
+  const normalizeWs = (line: string) =>
+    line.replace(/\t/g, '  ').replace(/[ \t]+$/g, '').trim();
+
+  const expectedLines = oldLines.map(normalizeWs);
+  if (!expectedLines.some(Boolean)) return [];
+
+  const contentLines = splitLines(normalizedContent.text);
+  const matches: TextMatch[] = [];
+
+  for (let index = 0; index + oldLines.length <= contentLines.length; index++) {
+    const window = contentLines.slice(index, index + oldLines.length);
+    let matched = true;
+    for (let i = 0; i < oldLines.length; i++) {
+      if (normalizeWs(window[i].text) !== expectedLines[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (!matched) continue;
+
+    const first = window[0];
+    const last = window[window.length - 1];
+    const normalizedEnd = oldHasTrailingEol && last.hasEol ? last.end + 1 : last.end;
+    matches.push({
+      start: normalizedContent.boundaries[first.start],
+      end: normalizedContent.boundaries[normalizedEnd],
+      line: index + 1,
+      strategy: 'fuzzy_whitespace',
+      indentation: window[0].text.match(/^[ \t]*/)?.[0] || '',
+    });
+  }
+
+  return matches.filter((match) => match.start <= match.end && match.end <= originalContent.length);
+}
+
 function prepareReplacement(newText: string, content: string, match: TextMatch): string {
   const eol = detectLocalEol(content.slice(match.start, match.end)) || detectDominantEol(content);
   let normalized = normalizeLineEndingsWithBoundaries(newText).text;
-  if (match.strategy === 'normalized_indentation') {
+  if (match.strategy === 'normalized_indentation' || match.strategy === 'fuzzy_whitespace') {
     const hasTrailingEol = normalized.endsWith('\n');
     const lines = normalized.split('\n');
     if (hasTrailingEol) lines.pop();
     const dedented = canonicalizeIndentedBlock(lines).lines;
+    const targetBlock = content.slice(match.start, match.end);
+    const usesTabs = targetBlock.includes('\t');
+    const indentPrefix = match.indentation || '';
+
     normalized = dedented
-      .map((line) => line ? `${match.indentation || ''}${line}` : '')
+      .map((line) => {
+        if (!line) return '';
+        if (usesTabs && line.startsWith('  ')) {
+          const tabIndent = line.match(/^[ ]*/)?.[0].replace(/  /g, '\t') || '';
+          return `${indentPrefix}${tabIndent}${line.trimStart()}`;
+        }
+        return `${indentPrefix}${line}`;
+      })
       .join('\n') + (hasTrailingEol ? '\n' : '');
   }
   return normalized.replace(/\n/g, eol);

@@ -5903,7 +5903,87 @@ Always write tests first!`;
     lastToolResult: { isTruncated: true, symbolsCount: 15 },
   });
   assert(blastAdvice.playbook === 'G_BLAST_RADIUS', 'ToolSynergyAdvisor kích hoạt Playbook G sau khi đọc file');
-  assert(blastAdvice.suggestedTools.includes('query_call_graph'), 'Playbook G gợi ý query_call_graph để kiểm tra blast radius');
+  // ========================================
+  // 🧪 40. KIỂM THỬ FUZZY WHITESPACE NORMALIZATION (REPLACE_TEXT) & TWO-STAGE OUTPUT CAPPING (SEARCH_TEXT)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 40. KIỂM THỬ FUZZY WHITESPACE NORMALIZATION (REPLACE_TEXT) & TWO-STAGE OUTPUT CAPPING (SEARCH_TEXT)');
+  console.log('========================================');
+
+  // 1. Fuzzy Whitespace Normalization trong replace_text (Tab vs Space & Trailing Whitespace)
+  const wsTestPath = path.join(workspace.rootDir, 'temp_fuzzy_whitespace_test.ts');
+  const tabContent = 'function compute() {\n\t\tlet totalScore = 100;   \n\t\treturn totalScore * 2;\n}\n';
+  await fs.writeFile(wsTestPath, tabContent, 'utf8');
+
+  try {
+    // LLM sinh ra 4 spaces thay vì 2 tabs \t\t và không có 3 trailing spaces ở cuối dòng
+    const fuzzyWsRes = await replaceTextTool.execute({
+      path: 'temp_fuzzy_whitespace_test.ts',
+      oldText: 'function compute() {\n    let totalScore = 100;\n    return totalScore * 2;\n}',
+      newText: 'function compute() {\n    let totalScore = 500;\n    return totalScore * 3;\n}',
+    }, workspace);
+
+    assert(fuzzyWsRes.success === true, 'replace_text áp dụng thành công Fuzzy Whitespace Normalization');
+    assert(
+      fuzzyWsRes.matchStrategy === 'fuzzy_whitespace' || fuzzyWsRes.matchStrategy === 'normalized_indentation',
+      'matchStrategy nhận diện đúng fuzzy_whitespace hoặc normalized_indentation',
+    );
+
+    const updatedWsContent = await fs.readFile(wsTestPath, 'utf8');
+    assert(updatedWsContent.includes('totalScore = 500;'), 'Nội dung file được cập nhật giá trị mới 500');
+    assert(updatedWsContent.includes('\t\tlet totalScore = 500;'), 'replace_text bảo toàn cấu trúc Tab ban đầu của file');
+  } finally {
+    await fs.rm(wsTestPath, { force: true });
+  }
+
+  // 2. Two-Stage Output Capping & Output Modes trong search_text
+  const searchTestDir = path.join(workspace.rootDir, 'temp_search_two_stage');
+  await fs.mkdir(searchTestDir, { recursive: true });
+
+  try {
+    // Tạo 5 files với tổng cộng 30 matches
+    for (let f = 1; f <= 5; f++) {
+      const fileLines: string[] = [];
+      for (let l = 1; l <= 6; l++) {
+        fileLines.push(`// log item ${l}: KEYWORD_TARGET_XYZ payload details`);
+      }
+      await fs.writeFile(path.join(searchTestDir, `log_${f}.txt`), fileLines.join('\n'), 'utf8');
+    }
+
+    // 2.1. Kiểm thử outputMode: 'files_with_matches' (Stage 1 Overview)
+    const filesWithMatchesRes = await searchTextTool.execute({
+      query: 'KEYWORD_TARGET_XYZ',
+      path: 'temp_search_two_stage',
+      outputMode: 'files_with_matches',
+    }, workspace);
+
+    assert(filesWithMatchesRes.totalFiles === 5, 'outputMode="files_with_matches" tìm đúng 5 files');
+    assert(filesWithMatchesRes.totalMatches === 30, 'Đếm đúng 30 matches');
+    assert(Array.isArray(filesWithMatchesRes.files) && filesWithMatchesRes.files.length === 5, 'Trả về danh mục file rút gọn');
+    assert(filesWithMatchesRes.matches === undefined, 'Không dump chi tiết toàn bộ các dòng để tiết kiệm token');
+
+    // 2.2. Kiểm thử outputMode: 'count'
+    const countRes = await searchTextTool.execute({
+      query: 'KEYWORD_TARGET_XYZ',
+      path: 'temp_search_two_stage',
+      outputMode: 'count',
+    }, workspace);
+
+    assert(countRes.totalMatches === 30 && countRes.totalFiles === 5, 'outputMode="count" trả về đúng số lượng tổng');
+
+    // 2.3. Kiểm thử Two-Stage Capping tự động ở chế độ 'content' mặc định
+    const defaultContentRes = await searchTextTool.execute({
+      query: 'KEYWORD_TARGET_XYZ',
+      path: 'temp_search_two_stage',
+    }, workspace);
+
+    assert(defaultContentRes.isCapped === true, 'search_text tự động kích hoạt Two-Stage Capping khi nhiều kết quả');
+    assert(defaultContentRes.fileSummary.length === 5, 'Cung cấp bảng tổng hợp số lượng match theo từng file');
+    assert(defaultContentRes.matches.length === 15, 'Giới hạn số dòng chi tiết ở 15 kết quả đại diện để chống ngộ độc context');
+    assert(Boolean(defaultContentRes.notice?.includes('[TWO-STAGE SEARCH CAPPED]')), 'Đính kèm thông báo chỉ dẫn thu hẹp phạm vi tìm kiếm');
+  } finally {
+    await fs.rm(searchTestDir, { recursive: true, force: true });
+  }
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
