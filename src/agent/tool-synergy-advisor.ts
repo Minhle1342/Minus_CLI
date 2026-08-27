@@ -9,7 +9,7 @@ export interface ToolSynergyContext {
 }
 
 export interface ToolAdvice {
-  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'GENERAL';
+  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'GENERAL';
   guidance: string;
   suggestedTools: string[];
 }
@@ -93,7 +93,18 @@ export class ToolSynergyAdvisor {
       };
     }
 
-    // 6. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
+    // 6. Vừa đọc file mã nguồn (Playbook G: Blast Radius & Impact Awareness)
+    if (lastToolName === 'read_file' && lastToolResult && !lastToolResult.error) {
+      if (lastToolResult.symbolsCount > 0 || lastToolResult.isTruncated || (Array.isArray(lastToolResult.outline) && lastToolResult.outline.length > 0)) {
+        return {
+          playbook: 'G_BLAST_RADIUS',
+          guidance: 'File inspected with symbols outline. Before modifying any function or class, verify upstream callers via "query_call_graph(direction=\'callers\')" or "get_symbol_context_360".',
+          suggestedTools: ['query_call_graph', 'get_symbol_context_360', 'replace_text', 'get_diagnostics'],
+        };
+      }
+    }
+
+    // 7. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
       guidance: 'Choose the most precise high-level tool: "get_symbol_context_360" for symbol analysis, "get_route_map" for APIs, or "get_architecture_topology" for system structure.',

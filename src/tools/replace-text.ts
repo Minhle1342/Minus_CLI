@@ -109,7 +109,24 @@ export const replaceTextTool: ToolDefinition = {
         };
       }
 
-      const matches = findTextMatches(content, oldText, matchMode);
+      let effectiveOldText = oldText;
+      let matches = findTextMatches(content, effectiveOldText, matchMode);
+      let autoStrippedLineNumbers = false;
+
+      // Fallback: Nếu LLM vô tình copy tiền tố số dòng (ví dụ "12: const x = 1;" hoặc "12 | const x = 1;"), tự động làm sạch
+      if (matches.length === 0 && /^\s*\d+[:|]\s+/m.test(oldText)) {
+        const sanitizedOldText = oldText
+          .split('\n')
+          .map((line) => line.replace(/^\s*\d+[:|]\s?/, ''))
+          .join('\n');
+        const fallbackMatches = findTextMatches(content, sanitizedOldText, matchMode);
+        if (fallbackMatches.length > 0) {
+          effectiveOldText = sanitizedOldText;
+          matches = fallbackMatches;
+          autoStrippedLineNumbers = true;
+        }
+      }
+
       if (matches.length === 0) {
         const candidates = findNearbyCandidates(content, oldText);
         const suggestedRead = candidates[0]
@@ -184,6 +201,7 @@ export const replaceTextTool: ToolDefinition = {
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
         message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        ...(autoStrippedLineNumbers ? { note: 'Tự động làm sạch tiền tố số dòng trong oldText (Line Number Sanitization).' } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
     } catch (err: any) {

@@ -116,8 +116,12 @@ export const readFileTool: ToolDefinition = {
       const lines = fileContent.split('\n');
       const totalLines = lines.length;
 
+      // Nếu file lớn (> 350 dòng) và không chỉ định khoảng dòng/symbol, tự động kích hoạt Windowing + AST Outline (SWE-agent & Cursor standard)
+      const isUnscopedLargeFile = args.startLine === undefined && args.endLine === undefined && !args.symbol && !args.outlineOnly && totalLines > 350;
       const startLine = Math.max(1, Number(args.startLine) || 1);
-      const endLine = Math.min(totalLines, Number(args.endLine) || totalLines);
+      const endLine = isUnscopedLargeFile
+        ? Math.min(120, totalLines)
+        : Math.min(totalLines, Number(args.endLine) || totalLines);
 
       if (startLine > totalLines) {
         return {
@@ -131,6 +135,10 @@ export const readFileTool: ToolDefinition = {
         ? selectedLines.map((line, idx) => `${startLine + idx}: ${line}`).join('\n')
         : selectedLines.join('\n');
 
+      const outline = isUnscopedLargeFile
+        ? SemanticSlicer.extractOutline(rawPath, fileContent)
+        : undefined;
+
       return {
         path: rawPath,
         content,
@@ -140,6 +148,12 @@ export const readFileTool: ToolDefinition = {
         contentHash,
         eol,
         lineNumbersIncluded: includeLineNumbers,
+        isTruncated: isUnscopedLargeFile,
+        symbolsCount: outline?.symbols?.length,
+        outline: outline?.symbols?.slice(0, 30),
+        notice: isUnscopedLargeFile
+          ? `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). Lines 1-120 and AST Symbol Outline are shown above to protect context window. To read other sections, pass startLine/endLine or symbol parameter.`
+          : undefined,
       };
     } catch (err: any) {
       if (err.code === 'ENOENT' || String(err.message).includes('ENOENT')) {

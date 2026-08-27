@@ -5841,6 +5841,70 @@ Always write tests first!`;
   });
   assert(testRatioRes.stats.effectiveHistoryBudgetTokens > 0, 'Compactor tính toán chính xác effectiveHistoryBudgetTokens theo tỷ lệ 75%');
 
+  // ========================================
+  // 🧪 39. KIỂM THỬ TỐI ƯU HÓA KHẢ NĂNG KIỂM SOÁT CODEBASE CỦA LLM (PROACTIVE READ WINDOWING, LINE SANITIZATION & BLAST RADIUS ADVICE)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 39. KIỂM THỬ TỐI ƯU HÓA KHẢ NĂNG KIỂM SOÁT CODEBASE CỦA LLM (PROACTIVE READ WINDOWING, LINE SANITIZATION & BLAST RADIUS ADVICE)');
+  console.log('========================================');
+
+  // 1. Proactive Read Windowing trên file lớn
+  const readFixturePath = path.join(workspace.rootDir, 'temp_read_window_fixture.ts');
+  const readLines: string[] = [];
+  for (let i = 1; i <= 400; i++) {
+    readLines.push(`export function calculateItem${i}(x: number): number { return x * ${i}; }`);
+  }
+  await fs.writeFile(readFixturePath, readLines.join('\n'), 'utf8');
+
+  try {
+    // Đọc không chỉ định khoảng dòng trên file 400 dòng -> Tự động bật Windowing 1-120 kèm AST Outline
+    const autoWindowRead = await readFileTool.execute({ path: 'temp_read_window_fixture.ts' }, workspace);
+    assert(autoWindowRead.isTruncated === true, 'read_file tự động kích hoạt Windowing khi file > 350 dòng');
+    assert(autoWindowRead.startLine === 1 && autoWindowRead.endLine === 120, 'read_file hiển thị đúng cửa sổ 120 dòng đầu');
+    assert(autoWindowRead.symbolsCount! >= 30, 'read_file trả về AST Symbol Outline cho các hàm còn lại');
+    assert(Boolean(autoWindowRead.notice?.includes('[WINDOWED FILE VIEW]')), 'read_file đính kèm thông báo hướng dẫn đọc chi tiết');
+
+    // Đọc có chỉ định khoảng dòng cụ thể -> Trả về chính xác theo yêu cầu
+    const scopedRead = await readFileTool.execute({ path: 'temp_read_window_fixture.ts', startLine: 200, endLine: 220 }, workspace);
+    assert(scopedRead.isTruncated === false, 'read_file trả về đầy đủ khi có chỉ định startLine/endLine');
+    assert(scopedRead.startLine === 200 && scopedRead.endLine === 220, 'read_file tuân thủ đúng khoảng dòng yêu cầu');
+
+    // Đọc theo tên symbol
+    const symbolRead = await readFileTool.execute({ path: 'temp_read_window_fixture.ts', symbol: 'calculateItem50' }, workspace);
+    assert(symbolRead.symbol === 'calculateItem50' && symbolRead.content.includes('return x * 50;'), 'read_file trích xuất chính xác symbol được yêu cầu');
+  } finally {
+    await fs.rm(readFixturePath, { force: true });
+  }
+
+  // 2. Line Number Prefix Sanitization trong replace_text
+  const sanitizeFixturePath = path.join(workspace.rootDir, 'temp_sanitize_line_test.ts');
+  await fs.writeFile(sanitizeFixturePath, 'const a = 1;\nconst b = 2;\nconst c = 3;\n', 'utf8');
+
+  try {
+    // LLM copy nhầm tiền tố số dòng từ output "2: const b = 2;"
+    const replaceWithLineNo = await replaceTextTool.execute({
+      path: 'temp_sanitize_line_test.ts',
+      oldText: '2: const b = 2;',
+      newText: 'const b = 200;',
+    }, workspace);
+    assert(replaceWithLineNo.success === true, 'replace_text tự động làm sạch tiền tố số dòng trong oldText');
+    assert(Boolean(replaceWithLineNo.note?.includes('Line Number Sanitization')), 'replace_text ghi nhận ghi chú Line Number Sanitization');
+
+    const updatedSanitizeContent = await fs.readFile(sanitizeFixturePath, 'utf8');
+    assert(updatedSanitizeContent.includes('const b = 200;'), 'Nội dung file sau khi tự làm sạch số dòng được cập nhật chuẩn xác');
+  } finally {
+    await fs.rm(sanitizeFixturePath, { force: true });
+  }
+
+  // 3. ToolSynergyAdvisor Playbook G (Blast Radius & Upstream Call Graph Awareness)
+  const section39Advisor = new ToolSynergyAdvisor();
+  const blastAdvice = section39Advisor.advise({
+    lastToolName: 'read_file',
+    lastToolResult: { isTruncated: true, symbolsCount: 15 },
+  });
+  assert(blastAdvice.playbook === 'G_BLAST_RADIUS', 'ToolSynergyAdvisor kích hoạt Playbook G sau khi đọc file');
+  assert(blastAdvice.suggestedTools.includes('query_call_graph'), 'Playbook G gợi ý query_call_graph để kiểm tra blast radius');
+
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   if (failureList.length > 0) {
