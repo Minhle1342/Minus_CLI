@@ -30,11 +30,18 @@ export class LocalProcessSandbox implements ISandboxProvider {
     const cwd = options?.cwd ?? this.defaultCwd;
 
     // Lọc và làm sạch biến môi trường (loại trừ các secret nhạy cảm nếu có)
+    // Đồng thời ép buộc môi trường Non-Interactive (Claude Code & SWE-agent standard) để chống treo terminal
     const sanitizedEnv: Record<string, string> = {
       PATH: process.env.PATH || '',
       HOME: process.env.HOME || process.env.USERPROFILE || '',
       USER: process.env.USER || process.env.USERNAME || '',
       NODE_ENV: 'development',
+      CI: 'true',
+      DEBIAN_FRONTEND: 'noninteractive',
+      PAGER: 'cat',
+      GIT_TERMINAL_PROMPT: '0',
+      FORCE_COLOR: '0',
+      npm_config_yes: 'true',
       ...options?.env,
     };
 

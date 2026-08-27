@@ -14,7 +14,7 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Tạo một file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Thích hợp khi tạo file mới hoàn toàn.',
+  description: 'Tạo một file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Tự động kiểm tra chống Lazy Code Placeholder và bảo vệ chống ghi đè mù lên file lớn có sẵn.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -26,15 +26,30 @@ export const writeFileTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Toàn bộ nội dung văn bản sẽ ghi vào file',
       },
+      overwrite: {
+        type: Type.BOOLEAN,
+        description: 'Bắt buộc truyền true nếu muốn ghi đè lên file lớn đã có sẵn (> 30 dòng). Mặc định false để bảo vệ mã nguồn cũ.',
+      },
     },
     required: ['path', 'content'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
     const rawPath = String(args.path || '');
     const content = String(args.content ?? '');
+    const overwrite = args.overwrite === true;
 
     if (!rawPath) {
       return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
+    }
+
+    // 1. Chống Lazy Code Placeholder (Claude Code & OpenHands standard)
+    const LAZY_CODE_REGEX = /(?:\/\/|\/\*|#|<!--)\s*\.\.\.\s*(?:existing|rest|unchanged|remains|more|other|code\s+remains|implementation\s+remains)/i;
+    if (LAZY_CODE_REGEX.test(content)) {
+      return toolError(
+        `Phát hiện Lazy Code Placeholder trong content (ví dụ: "// ... existing code ..."). write_file yêu cầu toàn bộ nội dung mã nguồn đầy đủ, không chấp nhận comment viết tắt. Để sửa đổi cục bộ, hãy sử dụng tool "replace_text".`,
+        'LAZY_CODE_PLACEHOLDER_DETECTED',
+        { path: rawPath },
+      );
     }
 
     try {
@@ -50,9 +65,26 @@ export const writeFileTool: ToolDefinition = {
       // Kiểm tra xem file đã tồn tại trước đó chưa
       let isExisting = false;
       try {
-        await fs.access(safePath);
+        const existingStat = await fs.stat(safePath);
         isExisting = true;
-      } catch {
+
+        // 2. Chống ghi đè mù lên file lớn có sẵn (SWE-agent standard)
+        if (!overwrite) {
+          const existingContent = await fs.readFile(safePath, 'utf-8');
+          const lineCount = existingContent.split('\n').length;
+          if (lineCount > 30 || existingStat.size > 1024) {
+            return toolError(
+              `File "${rawPath}" đã tồn tại và có dung lượng lớn (${lineCount} dòng, ${existingStat.size} bytes). Để tránh vô tình xóa mất logic cũ khi ghi đè toàn bộ, hãy dùng tool "replace_text" để sửa đổi chính xác từng phần. Nếu bạn thực sự muốn ghi đè toàn bộ file, hãy truyền thêm tham số overwrite: true.`,
+              'LARGE_FILE_OVERWRITE_PROTECTION',
+              { path: rawPath, lineCount, sizeBytes: existingStat.size },
+              'Use replace_text for surgical updates, or set overwrite: true to force rewrite.',
+            );
+          }
+        }
+      } catch (err: any) {
+        if (err.code !== 'ENOENT') {
+          // Ignore other stat errors
+        }
         isExisting = false;
       }
 

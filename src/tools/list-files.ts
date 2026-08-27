@@ -10,7 +10,7 @@ import { Workspace } from '../workspace/workspace.js';
  */
 export const listFilesTool: ToolDefinition = {
   name: 'list_files',
-  description: 'Liệt kê danh sách các tệp tin và thư mục con trong một thư mục thuộc workspace.',
+  description: 'Liệt kê danh sách các tệp tin và thư mục con trong một thư mục thuộc workspace. Hỗ trợ tự động phân trang và cắt bớt thư mục khổng lồ để bảo vệ Context Window.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -18,18 +18,28 @@ export const listFilesTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Đường dẫn tương đối tới thư mục cần xem (ví dụ: "." hoặc "src")',
       },
+      maxEntries: {
+        type: Type.INTEGER,
+        description: 'Số lượng phần tử tối đa trả về (mặc định: 60, tối đa: 200).',
+      },
+      offset: {
+        type: Type.INTEGER,
+        description: 'Vị trí bắt đầu lấy kết quả để phân trang (mặc định: 0).',
+      },
     },
     required: ['path'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
     const rawPath = String(args.path || '.');
+    const maxEntries = Math.min(200, Math.max(1, Number(args.maxEntries) || 60));
+    const offset = Math.max(0, Number(args.offset) || 0);
 
     try {
       const safePath = workspace.resolveSafePath(rawPath);
       const stat = await fs.stat(safePath);
 
       if (!stat.isDirectory()) {
-        return { path: rawPath, error: `Đường dẫn "${rawPath}" không phải là thư mục.` };
+        return { path: rawPath, error: `Đường dẫn "${rawPath}" không phải là thư mục.`, errorCode: 'NOT_A_DIRECTORY' };
       }
 
       const entries = await fs.readdir(safePath, { withFileTypes: true });
@@ -46,14 +56,26 @@ export const listFilesTool: ToolDefinition = {
         }
       }
 
+      const totalEntries = filteredEntries.length;
+      const isTruncated = totalEntries > offset + maxEntries;
+      const pagedEntries = filteredEntries.slice(offset, offset + maxEntries);
+
       return {
         path: rawPath,
-        entries: filteredEntries,
+        entries: pagedEntries,
+        totalEntries,
+        returnedEntries: pagedEntries.length,
+        offset,
+        isTruncated,
+        notice: isTruncated
+          ? `[DIRECTORY LISTING CAPPED]: Thư mục "${rawPath}" có ${totalEntries} mục. Đang hiển thị ${pagedEntries.length} mục (từ vị trí ${offset}). Truyền thêm offset=${offset + maxEntries} để xem các mục tiếp theo.`
+          : undefined,
       };
     } catch (err: any) {
       return {
         path: rawPath,
         error: `Không thể liệt kê thư mục: ${err.message}`,
+        errorCode: 'LIST_FILES_ERROR',
       };
     }
   },

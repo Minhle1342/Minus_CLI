@@ -5985,6 +5985,79 @@ Always write tests first!`;
     await fs.rm(searchTestDir, { recursive: true, force: true });
   }
 
+  // ========================================
+  // 🧪 41. KIỂM THỬ HARDENED GUARDS CHO CÁC NHÓM CÔNG CỤ CÒN LẠI (LAZY CODE GUARD, OVERWRITE SHIELD, NON-INTERACTIVE ENV & DIRECTORY PAGING)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 41. KIỂM THỬ HARDENED GUARDS CHO CÁC NHÓM CÔNG CỤ CÒN LẠI (LAZY CODE GUARD, OVERWRITE SHIELD, NON-INTERACTIVE ENV & DIRECTORY PAGING)');
+  console.log('========================================');
+
+  // 1. Kiểm thử Lazy Code Placeholder Detection trong write_file
+  const lazyWriteRes = await writeFileTool.execute({
+    path: 'temp_lazy_test.ts',
+    content: 'export function add(a: number, b: number) {\n  // ... existing implementation remains ...\n}',
+  }, workspace);
+  assert(
+    lazyWriteRes.success === false && lazyWriteRes.errorCode === 'LAZY_CODE_PLACEHOLDER_DETECTED',
+    'write_file từ chối nội dung chứa Lazy Code Placeholder',
+  );
+
+  // 2. Kiểm thử Large File Overwrite Protection trong write_file
+  const largeFileFixture = path.join(workspace.rootDir, 'temp_large_overwrite_target.ts');
+  const largeLines = Array.from({ length: 45 }, (_, i) => `const var_${i} = ${i};`);
+  await fs.writeFile(largeFileFixture, largeLines.join('\n'), 'utf8');
+
+  try {
+    // Thử ghi đè mà không truyền overwrite: true
+    const unconfirmedOverwrite = await writeFileTool.execute({
+      path: 'temp_large_overwrite_target.ts',
+      content: 'const freshCode = true;',
+    }, workspace);
+    assert(
+      unconfirmedOverwrite.success === false && unconfirmedOverwrite.errorCode === 'LARGE_FILE_OVERWRITE_PROTECTION',
+      'write_file chặn ghi đè mù lên file lớn có sẵn (> 30 dòng)',
+    );
+
+    // Ghi đè thành công khi có overwrite: true
+    const confirmedOverwrite = await writeFileTool.execute({
+      path: 'temp_large_overwrite_target.ts',
+      content: 'const freshCode = true;',
+      overwrite: true,
+    }, workspace);
+    assert(confirmedOverwrite.success === true, 'write_file ghi đè thành công khi có overwrite: true');
+  } finally {
+    await fs.rm(largeFileFixture, { force: true });
+  }
+
+  // 3. Kiểm thử Non-Interactive Environment Flags trong LocalProcessSandbox
+  const sandbox = new LocalProcessSandbox(workspace.rootDir);
+  const envTestRes = await sandbox.exec('node -e "console.log([process.env.CI, process.env.PAGER, process.env.GIT_TERMINAL_PROMPT].join(\':\'))"');
+  assert(envTestRes.success === true, 'LocalProcessSandbox thực thi lệnh kiểm tra môi trường thành công');
+  assert(envTestRes.stdout === 'true:cat:0', 'LocalProcessSandbox tự động inject các cờ non-interactive CI=true, PAGER=cat, GIT_TERMINAL_PROMPT=0');
+
+  // 4. Kiểm thử list_files Pagination & Directory Capping
+  const dirPagingRoot = path.join(workspace.rootDir, 'temp_dir_paging_test');
+  await fs.mkdir(dirPagingRoot, { recursive: true });
+
+  try {
+    for (let i = 1; i <= 25; i++) {
+      await fs.writeFile(path.join(dirPagingRoot, `file_${i.toString().padStart(2, '0')}.txt`), 'content', 'utf8');
+    }
+
+    // Liệt kê với maxEntries = 10 (Page 1)
+    const page1Res = await listFilesTool.execute({ path: 'temp_dir_paging_test', maxEntries: 10, offset: 0 }, workspace);
+    assert(page1Res.totalEntries === 25, 'list_files đếm đúng tổng số 25 entries');
+    assert(page1Res.returnedEntries === 10, 'list_files giới hạn đúng 10 entries cho trang 1');
+    assert(page1Res.isTruncated === true, 'list_files đánh dấu isTruncated = true khi còn dữ liệu');
+    assert(Boolean(page1Res.notice?.includes('[DIRECTORY LISTING CAPPED]')), 'list_files đính kèm notice hướng dẫn offset');
+
+    // Liệt kê trang 2 (offset = 10, maxEntries = 10)
+    const page2Res = await listFilesTool.execute({ path: 'temp_dir_paging_test', maxEntries: 10, offset: 10 }, workspace);
+    assert(page2Res.returnedEntries === 10 && page2Res.offset === 10, 'list_files lấy đúng trang 2 với offset 10');
+  } finally {
+    await fs.rm(dirPagingRoot, { recursive: true, force: true });
+  }
+
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   if (failureList.length > 0) {
