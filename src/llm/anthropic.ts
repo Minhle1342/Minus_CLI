@@ -96,16 +96,39 @@ export class AnthropicLLM {
       body.cache_control = { type: 'ephemeral' };
     }
 
-    const response = await fetch(`${this.baseURL.replace(/\/+$/, '')}/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-        ...this.extraHeaders,
-      },
-      body: JSON.stringify(body),
-    });
+    if (request?.signal?.aborted) {
+      return {
+        text: '',
+        toolCalls: [],
+        finishReason: 'aborted',
+        rawFinishReason: 'aborted',
+      };
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseURL.replace(/\/+$/, '')}/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+          ...this.extraHeaders,
+        },
+        body: JSON.stringify(body),
+        signal: request?.signal,
+      });
+    } catch (err: any) {
+      if (err.name === 'AbortError' || request?.signal?.aborted) {
+        return {
+          text: '',
+          toolCalls: [],
+          finishReason: 'aborted',
+          rawFinishReason: 'aborted',
+        };
+      }
+      throw err;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -194,11 +217,19 @@ export class AnthropicLLM {
     };
 
     for await (const chunk of response.body) {
+      if (request?.signal?.aborted) {
+        stopReason = 'aborted';
+        break;
+      }
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || '';
       let dataLines: string[] = [];
       for (const line of lines) {
+        if (request?.signal?.aborted) {
+          stopReason = 'aborted';
+          break;
+        }
         if (line.startsWith('data:')) {
           dataLines.push(line.slice(5).trimStart());
         } else if (line.trim() === '' && dataLines.length > 0) {
@@ -206,15 +237,17 @@ export class AnthropicLLM {
           dataLines = [];
         }
       }
-      if (dataLines.length > 0) {
+      if (!request?.signal?.aborted && dataLines.length > 0) {
         processEvent(dataLines.join('\n'));
       }
     }
-    const trailing = decoder.decode();
-    if (trailing) buffer += trailing;
-    if (buffer.startsWith('data:')) processEvent(buffer.slice(5).trim());
+    if (!request?.signal?.aborted) {
+      const trailing = decoder.decode();
+      if (trailing) buffer += trailing;
+      if (buffer.startsWith('data:')) processEvent(buffer.slice(5).trim());
+    }
 
-    const toolCalls: FunctionCall[] = Array.from(toolBlocks.values()).map((block) => {
+    const toolCalls: FunctionCall[] = request?.signal?.aborted ? [] : Array.from(toolBlocks.values()).map((block) => {
       let args: Record<string, any> = {};
       if (block.inputJson.trim()) {
         try {
@@ -357,6 +390,8 @@ function normalizeSchema(schema: any): any {
 function normalizeAnthropicFinishReason(raw: string | undefined, hasToolCalls: boolean): LLMFinishReason {
   if (hasToolCalls || raw === 'tool_use') return 'tool_calls';
   switch (raw) {
+    case 'aborted':
+      return 'aborted';
     case 'end_turn':
     case 'stop_sequence':
       return 'stop';

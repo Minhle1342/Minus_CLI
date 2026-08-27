@@ -75,6 +75,19 @@ export class ToolRunner {
     let executionContext = context;
     let permissionMetadata: ToolExecutionResult['permission'];
 
+    if (context?.signal?.aborted) {
+      return {
+        toolName,
+        args,
+        result: {
+          error: 'The tool call was not executed because task execution was cancelled.',
+          errorCode: 'ABORTED_BEFORE_DISPATCH',
+          retryable: true,
+        },
+        durationMs: 0,
+      };
+    }
+
     // Stage 0: bind runtime authority to the exact tool set shown to the model.
     if (context?.allowedToolNames || context?.allowedToolSetHash) {
       const names = context.allowedToolNames || [];

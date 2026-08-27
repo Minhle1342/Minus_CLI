@@ -100,6 +100,14 @@ export class FallbackRouterLLM {
         this.activeIndex = currentIndex;
         return response;
       } catch (err: any) {
+        if (request?.signal?.aborted || err?.name === 'AbortError') {
+          return {
+            text: '',
+            toolCalls: [],
+            finishReason: 'aborted',
+            rawFinishReason: 'aborted',
+          };
+        }
         lastError = err;
         const msg = String(err?.message || '');
         const isRateLimitOrOverload =

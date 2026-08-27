@@ -74,6 +74,8 @@ export interface ToolExecutionContext {
   /** Set only by the orchestrator after checking session-backed evidence. */
   completionEvidenceVerified?: boolean;
   maxToolCalls?: number;
+  /** Optional cancellation signal to abort long-running tools and child processes. */
+  signal?: AbortSignal;
 }
 ⋮----
 /** Original human request for the current turn, before guard prompts. */
@@ -83,6 +85,8 @@ export interface ToolExecutionContext {
 /** Durable binding between the model-visible tool set and runtime authority. */
 ⋮----
 /** Set only by the orchestrator after checking session-backed evidence. */
+⋮----
+/** Optional cancellation signal to abort long-running tools and child processes. */
 ⋮----
 /**
  * Định nghĩa chuẩn cho một Tool trong hệ thống Coding Agent.

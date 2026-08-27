@@ -627,6 +627,27 @@ async function main() {
 
   activeWorkspaceRef = workspace;
 
+  // Bộ điều khiển hủy tác vụ chủ động trong lúc đang chạy (Antigravity CLI Style Cancellation)
+  let activeExecutionController: AbortController | null = null;
+
+  const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
+    const controller = new AbortController();
+    activeExecutionController = controller;
+    try {
+      return await fn(controller.signal);
+    } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED')) {
+        CLI.renderTaskCancelledToast();
+        return undefined;
+      }
+      throw err;
+    } finally {
+      if (activeExecutionController === controller) {
+        activeExecutionController = null;
+      }
+    }
+  };
+
   const executeDurableGoal = async (objective?: string): Promise<void> => {
     if (!activeSession) {
       throw new Error('Không có active session để chạy goal.');
@@ -645,12 +666,13 @@ async function main() {
     }
 
     CLI.renderGoalBanner(state.objective);
-    if (objective) {
-      const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(objective, workspace);
-      if (attachmentResult.hasAttachments) {
-        CLI.renderAttachmentSummary(attachmentResult.attachments);
-      }
-      const goalAutonomousPrompt = `[AUTONOMOUS GOAL EXECUTION - CODEX CLI RALPH LOOP]:
+    await runWithCancellation(async (signal) => {
+      if (objective) {
+        const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(objective, workspace);
+        if (attachmentResult.hasAttachments) {
+          CLI.renderAttachmentSummary(attachmentResult.attachments);
+        }
+        const goalAutonomousPrompt = `[AUTONOMOUS GOAL EXECUTION - CODEX CLI RALPH LOOP]:
 Goal Objective: ${objective}
 
 Follow the OpenAI Codex CLI Goal-driven Execution Protocol:
@@ -659,27 +681,28 @@ Follow the OpenAI Codex CLI Goal-driven Execution Protocol:
 3. Update task status via update_plan_task as milestones complete.
 4. Submit final verified solution via submit_solution once all tasks are complete and verified.`;
 
-      await agentLoop.submit(
-        activeSession,
-        goalAutonomousPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''),
-        'human',
-        { isGoalMode: true },
-      );
-    } else {
-      // Tiếp tục Goal round dựa trên task kế tiếp của PlanManager
-      const nextTask = agentLoop.planManager.getNextIncompleteTask();
-      if (nextTask) {
-        const roundPrompt = `[GOAL CONTINUATION - ROUND #${state.roundsStarted}]:
+        await agentLoop.submit(
+          activeSession,
+          goalAutonomousPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''),
+          'human',
+          { isGoalMode: true, signal },
+        );
+      } else {
+        // Tiếp tục Goal round dựa trên task kế tiếp của PlanManager
+        const nextTask = agentLoop.planManager.getNextIncompleteTask();
+        if (nextTask) {
+          const roundPrompt = `[GOAL CONTINUATION - ROUND #${state.roundsStarted}]:
 Goal: ${state.objective}
 Target Task #${nextTask.id}: ${nextTask.title}
 Acceptance Criteria: ${nextTask.acceptanceCriteria}
 
 Please focus on executing and verifying this task. Update its status to COMPLETED using update_plan_task upon verification.`;
-        await agentLoop.submit(activeSession, roundPrompt, 'system', { isGoalMode: true });
-      } else {
-        await agentLoop.run(activeSession, { isGoalMode: true });
+          await agentLoop.submit(activeSession, roundPrompt, 'system', { isGoalMode: true, signal });
+        } else {
+          await agentLoop.run(activeSession, { isGoalMode: true, signal });
+        }
       }
-    }
+    });
 
     checkAndAutoCompleteGoal();
   };
@@ -701,9 +724,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     }
   };
 
-  // Đăng ký hook Graceful Shutdown để tự động lưu trạng thái khi tắt đột ngột (Ctrl+C / SIGINT / SIGTERM)
+  // Đăng ký hook Graceful Shutdown và Intercept SIGINT
   let isShuttingDown = false;
   const handleGracefulShutdown = async (signal: string) => {
+    if (activeExecutionController) {
+      activeExecutionController.abort();
+      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (SIGINT / Ctrl+C).');
+      return;
+    }
     if (isShuttingDown) return;
     isShuttingDown = true;
     try {
@@ -721,8 +749,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     } catch {}
     process.exit(0);
   };
-  process.once('SIGINT', () => void handleGracefulShutdown('SIGINT'));
-  process.once('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
 
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
@@ -782,7 +810,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     });
   }
 
-  const rl = readline.createInterface({ input, output, completer });
+  const rl = readline.createInterface({ input, output, completer: completeSlashCommand });
   const getActiveModelInfo = () => ({
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
@@ -796,6 +824,17 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   );
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
+    // Phím tắt Ctrl+C hoặc Escape trong lúc đang thực thi: Hủy tác vụ hiện tại ngay lập tức (Antigravity CLI style)
+    if (activeExecutionController) {
+      const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
+      if (isCancelKey) {
+        activeExecutionController.abort();
+        slashHints.clear(promptWidth);
+        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+        return;
+      }
+    }
+
     // Phím tắt Ctrl + O: Chuyển đổi giữa Thu gọn (1-line step) và Mở rộng chi tiết (Full verbose)
     const isCtrlO = (key?.ctrl && (key?.name === 'o' || _sequence === '\x0f')) || _sequence === '\x0f';
     if (isCtrlO) {
@@ -834,7 +873,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     slashHintRefreshScheduled = true;
     setImmediate(() => {
       slashHintRefreshScheduled = false;
-      slashHints.update(rl.line, rl.cursor);
+      const curLine = rl.line || '';
+      const curCursor = rl.cursor ?? curLine.length;
+      slashHints.update(curLine, curCursor);
     });
   };
   // Clear transient rows before readline handles Enter and invokes the question callback.
@@ -842,13 +883,10 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   input.prependListener('keypress', handleInputKeypress);
 
   /**
-   * Xả sạch mọi dữ liệu tồn đọng trong stdin stream và readline buffer
+   * Xả sạch mọi dữ liệu tồn đọng trong readline buffer
    * Đảm bảo các prompt xác nhận quyền hoặc menu không bị nhận ký tự thừa từ lần nhập/dán trước.
    */
-  function flushStdin(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream): void {
-    try {
-      while (inputStream.read() !== null) {}
-    } catch {}
+  function flushStdin(rlInterface: readline.Interface): void {
     try {
       (rlInterface as any).line = '';
       (rlInterface as any).cursor = 0;
@@ -859,6 +897,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
    * Đọc User Prompt từ bàn phím, tự động gộp các dòng nếu người dùng dán (paste) đoạn văn bản nhiều dòng
    */
   async function readUserPrompt(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream, promptSymbol: string): Promise<string> {
+    // Bảo đảm con trỏ terminal luôn hiển thị nhấp nháy cho người dùng
+    process.stdout.write('\x1b[?25h');
+    slashHints.clear(0);
     const promptLen = getVisibleWidth(promptSymbol);
     const firstLine = await rlInterface.question(promptSymbol);
     slashHints.clear(promptLen + getVisibleWidth(firstLine));
@@ -875,13 +916,18 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
 
       const hasMore = await new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => resolve(false), 30);
+        let timer: NodeJS.Timeout;
         const onLine = (extraLine: string) => {
           clearTimeout(timer);
+          rlInterface.removeListener('line', onLine);
           lines.push(extraLine);
           resolve(true);
         };
-        rlInterface.once('line', onLine);
+        timer = setTimeout(() => {
+          rlInterface.removeListener('line', onLine);
+          resolve(false);
+        }, 30);
+        rlInterface.on('line', onLine);
       });
 
       if (!hasMore) {
@@ -889,7 +935,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
     }
 
-    flushStdin(rlInterface, inputStream);
+    flushStdin(rlInterface);
     return lines.join('\n');
   }
 
@@ -897,11 +943,11 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   kernel.ctx.permissions.setPromptHandler(async (request) => {
     slashHints.clear();
     // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
-    flushStdin(rl, input);
+    flushStdin(rl);
 
     CLI.renderPermissionPrompt(request);
     const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
-    flushStdin(rl, input);
+    flushStdin(rl);
 
     if (answer === 'y' || answer === 'yes' || answer === '') {
       return 'approve';
@@ -1015,6 +1061,59 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         continue;
       }
 
+      // Xử lý lệnh /cancel, /stop, /abort: Dừng tất cả tác vụ, goal, subagent, compose đang chạy (Antigravity CLI Style)
+      if (trimmed === '/cancel' || trimmed.startsWith('/cancel ') || trimmed === '/stop' || trimmed === '/abort') {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const target = parts[0]?.toLowerCase() || 'all';
+
+        let cancelledAny = false;
+
+        // 1. Goal Mode
+        const goalState = agentLoop.goalManager.getState();
+        if (goalState?.phase === 'active' || goalState?.phase === 'paused') {
+          agentLoop.goalManager.pause('Tác vụ đã được dừng qua lệnh /cancel.');
+          console.log(`\n${c.yellow}⏸️ [GOAL PAUSED]${c.reset} ${c.dim}Đã tạm dừng Durable Goal: "${goalState.objective}". Dùng /resume để tiếp tục khi cần.${c.reset}`);
+          cancelledAny = true;
+        }
+
+        // 2. Compose Pipeline
+        if (kernel.ctx.compose && kernel.ctx.compose.isActive()) {
+          const res = await kernel.ctx.compose.abort();
+          console.log(`\n${c.yellow}🛑 [COMPOSE ABORTED]${c.reset} ${c.dim}${res.message}${c.reset}`);
+          cancelledAny = true;
+        }
+
+        // 3. Subagents
+        const subagentsStopped = agentLoop.subagentManager.stopAll();
+        if (subagentsStopped > 0) {
+          console.log(`\n${c.yellow}🛑 [SUBAGENTS STOPPED]${c.reset} ${c.dim}Đã dừng ${subagentsStopped} subagent(s).${c.reset}`);
+          cancelledAny = true;
+        }
+
+        // 4. Background Tasks
+        if (target === 'all' || target === 'tasks') {
+          const tasks = kernel.ctx.tasks.listTasks().filter((t) => t.status === 'running');
+          for (const task of tasks) {
+            kernel.ctx.tasks.stopTask(task.id);
+          }
+          if (tasks.length > 0) {
+            console.log(`\n${c.yellow}🛑 [TASKS STOPPED]${c.reset} ${c.dim}Đã dừng ${tasks.length} background task(s).${c.reset}`);
+            cancelledAny = true;
+          }
+        }
+
+        if (activeSession) {
+          await sessionPersistence.save(activeSession).catch(() => {});
+        }
+
+        if (cancelledAny) {
+          CLI.renderTaskCancelledToast('Đã dừng toàn bộ các tiến trình và lưu phiên làm việc.');
+        } else {
+          console.log(`\n${c.cyan}ℹ️ Hiện tại không có tác vụ nền hoặc goal nào đang chạy.${c.reset}\n`);
+        }
+        continue;
+      }
+
       // Xử lý lệnh /resume hoặc /continue: Tự động tiếp tục thông minh (Unified Smart Resume)
       if (trimmed === '/resume' || trimmed.startsWith('/resume ') || trimmed === '/continue') {
         // 1. Nếu có Compose feature đang active
@@ -1054,7 +1153,9 @@ Acceptance Criteria: ${nextTask.acceptanceCriteria}
 Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
           sessionCount++;
           try {
-            await agentLoop.submit(activeSession, resumePrompt, 'system');
+            await runWithCancellation(async (signal) => {
+              await agentLoop.submit(activeSession, resumePrompt, 'system', { signal });
+            });
           } catch (err: any) {
             console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
           }
@@ -1103,7 +1204,9 @@ Acceptance Criteria: ${nextTask.acceptanceCriteria}
 Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
           sessionCount++;
           try {
-            await agentLoop.submit(activeSession, resumePrompt, 'system');
+            await runWithCancellation(async (signal) => {
+              await agentLoop.submit(activeSession, resumePrompt, 'system', { signal });
+            });
           } catch (err: any) {
             console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
           }
@@ -1131,7 +1234,9 @@ ${planPrompt}`;
 
         sessionCount++;
         try {
-          await agentLoop.submit(activeSession, expandedPlanningPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''));
+          await runWithCancellation(async (signal) => {
+            await agentLoop.submit(activeSession, expandedPlanningPrompt + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : ''), 'human', { signal });
+          });
           const tasks = agentLoop.planManager.getTasks();
           if (tasks.length > 0) {
             console.log(`\n💡 ${c.brightGreen}${c.bold}[PLAN READY]${c.reset} ${c.dim}Kế hoạch gồm ${tasks.length} bước đã sẵn sàng. Gõ ${c.bold}${c.brightCyan}/goal resume${c.reset} ${c.dim}hoặc ${c.bold}${c.brightCyan}/goal on${c.reset} ${c.dim}để chuyển sang chế độ tự trị (Autonomous Ralph Loop) thực thi trọn gói.${c.reset}\n`);
@@ -1725,7 +1830,9 @@ ${planPrompt}`;
           );
 
           sessionCount++;
-          await agentLoop.run(activeSession);
+          await runWithCancellation(async (signal) => {
+            await agentLoop.run(activeSession, { signal });
+          });
         } catch (err: any) {
           console.error(`\n${c.red}✖ Lỗi khi đọc ảnh:${c.reset}`, err.message);
         }
@@ -2121,8 +2228,10 @@ ${planPrompt}`;
       sessionCount++;
 
       try {
-        await agentLoop.submit(activeSession, attachmentResult.expandedPrompt);
-        checkAndAutoCompleteGoal();
+        await runWithCancellation(async (signal) => {
+          await agentLoop.submit(activeSession, attachmentResult.expandedPrompt, 'human', { signal });
+          checkAndAutoCompleteGoal();
+        });
       } catch (err: any) {
         console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Agent Loop:${c.reset}`, err.message);
         if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {

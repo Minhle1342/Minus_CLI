@@ -24,6 +24,7 @@ export interface SandboxOptions {
   memoryLimitMb?: number;
   cpuLimit?: number;
   networkDisabled?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface SandboxStatus {

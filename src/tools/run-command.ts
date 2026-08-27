@@ -319,7 +319,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
-        const hostResult = await hostSandbox.exec(rawCommand, { cwd: workspace.rootDir, timeoutMs });
+        const hostResult = await hostSandbox.exec(rawCommand, { cwd: workspace.rootDir, timeoutMs, signal: context?.signal });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
         const parsedSearch = parseRipgrepCommand(rawCommand);
@@ -373,6 +373,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const res = await sandboxManager.exec(rawCommand, {
           cwd: workspace.rootDir,
           timeoutMs,
+          signal: context?.signal,
         });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
@@ -432,6 +433,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           {
             cwd: workspace.rootDir,
             timeout: timeoutMs,
+            signal: context?.signal,
             maxBuffer: 1024 * 1024,
           },
           (error, stdout, stderr) => {

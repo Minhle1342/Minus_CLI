@@ -333,6 +333,32 @@ export class AgentLoop {
       () => this.runInternal(session, options),
       () => this.runInternal(session, options),
     ).catch(async (error) => {
+      // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
+      const isCancelled = options?.signal?.aborted
+        || error?.name === 'AbortError'
+        || (typeof error?.message === 'string' && (error.message.includes('cancellation requested') || error.message.includes('COMMAND_CANCELLED') || error.message.includes('aborted')));
+
+      if (isCancelled) {
+        this.goalManager.pause('Task execution cancelled by user.');
+        session.append('goal/change', {
+          reason: 'cancelled',
+          goal: this.goalManager.getState(),
+        });
+        this.subagentManager.stopAll();
+        this.pipelinedDispatcher.resetTurn();
+        try {
+          if (session.recoverInterrupted()) {
+            await this.persistSession(session);
+          }
+        } catch {}
+        this.setAgentStatus('idle', session);
+        await CLI.renderExecutionStopped(
+          'Agent stopped: cancellation requested.',
+          'CANCELLED' as any,
+        );
+        return 'Tác vụ đã được dừng theo yêu cầu của người dùng.';
+      }
+
       // Preserve an auditable, balanced lifecycle even when a provider, hook,
       // persistence adapter, or tool pipeline throws unexpectedly.
       const errClassification = classifyLLMError(error);
@@ -783,6 +809,7 @@ export class AgentLoop {
         sessionId: session.id,
         promptCacheKey: session.id,
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
+        signal: options?.signal,
       };
       const requestStartedAt = Date.now();
       let firstTokenAt: number | undefined;
@@ -797,12 +824,13 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('model:token', token);
           },
           onToolCallEarly: (earlyCall) => {
-            if (this.loopOptions?.enableStreamingDispatch !== false) {
+            if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
               const runContext = {
                 sessionId: session.id,
                 agentId: this.agentId,
                 turn,
                 userRequest: turnUserRequest,
+                signal: options?.signal,
               };
               this.pipelinedDispatcher.dispatchEarly(
                 earlyCall.name,
@@ -831,6 +859,18 @@ export class AgentLoop {
         cachedTokens: response.usage.cachedTokens,
         profile: latencyProfile,
       });
+
+      if (options?.signal?.aborted || response.finishReason === 'aborted') {
+        const cancellationMessage = 'Agent stopped: cancellation requested.';
+        this.pipelinedDispatcher.resetTurn();
+        this.subagentManager.stopAll();
+        session.append('step/end', { turn, step, reason: 'cancelled' });
+        await this.persistSession(session);
+        await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
+        this.goalManager.pause('Task execution cancelled by user.');
+        return cancellationMessage;
+      }
       session.append('control/decision', {
         turn,
         step,
@@ -1070,6 +1110,7 @@ export class AgentLoop {
                 agentId: this.agentId,
                 turn,
                 userRequest: turnUserRequest,
+                signal: options?.signal,
                 ...(toolControlMode === 'enforce' ? {
                   decisionId: activeDecisionId,
                   allowedToolNames: visibleToolNames,
@@ -1246,6 +1287,7 @@ export class AgentLoop {
                 agentId: this.agentId,
                 turn,
                 userRequest: turnUserRequest,
+                signal: options?.signal,
                 ...(toolControlMode === 'enforce' ? {
                   decisionId: activeDecisionId,
                   allowedToolNames: visibleToolNames,

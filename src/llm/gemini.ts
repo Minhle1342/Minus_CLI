@@ -33,6 +33,7 @@ export interface LLMRequestOptions {
   enablePromptCaching?: boolean;
   promptCacheRetention?: 'in_memory' | '24h';
   promptCacheBreakpoint?: boolean;
+  signal?: AbortSignal;
 }
 
 export type LLMFinishReason =
@@ -124,6 +125,15 @@ export class GeminiLLM {
       };
     }
 
+    if (request?.signal?.aborted) {
+      return {
+        text: '',
+        toolCalls: [],
+        finishReason: 'aborted',
+        rawFinishReason: 'aborted',
+      };
+    }
+
     const responseStream = await retryWithExponentialBackoff(
       () => this.client.models.generateContentStream({
         model: this.modelName,
@@ -147,6 +157,10 @@ export class GeminiLLM {
     let lastUsage: LLMUsage | undefined;
 
     for await (const chunk of responseStream) {
+      if (request?.signal?.aborted) {
+        rawFinishReason = 'aborted';
+        break;
+      }
       if ((chunk as any).usageMetadata) {
         const meta = (chunk as any).usageMetadata;
         const promptTokens = meta.promptTokenCount ?? 0;
@@ -328,6 +342,8 @@ function normalizeGeminiFinishReason(raw: string | undefined, hasToolCalls: bool
     case 'MALFORMED_FUNCTION_CALL':
     case 'UNEXPECTED_TOOL_CALL':
       return 'error';
+    case 'ABORTED':
+      return 'aborted';
     default:
       return 'unknown';
   }

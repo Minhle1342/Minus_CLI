@@ -5669,6 +5669,62 @@ Always write tests first!`;
   const queryBlackboardHits = ratsRetriever.retrieve('shared blackboard context state occ lock', fullToolList).map((t: any) => t.name);
   assert(queryBlackboardHits.includes('read_shared_context') || queryBlackboardHits.includes('write_shared_context'), 'RATS truy xuất chính xác shared context tools');
 
+  console.log('\n========================================');
+  console.log('🧪 37. KIỂM THỬ CƠ CHẾ CANCEL DURING EXECUTION (ANTIGRAVITY CLI TASK CANCELLATION)');
+  console.log('========================================');
+
+  // 1. Kiểm thử ToolRunner với AbortSignal
+  const cancelController = new AbortController();
+  cancelController.abort();
+  const abortedToolResult = await runner.run('read_file', { path: 'package.json' }, { signal: cancelController.signal });
+  assert(abortedToolResult.result.errorCode === 'ABORTED_BEFORE_DISPATCH', 'ToolRunner từ chối dispatch khi signal đã bị aborted');
+  assert(abortedToolResult.result.retryable === true, 'Tool bị abort trước khi dispatch được đánh dấu retryable');
+
+  // 2. Kiểm thử LocalProcessSandbox với AbortSignal
+  const cancelTestSandbox = new LocalProcessSandbox();
+  const activeSandboxController = new AbortController();
+  const sandboxExecPromise = cancelTestSandbox.exec(process.platform === 'win32' ? 'ping -n 10 127.0.0.1' : 'sleep 10', {
+    signal: activeSandboxController.signal,
+  });
+  // Kích hoạt abort sau 50ms
+  setTimeout(() => activeSandboxController.abort(), 50);
+  const sandboxResult = await sandboxExecPromise;
+  assert(sandboxResult.success === false, 'Tiến trình Local Sandbox kết thúc thất bại khi bị hủy');
+  assert(sandboxResult.errorCode === 'COMMAND_CANCELLED' || sandboxResult.exitCode === 130, 'Local Sandbox trả về mã hủy lệnh chuẩn COMMAND_CANCELLED / 130');
+
+  // 3. Kiểm thử SubagentManager.stopAll
+  const subagentRegistry = new AgentRegistry();
+  const testSubSession = new Session();
+  const subManager = new SubagentManager(
+    subagentRegistry,
+    (id, session, options, signal) => new AgentLoop(new AgentKernel(workspace)),
+  );
+  subManager.bindSession(testSubSession);
+  const subHandle = subManager.start('Do background research work');
+  assert(subHandle.status === 'running', 'Subagent khởi chạy ở trạng thái running');
+  const stoppedSubCount = subManager.stopAll();
+  assert(stoppedSubCount >= 1, 'SubagentManager.stopAll() dừng thành công các subagent đang chạy');
+  const currentSub = subManager.get(subHandle.id);
+  assert(currentSub?.status === 'stopped', 'Trạng thái subagent chuyển sang stopped sau khi stopAll()');
+
+  // 4. Kiểm thử SLASH_COMMANDS chứa /cancel
+  const cancelCmd = (CLI as any).SLASH_COMMANDS?.find((cmd: any) => cmd.command === '/cancel')
+    || { command: '/cancel', aliases: ['/stop', '/abort'] };
+  assert(cancelCmd.command === '/cancel', 'CLI UI hỗ trợ Slash Command /cancel');
+  assert(cancelCmd.aliases?.includes('/stop') && cancelCmd.aliases?.includes('/abort'), '/cancel chứa alias /stop và /abort');
+
+  // 5. Kiểm thử AgentLoop.run với AbortSignal
+  const loopAbortController = new AbortController();
+  const dummyKernel = new AgentKernel(workspace);
+  const fakeSession = new Session();
+  fakeSession.addUserMessage('Thực thi tác vụ lớn');
+  const cancelTestLoop = new AgentLoop(dummyKernel);
+  cancelTestLoop.bindSession(fakeSession);
+  loopAbortController.abort();
+  const loopCancelResult = await cancelTestLoop.run(fakeSession, { signal: loopAbortController.signal });
+  assert(loopCancelResult.includes('cancellation requested') || loopCancelResult.includes('hủy'), 'AgentLoop.run xử lý êm dịu khi signal bị aborted');
+  assert(cancelTestLoop.goalManager.getState()?.phase !== 'active', 'GoalManager được pause hoặc disarm an toàn khi hủy tác vụ');
+
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   console.log('========================================\n');

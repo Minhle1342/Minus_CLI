@@ -237,6 +237,18 @@ export class DockerSandbox implements ISandboxProvider {
       throw new Error('Docker Sandbox chưa được khởi tạo.');
     }
 
+    if (options?.signal?.aborted) {
+      return {
+        stdout: '',
+        stderr: 'Command was cancelled by user before execution.',
+        exitCode: 130,
+        durationMs: 0,
+        sandboxType: 'docker',
+        success: false,
+        errorCode: 'COMMAND_CANCELLED',
+      };
+    }
+
     const startTime = Date.now();
     const timeout = options?.timeoutMs ?? 30000;
     
@@ -245,6 +257,7 @@ export class DockerSandbox implements ISandboxProvider {
     try {
       const { stdout, stderr } = await execFileAsync('docker', dockerExecArgs, {
         timeout,
+        signal: options?.signal,
         maxBuffer: 1024 * 1024 * 5,
       });
 
@@ -259,6 +272,17 @@ export class DockerSandbox implements ISandboxProvider {
         image: this.image,
       };
     } catch (err: any) {
+      if (options?.signal?.aborted || err?.name === 'AbortError') {
+        return {
+          stdout: (err.stdout || '').trim(),
+          stderr: 'Command was cancelled by user.',
+          exitCode: 130,
+          durationMs: Date.now() - startTime,
+          sandboxType: 'docker',
+          success: false,
+          errorCode: 'COMMAND_CANCELLED',
+        };
+      }
       const stderr = (err.stderr || err.message || '').trim();
       const timedOut = Boolean(err?.killed && err?.signal === 'SIGTERM');
       const isMissingUtility =

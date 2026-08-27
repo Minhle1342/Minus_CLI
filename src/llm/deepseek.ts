@@ -467,24 +467,43 @@ export class DeepseekLLM {
     }
 
     // Chỉ đặt temperature cho model thông thường (reasoning models dùng mặc định)
-    if (!isReasoningModel) {
-      requestBody.temperature = 0.2;
+    if (request?.signal?.aborted) {
+      return {
+        text: '',
+        toolCalls: [],
+        finishReason: 'aborted',
+        rawFinishReason: 'aborted',
+      };
     }
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-        'HTTP-Referer': 'https://github.com/mini-agent-loop',
-        'X-Title': 'Autonomous Coding Agent',
-        'session-id': promptCacheKey,
-        'X-Session-ID': promptCacheKey,
-        'prompt-cache-key': promptCacheKey,
-        ...this.extraHeaders,
-      },
-      body: JSON.stringify(requestBody),
-    });
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          'HTTP-Referer': 'https://github.com/mini-agent-loop',
+          'X-Title': 'Autonomous Coding Agent',
+          'session-id': promptCacheKey,
+          'X-Session-ID': promptCacheKey,
+          'prompt-cache-key': promptCacheKey,
+          ...this.extraHeaders,
+        },
+        body: JSON.stringify(requestBody),
+        signal: request?.signal,
+      });
+    } catch (err: any) {
+      if (err.name === 'AbortError' || request?.signal?.aborted) {
+        return {
+          text: '',
+          toolCalls: [],
+          finishReason: 'aborted',
+          rawFinishReason: 'aborted',
+        };
+      }
+      throw err;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -575,6 +594,10 @@ export class DeepseekLLM {
       let buffer = '';
 
       while (true) {
+        if (request?.signal?.aborted) {
+          rawFinishReason = 'aborted';
+          break;
+        }
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -582,11 +605,19 @@ export class DeepseekLLM {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) processSseLine(line);
+        for (const line of lines) {
+          if (request?.signal?.aborted) {
+            rawFinishReason = 'aborted';
+            break;
+          }
+          processSseLine(line);
+        }
       }
 
-      buffer += decoder.decode();
-      for (const line of buffer.split('\n')) processSseLine(line);
+      if (!request?.signal?.aborted) {
+        buffer += decoder.decode();
+        for (const line of buffer.split('\n')) processSseLine(line);
+      }
     }
 
     const toolCalls: (FunctionCall & { id?: string })[] = [];
@@ -611,18 +642,20 @@ export class DeepseekLLM {
       }
     }
 
-    const finishReason = rawFinishReason
-      ? normalizeOpenAIFinishReason(rawFinishReason)
-      : sawDoneMarker
-        ? 'unknown'
-        : 'transport_eof';
+    const finishReason = request?.signal?.aborted
+      ? 'aborted'
+      : rawFinishReason
+        ? normalizeOpenAIFinishReason(rawFinishReason)
+        : sawDoneMarker
+          ? 'unknown'
+          : 'transport_eof';
 
     return {
       text: fullText || undefined,
       reasoningContent: fullReasoning || undefined,
-      toolCalls,
+      toolCalls: request?.signal?.aborted ? [] : toolCalls,
       finishReason,
-      rawFinishReason,
+      rawFinishReason: request?.signal?.aborted ? 'aborted' : rawFinishReason,
       usage: parsedUsage,
     };
   }
@@ -637,6 +670,8 @@ export class DeepseekLLM {
 
 function normalizeOpenAIFinishReason(raw: string): LLMFinishReason {
   switch (raw.toLowerCase()) {
+    case 'aborted':
+      return 'aborted';
     case 'stop':
       return 'stop';
     case 'tool_calls':

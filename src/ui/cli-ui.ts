@@ -106,6 +106,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
+  { command: '/cancel', usage: '/cancel [all|goal|tasks|subagents]', description: 'Hủy tác vụ/goal/subagent đang chạy (hoặc bấm Ctrl+C / Esc trong khi thực thi)', category: 'Execution', aliases: ['/stop', '/abort'] },
   { command: '/resume', description: 'Tiếp tục thông minh tác vụ/kế hoạch/goal bị gián đoạn (One-Click Resume)', category: 'Execution', aliases: ['/continue'] },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
@@ -292,8 +293,6 @@ export class RealtimeSlashCommandHints {
     if (maxRows === 0) return;
 
     let buf = '\x1b[?25l'; // Ẩn con trỏ
-    // Lưu vị trí con trỏ ban đầu (ANSI DEC/SCO)
-    buf += '\x1b7\x1b[s';
 
     // Ghi từng dòng hint kèm xóa sạch dòng cũ (Clear Line \x1b[2K)
     for (let i = 0; i < maxRows; i++) {
@@ -301,13 +300,13 @@ export class RealtimeSlashCommandHints {
       buf += `\r\n\x1b[2K${lineContent}`;
     }
 
-    // Di chuyển con trỏ ngược lên lại số dòng đã xuống để chống trôi dòng khi terminal scroll ở đáy viewport
+    // Di chuyển con trỏ ngược lên lại chính xác số dòng đã xuống để trở về đúng dòng prompt của readline
     buf += `\x1b[${maxRows}A`;
-    // Khôi phục vị trí con trỏ ban đầu
-    buf += '\x1b8\x1b[u';
     // Đảm bảo vị trí cột ngang chính xác
     if (cursorColumn > 0) {
       buf += `\r\x1b[${cursorColumn}C`;
+    } else {
+      buf += '\r';
     }
     buf += '\x1b[?25h'; // Hiện lại con trỏ
 
@@ -2074,6 +2073,13 @@ export class CLI {
     console.log(`\n${c.crimson}${c.bold}╰────────────────────────────────────────────────────────────────────────────╯${c.reset}\n`);
   }
 
+  /**
+   * Hiển thị thông báo Toast ngắn gọn khi tác vụ bị hủy ngang qua Ctrl+C / Escape (Antigravity CLI Style)
+   */
+  static renderTaskCancelledToast(message: string = 'Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).'): void {
+    console.log(`\n${c.crimson}${c.bold}🛑 [CANCELLED]${c.reset} ${c.brightYellow}${message}${c.reset} ${c.dim}(Phiên và bộ nhớ đã được lưu an toàn)${c.reset}\n`);
+  }
+
 
   /**
    * Hiển thị danh sách Skills và trạng thái kích hoạt
@@ -2229,10 +2235,10 @@ export class CLI {
 
 
   /**
-   * Dấu nhắc lệnh người dùng (Prompt Symbol)
+   * Dấu nhắc lệnh người dùng (Prompt Symbol) màu xanh ngọc (Cyan) chuẩn Antigravity
    */
   static getPromptSymbol(): string {
-    return `${c.brightCyan}${c.bold}❯${c.reset} `;
+    return `${c.geminiCyan || c.brightCyan}${c.bold}❯${c.reset} `;
   }
 }
 

@@ -228,6 +228,26 @@ export class SubagentManager {
     return true;
   }
 
+  /**
+   * Dừng toàn bộ subagents đang chạy khi tác vụ cha bị hủy
+   */
+  stopAll(): number {
+    let stoppedCount = 0;
+    for (const [id, entry] of this.handles.entries()) {
+      if (entry.handle.status === 'running') {
+        entry.controller.abort();
+        entry.handle.status = 'stopped';
+        entry.handle.error = 'Subagent stopped due to parent task cancellation.';
+        entry.handle.finishedAt = new Date().toISOString();
+        this.agents.update(id, { status: 'stopped' });
+        this.recordState(entry.handle);
+        this.notifyCompletion(entry.handle);
+        stoppedCount++;
+      }
+    }
+    return stoppedCount;
+  }
+
   private finishFailure(handle: SubagentHandle, error: unknown): void {
     handle.status = 'failed';
     handle.error = error instanceof Error ? error.message : String(error);

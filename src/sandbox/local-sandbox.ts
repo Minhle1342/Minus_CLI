@@ -38,11 +38,24 @@ export class LocalProcessSandbox implements ISandboxProvider {
       ...options?.env,
     };
 
+    if (options?.signal?.aborted) {
+      return {
+        stdout: '',
+        stderr: 'Command was cancelled by user before execution.',
+        exitCode: 130,
+        durationMs: 0,
+        sandboxType: 'local',
+        success: false,
+        errorCode: 'COMMAND_CANCELLED',
+      };
+    }
+
     try {
       const { stdout, stderr } = await execAsync(command, {
         cwd,
         env: sanitizedEnv,
         timeout,
+        signal: options?.signal,
         maxBuffer: 1024 * 1024 * 5, // 5MB buffer
       });
 
@@ -55,15 +68,17 @@ export class LocalProcessSandbox implements ISandboxProvider {
         success: true,
       };
     } catch (err: any) {
-      const exitCode = typeof err.code === 'number' ? err.code : 1;
+      const isCancelled = options?.signal?.aborted || err?.name === 'AbortError';
+      const exitCode = isCancelled ? 130 : typeof err.code === 'number' ? err.code : 1;
       return {
         stdout: (err.stdout || '').trim(),
-        stderr: (err.stderr || err.message || '').trim(),
+        stderr: isCancelled ? 'Command was cancelled by user.' : (err.stderr || err.message || '').trim(),
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
         success: false,
-        timedOut: Boolean(err?.killed && err?.signal === 'SIGTERM'),
+        timedOut: !isCancelled && Boolean(err?.killed && err?.signal === 'SIGTERM'),
+        ...(isCancelled ? { errorCode: 'COMMAND_CANCELLED' } : {}),
       };
     }
   }
