@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from './workspace.js';
+import { SemanticSlicer } from '../agent/semantic-slicer.js';
 
 export interface WorkspaceEntryInfo {
   relativePath: string;
@@ -341,16 +342,38 @@ export class PromptAttachmentProcessor {
           const lineCount = lines.length;
           const ext = path.extname(relPath).replace(/^\./, '') || 'text';
 
+          let renderedContent = content;
+          let isSliced = false;
+
+          // Nếu file quá dài (> 350 dòng hoặc > 14KB), tự động áp dụng Semantic AST Slicing (Cursor Standard)
+          if (lineCount > 350 || stat.size > 14000) {
+            const outline = SemanticSlicer.extractOutline(relPath, content);
+            if (outline.symbols.length > 0) {
+              isSliced = true;
+              const headLines = lines.slice(0, 45).join('\n');
+              const topSymbols = outline.symbols.slice(0, 25);
+              let symbolOutlineLines = topSymbols
+                .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
+                .join('\n');
+              if (outline.symbols.length > 25) {
+                symbolOutlineLines += `\n  - ... (+${outline.symbols.length - 25} other symbols in this file)`;
+              }
+
+              renderedContent = `${headLines}\n\n// ... [SEMANTIC AST SLICE: File is large (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB)] ...\n// Structural symbols index (showing ${topSymbols.length}/${outline.symbols.length}):\n${symbolOutlineLines}\n\n// [NOTE]: Use tool read_file with startLine/endLine if a specific function implementation is required.`;
+            }
+          }
+
           attachments.push({
             path: relPath,
             type: 'file',
             sizeBytes: stat.size,
             lineCount,
+            preview: isSliced ? `[AST Sliced: ${lineCount} lines]` : undefined,
           });
 
           // Định dạng theo chuẩn Markdown Code Block rõ ràng cho LLM
           attachedContextBlocks.push(
-            `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB)]\n\`\`\`${ext}\n${content}\n\`\`\`\n---`
+            `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB${isSliced ? ' • Semantic AST Sliced' : ''})]\n\`\`\`${ext}\n${renderedContent}\n\`\`\`\n---`
           );
         } else if (stat.isDirectory()) {
           // Nếu là thư mục, tạo sơ đồ cây thư mục (Directory Tree)

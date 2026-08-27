@@ -27,6 +27,7 @@ export interface CompactionOptions {
   requestOverheadTokens?: number;
   outputReserveTokens?: number;
   triggerRatio?: number;
+  reinjectInvariants?: string;
 }
 
 /**
@@ -246,13 +247,24 @@ export class ContextCompactor {
     }
 
     const charsSaved = Math.max(0, originalLength - compactedLength);
-    const compactedTokens = ContextCompactor.estimateTokens(' '.repeat(compactedLength));
-    const tokensSaved = Math.max(0, originalTokens - compactedTokens);
+
+    if (options?.reinjectInvariants && charsSaved > 0) {
+      compactedMessages.push({
+        role: 'user',
+        parts: [{
+          text: `[CRITICAL STATE INVARIANTS - RESTORED AFTER COMPACTION]:\n${options.reinjectInvariants.trim()}`,
+        }],
+      });
+      compactedLength += options.reinjectInvariants.length + 65;
+    }
+
+    const finalTokens = ContextCompactor.estimateTokens(' '.repeat(compactedLength));
+    const finalTokensSaved = Math.max(0, originalTokens - finalTokens);
 
     const stats: CompactionStats = {
       originalTokens,
-      compactedTokens,
-      tokensSaved,
+      compactedTokens: finalTokens,
+      tokensSaved: finalTokensSaved,
       originalLength,
       compactedLength,
       charsSaved,

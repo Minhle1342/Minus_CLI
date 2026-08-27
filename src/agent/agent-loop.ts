@@ -774,12 +774,19 @@ export class AgentLoop {
 
       // Budget the complete model-visible request, not history alone. This is
       // proactive compaction at a safe provider-turn boundary, not a timeout.
+      const reinjectInvariants = [
+        activeTask ? `Active Task: "${activeTask.title}"` : undefined,
+        this.goalManager.getState()?.objective ? `Goal Objective: "${this.goalManager.getState()?.objective}"` : undefined,
+        'Strict Invariants: No unrequested git push to main. No unrequested automated browser test subagents.',
+      ].filter(Boolean).join('\n');
+
       const compactionResult = this.contextCompactor.compact(session.getHistory(), {
         requestOverheadTokens: requestFootprint.nonHistoryTokens,
         outputReserveTokens: requestFootprint.outputReserveTokens,
         triggerRatio: this.loopOptions?.requestCompactionRatio
           ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
-          ?? 0.82,
+          ?? 0.75, // Proactive 75% context compaction trigger (Claude Code standard)
+        reinjectInvariants,
       });
       if (compactionResult.stats.charsSaved > 0) {
         session.setHistory(compactionResult.messages);
