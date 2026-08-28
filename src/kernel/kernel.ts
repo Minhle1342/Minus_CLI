@@ -29,6 +29,8 @@ import { DreamManager } from '../dream/dream-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
+import { IExecutionSubstrate, ExecutionSubstrateFactory } from '../execution/index.js';
+import { TestEngineeringHarness } from '../testing/index.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -139,6 +141,8 @@ export interface KernelContext {
   schedules: ScheduleManager;
   sharedContext: SharedContextService;
   agentEvents: AgentEventBus;
+  executionSubstrate: IExecutionSubstrate;
+  testHarness: TestEngineeringHarness;
   llm: any;
   events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
@@ -158,7 +162,7 @@ export interface AgentPlugin {
  * AgentKernel - Vi nhân điều phối trung tâm theo chuẩn Cordis (Micro-Kernel Architecture)
  * 
  * Quản lý:
- * 1. KernelContext và toàn bộ các subsystem (Tools, Workspace, Sandbox, Tasks, Plan, Memory).
+ * 1. KernelContext và toàn bộ các subsystem (Tools, Workspace, Sandbox, Tasks, Plan, Memory, Substrate, Test Harness).
  * 2. Event Bus đa luồng.
  * 3. Hot-pluggable Plugin Lifecycle.
  */
@@ -169,11 +173,12 @@ export class AgentKernel {
 
   constructor(workspace: Workspace = new Workspace(), llm?: any) {
     const events = new KernelEventBus();
+    const systemPrompt = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
+
     const plan = new PlanManager();
     const goal = new GoalManager();
     const agentHooks = new AgentHookRegistry();
     const inbox = new AgentInbox();
-    const systemPrompt = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
     const agents = new AgentRegistry();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
@@ -190,6 +195,16 @@ export class AgentKernel {
     const schedules = new ScheduleManager();
     const sharedContext = new SharedContextService();
     const agentEvents = new AgentEventBus();
+    const executionSubstrate = ExecutionSubstrateFactory.create({
+      workspaceRoot: workspace.rootDir,
+      policyMode: 'workspace-write',
+    });
+    const testHarness = new TestEngineeringHarness({
+      workspaceRoot: workspace.rootDir,
+      substrate: executionSubstrate,
+      hypothesisTracker: hypothesis,
+      criticGate: critic,
+    });
     const tools = new ToolRegistry(plan, memory);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
@@ -226,6 +241,8 @@ export class AgentKernel {
       schedules,
       sharedContext,
       agentEvents,
+      executionSubstrate,
+      testHarness,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {

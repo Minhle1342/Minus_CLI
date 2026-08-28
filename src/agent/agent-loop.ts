@@ -830,7 +830,7 @@ export class AgentLoop {
             firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:token', token);
           },
-          onToolCallEarly: (earlyCall) => {
+          onToolCallEarly: (earlyCall: { name: string; args: Record<string, any>; id?: string }) => {
             if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
               const runContext = {
                 sessionId: session.id,

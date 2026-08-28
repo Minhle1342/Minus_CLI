@@ -17,7 +17,12 @@ export type ToolErrorCode =
   | 'COMMAND_TIMEOUT'
   | 'COMMAND_NOT_FOUND'
   | 'INVALID_TOOL_RESULT'
-  | 'TRANSACTION_ABORTED';
+  | 'TRANSACTION_ABORTED'
+  | 'LAZY_CODE_PLACEHOLDER_DETECTED'
+  | 'LARGE_FILE_OVERWRITE_PROTECTION'
+  | 'SANDBOX_VIOLATION'
+  | 'SUBSTRATE_EXECUTION_ERROR'
+  | 'TEST_HARNESS_FAILURE';
 
 export interface ToolSuccessResult<T = Record<string, any>> {
   success: true;

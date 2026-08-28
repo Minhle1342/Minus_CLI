@@ -862,37 +862,43 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Mistral Large mô hình mạnh nhất của Mistral',
   },
 
-  // 8. OpenRouter
+  // 8. OpenRouter (Free Coding Models)
   {
     id: '25',
-    name: 'openrouter/free',
-    provider: 'OpenRouter (Free)',
-    desc: 'Tự động định tuyến sang model miễn phí tốt nhất trên OpenRouter',
-  },
-  {
-    id: '26',
-    name: 'openrouter/z-ai/glm-5.3-flash',
-    provider: 'OpenRouter (Z.ai)',
-    desc: 'GLM-5.3 Flash (Z.ai - cựu Ox Alpha): Multimodal reasoning coding model, 1M context',
+    name: 'openrouter/poolside/laguna-s-2.1:free',
+    provider: 'OpenRouter (Poolside)',
+    desc: 'Laguna S 2.1 (118B MoE): Model Coding Agent chuyên dụng hàng đầu từ Poolside AI, 256K context',
     recommended: true,
   },
   {
+    id: '26',
+    name: 'openrouter/poolside/laguna-xs-2.1:free',
+    provider: 'OpenRouter (Poolside)',
+    desc: 'Laguna XS 2.1 (33B MoE): Model Coding Agent siêu tốc độ, độ trễ thấp, 256K context',
+  },
+  {
     id: '27',
-    name: 'openrouter/meta-llama/llama-3.3-70b-instruct:free',
-    provider: 'OpenRouter (Free)',
-    desc: 'Llama 3.3 70B miễn phí qua OpenRouter',
+    name: 'openrouter/cohere/north-mini-code:free',
+    provider: 'OpenRouter (Cohere)',
+    desc: 'North Mini Code (30B MoE): Model agentic coding chuyên biệt của Cohere, 256K context',
   },
   {
     id: '28',
-    name: 'openrouter/deepseek/deepseek-r1:free',
-    provider: 'OpenRouter (Free)',
-    desc: 'DeepSeek R1 miễn phí qua OpenRouter',
+    name: 'openrouter/thinkingmachines/inkling:free',
+    provider: 'OpenRouter (Thinking Machines)',
+    desc: 'Inkling (975B MoE): Siêu ngữ cảnh 1 Triệu tokens (1M context), reasoning & coding sâu',
   },
   {
     id: '29',
-    name: 'openrouter/google/gemini-2.0-flash-exp:free',
+    name: 'openrouter/google/gemma-4-31b-it:free',
+    provider: 'OpenRouter (Google DeepMind)',
+    desc: 'Gemma 4 31B: Reasoning mode, function calling chuẩn xác, 256K context',
+  },
+  {
+    id: '29f',
+    name: 'openrouter/free',
     provider: 'OpenRouter (Free)',
-    desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
+    desc: 'Tự động định tuyến sang model miễn phí khả dụng tốt nhất trên OpenRouter',
   },
 
   // 9. Pollinations AI

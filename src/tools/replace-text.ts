@@ -5,7 +5,15 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
-type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'fuzzy_whitespace';
+type MatchStrategy =
+  | 'exact'
+  | 'normalized_eol'
+  | 'normalized_indentation'
+  | 'fuzzy_whitespace'
+  | 'quote_normalized'
+  | 'context_reduction'
+  | 'ellipsis_anchor'
+  | 'fuzzy_similarity';
 
 interface TextMatch {
   start: number;
@@ -21,6 +29,8 @@ interface NormalizedText {
   boundaries: number[];
 }
 
+const ELLIPSIS_LINE_REGEX = /^\s*(?:\/\/|#|\/\*|<!--)?\s*\.{3,}(?:[^\n*<]*)(?:\.{3,})?\s*(?:\*\/|-->)?\s*$/i;
+
 /**
  * Tool 4: replace_text
  * Thay thế một đoạn văn bản/code chính xác (surgical edit) trong một file.
@@ -28,7 +38,7 @@ interface NormalizedText {
  */
 export const replaceTextTool: ToolDefinition = {
   name: 'replace_text',
-  description: 'Thay thế duy nhất một đoạn oldText trong file. Chế độ auto khớp an toàn cả LF/CRLF và chênh lệch indentation của block nhiều dòng; không dùng fuzzy semantic matching. Có thể truyền expectedFileHash lấy từ read_file để chặn sửa trên nội dung đã cũ.',
+  description: 'Thay thế duy nhất một đoạn oldText trong file với cơ chế Hardened Multi-tier Matching (exact, LF/CRLF, indentation, whitespace normalization, quote-agnostic, context reduction, ellipsis anchor, fuzzy similarity).',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -38,7 +48,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       oldText: {
         type: Type.STRING,
-        description: 'Đoạn văn bản/code gốc cần thay thế (phải trùng khớp chính xác 100%, bao gồm khoảng trắng/xuống dòng)',
+        description: 'Đoạn văn bản/code gốc cần thay thế (khớp chính xác hoặc khớp tương đương cấu trúc)',
       },
       newText: {
         type: Type.STRING,
@@ -47,7 +57,7 @@ export const replaceTextTool: ToolDefinition = {
       matchMode: {
         type: Type.STRING,
         enum: ['auto', 'exact'],
-        description: 'auto (mặc định) cho phép tương đương LF/CRLF và indentation; exact chỉ khớp byte-for-byte.',
+        description: 'auto (mặc định) áp dụng toàn bộ chuỗi chiến lược so khớp thông minh; exact chỉ khớp byte-for-byte.',
       },
       expectedFileHash: {
         type: Type.STRING,
@@ -89,7 +99,21 @@ export const replaceTextTool: ToolDefinition = {
         };
       }
 
-      const stat = await fs.stat(safePath);
+      let stat;
+      try {
+        stat = await fs.stat(safePath);
+      } catch (statErr: any) {
+        if (statErr.code === 'ENOENT' || String(statErr.message).includes('ENOENT')) {
+          return {
+            success: false,
+            path: rawPath,
+            error: `File "${rawPath}" không tồn tại (ENOENT: no such file or directory).`,
+            errorCode: 'FILE_NOT_FOUND',
+            suggestion: 'Hãy kiểm tra lại đường dẫn tệp tin bằng list_files hoặc search_codebase_fast.',
+          };
+        }
+        throw statErr;
+      }
 
       if (!stat.isFile()) {
         return { success: false, path: rawPath, error: `"${rawPath}" không phải là file.`, errorCode: 'NOT_A_FILE' };
@@ -113,7 +137,7 @@ export const replaceTextTool: ToolDefinition = {
       let matches = findTextMatches(content, effectiveOldText, matchMode);
       let autoStrippedLineNumbers = false;
 
-      // Fallback: Nếu LLM vô tình copy tiền tố số dòng (ví dụ "12: const x = 1;" hoặc "12 | const x = 1;"), tự động làm sạch
+      // Fallback 1: Nếu LLM vô tình copy tiền tố số dòng (ví dụ "12: const x = 1;" hoặc "12 | const x = 1;"), tự động làm sạch
       if (matches.length === 0 && /^\s*\d+[:|]\s+/m.test(oldText)) {
         const sanitizedOldText = oldText
           .split('\n')
@@ -135,9 +159,9 @@ export const replaceTextTool: ToolDefinition = {
         return {
           success: false,
           path: rawPath,
-          error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF và indentation an toàn.`,
+          error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF, indentation, whitespace normalization, quote-agnostic, context reduction và fuzzy similarity.`,
           errorCode: 'TEXT_NOT_FOUND',
-          diagnostic: 'oldText khác nội dung hiện tại; preview có dấu "..." trên CLI chỉ là phần hiển thị bị rút gọn và không nên được sao chép làm source.',
+          diagnostic: 'oldText khác nội dung hiện tại; hãy dùng read_file với includeLineNumbers=false để lấy chính xác khối mã.',
           observedFileHash,
           oldTextLength: oldText.length,
           candidates,
@@ -200,7 +224,7 @@ export const replaceTextTool: ToolDefinition = {
         line: match.line,
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
-        message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        message: `Đã thay thế thành công 1 vị trí trong "${rawPath}" (chiến lược: ${match.strategy}).`,
         ...(autoStrippedLineNumbers ? { note: 'Tự động làm sạch tiền tố số dòng trong oldText (Line Number Sanitization).' } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
@@ -216,6 +240,7 @@ export const replaceTextTool: ToolDefinition = {
 };
 
 function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact'): TextMatch[] {
+  // 1. Exact byte-for-byte match
   const exact = findAllRanges(content, oldText).map(({ start, end }) => ({
     start,
     end,
@@ -224,6 +249,7 @@ function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact
   }));
   if (mode === 'exact') return exact;
 
+  // 2. Normalized EOL (LF vs CRLF)
   const normalizedContent = normalizeLineEndingsWithBoundaries(content);
   const normalizedOldText = normalizeLineEndingsWithBoundaries(oldText).text;
   const eolEquivalent = findAllRanges(normalizedContent.text, normalizedOldText).map(({ start, end }) => ({
@@ -236,10 +262,43 @@ function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact
   }));
   if (eolEquivalent.length > 0) return eolEquivalent;
 
+  // 3. Indentation Equivalence
   const indentMatches = findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
   if (indentMatches.length > 0) return indentMatches;
 
-  return findFuzzyWhitespaceMatches(content, normalizedContent, normalizedOldText);
+  // 4. Fuzzy Whitespace Normalization (Tab vs 2/4 spaces, trailing whitespace, intra-line space)
+  const wsMatches = findFuzzyWhitespaceMatches(content, normalizedContent, normalizedOldText);
+  if (wsMatches.length > 0) return wsMatches;
+
+  // 5. Quote-Agnostic Normalization (single vs double vs backtick quotes)
+  const quoteMatches = findQuoteNormalizedMatches(content, normalizedContent, normalizedOldText);
+  if (quoteMatches.length > 0) return quoteMatches;
+
+  // 6. Ellipsis Anchor Matching (// ... existing code ...)
+  const anchorMatches = findEllipsisAnchorMatches(content, normalizedContent, normalizedOldText);
+  if (anchorMatches.length > 0) return anchorMatches;
+
+  // 7. Context Reduction Cascade (Trimming 1 leading/trailing context line if >= 3 lines)
+  const contextMatches = findContextReductionMatches(content, normalizedContent, normalizedOldText);
+  if (contextMatches.length > 0) return contextMatches;
+
+  // 8. Fuzzy Similarity Matching (Levenshtein / Token Dice >= 0.88 with uniqueness constraint)
+  return findFuzzySimilarityMatches(content, normalizedContent, normalizedOldText);
+}
+
+function normalizeTextTokens(line: string): string {
+  return (line || '')
+    .replace(/[\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\t/g, '  ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeQuotes(str: string): string {
+  return str.replace(/["'`]/g, '"');
 }
 
 function findIndentationEquivalentMatches(
@@ -283,10 +342,7 @@ function findFuzzyWhitespaceMatches(
   if (oldHasTrailingEol) oldLines.pop();
   if (oldLines.length === 0) return [];
 
-  const normalizeWs = (line: string) =>
-    line.replace(/\t/g, '  ').replace(/[ \t]+$/g, '').trim();
-
-  const expectedLines = oldLines.map(normalizeWs);
+  const expectedLines = oldLines.map(normalizeTextTokens);
   if (!expectedLines.some(Boolean)) return [];
 
   const contentLines = splitLines(normalizedContent.text);
@@ -296,7 +352,7 @@ function findFuzzyWhitespaceMatches(
     const window = contentLines.slice(index, index + oldLines.length);
     let matched = true;
     for (let i = 0; i < oldLines.length; i++) {
-      if (normalizeWs(window[i].text) !== expectedLines[i]) {
+      if (normalizeTextTokens(window[i].text) !== expectedLines[i]) {
         matched = false;
         break;
       }
@@ -318,10 +374,192 @@ function findFuzzyWhitespaceMatches(
   return matches.filter((match) => match.start <= match.end && match.end <= originalContent.length);
 }
 
+function findQuoteNormalizedMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const oldHasTrailingEol = normalizedOldText.endsWith('\n');
+  const oldLines = normalizedOldText.split('\n');
+  if (oldHasTrailingEol) oldLines.pop();
+  if (oldLines.length === 0) return [];
+
+  const expectedLines = oldLines.map((l) => normalizeQuotes(normalizeTextTokens(l)));
+  if (!expectedLines.some(Boolean)) return [];
+
+  const contentLines = splitLines(normalizedContent.text);
+  const matches: TextMatch[] = [];
+
+  for (let index = 0; index + oldLines.length <= contentLines.length; index++) {
+    const window = contentLines.slice(index, index + oldLines.length);
+    let matched = true;
+    for (let i = 0; i < oldLines.length; i++) {
+      if (normalizeQuotes(normalizeTextTokens(window[i].text)) !== expectedLines[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (!matched) continue;
+
+    const first = window[0];
+    const last = window[window.length - 1];
+    const normalizedEnd = oldHasTrailingEol && last.hasEol ? last.end + 1 : last.end;
+    matches.push({
+      start: normalizedContent.boundaries[first.start],
+      end: normalizedContent.boundaries[normalizedEnd],
+      line: index + 1,
+      strategy: 'quote_normalized',
+      indentation: window[0].text.match(/^[ \t]*/)?.[0] || '',
+    });
+  }
+
+  return matches.filter((match) => match.start <= match.end && match.end <= originalContent.length);
+}
+
+function findEllipsisAnchorMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const lines = normalizedOldText.split('\n');
+  const ellipsisIdx = lines.findIndex((l) => ELLIPSIS_LINE_REGEX.test(l));
+  if (ellipsisIdx <= 0 || ellipsisIdx >= lines.length - 1) return [];
+
+  const headLines = lines.slice(0, ellipsisIdx).join('\n');
+  const tailLines = lines.slice(ellipsisIdx + 1).join('\n');
+  if (!headLines.trim() || !tailLines.trim()) return [];
+
+  const headMatches = findTextMatches(originalContent, headLines, 'auto');
+  const tailMatches = findTextMatches(originalContent, tailLines, 'auto');
+
+  if (headMatches.length === 1 && tailMatches.length === 1) {
+    const head = headMatches[0];
+    const tail = tailMatches[0];
+    if (head.start < tail.end && head.end <= tail.start) {
+      return [{
+        start: head.start,
+        end: tail.end,
+        line: head.line,
+        strategy: 'ellipsis_anchor',
+        indentation: head.indentation,
+      }];
+    }
+  }
+
+  return [];
+}
+
+function findContextReductionMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const oldLines = normalizedOldText.split('\n');
+  if (oldLines.length < 3) return [];
+
+  const contentLines = splitLines(normalizedContent.text);
+  const candidates: Array<{ trimmedOld: string[]; label: string }> = [
+    { trimmedOld: oldLines.slice(0, oldLines.length - 1), label: 'trailing-trimmed-1' },
+    { trimmedOld: oldLines.slice(1), label: 'leading-trimmed-1' },
+    { trimmedOld: oldLines.slice(1, oldLines.length - 1), label: 'both-trimmed-1' },
+  ];
+
+  for (const cand of candidates) {
+    if (cand.trimmedOld.length < 2) continue;
+    const expLines = cand.trimmedOld.map(normalizeTextTokens);
+    const matches: TextMatch[] = [];
+
+    for (let index = 0; index + cand.trimmedOld.length <= contentLines.length; index++) {
+      const window = contentLines.slice(index, index + cand.trimmedOld.length);
+      let matched = true;
+      for (let i = 0; i < cand.trimmedOld.length; i++) {
+        if (normalizeTextTokens(window[i].text) !== expLines[i]) {
+          matched = false;
+          break;
+        }
+      }
+      if (!matched) continue;
+
+      const first = window[0];
+      const last = window[window.length - 1];
+      matches.push({
+        start: normalizedContent.boundaries[first.start],
+        end: normalizedContent.boundaries[last.end],
+        line: index + 1,
+        strategy: 'context_reduction',
+        indentation: window[0].text.match(/^[ \t]*/)?.[0] || '',
+      });
+    }
+
+    if (matches.length === 1) {
+      return matches;
+    }
+  }
+
+  return [];
+}
+
+function findFuzzySimilarityMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const oldLines = normalizedOldText.split(/\r?\n/).map(normalizeTextTokens).filter(Boolean);
+  if (oldLines.length < 2) return [];
+
+  const contentLines = splitLines(normalizedContent.text);
+  const oldLen = oldLines.length;
+
+  let bestScore = 0;
+  let secondBestScore = 0;
+  let bestMatch: TextMatch | null = null;
+
+  for (let index = 0; index + oldLen <= contentLines.length; index++) {
+    const window = contentLines.slice(index, index + oldLen);
+    const windowLines = window.map((w) => normalizeTextTokens(w.text));
+
+    let totalSim = 0;
+    for (let i = 0; i < oldLen; i++) {
+      totalSim += lineSimilarity(oldLines[i], windowLines[i]);
+    }
+    const avgSim = totalSim / oldLen;
+
+    if (avgSim > bestScore) {
+      secondBestScore = bestScore;
+      bestScore = avgSim;
+      const first = window[0];
+      const last = window[window.length - 1];
+      bestMatch = {
+        start: normalizedContent.boundaries[first.start],
+        end: normalizedContent.boundaries[last.end],
+        line: index + 1,
+        strategy: 'fuzzy_similarity',
+        indentation: window[0].text.match(/^[ \t]*/)?.[0] || '',
+      };
+    } else if (avgSim > secondBestScore) {
+      secondBestScore = avgSim;
+    }
+  }
+
+  // Safety invariant: Match only if bestScore >= 0.88 and clearly unique
+  if (bestScore >= 0.88 && (bestScore - secondBestScore >= 0.15 || secondBestScore < 0.65) && bestMatch) {
+    return [bestMatch];
+  }
+
+  return [];
+}
+
 function prepareReplacement(newText: string, content: string, match: TextMatch): string {
   const eol = detectLocalEol(content.slice(match.start, match.end)) || detectDominantEol(content);
   let normalized = normalizeLineEndingsWithBoundaries(newText).text;
-  if (match.strategy === 'normalized_indentation' || match.strategy === 'fuzzy_whitespace') {
+
+  if (
+    match.strategy === 'normalized_indentation' ||
+    match.strategy === 'fuzzy_whitespace' ||
+    match.strategy === 'quote_normalized' ||
+    match.strategy === 'context_reduction' ||
+    match.strategy === 'fuzzy_similarity'
+  ) {
     const hasTrailingEol = normalized.endsWith('\n');
     const lines = normalized.split('\n');
     if (hasTrailingEol) lines.pop();
@@ -425,6 +663,38 @@ function diceSimilarity(left: string, right: string): number {
   let overlap = 0;
   for (const [pair, count] of leftPairs) overlap += Math.min(count, rightPairs.get(pair) || 0);
   return (2 * overlap) / Math.max(1, left.length + right.length - 2);
+}
+
+function lineSimilarity(s1: string, s2: string): number {
+  if (s1 === s2) return 1;
+  if (!s1 || !s2) return 0;
+  const longer = s1.length > s2.length ? s1 : s2;
+  const shorter = s1.length > s2.length ? s2 : s1;
+  if (longer.length === 0) return 1.0;
+  const editDistance = levenshtein(longer, shorter);
+  return (longer.length - editDistance) / longer.length;
+}
+
+function levenshtein(a: string, b: string): number {
+  const an = a ? a.length : 0;
+  const bn = b ? b.length : 0;
+  if (an === 0) return bn;
+  if (bn === 0) return an;
+  const matrix = Array.from({ length: bn + 1 }, (_, i) => [i]);
+  for (let j = 0; j <= an; j++) matrix[0][j] = j;
+  for (let i = 1; i <= bn; i++) {
+    for (let j = 1; j <= an; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1)
+        );
+      }
+    }
+  }
+  return matrix[bn][an];
 }
 
 function detectDominantEol(content: string): '\r\n' | '\n' {

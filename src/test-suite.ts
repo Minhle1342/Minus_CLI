@@ -78,6 +78,11 @@ import type { DreamAgent, DreamAgentInput, DreamProposal } from './dream/types.j
 import { GrillGate } from './agent/grill-gate.js';
 import { SpecManager } from './agent/spec-manager.js';
 import { ComposeController } from './agent/compose-controller.js';
+import { LocalExecutionSubstrate, IsolatedExecutionSubstrate, ExecutionSubstrateFactory } from './execution/index.js';
+import { SandboxPolicyEngine } from './sandbox/sandbox-policy.js';
+import { EphemeralScratchWorkspace } from './sandbox/scratch-workspace.js';
+import { TestEngineeringHarness, TestOutputParser } from './testing/index.js';
+import { runTestSuiteTool } from './tools/run-test-suite.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
@@ -6254,6 +6259,231 @@ Always write tests first!`;
   } finally {
     await fs.rm(adminSearchFile, { force: true });
   }
+
+  // ========================================
+  // 🧪 44. KIỂM THỬ HARDENED MULTI-TIER MATCHING TRONG REPLACE_TEXT (QUOTE-AGNOSTIC, ELLIPSIS ANCHOR, CONTEXT REDUCTION & FUZZY SIMILARITY)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 44. KIỂM THỬ HARDENED MULTI-TIER MATCHING TRONG REPLACE_TEXT (QUOTE-AGNOSTIC, ELLIPSIS ANCHOR, CONTEXT REDUCTION & FUZZY SIMILARITY)');
+  console.log('========================================');
+
+  const replaceTargetFile = path.join(workspace.rootDir, 'src', 'pages', 'AdminPage.jsx');
+  await fs.mkdir(path.dirname(replaceTargetFile), { recursive: true });
+
+  const adminPageBaseContent = [
+    'import React, { useState } from "react";',
+    '',
+    'export function AdminPage() {',
+    '  const [status, setStatus] = useState("idle");',
+    '  const [users, setUsers] = useState([]);',
+    '',
+    '  function handleSave() {',
+    '    console.log("Saving admin profile...");',
+    '    setStatus("saved");',
+    '  }',
+    '',
+    '  return (',
+    '    <div className="admin-page">',
+    '      <h1>Admin Dashboard</h1>',
+    '    </div>',
+    '  );',
+    '}',
+  ].join('\n');
+
+  await fs.writeFile(replaceTargetFile, adminPageBaseContent, 'utf8');
+
+  try {
+    // 1. Kiểm thử Quote-Agnostic Matching (File dùng nháy kép "", LLM truyền nháy đơn '')
+    const quoteMismatchOldText = `  function handleSave() {\n    console.log('Saving admin profile...');\n    setStatus('saved');\n  }`;
+    const quoteMismatchNewText = `  function handleSave() {\n    console.log('Saving admin profile v2...');\n    setStatus('saved_v2');\n  }`;
+
+    const quoteRes = await replaceTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        oldText: quoteMismatchOldText,
+        newText: quoteMismatchNewText,
+      },
+      workspace
+    );
+
+    assert(quoteRes.success === true, 'replace_text áp dụng thành công khi có khác biệt giữa nháy đơn và nháy kép');
+    assert(quoteRes.matchStrategy === 'quote_normalized', 'matchStrategy nhận diện đúng quote_normalized');
+
+    const updatedAfterQuote = await fs.readFile(replaceTargetFile, 'utf8');
+    assert(updatedAfterQuote.includes('saved_v2'), 'Nội dung file được cập nhật đúng giá trị saved_v2');
+
+    // 2. Kiểm thử Ellipsis Anchor Matching (LLM cung cấp block có chứa // ... existing code ...)
+    const ellipsisOldText = `export function AdminPage() {\n  // ... existing code ...\n  return (\n    <div className="admin-page">\n      <h1>Admin Dashboard</h1>\n    </div>\n  );\n}`;
+    const ellipsisNewText = `export function AdminPage() {\n  return (\n    <div className="admin-page-updated">\n      <h1>Admin Dashboard v2</h1>\n    </div>\n  );\n}`;
+
+    const ellipsisRes = await replaceTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        oldText: ellipsisOldText,
+        newText: ellipsisNewText,
+      },
+      workspace
+    );
+
+    assert(ellipsisRes.success === true, 'replace_text áp dụng thành công Ellipsis Anchor Matching');
+    assert(ellipsisRes.matchStrategy === 'ellipsis_anchor', 'matchStrategy nhận diện đúng ellipsis_anchor');
+
+    const updatedAfterEllipsis = await fs.readFile(replaceTargetFile, 'utf8');
+    assert(updatedAfterEllipsis.includes('admin-page-updated'), 'JSX mới được cập nhật chuẩn xác qua ellipsis anchor');
+
+    // 3. Kiểm thử Context Reduction (LLM chèn thêm dòng comment bị lệch ở đầu/cuối khối)
+    await fs.writeFile(replaceTargetFile, adminPageBaseContent, 'utf8');
+    const driftOldText = `  // Hallucinated comment not in file\n  const [status, setStatus] = useState("idle");\n  const [users, setUsers] = useState([]);`;
+    const driftNewText = `  const [status, setStatus] = useState("active_now");\n  const [users, setUsers] = useState(["admin"]);`;
+
+    const driftRes = await replaceTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        oldText: driftOldText,
+        newText: driftNewText,
+      },
+      workspace
+    );
+
+    assert(driftRes.success === true, 'replace_text áp dụng thành công nhờ Context Reduction Cascade');
+    assert(driftRes.matchStrategy === 'context_reduction', 'matchStrategy nhận diện đúng context_reduction');
+
+    const updatedAfterDrift = await fs.readFile(replaceTargetFile, 'utf8');
+    assert(updatedAfterDrift.includes('active_now'), 'Giá trị status cập nhật thành active_now');
+
+    // 4. Kiểm thử Fuzzy Similarity Matching (Độ tương đồng chuỗi Levenshtein >= 0.88)
+    await fs.writeFile(replaceTargetFile, adminPageBaseContent, 'utf8');
+    // Khối có lỗi chính tả nhẹ ("Saving admim profil...")
+    const simOldText = `  function handleSave() {\n    console.log("Saving admim profil...");\n    setStatus("saved");\n  }`;
+    const simNewText = `  function handleSave() {\n    console.log("Saving admin profile SUCCESS");\n    setStatus("saved_done");\n  }`;
+
+    const simRes = await replaceTextTool.execute(
+      {
+        path: 'src/pages/AdminPage.jsx',
+        oldText: simOldText,
+        newText: simNewText,
+      },
+      workspace
+    );
+
+    assert(simRes.success === true, 'replace_text áp dụng thành công nhờ Fuzzy Similarity Matching (Levenshtein >= 0.88)');
+    assert(simRes.matchStrategy === 'fuzzy_similarity', 'matchStrategy nhận diện đúng fuzzy_similarity');
+
+    const updatedAfterSim = await fs.readFile(replaceTargetFile, 'utf8');
+    assert(updatedAfterSim.includes('saved_done'), 'Nội dung file được cập nhật đúng qua fuzzy similarity');
+  } finally {
+    await fs.rm(replaceTargetFile, { force: true });
+  }
+
+  console.log('\n========================================');
+  console.log('🧪 45. KIỂM THỬ CODEX STANDARD EXECUTION SUBSTRATE, SANDBOX & TEST ENGINEERING');
+  console.log('========================================');
+
+  // 45.1. LocalExecutionSubstrate & Telemetry
+  const testSubstrate = new LocalExecutionSubstrate({ defaultCwd: process.cwd(), defaultTimeoutMs: 10000 });
+  const execResult = await testSubstrate.exec('node -e "console.log(\'SUBSTRATE_READY\')"');
+  assert(execResult.success === true, 'LocalExecutionSubstrate thực thi lệnh thành công');
+  assert(execResult.stdout.includes('SUBSTRATE_READY'), 'LocalExecutionSubstrate thu thập đúng stdout');
+  assert(execResult.exitCode === 0, 'LocalExecutionSubstrate trả về exitCode = 0');
+  const substrateTelem = testSubstrate.getTelemetry();
+  assert(substrateTelem.totalExecutions >= 1, 'Substrate ghi nhận telemetry totalExecutions');
+  assert(substrateTelem.successfulExecutions >= 1, 'Substrate ghi nhận successfulExecutions');
+  await testSubstrate.dispose();
+
+  // 45.2. SandboxPolicyEngine Security Boundaries & Path Containment
+  const sandboxPolicy = new SandboxPolicyEngine(process.cwd(), 'workspace-write');
+  assert(sandboxPolicy.isPathContained('src/index.ts') === true, 'SandboxPolicyEngine xác thực đường dẫn hợp lệ bên trong workspace');
+  assert(sandboxPolicy.isPathContained('../../../outside.txt') === false, 'SandboxPolicyEngine chặn path traversal ra ngoài workspace');
+  assert(sandboxPolicy.isSensitiveFile('.env') === true, 'SandboxPolicyEngine nhận diện file nhạy cảm .env');
+  assert(sandboxPolicy.isSensitiveFile('.env.production') === true, 'SandboxPolicyEngine nhận diện .env variants');
+
+  // Đánh giá lệnh nguy hiểm
+  const destructiveEval = sandboxPolicy.evaluateCommand('rm -rf /');
+  assert(destructiveEval.allowed === false, 'SandboxPolicyEngine chặn đứng lệnh hủy diệt hệ thống rm -rf /');
+  assert(destructiveEval.riskLevel === 'SYSTEM_RISK', 'Gán đúng riskLevel SYSTEM_RISK');
+
+  const safeReadEval = sandboxPolicy.evaluateCommand('cat package.json');
+  assert(safeReadEval.allowed === true, 'SandboxPolicyEngine cho phép lệnh đọc an toàn');
+  assert(safeReadEval.riskLevel === 'SAFE_READ_ONLY', 'Gán đúng riskLevel SAFE_READ_ONLY');
+
+  // 45.3. IsolatedExecutionSubstrate
+  const isolatedSubstrate = new IsolatedExecutionSubstrate({
+    workspaceRoot: process.cwd(),
+    policyMode: 'workspace-write',
+  });
+  const blockedExec = await isolatedSubstrate.exec('rm -rf /');
+  assert(blockedExec.success === false, 'IsolatedExecutionSubstrate chặn lệnh nguy hiểm trước khi chuyển tới Host OS');
+  assert(blockedExec.exitCode === 126, 'IsolatedExecutionSubstrate trả về exitCode 126 cho lệnh bị từ chối');
+  await isolatedSubstrate.dispose();
+
+  // 45.4. EphemeralScratchWorkspace
+  const scratchWs = new EphemeralScratchWorkspace({
+    sourceWorkspaceRoot: process.cwd(),
+  });
+  await scratchWs.create();
+  await scratchWs.writeFile('scratch_temp.txt', 'SANDBOX_ISOLATED_DATA');
+  const scratchRead = await scratchWs.readFile('scratch_temp.txt');
+  assert(scratchRead === 'SANDBOX_ISOLATED_DATA', 'EphemeralScratchWorkspace ghi và đọc file phân lập thành công');
+  await scratchWs.dispose();
+
+  // 45.5. TestOutputParser (Jest/Vitest, Mocha, Pytest, Cargo)
+  const sampleVitestOutput = `
+✓ src/test/app.test.ts (2)
+  ✓ calculateTotal (1ms)
+  ✓ validateInput (2ms)
+
+Test Files  1 passed (1)
+     Tests  2 passed (2)
+  Duration  145ms
+`;
+  const vitestReport = TestOutputParser.parse(sampleVitestOutput, 0, 145, 'npm test', 'vitest');
+  assert(vitestReport.isPassed === true, 'TestOutputParser phân tích Vitest pass thành công');
+  assert(vitestReport.passed === 2, 'TestOutputParser trích xuất đúng 2 passed tests');
+  assert(vitestReport.failed === 0, 'TestOutputParser trích xuất đúng 0 failed tests');
+
+  const samplePytestFailure = `
+============================= test session starts ==============================
+FAILED tests/test_math.py::test_division - ZeroDivisionError: division by zero
+========================= 1 failed, 3 passed in 0.25s ==========================
+`;
+  const pytestReport = TestOutputParser.parse(samplePytestFailure, 1, 250, 'pytest', 'pytest');
+  assert(pytestReport.isPassed === false, 'TestOutputParser nhận diện test thất bại');
+  assert(pytestReport.failed === 1, 'Trích xuất đúng 1 failed test');
+  assert(pytestReport.passed === 3, 'Trích xuất đúng 3 passed tests');
+
+  // 45.6. TestEngineeringHarness & Hypothesis System Integration
+  const testTracker = new HypothesisTracker();
+  const testHypothesis = testTracker.formulate({
+    statement: 'Sửa hàm chia số 0 để tránh crash',
+    falsificationTest: 'npm test',
+  });
+  testTracker.markTesting(testHypothesis.id);
+
+  const testCritic = new CriticGate();
+  const harness = new TestEngineeringHarness({
+    workspaceRoot: process.cwd(),
+    hypothesisTracker: testTracker,
+    criticGate: testCritic,
+  });
+
+  // Tự động phát hiện lệnh test của repo
+  const detectedCmd = await harness.detectTestCommand();
+  assert(detectedCmd === 'npm test', 'TestEngineeringHarness tự động phát hiện lệnh npm test từ package.json');
+
+  // Kiểm tra liên kết Hypothesis khi test thành công
+  testTracker.markValidated(testHypothesis.id, 'Test pass 100%');
+  const validatedHypo = testTracker.getHypotheses().find((h) => h.id === testHypothesis.id);
+  assert(validatedHypo?.status === 'validated', 'Hypothesis được chuyển thành validated sau khi kiểm thử thành công');
+
+  // 45.7. run_test_suite Tool
+  const runTestToolRes = await runTestSuiteTool.execute(
+    { command: 'node -e "console.log(\'Tests: 5 passed, 0 failed, 5 total\')"' },
+    new Workspace(process.cwd())
+  );
+  assert(runTestToolRes.success === true, 'run_test_suite tool thực thi thành công');
+  assert(runTestToolRes.isPassed === true, 'run_test_suite nhận diện trạng thái isPassed = true');
+  assert(runTestToolRes.passed === 5, 'run_test_suite trích xuất đúng 5 passed tests');
+  assert(Boolean(runTestToolRes.summary?.includes('VƯỢT QUA')), 'run_test_suite sinh summary chuẩn');
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

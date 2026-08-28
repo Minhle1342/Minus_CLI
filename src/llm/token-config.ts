@@ -363,13 +363,65 @@ const MODEL_TOKEN_PROFILES: Record<string, Partial<ModelTokenProfile>> = {
     supportsReasoningEffort: false,
     isReasoningModel: false,
   },
+
+  // OpenRouter Free Coding Models
+  'poolside/laguna-s-2.1:free': {
+    provider: 'other',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 65536,
+    maxSupportedInputTokens: 262144,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'poolside/laguna-xs-2.1:free': {
+    provider: 'other',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 65536,
+    maxSupportedInputTokens: 262144,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'cohere/north-mini-code:free': {
+    provider: 'other',
+    defaultMaxOutputTokens: 8192,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 32768,
+    maxSupportedInputTokens: 256000,
+    supportsThinkingBudget: false,
+    supportsReasoningEffort: false,
+    isReasoningModel: false,
+  },
+  'thinkingmachines/inkling:free': {
+    provider: 'other',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 500000,
+    maxSupportedOutputTokens: 65536,
+    maxSupportedInputTokens: 1048576,
+    supportsThinkingBudget: true,
+    supportsReasoningEffort: true,
+    isReasoningModel: true,
+  },
+  'google/gemma-4-31b-it:free': {
+    provider: 'gemini',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 65536,
+    maxSupportedInputTokens: 262144,
+    supportsThinkingBudget: true,
+    supportsReasoningEffort: false,
+    isReasoningModel: true,
+  },
 };
 
 /**
  * Lấy Profile Token mặc định cho một mô hình bất kỳ
  */
 export function getModelTokenProfile(modelName: string, baseURL?: string): ModelTokenProfile {
-  const normalized = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex|anthropic)\//, '');
+  const normalized = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex|anthropic|openrouter)\//, '');
 
   let matchedKey = Object.keys(MODEL_TOKEN_PROFILES).find((key) => key.toLowerCase() === normalized);
   if (!matchedKey) {

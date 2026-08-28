@@ -256,14 +256,14 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
     if (openrouterApiKey) {
       tiers.push({
-        name: 'openrouter/z-ai/glm-5.3-flash',
-        provider: 'OpenRouter (Z.ai GLM-5.3 Flash)',
+        name: 'openrouter/poolside/laguna-s-2.1:free',
+        provider: 'OpenRouter (Poolside Laguna S 2.1)',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'z-ai/glm-5.3-flash', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'poolside/laguna-s-2.1:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
       tiers.push({
         name: 'openrouter/free',
-        provider: 'OpenRouter Free',
+        provider: 'OpenRouter Free Router',
         tier: 3,
         createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
