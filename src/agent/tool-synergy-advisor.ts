@@ -64,6 +64,28 @@ export class ToolSynergyAdvisor {
       ['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file'].includes(lastToolName)
     ) {
       if (lastToolResult && !lastToolResult.error) {
+        const blast = lastToolResult.blastRadius;
+        if (blast) {
+          const testAdvice = blast.impactedTestSuites?.length > 0
+            ? ` Impacted test suite(s): ${blast.impactedTestSuites.slice(0, 2).join(', ')}. Run targeted test via "run_command".`
+            : ' Next, call "get_diagnostics" or targeted tests to verify.';
+          const consumerAdvice = blast.directConsumers?.length > 0
+            ? ` ${blast.directConsumers.length} direct consumer file(s) affected.`
+            : '';
+          const symbolAdvice = blast.modifiedSymbols?.length > 0
+            ? ` Modified symbols: ${blast.modifiedSymbols.slice(0, 3).join(', ')}.`
+            : '';
+          const riskPrefix = blast.risk ? `[Blast Radius: ${blast.risk}] ` : '';
+
+          return {
+            playbook: 'C_MUTATION',
+            guidance: `${riskPrefix}Code mutation applied.${symbolAdvice}${consumerAdvice}${testAdvice}`,
+            suggestedTools: blast.impactedTestSuites?.length > 0
+              ? ['run_command', 'get_diagnostics', 'get_symbol_context_360']
+              : ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
+          };
+        }
+
         return {
           playbook: 'C_MUTATION',
           guidance: 'Code was modified. Next, call "get_diagnostics" to check for compiler/type errors, then run relevant test suites via "run_command".',

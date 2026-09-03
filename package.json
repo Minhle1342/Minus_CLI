@@ -10,6 +10,7 @@
     "test": "tsx src/test-suite.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "test:latency": "tsx src/test-latency-optimization.ts",
+    "test:blast-radius": "tsx src/test-blast-radius.ts",
     "build": "tsc",
     "search:up": "tsx src/scripts/start-searxng.ts",
     "search:down": "docker compose -f deploy/searxng/compose.yaml down",

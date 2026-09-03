@@ -54,11 +54,26 @@ export class VerificationPolicy {
     return this.repairCycles;
   }
 
+  private pendingTargetedTests: Set<string> = new Set();
+
   /**
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
-  recordModification(filePath?: string): void {
+  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string }): void {
     this.hasUnverifiedModifications = true;
+    if (options?.impactedTestSuites) {
+      for (const t of options.impactedTestSuites) {
+        this.pendingTargetedTests.add(t);
+      }
+    }
+  }
+
+  getPendingTargetedTests(): string[] {
+    return Array.from(this.pendingTargetedTests);
+  }
+
+  clearPendingTargetedTests(): void {
+    this.pendingTargetedTests.clear();
   }
 
   hasPendingModifications(): boolean {

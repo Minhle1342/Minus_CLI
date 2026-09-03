@@ -6,6 +6,11 @@ import { Workspace } from '../workspace/workspace.js';
 import { computeStringHash } from '../workspace/workspace-digest.js';
 import { toolError, toolSuccess } from './tool-result.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
+import {
+  detectChangedSymbols,
+  calculateComprehensiveBlastRadius,
+  invalidateTopologyCache,
+} from './mutation-blast-radius.js';
 
 /**
  * Tool 5: write_file
@@ -70,12 +75,46 @@ export const writeFileTool: ToolDefinition = {
         );
       }
 
+      // Đọc nội dung cũ nếu file đã tồn tại để so sánh symbol
+      let oldContent: string | undefined;
+      if (isExisting) {
+        try {
+          oldContent = await fs.readFile(safePath, 'utf-8');
+        } catch {}
+      }
+
       // Đảm bảo thư mục cha tồn tại
       const parentDir = path.dirname(safePath);
       await fs.mkdir(parentDir, { recursive: true });
 
       // Ghi nội dung file
       await fs.writeFile(safePath, content, 'utf-8');
+      invalidateTopologyCache();
+
+      let blastRadiusSummary: any;
+      try {
+        const modifiedSymbols = detectChangedSymbols(rawPath, oldContent, content);
+        const blast = calculateComprehensiveBlastRadius({
+          workspace,
+          filePath: rawPath,
+          modifiedSymbols,
+          depth: 2,
+        });
+        blastRadiusSummary = {
+          risk: blast.risk,
+          score: blast.score,
+          depth: blast.depth,
+          modifiedSymbols: blast.modifiedSymbols.map((s) => s.name),
+          directConsumers: blast.directConsumers,
+          transitiveFiles: blast.transitiveFiles,
+          impactedTestSuites: blast.impactedTestSuites,
+          callersCount: blast.callers.length,
+          publicApiAffected: blast.publicApiAffected,
+          breakingChange: blast.breakingChange,
+          warnings: blast.warnings,
+          recommendedActions: blast.recommendedActions,
+        };
+      } catch {}
 
       const bytesWritten = Buffer.byteLength(content, 'utf-8');
       const contentHash = computeStringHash(content);
@@ -100,6 +139,7 @@ export const writeFileTool: ToolDefinition = {
         message: isExisting
           ? `Đã ghi đè thành công file "${rawPath}".`
           : `Đã tạo mới thành công file "${rawPath}".`,
+        ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {

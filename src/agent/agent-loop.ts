@@ -1368,7 +1368,11 @@ export class AgentLoop {
           }
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || '');
-            this.verificationPolicy.recordModification(mutatedPath);
+            const blast = executionResult.result?.blastRadius;
+            this.verificationPolicy.recordModification(mutatedPath, {
+              impactedTestSuites: blast?.impactedTestSuites,
+              risk: blast?.risk,
+            });
             hasSubmittedSolution = false;
             if (mutatedPath) {
               this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);

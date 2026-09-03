@@ -4,6 +4,11 @@ import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
+import {
+  detectChangedSymbols,
+  calculateComprehensiveBlastRadius,
+  invalidateTopologyCache,
+} from './mutation-blast-radius.js';
 
 type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation';
 
@@ -163,6 +168,32 @@ export const replaceTextTool: ToolDefinition = {
       }
 
       await fs.writeFile(safePath, updatedContent, 'utf-8');
+      invalidateTopologyCache();
+
+      let blastRadiusSummary: any;
+      try {
+        const modifiedSymbols = detectChangedSymbols(rawPath, content, updatedContent);
+        const blast = calculateComprehensiveBlastRadius({
+          workspace,
+          filePath: rawPath,
+          modifiedSymbols,
+          depth: 2,
+        });
+        blastRadiusSummary = {
+          risk: blast.risk,
+          score: blast.score,
+          depth: blast.depth,
+          modifiedSymbols: blast.modifiedSymbols.map((s) => s.name),
+          directConsumers: blast.directConsumers,
+          transitiveFiles: blast.transitiveFiles,
+          impactedTestSuites: blast.impactedTestSuites,
+          callersCount: blast.callers.length,
+          publicApiAffected: blast.publicApiAffected,
+          breakingChange: blast.breakingChange,
+          warnings: blast.warnings,
+          recommendedActions: blast.recommendedActions,
+        };
+      } catch {}
 
       let diagnosticWarning: string | undefined;
       let syntaxErrors: any[] | undefined;
@@ -184,6 +215,7 @@ export const replaceTextTool: ToolDefinition = {
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
         message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
     } catch (err: any) {

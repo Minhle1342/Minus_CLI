@@ -4,6 +4,7 @@ import type { ToolExecutionContext } from './types.js';
 import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
 import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
+import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 
 export interface ToolExecutionResult {
@@ -262,6 +263,9 @@ export class ToolRunner {
         ? rawResult
         : { output: String(rawResult) };
       normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
+      if (!normalizedResult.blastRadius) {
+        normalizedResult = await enrichMutationResultWithBlastRadius(toolName, executionArgs, normalizedResult, this.workspace);
+      }
 
       let resultSnapshot: Record<string, any>;
       try {

@@ -3,13 +3,19 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { getOrCreateTypeScriptService } from './inspect-symbol.js';
 import { toolError, toolSuccess } from './tool-result.js';
+import {
+  calculateComprehensiveBlastRadius,
+  type ImpactRiskLevel,
+  type EnrichedBlastRadius,
+} from './mutation-blast-radius.js';
 
-export type ImpactRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+export type { ImpactRiskLevel };
 
 export interface ImpactAnalysisResult {
   risk: ImpactRiskLevel;
   path: string;
   symbol?: string;
+  depth: number;
   definition?: {
     path: string;
     line?: number;
@@ -19,35 +25,41 @@ export interface ImpactAnalysisResult {
   directReferences: number;
   callers: number;
   dependentFiles: string[];
+  directConsumers: string[];
+  transitiveFiles: string[];
   relatedTests: string[];
+  impactedTestSuites: string[];
   publicApiAffected: boolean;
+  breakingChange?: boolean;
+  score: number;
   warnings: string[];
   recommendedVerification: string[];
+  recommendedActions: string[];
 }
 
 /**
- * Tool analyze_impact (Blast Radius & Semantic Impact Analysis)
+ * Tool analyze_impact (Industrial-grade Blast Radius & Semantic Impact Analysis)
  * 
- * Đánh giá mức độ rủi ro và phạm vi ảnh hưởng (blast radius) của một thay đổi
- * trước khi áp dụng mutation vào codebase.
+ * Đánh giá mức độ rủi ro và phạm vi ảnh hưởng (blast radius) đa tầng (multi-hop) của một thay đổi
+ * trước khi áp dụng mutation vào codebase, bám sát tiêu chuẩn Cursor / Claude Code harness.
  */
 export const analyzeImpactTool: ToolDefinition = {
   name: 'analyze_impact',
-  description: 'Phân tích phạm vi ảnh hưởng (Blast Radius & Impact Analysis) của một symbol hoặc file: tìm các file phụ thuộc, bài kiểm thử liên quan, và tính toán mức độ rủi ro (LOW/MEDIUM/HIGH/CRITICAL) để chọn quy trình kiểm thử phù hợp.',
+  description: 'Phân tích toàn diện phạm vi ảnh hưởng (Blast Radius đa tầng): tìm chính xác các file phụ thuộc trực tiếp và gián tiếp (transitive consumers), bài kiểm thử liên quan, callers thực tế, và đánh giá mức độ rủi ro (LOW/MEDIUM/HIGH/CRITICAL) để dẫn hướng kiểm thử.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn file cần phân tích (ví dụ: "src/services/user-service.ts")',
+        description: 'Đường dẫn file cần phân tích (ví dụ: "src/tools/registry.ts")',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tùy chọn: Tên symbol cụ thể (hàm, interface, class) cần phân tích tác động',
+        description: 'Tùy chọn: Tên symbol cụ thể (hàm, interface, class, method) cần phân tích tác động.',
       },
       depth: {
         type: Type.INTEGER,
-        description: 'Độ sâu phân tích chuỗi phụ thuộc (mặc định: 2).',
+        description: 'Độ sâu phân tích chuỗi phụ thuộc gián tiếp (mặc định: 2, tối đa: 5).',
       },
     },
     required: ['path'],
@@ -55,21 +67,27 @@ export const analyzeImpactTool: ToolDefinition = {
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
     const rawPath = String(args.path || '').trim();
     const symbol = args.symbol ? String(args.symbol).trim() : undefined;
+    const depth = typeof args.depth === 'number' ? args.depth : 2;
 
     if (!rawPath) {
       return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
     }
 
     try {
-      const tsService = getOrCreateTypeScriptService(workspace);
-      const warnings: string[] = [];
-      let directReferences = 0;
-      let callers = 0;
-      let dependentFiles: string[] = [];
-      let relatedTests: string[] = [];
-      let publicApiAffected = false;
-      let definitionInfo: ImpactAnalysisResult['definition'];
+      // 1. Phân tích đồ thị phụ thuộc toàn diện đa tầng
+      const blast = calculateComprehensiveBlastRadius({
+        workspace,
+        filePath: rawPath,
+        symbol,
+        depth,
+      });
 
+      const tsService = getOrCreateTypeScriptService(workspace);
+      let definitionInfo: ImpactAnalysisResult['definition'];
+      let directReferences = 0;
+      let callersCount = blast.callers.length;
+
+      // 2. Nếu có symbol, lấy thêm thông tin chi tiết về symbol definition
       if (symbol) {
         const symDef = tsService.inspectSymbol(rawPath, symbol);
         if (symDef.found) {
@@ -79,54 +97,43 @@ export const analyzeImpactTool: ToolDefinition = {
             kind: symDef.kind,
             typeSignature: symDef.typeSignature,
           };
-          publicApiAffected = Boolean(symDef.isExported);
-          if (symDef.isExported) {
-            warnings.push(`Symbol "${symbol}" được export công khai; thay đổi có thể ảnh hưởng API bên ngoài.`);
-          }
         }
 
         const refs = tsService.findReferences(rawPath, symbol, 100);
         directReferences = refs.filter((r) => !r.isDefinition).length;
-        const distinctFiles = Array.from(new Set(refs.map((r) => r.file)));
-        dependentFiles = distinctFiles.filter((f) => f !== rawPath);
-        callers = refs.filter((r) => !r.isDefinition && r.file !== rawPath).length;
-
-        relatedTests = distinctFiles.filter((f) => /test|spec/i.test(f));
+        if (callersCount === 0) {
+          callersCount = refs.filter((r) => !r.isDefinition && r.file !== rawPath).length;
+        }
       } else {
-        // Quét toàn bộ file
+        // Quét diagnostics trước đó của file
         const allDiag = tsService.getDiagnostics(rawPath);
         if (allDiag.length > 0) {
-          warnings.push(`File "${rawPath}" hiện có ${allDiag.length} cảnh báo/lỗi diagnostics từ trước.`);
+          blast.warnings.push(`File "${rawPath}" hiện có ${allDiag.length} cảnh báo/lỗi diagnostics từ trước.`);
         }
       }
 
-      // Xác định Risk Level
-      let risk: ImpactRiskLevel = 'LOW';
-      if (publicApiAffected && directReferences > 10) {
-        risk = 'HIGH';
-      } else if (publicApiAffected || directReferences > 3 || dependentFiles.length > 2) {
-        risk = 'MEDIUM';
-      }
-
-      const recommendedVerification: string[] = ['get_diagnostics'];
-      if (risk === 'MEDIUM') {
-        recommendedVerification.push('tsc --noEmit', 'run targeted tests');
-      } else if (risk === 'HIGH') {
-        recommendedVerification.push('tsc --noEmit', 'run relevant tests', 'npm test (full test suite)');
-      }
+      // 3. Chuẩn bị recommendedVerification (tương thích ngược)
+      const recommendedVerification = [...blast.recommendedActions];
 
       const result: ImpactAnalysisResult = {
-        risk,
-        path: rawPath,
+        risk: blast.risk,
+        score: blast.score,
+        path: blast.targetFile,
         symbol,
+        depth: blast.depth,
         definition: definitionInfo,
         directReferences,
-        callers,
-        dependentFiles,
-        relatedTests,
-        publicApiAffected,
-        warnings,
+        callers: callersCount,
+        dependentFiles: blast.directConsumers,
+        directConsumers: blast.directConsumers,
+        transitiveFiles: blast.transitiveFiles,
+        relatedTests: blast.impactedTestSuites,
+        impactedTestSuites: blast.impactedTestSuites,
+        publicApiAffected: blast.publicApiAffected,
+        breakingChange: blast.breakingChange,
+        warnings: blast.warnings,
         recommendedVerification,
+        recommendedActions: blast.recommendedActions,
       };
 
       return toolSuccess(result);
