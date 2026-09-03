@@ -191,6 +191,8 @@ export class ContextCompactor {
             let logTail = rawLog;
             if (logLines.length > 12) {
               logTail = logLines.slice(0, 3).join('\n') + '\n... [Cắt ' + (logLines.length - 8) + ' dòng log] ...\n' + logLines.slice(-5).join('\n');
+            } else if (rawLog.length > this.config.maxCharactersPerToolResult) {
+              logTail = rawLog.slice(0, 150) + '\n... [Cắt ' + (rawLog.length - 300) + ' ký tự] ...\n' + rawLog.slice(-150);
             }
 
             compressedPayload = {

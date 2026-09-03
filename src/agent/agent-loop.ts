@@ -54,6 +54,7 @@ import { DynamicContextCache } from './dynamic-context-cache.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness } from './cognitive-harness.js';
+import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
@@ -113,6 +114,8 @@ export class AgentLoop {
   readonly rollbackOrchestrator: HypothesisRollbackOrchestrator;
   readonly workspaceVerifier: WorkspaceStateVerifier;
   readonly cognitiveHarness = new CognitiveHarness();
+  readonly contextSnapshotManager: ContextSnapshotManager;
+  private targetFilesModifiedInTurn = new Set<string>();
   readonly kernel?: AgentKernel;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
@@ -184,6 +187,8 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
+      this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
+      this.contextSnapshotManager.init().catch(() => {});
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
@@ -213,6 +218,8 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
+      this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
+      this.contextSnapshotManager.init().catch(() => {});
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
@@ -445,6 +452,7 @@ export class AgentLoop {
     this.finalAnswerGuard.reset();
     this.verificationPolicy.reset();
     this.cognitiveHarness.reset();
+    this.targetFilesModifiedInTurn.clear();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
@@ -511,6 +519,15 @@ export class AgentLoop {
       return rejectionMessage;
     }
 
+    // 0. Context Drift & Inter-Task Semantic Handoff (context-management-context-save)
+    const latestSnapshot = await this.contextSnapshotManager.getLatestSnapshot().catch(() => undefined);
+    if (latestSnapshot) {
+      const drift = await this.contextSnapshotManager.detectDrift(latestSnapshot).catch(() => undefined);
+      if (drift?.hasDrift) {
+        CLI.renderContextDriftWarning(drift);
+      }
+    }
+
     // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
     const history = session.getHistory();
     if (history.length === 1 && history[0].role === 'user') {
@@ -527,6 +544,9 @@ export class AgentLoop {
           : '';
         let prefix = `${digest}\n\n`;
         prefix += scopedMemory;
+        if (latestSnapshot) {
+          prefix += `${this.contextSnapshotManager.generateHandoffDigest([latestSnapshot])}\n\n`;
+        }
         if (isGoal) {
           prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
         } else if (!isFinite(effectiveMaxSteps)) {
@@ -580,7 +600,30 @@ export class AgentLoop {
         this.goalManager.disarm();
         return rejectionMessage;
       }
-      // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
+      // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - context-management-context-save)
+      const currentHistory = session.getHistory();
+      let totalHistoryChars = 0;
+      for (const m of currentHistory) {
+        for (const p of m.parts || []) {
+          if (typeof p?.text === 'string') totalHistoryChars += p.text.length;
+          if (p?.functionResponse) totalHistoryChars += JSON.stringify(p.functionResponse).length;
+        }
+      }
+      const estimatedHistoryTokens = ContextCompactor.estimateTokens(' '.repeat(totalHistoryChars));
+      const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
+      const compactionThreshold = maxBudget * 0.70;
+
+      if (estimatedHistoryTokens > compactionThreshold && currentHistory.length > 4) {
+        const compactRes = this.contextCompactor.compact(currentHistory, {
+          triggerRatio: 0.70,
+        });
+        if (compactRes.stats.tokensSaved > 0) {
+          session.replaceHistory(compactRes.messages, 'auto-compaction');
+          CLI.renderAutoCompactionNotice(compactRes.stats.tokensSaved, compactRes.stats.compactedTokens);
+          await this.persistSession(session);
+        }
+      }
+
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
         const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
@@ -1495,6 +1538,10 @@ export class AgentLoop {
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
             consecutiveUnproductiveSteps = 0;
+            const targetPath = toolArgs.path || toolArgs.target_path || toolArgs.file_path || toolArgs.targetFile;
+            if (targetPath) {
+              this.targetFilesModifiedInTurn.add(String(targetPath));
+            }
           } else if (!isMutatingOrVerification) {
             consecutiveUnproductiveSteps++;
           }
@@ -1969,7 +2016,7 @@ export class AgentLoop {
       } else {
         this.goalManager.disarm();
       }
-      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed', turnUserRequest, finalAnswer);
 
       return finalAnswer;
     }
@@ -2197,6 +2244,8 @@ export class AgentLoop {
     maxSteps: number,
     isGoalMode: boolean,
     reason: string,
+    turnUserRequest?: string,
+    finalAnswer?: string,
   ): Promise<void> {
     await this.agentHooks.run('agent/turn-stopping', {
       session,
@@ -2209,9 +2258,32 @@ export class AgentLoop {
     session.append('turn/end', { turn, reason });
     session.assertRuntimeInvariants();
     await this.persistSession(session);
-    if (reason === 'goal-completed' || reason === 'task-completed' || (isGoalMode && reason === 'goal-stopped')) {
+    if (reason === 'goal-completed' || reason === 'task-completed' || reason === 'completed' || (isGoalMode && reason === 'goal-stopped')) {
       void this.summarizeSessionEpisodic(session).catch(() => {});
+
+      // Auto Context Save (Task Boundary Snapshot - context-management-context-save)
+      if (turnUserRequest || finalAnswer) {
+        try {
+          const snapshot = await this.contextSnapshotManager.captureSnapshot({
+            sessionId: session.id,
+            turn,
+            taskPrompt: turnUserRequest || 'Task Execution',
+            finalAnswer: finalAnswer || 'Task completed.',
+            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+            verificationStatus: this.verificationPolicy.canComplete().allowed ? 'verified' : 'unverified',
+          });
+          CLI.renderContextSnapshotSaved(snapshot);
+          session.append('context/snapshot', {
+            snapshotId: snapshot.snapshotId,
+            contextFingerprint: snapshot.contextFingerprint,
+          });
+          await this.persistSession(session);
+        } catch {
+          // Non-blocking snapshot
+        }
+      }
     }
+    this.targetFilesModifiedInTurn.clear();
     this.setAgentStatus('idle', session, turn);
   }
 

@@ -42,7 +42,8 @@ export type SessionEventType =
   | 'session/compaction'
   | 'request/header'
   | 'control/decision'
-  | 'audit/task-completion';
+  | 'audit/task-completion'
+  | 'context/snapshot';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
 
@@ -144,6 +145,8 @@ export interface SessionEventData {
   skill?: SkillActivationDecision | null;
   requestHeader?: RecordedRequestHeader;
   controlDecision?: Record<string, any>;
+  snapshotId?: string;
+  contextFingerprint?: string;
 }
 
 export interface SessionEvent {
@@ -208,6 +211,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'request/header',
     'control/decision',
     'audit/task-completion',
+    'context/snapshot',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);
   }

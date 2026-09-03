@@ -1433,6 +1433,48 @@ export class CLI {
   }
 
   /**
+   * Hiển thị thông báo Nén Ngữ Cảnh Tự Động (Auto Context Compaction Gate)
+   */
+  static renderAutoCompactionNotice(savedTokens: number, remainingTokens: number): void {
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.cyan}${c.bold}🧹 [AUTO CONTEXT COMPACTION TRIGGERED]:${c.reset} ${c.emerald}Pruned & saved ~${savedTokens.toLocaleString()} tokens${c.reset} (History: ~${remainingTokens.toLocaleString()} tokens)`);
+  }
+
+  /**
+   * Hiển thị thông báo Snapshot Ngữ Cảnh đã được lưu an toàn tại ranh giới nhiệm vụ
+   */
+  static renderContextSnapshotSaved(snapshot: {
+    snapshotId: string;
+    turn: number;
+    contextFingerprint: string;
+    architecturalDecisions: Array<any>;
+    stateMutations: { filesModified: string[] };
+    verificationStatus: string;
+  }): void {
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}💾 [CONTEXT SNAPSHOT SAVED - TASK BOUNDARY]:${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.white}• Snapshot ID:${c.reset} ${c.brightCyan}${snapshot.snapshotId}${c.reset} (Turn ${snapshot.turn})`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.white}• Fingerprint:${c.reset} ${c.mutedText}sha256:${snapshot.contextFingerprint.slice(0, 16)}...${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.white}• Decisions:${c.reset}   ${c.brightGreen}${snapshot.architecturalDecisions.length} architectural decisions recorded${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.white}• Artifacts:${c.reset}   ${c.slate}.codingagent/snapshots/${snapshot.snapshotId}.{json,md}${c.reset}`);
+  }
+
+  /**
+   * Hiển thị cảnh báo Trôi Dạt Ngữ Cảnh (Context Drift Warning)
+   */
+  static renderContextDriftWarning(drift: {
+    divergedFiles: string[];
+    details: string[];
+  }): void {
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.crimson}${c.bold}⚠️ [CONTEXT DRIFT DETECTED - WORKSPACE DIVERGED]:${c.reset}`);
+    for (const d of drift.details.slice(0, 3)) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.amber}↳ ${d}${c.reset}`);
+    }
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightCyan}👉 Action:${c.reset} ${c.mutedText}Re-inspecting modified files before initiating new task mutations.${c.reset}`);
+  }
+
+  /**
    * Hiển thị Bộ nhớ dài hạn của dự án
    */
   static renderMemory(data: any): void {
