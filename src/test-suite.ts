@@ -88,6 +88,7 @@ import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
 import { PlanningPlugin } from './kernel/plugins/planning-plugin.js';
 import { MemoryPlugin } from './kernel/plugins/memory-plugin.js';
 import { SandboxPlugin } from './kernel/plugins/sandbox-plugin.js';
+import { runControlPlaneTests } from './control-plane/__tests__/control-plane.test.js';
 import { TaskPlugin } from './kernel/plugins/task-plugin.js';
 import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
 import {
@@ -6381,7 +6382,7 @@ Always write tests first!`;
 
   // 45.1. LocalExecutionSubstrate & Telemetry
   const testSubstrate = new LocalExecutionSubstrate({ defaultCwd: process.cwd(), defaultTimeoutMs: 10000 });
-  const execResult = await testSubstrate.exec('node -e "console.log(\'SUBSTRATE_READY\')"');
+  const execResult = await testSubstrate.exec('echo SUBSTRATE_READY');
   assert(execResult.success === true, 'LocalExecutionSubstrate thực thi lệnh thành công');
   assert(execResult.stdout.includes('SUBSTRATE_READY'), 'LocalExecutionSubstrate thu thập đúng stdout');
   assert(execResult.exitCode === 0, 'LocalExecutionSubstrate trả về exitCode = 0');
@@ -6477,13 +6478,20 @@ FAILED tests/test_math.py::test_division - ZeroDivisionError: division by zero
 
   // 45.7. run_test_suite Tool
   const runTestToolRes = await runTestSuiteTool.execute(
-    { command: 'node -e "console.log(\'Tests: 5 passed, 0 failed, 5 total\')"' },
+    { command: 'echo Tests: 5 passed, 0 failed, 5 total' },
     new Workspace(process.cwd())
   );
   assert(runTestToolRes.success === true, 'run_test_suite tool thực thi thành công');
   assert(runTestToolRes.isPassed === true, 'run_test_suite nhận diện trạng thái isPassed = true');
   assert(runTestToolRes.passed === 5, 'run_test_suite trích xuất đúng 5 passed tests');
   assert(Boolean(runTestToolRes.summary?.includes('VƯỢT QUA')), 'run_test_suite sinh summary chuẩn');
+
+  // ========================================
+  // 46. KIỂM THỬ EVIDENCE-DRIVEN CONTROL PLANE (SCENARIOS A - H)
+  // ========================================
+  const edcpTestRes = await runControlPlaneTests();
+  passed += edcpTestRes.passed;
+  failed += edcpTestRes.failed;
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

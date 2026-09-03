@@ -78,7 +78,7 @@ export class LocalExecutionSubstrate implements IExecutionSubstrate {
     const shellExecutable = isWindows
       ? (process.env.ComSpec || 'cmd.exe')
       : (process.env.SHELL || '/bin/bash');
-    const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-c', command];
+    const shellArgs = isWindows ? ['/c', command] : ['-c', command];
 
     const mergedEnv = options.isolatedEnv
       ? { ...options.env }

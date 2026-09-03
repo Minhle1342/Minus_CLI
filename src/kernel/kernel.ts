@@ -31,6 +31,7 @@ import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
 import { IExecutionSubstrate, ExecutionSubstrateFactory } from '../execution/index.js';
 import { TestEngineeringHarness } from '../testing/index.js';
+import { EvidenceDrivenControlPlane } from '../control-plane/index.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -143,6 +144,7 @@ export interface KernelContext {
   agentEvents: AgentEventBus;
   executionSubstrate: IExecutionSubstrate;
   testHarness: TestEngineeringHarness;
+  controlPlane: EvidenceDrivenControlPlane;
   llm: any;
   events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
@@ -205,6 +207,10 @@ export class AgentKernel {
       hypothesisTracker: hypothesis,
       criticGate: critic,
     });
+    const controlPlane = new EvidenceDrivenControlPlane({
+      workspace,
+      checkpointManager: checkpoints,
+    });
     const tools = new ToolRegistry(plan, memory);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
@@ -243,6 +249,7 @@ export class AgentKernel {
       agentEvents,
       executionSubstrate,
       testHarness,
+      controlPlane,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {
@@ -253,6 +260,10 @@ export class AgentKernel {
         const oldPath = this.ctx.workspace.rootDir;
         void disposeLspManager(oldWorkspace);
         this.ctx.workspace = newWs;
+        this.ctx.controlPlane = new EvidenceDrivenControlPlane({
+          workspace: newWs,
+          checkpointManager: (this.ctx as any).checkpoints,
+        });
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, this.ctx.compose);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);

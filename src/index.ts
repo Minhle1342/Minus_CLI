@@ -810,7 +810,27 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     });
   }
 
-  const rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+  let rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+  const setupReadlineListeners = (rlInstance: readline.Interface): void => {
+    rlInstance.on('SIGINT', () => {
+      if (activeExecutionController) {
+        activeExecutionController.abort();
+        slashHints.clear(promptWidth);
+        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+      } else {
+        const curLine = (rlInstance as any).line || '';
+        if (curLine.length > 0) {
+          (rlInstance as any).line = '';
+          (rlInstance as any).cursor = 0;
+          (rlInstance as any)._refreshLine?.();
+        } else {
+          void handleGracefulShutdown('SIGINT');
+        }
+      }
+    });
+  };
+  setupReadlineListeners(rl);
+
   const getActiveModelInfo = () => ({
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
@@ -901,17 +921,38 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     process.stdout.write('\x1b[?25h');
     slashHints.clear(0);
     const promptLen = getVisibleWidth(promptSymbol);
-    const firstLine = await rlInterface.question(promptSymbol);
+
+    let activeRl = rlInterface;
+    if ((activeRl as any).closed) {
+      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+      setupReadlineListeners(rl);
+      activeRl = rl;
+    }
+
+    let firstLine = '';
+    try {
+      firstLine = await activeRl.question(promptSymbol);
+    } catch (err: any) {
+      if (err?.code === 'ERR_USE_AFTER_CLOSE' || (activeRl as any).closed) {
+        rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+        setupReadlineListeners(rl);
+        activeRl = rl;
+        firstLine = await activeRl.question(promptSymbol);
+      } else {
+        throw err;
+      }
+    }
+
     slashHints.clear(promptLen + getVisibleWidth(firstLine));
     const lines: string[] = [firstLine];
 
     // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây
     while (true) {
-      const pendingLine = (rlInterface as any).line;
+      const pendingLine = (activeRl as any).line;
       if (typeof pendingLine === 'string' && pendingLine.length > 0) {
         lines.push(pendingLine);
-        (rlInterface as any).line = '';
-        (rlInterface as any).cursor = 0;
+        (activeRl as any).line = '';
+        (activeRl as any).cursor = 0;
         continue;
       }
 
@@ -919,15 +960,15 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         let timer: NodeJS.Timeout;
         const onLine = (extraLine: string) => {
           clearTimeout(timer);
-          rlInterface.removeListener('line', onLine);
+          activeRl.removeListener('line', onLine);
           lines.push(extraLine);
           resolve(true);
         };
         timer = setTimeout(() => {
-          rlInterface.removeListener('line', onLine);
+          activeRl.removeListener('line', onLine);
           resolve(false);
         }, 30);
-        rlInterface.on('line', onLine);
+        activeRl.on('line', onLine);
       });
 
       if (!hasMore) {
@@ -935,18 +976,29 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
     }
 
-    flushStdin(rlInterface);
+    flushStdin(activeRl);
     return lines.join('\n');
   }
 
   // Đăng ký Permission Prompt Handler cho interactive CLI mode
   kernel.ctx.permissions.setPromptHandler(async (request) => {
     slashHints.clear();
+    if ((rl as any).closed) {
+      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+      setupReadlineListeners(rl);
+    }
     // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
     flushStdin(rl);
 
     CLI.renderPermissionPrompt(request);
-    const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    let answer = '';
+    try {
+      answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    } catch {
+      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+      setupReadlineListeners(rl);
+      answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+    }
     flushStdin(rl);
 
     if (answer === 'y' || answer === 'yes' || answer === '') {

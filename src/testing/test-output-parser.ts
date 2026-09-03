@@ -25,9 +25,10 @@ export class TestOutputParser {
 
     switch (framework) {
       case 'vitest':
-      case 'jest': {
-        // Ví dụ: Tests: 12 passed, 2 failed, 14 total
-        const testsLine = text.match(/Tests:\s+([^\n\r]+)/i);
+      case 'jest':
+      case 'npm': {
+        // Ví dụ: Tests: 12 passed, 2 failed, 14 total hoặc Tests  2 passed (2)
+        const testsLine = text.match(/Tests:?\s+([^\n\r]+)/i);
         if (testsLine) {
           const passMatch = testsLine[1].match(/(\d+)\s+passed/i);
           const failMatch = testsLine[1].match(/(\d+)\s+failed/i);
@@ -57,11 +58,12 @@ export class TestOutputParser {
 
       case 'pytest': {
         // Ví dụ: ====== 12 passed, 2 failed, 1 skipped in 0.45s ======
-        const summaryMatch = text.match(/===+([^\n\r]+)===+/i);
-        if (summaryMatch) {
-          const passMatch = summaryMatch[1].match(/(\d+)\s+passed/i);
-          const failMatch = summaryMatch[1].match(/(\d+)\s+failed/i);
-          const skipMatch = summaryMatch[1].match(/(\d+)\s+skipped/i);
+        const summaryMatches = text.match(/===+([^\n\r]+)===+/gi) || [];
+        const summaryLine = summaryMatches.find((line) => /passed|failed/i.test(line)) || summaryMatches[0];
+        if (summaryLine) {
+          const passMatch = summaryLine.match(/(\d+)\s+passed/i);
+          const failMatch = summaryLine.match(/(\d+)\s+failed/i);
+          const skipMatch = summaryLine.match(/(\d+)\s+skipped/i);
 
           passed = passMatch ? parseInt(passMatch[1], 10) : 0;
           failed = failMatch ? parseInt(failMatch[1], 10) : 0;
@@ -131,7 +133,7 @@ export class TestOutputParser {
     const text = output || '';
 
     if (cmd.includes('vitest') || text.includes('VITEST')) return 'vitest';
-    if (cmd.includes('jest') || text.includes('Jest:')) return 'jest';
+    if (cmd.includes('jest') || text.includes('Jest:') || /Tests:?\s+\d+\s+passed/i.test(text)) return 'jest';
     if (cmd.includes('mocha') || text.includes('passing (') || text.includes('failing')) return 'mocha';
     if (cmd.includes('pytest') || text.includes('pytest')) return 'pytest';
     if (cmd.includes('cargo test') || text.includes('test result:')) return 'cargotest';

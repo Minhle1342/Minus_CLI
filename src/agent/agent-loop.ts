@@ -51,6 +51,7 @@ import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
+import { EvidenceDrivenControlPlane, type RiskLevel } from '../control-plane/index.js';
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
@@ -109,6 +110,7 @@ export class AgentLoop {
   readonly adaptiveReasoning = new AdaptiveReasoningController();
   readonly rollbackOrchestrator: HypothesisRollbackOrchestrator;
   readonly workspaceVerifier: WorkspaceStateVerifier;
+  readonly controlPlane: EvidenceDrivenControlPlane;
   readonly kernel?: AgentKernel;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
@@ -180,6 +182,7 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
+      this.controlPlane = this.kernel.ctx.controlPlane;
       this.maxSteps = options?.maxSteps ?? 30;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
@@ -209,6 +212,11 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
+      this.controlPlane = new EvidenceDrivenControlPlane({
+        workspace: this._workspace,
+        checkpointManager: this.checkpointManager,
+        speculativeManager: this.speculativeManager,
+      });
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
@@ -268,6 +276,7 @@ export class AgentLoop {
     this.repositoryMemory.setWorkspace(workspace);
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
+      this.controlPlane.workspaceManager.setWorkspace(workspace);
       if (this.toolProvider === this.toolRegistry) {
         this.toolRunner = this.kernel.ctx.toolRunner;
       } else {
@@ -278,6 +287,7 @@ export class AgentLoop {
       (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
       (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
+      this.controlPlane.workspaceManager.setWorkspace(workspace);
       this.checkpointManager.init().catch(() => {});
       this.memoryManager.init(workspace).catch(() => {});
       this.repositoryMemory.init().catch(() => {});
@@ -505,6 +515,12 @@ export class AgentLoop {
       return rejectionMessage;
     }
 
+    try {
+      await this.controlPlane.captureBaseline(`Turn ${turn} baseline`);
+    } catch {
+      // Baseline capture failure must not block execution
+    }
+
     // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
     const history = session.getHistory();
     if (history.length === 1 && history[0].role === 'user') {
@@ -608,6 +624,14 @@ export class AgentLoop {
       });
       previousClassification = classification;
       this.verificationPolicy.setRequiredRisk(classification.risk);
+      const mappedRiskLevel: RiskLevel = (classification.risk === 'R0' || classification.risk === 'R1')
+        ? 'MINIMAL'
+        : (classification.risk === 'R2' || classification.risk === 'R3')
+        ? 'STANDARD'
+        : classification.risk === 'R4'
+        ? 'HIGH_RISK'
+        : 'CRITICAL';
+      this.controlPlane.setTaskRiskLevel(mappedRiskLevel);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
       const candidateProvider = toolControlMode === 'enforce'
@@ -1348,6 +1372,7 @@ export class AgentLoop {
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || '');
             this.verificationPolicy.recordModification(mutatedPath);
+            this.controlPlane.recordMutation({ filePath: mutatedPath });
             hasSubmittedSolution = false;
             if (mutatedPath) {
               this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);
@@ -1360,6 +1385,17 @@ export class AgentLoop {
               if (postDiagnostics) {
                 differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
               }
+            }
+            if (isVerificationCommand(toolArgs.command)) {
+              this.controlPlane.recordEvidence({
+                type: 'test',
+                command: String(toolArgs.command || ''),
+                sourceTool: toolName,
+                status: isToolResultFailure(executionResult.result) ? 'FAIL' : 'PASS',
+                summary: String(executionResult.result.stdout || executionResult.result.stderr || executionResult.result.error || '').slice(0, 150),
+                affectedFiles: [],
+                rawDetails: executionResult.result,
+              });
             }
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
@@ -1730,55 +1766,24 @@ export class AgentLoop {
             availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
             hasSubmittedSolution,
           });
-      const evidenceDecision = (isSubagent || isMockLLM)
-        ? { allow: true, reasons: [] }
-        : this.completionEvidenceGate.evaluate(finalAnswer, session, {
-            turn,
-            codeChangeRequired: this.planManager.getRequirements().required,
-            userRequest: turnUserRequest,
+
+      const edcpOutcome = (isSubagent || isMockLLM)
+        ? { authorized: true, decision: { approved: true, score: 100, hardBlockers: [], staleEvidence: [], missingEvidence: [], reasons: [], critiquePrompt: undefined } }
+        : this.controlPlane.authorizeCompletion({
             hasSubmittedSolution,
+            finalAnswerText: finalAnswer,
+            registeredFiles: this.kernel?.ctx.compose?.getState()?.registeredFiles,
           });
-      const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
-      if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
-        activeSkills.push('verification-before-completion');
-      }
-      const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM)
-        ? { allowed: true }
-        : this.verificationPolicy.canComplete(activeSkills);
-      const criticDecision = (isSubagent || isMockLLM)
-        ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
-        : this.criticGate.evaluate({
-            finalAnswer,
-            session,
-            workspace: this._workspace,
-            hypothesisTracker: this.hypothesisTracker,
-            userRequest: turnUserRequest,
-            turn,
-            hasSubmittedSolution,
-          });
-      const finalAnswerDecision = (isSubagent || isMockLLM)
-        ? (policyDecision.allow ? { allow: true } : policyDecision)
-        : (!policyDecision.allow
+
+      const finalAnswerDecision = !policyDecision.allow
         ? policyDecision
-        : !criticDecision.approved
+        : !edcpOutcome.authorized
         ? {
             allow: false,
             reason: 'unverified-evidence' as const,
-            continuationPrompt: criticDecision.critiquePrompt,
+            continuationPrompt: edcpOutcome.decision.critiquePrompt || `[CONTROL PLANE CRITIC]: Task verification incomplete. Action required:\n${edcpOutcome.decision.reasons.map((r) => `- ${r}`).join('\n')}`,
           }
-        : (!hasSubmittedSolution && !evidenceDecision.allow)
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: evidenceDecision.continuationPrompt,
-          }
-        : (!hasSubmittedSolution && !verificationDecision.allowed)
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
-          }
-        : { allow: true });
+        : { allow: true };
 
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;
