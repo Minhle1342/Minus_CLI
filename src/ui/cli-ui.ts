@@ -1549,15 +1549,59 @@ export class CLI {
   }
 
   /**
-   * Đầu mỗi Step trong AgentLoop (Antigravity Responsive Step Header)
+   * Đầu mỗi Step trong AgentLoop (Antigravity Responsive Step Header & Workflow Pipeline)
    */
-  static renderStepHeader(step: number, maxSteps: number): void {
+  static renderStepHeader(
+    step: number,
+    maxSteps: number,
+    context?: {
+      phase?: string;
+      activeTask?: string;
+      playbook?: string;
+      risk?: string;
+    },
+  ): void {
     const width = getTerminalWidth();
     const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
     const progress = isUnlimited ? `${step}/∞ [AUTONOMOUS GOAL]` : `${step}/${maxSteps}`;
     const title = `⚡ STEP ${progress}`;
     const barLen = Math.max(4, width - title.length - 6);
     console.log(`\n${c.geminiBlue}${c.bold}╭── ${c.brightCyan}${title}${c.geminiBlue} ${'─'.repeat(barLen)}${c.reset}`);
+
+    if (context?.phase) {
+      const phases = ['explore', 'implement', 'verify', 'release'];
+      const phaseLabels: Record<string, string> = {
+        explore: 'EXPLORE',
+        plan: 'PLAN',
+        implement: 'IMPLEMENT',
+        verify: 'VERIFY',
+        release: 'COMPLETE',
+      };
+      const current = (context.phase || 'explore').toLowerCase();
+
+      const pipelineStr = phases.map((p) => {
+        const label = phaseLabels[p] || p.toUpperCase();
+        if (p === current || (current === 'plan' && p === 'explore')) {
+          return `${c.brightYellow}${c.bold}● ${label}${c.reset}`;
+        }
+        const pIndex = phases.indexOf(p);
+        const currIndex = phases.indexOf(current === 'plan' ? 'explore' : current);
+        if (currIndex > pIndex) {
+          return `${c.emerald}✔ ${label}${c.reset}`;
+        }
+        return `${c.slate}○ ${label}${c.reset}`;
+      }).join(` ${c.slate}──►${c.reset} `);
+
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.brightCyan}${c.bold}🔄 PIPELINE:${c.reset}  ${pipelineStr}`);
+
+      const metaParts: string[] = [];
+      if (context.playbook) metaParts.push(`${c.teal}Playbook:${c.reset} ${c.brightCyan}[${context.playbook}]${c.reset}`);
+      if (context.risk) metaParts.push(`${c.teal}Risk:${c.reset} ${c.amber}[${context.risk}]${c.reset}`);
+      if (context.activeTask) metaParts.push(`${c.teal}Focus:${c.reset} ${c.mutedText}"${context.activeTask.slice(0, 45)}"${c.reset}`);
+      if (metaParts.length > 0) {
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${metaParts.join(` ${c.slate}·${c.reset} `)}`);
+      }
+    }
   }
 
   /**
@@ -1798,6 +1842,30 @@ export class CLI {
     console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
     console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.slate}📥 [RESULT]${c.reset} ${c.bold}${name}${c.reset} ➔ [${badge}] ${durationBadge}`);
 
+    if (result.blastRadius) {
+      const br = result.blastRadius;
+      const riskColors: Record<string, string> = {
+        CRITICAL: `${c.crimson}${c.bold}CRITICAL`,
+        HIGH: `${c.brightRed}${c.bold}HIGH`,
+        MEDIUM: `${c.brightYellow}${c.bold}MEDIUM`,
+        LOW: `${c.emerald}${c.bold}LOW`,
+      };
+      const riskBadge = riskColors[br.risk] || br.risk;
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.amber}${c.bold}💥 [BLAST RADIUS]${c.reset} Risk: [${riskBadge}${c.reset}] · Score: ${br.score ?? 0}`);
+      if (br.modifiedSymbols?.length) {
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}        ${c.slate}• Modified Symbols:${c.reset} ${c.brightCyan}${br.modifiedSymbols.join(', ')}${c.reset}`);
+      }
+      if (br.directConsumers?.length) {
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}        ${c.slate}• Direct Consumers:${c.reset} ${c.brightYellow}${br.directConsumers.length} file(s)${c.reset} ${c.dim}(${br.transitiveFiles?.length || 0} transitive)${c.reset}`);
+      }
+      if (br.impactedTestSuites?.length) {
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}        ${c.slate}• Targeted Tests:${c.reset}   ${c.brightGreen}${br.impactedTestSuites.join(', ')}${c.reset}`);
+      }
+      if (br.breakingChange) {
+        console.log(`${c.geminiBlue}${c.bold}│${c.reset}        ${c.crimson}${c.bold}⚠️  WARNING: Public API breaking change detected!${c.reset}`);
+      }
+    }
+
     if (result.error) {
       console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.crimson}${result.error}${c.reset}`);
     } else if (result.content !== undefined) {
@@ -1821,7 +1889,7 @@ export class CLI {
     } else if (result.message) {
       console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.emerald}${result.message}${c.reset}`);
     } else if (result.success === undefined || Object.keys(result).length > 1) {
-      const { diagnostic, suggestion, prompt, hint, suggestionText, ...rest } = result;
+      const { diagnostic, suggestion, prompt, hint, suggestionText, blastRadius, ...rest } = result;
       if (Object.keys(rest).length > 0) {
         const resStr = JSON.stringify(rest);
         const preview = resStr.length > 100 ? `${resStr.slice(0, 97)}...` : resStr;

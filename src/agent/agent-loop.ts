@@ -569,9 +569,6 @@ export class AgentLoop {
         this.goalManager.disarm();
         return rejectionMessage;
       }
-      CLI.renderStepHeader(step, effectiveMaxSteps);
-      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
-
       // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
@@ -609,6 +606,22 @@ export class AgentLoop {
         previous: previousClassification,
       });
       previousClassification = classification;
+
+      const adviceInfo = this.toolAdvisor.advise({
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        hasErrors: this.lastToolExecution?.result?.error !== undefined,
+        activeTaskTitle: activeTask?.title,
+      });
+
+      // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
+      CLI.renderStepHeader(step, effectiveMaxSteps, {
+        phase: classification.phase,
+        activeTask: activeTask?.title,
+        playbook: adviceInfo.playbook,
+        risk: classification.risk,
+      });
+      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
