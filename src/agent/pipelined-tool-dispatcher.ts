@@ -1,4 +1,4 @@
-import type { ToolRunner, ToolExecutionResult } from '../tools/types.js';
+import type { ToolRunner, ToolExecutionResult } from '../tools/tool-runner.js';
 import type { Workspace } from '../workspace/workspace.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
@@ -78,11 +78,11 @@ export class PipelinedToolDispatcher {
     const startTime = Date.now();
     this.telemetry.earlyDispatchedCount++;
 
-    const promise = toolRunner.run(toolName, args, context).then((res) => {
+    const promise = toolRunner.run(toolName, args, context).then((res: any) => {
       this.inFlightExecutions.delete(key);
       this.completedExecutions.set(key, { result: res, readyAt: Date.now() });
       return res;
-    }).catch((err) => {
+    }).catch((err: any) => {
       this.inFlightExecutions.delete(key);
       const fallbackResult: ToolExecutionResult = {
         toolName,

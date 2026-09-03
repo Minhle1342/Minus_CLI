@@ -58,13 +58,17 @@ export function htmlToMarkdown(html: string): string {
   return text.trim();
 }
 
+import { Workspace } from '../workspace/workspace.js';
+import { createWebFetchTool } from './web-fetch.js';
+
 /**
  * Tool: read_url_content
  * Chuẩn Google Antigravity CLI: Đọc nội dung từ URL qua HTTP request và chuyển sang markdown.
+ * Tái cấu trúc ủy nhiệm sang engine web_fetch với bộ lọc bảo mật prompt injection và code block extraction.
  */
 export const readUrlContentTool: ToolDefinition = {
   name: 'read_url_content',
-  description: 'Fetch content from a URL via HTTP request. Converts HTML to clean markdown for fast reading without browser overhead.',
+  description: 'Fetch content from a URL via HTTP request. Converts HTML to clean markdown for fast reading without browser overhead. (Delegates to web_fetch).',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -79,7 +83,7 @@ export const readUrlContentTool: ToolDefinition = {
     },
     required: [],
   },
-  async execute(args: Record<string, any>): Promise<Record<string, any>> {
+  async execute(args: Record<string, any>, workspace: Workspace = new Workspace()): Promise<Record<string, any>> {
     const targetUrl = String(args.Url || args.url || '').trim();
 
     if (!targetUrl) {
@@ -87,45 +91,29 @@ export const readUrlContentTool: ToolDefinition = {
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-      const res = await fetch(targetUrl, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
-        },
-      });
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
+      const webFetch = createWebFetchTool();
+      const res = await webFetch.execute({ url: targetUrl, ...args }, workspace);
+      if (res.error) {
         return {
           url: targetUrl,
-          error: `HTTP request failed with status: ${res.status} ${res.statusText}`,
-          statusCode: res.status,
+          error: res.error,
+          statusCode: res.statusCode,
+          errorCode: res.errorCode,
         };
       }
-
-      const rawHtml = await res.text();
-      const markdown = htmlToMarkdown(rawHtml);
-
-      // Cắt bớt nếu quá 40,000 ký tự
-      const maxLength = 40000;
-      const truncated = markdown.length > maxLength
-        ? markdown.slice(0, maxLength) + `\n\n[... Truncated ${markdown.length - maxLength} characters ...]`
-        : markdown;
-
       return {
         url: targetUrl,
         success: true,
-        content: truncated,
-        length: truncated.length,
+        content: res.content,
+        title: res.title,
+        length: res.returnedLength || res.content?.length || 0,
+        codeBlocksCount: res.codeBlocksCount,
+        securityWarnings: res.securityWarnings,
       };
     } catch (err: any) {
       return {
         url: targetUrl,
-        error: `Failed to fetch URL content: ${err.message}`,
+        error: `Failed to fetch URL content: ${err?.message || String(err)}`,
       };
     }
   },

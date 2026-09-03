@@ -418,7 +418,7 @@ export class ProjectMemoryManager {
     const requestedConfidence = options.confidence ?? (source === 'model' ? 0.5 : 1);
     const normalizedExistingInsight = existing?.insight.trim().toLowerCase();
     const hasConflict = Boolean(existing && normalizedExistingInsight !== insight.trim().toLowerCase());
-    const lacksModelProvenance = source === 'model' && !latestObservedResult;
+    const lacksModelProvenance = source === 'model' && category !== 'episodic' && !latestObservedResult;
     const existingIsUntrusted = Boolean(existing && this.normalizeInsight(existing).trustStatus !== 'active');
     const trustStatus = source === 'model' && (hasConflict || lacksModelProvenance || existingIsUntrusted)
       ? 'contested'
@@ -467,6 +467,10 @@ export class ProjectMemoryManager {
       } else {
         this.memoryData.learnedInsights.push(record);
       }
+
+      // Tự động phân rã và dọn dẹp các memory có điểm utility thấp (ngưỡng max 60 records)
+      this.pruneLowUtilityMemories(60, 0.25);
+
       await this.save();
 
       // Đồng bộ Vector Memory Store (RAG)
@@ -484,6 +488,100 @@ export class ProjectMemoryManager {
     }
 
     return record;
+  }
+
+  /**
+   * Lưu tóm tắt phiên làm việc (Episodic Memory) để tái sử dụng ở các phiên sau
+   */
+  async saveEpisodicSummary(
+    sessionId: string,
+    summary: string,
+    options: {
+      outcome?: string;
+      filesModified?: string[];
+      confidence?: number;
+    } = {},
+  ): Promise<MemoryRecord> {
+    const safeSessionKey = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32);
+    const key = `session_${safeSessionKey}`;
+    const tags = [
+      'episodic',
+      `session:${sessionId}`,
+      ...(options.outcome ? [`outcome:${options.outcome}`] : []),
+      ...(options.filesModified || []).map((f) => `file:${path.basename(f)}`),
+    ];
+    return this.saveInsight(key, summary, 'episodic', {
+      scope: 'project',
+      source: 'model',
+      confidence: options.confidence ?? 0.85,
+      tags,
+    });
+  }
+
+  /**
+   * Lấy danh sách các tóm tắt phiên gần nhất (Episodic Memories)
+   */
+  getEpisodicSummaries(limit = 3): MemoryRecord[] {
+    return this.memoryData.learnedInsights
+      .map((item) => this.normalizeInsight(item) as MemoryRecord)
+      .filter((item) => item.category === 'episodic' && item.trustStatus === 'active')
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit);
+  }
+
+  /**
+   * Tính toán điểm hữu dụng (Utility Score theo chuẩn MIRIX / CoALA):
+   * Utility = 0.4 * Recency + 0.3 * Frequency + 0.3 * Confidence
+   */
+  calculateUtility(item: LearnedInsight): number {
+    const now = Date.now();
+    const createdTime = item.createdAt ? Date.parse(item.createdAt) : now;
+    const ageInDays = Math.max(0, (now - createdTime) / (24 * 60 * 60 * 1000));
+    // Chu kỳ bán rã thời gian: 30 ngày (Exponential half-life)
+    const recencyScore = Math.pow(0.5, ageInDays / 30);
+    const accessCount = (item as any).accessCount || 1;
+    const frequencyScore = Math.min(accessCount / 10, 1.0);
+    const confidenceScore = item.confidence ?? 0.8;
+    return 0.4 * recencyScore + 0.3 * frequencyScore + 0.3 * confidenceScore;
+  }
+
+  /**
+   * Tự động dọn dẹp các memory ít hữu dụng khi vượt quá giới hạn
+   * Bảo toàn 100% các quy ước gõ tay (manual conventions) và rules
+   */
+  pruneLowUtilityMemories(maxItems = 60, minUtility = 0.25): number {
+    const records = this.memoryData.learnedInsights;
+    if (records.length <= maxItems) return 0;
+
+    // Giữ nguyên các quy ước thủ công và luật cốt lõi
+    const preservable = new Set<string>();
+    for (const item of records) {
+      if (item.source === 'manual' || item.category === 'convention' || item.category === 'rule') {
+        if (item.id) preservable.add(item.id);
+      }
+    }
+
+    // Sắp xếp các memory có thể xóa theo thứ tự Utility tăng dần (thấp nhất xóa trước)
+    const candidates = records
+      .filter((item) => !item.id || !preservable.has(item.id))
+      .map((item) => ({ item, utility: this.calculateUtility(item) }))
+      .sort((a, b) => a.utility - b.utility);
+
+    const toRemove = new Set<string>();
+    for (const candidate of candidates) {
+      if (records.length - toRemove.size <= maxItems) break;
+      if (candidate.utility < minUtility || records.length - toRemove.size > maxItems) {
+        if (candidate.item.id) toRemove.add(candidate.item.id);
+      }
+    }
+
+    if (toRemove.size > 0) {
+      this.memoryData.learnedInsights = records.filter((item) => !item.id || !toRemove.has(item.id));
+      for (const id of toRemove) {
+        void this.vectorStore.delete(id);
+      }
+    }
+    return toRemove.size;
   }
 
   /**
@@ -566,12 +664,20 @@ export class ProjectMemoryManager {
 
     const trustedInsights = this.memoryData.learnedInsights
       .map((item) => this.normalizeInsight(item))
-      .filter((item) => this.isTrustedForAutomaticContext(item, 0.65))
+      .filter((item) => item.category !== 'episodic' && this.isTrustedForAutomaticContext(item, 0.65))
       .slice(-4);
     if (trustedInsights.length > 0) {
       lines.push(`- Kinh nghiệm đã ghi nhớ:`);
       for (const item of trustedInsights) {
         lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
+      }
+    }
+
+    const episodicInsights = this.getEpisodicSummaries(2);
+    if (episodicInsights.length > 0) {
+      lines.push(`- Tóm tắt phiên trước (Episodic Context):`);
+      for (const item of episodicInsights) {
+        lines.push(`  * [${item.key}]: ${item.insight}`);
       }
     }
 
@@ -635,7 +741,13 @@ export class ProjectMemoryManager {
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score || b.item.updatedAt.localeCompare(a.item.updatedAt))
       .slice(0, options.limit ?? 8)
-      .map(({ item }) => ({ ...item }));
+      .map(({ item }) => {
+        const target = this.memoryData.learnedInsights.find((i) => i.id === item.id);
+        if (target) {
+          (target as any).accessCount = ((target as any).accessCount || 0) + 1;
+        }
+        return { ...item };
+      });
   }
 
   /**
@@ -685,7 +797,7 @@ export class ProjectMemoryManager {
       : source === 'model' ? 0.5 : 1;
     const validTrustStatuses = new Set(['active', 'contested', 'superseded']);
     const invalidExpiry = Boolean(item.expiresAt && !Number.isFinite(Date.parse(item.expiresAt)));
-    const inferredTrustStatus = source === 'model' && !item.sourceEventSeq ? 'contested' : 'active';
+    const inferredTrustStatus = source === 'model' && !item.sourceEventSeq && item.category !== 'episodic' ? 'contested' : 'active';
     const trustStatus = invalidExpiry
       ? 'contested'
       : validTrustStatuses.has(String(item.trustStatus))

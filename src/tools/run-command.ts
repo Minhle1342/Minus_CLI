@@ -84,6 +84,14 @@ const ALLOWED_COMMAND_PREFIXES = [
   'tsc',
   'curl ',
   'wget ',
+  // Read-only Git commands
+  'git status',
+  'git diff',
+  'git log',
+  'git branch',
+  'git show',
+  'git rev-parse',
+  'git describe',
 ];
 
 /**
@@ -189,7 +197,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
 /**
  * Tạo Tool run_command có tích hợp SandboxManager và TaskManager (Chuẩn Antigravity CLI Unified Command Execution)
  */
-export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager): ToolDefinition {
+export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
     description: 'Thực thi lệnh terminal (build, test, lint, explore, inspect, scripts) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu (dev server, long build) sang background task mà không làm treo Agent.',
@@ -221,7 +229,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
     },
     async execute(args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
       const rawCommand = String(args.command || args.CommandLine || '').trim();
-      const hasExplicitPermission = context?.permissionGranted === true;
+      let hasExplicitPermission = context?.permissionGranted === true;
+      const effectivePermissionManager = context?.permissionManager || permissionManager;
       const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
       const configuredTimeout = Number(process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
       const requestedTimeout = Number(args.timeout_ms);
@@ -237,6 +246,27 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(rawCommand);
+
+      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp hoặc chứa phân đoạn ngoài allowlist
+      const needsApproval = Boolean(shellAnalysis.error)
+        || shellAnalysis.complex
+        || !shellAnalysis.segments.every(isAllowedCommand);
+
+      if (needsApproval && !hasExplicitPermission && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+        const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+        if (permCheck.allowed) {
+          hasExplicitPermission = true;
+          if (context) context.permissionGranted = true;
+        } else {
+          return {
+            command: rawCommand,
+            error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi hoặc chưa được cấp quyền (PERMISSION APPROVAL).`,
+            errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
+            permissionRequestId: permCheck.permissionRequestId,
+          };
+        }
+      }
+
       if (shellAnalysis.error || (shellAnalysis.complex && !hasExplicitPermission)) {
         return {
           command: rawCommand,
@@ -245,10 +275,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
       const gitSubcommandBeforeDispatch = findGitSubcommand(rawCommand);
-      if (gitSubcommandBeforeDispatch) {
+      const readOnlyGitSubcommands = new Set(['status', 'diff', 'log', 'branch', 'show', 'rev-parse', 'describe', 'tag']);
+      if (gitSubcommandBeforeDispatch && !readOnlyGitSubcommands.has(gitSubcommandBeforeDispatch)) {
         return {
           command: rawCommand,
-          error: `Git ${gitSubcommandBeforeDispatch} phải được thực thi bằng git_command hoặc tool Git chuyên dụng.`,
+          error: `Git mutation (${gitSubcommandBeforeDispatch}) phải được thực thi bằng git_command hoặc tool Git chuyên dụng có per-turn authorization.`,
           errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
           suggestion: `Use git_command with subcommand "${gitSubcommandBeforeDispatch}" and a separate args array so workspace scope and per-turn authorization can be verified.`,
         };
@@ -257,9 +288,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
         return {
           command: rawCommand,
-          error: `One or more shell segments are not allowlisted: ${deniedSegments.join(', ')}`,
+          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) từ người dùng. Các phân đoạn ngoài allowlist: ${deniedSegments.join(', ')}`,
           errorCode: 'COMMAND_NOT_ALLOWED',
           deniedSegments,
+          suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
         };
       }
 
@@ -311,10 +343,27 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       if (executionTarget === 'host') {
         if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+          if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+            const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+            if (permCheck.allowed) {
+              hasExplicitPermission = true;
+              if (context) context.permissionGranted = true;
+            } else {
+              return {
+                command: rawCommand,
+                error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
+                errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
+                permissionRequestId: permCheck.permissionRequestId,
+              };
+            }
+          }
+        }
+        if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
-            error: `Lệnh "${rawCommand}" không nằm trong allowlist để thực thi trên Host.`,
+            error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host.`,
             errorCode: 'COMMAND_NOT_ALLOWED',
+            suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
           };
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
@@ -361,12 +410,30 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (sandboxManager) {
         const status = sandboxManager.getStatus();
         
-        // Nếu không ở trong môi trường Docker Container cô lập, vẫn áp dụng allowlist bảo vệ máy chủ
+        // Nếu không ở trong môi trường Docker Container cô lập, kiểm tra cấp quyền
+        if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+          if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+            const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+            if (permCheck.allowed) {
+              hasExplicitPermission = true;
+              if (context) context.permissionGranted = true;
+            } else {
+              return {
+                command: rawCommand,
+                error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
+                errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
+                permissionRequestId: permCheck.permissionRequestId,
+              };
+            }
+          }
+        }
+
         if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           return {
             command: rawCommand,
-            error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép trên Host. (Bật Docker Sandbox để chạy lệnh không giới hạn).`,
+            error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host. (Hoặc bật Docker Sandbox để chạy lệnh không giới hạn).`,
             errorCode: 'COMMAND_NOT_ALLOWED',
+            suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
           };
         }
 
@@ -420,10 +487,28 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Fallback mặc định
       if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+          const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+          if (permCheck.allowed) {
+            hasExplicitPermission = true;
+            if (context) context.permissionGranted = true;
+          } else {
+            return {
+              command: rawCommand,
+              error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi.`,
+              errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
+              permissionRequestId: permCheck.permissionRequestId,
+            };
+          }
+        }
+      }
+
+      if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
         return {
           command: rawCommand,
-          error: `Lệnh "${rawCommand}" không nằm trong danh sách lệnh an toàn được cấp phép.`,
+          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) trước khi thực thi.`,
           errorCode: 'COMMAND_NOT_ALLOWED',
+          suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
         };
       }
 

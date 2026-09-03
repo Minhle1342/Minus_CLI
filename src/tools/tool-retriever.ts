@@ -52,6 +52,8 @@ export class ToolRetriever {
         'run_command',
         'get_symbol_context_360',
         'get_diagnostics',
+        'search_codebase_fast',
+        'submit_solution',
       ],
       minScore: config?.minScore ?? 0.05,
     };
@@ -176,6 +178,7 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
+    if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
     if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
     if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
     if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
@@ -248,6 +251,9 @@ export class ToolRetriever {
     }
     if (text.includes('subagent') || text.includes('delegate') || text.includes('parallel') || text.includes('agent')) {
       tags.add('subagent delegate multi-agent background parallel');
+    }
+    if (text.includes('computer') || text.includes('desktop') || text.includes('mouse') || text.includes('click') || text.includes('keyboard') || text.includes('screenshot') || text.includes('screen') || text.includes('gui')) {
+      tags.add('computer use desktop gui screenshot mouse click type keyboard hotkey scroll screen display os');
     }
 
     return Array.from(tags).join(' ');

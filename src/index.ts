@@ -715,6 +715,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           agentLoop.goalManager.complete(agentLoop.planManager);
           if (activeSession) {
             sessionPersistence.save(activeSession).catch(() => {});
+            void agentLoop.summarizeSessionEpisodic(activeSession).catch(() => {});
           }
           console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
         }
@@ -1334,12 +1335,15 @@ ${planPrompt}`;
         continue;
       }
 
-      if (trimmed === '/new-session') {
-        activeSession = await kernel.ctx.sessions.create();
-        agentLoop.bindSession(activeSession);
-        await sessionPersistence.save(activeSession);
+      if (trimmed === '/new-session' || trimmed === '/reset-session') {
+        const { episodicRecord, newSession } = await agentLoop.resetSessionWithEpisodicEpilogue(activeSession);
+        activeSession = newSession;
         saveSession({ activeSessionId: activeSession.id });
-        console.log(`\n${c.green}✔ Đã tạo session mới:${c.reset} ${activeSession.id}\n`);
+        console.log(`\n${c.green}✔ Đã lưu tóm tắt Episodic Memory từ phiên cũ và tạo session mới sạch:${c.reset} ${activeSession.id}`);
+        if (episodicRecord) {
+          console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
+        }
+        console.log('');
         continue;
       }
 

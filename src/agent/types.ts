@@ -43,6 +43,8 @@ export interface AgentLoopOptions {
   repositoryMemoryTokens?: number;
   /** Per-turn classification and runtime tool authorization rollout mode. */
   toolControlMode?: ToolControlMode;
+  /** Execute read-only tools speculatively during model token streaming. */
+  enableStreamingDispatch?: boolean;
 }
 
 export type AgentState =

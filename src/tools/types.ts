@@ -10,6 +10,7 @@ export interface ToolExecutionContext {
   /** Internal capability set by ToolRunner only after PermissionManager approval. */
   permissionGranted?: boolean;
   permissionRequestId?: string;
+  permissionManager?: any;
   /** Durable binding between the model-visible tool set and runtime authority. */
   decisionId?: string;
   allowedToolNames?: string[];

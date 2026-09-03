@@ -48,7 +48,7 @@ export const readFileTool: ToolDefinition = {
     required: ['path'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '');
+    const rawPath = String(args.path || args.filePath || '').trim();
     if (!rawPath) {
       return { error: 'Tham số "path" là bắt buộc.' };
     }
@@ -63,7 +63,13 @@ export const readFileTool: ToolDefinition = {
 
       // Giới hạn kích thước file đọc để tránh tràn context LLM (tối đa 200KB)
       if (stat.size > 200 * 1024) {
-        return { path: rawPath, error: `File quá lớn (${stat.size} bytes). Giới hạn tối đa là 200KB.` };
+        return {
+          path: rawPath,
+          error: `File quá lớn (${Math.round(stat.size / 1024)}KB). Giới hạn tối đa mỗi lần đọc toàn bộ là 200KB để chống tràn context token.`,
+          errorCode: 'FILE_TOO_LARGE',
+          fileSizeBytes: stat.size,
+          suggestion: `Hãy đọc từng phần bằng tham số "startLine" và "endLine" (ví dụ: startLine: 1, endLine: 200), hoặc sử dụng "outlineOnly: true" để xem cấu trúc hàm/lớp, hoặc dùng "symbol: <tên_symbol>" để chỉ trích xuất phần thân hàm/lớp bạn cần.`,
+        };
       }
 
       const fileContent = await fs.readFile(safePath, 'utf-8');

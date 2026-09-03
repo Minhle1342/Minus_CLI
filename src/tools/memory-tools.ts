@@ -23,8 +23,8 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         },
         category: {
           type: Type.STRING,
-          description: 'Phân loại: "convention", "architecture", "gotcha", "rule".',
-          enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight'],
+          description: 'Phân loại: "convention", "architecture", "gotcha", "rule", "insight", "episodic".',
+          enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight', 'episodic'],
         },
         scope: {
           type: Type.STRING,

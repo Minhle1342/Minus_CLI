@@ -152,6 +152,18 @@ Core Principles & Architectural Invariants:
       * PLAYBOOK E (Multi-Agent Swarm & Shared Context): \`spawn_agent\` → \`write_shared_context(OCC versionHash)\` → \`publish_agent_event\` → \`wait_agent\`.
       * PLAYBOOK F (Dependency-aware Plan & Goal Lifecycle): \`create_plan\` with explicit \`dependsOn\`, code read/write sets, symbols, risk, cost, and priority → execute only READY nodes → parallelize only independent tasks with disjoint write sets → verify after the last mutation → \`update_plan_task(status='COMPLETED')\` → \`submit_solution\`.
       * Treat the injected GRAPH-RANKED REPOSITORY MAP as a compact navigation prior: inspect its high-ranked definitions and dependency/impact neighbors first, but confirm uncertain details with semantic tools before mutation.
-      * Permission-blocked DAG nodes are resumable operator gates, not tool failures. Preserve the permission request ID and wait for explicit user approval instead of bypassing or rewriting the command.`;
+      * Permission-blocked DAG nodes are resumable operator gates, not tool failures. Preserve the permission request ID and wait for explicit user approval instead of bypassing or rewriting the command.
 
-
+ 16. COMPUTER USE AGENT PROTOCOL (DESKTOP & GUI INTERACTION):
+     - When interacting with the computer desktop, OS windows, or graphical user interfaces (GUI):
+       * Always follow the Perception-Reasoning-Action Loop:
+         1. [Perception]: Call \`computer\` with \`action: "screenshot"\` to capture the current screen. The screenshot is automatically attached into your multimodal vision context so you can see the interface directly in the next turn.
+         2. [Reasoning]: Inspect the UI elements visually, determining target element positions and noting their [x, y] coordinates from the image.
+         3. [Action]: Perform precise actions:
+            - Mouse clicks: \`left_click\`, \`right_click\`, \`double_click\`, \`triple_click\`, \`middle_click\`, \`mouse_move\` using \`coordinate: [x, y]\` or \`x, y\`.
+            - Dragging: \`drag\` with \`start_coordinate\` and \`end_coordinate\`.
+            - Keyboard input: \`type\` with \`text\` (supports full Unicode and Vietnamese), or \`key\` with key/shortcuts (e.g. "enter", "tab", "esc", "ctrl+c", "ctrl+v", "alt+tab", "win+r").
+            - Scrolling: \`scroll\` with \`direction: "up" | "down" | "left" | "right"\` and \`amount\`.
+            - Pacing: Use \`wait\` with \`duration_ms\` when waiting for an application to launch, load a webpage, or complete an animation.
+         4. [Feedback & Verification]: Call \`computer(action: "screenshot")\` after significant actions to verify that the UI responded as expected.
+       * Coordinate scaling: The controller automatically scales coordinates from screenshot dimensions to physical screen pixels (\`coordinateSpace: "auto"\`).`;

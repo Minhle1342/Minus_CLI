@@ -14,7 +14,7 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Tạo một file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Thích hợp khi tạo file mới hoàn toàn.',
+  description: 'Tạo file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Hỗ trợ tham số overwrite: false để bảo đảm an toàn chống ghi đè nhầm file đã tồn tại.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -26,12 +26,17 @@ export const writeFileTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Toàn bộ nội dung văn bản sẽ ghi vào file',
       },
+      overwrite: {
+        type: Type.BOOLEAN,
+        description: 'Cho phép ghi đè nếu file đã tồn tại (mặc định: true). Nếu đặt false, tool sẽ từ chối ghi đè nếu file đã có sẵn.',
+      },
     },
     required: ['path', 'content'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '');
+    const rawPath = String(args.path || args.filePath || '').trim();
     const content = String(args.content ?? '');
+    const overwrite = args.overwrite !== false;
 
     if (!rawPath) {
       return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
@@ -54,6 +59,15 @@ export const writeFileTool: ToolDefinition = {
         isExisting = true;
       } catch {
         isExisting = false;
+      }
+
+      if (isExisting && !overwrite) {
+        return toolError(
+          `File "${rawPath}" đã tồn tại trên đĩa. Để cập nhật một phần nội dung, hãy dùng replace_text; hoặc đặt overwrite: true nếu muốn ghi đè toàn bộ.`,
+          'FILE_ALREADY_EXISTS',
+          { path: rawPath },
+          'Sử dụng replace_text để sửa đổi chính xác từng phần hoặc đặt overwrite=true để ghi đè.',
+        );
       }
 
       // Đảm bảo thư mục cha tồn tại

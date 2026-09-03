@@ -1,6 +1,6 @@
 export type MemoryScope = 'project' | 'session' | 'goal';
 export type MemorySource = 'manual' | 'workspace-index' | 'tool-result' | 'model' | 'dream';
-export type MemoryCategory = 'convention' | 'architecture' | 'gotcha' | 'rule' | 'insight';
+export type MemoryCategory = 'convention' | 'architecture' | 'gotcha' | 'rule' | 'insight' | 'episodic';
 export type MemoryTrustStatus = 'active' | 'contested' | 'superseded';
 
 export interface MemoryProvenance {
@@ -32,6 +32,7 @@ export interface MemoryRecord {
   provenance?: MemoryProvenance[];
   verifiedAt?: string;
   supersededBy?: string;
+  accessCount?: number;
 }
 
 export interface MemoryQueryOptions {

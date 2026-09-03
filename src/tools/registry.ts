@@ -19,8 +19,8 @@ import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
-import { searchWebTool } from './search-web.js';
-import { readUrlContentTool } from './read-url-content.js';
+import { createWebSearchTool } from './web-search.js';
+import { createWebFetchTool } from './web-fetch.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
 import { createPublishAgentEventTool } from './agent-event-tools.js';
 import { queryCallGraphTool } from './query-call-graph.js';
@@ -41,6 +41,7 @@ import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
+import { ComputerController, createComputerTool } from '../computer/index.js';
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -62,6 +63,10 @@ export interface ToolProvider {
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
   private retriever: ToolRetriever;
+  private computerController: ComputerController;
+  private sandboxManager?: any;
+  private taskManager?: TaskManager;
+  private permissionManager?: any;
 
   constructor(
     planManager?: PlanManager,
@@ -69,6 +74,7 @@ export class ToolRegistry implements ToolProvider {
     retrieverConfig?: ToolRetrieverConfig
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
+    this.computerController = new ComputerController();
 
     // Đăng ký mặc định các tool cốt lõi của Coding Agent
     this.register(readFileTool);
@@ -86,13 +92,15 @@ export class ToolRegistry implements ToolProvider {
     this.register(lspQueryTool);
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
+    this.register(createComputerTool(this.computerController));
     this.register(runCommandTool);
-    this.register(searchWebTool);
-    this.register(readUrlContentTool);
+    this.register(createWebSearchTool());
+    this.register(createWebFetchTool());
     this.register(queryCallGraphTool);
     this.register(getRouteMapTool);
     this.register(getSymbolContext360Tool);
     this.register(getArchitectureTopologyTool);
+    this.register(createSearchCodebaseFastTool());
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
@@ -110,6 +118,16 @@ export class ToolRegistry implements ToolProvider {
 
   attachSession(session: any): void {
     this.register(createInspectImageTool(() => session));
+    this.computerController.setSessionAccessor(() => session);
+  }
+
+  attachComputerController(controller: ComputerController): void {
+    this.computerController = controller;
+    this.register(createComputerTool(this.computerController));
+  }
+
+  getComputerController(): ComputerController {
+    return this.computerController;
   }
 
   attachPlanManager(planManager: PlanManager): void {
@@ -129,12 +147,19 @@ export class ToolRegistry implements ToolProvider {
   }
 
   attachSandboxManager(sandboxManager: any): void {
-    this.register(createRunCommandTool(sandboxManager));
+    this.sandboxManager = sandboxManager;
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
   attachTaskManager(taskManager: TaskManager): void {
+    this.taskManager = taskManager;
     this.register(createManageTaskTool(taskManager));
-    this.register(createRunCommandTool(undefined, taskManager));
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+  }
+
+  attachPermissionManager(permissionManager: any): void {
+    this.permissionManager = permissionManager;
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
   attachScheduleManager(scheduleManager: ScheduleManager): void {
@@ -165,11 +190,24 @@ export class ToolRegistry implements ToolProvider {
   /**
    * Lấy tool theo tên
    */
+  /**
+   * Lấy tool theo tên (hỗ trợ alias tương thích: search_web -> web_search, read_url_content -> web_fetch)
+   */
   has(name: string): boolean {
+    if (name === 'search_web') return this.tools.has('web_search') || this.tools.has('search_web');
+    if (name === 'read_url_content') return this.tools.has('web_fetch') || this.tools.has('read_url_content');
     return this.tools.has(name);
   }
 
   get(name: string): ToolDefinition | undefined {
+    if (name === 'search_web') {
+      const found = this.tools.get('web_search') || this.tools.get('search_web');
+      if (found) return found;
+    }
+    if (name === 'read_url_content') {
+      const found = this.tools.get('web_fetch') || this.tools.get('read_url_content');
+      if (found) return found;
+    }
     return this.tools.get(name);
   }
 
@@ -213,7 +251,19 @@ export class ToolRegistry implements ToolProvider {
    * Thực thi trực tiếp tool với workspace context (fallback method)
    */
   async execute(name: string, args: Record<string, any>, workspace: Workspace = new Workspace()): Promise<Record<string, any>> {
-    const tool = this.get(name);
+    let resolvedName = name;
+    let resolvedArgs = args;
+
+    if (name === 'search_web' && !this.tools.has('search_web') && this.tools.has('web_search')) {
+      resolvedName = 'web_search';
+    } else if (name === 'read_url_content' && !this.tools.has('read_url_content') && this.tools.has('web_fetch')) {
+      resolvedName = 'web_fetch';
+      if (!resolvedArgs.url && resolvedArgs.Url) {
+        resolvedArgs = { ...resolvedArgs, url: resolvedArgs.Url };
+      }
+    }
+
+    const tool = this.get(resolvedName);
     if (!tool) {
       return {
         error: `Tool "${name}" không tồn tại trong ToolRegistry. Các tool hiện có: ${Array.from(this.tools.keys()).join(', ')}`,
@@ -222,7 +272,7 @@ export class ToolRegistry implements ToolProvider {
     }
 
     try {
-      return await tool.execute(args, workspace);
+      return await tool.execute(resolvedArgs, workspace);
     } catch (err: any) {
       return {
         error: `Lỗi khi thực thi tool "${name}": ${err.message}`,
@@ -259,6 +309,12 @@ export class ToolScope implements ToolProvider {
   get(name: string): ToolDefinition | undefined {
     const local = this.localTools.get(name);
     if (local) return local;
+    if (name === 'search_web' && (!this.allowed || this.allowed.has('search_web') || this.allowed.has('web_search'))) {
+      return this.base.get('web_search') || this.base.get('search_web');
+    }
+    if (name === 'read_url_content' && (!this.allowed || this.allowed.has('read_url_content') || this.allowed.has('web_fetch'))) {
+      return this.base.get('web_fetch') || this.base.get('read_url_content');
+    }
     if (this.allowed && !this.allowed.has(name)) return undefined;
     return this.base.get(name);
   }

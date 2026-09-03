@@ -16,13 +16,17 @@ export const listFilesTool: ToolDefinition = {
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới thư mục cần xem (ví dụ: "." hoặc "src")',
+        description: 'Đường dẫn tương đối tới thư mục cần xem (ví dụ: "." hoặc "src"). Mặc định là ".". Chấp nhận alias dirPath.',
+      },
+      dirPath: {
+        type: Type.STRING,
+        description: 'Alias cho path: thư mục cần liệt kê.',
       },
     },
-    required: ['path'],
+    required: [],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '.');
+    const rawPath = String(args.path || args.dirPath || '.').trim() || '.';
 
     try {
       const safePath = workspace.resolveSafePath(rawPath);

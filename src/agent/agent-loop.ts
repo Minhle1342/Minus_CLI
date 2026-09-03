@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
@@ -10,6 +11,7 @@ import { ContextCompactor } from './context-compactor.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
+import type { MemoryRecord } from '../memory/types.js';
 import { AgentKernel, KernelContext } from '../kernel/kernel.js';
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
@@ -160,7 +162,7 @@ export class AgentLoop {
       this._workspace = this.kernel.ctx.workspace;
       this.toolProvider = options?.toolScope || this.toolRegistry;
       this.toolRunner = options?.toolScope
-        ? new ToolRunner(this.toolProvider, this._workspace, undefined, this.kernel.ctx.compose)
+        ? new ToolRunner(this.toolProvider, this._workspace, this.kernel.ctx.permissions, this.kernel.ctx.compose)
         : this.kernel.ctx.toolRunner;
       this.checkpointManager = this.kernel.ctx.checkpoints;
       this.contextCompactor = this.kernel.ctx.compactor;
@@ -271,10 +273,10 @@ export class AgentLoop {
       if (this.toolProvider === this.toolRegistry) {
         this.toolRunner = this.kernel.ctx.toolRunner;
       } else {
-        this.toolRunner = new ToolRunner(this.toolProvider, workspace, undefined, this.kernel.ctx.compose);
+        this.toolRunner = new ToolRunner(this.toolProvider, workspace, this.kernel.ctx.permissions, this.kernel.ctx.compose);
       }
     } else {
-      this.toolRunner = new ToolRunner(this.toolProvider, this._workspace);
+      this.toolRunner = new ToolRunner(this.toolProvider, this._workspace, this.toolRunner.getPermissionManager?.());
       (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
       (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
@@ -613,7 +615,8 @@ export class AgentLoop {
       const candidateProvider = toolControlMode === 'enforce'
         ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, recommendedToolDecision.allowedToolNames)
         : this.toolProvider;
-      const dynamicRetrievalEnabled = toolControlMode === 'enforce' || this.loopOptions?.enableDynamicToolRetrieval === true;
+      const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
+        && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
       const activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
         ? candidateProvider.getRelevantTools(activeStepQuery)
         : candidateProvider.getFunctionDeclarations();
@@ -654,7 +657,32 @@ export class AgentLoop {
         activeTaskTitle: activeTask?.title,
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
       });
-      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, 4);
+      // Intent-Gated Memory Retrieval:
+      // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
+      // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
+      //   + Tắt Graph Repository Map (tiết kiệm 1.600 tokens)
+      //   + Thu nhỏ ngân sách Repository Memory xuống ~300 tokens
+      //   + Giảm số lượng relevantMemory xuống tối đa 2
+      // - Phase 'explore' / 'plan' hoặc complexity 'large' -> Tác vụ bao quát: Nạp đầy đủ ngân sách
+      const isLocalizedExecution = classification.phase === 'implement'
+        || classification.phase === 'verify'
+        || classification.phase === 'release'
+        || classification.complexity === 'trivial'
+        || classification.complexity === 'small'
+        || classification.fastPath;
+
+      const configuredRepoMemTokens = this.loopOptions?.repositoryMemoryTokens ?? 1_000;
+      const configuredRepoMapTokens = this.loopOptions?.repositoryMapTokens ?? 1_600;
+
+      const effectiveRepoMemTokens = isLocalizedExecution
+        ? Math.min(300, configuredRepoMemTokens)
+        : configuredRepoMemTokens;
+      const effectiveRepoMapTokens = isLocalizedExecution
+        ? 0
+        : configuredRepoMapTokens;
+
+      const memoryLimit = isLocalizedExecution ? 2 : 4;
+      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
       const memoryPrompt = relevantMemory.length > 0
         ? [
             '[VERIFIED RELEVANT PROJECT MEMORY]',
@@ -681,9 +709,9 @@ export class AgentLoop {
         relevantMemory: relevantMemory.map((item) => [item.key, item.confidence, item.insight]),
         registeredFiles: composeState?.registeredFiles || [],
         repositoryMemoryEnabled: this.loopOptions?.enableRepositoryMemory !== false,
-        repositoryMemoryTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
-        repositoryMapEnabled: this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel,
-        repositoryMapTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+        repositoryMemoryTokens: effectiveRepoMemTokens,
+        repositoryMapEnabled: this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0,
+        repositoryMapTokens: effectiveRepoMapTokens,
       });
       const cachedDynamicContext = dynamicCacheEnabled
         ? this.dynamicContextCache.get(dynamicCacheKey)
@@ -693,11 +721,11 @@ export class AgentLoop {
         repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
         repositoryContext = cachedDynamicContext.repositoryContext;
       } else {
-        if (this.loopOptions?.enableRepositoryMemory !== false) {
+        if (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0) {
           try {
             const recalled = await this.repositoryMemory.recall(activeStepQuery, {
-              limit: 12,
-              maxTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
+              limit: isLocalizedExecution ? 4 : 12,
+              maxTokens: effectiveRepoMemTokens,
             });
             repositoryMemoryContext = recalled.rendered;
             repositoryMemoryRecords = recalled.records;
@@ -705,7 +733,7 @@ export class AgentLoop {
             // Repository memory is an independent, fail-open context source.
           }
         }
-        if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel) {
+        if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0) {
           try {
             const repositoryQuery = [
               activeStepQuery,
@@ -713,7 +741,7 @@ export class AgentLoop {
               ...repositoryMemoryRecords.map((item) => item.statement),
             ].filter(Boolean).join('\n');
             repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
-              maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+              maxTokens: effectiveRepoMapTokens,
               seedFiles: [
                 ...(activeTask?.readSet || []),
                 ...(activeTask?.writeSet || []),
@@ -823,7 +851,7 @@ export class AgentLoop {
             firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:token', token);
           },
-          onToolCallEarly: (earlyCall) => {
+          onToolCallEarly: (earlyCall: any) => {
             if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
               const runContext = {
                 sessionId: session.id,
@@ -1925,6 +1953,106 @@ export class AgentLoop {
     }
   }
 
+  /**
+   * Đúc kết một Session thành bản ghi Episodic Memory súc tích
+   * Ghi lại mục tiêu, các file đã sửa đổi, kết quả test và kết luận để tái sử dụng ở các phiên sau.
+   */
+  async summarizeSessionEpisodic(session: Session): Promise<MemoryRecord | null> {
+    const events = session.getEvents();
+    if (events.length === 0) return null;
+
+    // 1. Tìm mục tiêu ban đầu từ tin nhắn user
+    const firstUserEvent = events.find((e) => e.type === 'user/message' && e.data.source !== 'system');
+    let objective = '';
+    if (firstUserEvent?.data.content?.parts) {
+      for (const p of firstUserEvent.data.content.parts) {
+        if (typeof p?.text === 'string') {
+          // Bỏ phần warm start prefix nếu có
+          const rawText = p.text;
+          const userIdx = rawText.indexOf('[USER INSTRUCTION]:');
+          objective = userIdx >= 0 ? rawText.slice(userIdx + 19).trim() : rawText.trim();
+          break;
+        }
+      }
+    }
+    if (!objective) objective = 'Tác vụ lập trình';
+    const compactObjective = objective.slice(0, 150).replace(/\s+/g, ' ');
+
+    // 2. Thu thập các files đã chỉnh sửa qua tool calls
+    const modifiedFiles = new Set<string>();
+    let testsPassed = false;
+    let testsFailed = false;
+
+    for (const e of events) {
+      if (e.type === 'tool/call') {
+        const name = e.data.toolName;
+        const args = e.data.args || {};
+        if (['replace_text', 'write_file', 'patch_file'].includes(name || '')) {
+          const p = args.path || args.filePath || args.targetFile;
+          if (p && typeof p === 'string') modifiedFiles.add(path.basename(p));
+        }
+      }
+      if (e.type === 'tool/result') {
+        const res = e.data.result || {};
+        if (typeof res.exitCode === 'number') {
+          if (res.exitCode === 0) testsPassed = true;
+          else testsFailed = true;
+        }
+      }
+    }
+
+    // 3. Xác định outcome
+    const filesList = Array.from(modifiedFiles);
+    const verificationOutcome = testsPassed
+      ? 'Đã xác thực test thành công (exitCode: 0)'
+      : testsFailed
+        ? 'Test chưa pass hoàn toàn'
+        : filesList.length > 0 ? 'Đã chỉnh sửa code' : 'Đã khảo sát';
+
+    // 4. Tìm tóm tắt cuối cùng từ model nếu có
+    const lastAssistant = [...events].reverse().find((e) => e.type === 'assistant/message');
+    let finalSummary = '';
+    if (lastAssistant?.data.content?.parts) {
+      for (const p of lastAssistant.data.content.parts) {
+        if (typeof p?.text === 'string' && p.text.trim()) {
+          finalSummary = p.text.slice(0, 160).replace(/\s+/g, ' ');
+          break;
+        }
+      }
+    }
+
+    const summaryStatement = `[Phiên ${session.id.slice(0, 10)}] Mục tiêu: "${compactObjective}". Files sửa: ${filesList.join(', ') || 'không'}. Kết quả: ${verificationOutcome}.${finalSummary ? ` Tóm tắt: ${finalSummary}` : ''}`;
+
+    return this.memoryManager.saveEpisodicSummary(session.id, summaryStatement, {
+      outcome: testsPassed ? 'success' : testsFailed ? 'failure' : 'completed',
+      filesModified: filesList,
+      confidence: testsPassed ? 0.95 : 0.8,
+    });
+  }
+
+  /**
+   * Reset Session an toàn kèm Episodic Epilogue:
+   * 1. Đúc kết phiên hiện tại thành Episodic Memory ghi vào ProjectMemoryManager
+   * 2. Tạo một Session mới sạch sẽ, giải phóng toàn bộ history tokens cũ
+   * 3. Phiên mới sẽ nhận được bản tóm tắt phiên trước qua Warm-Start Digest
+   */
+  async resetSessionWithEpisodicEpilogue(
+    session: Session,
+    newSessionId?: string,
+  ): Promise<{ episodicRecord: MemoryRecord | null; newSession: Session }> {
+    const episodicRecord = await this.summarizeSessionEpisodic(session);
+    const newSession = this.kernel
+      ? await this.kernel.ctx.sessions.create(newSessionId)
+      : new Session(newSessionId);
+
+    this.bindSession(newSession);
+    if (this.sessionPersistence) {
+      await this.sessionPersistence.save(newSession);
+    }
+
+    return { episodicRecord, newSession };
+  }
+
   private async persistSession(session: Session): Promise<void> {
     if (!this.sessionPersistence) return;
     await this.sessionPersistence.save(session);
@@ -1986,6 +2114,9 @@ export class AgentLoop {
     session.append('turn/end', { turn, reason });
     session.assertRuntimeInvariants();
     await this.persistSession(session);
+    if (reason === 'goal-completed' || reason === 'task-completed' || (isGoalMode && reason === 'goal-stopped')) {
+      void this.summarizeSessionEpisodic(session).catch(() => {});
+    }
     this.setAgentStatus('idle', session, turn);
   }
 

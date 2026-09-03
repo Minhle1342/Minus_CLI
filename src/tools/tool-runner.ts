@@ -242,7 +242,13 @@ export class ToolRunner {
         executionContext = {
           ...context,
           permissionGranted: true,
+          permissionManager: this.permissionManager,
           ...(permCheck.permissionRequestId ? { permissionRequestId: permCheck.permissionRequestId } : {}),
+        };
+      } else {
+        executionContext = {
+          ...context,
+          permissionManager: this.permissionManager,
         };
       }
     }
