@@ -53,6 +53,7 @@ import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
+import { CognitiveHarness } from './cognitive-harness.js';
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
@@ -111,6 +112,7 @@ export class AgentLoop {
   readonly adaptiveReasoning = new AdaptiveReasoningController();
   readonly rollbackOrchestrator: HypothesisRollbackOrchestrator;
   readonly workspaceVerifier: WorkspaceStateVerifier;
+  readonly cognitiveHarness = new CognitiveHarness();
   readonly kernel?: AgentKernel;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
@@ -182,7 +184,7 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
-      this.maxSteps = options?.maxSteps ?? 30;
+      this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
       this.kernel.init().catch(() => {});
@@ -192,7 +194,7 @@ export class AgentLoop {
       this.toolRegistry = toolRegistry ?? new ToolRegistry();
       this.toolProvider = options?.toolScope || this.toolRegistry;
       this.toolRunner = new ToolRunner(this.toolProvider, this._workspace);
-      this.maxSteps = options?.maxSteps ?? 30;
+      this.maxSteps = options?.maxSteps ?? Infinity;
       this.checkpointManager = options?.checkpointManager ?? new CheckpointManager(this._workspace.rootDir);
       this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
       this.planManager = new PlanManager();
@@ -442,14 +444,16 @@ export class AgentLoop {
     this.progressGuard.reset();
     this.finalAnswerGuard.reset();
     this.verificationPolicy.reset();
+    this.cognitiveHarness.reset();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
-    const effectiveMaxSteps = options?.maxSteps ?? (isGoal ? Infinity : this.maxSteps);
+    const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
     const isContinuationOrGoal = isGoal || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
     }
+    let consecutiveUnproductiveSteps = 0;
     let consecutiveEmptyTurns = 0;
     let consecutiveIncompleteFinals = 0;
     let consecutivePlanCompletionRejects = 0;
@@ -525,7 +529,14 @@ export class AgentLoop {
         prefix += scopedMemory;
         if (isGoal) {
           prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
+        } else if (!isFinite(effectiveMaxSteps)) {
+          prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
         }
+        const initialScaffold = this.cognitiveHarness.createScaffold({
+          request: userText,
+          phase: 'explore',
+        });
+        prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
         const rewrittenHistory = history.map((message, index) =>
           index === 0
             ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
@@ -620,7 +631,40 @@ export class AgentLoop {
         activeTask: activeTask?.title,
         playbook: adviceInfo.playbook,
         risk: classification.risk,
+        isGoal,
       });
+
+      if (step === 1 || this.reflectionEngine.getConsecutiveFailures() > 1) {
+        const activeScaffold = this.cognitiveHarness.createScaffold({
+          request: turnUserRequest,
+          phase: classification.phase,
+          activeTask: activeTask?.title,
+          consecutiveFailures: this.reflectionEngine.getConsecutiveFailures(),
+        });
+        CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+      }
+
+      const safetyCeiling = envFiniteNumber('MINUS_SAFETY_MAX_STEPS') ?? 500;
+      if (!isFinite(effectiveMaxSteps) && step >= safetyCeiling) {
+        const circuitBreakerMessage = `Agent stopped: Dynamic convergence safety ceiling (${safetyCeiling} steps) reached without final answer.`;
+        CLI.renderModelAction('max_steps');
+        CLI.renderStepFooter();
+        await CLI.renderExecutionStopped(circuitBreakerMessage, 'CIRCUIT_BREAKER_REACHED');
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'circuit-breaker-reached');
+        this.goalManager.disarm();
+        return circuitBreakerMessage;
+      }
+
+      if (!isFinite(effectiveMaxSteps) && consecutiveUnproductiveSteps >= 18) {
+        const stagnationMessage = `Agent stopped: Convergence stagnation detected (${consecutiveUnproductiveSteps} consecutive inspection steps without progress).`;
+        CLI.renderModelAction('max_steps');
+        CLI.renderStepFooter();
+        await CLI.renderExecutionStopped(stagnationMessage, 'STAGNATION_LIMIT_REACHED');
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'stagnation-limit-reached');
+        this.goalManager.disarm();
+        return stagnationMessage;
+      }
+
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
@@ -1420,7 +1464,25 @@ export class AgentLoop {
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
+            if (reflectionAnalysis.detectiveReport) {
+              CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
+            }
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
+          }
+
+          const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+          const falsifiedCount = this.hypothesisTracker.getFalsifiedHypotheses().length;
+          const cognitiveBrake = this.cognitiveHarness.evaluateCognitiveBrake({
+            consecutiveFailures: reflectionAnalysis.consecutiveFailures,
+            hypothesisFailedCount: falsifiedCount,
+            currentHypothesis: activeHypothesis?.statement,
+          });
+
+          if (cognitiveBrake.active) {
+            CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
+            if (activeHypothesis) {
+              this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
+            }
           }
 
           const progressDecision = this.progressGuard.observe({
@@ -1428,6 +1490,14 @@ export class AgentLoop {
             args: toolArgs,
             result: executionResult.result,
           });
+
+          const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'submit_solution'].includes(toolName)
+            || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
+          if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
+            consecutiveUnproductiveSteps = 0;
+          } else if (!isMutatingOrVerification) {
+            consecutiveUnproductiveSteps++;
+          }
 
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
           if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
@@ -1440,6 +1510,12 @@ export class AgentLoop {
             ...executionResult.result,
             ...(reflectionAnalysis.reflectionPrompt
               ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
+              : {}),
+            ...(cognitiveBrake.active
+              ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
+              : {}),
+            ...(consecutiveUnproductiveSteps === 10 && !isFinite(effectiveMaxSteps)
+              ? { _system_convergence_directive: '[DYNAMIC CONVERGENCE NOTICE]: 10 consecutive inspection steps executed without state modification or verification. Synthesize your findings now and proceed to implementation or final response.' }
               : {}),
             ...(progressDecision.message
               ? { _system_loop_guard: progressDecision.message }
@@ -1901,7 +1977,9 @@ export class AgentLoop {
     // 7. Nếu đạt maxSteps mà chưa hoàn thành
     const timeoutMessage = isGoal
       ? `Agent stopped: Goal execution finished.`
-      : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
+      : !isFinite(effectiveMaxSteps)
+        ? `Agent stopped: Dynamic convergence limit reached without final answer.`
+        : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
     await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');

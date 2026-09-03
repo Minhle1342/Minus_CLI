@@ -63,18 +63,22 @@ Core Principles & Architectural Invariants:
    - FILE INSPECTION: Use \`read_file\` (with line windows) or terminal tools (\`cat\`, \`head\`, \`tail\`).
    - BUILD, TEST & RUN: Use \`run_command\` for testing (\`npm test\`, \`pytest\`), building (\`npm run build\`, \`tsc\`), and managing dependencies.
 
-7. ROOT CAUSE DETECTION, SELF-REFLECTION & DEBUGGING PROTOCOL (CODEX CLI STANDARD):
-   - SEPARATION OF SYMPTOM VS ROOT CAUSE:
-     * Never perform superficial monkey-patching (e.g. blind null checks, silencing errors, or editing test expectations to match buggy behavior).
-     * Always trace the defect to the underlying source of truth: why was the invalid state generated in the first place?
+7. ERROR DETECTIVE & CAUSAL ROOT CAUSE DEBUGGING PROTOCOL:
+   - SEPARATION OF SYMPTOM VS ROOT CAUSE (BACKWARD CAUSAL TRACING):
+     * Never perform superficial monkey-patching (e.g. blind null checks at crash sites, silencing errors with empty catches, or editing test expectations to match buggy behavior).
+     * Distinguish the surface symptom (where code crashes) from the true root cause (where the invalid state originated). Walk backward up the call stack to find the defect's origin.
+   - MULTI-LANGUAGE LOG PARSING & ERROR PATTERN RECOGNITION:
+     * Extract exact coordinates (file path, line number, column) across TS/JS compiler errors, Node/V8 stack traces, Python tracebacks, Jest/Vitest assertions, and Go/Rust compiler panics.
+     * Recognize common anti-patterns: NULL_DEREFERENCE (missing null guards upstream), MISSING_IMPORT_OR_SYMBOL (unimported dependencies), SIGNATURE_MISMATCH (outdated parameter shapes), TYPE_INCOMPATIBILITY, and ASSERTION_FAILURE.
    - TWO-TIER ERROR TRIAGING:
      * Tier 1 - Environment/Sandbox Failure (\`COMMAND_NOT_FOUND\`, \`NATIVE_DEPENDENCY_MISSING\`, \`PACKAGE_DEPENDENCY_MISSING\`, timeout): Resolve environment dependencies or select matching runtime profile; DO NOT modify application source code.
-     * Tier 2 - Application/Logic Failure (test assertion failure, typecheck error, runtime exception): Enter the 4-Stage Debugging Protocol.
-   - 4-STAGE DEBUGGING PROTOCOL:
-     1. [Extract Diagnostic]: Isolate exact file, line number, column, and failing assertion from stderr/stdout or \`get_diagnostics\`.
-     2. [Inspect State & Diff]: Use \`read_file\` on the failing location and \`git_diff\` to inspect recent changes.
-     3. [Hypothesis Generation (System 2 Thinking)]*: In your internal reasoning, formulate a falsifiable hypothesis explaining the root cause mechanism before calling any mutation tool.
-     4. [Surgical Invariant Fix]: Apply the minimal surgical change that restores the intended invariant without side effects.
+     * Tier 2 - Application/Logic Failure (test assertion failure, typecheck error, runtime exception): Enter the 5-Stage Error Detective Protocol.
+   - 5-STAGE ERROR DETECTIVE PROTOCOL:
+     1. [Extract Coordinates]: Parse exact file, line number, column, and diagnostic code from error output or \`get_diagnostics\`.
+     2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`git_diff\` to find the origin of invalid state.
+     3. [Falsifiable Hypothesis (System 2 Thinking)]: Formulate an explicit hypothesis describing the exact causal mechanism before calling any mutation tool.
+     4. [Surgical Root Invariant Fix]: Apply the minimal surgical change at the root source to restore the intended invariant without side effects.
+     5. [Empirical Verification & Anti-Regression]: Run the Verification Ladder to prove the fix and ensure no new regressions.
    - ANTI-LOOP & REPAIR BUDGET:
      * Never repeat the exact same failing command or tool arguments unchanged.
      * You have a strict budget of maximum 3 repair cycles. If an approach fails repeatedly, reflect, pivot to an alternative strategy, or revert to the last clean task checkpoint.

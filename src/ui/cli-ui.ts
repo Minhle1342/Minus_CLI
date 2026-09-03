@@ -1401,6 +1401,38 @@ export class CLI {
   }
 
   /**
+   * Hiển thị Báo cáo Phân tích Lỗi sâu (Error Detective Causal RCA)
+   */
+  static renderErrorDetectiveReport(report: {
+    primaryDefect?: string;
+    location?: string;
+    rootCause?: string;
+    pattern?: string;
+    immediateFix?: string;
+    prevention?: string;
+  }): void {
+    if (!report.primaryDefect) return;
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.crimson}${c.bold}🕵️ [ERROR DETECTIVE - CAUSAL ROOT CAUSE ANALYSIS]${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightYellow}• Symptom:${c.reset} ${c.white}${report.primaryDefect}${c.reset}`);
+    if (report.location) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightCyan}• Location:${c.reset} ${c.emerald}${report.location}${c.reset}`);
+    }
+    if (report.pattern) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.amber}• Anti-Pattern:${c.reset} ${c.brightRed}[${report.pattern}]${c.reset}`);
+    }
+    if (report.rootCause) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightGreen}• Root Cause:${c.reset} ${c.mutedText}${report.rootCause}${c.reset}`);
+    }
+    if (report.immediateFix) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightCyan}• Immediate Fix:${c.reset} ${c.white}${report.immediateFix}${c.reset}`);
+    }
+    if (report.prevention) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.slate}• Prevention:${c.reset} ${c.mutedText}${report.prevention}${c.reset}`);
+    }
+  }
+
+  /**
    * Hiển thị Bộ nhớ dài hạn của dự án
    */
   static renderMemory(data: any): void {
@@ -1559,11 +1591,14 @@ export class CLI {
       activeTask?: string;
       playbook?: string;
       risk?: string;
+      isGoal?: boolean;
     },
   ): void {
     const width = getTerminalWidth();
     const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
-    const progress = isUnlimited ? `${step}/∞ [AUTONOMOUS GOAL]` : `${step}/${maxSteps}`;
+    const progress = isUnlimited
+      ? (context?.isGoal ? `${step}/∞ [AUTONOMOUS GOAL]` : `${step}/∞ [DYNAMIC CONVERGENCE]`)
+      : `${step}/${maxSteps}`;
     const title = `⚡ STEP ${progress}`;
     const barLen = Math.max(4, width - title.length - 6);
     console.log(`\n${c.geminiBlue}${c.bold}╭── ${c.brightCyan}${title}${c.geminiBlue} ${'─'.repeat(barLen)}${c.reset}`);
@@ -1639,6 +1674,28 @@ export class CLI {
     }
     if (lines.length > 12) {
       console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.gray}... (+${lines.length - 12} dòng suy luận • Nhập /explore reasoning để xem toàn bộ)${c.reset}`);
+    }
+  }
+
+  /**
+   * Hiển thị Cognitive Scaffold (Ejentum-inspired Pre-execution Reasoning Framework)
+   */
+  static renderCognitiveScaffold(scaffoldLines: string[]): void {
+    if (!scaffoldLines || scaffoldLines.length === 0) return;
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.geminiPurple}${c.bold}🧠 [COGNITIVE SCAFFOLD ACTIVE]:${c.reset}`);
+    for (const line of scaffoldLines) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightCyan}${line}${c.reset}`);
+    }
+  }
+
+  /**
+   * Hiển thị Cognitive Brake (Tự ngắt nhánh suy luận sai / Branch Pruning)
+   */
+  static renderCognitiveBrake(reason: string, pivot?: string): void {
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}`);
+    console.log(`${c.geminiBlue}${c.bold}│${c.reset}  ${c.crimson}${c.bold}🛑 [COGNITIVE BRAKE ACTIVATED]${c.reset} ${c.amber}${reason}${c.reset}`);
+    if (pivot) {
+      console.log(`${c.geminiBlue}${c.bold}│${c.reset}     ${c.brightGreen}👉 Pivoting Strategy:${c.reset} ${c.mutedText}${pivot}${c.reset}`);
     }
   }
 

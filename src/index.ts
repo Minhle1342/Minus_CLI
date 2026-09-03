@@ -74,7 +74,7 @@ const anthropicApiKeys = Array.from(new Set([
   ...Array.from({ length: 9 }, (_, index) => process.env[`ANTHROPIC_API_KEY_${index + 2}`]),
 ].filter((key): key is string => Boolean(key?.trim()))));
 const anthropicApiKey = anthropicApiKeys[0] || '';
-const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 30;
+const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : Infinity;
 
 let activeWorkspaceRef: Workspace | undefined;
 
