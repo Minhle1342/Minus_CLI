@@ -200,6 +200,7 @@ export interface SlashHintTerminal {
 }
 
 export class RealtimeSlashCommandHints {
+  private static readonly RESERVED_ROWS = 7;
   private visible = false;
   private renderedRows = 0;
   private renderKey?: string;
@@ -301,21 +302,47 @@ export class RealtimeSlashCommandHints {
     const nextRows = lines.length;
     const maxRows = Math.max(prevRows, nextRows);
 
-    if (maxRows === 0) return;
+    if (maxRows === 0 && nextRows === 0) return;
 
-    let buf = '\x1b[?25l\x1b7';
+    let buf = '\x1b[?25l'; // Ẩn con trỏ
+
+    // 1. Đặt chỗ (reservation) trước khi lưu con trỏ nếu popup chưa hiển thị.
+    // Nếu prompt ở đáy viewport của terminal, việc này buộc buffer cuộn trước
+    // để các dòng hint sau đó ghi đè trực tiếp mà không gây trôi dòng (scroll drift).
+    if (!this.visible && nextRows > 0) {
+      const reserve = Math.max(RealtimeSlashCommandHints.RESERVED_ROWS, nextRows);
+      for (let i = 0; i < reserve; i++) {
+        buf += '\r\n\x1b[2K';
+      }
+      buf += `\x1b[${reserve}A`;
+      if (cursorColumn > 0) {
+        buf += `\r\x1b[${cursorColumn}C`;
+      } else {
+        buf += '\r';
+      }
+    }
+
+    // 2. Lưu vị trí con trỏ ban đầu tại dòng input (cả DEC \x1b7 và SCO \x1b[s)
+    buf += '\x1b7\x1b[s';
+
+    // 3. Ghi từng dòng hint kèm xóa sạch dòng cũ (Clear Line \x1b[2K)
     for (let i = 0; i < maxRows; i++) {
       const lineContent = i < nextRows ? lines[i] : '';
       buf += `\r\n\x1b[2K${lineContent}`;
     }
+
+    // 4. Di chuyển con trỏ ngược lên lại số dòng đã xuống để trở về dòng input
     buf += `\x1b[${maxRows}A`;
+
+    // 5. Khôi phục vị trí con trỏ ban đầu và định vị cột ngang chính xác
+    buf += '\x1b8\x1b[u';
     if (cursorColumn > 0) {
       buf += `\r\x1b[${cursorColumn}C`;
     } else {
       buf += '\r';
     }
-    buf += '\x1b8';
-    buf += '\x1b[?25h';
+
+    buf += '\x1b[?25h'; // Hiện lại con trỏ
 
     this.terminal.write(buf);
     this.renderedRows = nextRows;

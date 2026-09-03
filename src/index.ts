@@ -811,7 +811,13 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     });
   }
 
-  const rl = readline.createInterface({ input, output, completer: completeSlashCommand });
+  const completer = (line: string): [string[], string] => {
+    if (activeWorkspaceRef && FileMentionEngine.extractActiveMention(line)) {
+      return FileMentionEngine.completeMention(line, activeWorkspaceRef);
+    }
+    return completeSlashCommand(line);
+  };
+  const rl = readline.createInterface({ input, output, completer });
   const getActiveModelInfo = () => ({
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
@@ -860,13 +866,18 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
     }
-    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, Escape, v.v.) tránh vỡ UI
-    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'escape', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
+    // Phím Escape khi đang gõ: Đóng popup gợi ý ngay lập tức
+    if (key?.name === 'escape' || _sequence === '\x1b') {
+      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
     }
-    const removesOnlySlash = rl.line === '/'
+    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, v.v.) tránh vỡ UI
+    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
+      return;
+    }
+    const removesOnlyTrigger = (rl.line === '/' || rl.line === '@')
       && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
-    if (removesOnlySlash) {
+    if (removesOnlyTrigger) {
       slashHints.clear(promptWidth);
       return;
     }
