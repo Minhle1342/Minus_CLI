@@ -56,7 +56,7 @@ import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js
 import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
-import { FinalAnswerGuard } from './agent/final-answer-guard.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent, verifyWorkspaceGrounding } from './agent/final-answer-guard.js';
 import { CompletionEvidenceGate, classifyToolEvidence } from './agent/completion-evidence.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
@@ -106,12 +106,14 @@ import {
   CLI,
   FINAL_ANSWER_CHARACTER_DELAY_MS,
   RealtimeSlashCommandHints,
+  SLASH_COMMANDS,
   completeSlashCommand,
   formatToolArgumentPreview,
   getSlashCommandSuggestions,
   isToolResultFailure,
   writeTypewriterText,
 } from './ui/cli-ui.js';
+import { AgentInbox } from './agent/agent-inbox.js';
 import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskTool } from './tools/task-tools.js';
 import { createManageTaskTool } from './tools/manage-task.js';
 import { createScheduleTool } from './tools/schedule-tool.js';
@@ -136,7 +138,14 @@ import { loadSession, saveSession, clearSession, getSessionFilePath } from './se
 import { SkillLoader } from './skills/skill-loader.js';
 import { SkillRegistry } from './skills/skill-registry.js';
 import { SuperpowersSource } from './skills/superpowers-source.js';
-import { SkillActivator, detectPlanningIntent } from './skills/skill-activator.js';
+import { SkillActivator, detectPlanningIntent, detectGameProgrammingIntent } from './skills/skill-activator.js';
+import {
+  gameTilemapStudioTool,
+  gamePixelSpriteStudioTool,
+  game2DPhysicsConfigTool,
+  gameScaffoldEngineTool,
+} from './tools/game-tools.js';
+import { unityGameplayStudioTool } from './tools/unity-tools.js';
 import { SuperpowersWorkflowMap } from './skills/workflow-map.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
@@ -152,6 +161,16 @@ import { SuperpowersPlugin } from './kernel/plugins/superpowers-plugin.js';
 import { createGitTools } from './tools/git-tools.js';
 import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
 import { classifyGitCommand, detectExplicitGitCommandNames } from './tools/git-command-policy.js';
+import {
+  CORE_SYSTEM_PROMPT,
+  SECTION_UNITY_GAME_DEV,
+  SECTION_COMPUTER_USE,
+  SECTION_ARCHITECTURE_ANALYSIS,
+  DEFAULT_PROMPT_SECTIONS,
+  detectPromptContext,
+  CODING_AGENT_SYSTEM_PROMPT,
+} from './llm/prompts.js';
+import { PromptAssembler } from './llm/prompt-assembler.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -714,10 +733,10 @@ async function runUnitTests() {
     gitPushGlobalOptionBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
     'run_command vẫn chặn git push khi Git có global option -C',
   );
-  const gitReadBypass = await runCommandTool.execute({ command: 'git status --short' }, workspace);
+  const gitCheckoutBypass = await runCommandTool.execute({ command: 'git checkout -b feature' }, workspace);
   assert(
-    gitReadBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-    'run_command chuyển cả Git read-only sang git_command để áp dụng một policy thống nhất',
+    gitCheckoutBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
+    'run_command chuyển Git mutation sang git_command để áp dụng một policy thống nhất',
   );
 
   // Test 3.8: Kiểm tra Terminal-First Exploration trong run_command (Codex CLI standard)
@@ -771,6 +790,30 @@ async function runUnitTests() {
   const headlessInstall = await headlessInstallRunner.run('run_command', { command: 'npm install pyodbc' });
   assert(headlessInstall.result.errorCode === 'APPROVAL_REQUIRED' && approvedInstallCommands.length === 1, 'Headless unknown commands wait for approval instead of executing or failing at a second allowlist gate');
   assert(headlessInstall.permission?.status === 'required' && Boolean(headlessInstall.permission.requestId), 'Headless approval gate returns a resumable permission request ID');
+
+  // Test 3.9.1: Kiểm tra parameter CommandLine chuẩn Antigravity hiển thị đầy đủ trong PermissionRequest (tránh chuỗi rỗng)
+  installDecision = 'reject';
+  installPrompt = null;
+  const commandLineRejected = await approvalRunner.run('run_command', { CommandLine: 'npm install express' });
+  assert(commandLineRejected.result.errorCode === 'PERMISSION_DENIED', 'Lệnh truyền qua CommandLine bị từ chối chính xác');
+  assert(installPrompt?.target === 'npm install express', 'PermissionManager trích xuất target từ CommandLine thay vì chuỗi rỗng');
+  assert(installPrompt?.summary.includes('npm install express'), 'PermissionManager tóm tắt có chứa câu lệnh CommandLine đầy đủ');
+
+  // Test 3.9.2: Kiểm tra CLI.renderPermissionPrompt hiển thị đúng Target và không bao giờ in chuỗi rỗng ""
+  {
+    const loggedLines: string[] = [];
+    const savedLog = console.log;
+    console.log = (...args: any[]) => { loggedLines.push(args.map(a => String(a)).join(' ')); };
+    try {
+      CLI.renderPermissionPrompt(installPrompt);
+    } finally {
+      console.log = savedLog;
+    }
+    const promptOutput = loggedLines.join('\n');
+    assert(promptOutput.includes('npm install express'), 'CLI.renderPermissionPrompt in đầy đủ câu lệnh terminal');
+    const plainOutput = promptOutput.replace(/\x1b\[[0-9;]*m/g, '');
+    assert(!plainOutput.includes('── Target:\n') && !plainOutput.includes('── Target: \n') && !plainOutput.includes('── Target:  '), 'CLI.renderPermissionPrompt không in target rỗng');
+  }
 
   permManager.setMode('always_ask');
   simulatedDecision = 'reject';
@@ -2972,6 +3015,94 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Final-answer guard chặn false refusal cho Git subcommand tổng quát chưa được thử',
   );
 
+  // Kiểm thử Nhận diện ý định Phân tích Kiến trúc / Workflow / Pattern (detectArchitectureAnalysisIntent)
+  const archIntentVn = detectArchitectureAnalysisIntent('Phân tích cơ chế, workflow, pattern hay kiến trúc hệ thống của workspace này');
+  assert(archIntentVn.isArchitectureQuery === true, 'Nhận diện chính xác câu hỏi phân tích kiến trúc/workflow tiếng Việt');
+  assert(archIntentVn.categories.includes('architecture'), 'Phát hiện danh mục architecture');
+  assert(archIntentVn.categories.includes('workflow'), 'Phát hiện danh mục workflow');
+  assert(archIntentVn.categories.includes('pattern'), 'Phát hiện danh mục pattern');
+  assert(archIntentVn.categories.includes('mechanism'), 'Phát hiện danh mục mechanism');
+
+  const archIntentEn = detectArchitectureAnalysisIntent('Explain the system architecture, core workflows, and design patterns of the codebase');
+  assert(archIntentEn.isArchitectureQuery === true, 'Nhận diện chính xác câu hỏi phân tích kiến trúc tiếng Anh');
+
+  const codingTaskIntent = detectArchitectureAnalysisIntent('Sửa lỗi type error ở src/index.ts và chạy npm test');
+  assert(codingTaskIntent.isArchitectureQuery === false, 'Không nhận nhầm tác vụ coding/bugfix là câu hỏi phân tích kiến trúc');
+
+  // Kiểm thử verifyWorkspaceGrounding
+  const groundedAnalysis = verifyWorkspaceGrounding(
+    'Dự án sử dụng file cấu hình package.json và module src/agent/final-answer-guard.ts để kiểm soát.',
+    workspace,
+  );
+  assert(groundedAnalysis.isGrounded === true, 'verifyWorkspaceGrounding xác nhận các file có thật trong workspace');
+  assert(groundedAnalysis.validFiles.includes('package.json'), 'Tìm thấy file package.json hợp lệ');
+
+  const fakeAnalysis = verifyWorkspaceGrounding(
+    'Hệ thống dùng src/redux/store.ts và src/controllers/userController.ts để quản lý state.',
+    workspace,
+  );
+  assert(fakeAnalysis.isGrounded === false, 'verifyWorkspaceGrounding phát hiện bài phân tích trích dẫn file ảo không tồn tại');
+
+  // Kiểm thử FinalAnswerGuard cho câu hỏi phân tích kiến trúc
+  const archGuard = new FinalAnswerGuard();
+  const archContext = {
+    userRequest: 'Phân tích cơ chế, workflow, pattern hay kiến trúc hệ thống của workspace',
+    workspace,
+  };
+
+  // Trường hợp 1: Câu trả lời quá ngắn (< 500 ký tự)
+  const shortArchAnswer = 'Dự án này là một coding agent viết bằng TypeScript. Nó có agent loop, tools, và session. Hết.';
+  const shortDecision = archGuard.evaluate(shortArchAnswer, archContext);
+  assert(shortDecision.allow === false, 'FinalAnswerGuard chặn câu trả lời phân tích kiến trúc cộc lốc/ngắn ngủn');
+  assert(shortDecision.reason === 'insufficient-architecture-answer', 'Lý do từ chối là insufficient-architecture-answer');
+  assert(Boolean(shortDecision.continuationPrompt?.includes('TIÊU CHUẨN BẮT BUỘC KHI PHÂN TÍCH KIẾN TRÚC')), 'Prompt tiếp tục có hướng dẫn cấu trúc bắt buộc');
+
+  // Trường hợp 2: Đã có submit_solution summary nhưng query là phân tích kiến trúc -> Không được short-circuit câu trả lời ngắn
+  const autoFinalizeBlocked = archGuard.evaluate(
+    'Task completed with exit code 0.',
+    { ...archContext, hasSubmittedSolution: true },
+  );
+  assert(autoFinalizeBlocked.allow === false, 'FinalAnswerGuard không cho phép auto-finalize summary ngắn đối với câu hỏi phân tích kiến trúc');
+
+  // Trường hợp 3: Câu trả lời trích dẫn file ảo không tồn tại
+  const fakeFileAnswer = `
+## 1. Tổng quan hệ thống
+Hệ thống là một agent tự động được xây dựng trên framework giả định.
+## 2. Luồng thực thi & Workflow
+Luồng hoạt động bắt đầu từ file src/redux/fake-store.ts điều phối qua src/controllers/userController.ts.
+## 3. Các Design Pattern
+Áp dụng mẫu MVC và Factory pattern tại src/services/fakeService.ts.
+## 4. Bất biến hệ thống
+Các quy tắc xử lý lỗi được định nghĩa tại src/models/fakeModel.ts.
+  `.repeat(2);
+  const fakeFileDecision = archGuard.evaluate(fakeFileAnswer, archContext);
+  assert(fakeFileDecision.allow === false, 'FinalAnswerGuard chặn câu trả lời phân tích kiến trúc trích dẫn file ảo không có thật');
+
+  // Trường hợp 4: Câu trả lời đầy đủ, có cấu trúc chuẩn, trích dẫn file thực tế trong workspace
+  const completeArchAnswer = `
+## 1. Tổng quan & Sứ mệnh hệ thống
+Hệ thống là một Autonomous Coding Agent viết bằng TypeScript và Node.js, hoạt động theo mô hình OODA loop độc lập không phụ thuộc framework ngoài. Điểm khởi đầu của hệ thống nằm tại [package.json](package.json) và src/index.ts.
+
+## 2. Cơ chế & Luồng thực thi chi tiết (Workflow & Dataflow)
+Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/agent-loop.ts:
+- Bước 1: Tiếp nhận yêu cầu của người dùng và khởi tạo Session state.
+- Bước 2: Gọi mô hình Gemini để đưa ra quyết định gọi Tool hoặc trả lời Final Answer.
+- Bước 3: ToolRunner điều phối thực thi qua 5 chốt chặn an toàn tại src/tools/tool-runner.ts.
+- Bước 4: Kiểm chứng kết quả qua CompletionEvidenceGate trước khi nghiệm thu.
+
+## 3. Mẫu thiết kế & Kiến trúc thành phần (Design Patterns)
+- **Gatekeeper Pattern**: Áp dụng trong src/agent/final-answer-guard.ts để chặn các câu trả lời hứa hẹn suông hoặc không có bằng chứng.
+- **Chain of Responsibility**: Áp dụng trong ToolRunner để tuần tự kiểm tra tham số, workspace boundary và sandbox execution.
+- **State & Memento Pattern**: Áp dụng trong src/session/session.ts lưu trữ chuỗi sự kiện append-only.
+
+## 4. Bất biến hệ thống & Rào chắn bảo vệ (System Invariants)
+- Mọi thao tác ghi mã nguồn đều phải nằm trong workspace an toàn, ngăn chặn path traversal.
+- Trước khi hoàn tất tác vụ sửa mã, bắt buộc phải có lệnh kiểm thử kiểm chứng với exitCode 0.
+  `;
+  const completeDecision = archGuard.evaluate(completeArchAnswer, archContext);
+  assert(completeDecision.allow === true, 'FinalAnswerGuard chấp thuận câu trả lời phân tích kiến trúc đầy đủ, có cấu trúc và đúng sự thật');
+
+
   // 2. Kiểm thử SandboxManager Orchestration
   const sandboxMgr = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
   await sandboxMgr.init();
@@ -4017,6 +4148,149 @@ Always write tests first!`;
     planActivationVn.promptSections.some((p) => p.name.includes('writing-plans')),
     'SkillActivator tạo prompt section cho writing-plans để nạp vào LLM',
   );
+
+  // 4.1 Kiểm tra Intent-Gated Game Skills & Game Development Tools
+  assert(skillRegistry.get('game-development') !== undefined, 'SkillRegistry nạp thành công game-development');
+  assert(skillRegistry.get('unity-ai-game-creator') !== undefined, 'SkillRegistry nạp thành công unity-ai-game-creator');
+  assert(
+    Boolean(skillRegistry.loadContent('game-development')?.includes('Fixed Timestep Accumulator')),
+    'SkillRegistry loadContent trả về playbook chuẩn của game-development',
+  );
+  assert(
+    Boolean(skillRegistry.loadContent('unity-ai-game-creator')?.includes('Master 5-Phase Development Pipeline')),
+    'SkillRegistry loadContent trả về playbook chuẩn của unity-ai-game-creator',
+  );
+
+  // Phân loại intent lập trình game
+  const gameIntentVn = detectGameProgrammingIntent('Lập trình game 2D platformer pixel art');
+  assert(gameIntentVn.isGameProgramming === true && gameIntentVn.is2DOrPixel === true, 'detectGameProgrammingIntent nhận diện chính xác yêu cầu lập trình game 2D/Pixel tiếng Việt');
+
+  const gameIntentEn = detectGameProgrammingIntent('Please build a 2D pixel game with sprite sheet');
+  assert(gameIntentEn.isGameProgramming === true, 'detectGameProgrammingIntent nhận diện chính xác yêu cầu lập trình game tiếng Anh');
+
+  const gameSlashIntent = detectGameProgrammingIntent('/game-development');
+  assert(gameSlashIntent.isGameProgramming === true, 'detectGameProgrammingIntent nhận diện /game-development slash command');
+
+  const unitySlashIntent = detectGameProgrammingIntent('/unity-ai-game-creator');
+  assert(unitySlashIntent.isGameProgramming === true && unitySlashIntent.detectedEngine === 'unity', 'detectGameProgrammingIntent nhận diện /unity-ai-game-creator slash command');
+
+  const nonGameIntent = detectGameProgrammingIntent('Thiết kế REST API cho module xác thực tài khoản user');
+  assert(nonGameIntent.isGameProgramming === false, 'detectGameProgrammingIntent không nhầm lẫn tác vụ thông thường với game');
+
+  const gameTheoryBoundary = detectGameProgrammingIntent('Giải thích định lý Nash equilibrium trong game theory kinh tế học');
+  assert(gameTheoryBoundary.isGameProgramming === false, 'detectGameProgrammingIntent loại trừ game theory để tránh false positive');
+
+  // Gating trong SkillActivator: Tác vụ thông thường KHÔNG nạp game-development và unity-ai-game-creator
+  const normalActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Thiết kế REST API và tối ưu database backend cho hệ thống thanh toán',
+  });
+  assert(
+    !normalActivation.activeSkills.some((s) => s.id === 'game-development' || s.id === 'unity-ai-game-creator'),
+    'SkillActivator KHÔNG nạp game-development và unity-ai-game-creator khi không có yêu cầu lập trình game (chống loãng context)',
+  );
+
+  // Gating trong SkillActivator: Yêu cầu lập trình game PHẢI nạp game-development và unity-ai-game-creator
+  const gameActivation = activator.evaluate({
+    session: spTestSession,
+    userRequest: 'Lập trình game 2D pixel art phong cách roguelike',
+  });
+  assert(
+    gameActivation.activeSkills.some((s) => s.id === 'game-development'),
+    'SkillActivator tự động nạp game-development khi người dùng yêu cầu lập trình game',
+  );
+  assert(
+    gameActivation.activeSkills.some((s) => s.id === 'unity-ai-game-creator'),
+    'SkillActivator tự động nạp unity-ai-game-creator khi người dùng yêu cầu lập trình game',
+  );
+  assert(
+    gameActivation.promptSections.some((p) => p.name.includes('game-development')),
+    'SkillActivator tạo prompt section cho game-development',
+  );
+  assert(
+    gameActivation.promptSections.some((p) => p.name.includes('unity-ai-game-creator')),
+    'SkillActivator tạo prompt section cho unity-ai-game-creator',
+  );
+
+  // Kiểm tra thực thi 4 Game Tools
+  const tilemapRes = await gameTilemapStudioTool.execute({
+    generator: 'cellular_automata',
+    width: 20,
+    height: 15,
+    tileSize: 16,
+    fillRatio: 0.45,
+    outputFormat: 'tiled_json',
+  }, workspace);
+  assert(tilemapRes.success === true, 'game_tilemap_studio thực thi thành công thuật toán cellular_automata');
+  assert(tilemapRes.collisionBoxesCount > 0, 'game_tilemap_studio tính toán và gom nhóm thành công các AABB collision bounding boxes');
+
+  const spriteRes = await gamePixelSpriteStudioTool.execute({
+    spriteName: 'hero_knight',
+    frameWidth: 16,
+    frameHeight: 16,
+    palette: 'pico-8',
+    customColors: ['#000000', '#fff1e8', '#ff004d'],
+    animations: [
+      { name: 'idle', frameCount: 4, fps: 8 },
+      { name: 'run', frameCount: 6, fps: 12 },
+    ],
+    targetFormat: 'texture_packer_json',
+  }, workspace);
+  assert(spriteRes.success === true, 'game_pixel_sprite_studio thực thi thành công');
+  assert(spriteRes.paletteReport.isStrictlyCompliant === true, 'game_pixel_sprite_studio xác thực thành công mã màu HEX chuẩn PICO-8');
+  assert(spriteRes.sheetDimensions.totalFrames === 10, 'game_pixel_sprite_studio tính toán chính xác tổng 10 frames hoạt ảnh');
+
+  const physicsRes = await game2DPhysicsConfigTool.execute({
+    mode: 'full_physics_profile',
+    jumpHeight: 48,
+    timeToApex: 0.35,
+    layers: ['Player', 'Terrain', 'Enemy'],
+    collisionPairs: [{ layerA: 'Player', layerB: 'Terrain', collides: true }],
+    targetEngine: 'godot_2d',
+  }, workspace);
+  assert(physicsRes.success === true, 'game_2d_physics_config thực thi thành công');
+  assert(physicsRes.jumpKinematics.computedValues.gravity > 0, 'game_2d_physics_config tính toán chính xác trọng lực g');
+  assert(physicsRes.collisionMatrix !== undefined, 'game_2d_physics_config sinh thành công ma trận va chạm 32-bit bitmask');
+
+  const scaffoldRes = await gameScaffoldEngineTool.execute({
+    engine: 'html5_canvas_ts',
+    architectureComponent: 'fixed_timestep_loop',
+  }, workspace);
+  assert(scaffoldRes.success === true, 'game_scaffold_engine thực thi thành công');
+  assert(Boolean(scaffoldRes.codePreview.includes('FixedTimestep') || scaffoldRes.codePreview.includes('fixedStep')), 'game_scaffold_engine sinh code Fixed Timestep Loop chuẩn');
+
+  const unityRes = await unityGameplayStudioTool.execute({
+    action: 'compose_scene',
+    scenePath: 'Assets/Scenes/GameplayLevel.unity',
+    gameplayType: '2d_platformer',
+    prefabsToInstantiate: [
+      {
+        prefabPath: 'Assets/Prefabs/Player.prefab',
+        instanceName: 'PlayerCharacter',
+        position: { x: 0, y: 1.5, z: 0 },
+        componentsToAdd: ['Rigidbody2D', 'BoxCollider2D'],
+      },
+    ],
+    referenceWirings: [
+      {
+        sourceObject: 'GameManager',
+        sourceComponent: 'GameManager',
+        fieldName: 'playerReference',
+        targetObject: 'PlayerCharacter',
+      },
+    ],
+    buildScenes: [
+      { path: 'Assets/Scenes/MainMenu.unity', enabled: true },
+      { path: 'Assets/Scenes/GameplayLevel.unity', enabled: true },
+    ],
+    format: 'detailed',
+  }, workspace);
+  assert(unityRes.success === true, 'unity_gameplay_studio thực thi thành công');
+  assert(unityRes.summary.prefabsInstantiatedCount === 1, 'unity_gameplay_studio nhận diện đúng số prefab');
+  assert(unityRes.summary.referenceWiringsCount === 1, 'unity_gameplay_studio ghi nhận đúng reference wiring');
+  assert(Boolean(unityRes.fullEditorScript?.includes('PrefabUtility.InstantiatePrefab')), 'unity_gameplay_studio sinh code PrefabUtility chuẩn');
+  assert(Boolean(unityRes.fullEditorScript?.includes('SerializedObject')), 'unity_gameplay_studio sinh code SerializedObject chuẩn');
+  assert(Boolean(unityRes.fullEditorScript?.includes('EditorBuildSettingsScene')), 'unity_gameplay_studio cấu hình đúng Build Settings');
   assert(
     detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
       && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,
@@ -4448,7 +4722,7 @@ Always write tests first!`;
     { path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' },
     workspace,
   );
-  assert(toolImpactRes.success === true && (toolImpactRes.risk === 'HIGH' || toolImpactRes.risk === 'MEDIUM'), 'Tool analyze_impact đánh giá đúng mức độ rủi ro của symbol');
+  assert(toolImpactRes.success === true && (toolImpactRes.risk === 'CRITICAL' || toolImpactRes.risk === 'HIGH' || toolImpactRes.risk === 'MEDIUM'), 'Tool analyze_impact đánh giá đúng mức độ rủi ro của symbol');
   assert(toolImpactRes.recommendedVerification.length > 0, 'analyze_impact đề xuất các bước verification tương ứng với mức rủi ro');
 
   // 23.7. Verification Baseline & Differential Mode
@@ -5578,6 +5852,37 @@ Always write tests first!`;
   assert(allToolNames.includes('get_symbol_context_360'), 'ToolRegistry chứa get_symbol_context_360 mặc định');
   assert(allToolNames.includes('get_architecture_topology'), 'ToolRegistry chứa get_architecture_topology mặc định');
 
+  // 6. Kiểm thử Khả năng tương thích tham số mềm dẻo (Alias & Auto-inference) cho query_call_graph & sibling tools
+  const testIntelRunner = new ToolRunner(defaultRegistry, workspace);
+
+  // 6a. query_call_graph với alias { symbol, path } qua ToolRunner strict schema validation
+  const aliasCallGraph = await testIntelRunner.run('query_call_graph', {
+    symbol: 'AgentLoop',
+    path: 'src/agent/agent-loop.ts',
+  });
+  assert(aliasCallGraph.result.success === true, 'query_call_graph chấp nhận alias symbol và path qua schema validation');
+  assert(aliasCallGraph.result.callGraph.symbol === 'AgentLoop', 'query_call_graph truy vết đúng symbol từ alias');
+
+  // 6b. query_call_graph chỉ với filePath/path -> tự động suy luận symbolName từ tên file
+  const inferCallGraph = await testIntelRunner.run('query_call_graph', {
+    path: 'Assets/_Project/Scripts/Combat/Tower.cs',
+  });
+  assert(inferCallGraph.result.success === true, 'query_call_graph tự động suy luận symbol từ đường dẫn file');
+  assert(inferCallGraph.result.callGraph.symbol === 'Tower', 'query_call_graph suy luận chính xác symbol Tower từ Tower.cs');
+
+  // 6c. inspect_symbol và find_references với alias { symbolName, filePath }
+  const aliasInspect = await testIntelRunner.run('inspect_symbol', {
+    symbolName: 'AgentLoop',
+    filePath: 'src/agent/agent-loop.ts',
+  });
+  assert(aliasInspect.result.success === true, 'inspect_symbol chấp nhận alias symbolName và filePath');
+
+  const aliasRefs = await testIntelRunner.run('find_references', {
+    symbolName: 'AgentLoop',
+    filePath: 'src/agent/agent-loop.ts',
+  });
+  assert(aliasRefs.result.success === true, 'find_references chấp nhận alias symbolName và filePath');
+
   console.log('\n========================================');
   console.log('🧪 36. KIỂM THỬ ĐIỀU PHỐI CÔNG CỤ ĐỘNG & NGĂN CHẶN LOÃNG NGỮ CẢNH (TOOL SYNERGY ADVISOR & RATS RETRIEVAL)');
   console.log('========================================');
@@ -5724,6 +6029,216 @@ Always write tests first!`;
   const loopCancelResult = await cancelTestLoop.run(fakeSession, { signal: loopAbortController.signal });
   assert(loopCancelResult.includes('cancellation requested') || loopCancelResult.includes('hủy'), 'AgentLoop.run xử lý êm dịu khi signal bị aborted');
   assert(cancelTestLoop.goalManager.getState()?.phase !== 'active', 'GoalManager được pause hoặc disarm an toàn khi hủy tác vụ');
+
+  console.log('\n========================================');
+  console.log('🧪 38. KIỂM THỬ CƠ CHẾ QUEUED MESSAGES & MID-TURN STEERABILITY (ANTIGRAVITY STANDARD)');
+  console.log('========================================');
+
+  // 38.1. AgentInbox Queue Management (enqueue, getQueue, peek, cancel, clear, claimSteerMessage)
+  const testInbox = new AgentInbox();
+  const testSessionId = 'session-test-queue-1';
+
+  const item1 = testInbox.enqueue(testSessionId, 'Message 1: First instruction', 'human', { id: 'msg-1' });
+  const item2 = testInbox.enqueue(testSessionId, 'Message 2: Second instruction', 'human', { id: 'msg-2' });
+  const item3 = testInbox.enqueue(testSessionId, 'Message 3: Third instruction', 'human', { id: 'msg-3' });
+
+  assert(testInbox.pending(testSessionId) === 3, 'AgentInbox có đúng 3 tin nhắn đang chờ');
+  const queueSnapshot = testInbox.getQueue(testSessionId);
+  assert(queueSnapshot.length === 3, 'getQueue trả về đúng 3 tin nhắn');
+  assert(queueSnapshot[0].id === 'msg-1' && queueSnapshot[1].id === 'msg-2' && queueSnapshot[2].id === 'msg-3', 'getQueue giữ nguyên thứ tự FIFO');
+  assert(testInbox.peek(testSessionId)?.id === 'msg-1', 'peek trả về đúng tin nhắn đầu hàng đợi');
+
+  // Cancel item 2
+  let item2Rejected = false;
+  item2.promise.catch(() => { item2Rejected = true; });
+  const cancelSuccess = testInbox.cancel(testSessionId, 'msg-2', 'User cancelled msg-2');
+  assert(cancelSuccess === true, 'cancel trả về true khi tìm thấy và xóa tin nhắn');
+  assert(testInbox.pending(testSessionId) === 2, 'Hàng đợi giảm còn 2 tin nhắn sau khi cancel');
+  const remainingIds = testInbox.getQueue(testSessionId).map((i) => i.id);
+  assert(!remainingIds.includes('msg-2') && remainingIds.includes('msg-1') && remainingIds.includes('msg-3'), 'Tin nhắn msg-2 đã bị loại khỏi hàng đợi');
+
+  // Claim steer message
+  const claimedSteer = testInbox.claimSteerMessage(testSessionId);
+  assert(claimedSteer?.id === 'msg-1', 'claimSteerMessage lấy ra đúng tin nhắn đầu hàng đợi msg-1');
+  assert(testInbox.pending(testSessionId) === 1, 'Hàng đợi còn 1 tin nhắn sau khi claim');
+
+  // Clear remaining queue
+  let item3Rejected = false;
+  item3.promise.catch(() => { item3Rejected = true; });
+  const clearedCount = testInbox.clear(testSessionId);
+  assert(clearedCount === 1, 'clear xóa đúng 1 tin nhắn còn lại');
+  assert(testInbox.pending(testSessionId) === 0, 'Hàng đợi trở về 0 sau khi clear');
+
+  // 38.2. Reactive Wakeup (sleepWithWakeup)
+  const wakeupLoop = new AgentLoop({ getTokenConfig: () => ({ maxInputTokens: 32000, maxOutputTokens: 4096 }), generate: async () => ({ text: '' }) });
+  const wakeupSessionId = 'session-wakeup-test';
+
+  // Test 1: Đánh thức sớm khi có tin nhắn vào queue
+  const sleepStartTime = Date.now();
+  const sleepPromise = wakeupLoop.sleepWithWakeup(wakeupSessionId, 3000);
+
+  // Sau 15ms đưa tin nhắn vào queue để đánh thức
+  setTimeout(() => {
+    wakeupLoop.inbox.enqueue(wakeupSessionId, 'Wake up agent now!', 'human');
+  }, 15);
+
+  const wakeupResult = await sleepPromise;
+  const elapsedMs = Date.now() - sleepStartTime;
+  assert(wakeupResult.awakenedByQueue === true, 'sleepWithWakeup được đánh thức sớm bởi tin nhắn mới trong queue');
+  assert(wakeupResult.aborted === false, 'sleepWithWakeup không bị abort');
+  assert(elapsedMs < 1500, `sleepWithWakeup đánh thức tức thì (<1500ms), thực tế: ${elapsedMs}ms`);
+
+  // Test 2: AbortSignal hủy sleep
+  const abortSessionId = 'session-wakeup-abort-test';
+  const sleepAbortController = new AbortController();
+  const abortSleepPromise = wakeupLoop.sleepWithWakeup(abortSessionId, 3000, sleepAbortController.signal);
+  sleepAbortController.abort();
+  const abortSleepResult = await abortSleepPromise;
+  assert(abortSleepResult.aborted === true, 'sleepWithWakeup nhận diện chính xác tín hiệu abort');
+  assert(abortSleepResult.awakenedByQueue === false, 'sleepWithWakeup khi bị abort có awakenedByQueue = false');
+
+  // 38.3. Mid-Turn Steerability & Resolution
+  const steerSession = new Session('session-steer-test');
+  steerSession.addUserMessage('Khởi động tác vụ nhiều bước');
+  
+  let chatCallCount = 0;
+  let steerLoopRef: AgentLoop | null = null;
+  const mockSteeringLLM = {
+    getTokenConfig: () => ({ maxInputTokens: 32000, maxOutputTokens: 4096 }),
+    generate: async (sess: Session) => {
+      chatCallCount++;
+      if (chatCallCount === 1) {
+        // Step 1: Agent gọi tool read_file
+        // Trong khi Agent chuẩn bị qua Step 2, người dùng enqueue một tin nhắn bẻ lái
+        steerLoopRef?.inbox.enqueue(
+          sess.id,
+          'Dừng việc đọc file đó lại, hãy chuyển hướng sang phân tích kiến trúc workspace',
+          'human',
+          { id: 'steer-msg-42' },
+        );
+        return {
+          text: 'Đang đọc package.json',
+          toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }],
+          rawContent: { role: 'model', parts: [{ functionCall: { name: 'read_file', args: { path: 'package.json' } } }] },
+        };
+      } else {
+        // Step 2: Agent nhìn thấy tin nhắn bẻ lái trong contents và đưa ra câu trả lời cuối cùng
+        return {
+          text: 'Đã nhận được chỉ đạo bẻ lái của người dùng. Hệ thống chuyển sang phân tích kiến trúc thành công.',
+          rawContent: { role: 'model', parts: [{ text: 'Đã nhận được chỉ đạo bẻ lái của người dùng. Hệ thống chuyển sang phân tích kiến trúc thành công.' }] },
+        };
+      }
+    },
+  };
+
+  const steerTestLoop = new AgentLoop(mockSteeringLLM, undefined, { workspace, maxSteps: 5 });
+  steerLoopRef = steerTestLoop;
+  steerTestLoop.bindSession(steerSession);
+
+  const steerRunResult = await steerTestLoop.run(steerSession);
+  assert(steerRunResult.includes('phân tích kiến trúc'), 'AgentLoop hoàn thành với câu trả lời thích ứng theo chỉ đạo bẻ lái');
+
+  const steerHistory = steerSession.getHistory();
+  const steeredUserMsg = steerHistory.find((m) =>
+    m.role === 'user' && m.parts?.some((p: any) => typeof p.text === 'string' && p.text.includes('[USER QUEUED MESSAGE (MID-TURN STEERING)]')),
+  );
+  assert(Boolean(steeredUserMsg), 'Session history ghi nhận tin nhắn bẻ lái [USER QUEUED MESSAGE (MID-TURN STEERING)]');
+
+  const claimedEvents = steerSession.getEvents().filter((e) => e.type === 'input/claimed');
+  const steerClaimedEvent = claimedEvents.find((e) => e.data.isSteering === true);
+  assert(Boolean(steerClaimedEvent), 'Session ghi nhận event input/claimed với isSteering: true');
+  assert(steerClaimedEvent?.data.inputId === 'steer-msg-42', 'Event ghi nhận chính xác inputId của tin nhắn bẻ lái');
+
+  // 38.4. SLASH_COMMANDS Verification
+  const queueCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/queue');
+  assert(Boolean(queueCmd), 'SLASH_COMMANDS có chứa lệnh /queue');
+  assert(Boolean(queueCmd?.aliases?.includes('/q')), '/queue có alias /q');
+
+  const steerCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/steer');
+  assert(Boolean(steerCmd), 'SLASH_COMMANDS có chứa lệnh /steer');
+
+  // ========================================
+  // 🧪 39. KIỂM THỬ BỐN CHIẾN LƯỢC TỐI ƯU HÓA SYSTEM PROMPT (GIẢM >70% TOKEN MỖI TURN)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 39. KIỂM THỬ BỐN CHIẾN LƯỢC TỐI ƯU HÓA SYSTEM PROMPT (GIẢM >70% TOKEN MỖI TURN)');
+  console.log('========================================');
+
+  // 39.1. Đong đếm Token và chứng minh mức tiết kiệm > 70% của Core Invariant Prompt
+  const coreChars = CORE_SYSTEM_PROMPT.length;
+  const legacyChars = CODING_AGENT_SYSTEM_PROMPT.length;
+  const coreTokens = ContextCompactor.estimateTokens(CORE_SYSTEM_PROMPT);
+  const legacyTokens = ContextCompactor.estimateTokens(CODING_AGENT_SYSTEM_PROMPT);
+  const tokenReductionPercent = ((legacyTokens - coreTokens) / legacyTokens) * 100;
+
+  console.log(`- Core System Prompt: ${coreChars} chars (~${coreTokens} tokens)`);
+  console.log(`- Legacy System Prompt: ${legacyChars} chars (~${legacyTokens} tokens)`);
+  console.log(`- Tỷ lệ cắt giảm Token của Core Invariant: ${tokenReductionPercent.toFixed(1)}%`);
+
+  assert(coreTokens < 1500, `CORE_SYSTEM_PROMPT đạt chuẩn siêu tinh gọn (< 1500 tokens, thực tế: ~${coreTokens})`);
+  assert(tokenReductionPercent > 70, `Chiến lược 1 & 3 đạt mục tiêu cắt giảm > 70% token (thực tế: ${tokenReductionPercent.toFixed(1)}%)`);
+  assert(CORE_SYSTEM_PROMPT.includes('WORKSPACE-GROUNDED REASONING'), 'Core prompt bảo toàn quy tắc Workspace Grounding');
+  assert(CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'), 'Core prompt bảo toàn quy tắc Root Cause Detective');
+  assert(CORE_SYSTEM_PROMPT.includes('VERIFICATION LADDER'), 'Core prompt bảo toàn Verification Ladder');
+  assert(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'), 'Core prompt bảo toàn quy tắc Language Matching');
+
+  // 39.2. Progressive Disclosure & Context-Aware Assembly
+  const customAssembler = new PromptAssembler();
+  for (const s of DEFAULT_PROMPT_SECTIONS) {
+    customAssembler.register(s);
+  }
+
+  // Tình huống A: Tác vụ phát triển tiêu chuẩn (Non-Unity, Non-Computer-Use, Non-Architecture)
+  const standardCtx = detectPromptContext(
+    workspace,
+    new ToolRegistry(),
+    'Hãy đọc file package.json và kiểm tra các dependency',
+  );
+  assert(standardCtx.isUnity === false, 'detectPromptContext nhận diện chính xác non-Unity project');
+  assert(standardCtx.hasComputerTool === false, 'detectPromptContext nhận diện không có computer tool');
+  assert(standardCtx.isArchitectureAnalysis === false, 'detectPromptContext nhận diện không phải truy vấn kiến trúc');
+
+  const standardAssembled = customAssembler.assembleForContext(standardCtx);
+  assert(!standardAssembled.includes('PROFESSIONAL UNITY GAME DEVELOPER PROTOCOL'), 'Standard turn không nạp module Unity (tiết kiệm ~1500 tokens)');
+  assert(!standardAssembled.includes('COMPUTER USE AGENT PROTOCOL'), 'Standard turn không nạp module Computer Use (tiết kiệm ~600 tokens)');
+  assert(!standardAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Standard turn không nạp module Deep Architecture (tiết kiệm ~600 tokens)');
+  
+  const standardTokens = ContextCompactor.estimateTokens(standardAssembled);
+  const standardSavings = ((legacyTokens - standardTokens) / legacyTokens) * 100;
+  console.log(`- Standard Turn Assembled Prompt: ${standardAssembled.length} chars (~${standardTokens} tokens, tiết kiệm ${standardSavings.toFixed(1)}%)`);
+  assert(standardSavings > 70, `Standard turn cắt giảm > 70% token so với prompt gốc (thực tế: ${standardSavings.toFixed(1)}%)`);
+
+  // Tình huống B: Yêu cầu phân tích kiến trúc -> Module Architecture Analysis được nạp động
+  const archCtx = detectPromptContext(
+    workspace,
+    new ToolRegistry(),
+    'Phân tích kiến trúc hệ thống, workflow thực thi và design pattern của workspace',
+  );
+  assert(archCtx.isArchitectureAnalysis === true, 'detectPromptContext nhận diện đúng Intent phân tích kiến trúc');
+  const archAssembled = customAssembler.assembleForContext(archCtx);
+  assert(archAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Assembled prompt nạp động module Architecture Analysis khi người dùng yêu cầu');
+
+  // Tình huống C: Môi trường có Computer Tool -> Module Computer Use được nạp động
+  const computerRegistry = new ToolRegistry();
+  computerRegistry.register({
+    name: 'computer',
+    description: 'Desktop GUI tool',
+    parameters: { type: 'OBJECT', properties: { action: { type: 'STRING' } } } as any,
+    execute: async () => ({ success: true }),
+  });
+  const computerCtx = detectPromptContext(workspace, computerRegistry, 'Chụp màn hình desktop');
+  assert(computerCtx.hasComputerTool === true, 'detectPromptContext nhận diện có công cụ computer');
+  const computerAssembled = customAssembler.assembleForContext(computerCtx);
+  assert(computerAssembled.includes('COMPUTER USE AGENT PROTOCOL'), 'Assembled prompt nạp động module Computer Use khi có tool computer');
+
+  // 39.3. Bất biến KV-Cache Prefix Invariance & Deterministic Assembly
+  // Core Prompt luôn nằm ở offset 0 bất kể thứ tự đăng ký
+  assert(standardAssembled.startsWith('You are a high-performance coding agent'), 'Core Invariant luôn nằm ở vị trí đầu tiên (Priority -1000)');
+  assert(archAssembled.startsWith('You are a high-performance coding agent'), 'Kiến trúc mới đảm bảo Stable Prefix không bị xáo trộn khi nạp thêm module');
+  
+  // 39.4. Tương thích ngược (Backward Compatibility)
+  assert(typeof customAssembler.assemble() === 'string' && customAssembler.assemble().length > 0, 'PromptAssembler.assemble() hoạt động bình thường không cần đối số');
+  assert(typeof CODING_AGENT_SYSTEM_PROMPT === 'string' && CODING_AGENT_SYSTEM_PROMPT.length > 0, 'CODING_AGENT_SYSTEM_PROMPT duy trì tương thích ngược');
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

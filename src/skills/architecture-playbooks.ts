@@ -5,7 +5,11 @@
  * and Domain-Driven Design / Clean Architecture engineering principles.
  */
 
+import { GAME_DEVELOPMENT_PLAYBOOK, UNITY_AI_GAME_CREATOR_PLAYBOOK } from './game-playbooks.js';
+
 export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
+  'game-development': GAME_DEVELOPMENT_PLAYBOOK,
+  'unity-ai-game-creator': UNITY_AI_GAME_CREATOR_PLAYBOOK,
   'system-architect': `### ARCHITECTURAL ENGINEERING PROTOCOL (SYSTEM-ARCHITECT)
 1. **Clean Architecture & Strict Boundary Separation:**
    - **Domain Core:** Pure business entities, domain types, and value objects with ZERO dependencies on frameworks, databases, or UI.

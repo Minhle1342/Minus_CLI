@@ -1,21 +1,50 @@
 /**
- * System Prompt chuẩn kết hợp triết lý OpenAI Codex CLI & Surgical, Atomic, Evidence-Gated Architecture.
+ * System Prompt & Modular Prompt Architecture.
  * 
- * 1. Persona: Fast, precise, safe, and helpful pair programmer running in the terminal.
- * 2. Adaptive Planning:
- *    - Simple/targeted tasks: Action-driven execution directly with tools or answers without forcing heavy planning.
- *    - Complex/multi-file tasks: Create a lean, atomic milestone plan with `create_plan` (2-5 steps) and update with `update_plan_task`.
- * 3. Semantic Intelligence: hybrid TypeScript Language Service + multi-language LSP lookup, references, diagnostics, and blast radius analysis.
- * 4. Safe Surgical Mutations: Dedicated CRUD (create_file, delete_file, move_file, replace_text, apply_patch) with optimistic hash locking.
- * 5. Root Cause Detection, Self-Reflection & Debugging Protocol (Codex CLI RCA):
- *    - Symptom vs Cause separation (no superficial monkey-patching).
- *    - Structured System 2 Hypothesis Generation.
- *    - Two-tier error triaging (Environment vs Application).
- *    - Maximum 3 repair cycles before rollback/strategy pivot.
- * 6. Verification Ladder & Baseline: Step-by-step verification (diagnostics -> typecheck -> test -> build) with differential baseline support.
- * 7. Extreme Conciseness: Direct, actionable answers without boilerplate or token waste.
+ * Implements the 4 Token Optimization Strategies:
+ * 1. Lean Core Invariant System Prompt (~1,200 tokens) at priority -1000.
+ * 2. Context-Aware Progressive Disclosure (Unity, Computer Use, Architecture, Frontend loaded on-demand).
+ * 3. Deduplication & High-Density Phrasing.
+ * 4. Deterministic Prefix Invariance for optimal KV-Cache hit rate (>80%).
  */
-export const CODING_AGENT_SYSTEM_PROMPT = `You are a high-performance coding agent running in the terminal, a fast, precise, safe, and helpful pair programmer.
+
+import {
+  CORE_SYSTEM_PROMPT,
+  SECTION_GIT_OPERATIONS,
+  SECTION_FRONTEND_UI,
+  SECTION_ANTIGRAVITY_TOOLS,
+  SECTION_CODEBASE_INTELLIGENCE,
+  SECTION_TOOL_PLAYBOOKS,
+  SECTION_COMPUTER_USE,
+  SECTION_UNITY_GAME_DEV,
+  SECTION_ARCHITECTURE_ANALYSIS,
+  DEFAULT_PROMPT_SECTIONS,
+  detectPromptContext,
+  type PromptAssemblyContext,
+} from './prompt-sections.js';
+import { PromptAssembler } from './prompt-assembler.js';
+
+export {
+  CORE_SYSTEM_PROMPT,
+  SECTION_GIT_OPERATIONS,
+  SECTION_FRONTEND_UI,
+  SECTION_ANTIGRAVITY_TOOLS,
+  SECTION_CODEBASE_INTELLIGENCE,
+  SECTION_TOOL_PLAYBOOKS,
+  SECTION_COMPUTER_USE,
+  SECTION_UNITY_GAME_DEV,
+  SECTION_ARCHITECTURE_ANALYSIS,
+  DEFAULT_PROMPT_SECTIONS,
+  detectPromptContext,
+  type PromptAssemblyContext,
+  PromptAssembler,
+};
+
+/**
+ * Legacy Monolithic System Prompt (Codex CLI + Surgical Architecture standard, ~5,000 tokens).
+ * Preserved for backward compatibility and benchmarking token reduction ratio.
+ */
+export const LEGACY_MONOLITHIC_SYSTEM_PROMPT = `You are a high-performance coding agent running in the terminal, a fast, precise, safe, and helpful pair programmer.
 Your goal is to inspect codebases, solve bugs, implement features, and empirically verify results with maximum token efficiency and zero regressions.
 
 Core Principles & Architectural Invariants:
@@ -171,3 +200,5 @@ Core Principles & Architectural Invariants:
             - Pacing: Use \`wait\` with \`duration_ms\` when waiting for an application to launch, load a webpage, or complete an animation.
          4. [Feedback & Verification]: Call \`computer(action: "screenshot")\` after significant actions to verify that the UI responded as expected.
        * Coordinate scaling: The controller automatically scales coordinates from screenshot dimensions to physical screen pixels (\`coordinateSpace: "auto"\`).`;
+
+export const CODING_AGENT_SYSTEM_PROMPT = LEGACY_MONOLITHIC_SYSTEM_PROMPT;

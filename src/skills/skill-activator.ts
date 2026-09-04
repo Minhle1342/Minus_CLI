@@ -4,6 +4,9 @@ import { Session } from '../session/session.js';
 import { CapabilityCatalog } from '../capabilities/capability-catalog.js';
 import { detectExplicitGitMutationIntent } from '../tools/git-intent.js';
 import { detectExplicitGitCommandNames } from '../tools/git-command-policy.js';
+import { detectGameProgrammingIntent, type GameProgrammingIntentResult } from './game-intent.js';
+
+export { detectGameProgrammingIntent, type GameProgrammingIntentResult };
 
 export interface ActivationContext {
   session: Session;
@@ -120,6 +123,22 @@ export class SkillActivator {
 
       const explicitlyEnabled = context.manualOverrides?.enabled?.includes(skill.id);
       const isAutoActivate = skill.autoActivate === true;
+
+      // Cơ chế Intent-Gated đặc biệt: game-development và unity-ai-game-creator CHỈ được nạp khi có yêu cầu lập trình game
+      const isGatedGameSkill = skill.id === 'game-development' || skill.id === 'unity-ai-game-creator';
+      if (isGatedGameSkill) {
+        let gameMatch = false;
+        if (context.userRequest) {
+          const gameIntent = detectGameProgrammingIntent(context.userRequest);
+          if (gameIntent.isGameProgramming) {
+            gameMatch = true;
+          }
+        }
+        if (explicitlyEnabled || gameMatch) {
+          candidateSkills.push(skill);
+        }
+        continue;
+      }
 
       // Khớp phân loại ngữ cảnh từ userRequest (Classification)
       let matchesContext = false;

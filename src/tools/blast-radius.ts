@@ -51,26 +51,34 @@ export const analyzeImpactTool: ToolDefinition = {
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn file cần phân tích (ví dụ: "src/tools/registry.ts")',
+        description: 'Đường dẫn file cần phân tích (ví dụ: "src/tools/registry.ts"). Alias: "filePath".',
+      },
+      filePath: {
+        type: Type.STRING,
+        description: 'Alias cho "path": Đường dẫn file cần phân tích.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tùy chọn: Tên symbol cụ thể (hàm, interface, class, method) cần phân tích tác động.',
+        description: 'Tùy chọn: Tên symbol cụ thể (hàm, interface, class, method) cần phân tích tác động. Alias: "symbolName".',
+      },
+      symbolName: {
+        type: Type.STRING,
+        description: 'Alias cho "symbol": Tên symbol cụ thể cần phân tích.',
       },
       depth: {
         type: Type.INTEGER,
         description: 'Độ sâu phân tích chuỗi phụ thuộc gián tiếp (mặc định: 2, tối đa: 5).',
       },
     },
-    required: ['path'],
+    required: [],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '').trim();
-    const symbol = args.symbol ? String(args.symbol).trim() : undefined;
+    const rawPath = String(args.path || args.filePath || '').trim();
+    const symbol = args.symbol || args.symbolName ? String(args.symbol || args.symbolName).trim() : undefined;
     const depth = typeof args.depth === 'number' ? args.depth : 2;
 
     if (!rawPath) {
-      return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
+      return toolError('Tham số "path" (hoặc "filePath") là bắt buộc.', 'INVALID_ARGS');
     }
 
     try {

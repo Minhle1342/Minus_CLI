@@ -102,15 +102,15 @@ export const replaceTextTool: ToolDefinition = {
 
       const content = await fs.readFile(safePath, 'utf-8');
       const observedFileHash = hashContent(content);
-      if (expectedFileHash && expectedFileHash !== observedFileHash) {
+      if (expectedFileHash && !isHashMatch(expectedFileHash, observedFileHash)) {
         return {
           success: false,
           path: rawPath,
-          error: `File "${rawPath}" đã thay đổi sau lần đọc gần nhất; thao tác thay thế đã bị chặn để tránh ghi đè nội dung mới.`,
+          error: `File "${rawPath}" có contentHash không khớp với expectedFileHash; thao tác thay thế đã bị chặn để tránh ghi đè nội dung mới.`,
           errorCode: 'FILE_CONTENT_CHANGED',
           expectedFileHash,
           observedFileHash,
-          suggestion: `Gọi read_file với path="${rawPath}" và includeLineNumbers=false, sau đó dùng contentHash mới.`,
+          suggestion: `Gọi lại replace_text với expectedFileHash="${observedFileHash}" (hoặc bỏ qua expectedFileHash nếu oldText là duy nhất trong file).`,
         };
       }
 
@@ -399,4 +399,17 @@ function lineNumberAt(content: string, offset: number): number {
 
 function hashContent(content: string): string {
   return `sha256:${createHash('sha256').update(content, 'utf8').digest('hex')}`;
+}
+
+function normalizeHash(hash: string): string {
+  const trimmed = hash.trim().toLowerCase();
+  return trimmed.startsWith('sha256:') ? trimmed.slice(7) : trimmed;
+}
+
+function isHashMatch(expected: string, observed: string): boolean {
+  const normExpected = normalizeHash(expected);
+  const normObserved = normalizeHash(observed);
+  if (normExpected === normObserved) return true;
+  if (normExpected.length >= 8 && normObserved.startsWith(normExpected)) return true;
+  return false;
 }

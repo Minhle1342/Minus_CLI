@@ -189,6 +189,7 @@ export class ToolRetriever {
     if (name.includes('memory') || name.includes('digest')) return 'memory';
     if (name.includes('repomix') || name.includes('pack') || name.includes('compress')) return 'repomix';
     if (name.includes('git') || name.includes('commit') || name.includes('push') || name.includes('diff')) return 'git';
+    if (name.startsWith('game_') || name.startsWith('unity_') || name.includes('tilemap') || name.includes('sprite') || name.includes('physics') || name.includes('prefab') || name.includes('scene')) return 'game_development';
     if (name.includes('approval')) return 'approval';
     if (name.includes('review')) return 'review';
     return 'general';
@@ -254,6 +255,9 @@ export class ToolRetriever {
     }
     if (text.includes('computer') || text.includes('desktop') || text.includes('mouse') || text.includes('click') || text.includes('keyboard') || text.includes('screenshot') || text.includes('screen') || text.includes('gui')) {
       tags.add('computer use desktop gui screenshot mouse click type keyboard hotkey scroll screen display os');
+    }
+    if (text.includes('game') || text.includes('tilemap') || text.includes('pixel') || text.includes('sprite') || text.includes('physics') || text.includes('hitbox') || text.includes('jump') || text.includes('fsm') || text.includes('unity') || text.includes('scene') || text.includes('prefab')) {
+      tags.add('game development unity editor scene prefab hierarchy component serializedobject wire reference 2d 3d pixel tilemap sprite animation atlas physics hitbox collision jump kinematic fsm state machine godot phaser canvas');
     }
 
     return Array.from(tags).join(' ');

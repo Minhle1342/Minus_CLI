@@ -481,7 +481,9 @@ export class CodebaseIntelligenceService {
       if (
         (ts.isFunctionDeclaration(node) && node.name?.text === symbolName) ||
         (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName) ||
-        (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName)
+        (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName) ||
+        (ts.isClassDeclaration(node) && node.name?.text === symbolName) ||
+        (ts.isInterfaceDeclaration(node) && node.name?.text === symbolName)
       ) {
         symbolBodyNode = node;
         return;
@@ -490,7 +492,41 @@ export class CodebaseIntelligenceService {
     }
     findSymbolNode(sourceFile);
 
-    if (!symbolBodyNode) return [];
+    if (!symbolBodyNode) {
+      // Fallback cho C# / Unity / non-TS files
+      const lines = fileContent.split('\n');
+      const calls = new Map<string, CallNode>();
+      const declPattern = new RegExp(`(?:class|interface|struct|def|void|int|string|float|bool|async|public|private|protected)\\s+${symbolName}\\b`, 'i');
+      let inScope = false;
+      let braceCount = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const lineText = lines[i];
+        if (!inScope && declPattern.test(lineText)) {
+          inScope = true;
+          braceCount = (lineText.match(/\{/g) || []).length - (lineText.match(/\}/g) || []).length;
+          continue;
+        }
+        if (inScope) {
+          braceCount += (lineText.match(/\{/g) || []).length - (lineText.match(/\}/g) || []).length;
+          const callMatches = lineText.matchAll(/\b([A-Za-z0-9_]+)\s*\(/g);
+          for (const m of callMatches) {
+            const calledName = m[1];
+            const keywords = new Set(['if', 'for', 'while', 'switch', 'catch', 'sizeof', 'typeof', 'using', 'return', 'new']);
+            if (calledName && calledName !== symbolName && !keywords.has(calledName) && !calls.has(calledName)) {
+              calls.set(calledName, {
+                name: calledName,
+                file: this.workspace.toRelativePath(filePath),
+                line: i + 1,
+              });
+            }
+          }
+          if (braceCount <= 0 && lineText.includes('}')) {
+            break;
+          }
+        }
+      }
+      return Array.from(calls.values());
+    }
 
     const calls = new Map<string, CallNode>();
 
@@ -568,6 +604,25 @@ export class CodebaseIntelligenceService {
       };
 
       visit(sourceFile);
+
+      // Fallback cho C# / Unity / non-TS files nếu AST không bắt được call expression
+      if (callers.length === 0 && (file.endsWith('.cs') || file.endsWith('.py') || file.endsWith('.shader'))) {
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i];
+          if (l.includes(symbolName) && !l.includes(`class ${symbolName}`) && !l.includes(`interface ${symbolName}`)) {
+            const callerName = path.basename(file, path.extname(file));
+            const relFile = this.workspace.toRelativePath(file);
+            if (!callers.some((c) => c.name === callerName && c.file === relFile && c.line === i + 1)) {
+              callers.push({
+                name: callerName,
+                file: relFile,
+                line: i + 1,
+              });
+            }
+          }
+        }
+      }
     }
 
     return callers;
@@ -630,7 +685,7 @@ export class CodebaseIntelligenceService {
           if (entry.isDirectory()) {
             scan(full);
           } else if (entry.isFile()) {
-            if (/\.(ts|tsx|js|jsx|py|go|rs|java|cpp|c)$/.test(entry.name)) {
+            if (/\.(ts|tsx|js|jsx|py|go|rs|java|cpp|c|cs|shader|hlsl)$/i.test(entry.name)) {
               results.push(full);
             }
           }

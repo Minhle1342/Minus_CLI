@@ -70,11 +70,15 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         throw new Error('Missing required argument: "verificationEvidence" is mandatory. Provide the test/build command and its passing result.');
       }
       if (context?.completionEvidenceVerified !== true) {
+        const reason = context?.completionEvidenceReason
+          ? `submit_solution bị từ chối do thiếu bằng chứng kiểm chứng thực nghiệm: ${context.completionEvidenceReason}`
+          : 'submit_solution requires durable session-backed mutation and verification evidence; prose evidence is not trusted.';
         return {
           success: false,
           submitted: false,
-          error: 'submit_solution requires durable session-backed mutation and verification evidence; prose evidence is not trusted.',
+          error: reason,
           errorCode: 'UNVERIFIED_SUBMISSION',
+          suggestion: 'Hãy hoàn thành các thay đổi mã nguồn cần thiết và chạy lệnh kiểm thử/build hợp lệ (ví dụ: `npm test`, `npm run build`, `pytest`, `cargo test`) với exit code 0 trước khi gọi lại submit_solution.',
         } as any;
       }
 

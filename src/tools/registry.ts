@@ -21,6 +21,8 @@ import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
 import { createWebSearchTool } from './web-search.js';
 import { createWebFetchTool } from './web-fetch.js';
+import { searchWebTool } from './search-web.js';
+import { readUrlContentTool } from './read-url-content.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
 import { createPublishAgentEventTool } from './agent-event-tools.js';
 import { queryCallGraphTool } from './query-call-graph.js';
@@ -42,6 +44,13 @@ import { createSearchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
+import {
+  gameTilemapStudioTool,
+  gamePixelSpriteStudioTool,
+  game2DPhysicsConfigTool,
+  gameScaffoldEngineTool,
+} from './game-tools.js';
+import { unityGameplayStudioTool } from './unity-tools.js';
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -92,15 +101,23 @@ export class ToolRegistry implements ToolProvider {
     this.register(lspQueryTool);
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
-    this.register(createComputerTool(this.computerController));
     this.register(runCommandTool);
     this.register(createWebSearchTool());
     this.register(createWebFetchTool());
+    this.register(searchWebTool);
+    this.register(readUrlContentTool);
     this.register(queryCallGraphTool);
     this.register(getRouteMapTool);
     this.register(getSymbolContext360Tool);
     this.register(getArchitectureTopologyTool);
     this.register(createSearchCodebaseFastTool());
+
+    // Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine
+    this.register(gameTilemapStudioTool);
+    this.register(gamePixelSpriteStudioTool);
+    this.register(game2DPhysicsConfigTool);
+    this.register(gameScaffoldEngineTool);
+    this.register(unityGameplayStudioTool);
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));

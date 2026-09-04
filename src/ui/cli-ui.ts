@@ -106,6 +106,8 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
+  { command: '/queue', usage: '/queue [list|cancel <id>|clear|add <text>]', description: 'Quản lý hàng đợi tin nhắn Queued Messages (Antigravity-style)', category: 'Execution', aliases: ['/q'] },
+  { command: '/steer', usage: '/steer <yêu cầu điều chỉnh>', description: 'Đưa tin nhắn vào hàng đợi để bẻ lái Agent ngay trong bước kế tiếp', category: 'Execution' },
   { command: '/cancel', usage: '/cancel [all|goal|tasks|subagents]', description: 'Hủy tác vụ/goal/subagent đang chạy (hoặc bấm Ctrl+C / Esc trong khi thực thi)', category: 'Execution', aliases: ['/stop', '/abort'] },
   { command: '/resume', description: 'Tiếp tục thông minh tác vụ/kế hoạch/goal bị gián đoạn (One-Click Resume)', category: 'Execution', aliases: ['/continue'] },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
@@ -467,36 +469,342 @@ export interface ModelOption {
 }
 
 export const AVAILABLE_MODELS: ModelOption[] = [
+  // 0. Smart 3-Tier Fallback Router & 9Router Gateway
   {
     id: '0',
     name: 'auto-fallback',
-    provider: '3-Tier Smart Router',
-    desc: 'Tự động luân chuyển: Gemini ➔ Groq ➔ Cerebras ➔ SambaNova khi bị rate limit',
+    provider: '3-Tier Smart Router (Chống Rate-Limit)',
+    desc: 'Tự động luân chuyển: Gemini ➔ Groq ➔ Cerebras ➔ SambaNova ➔ Pollinations khi bị 429',
     recommended: true,
   },
   {
+    id: '9r',
+    name: '9router/auto',
+    provider: '9Router Gateway (Local Proxy)',
+    desc: 'Định tuyến qua 9Router Proxy (localhost:20128/v1) với RTK Token Saver & 40+ providers',
+  },
+
+  // 1. Google AI Studio
+  {
     id: '1',
-    name: 'gemini-2.5-pro',
-    provider: 'Google Gemini',
-    desc: 'Mô hình lập trình mạnh mẽ nhất của DeepMind với Deep Reasoning',
+    name: 'gemini-3.7-flash',
+    provider: 'Google AI Studio',
+    desc: 'Model thế hệ mới nhất 2026, tối ưu Coding & Agentic workflow siêu tốc',
+    recommended: true,
   },
   {
     id: '2',
-    name: 'gemini-2.5-flash',
-    provider: 'Google Gemini',
-    desc: 'Tốc độ cực nhanh, phù hợp tác vụ khám phá và chỉnh sửa nhanh',
+    name: 'gemini-3.6-flash',
+    provider: 'Google AI Studio',
+    desc: 'Bản nâng cấp ổn định, phản hồi nhanh và gọi công cụ chuẩn xác',
   },
+  {
+    id: '3',
+    name: 'gemini-3.5-flash',
+    provider: 'Google AI Studio',
+    desc: 'Cân bằng hoàn hảo giữa tốc độ, độ thông minh và hiệu năng thực thi',
+  },
+  {
+    id: '4',
+    name: 'gemini-3.5-flash-lite',
+    provider: 'Google AI Studio',
+    desc: 'Bản Lite thế hệ 3.5 siêu nhanh, độ trễ thấp (thay thế 2.5-flash-lite)',
+  },
+  {
+    id: '5',
+    name: 'gemini-3.1-flash-lite-preview',
+    provider: 'Google AI Studio',
+    desc: 'Phản hồi cực nhanh, gọi tool chuẩn xác, siêu nhẹ và tiết kiệm',
+  },
+  {
+    id: '6',
+    name: 'gemini-3.1-flash-lite',
+    provider: 'Google AI Studio',
+    desc: 'Bản Flash Lite chính thức thế hệ 3.1, ổn định và tối ưu tài nguyên',
+  },
+  {
+    id: '7',
+    name: 'gemini-flash-latest',
+    provider: 'Google AI Studio',
+    desc: 'Alias tự động trỏ đến mô hình Gemini Flash mới nhất của Google',
+  },
+
+  // 2. Groq Cloud (Free Tier: Siêu tốc độ LPU >500 tokens/s)
+  {
+    id: '8',
+    name: 'groq/llama-3.3-70b-versatile',
+    provider: 'Groq Cloud (Free)',
+    desc: 'Llama 3.3 70B chạy trên chip LPU siêu tốc ~300 tok/s, rất thông minh',
+    recommended: true,
+  },
+  {
+    id: '9',
+    name: 'groq/deepseek-r1-distill-llama-70b',
+    provider: 'Groq Cloud (Free)',
+    desc: 'DeepSeek R1 reasoning suy luận từng bước siêu tốc trên Groq',
+  },
+  {
+    id: '10',
+    name: 'groq/llama-3.1-8b-instant',
+    provider: 'Groq Cloud (Free)',
+    desc: 'Llama 3.1 8B phản hồi tức thì ~600 tokens/s, cực kỳ nhẹ',
+  },
+  {
+    id: '11',
+    name: 'groq/gemma2-9b-it',
+    provider: 'Groq Cloud (Free)',
+    desc: 'Google Gemma 2 9B chạy trên Groq LPU',
+  },
+
+  // 3. Cerebras Cloud
+  {
+    id: '12',
+    name: 'cerebras/llama-3.3-70b',
+    provider: 'Cerebras Cloud (Free)',
+    desc: 'Llama 3.3 70B, tốc độ kỷ lục ~1.800 tok/s, hạn mức 1M tokens/ngày',
+  },
+  {
+    id: '13',
+    name: 'cerebras/llama3.1-8b',
+    provider: 'Cerebras Cloud (Free)',
+    desc: 'Llama 3.1 8B siêu tốc ~2.000 tok/s, 1M tokens/ngày',
+  },
+
+  // 4. SambaNova Cloud
+  {
+    id: '14',
+    name: 'sambanova/Meta-Llama-3.1-405B-Instruct',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'Model Llama 405B khổng lồ chạy miễn phí cho Developer',
+  },
+  {
+    id: '15',
+    name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'Llama 3.3 70B trên kiến trúc chip SN40L cực mạnh',
+  },
+  {
+    id: '16',
+    name: 'sambanova/DeepSeek-R1-Distill-Llama-70B',
+    provider: 'SambaNova Cloud (Free)',
+    desc: 'DeepSeek R1 70B reasoning trên hạ tầng SambaNova',
+  },
+
+  // 5. GitHub Models
+  {
+    id: '17',
+    name: 'github/gpt-4o',
+    provider: 'GitHub Models (Free)',
+    desc: 'GPT-4o chính thức miễn phí qua GitHub Token / Azure endpoint',
+  },
+  {
+    id: '18',
+    name: 'github/gpt-4o-mini',
+    provider: 'GitHub Models (Free)',
+    desc: 'GPT-4o Mini tốc độ cao qua GitHub Token',
+  },
+  {
+    id: '19',
+    name: 'github/Mistral-large-2407',
+    provider: 'GitHub Models (Free)',
+    desc: 'Mistral Large 128k context qua GitHub Models',
+  },
+
+  // 6. SiliconFlow
+  {
+    id: '20',
+    name: 'siliconflow/deepseek-ai/DeepSeek-V3',
+    provider: 'SiliconFlow (Free)',
+    desc: 'DeepSeek V3 671B qua hạ tầng SiliconFlow',
+  },
+  {
+    id: '21',
+    name: 'siliconflow/deepseek-ai/DeepSeek-R1',
+    provider: 'SiliconFlow (Free)',
+    desc: 'DeepSeek R1 suy luận chuyên sâu',
+  },
+  {
+    id: '22',
+    name: 'siliconflow/Qwen/Qwen2.5-Coder-32B-Instruct',
+    provider: 'SiliconFlow (Free)',
+    desc: 'Qwen 2.5 Coder 32B chuyên gia lập trình hàng đầu',
+  },
+
+  // 7. Mistral AI
+  {
+    id: '23',
+    name: 'mistral/codestral-latest',
+    provider: 'Mistral AI (Free)',
+    desc: 'Codestral chuyên gia lập trình của Mistral (Free dev key)',
+  },
+  {
+    id: '24',
+    name: 'mistral/mistral-large-latest',
+    provider: 'Mistral AI (Free)',
+    desc: 'Mistral Large mô hình mạnh nhất của Mistral',
+  },
+
+  // 8. OpenRouter
+  {
+    id: '25',
+    name: 'openrouter/free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Tự động định tuyến sang model miễn phí tốt nhất trên OpenRouter',
+  },
+  {
+    id: '26',
+    name: 'openrouter/z-ai/glm-5.3-flash',
+    provider: 'OpenRouter (Z.ai)',
+    desc: 'GLM-5.3 Flash (Z.ai - cựu Ox Alpha): Multimodal reasoning coding model, 1M context',
+    recommended: true,
+  },
+  {
+    id: '27',
+    name: 'openrouter/meta-llama/llama-3.3-70b-instruct:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Llama 3.3 70B miễn phí qua OpenRouter',
+  },
+  {
+    id: '28',
+    name: 'openrouter/deepseek/deepseek-r1:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'DeepSeek R1 miễn phí qua OpenRouter',
+  },
+  {
+    id: '29',
+    name: 'openrouter/google/gemini-2.0-flash-exp:free',
+    provider: 'OpenRouter (Free)',
+    desc: 'Gemini 2.0 Flash Experimental miễn phí qua OpenRouter',
+  },
+
+  // 9. Pollinations AI
+  {
+    id: '30',
+    name: 'pollinations/openai',
+    provider: 'Pollinations.ai (Zero-Key)',
+    desc: 'GPT-4o-mini miễn phí 100%, không cần đăng ký tài khoản hay API key',
+  },
+  {
+    id: '31',
+    name: 'pollinations/mistral',
+    provider: 'Pollinations.ai (Zero-Key)',
+    desc: 'Mistral miễn phí 100%, không cần đăng ký tài khoản hay API key',
+  },
+
+  // 10. DeepSeek Direct
+  {
+    id: '32',
+    name: 'deepseek-chat',
+    provider: 'DeepSeek Direct',
+    desc: 'DeepSeek V3 chính thức (cần key platform.deepseek.com)',
+  },
+  {
+    id: '33',
+    name: 'deepseek-reasoner',
+    provider: 'DeepSeek Direct',
+    desc: 'DeepSeek R1 reasoning chính thức (cần key platform.deepseek.com)',
+  },
+
+  // 11. Anthropic Claude API (active models)
+  {
+    id: '34',
+    name: 'claude-fable-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Fable 5: model Anthropic mạnh nhất cho agent chạy dài và tác vụ phức tạp',
+    recommended: true,
+  },
+  {
+    id: '35',
+    name: 'claude-opus-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 5: suy luận và coding agentic cao cấp',
+  },
+  {
+    id: '36',
+    name: 'claude-opus-4-8',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.8: coding agentic và enterprise work phức tạp',
+  },
+  {
+    id: '37',
+    name: 'claude-opus-4-7',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.7: Opus mạnh cho reasoning và coding',
+  },
+  {
+    id: '38',
+    name: 'claude-opus-4-6',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.6: năng lực cao cho tác vụ dài và nhiều bước',
+  },
+  {
+    id: '39',
+    name: 'claude-opus-4-5-20251101',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Opus 4.5: snapshot ổn định cho coding agent',
+  },
+  {
+    id: '40',
+    name: 'claude-sonnet-5',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 5: cân bằng tốc độ, chất lượng và coding agentic',
+  },
+  {
+    id: '41',
+    name: 'claude-sonnet-4-6',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 4.6: nhanh, mạnh và phù hợp cho coding hằng ngày',
+  },
+  {
+    id: '42',
+    name: 'claude-sonnet-4-5-20250929',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Sonnet 4.5: snapshot ổn định cho coding và automation',
+  },
+  {
+    id: '43',
+    name: 'claude-haiku-4-5-20251001',
+    provider: 'Anthropic Claude API',
+    desc: 'Claude Haiku 4.5: phản hồi nhanh và tiết kiệm cho tác vụ nhẹ',
+  },
+
+  // 12. MINUS CLI Models (OpenAI / ChatGPT Plus)
   {
     id: 'cs',
-    name: 'codestral-latest',
-    provider: 'Mistral AI',
-    desc: 'Chuyên gia code 256k context của Mistral',
+    name: 'codex/gpt-5.6-sol',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: '☀️ GPT-5.6 Sol: Đỉnh cao suy luận, quy hoạch logic phức tạp & hoàn thiện code tối đa',
+    recommended: true,
   },
   {
-    id: 'llama',
-    name: 'llama-3.3-70b-versatile',
-    provider: 'Groq / Meta',
-    desc: 'Suy luận tốc độ cao trên phần cứng LPU',
+    id: 'ct',
+    name: 'codex/gpt-5.6-terra',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: '🌍 GPT-5.6 Terra: Mô hình chủ lực cân bằng tốc độ & chất lượng cho coding hàng ngày',
+  },
+  {
+    id: 'cl',
+    name: 'codex/gpt-5.6-luna',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: '🌙 GPT-5.6 Luna: Siêu tốc độ, nhẹ, tối ưu cho tác vụ rõ ràng & lặp lại nhanh',
+  },
+  {
+    id: 'c4',
+    name: 'codex/o4-mini',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'o4-mini: Reasoning code thế hệ mới tối ưu cho coding agent',
+  },
+  {
+    id: 'c3',
+    name: 'codex/o3-mini',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'o3-mini: Suy luận chuyên sâu lập trình và giải quyết thuật toán hóc búa',
+  },
+  {
+    id: 'cg',
+    name: 'codex/gpt-4o',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'GPT-4o: Đa năng, xử lý ngữ cảnh lớn & sinh mã ổn định',
   },
 ];
 
@@ -611,18 +919,32 @@ export class CLI {
   }
 
   /**
-   * Hiển thị bảng chọn Model gọn gàng
+   * Hiển thị danh sách các model có sẵn để người dùng chọn
    */
   static renderModelSelector(currentModel: string): void {
-    console.log(`\n${c.brightCyan}${c.bold}❯ AVAILABLE MODELS${c.reset}`);
+    const width = getTerminalWidth();
+    console.log(`\n${createBoxHeader('🤖 DANH SÁCH MÔ HÌNH KHẢ DỤNG (SELECT MODEL)', c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
+    
+    let lastProvider = '';
     for (const m of AVAILABLE_MODELS) {
+      if (m.provider !== lastProvider) {
+        lastProvider = m.provider;
+        console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}❖ ${m.provider.toUpperCase()}${c.reset}`);
+      }
+
       const isCurrent = m.name === currentModel;
       const marker = isCurrent ? ` ${c.emerald}${c.bold}* [ACTIVE]${c.reset}` : '';
-      const rec = m.recommended ? ` ${c.amber}(Recommended)${c.reset}` : '';
-      console.log(`  ${c.brightCyan}[${m.id.padStart(2)}]${c.reset} ${c.bold}${m.name}${c.reset}${rec}${marker} ── ${c.slate}${m.provider}${c.reset}`);
-      console.log(`       ${c.mutedText}${m.desc}${c.reset}`);
+      const recBadge = m.recommended ? ` ${c.geminiAmber}(Recommended)${c.reset}` : '';
+      
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}${c.bold}[${m.id.padStart(2, ' ')}]${c.reset} ${c.bold}${m.name}${c.reset}${recBadge}${marker}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}         ${c.mutedText}${m.desc}${c.reset}`);
+      console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
     }
-    console.log(`\n  ${c.slate}👉 Nhập ID hoặc tên model để chọn:${c.reset}\n`);
+
+    console.log(`${createBoxDivider(c.geminiPurple, width)}`);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}👉 Nhập ID model (ví dụ: ${c.brightCyan}0${c.slate}, ${c.brightCyan}1${c.slate}, ${c.brightCyan}9r${c.slate}, ${c.brightCyan}26${c.slate}, ${c.brightCyan}cs${c.slate}...) hoặc ${c.brightCyan}tên model bất kỳ${c.slate} để đổi mô hình:${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
   /**
@@ -980,7 +1302,10 @@ export class CLI {
     const duration = durationMs > 0 ? ` ${c.slate}(${durationMs}ms)${c.reset}` : '';
 
     if (isError) {
-      console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${result.error || result.message || 'Unknown error'}`);
+      const firstStderrLine = result.stderr ? String(result.stderr).trim().split('\n')[0] : '';
+      const exitDetail = typeof result.exitCode === 'number' && result.exitCode !== 0 ? `Process exited with code ${result.exitCode}` : '';
+      const errDetail = result.error || result.message || firstStderrLine || exitDetail || 'Unknown error';
+      console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${errDetail}`);
       return;
     }
 
@@ -1048,11 +1373,21 @@ export class CLI {
     modelName: string;
     preservePrefixCache: boolean;
     sessionId?: string;
-    totalPromptTokens?: number;
-    totalCachedTokens?: number;
-    lastHitRate?: number;
+    sessionAgeSec?: number;
+    cachedTokens?: number;
+    totalTokens?: number;
+    cacheHitRate?: number;
+    cachedCheckpoints?: number;
   }): void {
-    console.log(`\n  ${c.slate}Prompt Cache:${c.reset} ${info.preservePrefixCache ? 'Preserve KV-Cache' : 'Standard'} · Hit Rate: ${info.lastHitRate || 0}%\n`);
+    const cached = info.cachedTokens ?? 0;
+    const total = info.totalTokens ?? 0;
+    const rate = info.cacheHitRate ?? (total > 0 ? Number(((cached / total) * 100).toFixed(1)) : 0);
+    const modeBadge = info.preservePrefixCache
+      ? `${c.emerald}ENABLED (Prefix Preserved)${c.reset}`
+      : `${c.amber}DISABLED${c.reset}`;
+    console.log(`\n  ${c.geminiCyan}${c.bold}❯ PROMPT CACHE TELEMETRY${c.reset} [${modeBadge}]`);
+    console.log(`    Model: ${c.brightCyan}${info.modelName}${c.reset} │ Session: ${c.slate}${info.sessionId || 'active'}${c.reset} (${info.sessionAgeSec ?? 0}s)`);
+    console.log(`    Tokens: ${cached.toLocaleString()} cached / ${total.toLocaleString()} total (${c.yellow}${rate}%${c.reset} hit rate) │ Checkpoints: ${info.cachedCheckpoints ?? 0}`);
   }
 
   static renderAttachmentSummary(attachments: AttachedItemSummary[]): void {
@@ -1130,10 +1465,51 @@ export class CLI {
     const content = message.trim();
     console.log(`\n  ${c.crimson}${c.bold}🛑 AGENT EXECUTION STOPPED (${reason})${c.reset}\n`);
     console.log(`  ${content}\n`);
+    if (reason === 'CANCELLED' || reason === 'STOPPED') {
+      CLI.renderPromptInputNotice('Tác vụ đã được dừng an toàn. Sẵn sàng nhận yêu cầu / prompt tiếp theo:', { force: true });
+    }
   }
 
-  static renderTaskCancelledToast(message = 'Đã dừng tác vụ theo yêu cầu (Ctrl+C / Esc).'): void {
-    console.log(`\n  ${c.crimson}🛑 [Cancelled]${c.reset} ${message}\n`);
+  private static lastCancelledToastTimestamp = 0;
+
+  static resetToastDebounceTimestamps(): void {
+    CLI.lastCancelledToastTimestamp = 0;
+    CLI.lastPromptNoticeTimestamp = 0;
+  }
+
+  static renderTaskCancelledToast(
+    message = 'Đã dừng tác vụ theo yêu cầu (Ctrl+C / Esc).',
+    options: { showPromptNotice?: boolean; force?: boolean } = {},
+  ): void {
+    const now = Date.now();
+    // Chống in lặp liên tiếp khi nhận cả signal và keypress event gần như đồng thời
+    if (!options.force && now - CLI.lastCancelledToastTimestamp < 400) {
+      return;
+    }
+    CLI.lastCancelledToastTimestamp = now;
+
+    console.log(`\n  ${c.crimson}${c.bold}🛑 [Cancelled]${c.reset} ${c.brightRed}${message}${c.reset}`);
+    if (options.showPromptNotice !== false) {
+      CLI.renderPromptInputNotice('Đã dừng tác vụ đang thực thi. Mời bạn nhập prompt mới tiếp tục:', { force: options.force });
+    } else {
+      console.log('');
+    }
+  }
+
+  private static lastPromptNoticeTimestamp = 0;
+
+  static renderPromptInputNotice(
+    hint = 'Sẵn sàng nhận lệnh mới. Mời bạn nhập yêu cầu / prompt:',
+    options: { force?: boolean } = {},
+  ): void {
+    const now = Date.now();
+    // Chống in lặp liên tiếp thông báo prompt trong vòng 400ms
+    if (!options.force && now - CLI.lastPromptNoticeTimestamp < 400) {
+      return;
+    }
+    CLI.lastPromptNoticeTimestamp = now;
+    console.log(`  ${c.brightCyan}💬 ${hint}${c.reset}`);
+    console.log(`  ${c.slate}💡 Gợi ý: Nhập câu lệnh, hoặc gõ ${c.bold}/help${c.reset}${c.slate} để xem trợ giúp, ${c.bold}/exit${c.reset}${c.slate} để thoát chương trình.${c.reset}\n`);
   }
 
   static renderSkills(skills: any[], activeDecisions: any[] = []): void {
@@ -1175,9 +1551,26 @@ export class CLI {
     riskLevel: string;
     details?: Record<string, any>;
   }): void {
+    const rawTarget = (request.target || '').trim();
+    const fallbackTarget = request.details
+      ? String(request.details.command || request.details.CommandLine || request.details.commandLine || request.details.cmd || request.details.path || request.details.filePath || '').trim()
+      : '';
+    const displayTarget = rawTarget || fallbackTarget || '(không xác định)';
+
+    let displaySummary = request.summary || '';
+    const hasEmptyPlaceholder = displaySummary.includes(': ""') || displaySummary.trim() === '""';
+    if (!displaySummary && displayTarget && displayTarget !== '(không xác định)') {
+      displaySummary = `Thực thi thao tác trên "${displayTarget}"`;
+    } else if (hasEmptyPlaceholder && displayTarget && displayTarget !== '(không xác định)') {
+      displaySummary = displaySummary.replace(': ""', `: "${displayTarget}"`).replace(/^""$/, `"${displayTarget}"`);
+    }
+
     console.log(`\n  ${c.amber}${c.bold}⚠️  PERMISSION REQUEST${c.reset} [${request.riskLevel}]`);
-    console.log(`  Tool: ${c.bold}${request.toolName}${c.reset} ── Target: ${c.brightCyan}${request.target}${c.reset}`);
-    console.log(`  Desc: ${request.summary}`);
+    console.log(`  Tool: ${c.bold}${request.toolName}${c.reset} ── Target: ${c.brightCyan}${displayTarget}${c.reset}`);
+    console.log(`  Desc: ${displaySummary}`);
+    if (request.details?.misuse) {
+      console.log(`  ${c.geminiPurple || c.magenta}💡 Gợi ý: Bấm [n] để từ chối và chuyển sang tool: ${c.brightCyan}${request.details.misuse.tool}${c.reset}`);
+    }
     console.log(`  ${c.slate}[y] Allow once · [a] Allow for session · [n] Reject · [q] Abort${c.reset}`);
   }
 
@@ -1188,9 +1581,32 @@ export class CLI {
     console.log(`  Presets: low (16k) · medium (64k) · high (128k) · max\n`);
   }
 
+  static renderSteeringNotice(text: string): void {
+    const preview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+    console.log(`\n  ${c.bgCyan}${c.bold} ⚡ QUEUED MESSAGE INJECTED (MID-TURN STEERING) ${c.reset} ${c.brightCyan}"${preview}"${c.reset}`);
+    console.log(`  ${c.slate}↳ Đã tiêm tin nhắn bẻ lái vào ngữ cảnh; Agent đang điều chỉnh suy luận ngay trong bước này.${c.reset}\n`);
+  }
+
+  static renderQueueStatus(items: Array<{ id: string; text: string; source: string; enqueuedAt: string }>): void {
+    if (items.length === 0) {
+      console.log(`\n  ${c.slate}ℹ Hàng đợi Queued Messages trống (0 tin nhắn).${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${c.brightCyan}${c.bold}❯ QUEUED MESSAGES (${items.length})${c.reset}`);
+    items.forEach((item, index) => {
+      const time = item.enqueuedAt ? new Date(item.enqueuedAt).toLocaleTimeString() : '';
+      const preview = item.text.replace(/\s+/g, ' ');
+      const truncated = preview.length > 70 ? `${preview.slice(0, 67)}...` : preview;
+      console.log(`  ${c.bold}#${index + 1}${c.reset} [${c.amber}${item.id}${c.reset}] ${c.slate}(${item.source || 'human'} · ${time})${c.reset}: ${truncated}`);
+    });
+    console.log(`  ${c.slate}💡 Dùng /queue cancel <id> để hủy hoặc /queue clear để xóa hàng đợi.${c.reset}\n`);
+  }
+
   static getPromptSymbol(): string {
     return `${c.geminiCyan || c.brightCyan}${c.bold}❯${c.reset} `;
   }
 }
 
 export const formatMarkdownTerminal = CLI.formatMarkdownTerminal;
+export const renderTaskCancelledToast = CLI.renderTaskCancelledToast.bind(CLI);
+export const renderPromptInputNotice = CLI.renderPromptInputNotice.bind(CLI);

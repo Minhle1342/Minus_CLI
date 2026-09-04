@@ -15,7 +15,7 @@ import { GoalManager } from '../agent/goal-manager.js';
 import { AgentHookRegistry } from '../agent/agent-hooks.js';
 import { AgentInbox } from '../agent/agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
+import { CODING_AGENT_SYSTEM_PROMPT, DEFAULT_PROMPT_SECTIONS } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
@@ -70,6 +70,7 @@ export interface KernelEvents {
     persistenceWrites: number;
   }) => void;
   'model:final_answer': (answer: string) => void;
+  'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
   'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
@@ -173,7 +174,10 @@ export class AgentKernel {
     const goal = new GoalManager();
     const agentHooks = new AgentHookRegistry();
     const inbox = new AgentInbox();
-    const systemPrompt = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
+    const systemPrompt = new PromptAssembler();
+    for (const section of DEFAULT_PROMPT_SECTIONS) {
+      systemPrompt.register(section);
+    }
     const agents = new AgentRegistry();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);

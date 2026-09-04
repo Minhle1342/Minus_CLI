@@ -1,9 +1,18 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { detectExplicitGitMutationIntent, normalizeIntentText } from '../tools/git-intent.js';
 import { detectExplicitGitCommandNames } from '../tools/git-command-policy.js';
 
+export type FinalAnswerGuardRejectionReason =
+  | 'deferred-work'
+  | 'unverified-capability-denial'
+  | 'empty-answer'
+  | 'insufficient-architecture-answer'
+  | 'unverified-architecture-claims';
+
 export interface FinalAnswerGuardDecision {
   allow: boolean;
-  reason?: 'deferred-work' | 'unverified-capability-denial' | 'empty-answer';
+  reason?: FinalAnswerGuardRejectionReason;
   continuationPrompt?: string;
 }
 
@@ -11,6 +20,10 @@ export interface FinalAnswerGuardContext {
   userRequest?: string;
   availableToolNames?: string[];
   hasSubmittedSolution?: boolean;
+  workspace?: {
+    rootDir: string;
+    resolveSafePath?: (targetPath: string) => string;
+  };
 }
 
 interface ToolFailureSummary {
@@ -101,8 +114,10 @@ export class FinalAnswerGuard {
       };
     }
 
-    // 2. Nếu đã submit_solution thành công (Codex CLI Standard), câu trả lời trực tiếp là Final Answer hợp lệ cho người dùng
-    if (context?.hasSubmittedSolution) {
+    const isArchQuery = detectArchitectureAnalysisIntent(context?.userRequest).isArchitectureQuery;
+
+    // 2. Nếu đã submit_solution thành công (Codex CLI Standard) và KHÔNG PHẢI query phân tích kiến trúc/workflow
+    if (context?.hasSubmittedSolution && !isArchQuery) {
       return { allow: true };
     }
 
@@ -112,6 +127,11 @@ export class FinalAnswerGuard {
     if (!promisesFutureToolWork) {
       const gitDenial = this.evaluateGitCapabilityDenial(normalized, context);
       if (gitDenial) return gitDenial;
+
+      // 3. Kiểm định tính chuyên sâu, có cấu trúc và đúng sự thật cho query kiến trúc / workflow / pattern
+      const archDecision = evaluateArchitectureAnalysis(answer, context);
+      if (archDecision) return archDecision;
+
       return { allow: true };
     }
 
@@ -177,6 +197,256 @@ export class FinalAnswerGuard {
       ].join('\n'),
     };
   }
+}
+
+export type ArchitectureCategory = 'architecture' | 'workflow' | 'pattern' | 'mechanism' | 'business';
+
+export interface ArchitectureIntentResult {
+  isArchitectureQuery: boolean;
+  categories: ArchitectureCategory[];
+}
+
+/**
+ * Nhận diện ý định phân tích kiến trúc, workflow, design pattern, cơ chế và nghiệp vụ của workspace.
+ */
+export function detectArchitectureAnalysisIntent(userRequest?: string): ArchitectureIntentResult {
+  if (!userRequest || typeof userRequest !== 'string') {
+    return { isArchitectureQuery: false, categories: [] };
+  }
+
+  const normalized = normalizeForMatching(userRequest);
+  const categories = new Set<ArchitectureCategory>();
+
+  // 1. Nhóm từ khóa hành vi phân tích / tìm hiểu / giải thích / review
+  const hasAnalyticalAction =
+    /\b(?:phan tich|giai thich|tim hieu|khao sat|danh gia|tong quan|trinh bay|chi ra|kiem tra|cho biet|mo ta|analyze|explain|inspect|review|describe|breakdown|trace|explore|understand|overview|walkthrough)\b/.test(
+      normalized,
+    ) || /\b(?:hoat dong nhu the nao|hoat dong the nao|van hanh the nao|to chuc nhu the nao|how does .* work|how it works)\b/.test(
+      normalized,
+    );
+
+  // 2. Nhóm Kiến trúc (Architecture / System Topology)
+  if (
+    /\b(?:kien truc|kien truc he thong|cau truc he thong|kien truc tong the|architecture|system design|system architecture|software architecture|architectural|topology)\b/.test(
+      normalized,
+    )
+  ) {
+    categories.add('architecture');
+  }
+
+  // 3. Nhóm Workflow & Luồng dữ liệu (Workflow / Dataflow / Execution trace)
+  if (
+    /\b(?:workflow|luong|luong hoat dong|luong thuc thi|luong du lieu|dataflow|data flow|execution flow|call flow|call graph|lifecycle|sequence)\b/.test(
+      normalized,
+    )
+  ) {
+    categories.add('workflow');
+  }
+
+  // 4. Nhóm Mẫu thiết kế (Design Patterns)
+  if (
+    /\b(?:pattern|design pattern|mau thiet ke|mo hinh thiet ke|creational pattern|structural pattern|behavioral pattern)\b/.test(
+      normalized,
+    )
+  ) {
+    categories.add('pattern');
+  }
+
+  // 5. Nhóm Cơ chế (Mechanisms)
+  if (
+    /\b(?:co che|co che hoat dong|co che van hanh|co che ben trong|internal mechanism|mechanism|engine mechanism)\b/.test(
+      normalized,
+    )
+  ) {
+    categories.add('mechanism');
+  }
+
+  // 6. Nhóm Nghiệp vụ (Business Mechanisms / Domain logic)
+  if (
+    /\b(?:nghiep vu|logic nghiep vu|business logic|business mechanism|domain model|domain logic)\b/.test(
+      normalized,
+    )
+  ) {
+    categories.add('business');
+  }
+
+  // Query được coi là query phân tích kiến trúc khi có từ 2 danh mục trở lên HOẶC có 1 danh mục đi kèm hành động phân tích/giải thích/walkthrough
+  const isArchitectureQuery = categories.size >= 2 || (categories.size >= 1 && hasAnalyticalAction);
+
+  return {
+    isArchitectureQuery,
+    categories: Array.from(categories),
+  };
+}
+
+export interface GroundingVerificationResult {
+  isGrounded: boolean;
+  validFiles: string[];
+  invalidFiles: string[];
+  reasons: string[];
+}
+
+/**
+ * Kiểm định xem bài phân tích có dẫn chứng các tệp nguồn có thật trong workspace hay không.
+ */
+export function verifyWorkspaceGrounding(
+  answer: string,
+  workspace?: { rootDir: string; resolveSafePath?: (targetPath: string) => string },
+): GroundingVerificationResult {
+  if (!workspace || !workspace.rootDir) {
+    return { isGrounded: true, validFiles: [], invalidFiles: [], reasons: [] };
+  }
+
+  // Quét các đường dẫn file được đề cập trong câu trả lời
+  const pathRegex = /(?:^|[\s`('"])([a-zA-Z0-9_.-]+(?:[\/\\][a-zA-Z0-9_.-]+)+\.[a-zA-Z0-9]+|package\.json|tsconfig\.json|README\.md)(?:[\s`')"]|$)/gm;
+  const rawCandidates = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = pathRegex.exec(answer)) !== null) {
+    const raw = match[1].replace(/^[('"`]|['"`)]$/g, '').trim();
+    if (!raw.startsWith('http') && !raw.includes('node_modules') && !raw.startsWith('file://')) {
+      rawCandidates.add(raw.replace(/\\/g, '/'));
+    }
+  }
+
+  const fileUrlRegex = /file:\/\/\/[^\s`"')]+/g;
+  while ((match = fileUrlRegex.exec(answer)) !== null) {
+    const rawUrl = match[0].replace(/^file:\/\/\//, '');
+    rawCandidates.add(rawUrl.replace(/\\/g, '/'));
+  }
+
+  const validFiles: string[] = [];
+  const invalidFiles: string[] = [];
+
+  for (const candidate of rawCandidates) {
+    try {
+      let resolved: string;
+      if (path.isAbsolute(candidate)) {
+        resolved = candidate;
+      } else if (workspace.resolveSafePath) {
+        resolved = workspace.resolveSafePath(candidate);
+      } else {
+        resolved = path.resolve(workspace.rootDir, candidate);
+      }
+
+      if (fs.existsSync(resolved)) {
+        validFiles.push(candidate);
+      } else if (
+        candidate.startsWith('src/') ||
+        candidate.startsWith('lib/') ||
+        candidate.startsWith('app/') ||
+        candidate.startsWith('deploy/') ||
+        candidate.startsWith('docs/')
+      ) {
+        invalidFiles.push(candidate);
+      }
+    } catch {
+      if (
+        candidate.startsWith('src/') ||
+        candidate.startsWith('lib/') ||
+        candidate.startsWith('app/') ||
+        candidate.startsWith('deploy/') ||
+        candidate.startsWith('docs/')
+      ) {
+        invalidFiles.push(candidate);
+      }
+    }
+  }
+
+  const reasons: string[] = [];
+  if (validFiles.length === 0) {
+    reasons.push(
+      'Câu trả lời phân tích không viện dẫn bất kỳ tệp nguồn hay module nào thực tế tồn tại trong workspace (thiếu empirical workspace grounding).',
+    );
+  }
+  if (invalidFiles.length > 0 && validFiles.length === 0) {
+    reasons.push(
+      `Câu trả lời viện dẫn các đường dẫn tệp không tồn tại trong workspace: ${invalidFiles.slice(0, 3).join(', ')}.`,
+    );
+  }
+
+  return {
+    isGrounded: validFiles.length > 0,
+    validFiles,
+    invalidFiles,
+    reasons,
+  };
+}
+
+/**
+ * Đánh giá tính chuyên sâu, cấu trúc và tính có căn cứ thực tế của bài phân tích kiến trúc / workflow.
+ */
+export function evaluateArchitectureAnalysis(
+  answer: string,
+  context?: FinalAnswerGuardContext,
+): FinalAnswerGuardDecision | undefined {
+  const intent = detectArchitectureAnalysisIntent(context?.userRequest);
+  if (!intent.isArchitectureQuery) return undefined;
+
+  const trimmed = answer.trim();
+  const deficiencies: string[] = [];
+
+  // 1. Tiêu chí độ dài tối thiểu: Một phân tích kiến trúc nghiêm túc tối thiểu phải từ 500 ký tự trở lên
+  if (trimmed.length < 500) {
+    deficiencies.push(
+      `Phản hồi quá ngắn (${trimmed.length} ký tự, yêu cầu tối thiểu 500 ký tự). Yêu cầu phân tích kiến trúc/workflow/pattern không được tóm tắt cụt ngủn hoặc trả lời sơ sài.`,
+    );
+  }
+
+  // 2. Tiêu chí cấu trúc phân tích cốt lõi (Ít nhất 2 trong 4 khía cạnh)
+  const normalized = normalizeForMatching(answer);
+  const structuralSections = {
+    overview: /\b(?:tong quan|muc tieu|nhiem vu|gioi thieu|boi canh|overview|introduction|architecture overview|high-level|system overview)\b/.test(
+      normalized,
+    ),
+    workflow: /\b(?:workflow|luong|quy trinh|lifecycle|flow|sequence|cac buoc|buoc 1|step 1|dataflow|execution flow)\b/.test(
+      normalized,
+    ),
+    pattern: /\b(?:pattern|mau thiet ke|layer|tang|module|component|thanh phan|kien truc)\b/.test(
+      normalized,
+    ),
+    invariantsOrFiles: /\b(?:bat bien|invariant|guardrail|loi|error|file|ma nguon|source|src\/)\b/.test(
+      normalized,
+    ),
+  };
+
+  const sectionsCount = Object.values(structuralSections).filter(Boolean).length;
+  if (sectionsCount < 2) {
+    deficiencies.push(
+      'Thiếu cấu trúc phân tích chuyên sâu. Bài phân tích bắt buộc phải có các mục phân cấp rõ ràng (Tổng quan hệ thống/nghiệp vụ, Luồng workflow/thực thi, Các Pattern/Component cốt lõi, và Bất biến/File nguồn dẫn chứng).',
+    );
+  }
+
+  // 3. Tiêu chí kiểm định thực tế trong workspace (Grounding Verification)
+  if (context?.workspace) {
+    const grounding = verifyWorkspaceGrounding(answer, context.workspace);
+    if (!grounding.isGrounded) {
+      deficiencies.push(...grounding.reasons);
+    }
+  }
+
+  if (deficiencies.length === 0) {
+    return undefined; // Đạt chuẩn
+  }
+
+  return {
+    allow: false,
+    reason: 'insufficient-architecture-answer',
+    continuationPrompt: [
+      '[SYSTEM ARCHITECTURE GUARD]: Phản hồi của bạn bị TỪ CHỐI vì chưa đạt tiêu chuẩn phân tích kiến trúc, workflow, pattern hoặc nghiệp vụ của workspace.',
+      'Các khiếm khuyết được phát hiện:',
+      ...deficiencies.map((d) => `- ${d}`),
+      '',
+      'TIÊU CHUẨN BẮT BUỘC KHI PHÂN TÍCH KIẾN TRÚC & WORKFLOW (FULL-OUTPUT CODEX STANDARD):',
+      '1. DẪN CHỨNG MÃ NGUỒN THỰC TẾ: Bạn PHẢI viện dẫn các file thực tế trong workspace (sử dụng read_file / search_text / query_call_graph nếu chưa khảo sát). Tuyệt đối không bịa đặt đường dẫn file hoặc thư viện ngoài.',
+      '2. CẤU TRÚC BÀI PHÂN TÍCH ĐẦY ĐỦ:',
+      '   - ## 1. Tổng quan & Sứ mệnh hệ thống (System Overview & Architecture Style)',
+      '   - ## 2. Cơ chế & Luồng thực thi chi tiết (End-to-End Workflow / Sequence Trace)',
+      '   - ## 3. Mẫu thiết kế & Trách nhiệm các thành phần (Design Patterns with File Anchors)',
+      '   - ## 4. Bất biến hệ thống, Rào chắn bảo vệ & Đánh đổi kỹ thuật (System Invariants & Guardrails)',
+      '3. KHÔNG RÚT GỌN: Nghiêm cấm câu trả lời cụt ngủn, cấm dùng placeholder như "...", "để ngắn gọn", "v.v.". Hãy viết đầy đủ, mạch lạc bằng đúng ngôn ngữ của người dùng.',
+    ].join('\n'),
+  };
 }
 
 function normalizeForMatching(value: string): string {

@@ -629,6 +629,7 @@ async function main() {
 
   // Bộ điều khiển hủy tác vụ chủ động trong lúc đang chạy (Antigravity CLI Style Cancellation)
   let activeExecutionController: AbortController | null = null;
+  let lastCancellationTimestamp = 0;
 
   const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
     const controller = new AbortController();
@@ -636,14 +637,16 @@ async function main() {
     try {
       return await fn(controller.signal);
     } catch (err: any) {
-      if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED')) {
-        CLI.renderTaskCancelledToast();
+      if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED') || err?.message?.includes('aborted')) {
+        lastCancellationTimestamp = Date.now();
+        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
         return undefined;
       }
       throw err;
     } finally {
       if (activeExecutionController === controller) {
         activeExecutionController = null;
+        lastCancellationTimestamp = Date.now();
       }
     }
   };
@@ -725,34 +728,6 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     }
   };
 
-  // Đăng ký hook Graceful Shutdown và Intercept SIGINT
-  let isShuttingDown = false;
-  const handleGracefulShutdown = async (signal: string) => {
-    if (activeExecutionController) {
-      activeExecutionController.abort();
-      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (SIGINT / Ctrl+C).');
-      return;
-    }
-    if (isShuttingDown) return;
-    isShuttingDown = true;
-    try {
-      if (agentLoop.goalManager.getState()?.phase === 'active') {
-        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
-      }
-      if (activeSession) {
-        await sessionPersistence.save(activeSession).catch(() => {});
-      }
-      saveSession({
-        modelName,
-        workspacePath: workspace.rootDir,
-        activeSessionId: activeSession?.id,
-      }, workspace.rootDir);
-    } catch {}
-    process.exit(0);
-  };
-  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
-
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
     modelName,
@@ -818,6 +793,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     return completeSlashCommand(line);
   };
   const rl = readline.createInterface({ input, output, completer });
+  rl.setPrompt(CLI.getPromptSymbol());
   const getActiveModelInfo = () => ({
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
@@ -829,6 +805,79 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     getActiveModelInfo,
     () => promptWidth,
   );
+
+  // Đăng ký hook Graceful Shutdown và Intercept SIGINT (Hỗ trợ Antigravity CLI Cancellation & Non-terminating Prompt)
+  let isShuttingDown = false;
+  let lastExitPromptTimestamp = 0;
+
+  const handleGracefulShutdown = async (signal: string) => {
+    const now = Date.now();
+
+    // 1. Nếu đang có tác vụ đang thực thi (activeExecutionController):
+    // Dừng tác vụ ngay lập tức, KHÔNG đóng chương trình, tự động hiển thị thông báo sẵn sàng nhận prompt mới!
+    if (activeExecutionController) {
+      activeExecutionController.abort();
+      lastCancellationTimestamp = now;
+      slashHints.clear(promptWidth);
+      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+      return;
+    }
+
+    // 2. Chống race condition: Bỏ qua tín hiệu trễ (trailing SIGINT) trong vòng 1500ms sau khi vừa hủy tác vụ
+    if (now - lastCancellationTimestamp < 1500) {
+      return;
+    }
+
+    // 3. Nếu người dùng bấm Ctrl+C tại dấu nhắc lệnh prompt (không có tác vụ nào đang chạy):
+    // Không thoát đột ngột làm mất phiên làm việc. Xóa dòng nhập hiện tại, nhắc người dùng và mời tiếp tục nhập prompt.
+    if (signal === 'SIGINT') {
+      const elapsed = now - lastExitPromptTimestamp;
+      // Bỏ qua nếu event bị lặp trong vòng 300ms do readline / process emitter
+      if (elapsed < 300) {
+        return;
+      }
+      // Nếu bấm Ctrl+C lần thứ 2 trong khoảng 300ms đến 2000ms -> Người dùng thực sự muốn thoát
+      if (elapsed > 2000) {
+        lastExitPromptTimestamp = now;
+        try {
+          (rl as any).line = '';
+          (rl as any).cursor = 0;
+          slashHints.clear(promptWidth);
+        } catch {}
+        console.log(`\n  ${c.yellow}⚠️  Nhấn Ctrl+C thêm 1 lần nữa trong 2 giây để thoát chương trình, hoặc tiếp tục nhập lệnh / prompt.${c.reset}`);
+        CLI.renderPromptInputNotice('Sẵn sàng nhận lệnh mới. Mời bạn nhập yêu cầu / prompt:');
+        try {
+          rl.setPrompt(CLI.getPromptSymbol());
+          rl.prompt(true);
+        } catch {}
+        return;
+      }
+    }
+
+    // 4. Thoát an toàn (SIGTERM từ hệ thống hoặc bấm Ctrl+C 2 lần liên tiếp để xác nhận):
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    try {
+      if (agentLoop.goalManager.getState()?.phase === 'active') {
+        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
+      }
+      if (activeSession) {
+        await sessionPersistence.save(activeSession).catch(() => {});
+      }
+      saveSession({
+        modelName,
+        workspacePath: workspace.rootDir,
+        activeSessionId: activeSession?.id,
+      }, workspace.rootDir);
+    } catch {}
+    console.log(`\n${c.green}Tạm biệt! Phiên làm việc đã được lưu trữ an toàn. 👋${c.reset}\n`);
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
+  rl.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
     // Phím tắt Ctrl+C hoặc Escape trong lúc đang thực thi: Hủy tác vụ hiện tại ngay lập tức (Antigravity CLI style)
@@ -836,6 +885,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
       if (isCancelKey) {
         activeExecutionController.abort();
+        lastCancellationTimestamp = Date.now();
         slashHints.clear(promptWidth);
         CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
         return;
@@ -866,9 +916,17 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
     }
-    // Phím Escape khi đang gõ: Đóng popup gợi ý ngay lập tức
+    // Phím Escape khi đang gõ: Đóng popup gợi ý ngay lập tức hoặc xóa sạch dòng nhập nếu đã đóng gợi ý
     if (key?.name === 'escape' || _sequence === '\x1b') {
       slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
+      if (typeof (rl as any).line === 'string' && (rl as any).line.length > 0) {
+        (rl as any).line = '';
+        (rl as any).cursor = 0;
+        try {
+          rl.setPrompt(CLI.getPromptSymbol());
+          rl.prompt(true);
+        } catch {}
+      }
       return;
     }
     // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, v.v.) tránh vỡ UI
@@ -912,6 +970,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     // Bảo đảm con trỏ terminal luôn hiển thị nhấp nháy cho người dùng
     process.stdout.write('\x1b[?25h');
     slashHints.clear(0);
+    rlInterface.setPrompt(promptSymbol);
     const promptLen = getVisibleWidth(promptSymbol);
     const firstLine = await rlInterface.question(promptSymbol);
     slashHints.clear(promptLen + getVisibleWidth(firstLine));
@@ -1070,6 +1129,74 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/tasks') {
         CLI.renderTasks(kernel.ctx.tasks.listTasks());
+        continue;
+      }
+
+      // Lệnh Quản lý Queued Messages (/queue hoặc /q)
+      if (
+        trimmed === '/queue' ||
+        trimmed.startsWith('/queue ') ||
+        trimmed === '/q' ||
+        trimmed.startsWith('/q ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const subCmd = parts[0]?.toLowerCase();
+        const arg = parts.slice(1).join(' ');
+
+        if (!subCmd || subCmd === 'list' || subCmd === 'status') {
+          const queueItems = activeSession ? agentLoop.inbox.getQueue(activeSession.id) : [];
+          CLI.renderQueueStatus(queueItems);
+          continue;
+        }
+
+        if (subCmd === 'cancel' || subCmd === 'remove' || subCmd === 'rm') {
+          if (!arg) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp ID tin nhắn cần hủy. Ví dụ: /queue cancel input-12345${c.reset}\n`);
+            continue;
+          }
+          const cancelled = activeSession ? agentLoop.inbox.cancel(activeSession.id, arg.trim()) : false;
+          if (cancelled) {
+            console.log(`\n${c.green}✔ Đã hủy thành công tin nhắn [${arg.trim()}] khỏi hàng đợi.${c.reset}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không tìm thấy tin nhắn với ID "${arg.trim()}" trong hàng đợi.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'clear' || subCmd === 'clean') {
+          const count = activeSession ? agentLoop.inbox.clear(activeSession.id) : 0;
+          console.log(`\n${c.green}✔ Đã xóa toàn bộ ${count} tin nhắn đang chờ trong hàng đợi.${c.reset}\n`);
+          continue;
+        }
+
+        if (subCmd === 'add' || subCmd === 'push') {
+          if (!arg) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung tin nhắn cần đưa vào hàng đợi. Ví dụ: /queue add Hãy tập trung sửa file tests${c.reset}\n`);
+            continue;
+          }
+          if (activeSession) {
+            const item = agentLoop.inbox.enqueue(activeSession.id, arg, 'human');
+            console.log(`\n${c.green}✔ Đã thêm tin nhắn vào hàng đợi [ID: ${item.id}]. Tin nhắn sẽ được xử lý hoặc tiêm bẻ lái vào bước tiếp theo.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        console.log(`\n${c.yellow}⚠️ Cú pháp chưa đúng. Hỗ trợ: /queue [list|cancel <id>|clear|add <text>]${c.reset}\n`);
+        continue;
+      }
+
+      // Lệnh bẻ lái tức thì (/steer <text>)
+      if (trimmed === '/steer' || trimmed.startsWith('/steer ')) {
+        const steerText = trimmed.replace(/^\/steer\s*/i, '').trim();
+        if (!steerText) {
+          console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung điều chỉnh hướng đi. Ví dụ: /steer Dừng việc chỉnh sửa file đó, hãy kiểm tra file config trước.${c.reset}\n`);
+          continue;
+        }
+        if (activeSession) {
+          const item = agentLoop.inbox.enqueue(activeSession.id, steerText, 'human', { isSteering: true });
+          console.log(`\n${c.bgCyan}${c.bold} ⚡ ĐÃ ĐƯA VÀO HÀNG ĐỢI BẺ LÁI (MID-TURN STEERING) ${c.reset}`);
+          console.log(`  ${c.brightCyan}Tin nhắn [${item.id}]: "${steerText}" sẽ được tiêm vào Agent ngay tại bước kế tiếp.${c.reset}\n`);
+        }
         continue;
       }
 

@@ -18,26 +18,40 @@ export const findReferencesTool: ToolDefinition = {
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn file định nghĩa symbol (ví dụ: "src/services/user-service.ts")',
+        description: 'Đường dẫn file định nghĩa symbol (ví dụ: "src/services/user-service.ts"). Alias: "filePath".',
+      },
+      filePath: {
+        type: Type.STRING,
+        description: 'Alias cho "path": Đường dẫn file định nghĩa symbol.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tên symbol cần tìm tham chiếu',
+        description: 'Tên symbol cần tìm tham chiếu. Alias: "symbolName".',
+      },
+      symbolName: {
+        type: Type.STRING,
+        description: 'Alias cho "symbol": Tên symbol cần tìm tham chiếu.',
       },
       limit: {
         type: Type.INTEGER,
         description: 'Số lượng kết quả tối đa cần trả về (mặc định: 50).',
       },
     },
-    required: ['path', 'symbol'],
+    required: [],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '').trim();
-    const symbol = String(args.symbol || '').trim();
+    const rawPath = String(args.path || args.filePath || '').trim();
+    let symbol = String(args.symbol || args.symbolName || '').trim();
     const limit = typeof args.limit === 'number' ? Math.max(1, Math.min(200, args.limit)) : 50;
 
+    if (!symbol && rawPath) {
+      const baseName = rawPath.split(/[/\\]/).pop() || '';
+      const dotIndex = baseName.lastIndexOf('.');
+      symbol = dotIndex > 0 ? baseName.substring(0, dotIndex) : baseName;
+    }
+
     if (!rawPath || !symbol) {
-      return toolError('Cả "path" và "symbol" đều là bắt buộc.', 'INVALID_ARGS');
+      return toolError('Cả "path" (hoặc "filePath") và "symbol" (hoặc "symbolName") đều là bắt buộc.', 'INVALID_ARGS');
     }
 
     try {

@@ -178,7 +178,7 @@ export class PermissionManager {
     const timestamp = new Date().toISOString();
 
     if (toolName === 'apply_patch') {
-      let target = args.path ? String(args.path).trim() : '';
+      let target = (args.path || args.filePath || args.targetFile) ? String(args.path || args.filePath || args.targetFile).trim() : '';
       if (!target && typeof args.patch === 'string') {
         const fileMatches = Array.from(args.patch.matchAll(/^(?:---|\+\+\+)\s+[ab]?\/?([^\s\r\n]+)/gm))
           .map((m: any) => m[1])
@@ -206,7 +206,7 @@ export class PermissionManager {
     }
 
     if (toolName === 'replace_text') {
-      const target = String(args.path || 'unknown file');
+      const target = String(args.path || args.filePath || args.targetFile || 'unknown file');
       return {
         id,
         toolName,
@@ -220,7 +220,7 @@ export class PermissionManager {
     }
 
     if (toolName === 'write_file') {
-      const target = String(args.path || 'unknown file');
+      const target = String(args.path || args.filePath || args.targetFile || 'unknown file');
       const isCritical = target.includes('package.json') || target.includes('.env') || target.includes('tsconfig');
       return {
         id,
@@ -235,9 +235,31 @@ export class PermissionManager {
     }
 
     if (toolName === 'run_command') {
-      const cmd = String(args.command || '').trim();
+      const cmd = String(
+        args.command ||
+        args.CommandLine ||
+        args.commandLine ||
+        args.cmd ||
+        args.rawCommand ||
+        args.script ||
+        ''
+      ).trim();
       const lower = cmd.toLowerCase();
       const shellAnalysis = analyzeShellCommand(cmd);
+
+      // Nếu không có câu lệnh hợp lệ nào được truyền vào
+      if (!cmd) {
+        return {
+          id,
+          toolName,
+          category: 'command_execution',
+          target: '(lệnh rỗng)',
+          summary: 'Thực thi lệnh terminal (tham số câu lệnh rỗng hoặc không xác định)',
+          riskLevel: 'LOW',
+          details: { ...args, shellAnalysis },
+          timestamp,
+        };
+      }
 
       // 1. Phân loại lệnh nguy hiểm (Destructive) -> CRITICAL
       if (/\b(rm\s+-rf|del\s+\/f|rmdir\s+\/s|Remove-Item|erase|format|mkfs|dd|kill|taskkill|shutdown)\b/i.test(lower)) {

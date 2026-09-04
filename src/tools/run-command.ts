@@ -228,7 +228,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       required: [],
     },
     async execute(args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
-      const rawCommand = String(args.command || args.CommandLine || '').trim();
+      const rawCommand = String(args.command || args.CommandLine || args.commandLine || args.cmd || '').trim();
       let hasExplicitPermission = context?.permissionGranted === true;
       const effectivePermissionManager = context?.permissionManager || permissionManager;
       const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
@@ -247,13 +247,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(rawCommand);
 
-      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp hoặc chứa phân đoạn ngoài allowlist
+      const gitSubcommandBeforeDispatch = findGitSubcommand(rawCommand);
+      const readOnlyGitSubcommands = new Set(['status', 'diff', 'log', 'branch', 'show', 'rev-parse', 'describe', 'tag']);
+      const isGitMutation = Boolean(gitSubcommandBeforeDispatch && !readOnlyGitSubcommands.has(gitSubcommandBeforeDispatch));
+
+      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, là git mutation, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
         || shellAnalysis.complex
+        || isGitMutation
         || !shellAnalysis.segments.every(isAllowedCommand);
 
+      const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
+
       if (needsApproval && !hasExplicitPermission && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
-        const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+        const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
         if (permCheck.allowed) {
           hasExplicitPermission = true;
           if (context) context.permissionGranted = true;
@@ -274,14 +281,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           errorCode: 'COMMAND_PARSE_REJECTED',
         };
       }
-      const gitSubcommandBeforeDispatch = findGitSubcommand(rawCommand);
-      const readOnlyGitSubcommands = new Set(['status', 'diff', 'log', 'branch', 'show', 'rev-parse', 'describe', 'tag']);
-      if (gitSubcommandBeforeDispatch && !readOnlyGitSubcommands.has(gitSubcommandBeforeDispatch)) {
+      if (isGitMutation && !hasExplicitPermission) {
         return {
           command: rawCommand,
-          error: `Git mutation (${gitSubcommandBeforeDispatch}) phải được thực thi bằng git_command hoặc tool Git chuyên dụng có per-turn authorization.`,
+          error: `Git mutation (${gitSubcommandBeforeDispatch}) phải được thực thi bằng git_command hoặc cần được cấp quyền (PERMISSION APPROVAL).`,
           errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-          suggestion: `Use git_command with subcommand "${gitSubcommandBeforeDispatch}" and a separate args array so workspace scope and per-turn authorization can be verified.`,
+          suggestion: `Use git_command with subcommand "${gitSubcommandBeforeDispatch}" and a separate args array so workspace scope and per-turn authorization can be verified, hoặc yêu cầu phê duyệt từ người dùng.`,
         };
       }
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
@@ -344,7 +349,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (executionTarget === 'host') {
         if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
-            const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+            const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
             if (permCheck.allowed) {
               hasExplicitPermission = true;
               if (context) context.permissionGranted = true;
@@ -413,7 +418,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         // Nếu không ở trong môi trường Docker Container cô lập, kiểm tra cấp quyền
         if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
-            const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+            const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
             if (permCheck.allowed) {
               hasExplicitPermission = true;
               if (context) context.permissionGranted = true;
@@ -488,7 +493,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Fallback mặc định
       if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
         if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
-          const permCheck = await effectivePermissionManager.checkPermission('run_command', args, context);
+          const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
           if (permCheck.allowed) {
             hasExplicitPermission = true;
             if (context) context.permissionGranted = true;

@@ -16,14 +16,14 @@ import { AgentKernel, KernelContext } from '../kernel/kernel.js';
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
-import { AgentInbox, AgentInputSource } from './agent-inbox.js';
+import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
+import { CODING_AGENT_SYSTEM_PROMPT, DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
-import { FinalAnswerGuard } from './final-answer-guard.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -206,7 +206,10 @@ export class AgentLoop {
       this.goalManager = new GoalManager();
       this.agentHooks = new AgentHookRegistry();
       this.inbox = new AgentInbox();
-      this.promptAssembler = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
+      this.promptAssembler = new PromptAssembler();
+      for (const section of DEFAULT_PROMPT_SECTIONS) {
+        this.promptAssembler.register(section);
+      }
       this.agentRegistry = options?.agentRegistry || new AgentRegistry();
       this.agentId = options?.agentId || 'coding-agent';
       this.reflectionEngine = new ReflectionEngine();
@@ -490,6 +493,24 @@ export class AgentLoop {
     const maxPlanCompletionRetries = 3;
     const maxNoProgressStrategyChanges = 3;
 
+    const claimedSteerItems: AgentInboxItem[] = [];
+    const resolveSteerItems = (answer: string) => {
+      while (claimedSteerItems.length > 0) {
+        const item = claimedSteerItems.shift();
+        try {
+          item?.resolve(answer);
+        } catch {}
+      }
+    };
+    const rejectSteerItems = (err: unknown) => {
+      while (claimedSteerItems.length > 0) {
+        const item = claimedSteerItems.shift();
+        try {
+          item?.reject(err);
+        } catch {}
+      }
+    };
+
     this.setAgentStatus('running', session, turn);
 
     const isRootAgent = this.agentId === 'root'
@@ -516,6 +537,7 @@ export class AgentLoop {
       await CLI.renderExecutionStopped(rejectionMessage, 'TURN_REJECTED');
       await this.endTurn(session, turn, effectiveMaxSteps, isGoal, turnStartDecision.reason || 'turn-rejected');
       this.goalManager.disarm();
+      rejectSteerItems(new Error(rejectionMessage));
       return rejectionMessage;
     }
 
@@ -573,8 +595,40 @@ export class AgentLoop {
         await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
         this.goalManager.disarm();
+        rejectSteerItems(new Error(cancellationMessage));
         return cancellationMessage;
       }
+
+      // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
+      // Check if user submitted a queued steering message while the loop was executing
+      const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
+      if (steerItem) {
+        claimedSteerItems.push(steerItem);
+        const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
+        session.addUserMessage(steerPrompt, steerItem.source, steerItem.id);
+        session.append('input/claimed', {
+          inputId: steerItem.id,
+          isSteering: true,
+          step,
+          turn,
+        });
+        await this.persistSession(session);
+        CLI.renderSteeringNotice(steerItem.text);
+        this.kernel?.ctx.events.emit('model:steered', {
+          sessionId: session.id,
+          inputId: steerItem.id,
+          text: steerItem.text,
+          step,
+          turn,
+        });
+        consecutiveUnproductiveSteps = 0;
+        consecutiveEmptyTurns = 0;
+        consecutiveIncompleteFinals = 0;
+        consecutivePlanCompletionRejects = 0;
+        consecutiveIncompleteFinishes = 0;
+        consecutiveNoProgressStrategyChanges = 0;
+      }
+
       session.append('step/start', { turn, step });
       await this.persistSession(session);
       this.setAgentStatus('running', session, turn, step);
@@ -747,8 +801,13 @@ export class AgentLoop {
       }
 
       let response;
-      // System Prompt 100% STATIC để tối đa hóa KV-Cache Hit Rate (>80%) theo chuẩn OpenAI Codex
-      const assembledSystemPrompt = this.promptAssembler.assemble();
+      // Progressive System Prompt: Tiết kiệm >70% token/turn với Zero Cache Invalidation (Core Invariant Prefix tại -1000)
+      const promptAssemblyCtx = detectPromptContext(
+        this._workspace,
+        this.toolProvider,
+        turnUserRequest,
+      );
+      const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
       const rawPlanContext = this.planManager.renderExecutionContext();
       const advicePrompt = this.toolAdvisor.formatAdvicePrompt({
         lastToolName: this.lastToolExecution?.toolName,
@@ -1426,6 +1485,7 @@ export class AgentLoop {
                 } : {}),
                 ...(toolName === 'submit_solution' ? {
                   completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
+                  completionEvidenceReason: policyCompletion?.reason || completionEvidence?.reasons?.filter(Boolean).join('; ') || undefined,
                 } : {}),
               },
               toolCallId,
@@ -1649,8 +1709,10 @@ export class AgentLoop {
         // submit_solution already contains a comprehensive, evidence-backed
         // summary. Reusing it avoids an otherwise redundant provider request
         // whose only purpose is to restate the same result.
+        const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
         if (
-          hasSubmittedSolution
+          !isArchQuery
+          && hasSubmittedSolution
           && isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
           && (this.loopOptions?.enableSubmitAutoFinalization
             ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION'))
@@ -1839,13 +1901,15 @@ export class AgentLoop {
 
       // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
       const rawText = response.text ? response.text.trim() : '';
+      const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
       const isGenericStub = !rawText
         || /^(each task must be atomic|execution sequence satisfied|\(nhiệm vụ đã hoàn tất\)|\(task completed\)|\(solution submitted\))/i.test(rawText)
-        || (rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40);
+        || (!isArchQuery && rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40)
+        || (isArchQuery && rawText.length < 200);
 
-      const finalAnswer = (isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
+      const finalAnswer = (!isArchQuery && isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
         ? submittedSolutionSummary
-        : (rawText || (hasSubmittedSolution && submittedSolutionSummary ? submittedSolutionSummary : '(Nhiệm vụ đã hoàn tất)'));
+        : (rawText || (hasSubmittedSolution && !isArchQuery && submittedSolutionSummary ? submittedSolutionSummary : '(Nhiệm vụ đã hoàn tất)'));
       consecutiveEmptyTurns = 0;
 
       const planBlocker = this.planManager.getCompletionBlocker();
@@ -1890,6 +1954,7 @@ export class AgentLoop {
             userRequest: turnUserRequest,
             availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
             hasSubmittedSolution,
+            workspace: this._workspace,
           });
       const evidenceDecision = (isSubagent || isMockLLM)
         ? { allow: true, reasons: [] }
@@ -2018,6 +2083,12 @@ export class AgentLoop {
       }
       await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed', turnUserRequest, finalAnswer);
 
+      resolveSteerItems(finalAnswer);
+      if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
+        this.drainScheduled = true;
+        void this.drainInbox(session, options);
+      }
+
       return finalAnswer;
     }
 
@@ -2033,6 +2104,12 @@ export class AgentLoop {
     await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
     
+    resolveSteerItems(timeoutMessage);
+    if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
+      this.drainScheduled = true;
+      void this.drainInbox(session, options);
+    }
+
     return timeoutMessage;
   }
 
@@ -2053,7 +2130,8 @@ export class AgentLoop {
       inputText: item.text,
       source: item.source,
     });
-    const shouldStartDrain = !this.drainingInbox && !this.drainScheduled;
+    const isRunning = this.drainingInbox || this.runQueues.has(session.id);
+    const shouldStartDrain = !isRunning && !this.drainScheduled;
     if (shouldStartDrain) this.drainScheduled = true;
     try {
       await this.persistSession(session);
@@ -2064,6 +2142,54 @@ export class AgentLoop {
     }
     if (shouldStartDrain) void this.drainInbox(session, options);
     return item.promise;
+  }
+
+  /**
+   * Chờ đợi có hỗ trợ Reactive Wakeup (Google Antigravity Standard):
+   * Nếu người dùng enqueue tin nhắn mới vào session inbox trong lúc đang ngủ/chờ,
+   * hàm sẽ lập tức thức tỉnh (resolve early với { awakenedByQueue: true }) thay vì chờ hết thời gian timeout.
+   */
+  async sleepWithWakeup(
+    sessionId: string,
+    ms: number,
+    signal?: AbortSignal,
+  ): Promise<{ awakenedByQueue: boolean; aborted: boolean }> {
+    if (signal?.aborted) return { awakenedByQueue: false, aborted: true };
+    if (this.inbox.pending(sessionId) > 0) {
+      return { awakenedByQueue: true, aborted: false };
+    }
+
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
+      let unsubscribeWakeup: (() => void) | undefined;
+      let onAbort: (() => void) | undefined;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (unsubscribeWakeup) unsubscribeWakeup();
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve({ awakenedByQueue: false, aborted: false });
+      }, ms);
+
+      unsubscribeWakeup = this.inbox.onWakeup((enqueuedSessionId) => {
+        if (enqueuedSessionId === sessionId) {
+          cleanup();
+          resolve({ awakenedByQueue: true, aborted: false });
+        }
+      });
+
+      if (signal) {
+        onAbort = () => {
+          cleanup();
+          resolve({ awakenedByQueue: false, aborted: true });
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
   }
 
   /** Restore durable queued inputs and explicitly continue draining them. */

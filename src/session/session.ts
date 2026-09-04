@@ -94,6 +94,7 @@ export interface SessionEventData {
   source?: 'human' | 'system' | 'injected';
   inputId?: string;
   inputText?: string;
+  isSteering?: boolean;
   parentSessionId?: string;
   boundarySeq?: number;
   reason?: string;
