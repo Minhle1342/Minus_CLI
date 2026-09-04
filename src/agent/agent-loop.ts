@@ -141,6 +141,9 @@ export class AgentLoop {
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
+  private cachedTurnNumber?: number;
+  private cachedTurnToolDeclarations?: any[];
+  private cachedTurnToolProviderSize?: number;
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
@@ -261,6 +264,15 @@ export class AgentLoop {
       this.toolRegistry.register(createStopAgentTool(this.subagentManager));
       this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
     }
+
+    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
+      try {
+        const ctx = detectPromptContext(this._workspace);
+        if (ctx.isUnity) {
+          (this.toolRegistry as any).registerGameTools();
+        }
+      } catch {}
+    }
   }
 
   get workspace(): Workspace {
@@ -280,6 +292,14 @@ export class AgentLoop {
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
+    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
+      try {
+        const ctx = detectPromptContext(workspace);
+        if (ctx.isUnity) {
+          (this.toolRegistry as any).registerGameTools();
+        }
+      } catch {}
+    }
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
       if (this.toolProvider === this.toolRegistry) {
@@ -771,9 +791,22 @@ export class AgentLoop {
         : this.toolProvider;
       const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
         && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
-      const activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
-        ? candidateProvider.getRelevantTools(activeStepQuery)
-        : candidateProvider.getFunctionDeclarations();
+      const providerSize = candidateProvider.getAll().length;
+      let activeToolDeclarations: any[];
+      if (
+        this.cachedTurnNumber === turn
+        && this.cachedTurnToolDeclarations
+        && this.cachedTurnToolProviderSize === providerSize
+      ) {
+        activeToolDeclarations = this.cachedTurnToolDeclarations;
+      } else {
+        activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
+          ? candidateProvider.getRelevantTools(activeStepQuery)
+          : candidateProvider.getFunctionDeclarations();
+        this.cachedTurnNumber = turn;
+        this.cachedTurnToolDeclarations = activeToolDeclarations;
+        this.cachedTurnToolProviderSize = providerSize;
+      }
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
@@ -833,12 +866,23 @@ export class AgentLoop {
       const configuredRepoMemTokens = this.loopOptions?.repositoryMemoryTokens ?? 1_000;
       const configuredRepoMapTokens = this.loopOptions?.repositoryMapTokens ?? 1_600;
 
-      const effectiveRepoMemTokens = isLocalizedExecution
+      const explicitRepoMap = this.loopOptions?.enableGraphRepositoryMap === true;
+      const explicitRepoMem = this.loopOptions?.enableRepositoryMemory === true;
+
+      const effectiveRepoMemTokens = (isLocalizedExecution && !explicitRepoMem)
         ? Math.min(300, configuredRepoMemTokens)
         : configuredRepoMemTokens;
-      const effectiveRepoMapTokens = isLocalizedExecution
+      const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
         ? 0
         : configuredRepoMapTokens;
+
+      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      const shouldRecallRepoMem = explicitRepoMem
+        ? (effectiveRepoMemTokens > 0)
+        : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
+      const shouldRenderRepoMap = explicitRepoMap
+        ? (effectiveRepoMapTokens > 0)
+        : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0);
 
       const memoryLimit = isLocalizedExecution ? 2 : 4;
       const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
@@ -850,7 +894,6 @@ export class AgentLoop {
         : '';
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
       const composeState = this.kernel?.ctx.compose.getState();
-      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
       let repositoryMemoryContext = '';
       let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
       let repositoryContext = '';
@@ -867,9 +910,9 @@ export class AgentLoop {
         } : undefined,
         relevantMemory: relevantMemory.map((item) => [item.key, item.confidence, item.insight]),
         registeredFiles: composeState?.registeredFiles || [],
-        repositoryMemoryEnabled: this.loopOptions?.enableRepositoryMemory !== false,
+        repositoryMemoryEnabled: shouldRecallRepoMem,
         repositoryMemoryTokens: effectiveRepoMemTokens,
-        repositoryMapEnabled: this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0,
+        repositoryMapEnabled: shouldRenderRepoMap,
         repositoryMapTokens: effectiveRepoMapTokens,
       });
       const cachedDynamicContext = dynamicCacheEnabled
@@ -880,10 +923,10 @@ export class AgentLoop {
         repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
         repositoryContext = cachedDynamicContext.repositoryContext;
       } else {
-        if (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0) {
+        if (shouldRecallRepoMem) {
           try {
             const recalled = await this.repositoryMemory.recall(activeStepQuery, {
-              limit: isLocalizedExecution ? 4 : 12,
+              limit: isLocalizedExecution && !explicitRepoMem ? 4 : 12,
               maxTokens: effectiveRepoMemTokens,
             });
             repositoryMemoryContext = recalled.rendered;
@@ -892,7 +935,7 @@ export class AgentLoop {
             // Repository memory is an independent, fail-open context source.
           }
         }
-        if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0) {
+        if (shouldRenderRepoMap) {
           try {
             const repositoryQuery = [
               activeStepQuery,

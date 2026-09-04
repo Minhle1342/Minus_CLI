@@ -80,7 +80,8 @@ export class ToolRegistry implements ToolProvider {
   constructor(
     planManager?: PlanManager,
     memoryManager?: ProjectMemoryManager,
-    retrieverConfig?: ToolRetrieverConfig
+    retrieverConfig?: ToolRetrieverConfig,
+    options?: { enableGameTools?: boolean }
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
     this.computerController = new ComputerController();
@@ -112,15 +113,12 @@ export class ToolRegistry implements ToolProvider {
     this.register(getArchitectureTopologyTool);
     this.register(createSearchCodebaseFastTool());
 
-    // Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine
-    this.register(gameTilemapStudioTool);
-    this.register(gamePixelSpriteStudioTool);
-    this.register(game2DPhysicsConfigTool);
-    this.register(gameScaffoldEngineTool);
-    this.register(unityGameplayStudioTool);
-
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
+
+    if (options?.enableGameTools) {
+      this.registerGameTools();
+    }
 
     // Đăng ký các planning tools nếu có PlanManager
     if (planManager) {
@@ -136,6 +134,17 @@ export class ToolRegistry implements ToolProvider {
   attachSession(session: any): void {
     this.register(createInspectImageTool(() => session));
     this.computerController.setSessionAccessor(() => session);
+  }
+
+  /**
+   * Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine theo nguyên lý Progressive Disclosure.
+   */
+  registerGameTools(): void {
+    if (!this.tools.has(gameTilemapStudioTool.name)) this.register(gameTilemapStudioTool);
+    if (!this.tools.has(gamePixelSpriteStudioTool.name)) this.register(gamePixelSpriteStudioTool);
+    if (!this.tools.has(game2DPhysicsConfigTool.name)) this.register(game2DPhysicsConfigTool);
+    if (!this.tools.has(gameScaffoldEngineTool.name)) this.register(gameScaffoldEngineTool);
+    if (!this.tools.has(unityGameplayStudioTool.name)) this.register(unityGameplayStudioTool);
   }
 
   attachComputerController(controller: ComputerController): void {

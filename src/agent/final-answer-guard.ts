@@ -206,9 +206,6 @@ export interface ArchitectureIntentResult {
   categories: ArchitectureCategory[];
 }
 
-/**
- * Nhận diện ý định phân tích kiến trúc, workflow, design pattern, cơ chế và nghiệp vụ của workspace.
- */
 export function detectArchitectureAnalysisIntent(userRequest?: string): ArchitectureIntentResult {
   if (!userRequest || typeof userRequest !== 'string') {
     return { isArchitectureQuery: false, categories: [] };
@@ -217,9 +214,9 @@ export function detectArchitectureAnalysisIntent(userRequest?: string): Architec
   const normalized = normalizeForMatching(userRequest);
   const categories = new Set<ArchitectureCategory>();
 
-  // 1. Nhóm từ khóa hành vi phân tích / tìm hiểu / giải thích / review
+  // 1. Nhóm từ khóa hành vi phân tích chuyên sâu (Loại bỏ các động từ tác vụ thường ngày như "kiem tra", "inspect", "mo ta")
   const hasAnalyticalAction =
-    /\b(?:phan tich|giai thich|tim hieu|khao sat|danh gia|tong quan|trinh bay|chi ra|kiem tra|cho biet|mo ta|analyze|explain|inspect|review|describe|breakdown|trace|explore|understand|overview|walkthrough)\b/.test(
+    /\b(?:phan tich|giai thich|tim hieu|khao sat|tong quan|trinh bay|analyze|explain|breakdown|trace|explore|understand|overview|walkthrough)\b/.test(
       normalized,
     ) || /\b(?:hoat dong nhu the nao|hoat dong the nao|van hanh the nao|to chuc nhu the nao|how does .* work|how it works)\b/.test(
       normalized,
@@ -235,8 +232,9 @@ export function detectArchitectureAnalysisIntent(userRequest?: string): Architec
   }
 
   // 3. Nhóm Workflow & Luồng dữ liệu (Workflow / Dataflow / Execution trace)
+  // Chỉ khớp các cụm luồng cụ thể, tránh khớp chữ "luong" đứng đơn lẻ (gây bắt nhầm số lượng, chất lượng, âm lượng, lưu lượng)
   if (
-    /\b(?:workflow|luong|luong hoat dong|luong thuc thi|luong du lieu|dataflow|data flow|execution flow|call flow|call graph|lifecycle|sequence)\b/.test(
+    /\b(?:workflow|luong hoat dong|luong thuc thi|luong du lieu|luong xu ly|luong goi|dataflow|data flow|execution flow|call flow|call graph|lifecycle|execution trace)\b/.test(
       normalized,
     )
   ) {
@@ -268,6 +266,16 @@ export function detectArchitectureAnalysisIntent(userRequest?: string): Architec
     )
   ) {
     categories.add('business');
+  }
+
+  // Nếu câu chứa tác vụ sửa lỗi / debug / đo đạc / hiệu năng cụ thể và KHÔNG có từ khóa kiến trúc hệ thống rõ ràng,
+  // thì đó là tác vụ kỹ thuật thông thường, không phải bài luận phân tích kiến trúc.
+  const isBugOrTechnicalTask =
+    /\b(?:sua|fix|debug|loi|error|crash|latency|cham|slow|commit|patch|update|refactor|benchmark)\b/.test(
+      normalized,
+    );
+  if (isBugOrTechnicalTask && !categories.has('architecture')) {
+    return { isArchitectureQuery: false, categories: Array.from(categories) };
   }
 
   // Query được coi là query phân tích kiến trúc khi có từ 2 danh mục trở lên HOẶC có 1 danh mục đi kèm hành động phân tích/giải thích/walkthrough
