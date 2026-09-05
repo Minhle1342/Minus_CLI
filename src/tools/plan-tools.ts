@@ -22,7 +22,11 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
     }
 
     const candidate = rawTask as Record<string, unknown>;
-    if (typeof candidate.title !== 'string' || !candidate.title.trim()) {
+    const rawTitle = typeof candidate.title === 'string' && candidate.title.trim()
+      ? candidate.title.trim()
+      : (typeof candidate.description === 'string' && candidate.description.trim() ? candidate.description.trim() : undefined);
+
+    if (!rawTitle) {
       return { error: `tasks[${index}].title must be a non-empty string.` };
     }
 
@@ -37,7 +41,7 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
 
     const acceptanceCriteria = typeof candidate.acceptanceCriteria === 'string'
       ? candidate.acceptanceCriteria.trim()
-      : undefined;
+      : (typeof candidate.description === 'string' && candidate.description.trim() !== rawTitle ? candidate.description.trim() : undefined);
     const normalizeNumberArray = (value: unknown, field: string): number[] | undefined => {
       if (value === undefined) return undefined;
       if (!Array.isArray(value)) throw new Error(`tasks[${index}].${field} must be an array of positive task IDs.`);
@@ -72,7 +76,7 @@ function normalizePlanTasks(rawTasks: unknown[]): { tasks?: PlanTaskInput[]; err
     }
     tasks.push({
       ...(id === undefined ? {} : { id }),
-      title: candidate.title.trim(),
+      title: rawTitle,
       ...(acceptanceCriteria ? { acceptanceCriteria } : {}),
       ...(dependsOn === undefined ? {} : { dependsOn }),
       ...(parentId === undefined ? {} : { parentId }),
@@ -110,6 +114,14 @@ export function createPlanTool(planManager: PlanManager): ToolDefinition {
               title: {
                 type: Type.STRING,
                 description: 'Concrete action for this step, such as inspect affected files, reproduce the bug, implement the fix, or run relevant tests.',
+              },
+              description: {
+                type: Type.STRING,
+                description: 'Detailed description or alias for task title.',
+              },
+              status: {
+                type: Type.STRING,
+                description: 'Initial status of the task (e.g. PENDING, IN_PROGRESS).',
               },
               acceptanceCriteria: {
                 type: Type.STRING,

@@ -365,7 +365,7 @@ export class ToolUseGuardian {
       : undefined;
 
     // 3. Tự động ép kiểu (Auto-coercion) cho schema không khớp phổ biến
-    const { coerced, changed, coercedKeys } = this.coerceParameters(args || {}, schema);
+    const { coerced, changed, coercedKeys } = this.coerceParameters(args || {}, schema, toolName);
 
     return {
       valid: true,
@@ -383,22 +383,25 @@ export class ToolUseGuardian {
   /**
    * Tự động ép kiểu tham số dựa theo Schema (Schema Auto-Coercion)
    * Hỗ trợ cả hai dạng:
-   * 1. coerceParameters(args, schema) -> { coerced, changed, coercedKeys }
+   * 1. coerceParameters(args, schema, toolName?) -> { coerced, changed, coercedKeys }
    * 2. coerceParameters(toolName, args, schema) -> coerced (Record<string, any>)
    */
-  coerceParameters(args: Record<string, any>, schema?: any): { coerced: Record<string, any>; changed: boolean; coercedKeys: string[] };
+  coerceParameters(args: Record<string, any>, schema?: any, toolName?: string): { coerced: Record<string, any>; changed: boolean; coercedKeys: string[] };
   coerceParameters(toolName: string, args: Record<string, any>, schema?: any): Record<string, any>;
   coerceParameters(arg1: any, arg2?: any, arg3?: any): any {
     let actualArgs: Record<string, any>;
     let actualSchema: any;
+    let toolName: string | undefined;
     const isDirectArgsReturn = typeof arg1 === 'string';
 
     if (isDirectArgsReturn) {
+      toolName = arg1;
       actualArgs = arg2 || {};
       actualSchema = arg3;
     } else {
       actualArgs = arg1 || {};
       actualSchema = arg2;
+      toolName = typeof arg3 === 'string' ? arg3 : undefined;
     }
 
     if (!actualSchema || typeof actualSchema !== 'object' || !actualSchema.properties) {
@@ -409,9 +412,27 @@ export class ToolUseGuardian {
     let changed = false;
     const coercedKeys: string[] = [];
 
+    // Top-level semantic aliases
+    if (actualSchema.properties.path && !('path' in coerced)) {
+      const pathAlias = coerced.filePath || coerced.file_path || coerced.filename;
+      if (typeof pathAlias === 'string') {
+        coerced.path = pathAlias;
+        changed = true;
+        coercedKeys.push('path');
+      }
+    }
+    if (actualSchema.properties.command && !('command' in coerced)) {
+      const cmdAlias = coerced.cmd;
+      if (typeof cmdAlias === 'string') {
+        coerced.command = cmdAlias;
+        changed = true;
+        coercedKeys.push('command');
+      }
+    }
+
     for (const [key, prop] of Object.entries<any>(actualSchema.properties)) {
       if (key in coerced) {
-        const val = coerced[key];
+        let val = coerced[key];
         const targetType = (prop.type || '').toLowerCase();
 
         // Chuỗi số thành number (ví dụ: "10" -> 10)
@@ -421,6 +442,7 @@ export class ToolUseGuardian {
             coerced[key] = num;
             changed = true;
             coercedKeys.push(key);
+            val = num;
           }
         }
         // Chuỗi boolean thành boolean (ví dụ: "true" -> true)
@@ -429,10 +451,12 @@ export class ToolUseGuardian {
             coerced[key] = true;
             changed = true;
             coercedKeys.push(key);
+            val = true;
           } else if (val.toLowerCase() === 'false') {
             coerced[key] = false;
             changed = true;
             coercedKeys.push(key);
+            val = false;
           }
         }
         // Chuỗi JSON thành object / array (ví dụ: "{\"a\":1}" -> {a: 1})
@@ -440,12 +464,87 @@ export class ToolUseGuardian {
           const trimmed = val.trim();
           if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
             try {
-              coerced[key] = JSON.parse(trimmed);
+              val = JSON.parse(trimmed);
+              coerced[key] = val;
               changed = true;
               coercedKeys.push(key);
             } catch {
               // Bỏ qua nếu parse thất bại
             }
+          }
+        }
+
+        // Deep Array & Item-Level Coercion
+        if ((targetType === 'array' || Array.isArray(val)) && Array.isArray(val)) {
+          let arrayChanged = false;
+          const newArray = val.map((item) => {
+            // Phần tử là chuỗi số mà schema items yêu cầu number/integer
+            if (prop.items && (prop.items.type === 'number' || prop.items.type === 'integer') && typeof item === 'string' && item.trim() !== '') {
+              const num = Number(item);
+              if (Number.isFinite(num)) {
+                arrayChanged = true;
+                return num;
+              }
+            }
+            // Phần tử là object
+            if (item && typeof item === 'object' && !Array.isArray(item)) {
+              let itemChanged = false;
+              const coercedItem = { ...item };
+
+              // Quy tắc đặc thù cho create_plan hoặc mảng tasks:
+              if (toolName === 'create_plan' || key === 'tasks') {
+                // Ánh xạ description -> title nếu thiếu title
+                if (!coercedItem.title && typeof coercedItem.description === 'string' && coercedItem.description.trim()) {
+                  coercedItem.title = coercedItem.description.trim();
+                  itemChanged = true;
+                }
+                // Ép kiểu chuỗi số id -> number
+                if (typeof coercedItem.id === 'string' && /^\d+$/.test(coercedItem.id.trim())) {
+                  const parsedId = Number(coercedItem.id.trim());
+                  if (Number.isFinite(parsedId)) {
+                    coercedItem.id = parsedId;
+                    itemChanged = true;
+                  }
+                }
+              }
+
+              // Ánh xạ theo schema items.properties nếu có
+              if (prop.items?.properties) {
+                for (const [subKey, subProp] of Object.entries<any>(prop.items.properties)) {
+                  if (subKey in coercedItem) {
+                    const subVal = coercedItem[subKey];
+                    const subTargetType = (subProp.type || '').toLowerCase();
+                    if ((subTargetType === 'number' || subTargetType === 'integer') && typeof subVal === 'string' && subVal.trim() !== '') {
+                      const num = Number(subVal);
+                      if (Number.isFinite(num)) {
+                        coercedItem[subKey] = num;
+                        itemChanged = true;
+                      }
+                    } else if (subTargetType === 'boolean' && typeof subVal === 'string') {
+                      if (subVal.toLowerCase() === 'true') {
+                        coercedItem[subKey] = true;
+                        itemChanged = true;
+                      } else if (subVal.toLowerCase() === 'false') {
+                        coercedItem[subKey] = false;
+                        itemChanged = true;
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (itemChanged) {
+                arrayChanged = true;
+                return coercedItem;
+              }
+            }
+            return item;
+          });
+
+          if (arrayChanged) {
+            coerced[key] = newArray;
+            changed = true;
+            if (!coercedKeys.includes(key)) coercedKeys.push(key);
           }
         }
       }

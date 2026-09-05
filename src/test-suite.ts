@@ -53,6 +53,7 @@ import {
 } from './llm/token-config.js';
 import { ContextCompactor } from './agent/context-compactor.js';
 import { PlanManager } from './agent/plan-manager.js';
+import { createPlanTool } from './tools/plan-tools.js';
 import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js';
 import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine } from './agent/reflection-engine.js';
@@ -6393,6 +6394,37 @@ Always write tests first!`;
   });
   assert(advisoryRes.playbook === 'B_DEBUGGING', 'Advisor chuyển sang Playbook B khi có Guardian Diagnosis');
   assert(advisoryRes.guidance.includes('[TOOL GUARDIAN ADVISORY]'), 'Advisor chứa chỉ dẫn chuyên sâu từ Guardian');
+
+  // 40.6. Tool Use Guardian: Ép kiểu đệ quy sâu & Khắc phục Schema Mismatch cho create_plan
+  const planManager40 = new PlanManager();
+  planManager40.beginTurn(1, 'Kiểm thử khả năng tự phục hồi của create_plan');
+  const createPlanTool40 = createPlanTool(planManager40);
+  const guardianPlanRegistry = new ToolRegistry();
+  guardianPlanRegistry.register(createPlanTool40);
+  const planRunner40 = new ToolRunner(guardianPlanRegistry, workspace, undefined, undefined, guardian);
+
+  const payloadWithMismatches = {
+    tasks: [
+      { id: '1', description: 'Kiểm tra file cấu hình', status: 'pending' },
+      { id: '2', description: 'Triển khai bản vá và chạy test', status: 'pending' },
+    ],
+  };
+
+  const preCheckPlan = guardian.preCallValidate('create_plan', payloadWithMismatches, createPlanTool40.parameters);
+  assert(preCheckPlan.valid === true, 'Guardian preCallValidate thông qua payload mảng tasks lồng nhau');
+  assert(preCheckPlan.wasCoerced === true, 'Guardian tự động ép kiểu sâu và ánh xạ alias');
+  assert(preCheckPlan.coercedArgs.tasks[0].id === 1, 'task[0].id chuyển từ chuỗi "1" sang số nguyên 1');
+  assert(preCheckPlan.coercedArgs.tasks[0].title === 'Kiểm tra file cấu hình', 'task[0].title tự động ánh xạ từ description');
+  assert(preCheckPlan.coercedArgs.tasks[1].id === 2, 'task[1].id chuyển từ chuỗi "2" sang số nguyên 2');
+  assert(preCheckPlan.coercedArgs.tasks[1].title === 'Triển khai bản vá và chạy test', 'task[1].title tự động ánh xạ từ description');
+
+  const planRunResult = await planRunner40.run('create_plan', payloadWithMismatches);
+  assert(planRunResult.result.errorCode === undefined, 'create_plan không bị từ chối với mã lỗi INVALID_ARGS');
+  assert(planRunResult.result.error === undefined, 'create_plan chạy thành công không có lỗi');
+  assert(Array.isArray(planRunResult.result.tasks) && planRunResult.result.tasks.length === 2, 'Tạo thành công 2 task trong DAG');
+  assert(planRunResult.result.tasks[0].id === 1 && planRunResult.result.tasks[0].title === 'Kiểm tra file cấu hình', 'Task 1 bảo toàn thông tin');
+  assert(planRunResult.result.tasks[1].id === 2 && planRunResult.result.tasks[1].title === 'Triển khai bản vá và chạy test', 'Task 2 bảo toàn thông tin');
+
   // 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)
   console.log('\n========================================');
   console.log('🧪 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)');
