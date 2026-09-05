@@ -905,6 +905,7 @@ export class CLI {
     const steps = isFinite(opts.maxSteps) ? `${opts.maxSteps} steps` : 'dynamic ∞';
 
     console.log(`\n  ${c.brightCyan}${c.bold}⚡ MINUS CLI${c.reset} ${c.slate}v2.5${c.reset} · ${c.bold}${opts.modelName}${c.reset}${branch} · ${c.slate}${wsName}${c.reset}`);
+    console.log(`  ${c.slate}Workspace:${c.reset} ${c.brightCyan}${opts.workspaceRoot}${c.reset}`);
     console.log(`  ${c.slate}Budget: ${steps} · ${opts.tools.length} tools · Type ${c.brightCyan}/help${c.slate} for commands, ${c.white}Ctrl+C${c.slate} to cancel.${c.reset}\n`);
   }
 
@@ -1181,11 +1182,19 @@ export class CLI {
 
   static renderStatus(opts: StatusOptions): void {
     const goal = opts.isGoalMode ? 'Goal Mode: ON (∞)' : `Step Budget: ${opts.maxSteps}`;
-    console.log(`\n  ${c.brightCyan}${c.bold}❯ STATUS${c.reset} · ${opts.modelName} · ${goal} · Turns: ${opts.sessionTurns}\n`);
+    console.log(`\n  ${c.brightCyan}${c.bold}❯ STATUS${c.reset} · ${opts.modelName} · ${goal} · Turns: ${opts.sessionTurns}`);
+    if (opts.workspaceRoot) {
+      console.log(`  ${c.slate}Workspace:${c.reset} ${c.brightCyan}${opts.workspaceRoot}${c.reset}`);
+    }
+    if (opts.sandboxStatus) {
+      console.log(`  ${c.slate}Sandbox:${c.reset} ${opts.sandboxStatus}`);
+    }
+    console.log('');
   }
 
   static renderSessionInfo(data: { modelName?: string; workspacePath?: string; activeSessionId?: string; lastUpdated?: string }, sessionFile: string): void {
-    console.log(`\n  ${c.slate}Session:${c.reset} ${data.activeSessionId || 'none'} · Model: ${data.modelName || 'default'} · File: ${sessionFile}\n`);
+    const ws = data.workspacePath ? ` · Workspace: ${data.workspacePath}` : '';
+    console.log(`\n  ${c.slate}Session:${c.reset} ${data.activeSessionId || 'none'} · Model: ${data.modelName || 'default'}${ws} · File: ${sessionFile}\n`);
   }
 
   static renderInterruptedSessionNotice(data: {
@@ -1320,7 +1329,7 @@ export class CLI {
     } else if (action === 'tool_call') {
       console.log(`  ${c.geminiCyan}⚙️ [ACTION]${c.reset} ${detail || 'Requesting tool execution...'}`);
     } else {
-      console.log(`  ${c.crimson}⚠️ [CIRCUIT BREAKER]${c.reset} Max steps reached.`);
+      console.log(`  ${c.yellow}⏱️ [STEP BUDGET REACHED]${c.reset} ${detail || 'Max steps reached for current turn.'}`);
     }
   }
 
@@ -1420,6 +1429,7 @@ export class CLI {
     totalTokens?: number;
     cacheHitRate?: number;
     cachedCheckpoints?: number;
+    workspaceRoot?: string;
   }): void {
     const cached = info.cachedTokens ?? 0;
     const total = info.totalTokens ?? 0;
@@ -1429,6 +1439,9 @@ export class CLI {
       : `${c.amber}DISABLED${c.reset}`;
     console.log(`\n  ${c.geminiCyan}${c.bold}❯ PROMPT CACHE TELEMETRY${c.reset} [${modeBadge}]`);
     console.log(`    Model: ${c.brightCyan}${info.modelName}${c.reset} │ Session: ${c.slate}${info.sessionId || 'active'}${c.reset} (${info.sessionAgeSec ?? 0}s)`);
+    if (info.workspaceRoot) {
+      console.log(`    Workspace: ${c.brightCyan}${info.workspaceRoot}${c.reset}`);
+    }
     console.log(`    Tokens: ${cached.toLocaleString()} cached / ${total.toLocaleString()} total (${c.yellow}${rate}%${c.reset} hit rate) │ Checkpoints: ${info.cachedCheckpoints ?? 0}`);
   }
 

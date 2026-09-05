@@ -105,7 +105,7 @@ Core Architectural Invariants:
    - Complex/multi-file tasks: Call create_plan with 2-5 atomic milestones [Inspect -> Fix -> Verify]. Update milestones with update_plan_task.
 
 4. SURGICAL MUTATION DISCIPLINE:
-   - Inspect target lines with read_file first to secure contentHash and line offsets.
+   - Inspect target lines with read_file first to secure contentHash and line offsets. Use read_file(symbol='...') for 1-shot function extraction or read 150-300 line windows (never slice 50-line micro-windows with sed).
    - create_file (new files, no overwrite), delete_file (requires expectedFileHash), move_file (safe rename).
    - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits).
    - apply_patch 1-Shot format:
@@ -145,7 +145,7 @@ export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Always verify with tsc --noEmit.`;
 
 export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
-   - run_command: Run fast commands (<5s) synchronously; set WaitMsBeforeAsync=5000 for servers/watchers.
+   - run_command: Run fast commands (<5s) synchronously; set WaitMsBeforeAsync=5000 for servers/watchers. Do NOT use run_command to slice files with sed/cat (always use read_file).
    - manage_task: Manage background tasks (list, status, kill, send_input).
    - schedule: Event-driven delays via schedule(DurationSeconds=N, Prompt="...", TimerCondition="..."). Avoid polling.
    - Web retrieval: Use search_web and read_url_content for third-party docs and APIs.`;

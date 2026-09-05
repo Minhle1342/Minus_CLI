@@ -10,7 +10,7 @@ import {
   invalidateTopologyCache,
 } from './mutation-blast-radius.js';
 
-type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation';
+type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode';
 
 interface TextMatch {
   start: number;
@@ -33,7 +33,7 @@ interface NormalizedText {
  */
 export const replaceTextTool: ToolDefinition = {
   name: 'replace_text',
-  description: 'Thay thế duy nhất một đoạn oldText trong file. Chế độ auto khớp an toàn cả LF/CRLF và chênh lệch indentation của block nhiều dòng; không dùng fuzzy semantic matching. Có thể truyền expectedFileHash lấy từ read_file để chặn sửa trên nội dung đã cũ.',
+  description: 'Thay thế duy nhất một đoạn oldText trong file. Chế độ auto khớp an toàn cả LF/CRLF, Unicode (NFC/NFD) và chênh lệch indentation của block nhiều dòng; không dùng fuzzy semantic matching. Khuyến nghị: chọn oldText ngắn gọn (3-15 dòng mỏ neo duy nhất), tránh truyền cả block quá lớn (>50 dòng). Có thể truyền expectedFileHash lấy từ read_file để chặn sửa trên nội dung đã cũ.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -43,7 +43,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       oldText: {
         type: Type.STRING,
-        description: 'Đoạn văn bản/code gốc cần thay thế (phải trùng khớp chính xác 100%, bao gồm khoảng trắng/xuống dòng)',
+        description: 'Đoạn văn bản/code gốc cần thay thế (khuyến nghị 3-15 dòng mỏ neo duy nhất; tự động xử lý sai khác LF/CRLF và Unicode dựng sẵn/tổ hợp)',
       },
       newText: {
         type: Type.STRING,
@@ -120,12 +120,16 @@ export const replaceTextTool: ToolDefinition = {
         const suggestedRead = candidates[0]
           ? { path: rawPath, startLine: Math.max(1, candidates[0].line - 3), endLine: candidates[0].line + 6, includeLineNumbers: false }
           : { path: rawPath, includeLineNumbers: false };
+        let diagnostic = 'oldText khác nội dung hiện tại; preview có dấu "..." trên CLI chỉ là phần hiển thị bị rút gọn và không nên được sao chép làm source.';
+        if (oldText.length > 1000) {
+          diagnostic += ` Cảnh báo: oldText quá dài (${oldText.length} ký tự). Hãy thu hẹp oldText xuống 3-15 dòng mỏ neo duy nhất để tránh trượt ký tự.`;
+        }
         return {
           success: false,
           path: rawPath,
-          error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF và indentation an toàn.`,
+          error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF, Unicode và indentation an toàn.`,
           errorCode: 'TEXT_NOT_FOUND',
-          diagnostic: 'oldText khác nội dung hiện tại; preview có dấu "..." trên CLI chỉ là phần hiển thị bị rút gọn và không nên được sao chép làm source.',
+          diagnostic,
           observedFileHash,
           oldTextLength: oldText.length,
           candidates,
@@ -240,14 +244,25 @@ function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact
 
   const normalizedContent = normalizeLineEndingsWithBoundaries(content);
   const normalizedOldText = normalizeLineEndingsWithBoundaries(oldText).text;
-  const eolEquivalent = findAllRanges(normalizedContent.text, normalizedOldText).map(({ start, end }) => ({
-    start: normalizedContent.boundaries[start],
-    end: normalizedContent.boundaries[end],
-    line: lineNumberAt(normalizedContent.text, start),
-    strategy: content.slice(normalizedContent.boundaries[start], normalizedContent.boundaries[end]) === oldText
-      ? 'exact' as const
-      : 'normalized_eol' as const,
-  }));
+  const eolEquivalent = findAllRanges(normalizedContent.text, normalizedOldText).map(({ start, end }) => {
+    const rawSlice = content.slice(normalizedContent.boundaries[start], normalizedContent.boundaries[end]);
+    let strategy: MatchStrategy = 'exact';
+    if (rawSlice !== oldText) {
+      if (rawSlice.replace(/\r\n/g, '\n') === oldText.replace(/\r\n/g, '\n')) {
+        strategy = 'normalized_eol';
+      } else if (rawSlice.normalize('NFC') === oldText.normalize('NFC')) {
+        strategy = 'normalized_unicode';
+      } else {
+        strategy = 'normalized_eol';
+      }
+    }
+    return {
+      start: normalizedContent.boundaries[start],
+      end: normalizedContent.boundaries[end],
+      line: lineNumberAt(normalizedContent.text, start),
+      strategy,
+    };
+  });
   if (eolEquivalent.length > 0) return eolEquivalent;
 
   return findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
@@ -299,17 +314,22 @@ function prepareReplacement(newText: string, content: string, match: TextMatch):
   return normalized.replace(/\n/g, eol);
 }
 
+const graphemeSegmenter = new Intl.Segmenter('und', { granularity: 'grapheme' });
+
 function normalizeLineEndingsWithBoundaries(value: string): NormalizedText {
   let text = '';
   const boundaries = [0];
-  for (let index = 0; index < value.length; index++) {
-    if (value[index] === '\r') {
-      if (value[index + 1] === '\n') index++;
-      text += '\n';
+  for (const seg of graphemeSegmenter.segment(value)) {
+    let s = seg.segment;
+    if (s === '\r\n' || s === '\r') {
+      s = '\n';
     } else {
-      text += value[index];
+      s = s.normalize('NFC');
     }
-    boundaries.push(index + 1);
+    for (let index = 0; index < s.length; index++) {
+      text += s[index];
+      boundaries.push(seg.index + seg.segment.length);
+    }
   }
   return { text, boundaries };
 }

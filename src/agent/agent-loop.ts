@@ -785,26 +785,7 @@ export class AgentLoop {
         CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
       }
 
-      const safetyCeiling = envFiniteNumber('MINUS_SAFETY_MAX_STEPS') ?? 500;
-      if (!isFinite(effectiveMaxSteps) && step >= safetyCeiling) {
-        const circuitBreakerMessage = `Agent stopped: Dynamic convergence safety ceiling (${safetyCeiling} steps) reached without final answer.`;
-        CLI.renderModelAction('max_steps');
-        CLI.renderStepFooter();
-        await CLI.renderExecutionStopped(circuitBreakerMessage, 'CIRCUIT_BREAKER_REACHED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'circuit-breaker-reached');
-        this.goalManager.disarm();
-        return circuitBreakerMessage;
-      }
 
-      if (!isFinite(effectiveMaxSteps) && consecutiveUnproductiveSteps >= 18) {
-        const stagnationMessage = `Agent stopped: Convergence stagnation detected (${consecutiveUnproductiveSteps} consecutive inspection steps without progress).`;
-        CLI.renderModelAction('max_steps');
-        CLI.renderStepFooter();
-        await CLI.renderExecutionStopped(stagnationMessage, 'STAGNATION_LIMIT_REACHED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'stagnation-limit-reached');
-        this.goalManager.disarm();
-        return stagnationMessage;
-      }
 
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
       this.verificationPolicy.setRequiredRisk(classification.risk);
@@ -1703,9 +1684,7 @@ export class AgentLoop {
             ...(cognitiveBrake.active
               ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
               : {}),
-            ...(consecutiveUnproductiveSteps === 10 && !isFinite(effectiveMaxSteps)
-              ? { _system_convergence_directive: '[DYNAMIC CONVERGENCE NOTICE]: 10 consecutive inspection steps executed without state modification or verification. Synthesize your findings now and proceed to implementation or final response.' }
-              : {}),
+
             ...(progressDecision.message
               ? { _system_loop_guard: progressDecision.message }
               : {}),

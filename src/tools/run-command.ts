@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import { exec } from 'node:child_process';
 import { Type } from '@google/genai';
 import { ToolDefinition, type ToolExecutionContext } from './types.js';
@@ -158,13 +159,37 @@ export interface FileMisuseDetection {
 export function detectFileCommandMisuse(command: string): FileMisuseDetection | undefined {
   const trimmed = command.trim();
 
-  // 1. Đọc file qua shell (cat, type, Get-Content, gc, head, tail, more, less)
+  // 1.1. Đọc cắt đoạn file qua sed -n 'start,endp' filePath
+  const sedSliceMatch = trimmed.match(/^sed\s+-n\s+['"]?(\d+)(?:,(\d+))?p['"]?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (sedSliceMatch) {
+    const startLine = parseInt(sedSliceMatch[1], 10);
+    const endLine = sedSliceMatch[2] ? parseInt(sedSliceMatch[2], 10) : startLine;
+    const filePath = sedSliceMatch[3].replace(/^["']|["']$/g, '');
+    return {
+      tool: 'read_file',
+      reason: 'Đọc file theo khoảng dòng chính xác (không tốn lượt cấp quyền, cung cấp contentHash) thay vì chia nhỏ bằng sed',
+      suggestedArgs: { path: filePath, startLine, endLine },
+    };
+  }
+
+  // 1.2. Đọc file qua shell (cat, type, Get-Content, gc, head, tail, more, less, sed)
   const readMatch = trimmed.match(/^(?:cat|type|Get-Content|gc|head|tail|more|less)\s+([^\s;&|]+)/i);
   if (readMatch) {
     const filePath = readMatch[1].replace(/^["']|["']$/g, '');
     return {
       tool: 'read_file',
       reason: 'Đọc nội dung file với hashing và an toàn token',
+      suggestedArgs: { path: filePath },
+    };
+  }
+
+  // 1.3. Trích xuất text hoặc code qua awk
+  const awkMatch = trimmed.match(/^awk\s+.*?((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (awkMatch && !trimmed.includes('|')) {
+    const filePath = awkMatch[1].replace(/^["']|["']$/g, '');
+    return {
+      tool: 'read_file',
+      reason: 'Đọc nội dung file hoặc trích xuất symbol với read_file (symbol) / inspect_symbol',
       suggestedArgs: { path: filePath },
     };
   }
@@ -194,19 +219,73 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
   return undefined;
 }
 
+export interface SedSliceOptions {
+  filePath: string;
+  startLine: number;
+  endLine: number;
+}
+
+/**
+ * Phân tích cú pháp lệnh sed cắt dòng (ví dụ: sed -n '2228,2280p' server.js)
+ */
+export function parseSedSliceCommand(command: string): SedSliceOptions | null {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^sed\s+-n\s+['"]?(\d+)(?:,(\d+))?p['"]?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (!match) return null;
+  const startLine = parseInt(match[1], 10);
+  const endLine = match[2] ? parseInt(match[2], 10) : startLine;
+  const filePath = match[3].replace(/^["']|["']$/g, '');
+  return {
+    filePath,
+    startLine,
+    endLine,
+  };
+}
+
+/**
+ * Giả lập thực thi sed cắt dòng siêu tốc qua Node.js I/O (tránh độ trễ 3-13s khi spawn shell trên Windows)
+ */
+export async function executeSedSliceEmulation(
+  parsed: SedSliceOptions,
+  workspace: Workspace,
+): Promise<{ stdout: string; success: boolean; durationMs: number; exitCode: number }> {
+  const startTime = Date.now();
+  try {
+    const safePath = workspace.resolveSafePath(parsed.filePath);
+    const content = await fs.readFile(safePath, 'utf-8');
+    const lines = content.split(/\r?\n/);
+    const s = Math.max(1, parsed.startLine);
+    const e = Math.min(lines.length, parsed.endLine);
+    const selected = lines.slice(s - 1, e);
+    return {
+      stdout: selected.join('\n'),
+      success: true,
+      durationMs: Date.now() - startTime,
+      exitCode: 0,
+    };
+  } catch {
+    return {
+      stdout: '',
+      success: false,
+      durationMs: Date.now() - startTime,
+      exitCode: 1,
+    };
+  }
+}
+
 /**
  * Tạo Tool run_command có tích hợp SandboxManager và TaskManager (Chuẩn Antigravity CLI Unified Command Execution)
  */
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal (build, test, lint, explore, inspect, scripts) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu (dev server, long build) sang background task mà không làm treo Agent.',
+    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu sang background task. LƯU Ý QUAN TRỌNG: Để đọc hoặc kiểm tra mã nguồn (file inspection), BẮT BUỘC dùng tool "read_file" (hỗ trợ trích xuất toàn bộ hàm qua "symbol" trong 1-shot hoặc dải dòng 150-300 dòng). KHÔNG dùng run_command với sed/cat/head để chia nhỏ file thành từng khúc 50 dòng gây lãng phí step.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v")',
+          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v"). Không dùng để đọc file (hãy dùng read_file).',
         },
         CommandLine: {
           type: Type.STRING,
@@ -344,6 +423,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           error: 'execution_target chỉ chấp nhận "auto" hoặc "host".',
           errorCode: 'INVALID_EXECUTION_TARGET',
         };
+      }
+
+      // Tự động tối ưu hoá sed cắt dòng (sed -n 'start,endp' file) bằng bộ giả lập siêu tốc Node.js (<5ms)
+      const parsedSed = parseSedSliceCommand(rawCommand);
+      if (parsedSed) {
+        const emulatedSed = await executeSedSliceEmulation(parsedSed, workspace);
+        if (emulatedSed.success) {
+          return {
+            command: rawCommand,
+            stdout: truncateOutput(emulatedSed.stdout),
+            stderr: '',
+            exitCode: emulatedSed.exitCode,
+            durationMs: emulatedSed.durationMs,
+            sandbox: 'local',
+            executionTarget,
+            success: true,
+            emulated: true,
+            suggestion: 'Mẹo: Để tối ưu tốc độ và token, hãy dùng trực tiếp tool read_file với path, startLine, endLine hoặc symbol.',
+          };
+        }
       }
 
       if (executionTarget === 'host') {

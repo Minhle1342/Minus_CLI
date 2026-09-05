@@ -1557,6 +1557,7 @@ ${planPrompt}`;
           modelName,
           preservePrefixCache: agentLoop.contextCompactor.getConfig().preservePrefixCache,
           sessionId: activeSession.id,
+          workspaceRoot: workspace.rootDir,
         });
         continue;
       }

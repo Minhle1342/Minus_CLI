@@ -16,7 +16,7 @@ import { SemanticSlicer } from '../agent/semantic-slicer.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Đọc nội dung văn bản của một file trong workspace. Hỗ trợ đọc theo khoảng dòng, trích xuất Outline ngữ nghĩa (outlineOnly: true), hoặc trích xuất theo tên hàm/lớp (symbol).',
+  description: 'Công cụ đọc file & mã nguồn chính trong workspace (an toàn tuyệt đối, zero-latency, cung cấp contentHash để sửa code). Hỗ trợ: (1) Trích xuất trọn vẹn thân hàm/lớp qua "symbol" trong 1 bước duy nhất (1-shot); (2) Đọc theo khoảng dòng startLine/endLine (khuyến nghị đọc 150-300 dòng/lần, không chia vụn 50 dòng); (3) Đọc sơ đồ tổng quan với "outlineOnly: true".',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -26,11 +26,11 @@ export const readFileTool: ToolDefinition = {
       },
       startLine: {
         type: Type.INTEGER,
-        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn)',
+        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần để nắm trọn ngữ cảnh.',
       },
       endLine: {
         type: Type.INTEGER,
-        description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn)',
+        description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn).',
       },
       outlineOnly: {
         type: Type.BOOLEAN,
@@ -38,7 +38,7 @@ export const readFileTool: ToolDefinition = {
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tên hàm, lớp, hoặc interface cụ thể muốn đọc phần thân (ví dụ: "AgentLoop" hoặc "createPlan")',
+        description: 'ƯU TIÊN DÙNG: Tên hàm, lớp, hoặc interface cụ thể cần đọc phần thân (ví dụ: "runQueryPipeline", "AgentLoop"). Tool sẽ tự động trích xuất 100% trọn vẹn thân symbol qua AST trong 1 bước duy nhất mà không cần đoán dải dòng.',
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,

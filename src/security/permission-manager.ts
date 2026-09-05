@@ -246,6 +246,7 @@ export class PermissionManager {
       ).trim();
       const lower = cmd.toLowerCase();
       const shellAnalysis = analyzeShellCommand(cmd);
+      const misuse = detectFileCommandMisuse(cmd);
 
       // Nếu không có câu lệnh hợp lệ nào được truyền vào
       if (!cmd) {
@@ -256,7 +257,7 @@ export class PermissionManager {
           target: '(lệnh rỗng)',
           summary: 'Thực thi lệnh terminal (tham số câu lệnh rỗng hoặc không xác định)',
           riskLevel: 'LOW',
-          details: { ...args, shellAnalysis },
+          details: { ...args, shellAnalysis, misuse },
           timestamp,
         };
       }
@@ -270,7 +271,7 @@ export class PermissionManager {
           target: cmd,
           summary: `Thực thi lệnh xóa/hệ thống nguy hiểm: "${cmd}"`,
           riskLevel: 'CRITICAL',
-          details: args,
+          details: { ...args, shellAnalysis, misuse },
           timestamp,
         };
       }
@@ -284,12 +285,12 @@ export class PermissionManager {
           target: cmd,
           summary: `Thực thi lệnh cấu hình / cài đặt: "${cmd}"`,
           riskLevel: 'HIGH',
-          details: args,
+          details: { ...args, shellAnalysis, misuse },
           timestamp,
         };
       }
 
-      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|env|printenv|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
+      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|env|printenv|sed\s+-n|awk|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
       if (shellAnalysis.error || shellAnalysis.complex || shellAnalysis.segments.some((segment) => !safeSegment.test(segment.trim()))) {
         return {
           id,
@@ -298,13 +299,13 @@ export class PermissionManager {
           target: cmd,
           summary: `Thực thi chuỗi lệnh terminal cần phê duyệt: "${cmd}"`,
           riskLevel: 'MEDIUM',
-          details: { ...args, shellAnalysis },
+          details: { ...args, shellAnalysis, misuse },
           timestamp,
         };
       }
 
       // 3. Khám phá Codebase / Đọc file / Tìm kiếm (Terminal-First Codex Standard) -> LOW
-      if (/^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|git\s+status|git\s+diff|git\s+log|env|printenv)\b/i.test(lower)) {
+      if (/^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|git\s+status|git\s+diff|git\s+log|env|printenv|sed\s+-n|awk)\b/i.test(lower)) {
         return {
           id,
           toolName,
@@ -312,7 +313,7 @@ export class PermissionManager {
           target: cmd,
           summary: `Khám phá codebase / đọc dữ liệu terminal: "${cmd}"`,
           riskLevel: 'LOW',
-          details: args,
+          details: { ...args, shellAnalysis, misuse },
           timestamp,
         };
       }

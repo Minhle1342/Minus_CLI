@@ -678,6 +678,35 @@ async function runUnitTests() {
     'replace_text exact mode không tự nới lỏng điều kiện so khớp',
   );
 
+  // Test 3.6B: Unicode NFC vs NFD normalization tolerance (tiếng Việt / ký tự có dấu)
+  const unicodeNfcSource = 'const note = "Ch\u1EC9 trả về JSON";\n'; // NFC (\u1EC9)
+  await writeFileTool.execute({ path: robustReplacePath, content: unicodeNfcSource }, workspace);
+  const unicodeNfdOldText = 'const note = "Chi\u0309 trả về JSON";\n'; // NFD (i + \u0309)
+  const unicodeReplace = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: unicodeNfdOldText,
+    newText: 'const note = "Đã cập nhật thành công";\n',
+  }, workspace);
+  assert(
+    unicodeReplace.success === true
+    && unicodeReplace.matchStrategy === 'normalized_unicode'
+    && await fs.readFile(workspace.resolveSafePath(robustReplacePath), 'utf8') === 'const note = "Đã cập nhật thành công";\n',
+    'replace_text tự động hóa giải chênh lệch Unicode NFC và NFD trong tiếng Việt',
+  );
+
+  // Exact mode từ chối chênh lệch Unicode NFC/NFD
+  await writeFileTool.execute({ path: robustReplacePath, content: unicodeNfcSource }, workspace);
+  const unicodeExactRejectsNfd = await replaceTextTool.execute({
+    path: robustReplacePath,
+    oldText: unicodeNfdOldText,
+    newText: 'unused',
+    matchMode: 'exact',
+  }, workspace);
+  assert(
+    unicodeExactRejectsNfd.errorCode === 'TEXT_NOT_FOUND',
+    'replace_text exact mode từ chối sai khác Unicode NFC/NFD',
+  );
+
   const beforeStaleEdit = await readFileTool.execute({ path: robustReplacePath, includeLineNumbers: false }, workspace);
   await writeFileTool.execute({ path: robustReplacePath, content: 'newer content' }, workspace);
   const staleReplace = await replaceTextTool.execute({
