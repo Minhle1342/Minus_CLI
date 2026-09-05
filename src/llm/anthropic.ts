@@ -81,20 +81,26 @@ export class AnthropicLLM {
       ...this.tokenConfig,
       ...request?.tokenConfig,
     }, this.baseURL);
+    const systemPromptText = request?.systemPrompt || this.systemPrompt;
+    const systemPayload = request?.enablePromptCaching !== false
+      ? [
+          {
+            type: 'text',
+            text: systemPromptText,
+            cache_control: { type: 'ephemeral' },
+          },
+        ]
+      : systemPromptText;
+
     const body: Record<string, any> = {
       model: this.modelName,
-      system: request?.systemPrompt || this.systemPrompt,
+      system: systemPayload,
       messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext),
       max_tokens: effectiveTokenConfig.maxOutputTokens || 8192,
       stream: true,
       tools: tools.length > 0 ? this.convertTools(tools, request?.enablePromptCaching !== false) : undefined,
       temperature: 0.2,
     };
-    if (request?.enablePromptCaching !== false) {
-      // Anthropic automatic caching advances the breakpoint with the growing
-      // conversation while keeping tools -> system -> messages prefix order.
-      body.cache_control = { type: 'ephemeral' };
-    }
 
     if (request?.signal?.aborted) {
       return {

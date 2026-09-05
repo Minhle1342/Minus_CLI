@@ -869,6 +869,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         workspacePath: workspace.rootDir,
         activeSessionId: activeSession?.id,
       }, workspace.rootDir);
+      await kernel.dispose().catch(() => {});
     } catch {}
     console.log(`\n${c.green}Tạm biệt! Phiên làm việc đã được lưu trữ an toàn. 👋${c.reset}\n`);
     process.exit(0);

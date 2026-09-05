@@ -1,4 +1,4 @@
-import { exec, execFile, spawn } from 'node:child_process';
+import { exec, execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -174,6 +174,59 @@ export class DockerSandbox implements ISandboxProvider {
     return false;
   }
 
+  private exitHookRegistered = false;
+
+  /**
+   * Đăng ký lifecycle hooks để tự động tiêu huỷ container khi tiến trình kết thúc
+   */
+  private registerExitHooks(): void {
+    if (this.exitHookRegistered) return;
+    this.exitHookRegistered = true;
+
+    const cleanup = () => {
+      if (this.containerId) {
+        try {
+          execFileSync('docker', ['rm', '-f', this.containerId], { timeout: 4000, stdio: 'ignore' });
+        } catch {}
+      }
+    };
+
+    process.once('exit', cleanup);
+    process.once('SIGINT', cleanup);
+    process.once('SIGTERM', cleanup);
+  }
+
+  /**
+   * Tự động quét và xoá sạch các container minus-sandbox cũ bị bỏ rơi (orphaned)
+   * Ngăn chặn việc tích tụ container làm cạn kiệt ổ đĩa C: và RAM ảo hệ thống
+   */
+  async cleanupOrphanedSandboxes(): Promise<number> {
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'ps', '-a',
+        '--filter', 'name=minus-sandbox',
+        '--format', '{{.ID}}',
+      ], { timeout: 8000 });
+
+      const ids = (stdout || '')
+        .split(/\s+/)
+        .map((id) => id.trim())
+        .filter(Boolean);
+
+      if (ids.length === 0) return 0;
+
+      // Xoá theo từng batch tối đa 30 container để tránh tràn argument command line
+      for (let i = 0; i < ids.length; i += 30) {
+        const batch = ids.slice(i, i + 30);
+        await execFileAsync('docker', ['rm', '-f', ...batch], { timeout: 15000 }).catch(() => {});
+      }
+
+      return ids.length;
+    } catch {
+      return 0;
+    }
+  }
+
   /**
    * Khởi tạo Container cô lập và mount Workspace
    */
@@ -184,12 +237,15 @@ export class DockerSandbox implements ISandboxProvider {
       throw new Error('Docker Daemon không khả dụng trên hệ thống.');
     }
 
+    // Tự động dọn dẹp các sandbox mồ côi trước khi khởi tạo container mới
+    await this.cleanupOrphanedSandboxes();
+
     const containerName = `minus-sandbox-${Date.now()}`;
     const normalizedWsPath = this.workspacePath.replace(/\\/g, '/');
 
-    // Chạy container ở chế độ background (detached)
+    // Chạy container ở chế độ background (detached) với cờ tự động huỷ (--rm) khi dừng
     const runArgs = [
-      'run', '-d', '--name', containerName,
+      'run', '-d', '--rm', '--name', containerName,
       `--memory=${this.memoryLimitMb}m`,
       `--cpus=${this.cpuLimit}`,
       '--pids-limit=200',
@@ -204,6 +260,7 @@ export class DockerSandbox implements ISandboxProvider {
       const { stdout } = await execFileAsync('docker', runArgs, { timeout: 300000, maxBuffer: 1024 * 1024 * 5 });
       this.containerId = (stdout || '').trim().slice(0, 12);
       this.isDockerReady = true;
+      this.registerExitHooks();
 
       // Kiểm tra trước các công cụ thiết yếu (curl, git, bash, ripgrep)
       try {

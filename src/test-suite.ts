@@ -2919,6 +2919,19 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Phân loại timeout riêng thay vì báo nhầm test failure',
   );
 
+  const hostMemoryCommitDiagnosis = diagnoseCommandFailure('node -c server.js', {
+    stdout: '',
+    stderr: 'runtime: VirtualAlloc of 8192 bytes failed with errno=1455',
+    exitCode: 2,
+    durationMs: 3000,
+    sandboxType: 'docker',
+  });
+  assert(
+    hostMemoryCommitDiagnosis?.errorCode === 'HOST_MEMORY_COMMIT_EXHAUSTED'
+    && hostMemoryCommitDiagnosis.suggestion.includes('docker system prune'),
+    'Phân loại chính xác lỗi Windows VirtualAlloc commit limit cạn kiệt (errno 1455)',
+  );
+
   const environmentReflection = new ReflectionEngine().analyze({
     toolName: 'run_command',
     args: { command: 'dotnet test' },

@@ -85,6 +85,15 @@ export function diagnoseCommandFailure(
     };
   }
 
+  if (/VirtualAlloc.*errno=1455|errno=1455|ERROR_COMMITMENT_LIMIT|paging file is too small/i.test(combinedOutput)) {
+    return {
+      success: false,
+      errorCode: 'HOST_MEMORY_COMMIT_EXHAUSTED',
+      diagnostic: 'Windows virtual memory (Commitment Limit) is exhausted. The OS paging file cannot expand or physical RAM is saturated.',
+      suggestion: 'Free up disk space on drive C: (clean Docker build cache/containers with "docker system prune -f"), limit WSL2 RAM in .wslconfig, or expand the Windows Paging File.',
+    };
+  }
+
   return {
     success: false,
     errorCode: 'COMMAND_FAILED',

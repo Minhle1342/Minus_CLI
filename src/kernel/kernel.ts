@@ -33,6 +33,7 @@ import { disposeLspManager } from '../lsp/lsp-manager.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
+  'kernel:disposed': () => void;
   'plugin:registered': (pluginName: string) => void;
   'step:before': (step: number, maxSteps: number) => void;
   'step:after': (step: number) => void;
@@ -329,4 +330,20 @@ export class AgentKernel {
     this.plugins.delete(pluginName);
     return true;
   }
+
+  /**
+   * Dọn dẹp và giải phóng toàn bộ tài nguyên (Sandbox containers, Background tasks, Plugins)
+   */
+  async dispose(): Promise<void> {
+    for (const plugin of this.plugins.values()) {
+      if (plugin.dispose) {
+        await Promise.resolve(plugin.dispose(this.ctx)).catch(() => {});
+      }
+    }
+    await this.ctx.sandbox.dispose().catch(() => {});
+    await this.ctx.tasks.dispose().catch(() => {});
+    this.isInitialized = false;
+    this.ctx.events.emit('kernel:disposed');
+  }
 }
+
