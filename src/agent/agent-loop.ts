@@ -22,10 +22,11 @@ import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
+import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent } from './final-answer-guard.js';
-import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
+import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
@@ -103,6 +104,7 @@ export class AgentLoop {
   readonly agentRegistry: AgentRegistry;
   readonly agentId: string;
   readonly subagentManager: SubagentManager;
+  readonly orchestrator: AgentOrchestrator;
   readonly effectLedger: EffectLedger;
   readonly progressGuard = new LoopProgressGuard();
   readonly finalAnswerGuard = new FinalAnswerGuard();
@@ -258,11 +260,13 @@ export class AgentLoop {
     });
 
     this.agentRegistry.register(this.agentId, this.agentId);
+    this.agentRegistry.registerBenchmarkSpecialists();
     this.subagentManager = new SubagentManager(
       this.agentRegistry,
       (agentId, session, subagentOptions, signal) => this.createSubagentLoop(agentId, session, subagentOptions, signal),
       (session) => this.persistSession(session),
     );
+    this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     if (options?.enableSubagents !== false) {
       this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
       this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
@@ -270,6 +274,7 @@ export class AgentLoop {
       this.toolRegistry.register(createGetAgentResultTool(this.subagentManager));
       this.toolRegistry.register(createStopAgentTool(this.subagentManager));
       this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
+      this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
     }
 
     if (typeof (this.toolRegistry as any).registerGameTools === 'function') {

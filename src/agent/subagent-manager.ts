@@ -14,6 +14,10 @@ export interface SubagentOptions {
   worktreePath?: string;
   capabilities?: string[];
   requiredCapabilities?: string[];
+  priority?: 'high' | 'normal' | 'low';
+  preferCostEfficient?: boolean;
+  memoize?: boolean;
+  maxBudgetTokens?: number;
 }
 
 export type SubagentFactory = (
@@ -138,11 +142,7 @@ export class SubagentManager {
    * Tìm kiếm danh sách các agent phù hợp với capabilities
    */
   findAgentsByCapabilities(capabilities: string[]): import('./agent-registry.js').AgentRecord[] {
-    if (capabilities.length === 0) return this.agents.list();
-    return this.agents.list().filter((a) => {
-      if (!a.capabilities) return false;
-      return capabilities.every((req) => a.capabilities!.includes(req));
-    });
+    return this.agents.findAgentsByCapabilities(capabilities);
   }
 
   /**

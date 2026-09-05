@@ -1132,6 +1132,56 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         continue;
       }
 
+      // Lệnh Quản lý và Xem danh sách Subagents & Benchmark Specialists (/agents hoặc /subagents)
+      if (
+        trimmed === '/agents' ||
+        trimmed.startsWith('/agents ') ||
+        trimmed === '/subagents' ||
+        trimmed.startsWith('/subagents ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const subCmd = parts[0]?.toLowerCase();
+        const targetId = parts[1];
+
+        if (subCmd === 'resume' && targetId) {
+          const success = agentLoop.subagentManager.resume(targetId);
+          if (success) {
+            console.log(`\n${c.green}✔ Đã kích hoạt tiếp tục subagent:${c.reset} ${targetId}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không thể tiếp tục subagent "${targetId}" (không tồn tại hoặc không ở trạng thái stopped).\n${c.reset}`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'stop' && targetId) {
+          const success = agentLoop.subagentManager.stop(targetId);
+          if (success) {
+            console.log(`\n${c.yellow}🛑 Đã dừng subagent:${c.reset} ${targetId}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không thể dừng subagent "${targetId}".\n${c.reset}`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'inspect' && targetId) {
+          const agent = agentLoop.agentRegistry.get(targetId);
+          if (!agent) {
+            console.log(`\n${c.yellow}⚠️ Không tìm thấy agent với ID "${targetId}".\n${c.reset}`);
+          } else {
+            CLI.renderAgents([agent]);
+            if (agent.metadata?.systemInstruction) {
+              console.log(`${c.brightCyan}${c.bold}System Instruction:${c.reset}`);
+              console.log(`${c.dim}${agent.metadata.systemInstruction}${c.reset}\n`);
+            }
+          }
+          continue;
+        }
+
+        const agents = agentLoop.agentRegistry.list();
+        CLI.renderAgents(agents);
+        continue;
+      }
+
       // Lệnh Quản lý Queued Messages (/queue hoặc /q)
       if (
         trimmed === '/queue' ||
@@ -2276,14 +2326,14 @@ ${planPrompt}`;
           continue;
         }
 
-        if (domain === 'tasks' || domain === 'agents' || domain === 'subagents') {
-          const agents = (agentLoop.agentRegistry?.list?.() || []).map((a: any) => ({
-            id: a.id,
-            command: a.name || a.role || a.objective || 'subagent',
-            status: a.status || 'idle',
-            startedAt: a.createdAt || new Date().toISOString(),
-          }));
-          CLI.renderTasks(agents);
+        if (domain === 'tasks') {
+          CLI.renderTasks(kernel.ctx.tasks.listTasks());
+          continue;
+        }
+
+        if (domain === 'agents' || domain === 'subagents') {
+          const agents = agentLoop.agentRegistry.list();
+          CLI.renderAgents(agents);
           continue;
         }
 

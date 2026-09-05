@@ -537,8 +537,9 @@ export class ProjectMemoryManager {
     const now = Date.now();
     const createdTime = item.createdAt ? Date.parse(item.createdAt) : now;
     const ageInDays = Math.max(0, (now - createdTime) / (24 * 60 * 60 * 1000));
-    // Chu kỳ bán rã thời gian: 30 ngày (Exponential half-life)
-    const recencyScore = Math.pow(0.5, ageInDays / 30);
+    // Chu kỳ bán rã thời gian: episodic memories bán rã nhanh (3 ngày), kiến thức dài hạn 30 ngày
+    const halfLifeDays = item.category === 'episodic' ? 3 : 30;
+    const recencyScore = Math.pow(0.5, ageInDays / halfLifeDays);
     const accessCount = (item as any).accessCount || 1;
     const frequencyScore = Math.min(accessCount / 10, 1.0);
     const confidenceScore = item.confidence ?? 0.8;
@@ -547,16 +548,22 @@ export class ProjectMemoryManager {
 
   /**
    * Tự động dọn dẹp các memory ít hữu dụng khi vượt quá giới hạn
-   * Bảo toàn 100% các quy ước gõ tay (manual conventions) và rules
+   * Bảo toàn 100% các quy ước gõ tay (manual conventions), rules, và memory mới được tạo/cập nhật
    */
   pruneLowUtilityMemories(maxItems = 60, minUtility = 0.25): number {
     const records = this.memoryData.learnedInsights;
     if (records.length <= maxItems) return 0;
 
-    // Giữ nguyên các quy ước thủ công và luật cốt lõi
+    const now = Date.now();
+    // Giữ nguyên các quy ước thủ công, luật cốt lõi, và các memory vừa mới tạo/cập nhật trong 15 phút gần nhất
     const preservable = new Set<string>();
     for (const item of records) {
       if (item.source === 'manual' || item.category === 'convention' || item.category === 'rule') {
+        if (item.id) preservable.add(item.id);
+        continue;
+      }
+      const itemTime = item.updatedAt ? Date.parse(item.updatedAt) : (item.createdAt ? Date.parse(item.createdAt) : 0);
+      if (itemTime && (now - itemTime) < 15 * 60 * 1000) {
         if (item.id) preservable.add(item.id);
       }
     }

@@ -33,6 +33,8 @@ import { TaskManager } from '../tasks/task-manager.js';
 import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
+import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
+import { createAllocateAgentTaskTool } from './subagent-tools.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -196,6 +198,10 @@ export class ToolRegistry implements ToolProvider {
 
   attachAgentEventBus(eventBus: AgentEventBus): void {
     this.register(createPublishAgentEventTool(eventBus));
+  }
+
+  attachAgentOrchestrator(orchestrator: AgentOrchestrator): void {
+    this.register(createAllocateAgentTaskTool(orchestrator));
   }
 
   createScope(scopeId: string, allowedToolNames?: string[]): ToolScope {

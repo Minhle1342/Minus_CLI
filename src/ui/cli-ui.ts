@@ -1139,6 +1139,46 @@ export class CLI {
     console.log('');
   }
 
+  static renderAgents(agents: Array<{
+    id: string;
+    label?: string;
+    status: string;
+    capabilities?: string[];
+    metadata?: Record<string, any>;
+    activeTasksCount?: number;
+    totalTasksCompleted?: number;
+  }>): void {
+    console.log(`\n${c.brightCyan}${c.bold}❯ REGISTERED SUBAGENTS & BENCHMARK SPECIALISTS (${agents.length})${c.reset}`);
+    if (agents.length === 0) {
+      console.log(`  ${c.mutedText}No subagents registered.${c.reset}\n`);
+    } else {
+      for (const a of agents) {
+        const statusColor = a.status === 'running' ? c.brightGreen : a.status === 'error' ? c.red : c.slate;
+        const statusBadge = `${statusColor}[${a.status.toUpperCase()}]${c.reset}`;
+        const loadInfo = (typeof a.activeTasksCount === 'number' && a.activeTasksCount > 0)
+          ? ` ${c.yellow}(⚡ Active: ${a.activeTasksCount})${c.reset}`
+          : '';
+        const completedInfo = (typeof a.totalTasksCompleted === 'number' && a.totalTasksCompleted > 0)
+          ? ` ${c.dim}(Done: ${a.totalTasksCompleted})${c.reset}`
+          : '';
+        console.log(`  ${c.bold}${c.brightCyan}${a.id}${c.reset} ── ${statusBadge} ${c.white}${a.label || a.id}${c.reset}${loadInfo}${completedInfo}`);
+        if (a.metadata?.topBenchmark) {
+          console.log(`    ${c.amber}🏆 Top Benchmark:${c.reset} ${c.bold}${a.metadata.topBenchmark}${c.reset}`);
+        }
+        if (a.metadata?.model) {
+          console.log(`    ${c.slate}Model:${c.reset} ${a.metadata.model} ${a.metadata.provider ? `(${a.metadata.provider})` : ''}`);
+        }
+        if (a.metadata?.domain) {
+          console.log(`    ${c.slate}Domain:${c.reset} ${c.dim}${a.metadata.domain}${c.reset}`);
+        }
+        if (a.capabilities && a.capabilities.length > 0) {
+          console.log(`    ${c.slate}Capabilities:${c.reset} ${c.gray}${a.capabilities.join(', ')}${c.reset}`);
+        }
+        console.log('');
+      }
+    }
+  }
+
   static renderStatus(opts: StatusOptions): void {
     const goal = opts.isGoalMode ? 'Goal Mode: ON (∞)' : `Step Budget: ${opts.maxSteps}`;
     console.log(`\n  ${c.brightCyan}${c.bold}❯ STATUS${c.reset} · ${opts.modelName} · ${goal} · Turns: ${opts.sessionTurns}\n`);
@@ -1183,10 +1223,10 @@ export class CLI {
   ): void {
     const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
     const progress = isUnlimited ? `${step}/∞` : `${step}/${maxSteps}`;
-    const phaseTag = context?.phase ? ` [${context.phase.toUpperCase()}]` : '';
+    const tag = context?.phase ? `[${context.phase.toUpperCase()}]` : `STEP ${progress}`;
     const taskTag = context?.activeTask ? ` ── "${truncateDisplayText(context.activeTask, 40)}"` : '';
 
-    console.log(`\n${c.slate}─── STEP ${progress}${phaseTag}${taskTag} ───────────────────────────────────────${c.reset}`);
+    console.log(`\n${c.slate}─── ${tag}${taskTag} ───────────────────────────────────────${c.reset}`);
   }
 
   /**

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Workspace } from './workspace/workspace.js';
@@ -127,8 +128,10 @@ import { AgentEventBus } from './agent/agent-event-bus.js';
 import { AgentOrchestrator } from './agent/agent-orchestrator.js';
 import { SubagentManager } from './agent/subagent-manager.js';
 import { AgentRegistry } from './agent/agent-registry.js';
+import { getBenchmarkSpecialists, findSpecialistForBenchmark } from './agent/benchmark-agents.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './tools/shared-context-tools.js';
 import { createPublishAgentEventTool } from './tools/agent-event-tools.js';
+import { createAllocateAgentTaskTool } from './tools/subagent-tools.js';
 import { CodebaseIntelligenceService } from './tools/codebase-intelligence.js';
 import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
 import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
@@ -6541,6 +6544,251 @@ Always write tests first!`;
   const contextCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/context');
   assert(Boolean(contextCmd?.usage?.includes('snapshot')), '/context chứa subcommand snapshot');
   assert(Boolean(contextCmd?.usage?.includes('briefing')), '/context chứa subcommand briefing');
+
+  // ========================================
+  // 🧪 42. KIỂM THỬ TOÀN DIỆN MULTI-AGENT INTEGRATION ROADMAP (DISCOVERY, ORCHESTRATION, EVENT BUS HISTORY & FILE-BOUND OCC)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 42. KIỂM THỬ TOÀN DIỆN MULTI-AGENT INTEGRATION ROADMAP (DISCOVERY, ORCHESTRATION, EVENT BUS HISTORY & FILE-BOUND OCC)');
+  console.log('========================================');
+
+  // 42.1. AgentRegistry: Quảng bá & Khám phá Capabilities
+  const registry42 = new AgentRegistry();
+  registry42.register('agent-fe-1', 'Frontend React Developer');
+  registry42.advertiseCapabilities('agent-fe-1', ['frontend', 'react', 'tailwind']);
+  
+  registry42.register('agent-be-1', 'Backend Go Engineer');
+  registry42.advertiseCapabilities('agent-be-1', ['backend', 'go', 'grpc', 'postgres']);
+
+  registry42.register('agent-fullstack', 'Fullstack Senior');
+  registry42.advertiseCapabilities('agent-fullstack', ['frontend', 'react', 'backend', 'go']);
+
+  assert(registry42.getCapabilities('agent-fe-1').includes('react'), 'AgentRegistry lưu trữ chính xác capabilities');
+  assert(registry42.getCapabilities('agent-fe-1').length === 3, 'AgentRegistry bảo toàn số lượng capabilities');
+
+  const feDevs = registry42.findAgentsByCapabilities(['frontend', 'react']);
+  assert(feDevs.length === 2, 'findAgentsByCapabilities tìm thấy 2 agents phù hợp (fe-1 và fullstack)');
+  assert(feDevs.some((a) => a.id === 'agent-fe-1') && feDevs.some((a) => a.id === 'agent-fullstack'), 'findAgentsByCapabilities trả về đúng ID các agents');
+
+  const grpcDevs = registry42.findAgentsByCapability('grpc');
+  assert(grpcDevs.length === 1 && grpcDevs[0].id === 'agent-be-1', 'findAgentsByCapability tìm thấy chính xác agent sở hữu grpc');
+
+  const noMatchDevs = registry42.findAgentsByCapabilities(['frontend', 'grpc']);
+  assert(noMatchDevs.length === 0, 'findAgentsByCapabilities trả về mảng rỗng khi không có agent nào thỏa mãn đồng thời');
+
+  // 42.2. AgentOrchestrator: Phân bổ tác vụ & Swarm Status
+  const orchestrator42 = new AgentOrchestrator(registry42);
+  const statusBefore = orchestrator42.getOrchestrationStatus();
+  assert(statusBefore.totalAgents === 3, 'getOrchestrationStatus báo cáo đúng 3 agents');
+  assert(statusBefore.idleAgents === 3, 'Toàn bộ 3 agents ban đầu ở trạng thái idle');
+  assert(statusBefore.runningAgents === 0, 'Không có agent nào đang chạy ban đầu');
+
+  const allocatedHandle = orchestrator42.allocateTask('Xây dựng trang Dashboard UI', ['frontend', 'tailwind']);
+  assert(allocatedHandle.id === 'agent-fe-1', 'AgentOrchestrator phân bổ tác vụ cho agent-fe-1');
+  assert(allocatedHandle.status === 'running', 'Trạng thái tác vụ chuyển thành running');
+  assert(registry42.get('agent-fe-1')?.status === 'running', 'Trạng thái agent trong registry được cập nhật thành running');
+
+  const statusAfterAlloc = orchestrator42.getOrchestrationStatus();
+  assert(statusAfterAlloc.runningAgents === 1, 'getOrchestrationStatus ghi nhận 1 running agent');
+  assert(statusAfterAlloc.idleAgents === 2, 'getOrchestrationStatus ghi nhận 2 idle agents');
+
+  // Broadcast task cho các agents còn lại thỏa mãn 'backend'
+  const broadcastHandles = orchestrator42.broadcastTask('Thiết kế API contract', ['backend']);
+  assert(broadcastHandles.length === 2, 'broadcastTask phân tán cho 2 agents có năng lực backend (be-1 và fullstack)');
+  assert(orchestrator42.listAvailableAgents(['backend']).length === 0, 'Không còn agent backend nào idle sau khi broadcast');
+
+  let errorThrownOnMissing = false;
+  try {
+    orchestrator42.allocateTask('Phát triển Unity game', ['unity', 'csharp']);
+  } catch (err: any) {
+    errorThrownOnMissing = err.message.includes('No available agent found matching');
+  }
+  assert(errorThrownOnMissing === true, 'AgentOrchestrator ném lỗi rõ ràng khi không có agent đáp ứng capabilities');
+
+  // 42.3. AgentEventBus: Topic Wildcards & Event History Buffer
+  const eventBus42 = new AgentEventBus({ maxHistory: 5 });
+  assert(eventBus42.listenerCount() === 0, 'EventBus ban đầu chưa có listeners');
+
+  const receivedWildcardEvents: any[] = [];
+  const wildcardListener = (e: any) => { receivedWildcardEvents.push(e); };
+  eventBus42.subscribe('build:*', wildcardListener);
+  assert(eventBus42.listenerCount('build:*') === 1, 'listenerCount đếm đúng 1 listener cho topic build:*');
+
+  await eventBus42.publish('agent-be-1', 'build:success', { artifact: 'binary.exe', size: 1024 });
+  await eventBus42.publish('agent-fe-1', 'build:failed', { error: 'SyntaxError at line 10' });
+  await eventBus42.publish('agent-be-1', 'deploy:staging', { env: 'staging' });
+
+  assert(receivedWildcardEvents.length === 2, 'Wildcard listener build:* nhận đúng 2 sự kiện build:* và bỏ qua deploy');
+  assert(receivedWildcardEvents[0].topic === 'build:success', 'Sự kiện đầu tiên là build:success');
+  assert(receivedWildcardEvents[1].topic === 'build:failed', 'Sự kiện thứ hai là build:failed');
+
+  const recentAll = eventBus42.getRecentEvents();
+  assert(recentAll.length === 3, 'getRecentEvents ghi nhận đủ 3 sự kiện trong buffer');
+  const recentBuilds = eventBus42.getRecentEvents('build:*');
+  assert(recentBuilds.length === 2, 'getRecentEvents hỗ trợ lọc theo topic wildcard');
+
+  eventBus42.clearHistory();
+  assert(eventBus42.getRecentEvents().length === 0, 'clearHistory dọn sạch toàn bộ buffer lịch sử');
+
+  // 42.4. SharedContextService: File-Bound OCC
+  const sharedContext42 = new SharedContextService();
+  const testOccFile = path.join(workspace.rootDir, 'temp', 'occ-test-contract.json');
+  await fs.mkdir(path.dirname(testOccFile), { recursive: true });
+  await fs.writeFile(testOccFile, JSON.stringify({ version: '1.0.0', schema: 'users' }), 'utf8');
+
+  // Tính file hash ban đầu
+  const initialContent = await fs.readFile(testOccFile);
+  const initialHash = crypto.createHash('sha256').update(initialContent).digest('hex');
+
+  // Ghi context gắn với file hash
+  const occEntry1 = await sharedContext42.setWithFileVerification(
+    'contract:users',
+    { version: '1.0.0', schema: 'users' },
+    'db-agent',
+    testOccFile,
+    initialHash,
+  );
+  assert(occEntry1.fileHash === initialHash, 'setWithFileVerification ghi nhận đúng SHA-256 hash của file');
+  assert(sharedContext42.has('contract:users') === true, 'sharedContext.has trả về true cho key vừa ghi');
+
+  // Thay đổi file trên đĩa
+  await fs.writeFile(testOccFile, JSON.stringify({ version: '2.0.0', schema: 'users_v2' }), 'utf8');
+  let occStaleFileRejected = false;
+  try {
+    await sharedContext42.setWithFileVerification(
+      'contract:users',
+      { version: '2.0.0' },
+      'db-agent',
+      testOccFile,
+      initialHash, // Hash cũ -> Xung đột!
+    );
+  } catch (err: any) {
+    occStaleFileRejected = err.message.includes('Optimistic concurrency conflict on file');
+  }
+  assert(occStaleFileRejected === true, 'SharedContextService từ chối ghi khi file hash trên đĩa bị thay đổi (STALE_FILE_HASH)');
+  await fs.rm(testOccFile, { force: true });
+
+  // 42.5. ToolRegistry, KernelContext & allocate_agent_task tool
+  const multiKernel = new AgentKernel(workspace);
+  assert(multiKernel.ctx.orchestrator !== undefined, 'AgentKernel khởi tạo orchestrator trong KernelContext');
+  assert(multiKernel.ctx.tools.has('allocate_agent_task') === true, 'ToolRegistry chứa công cụ allocate_agent_task');
+  assert(multiKernel.ctx.tools.has('read_shared_context') === true, 'ToolRegistry chứa công cụ read_shared_context');
+  assert(multiKernel.ctx.tools.has('write_shared_context') === true, 'ToolRegistry chứa công cụ write_shared_context');
+  assert(multiKernel.ctx.tools.has('publish_agent_event') === true, 'ToolRegistry chứa công cụ publish_agent_event');
+
+  // Kiểm thử Tool allocate_agent_task
+  multiKernel.ctx.agents.register('agent-sec-1', 'Security Auditor');
+  multiKernel.ctx.agents.advertiseCapabilities('agent-sec-1', ['security', 'audit']);
+  
+  const allocateTool = multiKernel.ctx.tools.get('allocate_agent_task')!;
+  const allocRes = await allocateTool.execute({
+    objective: 'Audit access control policies',
+    requiredCapabilities: ['security', 'audit'],
+  }, workspace);
+  assert(allocRes.success === true, 'allocate_agent_task thực thi thành công');
+  assert(allocRes.agent?.id === 'agent-sec-1', 'allocate_agent_task chọn đúng agent-sec-1');
+  assert(allocRes.agent?.status === 'running', 'Agent được phân bổ chuyển trạng thái running');
+
+  // ========================================
+  // 43. KIỂM THỬ BENCHMARK SPECIALIST SUBAGENTS REGISTRATION & CAPABILITY ROUTING
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 43. KIỂM THỬ BENCHMARK SPECIALISTS (TOP BENCHMARK LLM SUBAGENTS)');
+  console.log('========================================');
+
+  const specialists43 = getBenchmarkSpecialists();
+  assert(specialists43.length === 5, 'Hệ thống định nghĩa đủ 5 Benchmark Specialists');
+
+  const registry43 = new AgentRegistry();
+  const registered43 = registry43.registerBenchmarkSpecialists();
+  assert(registered43.length === 5, 'AgentRegistry đăng ký thành công 5 benchmark specialists');
+
+  // Kiểm tra từng LLM và Benchmark cao nhất
+  const r1 = registry43.get('subagent-deepseek-r1-math');
+  assert(r1 !== undefined && r1.metadata?.score === '97.3%', 'DeepSeek-R1 ghi nhận top score 97.3% (MATH-500)');
+
+  const qwen = registry43.get('subagent-qwen25-coder-synthesis');
+  assert(qwen !== undefined && qwen.metadata?.score === '92.7%', 'Qwen 2.5 Coder ghi nhận top score 92.7% (HumanEval)');
+
+  const gemini = registry43.get('subagent-gemini-swe-architect');
+  assert(gemini !== undefined && gemini.metadata?.score === '59.6%', 'Gemini ghi nhận top score 59.6% (SWE-bench Verified)');
+
+  const llama = registry43.get('subagent-llama33-instruction-governor');
+  assert(llama !== undefined && llama.metadata?.score === '92.1%', 'Llama 3.3 ghi nhận top score 92.1% (IFEval)');
+
+  const codestral = registry43.get('subagent-codestral-fim-surgeon');
+  assert(codestral !== undefined && codestral.metadata?.score === '91.6%', 'Codestral ghi nhận top score 91.6% (HumanEval FIM)');
+
+  // Kiểm tra tra cứu theo benchmark & capability
+  assert(findSpecialistForBenchmark('humaneval')?.id === 'subagent-qwen25-coder-synthesis', 'findSpecialistForBenchmark map humaneval sang Qwen');
+  assert(findSpecialistForBenchmark('aime')?.id === 'subagent-deepseek-r1-math', 'findSpecialistForBenchmark map aime sang DeepSeek-R1');
+  assert(findSpecialistForBenchmark('swe-bench')?.id === 'subagent-gemini-swe-architect', 'findSpecialistForBenchmark map swe-bench sang Gemini');
+  assert(findSpecialistForBenchmark('ifeval')?.id === 'subagent-llama33-instruction-governor', 'findSpecialistForBenchmark map ifeval sang Llama 3.3');
+  assert(findSpecialistForBenchmark('fim')?.id === 'subagent-codestral-fim-surgeon', 'findSpecialistForBenchmark map fim sang Codestral');
+
+  // Kiểm tra AgentOrchestrator phân bổ đúng chuyên gia theo capability
+  const orch43 = new AgentOrchestrator(registry43);
+  const mathAlloc = orch43.allocateTask('Chứng minh thuật toán', ['math']);
+  assert(mathAlloc.id === 'subagent-deepseek-r1-math', 'Orchestrator phân bổ đúng DeepSeek-R1 cho math/reasoning');
+
+  const sweAlloc = orch43.allocateTask('Refactor kiến trúc repo lớn', ['swe-bench']);
+  assert(sweAlloc.id === 'subagent-gemini-swe-architect', 'Orchestrator phân bổ đúng Gemini cho swe-bench/refactoring');
+
+  const fimAlloc = orch43.allocateTask('Surgical infilling test', ['fim']);
+  assert(fimAlloc.id === 'subagent-codestral-fim-surgeon', 'Orchestrator phân bổ đúng Codestral cho FIM');
+
+  // ========================================
+  // 44. KIỂM THỬ TỐI ƯU HÓA MULTI-AGENT (WORKLOAD DISTRIBUTION, PROFILING, COST CONTROLS & MEMOIZATION)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 44. KIỂM THỬ TỐI ƯU HÓA MULTI-AGENT (WORKLOAD, PROFILING, COST & MEMOIZATION)');
+  console.log('========================================');
+
+  const reg44 = new AgentRegistry();
+  reg44.register('agent-coder-junior', 'Junior Coder', { score: '75.0%', model: 'deepseek-coder-6.7b' });
+  reg44.advertiseCapabilities('agent-coder-junior', ['vue-coding', 'synthesis']);
+
+  reg44.register('agent-coder-senior', 'Senior Coder', { score: '92.7%', model: 'Qwen/Qwen2.5-Coder-32B-Instruct' });
+  reg44.advertiseCapabilities('agent-coder-senior', ['vue-coding', 'synthesis']);
+
+  const orch44 = new AgentOrchestrator(reg44);
+
+  // 1. Benchmark Prioritization khi tải bằng nhau
+  const alloc44_1 = orch44.allocateTask('Viết thuật toán', ['vue-coding', 'synthesis']);
+  assert(alloc44_1.id === 'agent-coder-senior', 'Agent có điểm benchmark cao hơn được ưu tiên khi tải bằng nhau');
+
+  // 2. Workload Distribution (Cân bằng tải)
+  assert(reg44.get('agent-coder-senior')?.activeTasksCount === 1, 'activeTasksCount của senior tăng lên 1');
+  const alloc44_2 = orch44.allocateTask('Viết hàm định dạng', ['vue-coding', 'synthesis']);
+  assert(alloc44_2.id === 'agent-coder-junior', 'Tự động phân bổ cho agent rảnh hơn khi agent kia bận');
+
+  // 3. Cost-Efficiency Routing
+  reg44.register('agent-heavy', 'Heavy Specialist', { score: '97.0%', model: 'deepseek-ai/DeepSeek-R1-Reasoning' });
+  reg44.advertiseCapabilities('agent-heavy', ['algorithm', 'custom-math']);
+
+  reg44.register('agent-fast', 'Fast Assistant', { score: '88.0%', model: 'gemini-flash-light' });
+  reg44.advertiseCapabilities('agent-fast', ['algorithm', 'custom-math']);
+
+  const allocCost = orch44.allocateTask('Tính toán ma trận', ['algorithm', 'custom-math'], { preferCostEfficient: true });
+  assert(allocCost.id === 'agent-fast', 'preferCostEfficient ưu tiên định tuyến đến model nhẹ/rẻ');
+
+  // 4. Result Memoization
+  const memo1 = orch44.allocateTask('Nhiệm vụ lặp lại', ['custom-math'], { memoize: true });
+  const memo2 = orch44.allocateTask('Nhiệm vụ lặp lại', ['custom-math'], { memoize: true });
+  assert(memo2.status === 'completed', 'Nhiệm vụ lặp lại trả về kết quả completed tức thì từ cache');
+  assert(orch44.getOrchestrationMetrics().memoizationHits === 1, 'Orchestration metrics ghi nhận memoization hit');
+
+  // 5. Performance Profiling & Bottlenecks
+  orch44.recordTaskCompletion('agent-coder-junior', 100, true, 200);
+  const profJunior = orch44.getPerformanceProfile('agent-coder-junior');
+  assert(profJunior !== undefined && profJunior.tasksCompleted === 1, 'Hồ sơ hiệu năng ghi nhận task completed');
+
+  reg44.register('agent-flaky', 'Flaky Agent');
+  orch44.recordTaskAssigned('agent-flaky');
+  orch44.recordTaskCompletion('agent-flaky', 300, false);
+  orch44.recordTaskCompletion('agent-flaky', 400, false);
+  orch44.recordTaskCompletion('agent-flaky', 500, false);
+  assert(orch44.getOrchestrationMetrics().bottlenecks.includes('agent-flaky'), 'Tự động phát hiện và gắn cờ bottleneck khi lỗi > 30%');
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

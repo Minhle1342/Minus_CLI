@@ -1,6 +1,7 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { SubagentManager } from '../agent/subagent-manager.js';
+import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { Workspace } from '../workspace/workspace.js';
 
 export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
@@ -142,6 +143,68 @@ export function createResumeAgentTool(manager: SubagentManager): ToolDefinition 
       return agent
         ? { success: true, agent }
         : { success: false, error: 'SUBAGENT_NOT_RESUMABLE', agentId };
+    },
+  };
+}
+
+export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): ToolDefinition {
+  return {
+    name: 'allocate_agent_task',
+    description: 'Phân bổ và điều phối một tác vụ cho một Agent phù hợp dựa trên danh sách năng lực (capabilities matching).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        objective: {
+          type: Type.STRING,
+          description: 'Mục tiêu độc lập cần thực hiện.',
+        },
+        requiredCapabilities: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Danh sách các năng lực bắt buộc cần có của agent (ví dụ: ["frontend", "react"], ["database", "sql"]).',
+        },
+        maxSteps: {
+          type: Type.INTEGER,
+          description: 'Giới hạn số bước thực thi cho agent.',
+        },
+        toolNames: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Danh sách các công cụ được phép sử dụng.',
+        },
+        priority: {
+          type: Type.STRING,
+          description: 'Mức độ ưu tiên tác vụ: "high" (tối đa chất lượng), "normal", "low" (tiết kiệm chi phí/tải).',
+        },
+        preferCostEfficient: {
+          type: Type.BOOLEAN,
+          description: 'Nếu true, ưu tiên các mô hình chi phí thấp và tốc độ cao.',
+        },
+        memoize: {
+          type: Type.BOOLEAN,
+          description: 'Nếu true, lưu và tái sử dụng kết quả trong bộ nhớ đệm khi lặp lại cùng mục tiêu.',
+        },
+      },
+      required: ['objective'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const objective = String(args.objective || '').trim();
+      if (!objective) return { error: 'Tham số "objective" là bắt buộc.' };
+      const requiredCapabilities = Array.isArray(args.requiredCapabilities)
+        ? args.requiredCapabilities.map(String)
+        : [];
+      try {
+        const handle = orchestrator.allocateTask(objective, requiredCapabilities, {
+          maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
+          toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
+          priority: args.priority === 'high' || args.priority === 'low' ? args.priority : undefined,
+          preferCostEfficient: args.preferCostEfficient === true,
+          memoize: args.memoize === true,
+        });
+        return { success: true, agent: handle };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
     },
   };
 }

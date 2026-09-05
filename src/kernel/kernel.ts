@@ -25,6 +25,7 @@ import { CriticGate } from '../agent/critic-gate.js';
 import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
+import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { DreamManager } from '../dream/dream-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
@@ -143,6 +144,7 @@ export interface KernelContext {
   schedules: ScheduleManager;
   sharedContext: SharedContextService;
   agentEvents: AgentEventBus;
+  orchestrator: AgentOrchestrator;
   llm: any;
   events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
@@ -182,6 +184,7 @@ export class AgentKernel {
       systemPrompt.register(section);
     }
     const agents = new AgentRegistry();
+    agents.registerBenchmarkSpecialists();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
     const repositoryMemory = new CitationValidatedRepositoryMemory(workspace);
@@ -197,6 +200,7 @@ export class AgentKernel {
     const schedules = new ScheduleManager();
     const sharedContext = new SharedContextService();
     const agentEvents = new AgentEventBus();
+    const orchestrator = new AgentOrchestrator(agents);
     const tools = new ToolRegistry(plan, memory);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
@@ -204,6 +208,7 @@ export class AgentKernel {
     tools.attachScheduleManager(schedules);
     tools.attachSharedContextService(sharedContext);
     tools.attachAgentEventBus(agentEvents);
+    tools.attachAgentOrchestrator(orchestrator);
     const permissions = new PermissionManager();
     tools.attachPermissionManager(permissions);
     const toolRunner = new ToolRunner(tools, workspace, permissions, compose);
@@ -234,6 +239,7 @@ export class AgentKernel {
       schedules,
       sharedContext,
       agentEvents,
+      orchestrator,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {
