@@ -1,3 +1,5 @@
+import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
+
 export interface ToolSynergyContext {
   lastToolName?: string;
   lastToolResult?: any;
@@ -6,6 +8,7 @@ export interface ToolSynergyContext {
   activeTaskAcceptance?: string;
   hasRunningBackgroundTasks?: boolean;
   hasSharedContextConflicts?: boolean;
+  guardianDiagnosis?: ToolFailureDiagnosis;
 }
 
 export interface ToolAdvice {
@@ -92,6 +95,21 @@ export class ToolSynergyAdvisor {
           suggestedTools: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
         };
       }
+    }
+
+    // 3.5. Cảnh báo lỗi và gợi ý công cụ thay thế từ Tool Use Guardian (Playbook B: Root Cause Debugging)
+    const guardianDiag = context.guardianDiagnosis || lastToolResult?.guardianDiagnosis;
+    if (guardianDiag) {
+      const alternatives = guardianDiag.suggestedAlternative
+        ? [guardianDiag.suggestedAlternative]
+        : [];
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: `[TOOL GUARDIAN ADVISORY]: Tool "${lastToolName || 'unknown'}" failed with ${guardianDiag.category}. ${guardianDiag.recoveryAction}`,
+        suggestedTools: alternatives.length > 0
+          ? alternatives
+          : ['get_diagnostics', 'inspect_symbol', 'query_call_graph'],
+      };
     }
 
     // 4. Phát hiện lỗi Compiler / Test Failure / Lỗi Thực thi (Playbook B: Root Cause Debugging)

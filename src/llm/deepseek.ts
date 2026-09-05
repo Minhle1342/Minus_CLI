@@ -467,6 +467,10 @@ export class DeepseekLLM {
     }
 
     // Chỉ đặt temperature cho model thông thường (reasoning models dùng mặc định)
+    if (!isReasoningModel) {
+      requestBody.temperature = 0.2;
+    }
+
     if (request?.signal?.aborted) {
       return {
         text: '',

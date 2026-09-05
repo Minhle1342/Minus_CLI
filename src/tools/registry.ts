@@ -89,7 +89,6 @@ export class ToolRegistry implements ToolProvider {
     // Đăng ký mặc định các tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
-    this.register(searchTextTool);
     this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
@@ -103,8 +102,6 @@ export class ToolRegistry implements ToolProvider {
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
     this.register(runCommandTool);
-    this.register(createWebSearchTool());
-    this.register(createWebFetchTool());
     this.register(searchWebTool);
     this.register(readUrlContentTool);
     this.register(queryCallGraphTool);
@@ -217,24 +214,27 @@ export class ToolRegistry implements ToolProvider {
    * Lấy tool theo tên
    */
   /**
-   * Lấy tool theo tên (hỗ trợ alias tương thích: search_web -> web_search, read_url_content -> web_fetch)
+   * Lấy tool theo tên (ưu tiên exact match, sau đó hỗ trợ alias tương thích 2 chiều: search_web <-> web_search, read_url_content <-> web_fetch)
    */
   has(name: string): boolean {
-    if (name === 'search_web') return this.tools.has('web_search') || this.tools.has('search_web');
-    if (name === 'read_url_content') return this.tools.has('web_fetch') || this.tools.has('read_url_content');
-    return this.tools.has(name);
+    if (this.tools.has(name)) return true;
+    if (name === 'search_web') return this.tools.has('web_search');
+    if (name === 'web_search') return this.tools.has('search_web');
+    if (name === 'read_url_content') return this.tools.has('web_fetch');
+    if (name === 'web_fetch') return this.tools.has('read_url_content');
+    if (name === 'search_text') return this.tools.has('search_codebase_fast') || this.tools.has('search_text');
+    return false;
   }
 
   get(name: string): ToolDefinition | undefined {
-    if (name === 'search_web') {
-      const found = this.tools.get('web_search') || this.tools.get('search_web');
-      if (found) return found;
-    }
-    if (name === 'read_url_content') {
-      const found = this.tools.get('web_fetch') || this.tools.get('read_url_content');
-      if (found) return found;
-    }
-    return this.tools.get(name);
+    const exact = this.tools.get(name);
+    if (exact) return exact;
+    if (name === 'search_web') return this.tools.get('web_search');
+    if (name === 'web_search') return this.tools.get('search_web');
+    if (name === 'read_url_content') return this.tools.get('web_fetch');
+    if (name === 'web_fetch') return this.tools.get('read_url_content');
+    if (name === 'search_text') return this.tools.get('search_codebase_fast') || searchTextTool;
+    return undefined;
   }
 
   /**
@@ -280,12 +280,23 @@ export class ToolRegistry implements ToolProvider {
     let resolvedName = name;
     let resolvedArgs = args;
 
-    if (name === 'search_web' && !this.tools.has('search_web') && this.tools.has('web_search')) {
-      resolvedName = 'web_search';
-    } else if (name === 'read_url_content' && !this.tools.has('read_url_content') && this.tools.has('web_fetch')) {
-      resolvedName = 'web_fetch';
-      if (!resolvedArgs.url && resolvedArgs.Url) {
-        resolvedArgs = { ...resolvedArgs, url: resolvedArgs.Url };
+    if (!this.tools.has(name)) {
+      if (name === 'search_web' && this.tools.has('web_search')) {
+        resolvedName = 'web_search';
+      } else if (name === 'web_search' && this.tools.has('search_web')) {
+        resolvedName = 'search_web';
+      } else if (name === 'read_url_content' && this.tools.has('web_fetch')) {
+        resolvedName = 'web_fetch';
+        if (!resolvedArgs.url && resolvedArgs.Url) {
+          resolvedArgs = { ...resolvedArgs, url: resolvedArgs.Url };
+        }
+      } else if (name === 'web_fetch' && this.tools.has('read_url_content')) {
+        resolvedName = 'read_url_content';
+        if (!resolvedArgs.Url && resolvedArgs.url) {
+          resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
+        }
+      } else if (name === 'search_text') {
+        resolvedName = 'search_text';
       }
     }
 
@@ -335,13 +346,16 @@ export class ToolScope implements ToolProvider {
   get(name: string): ToolDefinition | undefined {
     const local = this.localTools.get(name);
     if (local) return local;
-    if (name === 'search_web' && (!this.allowed || this.allowed.has('search_web') || this.allowed.has('web_search'))) {
-      return this.base.get('web_search') || this.base.get('search_web');
+    if (this.allowed && !this.allowed.has(name)) {
+      // Check alias permission
+      const alias = name === 'search_web' ? 'web_search'
+        : name === 'web_search' ? 'search_web'
+        : name === 'read_url_content' ? 'web_fetch'
+        : name === 'web_fetch' ? 'read_url_content'
+        : name === 'search_text' ? 'search_codebase_fast'
+        : undefined;
+      if (!alias || !this.allowed.has(alias)) return undefined;
     }
-    if (name === 'read_url_content' && (!this.allowed || this.allowed.has('read_url_content') || this.allowed.has('web_fetch'))) {
-      return this.base.get('web_fetch') || this.base.get('read_url_content');
-    }
-    if (this.allowed && !this.allowed.has(name)) return undefined;
     return this.base.get(name);
   }
 

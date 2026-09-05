@@ -87,7 +87,7 @@ export class AnthropicLLM {
       messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext),
       max_tokens: effectiveTokenConfig.maxOutputTokens || 8192,
       stream: true,
-      tools: tools.length > 0 ? this.convertTools(tools) : undefined,
+      tools: tools.length > 0 ? this.convertTools(tools, request?.enablePromptCaching !== false) : undefined,
       temperature: 0.2,
     };
     if (request?.enablePromptCaching !== false) {
@@ -279,14 +279,20 @@ export class AnthropicLLM {
     return this.generateStream(session, tools, undefined, request);
   }
 
-  private convertTools(tools: FunctionDeclaration[]): any[] {
+  private convertTools(tools: FunctionDeclaration[], enablePromptCaching: boolean = false): any[] {
     return [...tools]
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-      .map((tool) => ({
-        name: tool.name,
-        description: tool.description || '',
-        input_schema: normalizeSchema(tool.parameters || { type: 'object', properties: {} }),
-      }));
+      .map((tool, idx, arr) => {
+        const item: any = {
+          name: tool.name,
+          description: tool.description || '',
+          input_schema: normalizeSchema(tool.parameters || { type: 'object', properties: {} }),
+        };
+        if (enablePromptCaching && idx === arr.length - 1) {
+          item.cache_control = { type: 'ephemeral' };
+        }
+        return item;
+      });
   }
 
   private convertHistoryToAnthropicMessages(session: Session, dynamicContext?: string): any[] {

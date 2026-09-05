@@ -6,6 +6,7 @@ import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
 
 export interface ToolExecutionResult {
   toolName: string;
@@ -16,6 +17,7 @@ export interface ToolExecutionResult {
     status: 'granted' | 'required' | 'denied' | 'error';
     requestId?: string;
   };
+  guardianDiagnosis?: ToolFailureDiagnosis;
 }
 
 export interface ToolExecutionGuard {
@@ -42,13 +44,21 @@ export class ToolRunner {
   private workspace: Workspace;
   private permissionManager?: PermissionManager;
   private executionGuard?: ToolExecutionGuard;
-  private scopedCallCount = 0;
+  readonly guardian: ToolUseGuardian;
+  private scopedCallCount: number = 0;
 
-  constructor(registry: ToolProvider, workspace: Workspace, permissionManager?: PermissionManager, executionGuard?: ToolExecutionGuard) {
+  constructor(
+    registry: ToolProvider,
+    workspace: Workspace,
+    permissionManager?: PermissionManager,
+    executionGuard?: ToolExecutionGuard,
+    guardian?: ToolUseGuardian,
+  ) {
     this.registry = registry;
     this.workspace = workspace;
     this.permissionManager = permissionManager;
     this.executionGuard = executionGuard;
+    this.guardian = guardian || new ToolUseGuardian();
   }
 
   setExecutionGuard(executionGuard?: ToolExecutionGuard): void {
@@ -64,7 +74,7 @@ export class ToolRunner {
   }
 
   createScoped(provider: ToolProvider): ToolRunner {
-    return new ToolRunner(provider, this.workspace, this.permissionManager, this.executionGuard);
+    return new ToolRunner(provider, this.workspace, this.permissionManager, this.executionGuard, this.guardian);
   }
 
   async run(
@@ -122,42 +132,66 @@ export class ToolRunner {
     // Stage 1: Tool Lookup
     const tool = this.registry.get(toolName);
     if (!tool) {
+      const errRes = {
+        error: `Tool "${toolName}" không tồn tại. Các tool có sẵn: ${this.registry.getAll().map(t => t.name).join(', ')}`,
+        errorCode: 'UNKNOWN_TOOL',
+      };
+      const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
       return {
         toolName,
         args,
-        result: {
-          error: `Tool "${toolName}" không tồn tại. Các tool có sẵn: ${this.registry.getAll().map(t => t.name).join(', ')}`,
-          errorCode: 'UNKNOWN_TOOL',
-        },
+        result: errRes,
         durationMs: Date.now() - startTime,
+        guardianDiagnosis: diagnosis,
       };
     }
+
+    // Stage 1.5: Guardian Pre-Call Validation (Payload Size, Auto-Coercion, Reliability Check)
+    const guardianPreCheck = this.guardian.preCallValidate(toolName, args, tool.parameters);
+    if (!guardianPreCheck.valid) {
+      const errRes = { error: guardianPreCheck.error, errorCode: guardianPreCheck.errorCode || 'INVALID_ARGS' };
+      const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+      return {
+        toolName,
+        args,
+        result: errRes,
+        durationMs: Date.now() - startTime,
+        guardianDiagnosis: diagnosis,
+      };
+    }
+    const candidateArgs = guardianPreCheck.coercedArgs;
 
     // Stage 2: lossless JSON snapshot + recursive schema validation.
     let executionArgs: Record<string, any>;
     try {
-      executionArgs = deepFreeze(cloneJsonStrict(args || {}, `Arguments for ${toolName}`));
+      executionArgs = deepFreeze(cloneJsonStrict(candidateArgs || {}, `Arguments for ${toolName}`));
     } catch (error: any) {
+      const errRes = { error: error.message, errorCode: 'INVALID_ARGS' };
+      const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
       return {
         toolName,
         args,
-        result: { error: error.message, errorCode: 'INVALID_ARGS' },
+        result: errRes,
         durationMs: Date.now() - startTime,
+        guardianDiagnosis: diagnosis,
       };
     }
     const validation = validateSchemaValue(executionArgs, tool.parameters as any, '$', {
       rejectUnknownProperties: true,
     });
     if (!validation.valid) {
+      const errRes = {
+        error: `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`,
+        errorCode: 'INVALID_ARGS',
+        validationErrors: validation.errors,
+      };
+      const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
       return {
         toolName,
         args: executionArgs,
-        result: {
-          error: `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`,
-          errorCode: 'INVALID_ARGS',
-          validationErrors: validation.errors,
-        },
+        result: errRes,
         durationMs: Date.now() - startTime,
+        guardianDiagnosis: diagnosis,
       };
     }
 
@@ -254,65 +288,90 @@ export class ToolRunner {
       }
     }
 
-    // Stage 4: Safe Execution
-    try {
-      const rawResult = await tool.execute(executionArgs, this.workspace, executionContext);
-      
-      // Stage 5: Output Normalization
-      let normalizedResult = typeof rawResult === 'object' && rawResult !== null
-        ? rawResult
-        : { output: String(rawResult) };
-      normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
-      if (!normalizedResult.blastRadius) {
-        normalizedResult = await enrichMutationResultWithBlastRadius(toolName, executionArgs, normalizedResult, this.workspace);
-      }
-
-      let resultSnapshot: Record<string, any>;
+    // Stage 4: Safe Execution with Guardian Auto-Retry for transient failures
+    let rawResult: any;
+    let attempt = 0;
+    while (true) {
+      attempt++;
       try {
-        resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`, {
-          omitUndefinedObjectProperties: true,
-        });
-      } catch (error: any) {
+        rawResult = await tool.execute(executionArgs, this.workspace, executionContext);
+        break;
+      } catch (err: any) {
+        const failureDiagnosis = classifyToolFailure(toolName, err);
+        if (failureDiagnosis.isRetryable && attempt <= failureDiagnosis.maxRetries && !context?.signal?.aborted) {
+          const delay = failureDiagnosis.backoffMs * Math.pow(2, attempt - 1) + Math.random() * 200;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        const errRes = {
+          error: `Lỗi khi thực thi tool "${toolName}": ${err.message}`,
+          errorCode: 'EXECUTION_ERROR',
+        };
+        const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
         return {
           toolName,
-          args: executionArgs,
-          result: { error: error.message, errorCode: 'INVALID_TOOL_RESULT' },
+          args,
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
-      const outputValidation = validateSchemaValue(resultSnapshot, tool.outputSchema as any, '$', {
-        rejectUnknownProperties: true,
-      });
-      if (!outputValidation.valid) {
-        return {
-          toolName,
-          args: executionArgs,
-          result: {
-            error: `Tool "${toolName}" returned an invalid result: ${outputValidation.errors.join('; ')}`,
-            errorCode: 'INVALID_TOOL_RESULT',
-            validationErrors: outputValidation.errors,
-          },
-          durationMs: Date.now() - startTime,
-        };
-      }
+    }
+      
+    // Stage 5: Output Normalization & Guardian Reliability Recording
+    let normalizedResult = typeof rawResult === 'object' && rawResult !== null
+      ? rawResult
+      : { output: String(rawResult) };
+    normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
+    if (!normalizedResult.blastRadius) {
+      normalizedResult = await enrichMutationResultWithBlastRadius(toolName, executionArgs, normalizedResult, this.workspace);
+    }
 
+    let resultSnapshot: Record<string, any>;
+    try {
+      resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`, {
+        omitUndefinedObjectProperties: true,
+      });
+    } catch (error: any) {
+      const errRes = { error: error.message, errorCode: 'INVALID_TOOL_RESULT' };
+      const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
       return {
         toolName,
         args: executionArgs,
-        result: deepFreeze(resultSnapshot),
+        result: errRes,
         durationMs: Date.now() - startTime,
-        ...(permissionMetadata ? { permission: permissionMetadata } : {}),
-      };
-    } catch (err: any) {
-      return {
-        toolName,
-        args,
-        result: {
-          error: `Lỗi khi thực thi tool "${toolName}": ${err.message}`,
-          errorCode: 'EXECUTION_ERROR',
-        },
-        durationMs: Date.now() - startTime,
+        guardianDiagnosis: diag,
       };
     }
+    const outputValidation = validateSchemaValue(resultSnapshot, tool.outputSchema as any, '$', {
+      rejectUnknownProperties: true,
+    });
+    if (!outputValidation.valid) {
+      const errRes = {
+        error: `Tool "${toolName}" returned an invalid result: ${outputValidation.errors.join('; ')}`,
+        errorCode: 'INVALID_TOOL_RESULT',
+        validationErrors: outputValidation.errors,
+      };
+      const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+      return {
+        toolName,
+        args: executionArgs,
+        result: errRes,
+        durationMs: Date.now() - startTime,
+        guardianDiagnosis: diag,
+      };
+    }
+
+    // Record execution in Guardian (unmasks Error-as-200 and updates tool reliability stats)
+    const diagnosis = this.guardian.recordExecution(toolName, resultSnapshot, Date.now() - startTime);
+
+    return {
+      toolName,
+      args: executionArgs,
+      result: deepFreeze(resultSnapshot),
+      durationMs: Date.now() - startTime,
+      ...(permissionMetadata ? { permission: permissionMetadata } : {}),
+      ...(diagnosis ? { guardianDiagnosis: diagnosis } : {}),
+    };
   }
 }

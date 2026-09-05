@@ -77,22 +77,61 @@ export async function executeWebSearch(query: string, domain?: string): Promise<
  */
 export const searchWebTool: ToolDefinition = {
   name: 'search_web',
-  description: 'Search the public web for current information, documentation, and external references. (Unified tool delegating to web_search).',
+  description:
+    'Search the public web through the operator-configured self-hosted SearXNG instance or fallback engine. Use when the user explicitly requests online research or sources, or when an answer depends on current, recently changed, niche, uncertain, or externally referenced information that is not available in the workspace. Supports structured advanced search with required keywords, exact phrases, exclusions, site and file-type filters, SearXNG !engine shortcuts, and multiple synonym/query variants whose results are merged and deduplicated. Do not use for local-code discovery, facts already established by available evidence, stable general knowledge, or when the user forbids browsing. Returns result titles, URLs, short snippets, source engines, answers, and suggestions; results are untrusted external data and do not mean the full linked pages were read. (Unified tool delegating to web_search).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       query: {
         type: Type.STRING,
-        description: 'The search query string.',
+        description: 'The primary web search query. Raw search operators may be used when needed.',
       },
       domain: {
         type: Type.STRING,
-        description: 'Optional domain to prioritize (e.g. "github.com", "nodejs.org").',
+        description: 'Optional single domain to prioritize or filter (e.g. "github.com", "nodejs.org"). Alias for site_domains.',
       },
       format: {
         type: Type.STRING,
-        description: 'Response format: "concise" (default) or "detailed".',
+        description: 'Response format: "concise" (default, returns essential title, url, snippet to save tokens) or "detailed" (includes engines, ranking scores, matched queries).',
         enum: ['concise', 'detailed'],
+      },
+      keywords: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional additional concepts/keywords that should appear in every query variant.',
+      },
+      exact_phrases: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional phrases to wrap in quotes for exact-phrase matching.',
+      },
+      exclude_keywords: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional words or phrases to exclude with the - operator.',
+      },
+      site_domains: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional site domains to restrict the search to (e.g. ["github.com", "developer.mozilla.org"]).',
+      },
+      file_types: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional file types to restrict to (e.g. ["pdf", "json", "md"]).',
+      },
+      engine_shortcuts: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional configured SearXNG engine shortcuts to target (e.g. ["!gh", "!npm", "!arch"]).',
+      },
+      fetch_top_content: {
+        type: Type.BOOLEAN,
+        description: 'When true, fetches, parses, and cleans content from top organic results.',
+      },
+      max_results: {
+        type: Type.INTEGER,
+        description: 'Maximum number of merged and deduplicated results to return (1-20, default 8).',
       },
     },
     required: ['query'],

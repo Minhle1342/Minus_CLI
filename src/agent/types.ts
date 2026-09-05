@@ -1,6 +1,8 @@
 import type { Workspace } from '../workspace/workspace.js';
 import type { CheckpointManager } from '../workspace/checkpoint.js';
 import type { ContextCompactor } from './context-compactor.js';
+import type { ContextGuardian } from '../context/context-guardian.js';
+import type { ContextAgent } from '../context/context-agent.js';
 import type { SessionPersistence } from '../session/session-persistence.js';
 import type { ToolScope } from '../tools/registry.js';
 import type { AgentRegistry } from './agent-registry.js';
@@ -11,6 +13,8 @@ export interface AgentLoopOptions {
   workspace?: Workspace;
   checkpointManager?: CheckpointManager;
   contextCompactor?: ContextCompactor;
+  contextGuardian?: ContextGuardian;
+  contextAgent?: ContextAgent;
   sessionPersistence?: SessionPersistence;
   toolScope?: ToolScope;
   agentId?: string;

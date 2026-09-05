@@ -8,6 +8,7 @@ import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
+import { ContextGuardian, ContextAgent } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -18,7 +19,7 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT, DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { EffectLedger } from './effect-ledger.js';
@@ -92,6 +93,8 @@ export class AgentLoop {
   readonly maxSteps: number;
   readonly checkpointManager: CheckpointManager;
   readonly contextCompactor: ContextCompactor;
+  readonly contextGuardian: ContextGuardian;
+  readonly contextAgent: ContextAgent;
   readonly planManager: PlanManager;
   readonly goalManager: GoalManager;
   readonly agentHooks: AgentHookRegistry;
@@ -128,7 +131,7 @@ export class AgentLoop {
   readonly toolAdvisor = new ToolSynergyAdvisor();
   readonly repositoryMap: GraphRankedRepositoryMap;
   readonly repositoryMemory: CitationValidatedRepositoryMemory;
-  private lastToolExecution?: { toolName: string; result: any };
+  private lastToolExecution?: { toolName: string; result: any; guardianDiagnosis?: any };
   readonly classificationEngine = new ClassificationEngine();
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
@@ -191,11 +194,13 @@ export class AgentLoop {
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
       this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
-      this.contextSnapshotManager.init().catch(() => {});
+      this.contextSnapshotManager.init().catch(() => { });
+      this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
+      this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
-      this.kernel.init().catch(() => {});
+      this.kernel.init().catch(() => { });
     } else {
       this.llm = kernelOrLLM;
       this._workspace = options?.workspace ?? new Workspace();
@@ -205,6 +210,8 @@ export class AgentLoop {
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.checkpointManager = options?.checkpointManager ?? new CheckpointManager(this._workspace.rootDir);
       this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
+      this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
+      this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
       this.planManager = new PlanManager();
       this.goalManager = new GoalManager();
       this.agentHooks = new AgentHookRegistry();
@@ -225,7 +232,7 @@ export class AgentLoop {
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
       this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
-      this.contextSnapshotManager.init().catch(() => {});
+      this.contextSnapshotManager.init().catch(() => { });
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
@@ -234,9 +241,9 @@ export class AgentLoop {
       this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
 
-      this.checkpointManager.init().catch(() => {});
-      this.memoryManager.init(this._workspace).catch(() => {});
-      this.repositoryMemory.init().catch(() => {});
+      this.checkpointManager.init().catch(() => { });
+      this.memoryManager.init(this._workspace).catch(() => { });
+      this.repositoryMemory.init().catch(() => { });
     }
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
@@ -271,7 +278,7 @@ export class AgentLoop {
         if (ctx.isUnity) {
           (this.toolRegistry as any).registerGameTools();
         }
-      } catch {}
+      } catch { }
     }
   }
 
@@ -298,7 +305,7 @@ export class AgentLoop {
         if (ctx.isUnity) {
           (this.toolRegistry as any).registerGameTools();
         }
-      } catch {}
+      } catch { }
     }
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
@@ -312,9 +319,9 @@ export class AgentLoop {
       (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
       (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
-      this.checkpointManager.init().catch(() => {});
-      this.memoryManager.init(workspace).catch(() => {});
-      this.repositoryMemory.init().catch(() => {});
+      this.checkpointManager.init().catch(() => { });
+      this.memoryManager.init(workspace).catch(() => { });
+      this.repositoryMemory.init().catch(() => { });
     }
   }
 
@@ -384,7 +391,7 @@ export class AgentLoop {
           if (session.recoverInterrupted()) {
             await this.persistSession(session);
           }
-        } catch {}
+        } catch { }
         this.setAgentStatus('idle', session);
         await CLI.renderExecutionStopped(
           'Agent stopped: cancellation requested.',
@@ -404,7 +411,7 @@ export class AgentLoop {
             isTaskCheckpoint: true,
             taskId: this.planManager.getActiveTask()?.id ? `task-${this.planManager.getActiveTask()?.id}` : undefined,
           });
-        } catch {}
+        } catch { }
 
         this.goalManager.pause(`LLM ${errClassification.kind}: ${errClassification.message}`);
         session.append('goal/change', {
@@ -519,7 +526,7 @@ export class AgentLoop {
         const item = claimedSteerItems.shift();
         try {
           item?.resolve(answer);
-        } catch {}
+        } catch { }
       }
     };
     const rejectSteerItems = (err: unknown) => {
@@ -527,7 +534,7 @@ export class AgentLoop {
         const item = claimedSteerItems.shift();
         try {
           item?.reject(err);
-        } catch {}
+        } catch { }
       }
     };
 
@@ -581,8 +588,8 @@ export class AgentLoop {
           .filter((item) => item.scope !== 'project');
         const scopedMemory = relevantMemory.length > 0
           ? `\n[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]\n${relevantMemory
-              .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
-              .join('\n')}\n`
+            .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
+            .join('\n')}\n`
           : '';
         let prefix = `${digest}\n\n`;
         prefix += scopedMemory;
@@ -688,6 +695,18 @@ export class AgentLoop {
       const compactionThreshold = maxBudget * 0.70;
 
       if (estimatedHistoryTokens > compactionThreshold && currentHistory.length > 4) {
+        // Context Guardian: Bảo vệ toàn vẹn ngữ cảnh trước khi nén (Pre-Compaction Zero Loss)
+        try {
+          const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
+            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+            projectPhase: `Turn ${turn} Execution`,
+          });
+          session.append('context/snapshot', {
+            reason: 'Context Guardian captured pre-compaction snapshot and generated transition briefing.',
+            snapshotId: guardianResult.snapshotId,
+          });
+        } catch {}
+
         const compactRes = this.contextCompactor.compact(currentHistory, {
           triggerRatio: 0.70,
         });
@@ -848,6 +867,7 @@ export class AgentLoop {
         hasErrors: this.lastToolExecution?.result?.error !== undefined,
         activeTaskTitle: activeTask?.title,
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
+        guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
       });
       // Intent-Gated Memory Retrieval:
       // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
@@ -888,9 +908,9 @@ export class AgentLoop {
       const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
       const memoryPrompt = relevantMemory.length > 0
         ? [
-            '[VERIFIED RELEVANT PROJECT MEMORY]',
-            ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
-          ].join('\n')
+          '[VERIFIED RELEVANT PROJECT MEMORY]',
+          ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
+        ].join('\n')
         : '';
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
       const composeState = this.kernel?.ctx.compose.getState();
@@ -1116,6 +1136,11 @@ export class AgentLoop {
           taskPhase: classification.phase,
           dynamicContextCache: this.dynamicContextCache.getStats(),
           dynamicContextCacheHit: Boolean(cachedDynamicContext),
+          promptTokens: response.usage?.promptTokens,
+          cachedTokens: response.usage?.cachedTokens,
+          cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
+          cacheReadInputTokens: response.usage?.cacheReadInputTokens,
+          cacheHitRate: response.usage?.cacheHitRate,
           hardTimeoutApplied: false,
         },
       });
@@ -1129,6 +1154,9 @@ export class AgentLoop {
         latencyProfile,
         taskPhase: classification.phase,
         dynamicContextCacheHit: Boolean(cachedDynamicContext),
+        promptTokens: response.usage?.promptTokens,
+        cachedTokens: response.usage?.cachedTokens,
+        cacheHitRate: response.usage?.cacheHitRate,
       });
 
       // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
@@ -1357,15 +1385,15 @@ export class AgentLoop {
               preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
                 ? outcome.value
                 : {
-                    toolName: scheduled.name,
-                    args: scheduled.args,
-                    durationMs: 0,
-                    result: {
-                      error: outcome.reason?.message || String(outcome.reason),
-                      errorCode: 'TOOL_EXECUTION_REJECTED',
-                      retryable: true,
-                    },
-                  });
+                  toolName: scheduled.name,
+                  args: scheduled.args,
+                  durationMs: 0,
+                  result: {
+                    error: outcome.reason?.message || String(outcome.reason),
+                    errorCode: 'TOOL_EXECUTION_REJECTED',
+                    retryable: true,
+                  },
+                });
             });
           }
 
@@ -1500,10 +1528,10 @@ export class AgentLoop {
             // Chạy tool qua pipeline an toàn
             const completionEvidence = toolName === 'submit_solution'
               ? this.completionEvidenceGate.evaluate('', session, {
-                  turn,
-                  codeChangeRequired: this.verificationPolicy.hasPendingModifications()
-                    || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
-                })
+                turn,
+                codeChangeRequired: this.verificationPolicy.hasPendingModifications()
+                  || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
+              })
               : undefined;
             const policyCompletion = toolName === 'submit_solution'
               ? this.verificationPolicy.canComplete()
@@ -1658,6 +1686,12 @@ export class AgentLoop {
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
           const payloadToRecord = {
             ...executionResult.result,
+            ...(executionResult.guardianDiagnosis?.errorAs200Unmasked
+              ? { _system_guardian_unmasked_error: `[GUARDIAN UNMASKED ERROR]: Tool returned HTTP 200 / success but contained embedded error: "${executionResult.guardianDiagnosis.message}".` }
+              : {}),
+            ...(executionResult.guardianDiagnosis && isToolResultFailure(executionResult.result)
+              ? { _system_guardian_recovery: `[GUARDIAN RECOVERY GUIDANCE]: Category: ${executionResult.guardianDiagnosis.category}. Action: ${executionResult.guardianDiagnosis.recoveryAction}${executionResult.guardianDiagnosis.suggestedAlternative ? ` Recommended alternative: ${executionResult.guardianDiagnosis.suggestedAlternative}` : ''}` }
+              : {}),
             ...(reflectionAnalysis.reflectionPrompt
               ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
               : {}),
@@ -1674,9 +1708,13 @@ export class AgentLoop {
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
           if (this.loopOptions?.enableRepositoryMemory !== false) {
-            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => {});
+            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
           }
-          this.lastToolExecution = { toolName, result: executionResult.result };
+          this.lastToolExecution = {
+            toolName,
+            result: executionResult.result,
+            guardianDiagnosis: executionResult.guardianDiagnosis,
+          };
           if (readPartition && partitionStartIndex !== undefined) {
             readBatchToolDurationMs.set(
               partitionStartIndex,
@@ -1994,19 +2032,19 @@ export class AgentLoop {
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
-            userRequest: turnUserRequest,
-            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-            hasSubmittedSolution,
-            workspace: this._workspace,
-          });
+          userRequest: turnUserRequest,
+          availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
+          hasSubmittedSolution,
+          workspace: this._workspace,
+        });
       const evidenceDecision = (isSubagent || isMockLLM)
         ? { allow: true, reasons: [] }
         : this.completionEvidenceGate.evaluate(finalAnswer, session, {
-            turn,
-            codeChangeRequired: this.planManager.getRequirements().required,
-            userRequest: turnUserRequest,
-            hasSubmittedSolution,
-          });
+          turn,
+          codeChangeRequired: this.planManager.getRequirements().required,
+          userRequest: turnUserRequest,
+          hasSubmittedSolution,
+        });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
       if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
         activeSkills.push('verification-before-completion');
@@ -2017,37 +2055,37 @@ export class AgentLoop {
       const criticDecision = (isSubagent || isMockLLM)
         ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
         : this.criticGate.evaluate({
-            finalAnswer,
-            session,
-            workspace: this._workspace,
-            hypothesisTracker: this.hypothesisTracker,
-            userRequest: turnUserRequest,
-            turn,
-            hasSubmittedSolution,
-          });
+          finalAnswer,
+          session,
+          workspace: this._workspace,
+          hypothesisTracker: this.hypothesisTracker,
+          userRequest: turnUserRequest,
+          turn,
+          hasSubmittedSolution,
+        });
       const finalAnswerDecision = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
-        ? policyDecision
-        : !criticDecision.approved
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: criticDecision.critiquePrompt,
-          }
-        : (!hasSubmittedSolution && !evidenceDecision.allow)
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: evidenceDecision.continuationPrompt,
-          }
-        : (!hasSubmittedSolution && !verificationDecision.allowed)
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
-          }
-        : { allow: true });
+          ? policyDecision
+          : !criticDecision.approved
+            ? {
+              allow: false,
+              reason: 'unverified-evidence' as const,
+              continuationPrompt: criticDecision.critiquePrompt,
+            }
+            : (!hasSubmittedSolution && !evidenceDecision.allow)
+              ? {
+                allow: false,
+                reason: 'unverified-evidence' as const,
+                continuationPrompt: evidenceDecision.continuationPrompt,
+              }
+              : (!hasSubmittedSolution && !verificationDecision.allowed)
+                ? {
+                  allow: false,
+                  reason: 'unverified-evidence' as const,
+                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
+                }
+                : { allow: true });
 
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;
@@ -2100,7 +2138,7 @@ export class AgentLoop {
       }
       consecutiveIncompleteFinals = 0;
       this.adaptiveReasoning.reset();
-      
+
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
       await CLI.renderFinalAnswer(finalAnswer);
@@ -2146,7 +2184,7 @@ export class AgentLoop {
     await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
     await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
-    
+
     resolveSteerItems(timeoutMessage);
     if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
       this.drainScheduled = true;
@@ -2428,7 +2466,7 @@ export class AgentLoop {
     session.assertRuntimeInvariants();
     await this.persistSession(session);
     if (reason === 'goal-completed' || reason === 'task-completed' || reason === 'completed' || (isGoalMode && reason === 'goal-stopped')) {
-      void this.summarizeSessionEpisodic(session).catch(() => {});
+      void this.summarizeSessionEpisodic(session).catch(() => { });
 
       // Auto Context Save (Task Boundary Snapshot - context-management-context-save)
       if (turnUserRequest || finalAnswer) {

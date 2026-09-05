@@ -2322,15 +2322,67 @@ ${planPrompt}`;
         continue;
       }
 
-      // Lệnh kiểm soát và phân tích ngữ cảnh (/context hoặc /ctx)
+      // Lệnh kiểm soát và phân tích ngữ cảnh (/context, /snapshot, /briefing)
       if (
         trimmed === '/context' ||
         trimmed.startsWith('/context ') ||
         trimmed === '/ctx' ||
-        trimmed.startsWith('/ctx ')
+        trimmed.startsWith('/ctx ') ||
+        trimmed === '/snapshot' ||
+        trimmed.startsWith('/snapshot ') ||
+        trimmed === '/briefing' ||
+        trimmed.startsWith('/briefing ')
       ) {
         const parts = trimmed.split(/\s+/).slice(1);
-        const sub = parts[0]?.toLowerCase();
+        const isSnapshotCmd = trimmed.startsWith('/snapshot');
+        const isBriefingCmd = trimmed.startsWith('/briefing');
+        const sub = isSnapshotCmd ? 'snapshot' : (isBriefingCmd ? 'briefing' : parts[0]?.toLowerCase());
+
+        if (sub === 'snapshot' || sub === 'guardian') {
+          try {
+            console.log(`\n${c.cyan}🛡️ Đang kích hoạt Context Guardian để chụp Snapshot & lập Thẻ Chuyển Giao...${c.reset}`);
+            const guardianRes = await agentLoop.contextGuardian.protectPreCompaction(activeSession);
+            console.log(`\n${c.green}✔ Đã chụp thành công Context Guardian Snapshot:${c.reset} ${c.bold}${guardianRes.snapshotId}${c.reset}`);
+            console.log(`  ${c.gray}↳ File: ${guardianRes.snapshotPath}${c.reset}`);
+            console.log(`  ${c.gray}↳ Toàn vẹn (Integrity Score): ${guardianRes.integrity.score}% (${guardianRes.integrity.checks.length} checks passing)${c.reset}\n`);
+            console.log(guardianRes.briefing);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi kích hoạt Context Guardian:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'briefing' || sub === 'load') {
+          try {
+            const briefing = await agentLoop.contextAgent.loadBriefing();
+            console.log(`\n${briefing}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi tải Briefing:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'save') {
+          try {
+            console.log(`\n${c.cyan}💾 Đang kích hoạt Context Agent để lưu tóm tắt phiên làm việc...${c.reset}`);
+            const saveRes = await agentLoop.contextAgent.saveSessionSummary(activeSession);
+            console.log(`${c.green}✔ Đã lưu tóm tắt phiên: ${saveRes.sessionFile}${c.reset}`);
+            console.log(`${c.green}✔ Đã đồng bộ ACTIVE_CONTEXT.md: ${saveRes.activeContextFile}${c.reset}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi lưu phiên làm việc:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'status') {
+          try {
+            const statusStr = await agentLoop.contextAgent.getStatus();
+            console.log(`\n${c.cyan}${statusStr}${c.reset}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi đọc trạng thái:${c.reset}`, err.message);
+          }
+          continue;
+        }
 
         if (sub === 'compact' || sub === 'prune' || sub === 'compress') {
           try {

@@ -61,6 +61,19 @@ export class PromptAssembler {
     return this.assembleForContext({});
   }
 
+  /**
+   * Generates a deterministic signature (hash + length) of the assembled prompt for prompt-caching validation.
+   */
+  getCacheSignature(ctx: PromptAssemblyContext = {}): string {
+    const text = this.assembleForContext(ctx);
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+      hash = ((hash << 5) - hash) + text.charCodeAt(i);
+      hash |= 0;
+    }
+    return `h_${(hash >>> 0).toString(16)}_${text.length}`;
+  }
+
   private sortedSections(): RegisteredPromptSection[] {
     return Array.from(this.sections.values()).sort(
       (a, b) => (a.priority || 0) - (b.priority || 0) || a.order - b.order,

@@ -15,7 +15,7 @@ import { GoalManager } from '../agent/goal-manager.js';
 import { AgentHookRegistry } from '../agent/agent-hooks.js';
 import { AgentInbox } from '../agent/agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT, DEFAULT_PROMPT_SECTIONS } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
@@ -57,6 +57,9 @@ export interface KernelEvents {
     latencyProfile: import('../agent/latency-orchestrator.js').ModelLatencyProfile;
     taskPhase: import('../control/classification-types.js').TaskPhase;
     dynamicContextCacheHit: boolean;
+    promptTokens?: number;
+    cachedTokens?: number;
+    cacheHitRate?: number;
   }) => void;
   'tools:batch': (telemetry: {
     mode: string;
@@ -248,10 +251,10 @@ export class AgentKernel {
         this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory, this.ctx.repositoryMemory);
         this.ctx.sessions.setWorkspace(newWs.rootDir);
         (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
-        this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
-        this.ctx.checkpoints.init().catch(() => {});
-        this.ctx.memory.init(newWs).catch(() => {});
-        this.ctx.repositoryMemory.init().catch(() => {});
+        this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => { });
+        this.ctx.checkpoints.init().catch(() => { });
+        this.ctx.memory.init(newWs).catch(() => { });
+        this.ctx.repositoryMemory.init().catch(() => { });
         this.ctx.events.emit('workspace:changed', oldPath, newWs.rootDir);
       },
       setLLM: (newLlm: any, newModelName?: string) => {

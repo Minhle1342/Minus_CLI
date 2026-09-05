@@ -80,6 +80,23 @@ export const readUrlContentTool: ToolDefinition = {
         type: Type.STRING,
         description: 'Alias for Url.',
       },
+      extract_mode: {
+        type: Type.STRING,
+        description: 'Extraction mode: "markdown" for structured markdown (default), "code_blocks" to extract only code/pre blocks, or "text" for plain text.',
+        enum: ['markdown', 'code_blocks', 'text'],
+      },
+      selector: {
+        type: Type.STRING,
+        description: 'Optional focus selector tag or keyword (e.g. "article", "main", "markdown-body", "code").',
+      },
+      max_length: {
+        type: Type.INTEGER,
+        description: 'Maximum characters of content to return (default 40000). Truncates with summary if exceeded.',
+      },
+      offset: {
+        type: Type.INTEGER,
+        description: 'Character offset to start reading from for pagination (default 0).',
+      },
     },
     required: [],
   },
