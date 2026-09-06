@@ -95,7 +95,7 @@ export class AnthropicLLM {
     const body: Record<string, any> = {
       model: this.modelName,
       system: systemPayload,
-      messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext),
+      messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext, request?.stepSuffixes),
       max_tokens: effectiveTokenConfig.maxOutputTokens || 8192,
       stream: true,
       tools: tools.length > 0 ? this.convertTools(tools, request?.enablePromptCaching !== false) : undefined,
@@ -301,7 +301,11 @@ export class AnthropicLLM {
       });
   }
 
-  private convertHistoryToAnthropicMessages(session: Session, dynamicContext?: string): any[] {
+  private convertHistoryToAnthropicMessages(
+    session: Session,
+    dynamicContext?: string,
+    stepSuffixes?: Map<number, string> | Record<number, string>,
+  ): any[] {
     const messages: Array<{ role: 'user' | 'assistant'; content: any }> = [];
     const history = session.getHistory();
 
@@ -355,12 +359,57 @@ export class AnthropicLLM {
     }
 
     if (dynamicContext?.trim()) {
-      const contextBlock = { type: 'text', text: `[Execution Context & Plan Status]\n${dynamicContext.trim()}` };
-      const lastUser = [...messages].reverse().find((message) => message.role === 'user');
-      if (lastUser) {
-        lastUser.content = Array.isArray(lastUser.content) ? [...lastUser.content, contextBlock] : [lastUser.content, contextBlock];
+      if (stepSuffixes && (stepSuffixes instanceof Map ? stepSuffixes.size > 0 : Object.keys(stepSuffixes).length > 0)) {
+        const getSuffix = (s: number) => stepSuffixes instanceof Map ? stepSuffixes.get(s) : (stepSuffixes as Record<number, string>)[s];
+
+        // Tìm tin nhắn user đầu tiên của turn hiện tại
+        let turnStartIdx = -1;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'text')) {
+            turnStartIdx = i;
+            break;
+          }
+        }
+
+        if (turnStartIdx !== -1) {
+          const s1 = getSuffix(1);
+          if (s1 && s1.trim()) {
+            messages[turnStartIdx].content.push({
+              type: 'text',
+              text: `\n\n[Execution Context & Plan Status]\n${s1.trim()}`,
+            });
+          }
+
+          let currentStep = 2;
+          for (let i = turnStartIdx + 1; i < messages.length; i++) {
+            const m = messages[i];
+            if (m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result')) {
+              const sK = getSuffix(currentStep);
+              if (sK && sK.trim()) {
+                m.content.push({
+                  type: 'text',
+                  text: `\n\n[Execution Context & Plan Status]\n${sK.trim()}`,
+                });
+              }
+              currentStep++;
+            }
+          }
+        } else {
+          const contextBlock = { type: 'text', text: `[Execution Context & Plan Status]\n${dynamicContext.trim()}` };
+          const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+          if (lastUser) {
+            lastUser.content = Array.isArray(lastUser.content) ? [...lastUser.content, contextBlock] : [lastUser.content, contextBlock];
+          }
+        }
       } else {
-        messages.push({ role: 'user', content: [contextBlock] });
+        const contextBlock = { type: 'text', text: `[Execution Context & Plan Status]\n${dynamicContext.trim()}` };
+        const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+        if (lastUser) {
+          lastUser.content = Array.isArray(lastUser.content) ? [...lastUser.content, contextBlock] : [lastUser.content, contextBlock];
+        } else {
+          messages.push({ role: 'user', content: [contextBlock] });
+        }
       }
     }
 

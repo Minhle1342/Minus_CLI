@@ -110,7 +110,7 @@ export class ToolSynergyAdvisor {
       const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `Diagnostics detected ${errCount} compiler/type error(s). Use "replace_text" or "apply_patch" to resolve errors before submitting.`,
+        guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Diagnostics detected ${errCount} compiler/type error(s). Never monkey-patch crash sites or weaken assertions! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace callers] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Use "replace_text" or "apply_patch" to resolve errors before submitting.`,
         suggestedTools: ['replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
       };
     }
@@ -137,7 +137,7 @@ export class ToolSynergyAdvisor {
     ) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: 'Error or diagnostic issue detected. Use "inspect_symbol" and "query_call_graph(direction=\'callers\')" to trace root cause up the call stack instead of guessing.',
+        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without modifying hypothesis! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Max 3 repair cycles.',
         suggestedTools: ['get_diagnostics', 'inspect_symbol', 'query_call_graph', 'search_web'],
       };
     }

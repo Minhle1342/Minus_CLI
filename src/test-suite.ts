@@ -6505,8 +6505,7 @@ Always write tests first!`;
 
   assert(coreTokens < 1500, `CORE_SYSTEM_PROMPT đạt chuẩn siêu tinh gọn (< 1500 tokens, thực tế: ~${coreTokens})`);
   assert(tokenReductionPercent > 70, `Chiến lược 1 & 3 đạt mục tiêu cắt giảm > 70% token (thực tế: ${tokenReductionPercent.toFixed(1)}%)`);
-  assert(CORE_SYSTEM_PROMPT.includes('WORKSPACE-GROUNDED REASONING'), 'Core prompt bảo toàn quy tắc Workspace Grounding');
-  assert(CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'), 'Core prompt bảo toàn quy tắc Root Cause Detective');
+  assert(!CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'), 'Core prompt đã tách 5-Stage Protocol sang ToolSynergyAdvisor để tối ưu KV-Cache');
   assert(CORE_SYSTEM_PROMPT.includes('VERIFICATION LADDER'), 'Core prompt bảo toàn Verification Ladder');
   assert(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'), 'Core prompt bảo toàn quy tắc Language Matching');
 

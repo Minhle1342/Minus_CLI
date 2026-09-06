@@ -14,6 +14,8 @@ export interface PromptAssemblyContext {
   hasComputerTool?: boolean;
   hasGitTools?: boolean;
   hasSubagentTools?: boolean;
+  hasAntigravityTools?: boolean;
+  hasCodebaseTools?: boolean;
 }
 
 const projectContextCache = new Map<string, { isUnity: boolean; isFrontend: boolean }>();
@@ -65,6 +67,8 @@ export function detectPromptContext(
   const hasComputerTool = toolNames.includes('computer');
   const hasGitTools = toolNames.some((name) => name.startsWith('git_'));
   const hasSubagentTools = toolNames.some((name) => name.includes('agent') || name.includes('subagent') || name === 'allocate_agent_task' || name === 'delegate_agent' || name === 'brainstorm_design');
+  const hasAntigravityTools = toolNames.length === 0 || toolNames.some((name) => ['run_command', 'manage_task', 'schedule', 'search_web', 'read_url_content'].includes(name));
+  const hasCodebaseTools = toolNames.length === 0 || toolNames.some((name) => ['query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology'].includes(name));
   const isArchitectureAnalysis = Boolean(request && detectArchitectureAnalysisIntent(request).isArchitectureQuery);
 
   return {
@@ -77,12 +81,14 @@ export function detectPromptContext(
     hasComputerTool,
     hasGitTools,
     hasSubagentTools,
+    hasAntigravityTools,
+    hasCodebaseTools,
   };
 }
 
 /**
  * TIER 0: BẤT BIẾN CỐT LÕI (CORE INVARIANT SYSTEM PROMPT)
- * Kích thước: ~650 tokens (tiết kiệm >85% so với bản gốc 4.860 tokens).
+ * Kích thước: ~550 tokens (tiết kiệm >88% so với bản gốc 4.860 tokens).
  * Luôn đứng đầu prompt (Priority: -1000) để đảm bảo 100% KV-Cache Hit Rate.
  */
 export const CORE_SYSTEM_PROMPT = `You are a high-performance coding agent running in the terminal, a fast, precise, safe, and helpful pair programmer.
@@ -110,30 +116,36 @@ Core Architectural Invariants:
 4. SURGICAL MUTATION DISCIPLINE:
    - Inspect target lines with read_file first to secure contentHash and line offsets. Use read_file(symbol='...') for 1-shot function extraction or read 150-300 line windows (never slice 50-line micro-windows with sed).
    - create_file (new files, no overwrite), delete_file (requires expectedFileHash; NEVER use shell rm/del), move_file (safe rename; NEVER use shell mv).
-   - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits).
-   - apply_patch 1-Shot format:
-     --- a/src/example.ts
-     +++ b/src/example.ts
-     @@ -10,3 +10,3 @@
-      const a = 1;
-     -const b = 2;
-     +const b = 3;
-      return a + b;
-   - Fuzz 0-2 auto-resolved; Fuzz 3 (FUZZY_CANDIDATE_FOUND) requires re-reading file for exact line matching.
+   - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits). See tool spec for patch hunk format.
 
-5. 5-STAGE ERROR DETECTIVE & ROOT CAUSE PROTOCOL:
-   - Never monkey-patch crash sites or weaken assertions. Trace callers backward to locate the invalid state origin.
-   - Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification].
-   - Maximum 3 repair cycles. Never repeat a failing command without modifying your hypothesis or approach.
-
-6. VERIFICATION LADDER & SUBMISSION GATE:
+5. VERIFICATION LADDER & SUBMISSION GATE:
    - Verification sequence: 1. get_diagnostics -> 2. Fast typecheck/build (tsc/npm build) -> 3. Targeted unit tests.
    - SUBMISSION: Upon successful verification, YOU MUST CALL submit_solution with empirical proof. Stop further edits.
 
-7. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
+6. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
    - Internal reasoning, tool calls, and diagnostics operate in English.
    - FINAL ANSWER LANGUAGE MATCHING: Your final answer MUST 100% match the user's natural prompt language (Vietnamese -> Vietnamese, English -> English).
    - Never output internal rule templates, execution sequence stubs, or placeholder quotes as the final answer.`;
+
+/**
+ * ON-DEMAND MODULE: ĐỊNH DẠNG VÀ CƠ CHẾ KHỚP PATCH (apply_patch 1-Shot Unified Diff)
+ * Được tách ra khỏi Core Invariant để tránh phình prompt khởi đầu (~60 tokens).
+ * Có thể nạp theo nhu cầu (on-demand reference) khi agent thao tác sửa đổi file hoặc gặp FUZZY_CANDIDATE_FOUND.
+ */
+export const SECTION_PATCH_FORMAT_SPEC = `UNIFIED DIFF & PATCH FORMAT SPECIFICATION (apply_patch):
+- Header: --- a/<path> followed by +++ b/<path>
+- Hunk format: @@ -start,count +start,count @@
+- Context lines prefix with ' ', deletions prefix with '-', additions prefix with '+'
+- 1-Shot Example:
+  --- a/src/example.ts
+  +++ b/src/example.ts
+  @@ -10,3 +10,3 @@
+   const a = 1;
+  -const b = 2;
+  +const b = 3;
+   return a + b;
+- Fuzz Matching: Fuzz 0-2 auto-resolved (line shifts, indentation tolerance, context reduction).
+- Fuzz 3 (FUZZY_CANDIDATE_FOUND): Returns advisory signal and does NOT mutate disk; call read_file for exact line matching.`;
 
 /**
  * TIER 1: DOMAIN MODULES (Progressive Disclosure)
@@ -196,8 +208,8 @@ export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'core', content: CORE_SYSTEM_PROMPT, priority: -1000 },
   { id: 'git-operations', content: SECTION_GIT_OPERATIONS, priority: 100, condition: (ctx: PromptAssemblyContext) => ctx.hasGitTools ?? true },
   { id: 'frontend-ui', content: SECTION_FRONTEND_UI, priority: 200, condition: (ctx: PromptAssemblyContext) => ctx.isFrontend ?? false },
-  { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300 },
-  { id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE, priority: 400 },
+  { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300, condition: (ctx: PromptAssemblyContext) => ctx.hasAntigravityTools ?? true },
+  { id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE, priority: 400, condition: (ctx: PromptAssemblyContext) => ctx.hasCodebaseTools ?? true },
   { id: 'tool-playbooks', content: SECTION_TOOL_PLAYBOOKS, priority: 500 },
   { id: 'task-orchestrator-boundaries', content: SECTION_TASK_ORCHESTRATOR_BOUNDARIES, priority: 550, condition: (ctx: PromptAssemblyContext) => ctx.hasSubagentTools ?? false },
   { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },

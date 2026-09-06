@@ -54,6 +54,7 @@ import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
+import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness } from './cognitive-harness.js';
@@ -147,6 +148,8 @@ export class AgentLoop {
     repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'];
     repositoryContext: string;
   }>();
+  readonly dynamicContextArbiter: DynamicContextArbiter;
+  private stepDynamicSuffixes = new Map<number, string>();
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
@@ -258,6 +261,8 @@ export class AgentLoop {
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
     this.contextCompactor.setConfig({ preservePrefixCache: true });
+    const dynamicBudget = options?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : 2000);
+    this.dynamicContextArbiter = new DynamicContextArbiter(dynamicBudget);
     this.latencyOrchestrator = new LatencyOrchestrator({
       enabled: options?.enableLatencyOptimization
         ?? envFeatureEnabled('MINUS_LATENCY_OPTIMIZATION'),
@@ -588,6 +593,7 @@ export class AgentLoop {
     this.verificationPolicy.reset();
     this.cognitiveHarness.reset();
     this.targetFilesModifiedInTurn.clear();
+    this.stepDynamicSuffixes.clear();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
@@ -1085,7 +1091,6 @@ export class AgentLoop {
           // Fail-open
         }
       }
-      let dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, recalledTurnContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
       const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
         ? (this.llm.getTokenConfig() || {})
         : {};
@@ -1093,6 +1098,16 @@ export class AgentLoop {
         || this.llm?.modelName
         || this.llm?.constructor?.name
         || 'unknown';
+      const arbitration = this.dynamicContextArbiter.arbitrate({
+        advicePrompt,
+        rawPlanContext,
+        recalledTurnContext,
+        memoryPrompt,
+        composeContext,
+        repositoryMemoryContext,
+        repositoryContext,
+      }, activeModelName);
+      let dynamicExecutionContext = arbitration.renderedContext;
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
       let requestFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
@@ -1158,9 +1173,13 @@ export class AgentLoop {
       }, { compactHistory: true });
       session.assertRuntimeInvariants({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
       await this.persistSession(session);
+      this.stepDynamicSuffixes.set(step, dynamicExecutionContext);
       const requestOptions: LLMRequestOptions = {
         systemPrompt: assembledSystemPrompt,
         dynamicContext: dynamicExecutionContext,
+        turn,
+        step,
+        stepSuffixes: new Map(this.stepDynamicSuffixes),
         sessionId: session.id,
         promptCacheKey: session.id,
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,

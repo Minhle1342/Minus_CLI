@@ -34,6 +34,9 @@ export interface LLMRequestOptions {
   promptCacheRetention?: 'in_memory' | '24h';
   promptCacheBreakpoint?: boolean;
   signal?: AbortSignal;
+  turn?: number;
+  step?: number;
+  stepSuffixes?: Map<number, string> | Record<number, string>;
 }
 
 export type LLMFinishReason =
@@ -103,7 +106,7 @@ export class GeminiLLM {
     callbacks?: StreamCallbacks,
     request?: LLMRequestOptions,
   ): Promise<LLMResponse> {
-    const contents = this.prepareContents(session, request?.dynamicContext);
+    const contents = this.prepareContents(session, request?.dynamicContext, request?.stepSuffixes);
     const effectiveTokenConfig = resolveTokenConfig(this.modelName, {
       ...this.tokenConfig,
       ...request?.tokenConfig,
@@ -259,25 +262,84 @@ export class GeminiLLM {
    * unsigned tool exchanges remain durable in Session, but are omitted from a
    * Gemini request together with their matching results.
    */
-  private prepareContents(session: Session, dynamicContext?: string): import('@google/genai').Content[] {
+  private prepareContents(
+    session: Session,
+    dynamicContext?: string,
+    stepSuffixes?: Map<number, string> | Record<number, string>,
+  ): import('@google/genai').Content[] {
     const rawHistory = session.getHistory();
     let history = rawHistory;
 
     if (dynamicContext && dynamicContext.trim()) {
       const cloned = rawHistory.map((item) => cloneJson(item));
-      const lastUserItem = [...cloned].reverse().find((item) => item.role === 'user');
-      if (lastUserItem) {
-        lastUserItem.parts = lastUserItem.parts || [];
-        lastUserItem.parts.push({
-          text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
-        });
-        history = cloned;
+
+      if (stepSuffixes && (stepSuffixes instanceof Map ? stepSuffixes.size > 0 : Object.keys(stepSuffixes).length > 0)) {
+        // Volatile Dynamic Suffix (Append-Only Prefix Extension):
+        // Bảo toàn 100% KV-Cache bằng cách đính kèm suffix bất biến cho từng step anchor
+        const getSuffix = (s: number) => stepSuffixes instanceof Map ? stepSuffixes.get(s) : (stepSuffixes as Record<number, string>)[s];
+
+        let turnStartIdx = -1;
+        for (let i = cloned.length - 1; i >= 0; i--) {
+          const item = cloned[i];
+          if (item.role === 'user' && item.parts?.some((p: any) => typeof p.text === 'string' && !p.functionResponse)) {
+            turnStartIdx = i;
+            break;
+          }
+        }
+
+        if (turnStartIdx !== -1) {
+          const s1 = getSuffix(1);
+          const turnUserItem = cloned[turnStartIdx];
+          if (s1 && s1.trim() && turnUserItem) {
+            turnUserItem.parts = turnUserItem.parts || [];
+            turnUserItem.parts.push({
+              text: `\n\n[Execution Context & Plan Status]\n${s1.trim()}`,
+            });
+          }
+
+          // Gắn suffix cho các step tiếp theo (Step 2, 3...) vào các tool responses tương ứng
+          let currentStep = 2;
+          for (let i = turnStartIdx + 1; i < cloned.length; i++) {
+            const item = cloned[i];
+            if (item.role === 'user' && item.parts?.some((p: any) => p.functionResponse)) {
+              const sK = getSuffix(currentStep);
+              if (sK && sK.trim()) {
+                item.parts = item.parts || [];
+                item.parts.push({
+                  text: `\n\n[Execution Context & Plan Status]\n${sK.trim()}`,
+                });
+              }
+              currentStep++;
+            }
+          }
+          history = cloned;
+        } else {
+          // Fallback nếu không xác định được turnStartIdx
+          const lastUserItem = [...cloned].reverse().find((item) => item.role === 'user');
+          if (lastUserItem) {
+            lastUserItem.parts = lastUserItem.parts || [];
+            lastUserItem.parts.push({
+              text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+            });
+          }
+          history = cloned;
+        }
       } else {
-        cloned.push({
-          role: 'user',
-          parts: [{ text: `[Execution Context & Plan Status]\n${dynamicContext.trim()}` }],
-        });
-        history = cloned;
+        // Fallback backward-compatible khi không có stepSuffixes
+        const lastUserItem = [...cloned].reverse().find((item) => item.role === 'user');
+        if (lastUserItem) {
+          lastUserItem.parts = lastUserItem.parts || [];
+          lastUserItem.parts.push({
+            text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+          });
+          history = cloned;
+        } else {
+          cloned.push({
+            role: 'user',
+            parts: [{ text: `[Execution Context & Plan Status]\n${dynamicContext.trim()}` }],
+          });
+          history = cloned;
+        }
       }
     }
 

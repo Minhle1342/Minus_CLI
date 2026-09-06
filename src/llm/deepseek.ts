@@ -141,6 +141,7 @@ export class DeepseekLLM {
     systemPrompt: string,
     dynamicContext?: string,
     promptCacheBreakpoint?: boolean,
+    stepSuffixes?: Map<number, string> | Record<number, string>,
   ): any[] {
     const history = session.getHistory();
     const rawMessages: any[] = [];
@@ -252,23 +253,73 @@ export class DeepseekLLM {
       }
     }
 
-    // 3. Dynamic Execution Context: Đính kèm vào tin nhắn User cuối cùng ở đuôi để bảo toàn tiền tố prefix
+    // 3. Dynamic Execution Context: Đính kèm theo cơ chế Append-Only Prefix Extension
+    // để giữ trọn vẹn 100% KV-Cache Prefix qua các multi-step turns
     if (dynamicContext && dynamicContext.trim()) {
-      const lastUserMsg = [...rawMessages].reverse().find((m) => m.role === 'user');
-      if (lastUserMsg) {
-        if (typeof lastUserMsg.content === 'string') {
-          lastUserMsg.content = `${lastUserMsg.content}\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`;
-        } else if (Array.isArray(lastUserMsg.content)) {
-          lastUserMsg.content.push({
-            type: 'text',
-            text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+      if (stepSuffixes && (stepSuffixes instanceof Map ? stepSuffixes.size > 0 : Object.keys(stepSuffixes).length > 0)) {
+        const getSuffix = (s: number) =>
+          stepSuffixes instanceof Map ? stepSuffixes.get(s) : (stepSuffixes as Record<number, string>)[s];
+
+        // Tìm tin nhắn user của turn hiện tại (quét ngược từ cuối lên)
+        let turnStartIdx = -1;
+        for (let i = rawMessages.length - 1; i >= 0; i--) {
+          if (rawMessages[i].role === 'user') {
+            turnStartIdx = i;
+            break;
+          }
+        }
+
+        if (turnStartIdx !== -1) {
+          // Gắn Suffix Step 1 cố định vào user message của turn hiện tại
+          const s1 = getSuffix(1);
+          if (s1 && s1.trim()) {
+            const userMsg = rawMessages[turnStartIdx];
+            if (typeof userMsg.content === 'string') {
+              userMsg.content = `${userMsg.content}\n\n[Execution Context & Plan Status]\n${s1.trim()}`;
+            } else if (Array.isArray(userMsg.content)) {
+              userMsg.content.push({
+                type: 'text',
+                text: `\n\n[Execution Context & Plan Status]\n${s1.trim()}`,
+              });
+            }
+          }
+
+          // Đối với các Step tiếp theo (Step 2, 3, ...), gắn suffix vào tool response tương ứng
+          let currentStep = 2;
+          for (let i = turnStartIdx + 1; i < rawMessages.length; i++) {
+            if (rawMessages[i].role === 'tool' && (i === rawMessages.length - 1 || rawMessages[i + 1].role === 'assistant')) {
+              const sK = getSuffix(currentStep);
+              if (sK && sK.trim()) {
+                if (typeof rawMessages[i].content === 'string') {
+                  rawMessages[i].content = `${rawMessages[i].content}\n\n[Execution Context & Plan Status]\n${sK.trim()}`;
+                }
+              }
+              currentStep++;
+            }
+          }
+        } else {
+          rawMessages.push({
+            role: 'user',
+            content: `[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
           });
         }
       } else {
-        rawMessages.push({
-          role: 'user',
-          content: `[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
-        });
+        const lastUserMsg = [...rawMessages].reverse().find((m) => m.role === 'user');
+        if (lastUserMsg) {
+          if (typeof lastUserMsg.content === 'string') {
+            lastUserMsg.content = `${lastUserMsg.content}\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`;
+          } else if (Array.isArray(lastUserMsg.content)) {
+            lastUserMsg.content.push({
+              type: 'text',
+              text: `\n\n[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+            });
+          }
+        } else {
+          rawMessages.push({
+            role: 'user',
+            content: `[Execution Context & Plan Status]\n${dynamicContext.trim()}`,
+          });
+        }
       }
     }
 
@@ -391,6 +442,7 @@ export class DeepseekLLM {
       request?.systemPrompt || this.systemPrompt,
       request?.dynamicContext,
       request?.promptCacheBreakpoint,
+      request?.stepSuffixes,
     );
     const openAITools = tools.length > 0 ? this.convertToolsToOpenAI(tools) : undefined;
     const endpoint = `${this.baseURL.replace(/\/+$/, '')}/chat/completions`;

@@ -51,6 +51,8 @@ export interface AgentLoopOptions {
   enableStreamingDispatch?: boolean;
   /** Hard-terminate runtime when identical tool observations repeat consecutively (defaults to false). */
   enableNoProgressTermination?: boolean;
+  /** Global Dynamic Budget for injected execution context in tokens (defaults to 2000). */
+  dynamicContextBudget?: number;
 }
 
 export type AgentState =
