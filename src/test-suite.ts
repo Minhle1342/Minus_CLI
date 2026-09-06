@@ -1579,7 +1579,11 @@ async function runUnitTests() {
     },
   });
   const persistentSearchLLM = new MockPersistentSearchLoopLLM();
-  const persistentSearchLoop = new AgentLoop(persistentSearchLLM, persistentSearchRegistry, { maxSteps: 20, workspace });
+  const persistentSearchLoop = new AgentLoop(persistentSearchLLM, persistentSearchRegistry, {
+    maxSteps: 20,
+    workspace,
+    enableNoProgressTermination: true,
+  });
   const persistentSearchSession = new Session('persistent-search-loop-session');
   persistentSearchSession.addUserMessage('Do not repeat the same code search indefinitely.');
   const persistentSearchResult = await persistentSearchLoop.run(persistentSearchSession, {
@@ -1593,7 +1597,7 @@ async function runUnitTests() {
     && persistentSearchSession.getEvents().some(
       (event) => event.type === 'turn/end' && event.data.reason === 'repeated-no-progress-terminal',
     ),
-    'Repeated search_codebase_fast is bounded and ends with an explicit no-progress blocker',
+    'Repeated search_codebase_fast is bounded and ends with an explicit no-progress blocker when enableNoProgressTermination is enabled',
   );
   assert(
     persistentSearchSession.getEvents().filter((event) => event.type === 'tool/call').length === 5
@@ -1601,6 +1605,55 @@ async function runUnitTests() {
     && persistentSearchSession.getDiagnostics().openTurns.length === 0
     && persistentSearchSession.getDiagnostics().openSteps.length === 0,
     'Bounded no-progress termination preserves tool pairing and closes lifecycle',
+  );
+
+  let defaultSearchExecutions = 0;
+  class MockDefaultPersistentSearchLLM {
+    calls = 0;
+    async generate(): Promise<any> {
+      this.calls++;
+      if (this.calls >= 6) {
+        return { text: 'Pivoted to direct answer after receiving advisory.', toolCalls: [] };
+      }
+      return {
+        toolCalls: [{ name: 'search_codebase_fast', args: { query: 'AgentLoop', limit: 5 } }],
+      };
+    }
+  }
+  const defaultSearchLLM = new MockDefaultPersistentSearchLLM();
+  const defaultSearchRegistry = new ToolRegistry();
+  defaultSearchRegistry.register({
+    name: 'search_codebase_fast',
+    description: 'Return a stable search observation for bounded-loop testing.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING' },
+        limit: { type: 'NUMBER' },
+      },
+      required: ['query'],
+    } as any,
+    execute: async () => {
+      defaultSearchExecutions++;
+      return { hits: [{ path: 'src/agent/agent-loop.ts', line: 40 }], total: 1 };
+    },
+  });
+  const defaultNoProgressLoop = new AgentLoop(defaultSearchLLM, defaultSearchRegistry, { maxSteps: 20, workspace });
+  const defaultNoProgressSession = new Session('default-no-progress-session');
+  defaultNoProgressSession.addUserMessage('Do not repeat indefinitely.');
+  const defaultNoProgressResult = await defaultNoProgressLoop.run(defaultNoProgressSession, {
+    isGoalMode: true,
+    maxSteps: 20,
+  });
+  assert(
+    !defaultNoProgressSession.getEvents().some(
+      (event) => event.type === 'turn/end' && event.data.reason === 'repeated-no-progress-terminal',
+    )
+    && defaultNoProgressResult.includes('Pivoted to direct answer')
+    && defaultNoProgressSession.getEvents().some(
+      (event) => event.type === 'user/message' && event.data.content?.parts?.some((part: any) => String(part.text || '').includes('[SYSTEM LOOP ADVISORY]')),
+    ),
+    'Default behavior does not terminate runtime on repeated no-progress, injects SYSTEM LOOP ADVISORY and allows completion',
   );
 
   class MockPersistentDeferredFinalLLM {

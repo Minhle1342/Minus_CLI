@@ -19,6 +19,8 @@ target/
 *.pdb
 *.exp
 *.lib
+*.node.old
+*.old
 
 # Environment, Secrets & Credentials (CRITICAL SECURITY)
 .env

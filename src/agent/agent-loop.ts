@@ -8,6 +8,7 @@ import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
+import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ContextGuardian, ContextAgent } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
@@ -782,14 +783,8 @@ export class AgentLoop {
       }
       // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - context-management-context-save)
       const currentHistory = session.getHistory();
-      let totalHistoryChars = 0;
-      for (const m of currentHistory) {
-        for (const p of m.parts || []) {
-          if (typeof p?.text === 'string') totalHistoryChars += p.text.length;
-          if (p?.functionResponse) totalHistoryChars += JSON.stringify(p.functionResponse).length;
-        }
-      }
-      const estimatedHistoryTokens = ContextCompactor.estimateTokens(' '.repeat(totalHistoryChars));
+      const totalHistoryChars = getHistoryTotalChars(currentHistory);
+      const estimatedHistoryTokens = ContextCompactor.estimateTokens(totalHistoryChars);
       const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
       const compactionThreshold = maxBudget * 0.70;
 
@@ -1945,11 +1940,23 @@ export class AgentLoop {
           strategyChangeRequired
           && consecutiveNoProgressStrategyChanges >= maxNoProgressStrategyChanges
         ) {
-          const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
-          await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
-          this.goalManager.disarm();
-          return noProgressMessage;
+          const enableNoProgressTermination = (this.loopOptions?.enableNoProgressTermination
+            ?? envFeatureEnabled('MINUS_ENABLE_NO_PROGRESS_TERMINATION', false)) === true;
+
+          if (enableNoProgressTermination) {
+            const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
+            await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
+            this.goalManager.disarm();
+            return noProgressMessage;
+          }
+
+          // Khi cơ chế dừng runtime bị bỏ/tắt: Không dừng execution, thay vào đó bổ sung lời nhắc chiến lược
+          // để định hướng model đổi cách tiếp cận và reset lại bộ đếm liên tiếp.
+          const loopGuidance = `[SYSTEM LOOP ADVISORY]: Tool '${strategyChangeRequired.toolName}' has returned identical observations ${strategyChangeRequired.repetitionCount} times. Avoid repeating this tool with the same arguments. Please choose an alternative approach, use different tool parameters, or complete the task with existing data.`;
+          session.addUserMessage(loopGuidance, 'system');
+          await this.persistSession(session);
+          consecutiveNoProgressStrategyChanges = 0;
         }
 
         if (!isMockLLM && process.env.NODE_ENV !== 'test' && this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})) {

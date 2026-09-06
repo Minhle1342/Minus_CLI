@@ -1,8 +1,7 @@
 use std::fs::File;
-use std::path::Path;
 use memmap2::Mmap;
 use napi_derive::napi;
-use regex::{Regex, RegexBuilder};
+use regex::RegexBuilder;
 use walkdir::WalkDir;
 
 #[napi(object)]

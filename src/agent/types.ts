@@ -49,6 +49,8 @@ export interface AgentLoopOptions {
   toolControlMode?: ToolControlMode;
   /** Execute read-only tools speculatively during model token streaming. */
   enableStreamingDispatch?: boolean;
+  /** Hard-terminate runtime when identical tool observations repeat consecutively (defaults to false). */
+  enableNoProgressTermination?: boolean;
 }
 
 export type AgentState =

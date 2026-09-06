@@ -45,6 +45,21 @@ export interface NativeSearchResult {
   durationMs: number;
 }
 
+export interface NativeBatchFileReadResult {
+  relPath: string;
+  content?: string | null;
+  hash?: string | null;
+  totalLines: number;
+  sizeBytes: number;
+  error?: string | null;
+}
+
+export interface NativeHistoryStats {
+  totalChars: number;
+  totalBytes: number;
+  estimatedTokens: number;
+}
+
 interface NativeCoreModule {
   rsVersion(): string;
   rsAnalyzeShellCommand(command: string): NativeShellAnalysis;
@@ -65,6 +80,9 @@ interface NativeCoreModule {
   rsGenerateSubwordEmbedding(text: string): number[];
   rsComputeFileHash(filePath: string): string;
   rsComputeStringHash(content: string): string;
+  rsScanAndDigestWorkspace(rootDir: string, ignoredDirs: string[]): string;
+  rsBatchReadFiles(rootDir: string, relPaths: string[], maxBytes: number): NativeBatchFileReadResult[];
+  rsFastHistoryStats(payloads: string[]): NativeHistoryStats;
 }
 
 let nativeCore: NativeCoreModule | null = null;
@@ -111,4 +129,65 @@ export function isNativeAvailable(): boolean {
 export function getNativeVersion(): string | null {
   const core = getNativeCore();
   return core ? core.rsVersion() : null;
+}
+
+/**
+ * Quét toàn bộ thư mục và tính digest đại diện cho Workspace trong 1 lần gọi (Bulk processing)
+ */
+export function nativeScanAndDigestWorkspace(rootDir: string, ignoredDirs: string[]): string | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsScanAndDigestWorkspace === 'function') {
+    try {
+      return core.rsScanAndDigestWorkspace(rootDir, ignoredDirs);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Đọc hàng loạt file trong workspace cùng lúc bằng Memory-Mapped I/O và kiểm tra Path Guard (Bulk read)
+ */
+export function nativeBatchReadFiles(
+  rootDir: string,
+  relPaths: string[],
+  maxBytes: number = 200 * 1024,
+): NativeBatchFileReadResult[] | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsBatchReadFiles === 'function') {
+    try {
+      return core.rsBatchReadFiles(rootDir, relPaths, maxBytes);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Phân tích thống kê ký tự và ước lượng token của toàn bộ session trong 1 lần gọi (Bulk history stats)
+ */
+export function nativeFastHistoryStats(payloads: string[]): NativeHistoryStats {
+  const core = getNativeCore();
+  if (core && typeof core.rsFastHistoryStats === 'function') {
+    try {
+      return core.rsFastHistoryStats(payloads);
+    } catch {
+      // Fallback
+    }
+  }
+
+  // TypeScript Fallback (Zero crash guarantee)
+  let totalChars = 0;
+  let totalBytes = 0;
+  for (const p of payloads) {
+    totalBytes += Buffer.byteLength(p, 'utf8');
+    totalChars += p.length;
+  }
+  return {
+    totalChars,
+    totalBytes,
+    estimatedTokens: Math.ceil(totalChars / 3.8),
+  };
 }

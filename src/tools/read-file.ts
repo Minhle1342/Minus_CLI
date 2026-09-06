@@ -5,6 +5,7 @@ import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { SemanticSlicer } from '../agent/semantic-slicer.js';
+import { nativeBatchReadFiles } from '../native/index.js';
 
 /**
  * Tool 1: read_file (Phase 3 - AST Semantic Slicing Ready)
@@ -72,8 +73,17 @@ export const readFileTool: ToolDefinition = {
         };
       }
 
-      const fileContent = await fs.readFile(safePath, 'utf-8');
-      const contentHash = `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
+      let fileContent: string;
+      let contentHash: string;
+
+      const nativeBatch = nativeBatchReadFiles(workspace.rootDir, [rawPath], 200 * 1024);
+      if (nativeBatch && nativeBatch[0] && nativeBatch[0].content !== null && nativeBatch[0].content !== undefined) {
+        fileContent = nativeBatch[0].content;
+        contentHash = nativeBatch[0].hash || `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
+      } else {
+        fileContent = await fs.readFile(safePath, 'utf-8');
+        contentHash = `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
+      }
       const eol = detectEol(fileContent);
       const includeLineNumbers = args.includeLineNumbers !== false;
 

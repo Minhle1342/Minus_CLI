@@ -15,7 +15,7 @@ pub struct RsHunkApplyResult {
 pub fn apply_hunk_to_content(
     original_content: &str,
     hunk_lines: &[String],
-    expected_old_start: usize,
+    _expected_old_start: usize,
 ) -> RsHunkApplyResult {
     let mut file_lines: Vec<String> = original_content.lines().map(|s| s.to_string()).collect();
     if original_content.ends_with('\n') || original_content.ends_with("\r\n") {

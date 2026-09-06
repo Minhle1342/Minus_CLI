@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Workspace } from './workspace.js';
-import { getNativeCore } from '../native/index.js';
+import { getNativeCore, nativeScanAndDigestWorkspace } from '../native/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,6 +69,12 @@ export async function computeWorkspaceDigest(workspace: Workspace): Promise<stri
   } catch {
     // Fallback for non-git repository: scan files
     try {
+      const ignoredDirs: string[] = Array.from((workspace as any).ignoredDirectories || ['node_modules', '.git', 'dist', 'target']).map(String);
+      const nativeDigest = nativeScanAndDigestWorkspace(root, ignoredDirs);
+      if (nativeDigest) {
+        return nativeDigest;
+      }
+
       const entries: Array<{ relPath: string; hash: string }> = [];
       
       async function scanDir(dir: string) {

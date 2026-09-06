@@ -1,6 +1,7 @@
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing } from '../session/session-invariants.js';
+import { getHistoryTotalChars } from '../session/message-metrics.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -78,9 +79,11 @@ export class ContextCompactor {
 
   /**
    * Ước lượng số lượng tokens theo quy tắc Heuristic (1 token ~ 3.8 - 4 ký tự)
+   * Nhận trực tiếp chuỗi hoặc số lượng ký tự để tránh cấp phát bộ nhớ chuỗi trắng
    */
-  static estimateTokens(text: string): number {
-    return Math.ceil(text.length / 3.8);
+  static estimateTokens(textOrLength: string | number): number {
+    const len = typeof textOrLength === 'number' ? textOrLength : (textOrLength?.length || 0);
+    return Math.ceil(Math.max(0, len) / 3.8);
   }
 
   /**
@@ -90,20 +93,12 @@ export class ContextCompactor {
    */
   compact(messages: SessionMessage[], options?: CompactionOptions): { messages: SessionMessage[]; stats: CompactionStats } {
     assertHistoryToolPairing(messages);
-    let originalLength = 0;
     let compactedLength = 0;
     let prunedPartsCount = 0;
 
-    // 1. Tính tổng dung lượng ban đầu
-    for (const msg of messages) {
-      for (const part of msg.parts || []) {
-        if (part.text) originalLength += part.text.length;
-        if (part.functionResponse) originalLength += JSON.stringify(part.functionResponse).length;
-        if (part.functionCall) originalLength += JSON.stringify(part.functionCall).length;
-      }
-    }
-
-    const originalTokens = ContextCompactor.estimateTokens(' '.repeat(originalLength));
+    // 1. Tính tổng dung lượng ban đầu qua O(1) WeakMap cache
+    const originalLength = getHistoryTotalChars(messages);
+    const originalTokens = ContextCompactor.estimateTokens(originalLength);
     const requestOverheadTokens = Math.max(0, options?.requestOverheadTokens || 0);
     const outputReserveTokens = Math.max(0, options?.outputReserveTokens || 0);
     const triggerRatio = Math.min(1, Math.max(0.5, options?.triggerRatio ?? 1));
@@ -239,14 +234,8 @@ export class ContextCompactor {
       };
     });
 
-    // 4. Tính toán kết quả sau khi nén
-    for (const msg of compactedMessages) {
-      for (const part of msg.parts || []) {
-        if (part.text) compactedLength += part.text.length;
-        if (part.functionResponse) compactedLength += JSON.stringify(part.functionResponse).length;
-        if (part.functionCall) compactedLength += JSON.stringify(part.functionCall).length;
-      }
-    }
+    // 4. Tính toán kết quả sau khi nén qua WeakMap cache
+    compactedLength = getHistoryTotalChars(compactedMessages);
 
     const charsSaved = Math.max(0, originalLength - compactedLength);
 
@@ -260,7 +249,7 @@ export class ContextCompactor {
       compactedLength += options.reinjectInvariants.length + 65;
     }
 
-    const finalTokens = ContextCompactor.estimateTokens(' '.repeat(compactedLength));
+    const finalTokens = ContextCompactor.estimateTokens(compactedLength);
     const finalTokensSaved = Math.max(0, originalTokens - finalTokens);
 
     const stats: CompactionStats = {

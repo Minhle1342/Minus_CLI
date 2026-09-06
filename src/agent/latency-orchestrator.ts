@@ -1,6 +1,7 @@
 import type { Content, FunctionDeclaration } from '@google/genai';
 import type { TaskPhase } from '../control/classification-types.js';
 import type { TokenConfig } from '../llm/token-config.js';
+import { getHistoryTotalChars } from '../session/message-metrics.js';
 
 export type ModelLatencyTier = 'fast' | 'standard' | 'deep-reasoning';
 
@@ -34,6 +35,19 @@ export interface ModelLatencyObservation {
   promptTokens?: number;
   cachedTokens?: number;
   profile?: ModelLatencyProfile;
+}
+
+const toolSchemaTokensCache = new WeakMap<object, number>();
+
+function getToolSchemaTokens(tools: FunctionDeclaration[]): number {
+  if (!tools || !Array.isArray(tools) || tools.length === 0) return 0;
+  const cached = toolSchemaTokensCache.get(tools);
+  if (cached !== undefined) return cached;
+
+  const len = serializedLength(tools);
+  const tokens = estimateTokensFromCharacters(len);
+  toolSchemaTokensCache.set(tools, tokens);
+  return tokens;
 }
 
 function serializedLength(value: unknown): number {
@@ -105,9 +119,9 @@ export class LatencyOrchestrator {
     maxInputTokens?: number;
     maxOutputTokens?: number;
   }): RequestFootprint {
-    const historyTokens = estimateTokensFromCharacters(serializedLength(input.history));
+    const historyTokens = estimateTokensFromCharacters(getHistoryTotalChars(input.history));
     const systemPromptTokens = estimateTokensFromCharacters(input.systemPrompt.length);
-    const toolSchemaTokens = estimateTokensFromCharacters(serializedLength(input.tools));
+    const toolSchemaTokens = getToolSchemaTokens(input.tools);
     const dynamicContextTokens = estimateTokensFromCharacters(input.dynamicContext?.length || 0);
     const nonHistoryTokens = systemPromptTokens + toolSchemaTokens + dynamicContextTokens;
     const outputReserveTokens = Math.max(0, input.maxOutputTokens || 0);
