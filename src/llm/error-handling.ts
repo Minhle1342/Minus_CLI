@@ -27,13 +27,31 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
   }
 
   const rawMessage = String(error?.message || error?.statusText || error || '').toLowerCase();
-  const statusCode = typeof error?.status === 'number'
+  let statusCode = typeof error?.status === 'number'
     ? error.status
     : typeof error?.statusCode === 'number'
     ? error.statusCode
     : typeof error?.response?.status === 'number'
     ? error.response.status
     : undefined;
+
+  // Trích xuất mã số HTTP từ payload message nếu có (vd: '{"code":503,...}' hoặc 'got status: UNAVAILABLE')
+  if (!statusCode) {
+    const codeMatch = rawMessage.match(/"code"\s*:\s*(\d{3})/i)
+      || rawMessage.match(/status(?:_code)?\s*[:=]\s*(\d{3})/i);
+    if (codeMatch) {
+      const parsed = parseInt(codeMatch[1], 10);
+      if (parsed >= 400 && parsed < 600) {
+        statusCode = parsed;
+      }
+    } else if (
+      rawMessage.includes('status: unavailable')
+      || rawMessage.includes('got status: unavailable')
+      || (typeof error?.status === 'string' && error.status.toUpperCase() === 'UNAVAILABLE')
+    ) {
+      statusCode = 503;
+    }
+  }
 
   // 1. Kiểm tra Transient Rate Limit (429 Too Many Requests / Burst Limit / Resource Exhausted tạm thời / Quota per minute)
   const isTransientRateLimit =
@@ -49,10 +67,9 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     || (statusCode === 429 && !rawMessage.includes('daily_limit_reached') && !rawMessage.includes('check your plan and billing details') && !rawMessage.includes('insufficient_quota') && !rawMessage.includes('credit_balance_too_low') && !rawMessage.includes('limit: 0'));
 
   if (isTransientRateLimit) {
-    // Trích xuất retry-after nếu có trong header hoặc message (vd: "Please retry in 5.2s")
+    // Trích xuất retry-after nếu có trong header hoặc message (vd: "Please retry in 5.2s" hoặc "retryDelay": "22s")
     let retryAfterMs: number | undefined;
-    const retryMatch = rawMessage.match(/retry after\s+([0-9.]+)\s*(s|sec|seconds|ms)?/i)
-      || rawMessage.match(/retry in\s+([0-9.]+)\s*(s|sec|seconds|ms)?/i);
+    const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
     if (retryMatch) {
       const value = parseFloat(retryMatch[1]);
       const unit = retryMatch[2]?.toLowerCase() || 's';
@@ -103,19 +120,34 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     };
   }
 
-  // 4. Kiểm tra Server Error (500, 502, 503, 504)
-  if (
+  // 4. Kiểm tra Server Error (500, 502, 503, 504, 529, UNAVAILABLE, Overloaded, High Demand)
+  const isServerError =
     (statusCode && statusCode >= 500 && statusCode < 600)
+    || rawMessage.includes('unavailable')
+    || rawMessage.includes('high demand')
+    || rawMessage.includes('spikes in demand')
     || rawMessage.includes('overloaded')
     || rawMessage.includes('service unavailable')
     || rawMessage.includes('bad gateway')
     || rawMessage.includes('gateway timeout')
-  ) {
+    || rawMessage.includes('internal server error')
+    || (typeof error?.status === 'string' && error.status.toUpperCase() === 'UNAVAILABLE');
+
+  if (isServerError) {
+    let retryAfterMs: number | undefined;
+    const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
+    if (retryMatch) {
+      const value = parseFloat(retryMatch[1]);
+      const unit = retryMatch[2]?.toLowerCase() || 's';
+      retryAfterMs = unit.startsWith('ms') ? value : Math.round(value * 1000);
+    }
+
     return {
       kind: 'SERVER_ERROR',
-      message: error.message || 'LLM Provider Server Error.',
+      message: error.message || 'LLM Provider Server Error / Service Unavailable (503).',
       retryable: true,
-      statusCode,
+      statusCode: statusCode || 503,
+      retryAfterMs,
     };
   }
 

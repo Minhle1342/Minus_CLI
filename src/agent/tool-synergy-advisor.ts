@@ -97,6 +97,24 @@ export class ToolSynergyAdvisor {
       }
     }
 
+    // 3.4. Vừa chạy get_diagnostics (Playbook C: Verification Transition)
+    if (lastToolName === 'get_diagnostics') {
+      const isClean = lastToolResult && !lastToolResult.error && lastToolResult.clean === true && (!lastToolResult.totalErrors || lastToolResult.totalErrors === 0);
+      if (isClean) {
+        return {
+          playbook: 'C_MUTATION',
+          guidance: 'Diagnostics clean (0 syntax and type errors). Verification passed! You can now call "submit_solution" with empirical proof and summary, or run specific test suites via "run_command" if required.',
+          suggestedTools: ['submit_solution', 'run_command'],
+        };
+      }
+      const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: `Diagnostics detected ${errCount} compiler/type error(s). Use "replace_text" or "apply_patch" to resolve errors before submitting.`,
+        suggestedTools: ['replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
+      };
+    }
+
     // 3.5. Cảnh báo lỗi và gợi ý công cụ thay thế từ Tool Use Guardian (Playbook B: Root Cause Debugging)
     const guardianDiag = context.guardianDiagnosis || lastToolResult?.guardianDiagnosis;
     if (guardianDiag) {

@@ -20,6 +20,7 @@ import { findReferencesTool } from './tools/find-references.js';
 import { getDiagnosticsTool } from './tools/get-diagnostics.js';
 import { analyzeImpactTool } from './tools/blast-radius.js';
 import { ToolUseGuardian, classifyToolFailure, DEFAULT_TOOL_ALTERNATIVES } from './tools/tool-use-guardian.js';
+import { generateFileToolDiff, isMutationTool } from './tools/diff-generator.js';
 import { ContextGuardian, ContextAgent } from './context/index.js';
 import { createInspectImageTool, extractImageDimensions, detectMimeType } from './tools/inspect-image.js';
 import { TypeScriptService } from './tools/typescript-service.js';
@@ -125,13 +126,14 @@ import { searchWebTool } from './tools/search-web.js';
 import { readUrlContentTool, htmlToMarkdown } from './tools/read-url-content.js';
 import { SharedContextService } from './agent/shared-context-service.js';
 import { AgentEventBus } from './agent/agent-event-bus.js';
-import { AgentOrchestrator } from './agent/agent-orchestrator.js';
+import { AgentOrchestrator, computeTaskSimilarity, FileConcurrencyLockManager, ORCHESTRATOR_NOT_BLOCKS } from './agent/agent-orchestrator.js';
 import { SubagentManager } from './agent/subagent-manager.js';
 import { AgentRegistry } from './agent/agent-registry.js';
 import { getBenchmarkSpecialists, findSpecialistForBenchmark } from './agent/benchmark-agents.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './tools/shared-context-tools.js';
 import { createPublishAgentEventTool } from './tools/agent-event-tools.js';
-import { createAllocateAgentTaskTool } from './tools/subagent-tools.js';
+import { createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from './tools/subagent-tools.js';
+import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
 import { CodebaseIntelligenceService } from './tools/codebase-intelligence.js';
 import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
 import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
@@ -883,6 +885,133 @@ async function runUnitTests() {
   permManager.setMode('read_only');
   const readOnlyBlock = await permRunner.run('write_file', { path: 'test_perm.txt', content: 'x' });
   assert(readOnlyBlock.result.errorCode === 'PERMISSION_DENIED', 'Chế độ Read-Only chặn mọi thao tác sửa/ghi file');
+
+  // Test 3.9.3: Kiểm tra generateFileToolDiff sinh đúng định dạng Git Diff (---, +++, @@, -, +) cho các tool sửa file
+  {
+    // 1. replace_text
+    const testDiffFile = 'diff_test_sample.ts';
+    await fs.writeFile(workspace.resolveSafePath(testDiffFile), 'const a = 1;\nconst b = 2;\nconst c = 3;\n', 'utf-8');
+    const replaceDiff = await generateFileToolDiff('replace_text', {
+      path: testDiffFile,
+      oldText: 'const b = 2;',
+      newText: 'const b = 42;',
+    }, workspace.rootDir);
+    assert(Boolean(replaceDiff), 'generateFileToolDiff sinh diff cho replace_text');
+    assert(replaceDiff!.includes('--- a/diff_test_sample.ts') && replaceDiff!.includes('+++ b/diff_test_sample.ts'), 'replace_text diff có header file chuẩn');
+    assert(replaceDiff!.includes('-const b = 2;') && replaceDiff!.includes('+const b = 42;'), 'replace_text diff có dòng - cũ và + mới');
+
+    // 2. write_file trên file có sẵn
+    const writeDiff = await generateFileToolDiff('write_file', {
+      path: testDiffFile,
+      content: 'const a = 1;\nconst b = 100;\nconst c = 3;\n',
+    }, workspace.rootDir);
+    assert(Boolean(writeDiff), 'generateFileToolDiff sinh diff cho write_file trên file có sẵn');
+    assert(writeDiff!.includes('-const b = 2;') && writeDiff!.includes('+const b = 100;'), 'write_file diff phát hiện đúng dòng thay đổi');
+
+    // 3. create_file
+    const createDiff = await generateFileToolDiff('create_file', {
+      path: 'new_created_file.ts',
+      content: 'export const hello = "world";\n',
+    }, workspace.rootDir);
+    assert(createDiff!.includes('--- /dev/null') && createDiff!.includes('+++ b/new_created_file.ts'), 'create_file diff có header /dev/null');
+    assert(createDiff!.includes('+export const hello = "world";'), 'create_file diff chứa toàn bộ dòng mới là +');
+
+    // 4. delete_file
+    const deleteDiff = await generateFileToolDiff('delete_file', {
+      path: testDiffFile,
+    }, workspace.rootDir);
+    assert(deleteDiff!.includes('--- a/diff_test_sample.ts') && deleteDiff!.includes('+++ /dev/null'), 'delete_file diff có header /dev/null');
+    assert(deleteDiff!.includes('-const a = 1;'), 'delete_file diff chứa các dòng cũ bị xóa');
+
+    // 5. move_file
+    const moveDiff = await generateFileToolDiff('move_file', {
+      sourcePath: 'src/old.ts',
+      targetPath: 'src/new.ts',
+    }, workspace.rootDir);
+    assert(moveDiff!.includes('rename from src/old.ts') && moveDiff!.includes('rename to src/new.ts'), 'move_file diff chứa thông tin rename');
+
+    // 6. apply_patch
+    const samplePatch = '--- a/foo.ts\n+++ b/foo.ts\n@@ -1,1 +1,1 @@\n-old\n+new';
+    const patchDiff = await generateFileToolDiff('apply_patch', {
+      patch: `\`\`\`diff\n${samplePatch}\n\`\`\``,
+    }, workspace.rootDir);
+    assert(patchDiff === samplePatch, 'apply_patch chuẩn hóa bỏ code block markdown');
+
+    try { await fs.unlink(workspace.resolveSafePath(testDiffFile)); } catch {}
+  }
+
+  // Test 3.9.4: Kiểm tra CLI.renderDiffView hiển thị màu đỏ cho dòng cũ và màu xanh cho dòng mới
+  {
+    const loggedLines: string[] = [];
+    const savedLog = console.log;
+    console.log = (...args: any[]) => { loggedLines.push(args.map(a => String(a)).join(' ')); };
+    try {
+      CLI.renderDiffView('--- a/app.ts\n+++ b/app.ts\n@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;', 'app.ts');
+    } finally {
+      console.log = savedLog;
+    }
+    const output = loggedLines.join('\n');
+    assert(output.includes('GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW)'), 'renderDiffView in tiêu đề Diff View');
+    assert(output.includes('-const x = 1;'), 'renderDiffView in nội dung dòng cũ');
+    assert(output.includes('+const x = 2;'), 'renderDiffView in nội dung dòng mới');
+    const hasRed = output.includes('\x1b[31m') || output.includes('\x1b[38;5;196m');
+    const hasGreen = output.includes('\x1b[32m') || output.includes('\x1b[38;5;48m');
+    assert(hasRed, 'renderDiffView tô màu đỏ cho dòng xóa/thay thế (-) trong Git Diff');
+    assert(hasGreen, 'renderDiffView tô màu xanh cho dòng thêm mới (+) trong Git Diff');
+  }
+
+  // Test 3.9.5: Kiểm tra CLI.renderPermissionPrompt tự động hiển thị Diff View khi request.diff tồn tại
+  {
+    const loggedLines: string[] = [];
+    const savedLog = console.log;
+    console.log = (...args: any[]) => { loggedLines.push(args.map(a => String(a)).join(' ')); };
+    try {
+      CLI.renderPermissionPrompt({
+        toolName: 'replace_text',
+        category: 'file_edit',
+        target: 'src/main.ts',
+        summary: 'Chỉnh sửa src/main.ts',
+        riskLevel: 'MEDIUM',
+        diff: '--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-oldLine\n+newLine',
+      });
+    } finally {
+      console.log = savedLog;
+    }
+    const output = loggedLines.join('\n');
+    assert(output.includes('GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW): src/main.ts'), 'renderPermissionPrompt tự động kích hoạt Diff View');
+    assert(output.includes('-oldLine') && output.includes('+newLine'), 'renderPermissionPrompt in diff đối chiếu trước khi hỏi cấp quyền');
+  }
+
+  // Test 3.9.6: Kiểm tra cơ chế approve_all_session vẫn hiển thị Diff View trực quan cho người dùng theo dõi
+  {
+    const sessionDiffPermManager = new PermissionManager('ask_sensitive');
+    sessionDiffPermManager.setWorkspaceRoot(workspace.rootDir);
+    let sessionPromptCount = 0;
+    sessionDiffPermManager.setPromptHandler(async () => {
+      sessionPromptCount++;
+      return 'approve_all_session';
+    });
+    const sessionDiffRunner = new ToolRunner(registry, workspace, sessionDiffPermManager);
+
+    // Lần 1: Người dùng chọn approve_all_session
+    await sessionDiffRunner.run('write_file', { path: 'test_auto_diff.txt', content: 'hello session' });
+    assert(sessionPromptCount === 1, 'Lần 1 hỏi người dùng');
+
+    // Lần 2: Đã approve_all_session, không hỏi lại nhưng VẪN hiển thị Diff View trực quan dạng Git Diff
+    const autoApprovedLogs: string[] = [];
+    const savedLog = console.log;
+    console.log = (...args: any[]) => { autoApprovedLogs.push(args.map(a => String(a)).join(' ')); };
+    try {
+      await sessionDiffRunner.run('write_file', { path: 'test_auto_diff.txt', content: 'hello session updated' });
+    } finally {
+      console.log = savedLog;
+    }
+    assert(sessionPromptCount === 1, 'Lần 2 không hỏi lại vì đã approve_all_session');
+    const output = autoApprovedLogs.join('\n');
+    assert(output.includes('AUTO-APPROVED IN SESSION'), 'Khi approve_all_session, hệ thống thông báo auto-approved kèm Diff View');
+    assert(output.includes('+hello session updated'), 'Diff View trong chế độ approve_all_session in đúng dòng mới');
+    try { await fs.unlink(workspace.resolveSafePath('test_auto_diff.txt')); } catch {}
+  }
 
   // Test 3.10: Kiểm thử PatchEngine & Unified Diff với Fuzz Matching (Codex CLI Standard)
   const patchSamplePath = 'test_patch_sample.ts';
@@ -5312,6 +5441,34 @@ Always write tests first!`;
   const submitEvidenceKinds = classifyToolEvidence('submit_solution', {}, { success: true, submitted: true });
   assert(submitEvidenceKinds.includes('verification'), 'classifyToolEvidence định danh submit_solution là verification evidence');
 
+  // Kiểm thử classifyToolEvidence với get_diagnostics (clean vs error)
+  const diagCleanEvidence = classifyToolEvidence('get_diagnostics', {}, { clean: true, totalErrors: 0 });
+  assert(diagCleanEvidence.includes('verification'), 'get_diagnostics sạch (0 errors) được phân loại là verification evidence');
+  assert(diagCleanEvidence.includes('inspection'), 'get_diagnostics sạch vẫn giữ vai trò inspection');
+
+  const diagErrorEvidence = classifyToolEvidence('get_diagnostics', {}, { clean: false, totalErrors: 3 });
+  assert(!diagErrorEvidence.includes('verification'), 'get_diagnostics có lỗi không được coi là verification');
+  assert(diagErrorEvidence.includes('inspection'), 'get_diagnostics có lỗi vẫn được coi là inspection');
+
+  // Kiểm thử VerificationPolicy ghi nhận get_diagnostics và cho phép complete
+  const testPolicy = new VerificationPolicy();
+  testPolicy.recordModification('src/index.ts');
+  assert(testPolicy.canComplete().allowed === false, 'VerificationPolicy chặn hoàn thành khi có unverified modification');
+  testPolicy.recordVerification('get_diagnostics', true, 'Diagnostics clean (0 errors)', 0, { tier: 'typecheck' });
+  assert(testPolicy.canComplete().allowed === true, 'VerificationPolicy cho phép hoàn thành sau khi get_diagnostics thành công');
+  assert(testPolicy.getLastVerification()?.tier === 'typecheck', 'get_diagnostics được xếp vào tier typecheck');
+
+  // Kiểm thử luồng Session + CompletionEvidenceGate: mutation -> get_diagnostics (clean) -> submit_solution
+  const diagSession = new Session('diag-test-session');
+  diagSession.append('tool/call', { turn: 1, toolName: 'replace_text', toolCallId: 'call-1', args: { path: 'src/index.ts' } });
+  diagSession.append('tool/result', { turn: 1, toolName: 'replace_text', toolCallId: 'call-1', result: { success: true } });
+  diagSession.append('tool/call', { turn: 1, toolName: 'get_diagnostics', toolCallId: 'call-2', args: {} });
+  diagSession.append('tool/result', { turn: 1, toolName: 'get_diagnostics', toolCallId: 'call-2', result: { clean: true, totalErrors: 0, diagnostics: [] } });
+
+  const diagGate = new CompletionEvidenceGate();
+  const diagGateDecision = diagGate.evaluate('', diagSession, { turn: 1, codeChangeRequired: true });
+  assert(diagGateDecision.allow === true, 'CompletionEvidenceGate chấp thuận khi get_diagnostics chạy sạch sau mutation');
+
   const evidenceGateWithSubmit = new CompletionEvidenceGate();
   const evidenceDecisionWithSubmit = evidenceGateWithSubmit.evaluate('Tôi sẽ tóm tắt kết quả', evalSession, { hasSubmittedSolution: true });
   assert(evidenceDecisionWithSubmit.allow === true, 'CompletionEvidenceGate chấp thuận khi hasSubmittedSolution = true');
@@ -5946,6 +6103,22 @@ Always write tests first!`;
   assert(adviceMutation.suggestedTools.includes('get_diagnostics'), 'Gợi ý get_diagnostics sau khi sửa code');
   assert(adviceMutation.suggestedTools.includes('run_command'), 'Gợi ý run_command sau khi sửa code');
 
+  // 1a-2. Playbook C (Verification Transition): Vừa chạy get_diagnostics sạch -> Gợi ý submit_solution
+  const adviceDiagClean = advisor.advise({
+    lastToolName: 'get_diagnostics',
+    lastToolResult: { clean: true, totalErrors: 0 },
+  });
+  assert(adviceDiagClean.playbook === 'C_MUTATION', 'Advisor nhận diện Playbook C sau khi get_diagnostics sạch');
+  assert(adviceDiagClean.suggestedTools.includes('submit_solution'), 'Gợi ý submit_solution sau khi get_diagnostics sạch');
+
+  // 1a-3. Playbook B (Debugging): Vừa chạy get_diagnostics có lỗi -> Gợi ý sửa lỗi
+  const adviceDiagError = advisor.advise({
+    lastToolName: 'get_diagnostics',
+    lastToolResult: { clean: false, totalErrors: 2 },
+  });
+  assert(adviceDiagError.playbook === 'B_DEBUGGING', 'Advisor nhận diện Playbook B khi get_diagnostics có lỗi');
+  assert(adviceDiagError.suggestedTools.includes('replace_text'), 'Gợi ý replace_text để sửa lỗi compiler');
+
   // 1b. Playbook B (Deep Debugging): Phát hiện lỗi -> Gợi ý query_call_graph & inspect_symbol
   const adviceError = advisor.advise({
     lastToolName: 'run_command',
@@ -6204,8 +6377,59 @@ Always write tests first!`;
   assert(Boolean(queueCmd), 'SLASH_COMMANDS có chứa lệnh /queue');
   assert(Boolean(queueCmd?.aliases?.includes('/q')), '/queue có alias /q');
 
-  const steerCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/steer');
-  assert(Boolean(steerCmd), 'SLASH_COMMANDS có chứa lệnh /steer');
+  // 38.5. Concurrent Input Queuing (Người dùng nhập lệnh lúc runtime đang thực thi)
+  {
+    // 1. Kiểm tra CLI.renderQueuedMessageEnqueued
+    const loggedQueueLines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { loggedQueueLines.push(args.map(a => String(a)).join(' ')); };
+    try {
+      CLI.renderQueuedMessageEnqueued('Hãy kiểm tra thêm file tsconfig.json trước khi build', 'input-runtime-1');
+    } finally {
+      console.log = originalLog;
+    }
+    const loggedOutput = loggedQueueLines.join('\n');
+    assert(loggedOutput.includes('QUEUED MESSAGE ENQUEUED (MID-TURN STEERING)'), 'renderQueuedMessageEnqueued in tiêu đề hàng đợi');
+    assert(loggedOutput.includes('input-runtime-1'), 'renderQueuedMessageEnqueued in ID tin nhắn');
+    assert(loggedOutput.includes('Hãy kiểm tra thêm file tsconfig.json'), 'renderQueuedMessageEnqueued in nội dung câu lệnh');
+
+    // 2. Mô phỏng Concurrent Runtime Queuing trong khi Turn đang chạy
+    const concurrentSession = new Session('session-concurrent-queue');
+    concurrentSession.addUserMessage('Khởi động tác vụ ban đầu');
+    const concurrentInbox = new AgentInbox();
+
+    // Giả lập runtime line listener nhận input khi agent đang thực thi
+    const handleRuntimeInput = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const enqueued = concurrentInbox.enqueue(concurrentSession.id, trimmed, 'human', { isSteering: true });
+      concurrentSession.append('input/queued', {
+        inputId: enqueued.id,
+        inputText: trimmed,
+        source: 'human',
+        isSteering: true,
+      });
+      return enqueued;
+    };
+
+    // Người dùng gõ 2 câu lệnh trong lúc turn đang chạy
+    const itemA = handleRuntimeInput('Câu lệnh 1: Chuyển hướng sang refactor');
+    const itemB = handleRuntimeInput('Câu lệnh 2: Chạy kiểm thử sau khi sửa');
+
+    assert(concurrentInbox.pending(concurrentSession.id) === 2, 'Cả 2 câu lệnh được đưa vào hàng đợi thành công trong lúc turn đang chạy');
+    const pendingInputs = concurrentSession.getPendingInputs();
+    assert(pendingInputs.length === 2, 'Session ghi nhận 2 pending input events');
+    assert(pendingInputs[0].text.includes('Chuyển hướng sang refactor'), 'Pending input 1 khớp nội dung');
+
+    // Mid-turn claim câu lệnh đầu tiên
+    const midTurnClaimed = concurrentInbox.claimSteerMessage(concurrentSession.id);
+    assert(midTurnClaimed?.id === itemA?.id, 'Đầu step kế tiếp, claimSteerMessage lấy đúng câu lệnh 1');
+    assert(concurrentInbox.pending(concurrentSession.id) === 1, 'Hàng đợi còn lại 1 câu lệnh sau khi bẻ lái mid-turn');
+
+    // Sau khi turn kết thúc, câu lệnh thứ hai vẫn còn để drain tiếp
+    const remainingInQueue = concurrentInbox.peek(concurrentSession.id);
+    assert(remainingInQueue?.id === itemB?.id, 'Câu lệnh 2 sẵn sàng cho post-turn drain tiếp theo');
+  }
 
   // ========================================
   // 🧪 39. KIỂM THỬ BỐN CHIẾN LƯỢC TỐI ƯU HÓA SYSTEM PROMPT (GIẢM >70% TOKEN MỖI TURN)
@@ -6831,6 +7055,288 @@ Always write tests first!`;
   orch44.recordTaskCompletion('agent-flaky', 400, false);
   orch44.recordTaskCompletion('agent-flaky', 500, false);
   assert(orch44.getOrchestrationMetrics().bottlenecks.includes('agent-flaky'), 'Tự động phát hiện và gắn cờ bottleneck khi lỗi > 30%');
+
+  // ========================================
+  // 45. KIỂM THỬ TỰ ĐỘNG GỬI PROMPT "Continue" KHI GẶP CIRCUIT BREAKER & QUOTA CAP (5 RETRIES)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 45. KIỂM THỬ TỰ ĐỘNG GỬI PROMPT "Continue" KHI GẶP CIRCUIT BREAKER & QUOTA CAP (5 RETRIES)');
+  console.log('========================================');
+
+  const cbWorkspace = new Workspace();
+
+  // 1. Tự động gửi prompt "Continue" ngầm khi gặp lỗi Rate Limit (429) và phục hồi thành công
+  let cbCalls = 0;
+  class FlakyCircuitBreakerLLM {
+    async generate(): Promise<any> {
+      cbCalls++;
+      if (cbCalls <= 2) {
+        throw new Error('Resource exhausted: rate limit exceeded. Please retry in 0.1s');
+      }
+      return {
+        text: 'Nhiệm vụ đã hoàn thành xuất sắc!',
+        toolCalls: [],
+        finishReason: 'stop',
+      };
+    }
+  }
+
+  const cbSession = new Session();
+  cbSession.addUserMessage('Kiểm tra tự phục hồi Circuit Breaker');
+  const cbLoop = new AgentLoop(new FlakyCircuitBreakerLLM(), new ToolRegistry(), { maxSteps: 3, workspace: cbWorkspace });
+  cbLoop.bindSession(cbSession);
+
+  const cbResult = await cbLoop.run(cbSession);
+  assert(cbResult.includes('hoàn thành'), 'AgentLoop tự động thử lại thành công mà không ngắt giữa chừng');
+  assert(cbCalls === 3, `Đã tự động gọi LLM 3 lần (2 lần lỗi + 1 lần thành công), thực tế: ${cbCalls}`);
+
+  const cbEvents = cbSession.getEvents();
+  const cbContinueEvents = cbEvents.filter((e) =>
+    e.type === 'user/message' && e.data.source === 'system' && e.data.content?.parts?.[0]?.text === 'Continue'
+  );
+  assert(cbContinueEvents.length === 2, `Đã tự động gửi ngầm 2 prompt "Continue" cho LLM, thực tế: ${cbContinueEvents.length}`);
+
+  // 2. Kiểm tra giới hạn 5 lần (Retry Cap): Nếu quá 5 lần vẫn lỗi thì báo "LLM đã hết Quota"
+  let quotaAttempts = 0;
+  class PermanentlyExhaustedLLM45 {
+    async generate(): Promise<any> {
+      quotaAttempts++;
+      throw new Error('Quota exceeded for model gemini-2.5-flash. Check billing or plan.');
+    }
+  }
+
+  const exhaustedSession45 = new Session();
+  exhaustedSession45.addUserMessage('Tác vụ thử thách quota');
+  const exhaustedLoop45 = new AgentLoop(new PermanentlyExhaustedLLM45(), new ToolRegistry(), { maxSteps: 3, workspace: cbWorkspace });
+  exhaustedLoop45.bindSession(exhaustedSession45);
+
+  let quotaThrew = false;
+  let quotaErrMessage = '';
+  try {
+    await exhaustedLoop45.run(exhaustedSession45);
+  } catch (err: any) {
+    quotaThrew = true;
+    quotaErrMessage = err?.message || String(err);
+  }
+
+  assert(quotaThrew === true, 'AgentLoop dừng lại và ném ngoại lệ khi vượt quá 5 lần retry');
+  assert(quotaAttempts === 6, `Đã thử đủ 6 lần (1 lần gốc + 5 lần retry Continue), thực tế: ${quotaAttempts}`);
+  assert(quotaErrMessage.includes('LLM đã hết Quota'), `Thông báo lỗi chứa rõ "LLM đã hết Quota", thực tế: ${quotaErrMessage}`);
+  assert(quotaErrMessage.includes('5 lần'), `Thông báo lỗi ghi nhận đã tự động gửi 5 lần, thực tế: ${quotaErrMessage}`);
+
+  // 3. Kiểm tra phân loại lỗi chính xác cho trường hợp 503 UNAVAILABLE từ Google Gemini SDK
+  const gemini503Error = new Error('got status: UNAVAILABLE. {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}');
+  (gemini503Error as any).status = 'UNAVAILABLE';
+  const classified503 = classifyLLMError(gemini503Error);
+  assert(classified503.kind === 'SERVER_ERROR', `classifyLLMError phân loại đúng SERVER_ERROR cho 503 UNAVAILABLE, thực tế: ${classified503.kind}`);
+  assert(classified503.retryable === true, '503 UNAVAILABLE được đánh dấu retryable = true');
+  assert(classified503.statusCode === 503, `statusCode được trích xuất chính xác là 503, thực tế: ${classified503.statusCode}`);
+
+  // 4. Kiểm tra AgentLoop tự động gửi prompt "Continue" ngầm khi gặp lỗi 503 UNAVAILABLE và phục hồi
+  let unavailableCalls = 0;
+  class Flaky503LLM {
+    async generate(): Promise<any> {
+      unavailableCalls++;
+      if (unavailableCalls <= 2) {
+        const err = new Error('got status: UNAVAILABLE. {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}');
+        (err as any).status = 'UNAVAILABLE';
+        throw err;
+      }
+      return {
+        text: 'Nhiệm vụ vượt qua 503 thành công!',
+        toolCalls: [],
+        finishReason: 'stop',
+      };
+    }
+  }
+
+  const unavailableSession = new Session();
+  unavailableSession.addUserMessage('Kiểm tra 503 auto-retry');
+  const unavailableLoop = new AgentLoop(new Flaky503LLM(), new ToolRegistry(), { maxSteps: 3, workspace: cbWorkspace });
+  unavailableLoop.bindSession(unavailableSession);
+
+  const unavailableResult = await unavailableLoop.run(unavailableSession);
+  assert(unavailableResult.includes('vượt qua 503 thành công'), 'AgentLoop tự động thử lại thành công khi gặp 503 UNAVAILABLE');
+  assert(unavailableCalls === 3, `Đã tự động gọi LLM 3 lần khi gặp 503 (2 lần lỗi + 1 lần thành công), thực tế: ${unavailableCalls}`);
+
+  // 5. Kiểm tra AgentLoop dừng lại sau 5 lần thử lại liên tiếp khi máy chủ 503 liên tục
+  let permanent503Calls = 0;
+  class Permanent503LLM {
+    async generate(): Promise<any> {
+      permanent503Calls++;
+      const err = new Error('got status: UNAVAILABLE. {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}');
+      (err as any).status = 'UNAVAILABLE';
+      throw err;
+    }
+  }
+
+  const perm503Session = new Session();
+  perm503Session.addUserMessage('Tác vụ thử thách server 503');
+  const perm503Loop = new AgentLoop(new Permanent503LLM(), new ToolRegistry(), { maxSteps: 3, workspace: cbWorkspace });
+  perm503Loop.bindSession(perm503Session);
+
+  let perm503Threw = false;
+  let perm503ErrMsg = '';
+  try {
+    await perm503Loop.run(perm503Session);
+  } catch (err: any) {
+    perm503Threw = true;
+    perm503ErrMsg = err?.message || String(err);
+  }
+
+  assert(perm503Threw === true, 'AgentLoop dừng lại và ném ngoại lệ khi 503 UNAVAILABLE vượt quá 5 lần retry');
+  assert(permanent503Calls === 6, `Đã thử đủ 6 lần khi 503 (1 lần gốc + 5 lần retry Continue), thực tế: ${permanent503Calls}`);
+  assert(perm503ErrMsg.includes('quá tải hoặc không khả dụng'), `Thông báo lỗi ghi rõ server quá tải hoặc không khả dụng, thực tế: ${perm503ErrMsg}`);
+  // ========================================
+  // 46. KIỂM THỬ MULTI-AGENT CHUẨN CÔNG NGHIỆP (BRAINSTORMING, ANTI-DUP, LOCKS, GATES & HEARTBEATS)
+  // ========================================
+  console.log('\n========================================');
+  console.log('🧪 46. KIỂM THỬ MULTI-AGENT CHUẨN CÔNG NGHIỆP (3 TÀI LIỆU QUY CHUẨN)');
+  console.log('========================================');
+
+  // 1. Kiểm thử MultiAgentBrainstormingEngine: 3 Pha, 5 Personas, Decision Log, Exit Criteria
+  const bEngine = new MultiAgentBrainstormingEngine();
+  const bResult = await bEngine.runReview('Thiết kế kiến trúc bộ nhớ phân tán cho hệ thống tác tử');
+  assert(bResult.understandingLock.confirmed === true, 'Understanding Lock được hoàn tất và xác nhận');
+  assert(bResult.reviewerFeedbacks['skeptic-challenger'] !== undefined, 'Skeptic / Challenger phản biện giả định ngầm');
+  assert(bResult.reviewerFeedbacks['constraint-guardian'] !== undefined, 'Constraint Guardian kiểm tra các ràng buộc phi chức năng');
+  assert(bResult.reviewerFeedbacks['user-advocate'] !== undefined, 'User Advocate đánh giá trải nghiệm người dùng');
+  assert(bResult.finalDisposition === 'APPROVED', 'Integrator / Arbiter ra phán quyết APPROVED sau khi giải quyết objections');
+  assert(bResult.exitCriteriaMet === true, 'Exit Criteria đạt chuẩn để chuyển sang bước triển khai');
+  assert(bResult.decisionLog.length >= 2, 'Decision Log bắt buộc được ghi nhận đầy đủ với các phương án và lý do');
+
+  const mdLog = bEngine.renderDecisionLogMarkdown(bResult);
+  assert(mdLog.includes('# Multi-Agent Decision Log:'), 'renderDecisionLogMarkdown tạo tiêu đề chuẩn');
+  assert(mdLog.includes('## 1. Understanding Lock'), 'renderDecisionLogMarkdown ghi nhận Understanding Lock');
+  assert(mdLog.includes('## 4. Arbiter Final Determination'), 'renderDecisionLogMarkdown ghi nhận phán quyết trọng tài');
+
+  // 2. Kiểm thử Tool brainstorm_design
+  const brainstormTool = createBrainstormDesignTool(bEngine);
+  const toolExecRes46 = await brainstormTool.execute({ goal: 'Kiến trúc PubSub phân tán' }, new Workspace(process.cwd()));
+  assert(toolExecRes46.success === true, 'Tool brainstorm_design thực thi thành công');
+  assert(toolExecRes46.disposition === 'APPROVED', 'Tool brainstorm_design trả về disposition APPROVED');
+  assert(Array.isArray(toolExecRes46.decisionLog), 'Tool brainstorm_design trả về mảng decisionLog');
+
+  // 3. Kiểm thử Task Anti-Duplication Engine (Ngưỡng >= 55%)
+  const simIdentical46 = computeTaskSimilarity('Fix authentication bug', 'Fix authentication bug');
+  assert(simIdentical46 === 1.0, 'Độ tương đồng 2 task giống hệt là 1.0');
+
+  const simSimilar = computeTaskSimilarity('Fix authentication bug in login controller', 'Fix the login auth bug');
+  assert(simSimilar >= 0.55, `Độ tương đồng 2 task tương tự đạt >= 0.55 (thực tế: ${simSimilar.toFixed(2)})`);
+
+  const simDifferent = computeTaskSimilarity('Deploy to Railway', 'Optimize SQL database index');
+  assert(simDifferent < 0.40, `Độ tương đồng 2 task hoàn toàn khác nhau < 0.40 (thực tế: ${simDifferent.toFixed(2)})`);
+
+  const reg46 = new AgentRegistry();
+  reg46.register('agent-worker-1', 'Worker 1');
+  reg46.advertiseCapabilities('agent-worker-1', ['coding']);
+  const orch46 = new AgentOrchestrator(reg46);
+
+  // Phân bổ task 1
+  orch46.allocateTask('Fix authentication bug in auth service', ['coding']);
+
+  // Phân bổ task trùng lặp với checkAntiDuplication: true -> phải ném lỗi DUPLICATE_TASK_DETECTED
+  let dupThrew = false;
+  let dupMessage = '';
+  try {
+    orch46.allocateTask('Fix authentication bug in auth service', ['coding'], { checkAntiDuplication: true });
+  } catch (err: any) {
+    dupThrew = true;
+    dupMessage = err.message;
+  }
+  assert(dupThrew === true, 'Anti-Duplication chặn việc phân bổ tác vụ trùng lặp khi checkAntiDuplication = true');
+  assert(dupMessage.includes('DUPLICATE_TASK_DETECTED'), 'Thông báo lỗi chỉ rõ DUPLICATE_TASK_DETECTED');
+
+  // 4. Kiểm thử File-Level Concurrency Locking
+  const lockMgr = new FileConcurrencyLockManager();
+  const lock1 = lockMgr.acquire('agent-A', ['src/auth/login.ts', 'src/auth/token.ts']);
+  assert(lock1.success === true && lock1.acquired.length === 2, 'Agent A lấy khóa file thành công');
+
+  // Agent B yêu cầu cùng file -> phải bị từ chối
+  const lock2 = lockMgr.acquire('agent-B', ['src/auth/login.ts', 'src/user/profile.ts']);
+  assert(lock2.success === false, 'Agent B bị từ chối khi lấy file đang bị Agent A khóa');
+  assert(lock2.conflictingFiles.includes('src/auth/login.ts'), 'Chỉ rõ file conflict src/auth/login.ts');
+
+  // Agent A giải phóng khóa -> Agent B lấy lại thành công
+  const released = lockMgr.release('agent-A');
+  assert(released.length === 2, 'Agent A giải phóng thành công 2 file locks');
+  const lock3 = lockMgr.acquire('agent-B', ['src/auth/login.ts', 'src/user/profile.ts']);
+  assert(lock3.success === true, 'Agent B lấy khóa thành công sau khi Agent A giải phóng');
+
+  // 5. Kiểm thử Evidence-Based Quality Gate
+  // A. Trường hợp FAIL: Claim hoàn thành nhưng không có file nào thay đổi
+  const qgFailNoFiles = orch46.verifyQualityGate({
+    requireFilesModified: true,
+    modifiedFiles: [],
+    diffText: '',
+  });
+  assert(qgFailNoFiles.passed === false, 'Quality Gate từ chối khi claim hoàn thành nhưng không có file sửa đổi');
+
+  // B. Trường hợp FAIL: Rò rỉ secrets / API keys trong diff
+  const qgFailSecret = orch46.verifyQualityGate({
+    requireFilesModified: true,
+    modifiedFiles: ['src/config.ts'],
+    diffText: '+ const apiKey = "sk-1234567890abcdef1234567890";',
+    scanSecrets: true,
+  });
+  assert(qgFailSecret.passed === false, 'Quality Gate từ chối khi phát hiện mã khóa nhạy cảm / token bị leak');
+  assert(qgFailSecret.checks.secretScan.pass === false, 'secretScan check trả về false');
+
+  // C. Trường hợp FAIL: Chạm vào file ngoài scope cho phép
+  const qgFailScope = orch46.verifyQualityGate({
+    requireFilesModified: true,
+    allowedFileScope: ['src/allowed.ts'],
+    modifiedFiles: ['src/allowed.ts', 'src/hacked.ts'],
+  });
+  assert(qgFailScope.passed === false, 'Quality Gate từ chối khi sửa đổi file ngoài allowed scope');
+
+  // D. Trường hợp PASS: Đầy đủ file diff, không lộ secret, đúng scope, test pass
+  const qgPass = orch46.verifyQualityGate({
+    requireFilesModified: true,
+    allowedFileScope: ['src/app.ts'],
+    modifiedFiles: ['src/app.ts'],
+    diffText: '+ const version = "2.0.0";',
+    scanSecrets: true,
+    requiredTestPass: true,
+    commandExecutionRecords: [{ command: 'npm test', exitCode: 0 }],
+  });
+  assert(qgPass.passed === true, 'Quality Gate chấp thuận khi thỏa mãn toàn bộ 4 lớp kiểm định');
+
+  // 6. Kiểm thử Tool verify_subagent_quality
+  const verifyTool = createVerifySubagentQualityTool(orch46);
+  const vToolRes = await verifyTool.execute({
+    agentId: 'agent-worker-1',
+    requireFilesModified: true,
+    modifiedFiles: ['src/app.ts'],
+    diffText: '+ safe code',
+    scanSecrets: true,
+  }, new Workspace(process.cwd()));
+  assert(vToolRes.success === true, 'Tool verify_subagent_quality thực thi thành công');
+  assert(vToolRes.qualityGate.passed === true, 'Quality gate trả về passed = true');
+
+  // 7. Kiểm thử Heartbeat Monitor & Stale Detection
+  orch46.updateHeartbeat('agent-worker-1');
+  const freshHbs = orch46.checkHeartbeats(30 * 60 * 1000);
+  assert(freshHbs.length > 0 && freshHbs[0].isStale === false, 'Heartbeat mới ghi nhận trạng thái healthy');
+
+  // Mô phỏng stale heartbeat với timeout 0ms
+  const staleHbs = orch46.checkHeartbeats(0);
+  assert(staleHbs.some((h) => h.isStale === true), 'Phát hiện tác tử stale khi vượt quá thời gian heartbeat');
+
+  // 8. Kiểm tra Orchestrator NOT-blocks hằng số
+  assert(ORCHESTRATOR_NOT_BLOCKS.includes('NOT a code writer'), 'ORCHESTRATOR_NOT_BLOCKS chứa định nghĩa NOT a code writer');
+  assert(ORCHESTRATOR_NOT_BLOCKS.includes('NOT a researcher'), 'ORCHESTRATOR_NOT_BLOCKS chứa định nghĩa NOT a researcher');
+  assert(ORCHESTRATOR_NOT_BLOCKS.includes('NOT a tester'), 'ORCHESTRATOR_NOT_BLOCKS chứa định nghĩa NOT a tester');
+
+  // 9. Kiểm thử CLI UI rendering cho Multi-Agent
+  assert(typeof CLI.renderBrainstormResult === 'function', 'CLI có phương thức renderBrainstormResult');
+  assert(typeof CLI.renderFileLocks === 'function', 'CLI có phương thức renderFileLocks');
+  assert(typeof CLI.renderHeartbeats === 'function', 'CLI có phương thức renderHeartbeats');
+  assert(typeof CLI.renderQualityGateResult === 'function', 'CLI có phương thức renderQualityGateResult');
+  CLI.renderBrainstormResult(bResult);
+  CLI.renderFileLocks({ 'src/auth.ts': 'subagent-1' });
+  CLI.renderHeartbeats([{ agentId: 'subagent-1', idleDurationMs: 5000, isStale: false }]);
+  CLI.renderQualityGateResult(qgPass);
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

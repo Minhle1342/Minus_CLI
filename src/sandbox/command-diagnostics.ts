@@ -10,6 +10,33 @@ export interface CommandFailureDiagnostic {
   missingDependency?: string;
 }
 
+export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestion: string }> = {
+  rm: {
+    tool: 'delete_file',
+    suggestion: 'Lệnh POSIX "rm" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "delete_file" (cross-platform, an toàn hash, <2ms) để xóa file hoặc thư mục.',
+  },
+  cat: {
+    tool: 'read_file',
+    suggestion: 'Lệnh POSIX "cat" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "read_file" với "startLine"/"endLine" hoặc "symbol".',
+  },
+  ls: {
+    tool: 'list_files',
+    suggestion: 'Lệnh POSIX "ls" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "list_files" để liệt kê thư mục.',
+  },
+  touch: {
+    tool: 'create_file',
+    suggestion: 'Lệnh POSIX "touch" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "create_file" hoặc "write_file" để tạo file.',
+  },
+  cp: {
+    tool: 'create_file',
+    suggestion: 'Lệnh POSIX "cp" không khả dụng trên Windows shell. Hãy sử dụng "read_file" kết hợp "create_file" để sao chép file an toàn trong workspace.',
+  },
+  mv: {
+    tool: 'move_file',
+    suggestion: 'Lệnh POSIX "mv" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "move_file" để di chuyển hoặc đổi tên file.',
+  },
+};
+
 export function diagnoseCommandFailure(
   command: string,
   result: SandboxExecutionResult,
@@ -22,6 +49,20 @@ export function diagnoseCommandFailure(
     || (result.exitCode === 127 ? extractExecutableCandidates(command)[0] : undefined);
 
   if (missingExecutable) {
+    const isWindows = process.platform === 'win32';
+    const lowerExec = missingExecutable.toLowerCase();
+    const posixMapping = isWindows && !status?.isIsolated ? POSIX_TO_TOOL_SUGGESTIONS[lowerExec] : undefined;
+
+    if (posixMapping) {
+      return {
+        success: false,
+        errorCode: 'POSIX_COMMAND_ON_WINDOWS',
+        missingExecutable,
+        diagnostic: `Lệnh POSIX "${missingExecutable}" không khả dụng trên môi trường Windows shell (cmd.exe).`,
+        suggestion: posixMapping.suggestion,
+      };
+    }
+
     const environment = status?.isIsolated
       ? `Docker sandbox image ${status.image || 'unknown'}`
       : 'local host environment';

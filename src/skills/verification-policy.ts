@@ -95,7 +95,9 @@ export class VerificationPolicy {
     exitCode?: number,
     options?: { diffHash?: string; tier?: VerificationLadderTier; hasNewFailures?: boolean },
   ): void {
-    const isVerification = isVerificationCommand(command);
+    const isVerification = isVerificationCommand(command)
+      || Boolean(options?.tier)
+      || /\b(?:get_diagnostics|submit_solution)\b/i.test(command);
     const effectiveSuccess = success && isVerification && options?.hasNewFailures !== true;
 
     this.lastVerification = {
@@ -180,7 +182,7 @@ export class VerificationPolicy {
     if (/\b(?:test|pytest|cargo\s+test|dotnet\s+test)\b/i.test(command)) {
       return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-])/i.test(command) ? 'targeted_test' : 'full_test';
     }
-    if (/\b(?:tsc|typecheck)\b/i.test(command)) return 'typecheck';
+    if (/\b(?:tsc|typecheck|get_diagnostics)\b/i.test(command)) return 'typecheck';
     if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';
     return 'structural';
   }

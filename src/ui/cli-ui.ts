@@ -3,6 +3,8 @@ import { Workspace } from '../workspace/workspace.js';
 import { FileMentionEngine, AttachedItemSummary } from '../workspace/file-attachment.js';
 import { TreeScanResult, TreeNode, getFileExtensionBadge } from '../workspace/tree-explorer.js';
 import { ContextInspectionReport } from '../context/context-inspector.js';
+import type { BrainstormingSessionResult } from '../agent/multi-agent-brainstorming.js';
+import type { QualityGateResult } from '../agent/agent-orchestrator.js';
 
 export interface UICollapsePreferences {
   thinking: boolean;
@@ -111,12 +113,13 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/cancel', usage: '/cancel [all|goal|tasks|subagents]', description: 'Hủy tác vụ/goal/subagent đang chạy (hoặc bấm Ctrl+C / Esc trong khi thực thi)', category: 'Execution', aliases: ['/stop', '/abort'] },
   { command: '/resume', description: 'Tiếp tục thông minh tác vụ/kế hoạch/goal bị gián đoạn (One-Click Resume)', category: 'Execution', aliases: ['/continue'] },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
+  { command: '/brainstorm', usage: '/brainstorm <yêu cầu thiết kế>', description: 'Thẩm định thiết kế đa tác tử tuần tự (Structured Peer-Review) với 5 Persona & Decision Log', category: 'Planning', aliases: ['/review-design'] },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
   { command: '/dream', usage: '/dream [run|preview|status]', description: 'Hợp nhất bộ nhớ nền bằng mistral/codestral-latest', category: 'Memory' },
   { command: '/tools', description: 'Liệt kê tool đã đăng ký', category: 'Tools' },
   { command: '/cache', description: 'Xem chẩn đoán cơ chế Prompt Caching (MINUS standard)', category: 'Telemetry', aliases: ['/prompt-cache'] },
   { command: '/status', description: 'Xem trạng thái phiên làm việc', category: 'Telemetry' },
-  { command: '/agents', usage: '/agents [resume|stop] [id]', description: 'Xem hoặc điều khiển subagent', category: 'Subagents' },
+  { command: '/agents', usage: '/agents [resume|stop|spawn|allocate|locks|heartbeats|inspect] [args]', description: 'Xem hoặc điều khiển subagent, khóa file & giám sát nhịp tim', category: 'Subagents', aliases: ['/subagents'] },
   { command: '/goal', usage: '/goal [on|off|status|plan|resume|pause|complete|objective]', description: 'Vòng lặp tự trị dài hạn (Ralph Loop) khớp nối với cây kế hoạch /plan', category: 'Goal Mode' },
   { command: '/skills', usage: '/skills [inspect] [id]', description: 'Xem Superpowers skills', category: 'Superpowers' },
   { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Xem capability catalog', category: 'Superpowers' },
@@ -1180,6 +1183,74 @@ export class CLI {
     }
   }
 
+  static renderBrainstormResult(result: BrainstormingSessionResult): void {
+    const dispColor = result.finalDisposition === 'APPROVED' ? c.emerald : result.finalDisposition === 'REVISE' ? c.amber : c.crimson;
+    console.log(`\n${c.brightCyan}${c.bold}┌── 🧠 MULTI-AGENT STRUCTURED PEER-REVIEW: ${result.goal.slice(0, 60)} ──┐${c.reset}`);
+    console.log(`│ ${c.slate}Session ID:${c.reset} ${c.white}${result.id}${c.reset} │ ${c.slate}Disposition:${c.reset} ${dispColor}${c.bold}[${result.finalDisposition}]${c.reset} │ ${c.slate}Exit Criteria:${c.reset} ${result.exitCriteriaMet ? `${c.emerald}PASS✔${c.reset}` : `${c.crimson}FAIL✖${c.reset}`}`);
+    console.log(`├─────────────────────────────────────────────────────────────────────────┤`);
+    console.log(`│ ${c.geminiAmber}${c.bold}1. UNDERSTANDING LOCK${c.reset}`);
+    console.log(`│   ${c.slate}Core Problem:${c.reset} ${result.understandingLock.coreProblem}`);
+    console.log(`│   ${c.slate}In Scope:${c.reset} ${result.understandingLock.inScope.join(', ')}`);
+    console.log(`├─────────────────────────────────────────────────────────────────────────┤`);
+    console.log(`│ ${c.geminiAmber}${c.bold}2. PEER-REVIEW FEEDBACKS (5 PERSONAS)${c.reset}`);
+    for (const [role, fb] of Object.entries(result.reviewerFeedbacks)) {
+      const vColor = fb.verdict === 'pass' ? c.emerald : fb.verdict === 'needs_revision' ? c.amber : c.crimson;
+      console.log(`│   ${c.bold}${c.brightCyan}▸ ${fb.roleName}${c.reset} ── ${vColor}[${fb.verdict.toUpperCase()}]${c.reset}`);
+      console.log(`│     ${c.slate}${fb.summary}${c.reset}`);
+      for (const obj of fb.objections) {
+        console.log(`│     ${c.crimson}✖ [${obj.severity.toUpperCase()}]${c.reset} ${obj.description}`);
+      }
+    }
+    console.log(`├─────────────────────────────────────────────────────────────────────────┤`);
+    console.log(`│ ${c.geminiAmber}${c.bold}3. DECISION LOG & ARBITER RATIONALE${c.reset}`);
+    console.log(`│   ${c.white}${result.arbiterRationale}${c.reset}`);
+    if (result.actionRequired && result.actionRequired.length > 0) {
+      console.log(`│   ${c.brightYellow}Required Actions:${c.reset}`);
+      for (const act of result.actionRequired) {
+        console.log(`│     • ${c.slate}${act}${c.reset}`);
+      }
+    }
+    console.log(`${c.brightCyan}${c.bold}└── 🏁 [EXIT CRITERIA: ${result.exitCriteriaMet ? 'PASSED - PROCEED TO IMPLEMENTATION' : 'BLOCKED - REVISE REQUIRED'}] ──┘${c.reset}\n`);
+  }
+
+  static renderFileLocks(locks: Record<string, string>): void {
+    const entries = Object.entries(locks);
+    console.log(`\n${c.brightCyan}${c.bold}❯ ACTIVE SUBAGENT FILE LOCKS (${entries.length})${c.reset}`);
+    if (entries.length === 0) {
+      console.log(`  ${c.mutedText}No files currently locked.${c.reset}\n`);
+    } else {
+      for (const [file, agentId] of entries) {
+        console.log(`  🔒 ${c.brightCyan}${file}${c.reset} ── ${c.yellow}[Locked by: ${agentId}]${c.reset}`);
+      }
+      console.log('');
+    }
+  }
+
+  static renderHeartbeats(heartbeats: Array<{ agentId: string; taskId?: string; idleDurationMs: number; isStale: boolean; lastActiveAt?: string }>): void {
+    console.log(`\n${c.brightCyan}${c.bold}❯ SUBAGENT HEARTBEATS & LIVENESS MONITOR (${heartbeats.length})${c.reset}`);
+    if (heartbeats.length === 0) {
+      console.log(`  ${c.mutedText}No active tasks currently monitored.${c.reset}\n`);
+    } else {
+      for (const hb of heartbeats) {
+        const sec = Math.round(hb.idleDurationMs / 1000);
+        const statusBadge = hb.isStale
+          ? `${c.crimson}${c.bold}[STALE / INACTIVE > 30M]${c.reset}`
+          : `${c.emerald}[HEALTHY]${c.reset}`;
+        console.log(`  💓 ${c.bold}${hb.agentId}${c.reset} (${hb.taskId || 'general'}) ── ${statusBadge} ${c.slate}Idle: ${sec}s · Last: ${hb.lastActiveAt || 'unknown'}${c.reset}`);
+      }
+      console.log('');
+    }
+  }
+
+  static renderQualityGateResult(res: QualityGateResult): void {
+    const status = res.passed ? `${c.emerald}${c.bold}✔ QUALITY GATE PASSED${c.reset}` : `${c.crimson}${c.bold}✖ QUALITY GATE REJECTED${c.reset}`;
+    console.log(`\n  ${status}`);
+    console.log(`    • Files modified: ${res.checks.filesModified.pass ? c.emerald + 'PASS' : c.crimson + 'FAIL'} ${c.slate}(${res.checks.filesModified.details})${c.reset}`);
+    console.log(`    • Scope check: ${res.checks.scopeCompliance.pass ? c.emerald + 'PASS' : c.crimson + 'FAIL'} ${c.slate}(${res.checks.scopeCompliance.details})${c.reset}`);
+    console.log(`    • Secret scan: ${res.checks.secretScan.pass ? c.emerald + 'PASS' : c.crimson + 'FAIL'} ${c.slate}(${res.checks.secretScan.details})${c.reset}`);
+    console.log(`    • Verification command: ${res.checks.verificationCommand.pass ? c.emerald + 'PASS' : c.crimson + 'FAIL'} ${c.slate}(${res.checks.verificationCommand.details})${c.reset}\n`);
+  }
+
   static renderStatus(opts: StatusOptions): void {
     const goal = opts.isGoalMode ? 'Goal Mode: ON (∞)' : `Step Budget: ${opts.maxSteps}`;
     console.log(`\n  ${c.brightCyan}${c.bold}❯ STATUS${c.reset} · ${opts.modelName} · ${goal} · Turns: ${opts.sessionTurns}`);
@@ -1522,6 +1593,8 @@ export class CLI {
     console.log(`  ${content}\n`);
     if (reason === 'CANCELLED' || reason === 'STOPPED') {
       CLI.renderPromptInputNotice('Tác vụ đã được dừng an toàn. Sẵn sàng nhận yêu cầu / prompt tiếp theo:', { force: true });
+    } else if (reason === 'CIRCUIT_BREAKER_TRIGGERED') {
+      CLI.renderPromptInputNotice('LLM đã tạm dừng do hết Quota hoặc máy chủ quá tải. Bạn có thể đổi sang model khác (/model) hoặc đợi vài phút:', { force: true });
     }
   }
 
@@ -1598,6 +1671,71 @@ export class CLI {
     console.log(`\n  ${c.slate}Permissions:${c.reset} mode=${c.bold}${mode}${c.reset}, auto-approved in session: ${approvedCount}\n`);
   }
 
+  /**
+   * Hiển thị Giao diện Xem trước Thay đổi (Diff View) trực quan dưới dạng Git Diff.
+   * Màu đỏ là nội dung cũ (-), màu xanh là nội dung mới (+).
+   */
+  static renderDiffView(
+    diffText: string,
+    target?: string,
+    options: { autoApproved?: boolean; title?: string } = {}
+  ): void {
+    if (!diffText || !diffText.trim()) return;
+
+    const lines = diffText.replace(/\r\n/g, '\n').trim().split('\n');
+    const displayTarget = target || 'File Mutation';
+    const isAuto = Boolean(options.autoApproved);
+
+    const bannerHeader = isAuto
+      ? `┌── ⚡ [AUTO-APPROVED IN SESSION] GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW): ${displayTarget} `
+      : `┌── 📄 GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW): ${displayTarget} `;
+    const bannerFooter = isAuto
+      ? `└── ⚡ [AUTO-APPROVED SESSION ACTION] Thay đổi sẽ được tự động áp dụng ──────────┘`
+      : `└── ⏳ [MINUS PERMISSION APPROVAL] Vui lòng đối chiếu trước khi cấp quyền ────────┘`;
+
+    console.log(`\n  ${c.brightCyan}${bannerHeader}${c.reset}`);
+
+    const maxLines = 50;
+    const renderLines = lines.slice(0, maxLines);
+
+    for (const line of renderLines) {
+      if (line.startsWith('---') || line.startsWith('+++')) {
+        console.log(`  ${c.dim}${c.white}${line}${c.reset}`);
+      } else if (line.startsWith('@@')) {
+        console.log(`  ${c.brightCyan}${line}${c.reset}`);
+      } else if (line.startsWith('-')) {
+        console.log(`  ${c.crimson}${line}${c.reset}`);
+      } else if (line.startsWith('+')) {
+        console.log(`  ${c.emerald}${line}${c.reset}`);
+      } else if (line.startsWith('rename from ') || line.startsWith('rename to ') || line.startsWith('similarity index ')) {
+        console.log(`  ${c.brightYellow}${line}${c.reset}`);
+      } else {
+        console.log(`  ${c.slate}${line}${c.reset}`);
+      }
+    }
+
+    if (lines.length > maxLines) {
+      console.log(`  ${c.slate}  ... (+${lines.length - maxLines} dòng thay đổi nữa)${c.reset}`);
+    }
+
+    console.log(`  ${c.brightCyan}${bannerFooter}${c.reset}\n`);
+  }
+
+  /**
+   * Hiển thị thông báo và Diff View cho thao tác sửa file khi người dùng đã chọn approve_all_session.
+   */
+  static renderSessionAutoApprovedDiff(request: {
+    toolName: string;
+    target: string;
+    summary?: string;
+    diff?: string;
+  }): void {
+    console.log(`\n  ${c.brightCyan}⚡ [AUTO-APPROVED IN SESSION]${c.reset} ${c.slate}Tự động duyệt thay đổi file theo cài đặt phiên:${c.reset} ${c.bold}${request.toolName}${c.reset} ── ${c.brightCyan}${request.target}${c.reset}`);
+    if (request.diff) {
+      CLI.renderDiffView(request.diff, request.target, { autoApproved: true });
+    }
+  }
+
   static renderPermissionPrompt(request: {
     toolName: string;
     category: string;
@@ -1605,12 +1743,18 @@ export class CLI {
     summary: string;
     riskLevel: string;
     details?: Record<string, any>;
+    diff?: string;
   }): void {
     const rawTarget = (request.target || '').trim();
     const fallbackTarget = request.details
       ? String(request.details.command || request.details.CommandLine || request.details.commandLine || request.details.cmd || request.details.path || request.details.filePath || '').trim()
       : '';
     const displayTarget = rawTarget || fallbackTarget || '(không xác định)';
+
+    // Nếu có Git Diff xem trước, hiển thị Diff View trực quan trước hộp thoại cấp quyền
+    if (request.diff) {
+      CLI.renderDiffView(request.diff, displayTarget, { autoApproved: false });
+    }
 
     let displaySummary = request.summary || '';
     const hasEmptyPlaceholder = displaySummary.includes(': ""') || displaySummary.trim() === '""';
@@ -1640,6 +1784,13 @@ export class CLI {
     const preview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
     console.log(`\n  ${c.bgCyan}${c.bold} ⚡ QUEUED MESSAGE INJECTED (MID-TURN STEERING) ${c.reset} ${c.brightCyan}"${preview}"${c.reset}`);
     console.log(`  ${c.slate}↳ Đã tiêm tin nhắn bẻ lái vào ngữ cảnh; Agent đang điều chỉnh suy luận ngay trong bước này.${c.reset}\n`);
+  }
+
+  static renderQueuedMessageEnqueued(text: string, id: string): void {
+    const preview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+    console.log(`\n  ${c.bgCyan}${c.bold} ⚡ QUEUED MESSAGE ENQUEUED (MID-TURN STEERING) ${c.reset} [${id}]`);
+    console.log(`  ${c.brightCyan}"${preview}"${c.reset}`);
+    console.log(`  ${c.slate}↳ Đã đưa câu lệnh vào hàng chờ; Agent sẽ nhận và điều chỉnh hành động ngay ở bước tiếp theo.${c.reset}\n`);
   }
 
   static renderQueueStatus(items: Array<{ id: string; text: string; source: string; enqueuedAt: string }>): void {

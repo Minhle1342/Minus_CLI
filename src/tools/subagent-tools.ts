@@ -2,6 +2,7 @@ import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { SubagentManager } from '../agent/subagent-manager.js';
 import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
+import { MultiAgentBrainstormingEngine } from '../agent/multi-agent-brainstorming.js';
 import { Workspace } from '../workspace/workspace.js';
 
 export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
@@ -14,6 +15,8 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
         objective: { type: Type.STRING, description: 'Mục tiêu độc lập cần subagent thực hiện.' },
         maxSteps: { type: Type.INTEGER, description: 'Giới hạn step của subagent (mặc định theo agent).' },
         toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Allowlist tool tùy chọn cho subagent.' },
+        fileScope: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Phạm vi các file được sửa đổi (cấp khóa file an toàn tránh xung đột đồng thời).' },
+        verificationCommand: { type: Type.STRING, description: 'Lệnh kiểm thử xác minh kết quả khi subagent hoàn thành.' },
       },
       required: ['objective'],
     },
@@ -23,6 +26,8 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
       const handle = manager.start(objective, {
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
+        fileScope: Array.isArray(args.fileScope) ? args.fileScope.map(String) : undefined,
+        verificationCommand: typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined,
       });
       return { success: true, agent: handle };
     },
@@ -59,27 +64,32 @@ export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
 export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'wait_agent',
-    description: 'Wait synchronously for a spawned child agent to complete its task without polling.',
+    description: 'Chờ đợi một subagent hoàn thành tác vụ với cơ chế event-driven timeout an toàn (không polling tốn tài nguyên).',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        agentId: { type: Type.STRING, description: 'The child agent ID to wait for.' },
-        timeoutMs: { type: Type.INTEGER, description: 'Timeout in milliseconds (default 60000ms).' },
+        agentId: {
+          type: Type.STRING,
+          description: 'ID của subagent cần đợi.',
+        },
+        timeoutMs: {
+          type: Type.INTEGER,
+          description: 'Thời gian chờ tối đa bằng mili-giây (mặc định: 60000ms = 60s).',
+        },
       },
       required: ['agentId'],
     },
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
       const agentId = String(args.agentId || '').trim();
-      if (!agentId) return { error: 'Param "agentId" is required.' };
+      if (!agentId) return { error: 'Tham số "agentId" là bắt buộc.' };
+      const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
       try {
-        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
-        const result = await manager.waitFor(agentId, timeoutMs);
+        const handle = await manager.waitFor(agentId, timeoutMs);
         return {
           success: true,
-          agentId: result.id,
-          status: result.status,
-          answer: result.answer,
-          error: result.error,
+          agent: handle,
+          completed: handle.status === 'completed',
+          answer: handle.answer,
         };
       } catch (err: any) {
         return { success: false, error: err.message, agentId };
@@ -94,11 +104,14 @@ export function createGetAgentResultTool(manager: SubagentManager): ToolDefiniti
     description: 'Đọc trạng thái và kết quả hiện tại của subagent đã delegate.',
     parameters: {
       type: Type.OBJECT,
-      properties: { agentId: { type: Type.STRING, description: 'ID trả về từ delegate_agent.' } },
+      properties: {
+        agentId: { type: Type.STRING, description: 'ID subagent cần kiểm tra.' },
+      },
       required: ['agentId'],
     },
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
       const agentId = String(args.agentId || '').trim();
+      if (!agentId) return { error: 'Tham số "agentId" là bắt buộc.' };
       const agent = manager.get(agentId);
       return agent ? { success: true, agent } : { success: false, error: 'SUBAGENT_NOT_FOUND', agentId };
     },
@@ -116,7 +129,9 @@ export function createStopAgentTool(manager: SubagentManager): ToolDefinition {
     },
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
       const agentId = String(args.agentId || '').trim();
-      return { agentId, success: manager.stop(agentId) };
+      if (!agentId) return { error: 'Tham số "agentId" là bắt buộc.' };
+      const stopped = manager.stop(agentId);
+      return { success: stopped, agentId };
     },
   };
 }
@@ -129,13 +144,14 @@ export function createResumeAgentTool(manager: SubagentManager): ToolDefinition 
       type: Type.OBJECT,
       properties: {
         agentId: { type: Type.STRING, description: 'ID subagent cần resume.' },
-        maxSteps: { type: Type.INTEGER, description: 'Giới hạn step cho lần resume.' },
-        toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Allowlist tool cho lần resume.' },
+        maxSteps: { type: Type.INTEGER, description: 'Giới hạn step bổ sung cho lượt resume.' },
+        toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Allowlist tool tùy chọn.' },
       },
       required: ['agentId'],
     },
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
       const agentId = String(args.agentId || '').trim();
+      if (!agentId) return { error: 'Tham số "agentId" là bắt buộc.' };
       const agent = manager.resume(agentId, {
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
@@ -150,7 +166,7 @@ export function createResumeAgentTool(manager: SubagentManager): ToolDefinition 
 export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): ToolDefinition {
   return {
     name: 'allocate_agent_task',
-    description: 'Phân bổ và điều phối một tác vụ cho một Agent phù hợp dựa trên danh sách năng lực (capabilities matching).',
+    description: 'Phân bổ và điều phối một tác vụ cho một Agent phù hợp dựa trên danh sách năng lực (capabilities matching), chống trùng lặp và khóa file an toàn.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -171,6 +187,15 @@ export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): To
           type: Type.ARRAY,
           items: { type: Type.STRING },
           description: 'Danh sách các công cụ được phép sử dụng.',
+        },
+        fileScope: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Phạm vi các file được phép sửa đổi (cấp khóa file tránh xung đột đồng thời).',
+        },
+        checkAntiDuplication: {
+          type: Type.BOOLEAN,
+          description: 'Kiểm tra chống trùng lặp với các tác vụ đang thực thi/chờ (ngưỡng >= 55%).',
         },
         priority: {
           type: Type.STRING,
@@ -197,6 +222,8 @@ export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): To
         const handle = orchestrator.allocateTask(objective, requiredCapabilities, {
           maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
           toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
+          fileScope: Array.isArray(args.fileScope) ? args.fileScope.map(String) : undefined,
+          checkAntiDuplication: args.checkAntiDuplication === true,
           priority: args.priority === 'high' || args.priority === 'low' ? args.priority : undefined,
           preferCostEfficient: args.preferCostEfficient === true,
           memoize: args.memoize === true,
@@ -205,6 +232,70 @@ export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): To
       } catch (err: any) {
         return { success: false, error: err.message };
       }
+    },
+  };
+}
+
+export function createBrainstormDesignTool(engine?: MultiAgentBrainstormingEngine): ToolDefinition {
+  const bEngine = engine || new MultiAgentBrainstormingEngine();
+  return {
+    name: 'brainstorm_design',
+    description: 'Kích hoạt quy trình thẩm định thiết kế đa tác tử tuần tự có kiểm soát (Structured Peer-Review) với 5 Persona (Primary Designer, Skeptic, Constraint Guardian, User Advocate, Integrator/Arbiter) và Decision Log.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        goal: { type: Type.STRING, description: 'Mục tiêu thiết kế cần thẩm định.' },
+        initialDesign: { type: Type.STRING, description: 'Tóm tắt thiết kế ban đầu nếu có.' },
+      },
+      required: ['goal'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const goal = String(args.goal || '').trim();
+      if (!goal) return { error: 'Tham số "goal" là bắt buộc.' };
+      try {
+        const result = await bEngine.runReview(goal, args.initialDesign);
+        const decisionLogMarkdown = bEngine.renderDecisionLogMarkdown(result);
+        return {
+          success: true,
+          disposition: result.finalDisposition,
+          exitCriteriaMet: result.exitCriteriaMet,
+          decisionLog: result.decisionLog,
+          decisionLogMarkdown,
+          arbiterRationale: result.arbiterRationale,
+          actions: result.actionRequired,
+        };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    },
+  };
+}
+
+export function createVerifySubagentQualityTool(orchestrator: AgentOrchestrator): ToolDefinition {
+  return {
+    name: 'verify_subagent_quality',
+    description: 'Cổng kiểm định chất lượng dựa trên bằng chứng thực tế (Evidence-Based Quality Gate) cho kết quả của Subagent.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        agentId: { type: Type.STRING, description: 'ID của subagent cần kiểm định.' },
+        requireFilesModified: { type: Type.BOOLEAN, description: 'Bắt buộc phải có file thực sự thay đổi trên đĩa.' },
+        allowedFileScope: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Danh sách các file được phép sửa đổi.' },
+        modifiedFiles: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Danh sách file đã thay đổi thực tế.' },
+        diffText: { type: Type.STRING, description: 'Nội dung unified diff để quét rò rỉ mã khóa bí mật.' },
+        scanSecrets: { type: Type.BOOLEAN, description: 'Bật kiểm tra quét rò rỉ mã khóa/secrets.' },
+      },
+      required: ['agentId'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const res = orchestrator.verifyQualityGate({
+        requireFilesModified: args.requireFilesModified !== false,
+        allowedFileScope: Array.isArray(args.allowedFileScope) ? args.allowedFileScope.map(String) : undefined,
+        modifiedFiles: Array.isArray(args.modifiedFiles) ? args.modifiedFiles.map(String) : undefined,
+        diffText: typeof args.diffText === 'string' ? args.diffText : undefined,
+        scanSecrets: args.scanSecrets !== false,
+      });
+      return { success: res.passed, qualityGate: res };
     },
   };
 }

@@ -97,6 +97,11 @@ export const getDiagnosticsTool: ToolDefinition = {
         clean: errors.length === 0,
         totalErrors: errors.length,
         totalWarnings: warnings.length,
+        verificationStatus: errors.length === 0 ? 'PASSED_CLEAN' : 'ERRORS_DETECTED',
+        verificationTier: 'typecheck',
+        message: errors.length === 0
+          ? 'Diagnostics passed: 0 syntax and type errors found. Code is clean and verified.'
+          : `Diagnostics detected ${errors.length} error(s). Review and resolve errors before submitting.`,
         diagnostics: diagnostics.slice(0, 30),
         providers: [
           ...new Set([

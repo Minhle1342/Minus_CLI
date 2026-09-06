@@ -59,6 +59,10 @@ export class ToolRunner {
     this.permissionManager = permissionManager;
     this.executionGuard = executionGuard;
     this.guardian = guardian || new ToolUseGuardian();
+
+    if (this.permissionManager && typeof (this.permissionManager as any).setWorkspaceRoot === 'function') {
+      (this.permissionManager as any).setWorkspaceRoot(this.workspace.rootDir);
+    }
   }
 
   setExecutionGuard(executionGuard?: ToolExecutionGuard): void {
@@ -67,6 +71,9 @@ export class ToolRunner {
 
   setPermissionManager(permissionManager: PermissionManager): void {
     this.permissionManager = permissionManager;
+    if (this.permissionManager && typeof (this.permissionManager as any).setWorkspaceRoot === 'function') {
+      (this.permissionManager as any).setWorkspaceRoot(this.workspace.rootDir);
+    }
   }
 
   getPermissionManager(): PermissionManager | undefined {

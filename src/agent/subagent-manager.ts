@@ -18,6 +18,8 @@ export interface SubagentOptions {
   preferCostEfficient?: boolean;
   memoize?: boolean;
   maxBudgetTokens?: number;
+  fileScope?: string[];
+  verificationCommand?: string;
 }
 
 export type SubagentFactory = (

@@ -1,6 +1,8 @@
 import type { ToolExecutionContext } from '../tools/types.js';
 import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-command.js';
 import { analyzeShellCommand } from './shell-segmenter.js';
+import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
+import { CLI } from '../ui/cli-ui.js';
 
 export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
 
@@ -15,6 +17,7 @@ export interface PermissionRequest {
   riskLevel: RiskLevel;
   details?: Record<string, any>;
   timestamp: string;
+  diff?: string;
 }
 
 export type PermissionPromptHandler = (
@@ -45,9 +48,18 @@ export class PermissionManager {
   private promptHandler?: PermissionPromptHandler;
   private sessionApprovedCategories = new Set<string>();
   private requestHistory: PermissionRequest[] = [];
+  private workspaceRoot?: string;
 
   constructor(mode: PermissionMode = 'ask_sensitive') {
     this.mode = mode;
+  }
+
+  setWorkspaceRoot(root: string): void {
+    this.workspaceRoot = root;
+  }
+
+  getWorkspaceRoot(): string | undefined {
+    return this.workspaceRoot;
   }
 
   setMode(mode: PermissionMode): void {
@@ -74,14 +86,9 @@ export class PermissionManager {
     args: Record<string, any>,
     context?: ToolExecutionContext,
   ): Promise<PermissionCheckResult> {
-    // 1. Chế độ Auto-Approve (Tự động duyệt tất cả)
-    if (this.mode === 'auto_approve') {
-      return { allowed: true, permissionGranted: toolName === 'run_command' };
-    }
-
     // 2. Chế độ Read-Only (Chỉ cho phép đọc, cấm mọi thao tác ghi / chạy lệnh)
     if (this.mode === 'read_only') {
-      if (['replace_text', 'apply_patch', 'write_file', 'run_command', 'git_commit', 'git_push'].includes(toolName)) {
+      if (['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file', 'run_command', 'git_commit', 'git_push'].includes(toolName)) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
@@ -95,13 +102,34 @@ export class PermissionManager {
     const request = this.classifyToolCall(toolName, args);
     this.requestHistory.push(request);
 
+    // Sinh Diff View xem trước nếu là tool sửa/thao tác file
+    if (isMutationTool(toolName)) {
+      try {
+        request.diff = await generateFileToolDiff(toolName, args, this.workspaceRoot);
+      } catch {
+        request.diff = undefined;
+      }
+    }
+
+    // 1. Chế độ Auto-Approve (Tự động duyệt tất cả nhưng vẫn in Diff View nếu là tool sửa file)
+    if (this.mode === 'auto_approve') {
+      if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
+        CLI.renderSessionAutoApprovedDiff(request);
+      }
+      return { allowed: true, permissionGranted: toolName === 'run_command' };
+    }
+
     // Nếu rủi ro LOW và ở chế độ ask_sensitive -> Cho phép tự động
     if (this.mode === 'ask_sensitive' && request.riskLevel === 'LOW') {
       return { allowed: true };
     }
 
-    // Nếu người dùng đã chọn "Luôn đồng ý danh mục này trong phiên"
+    // Nếu người dùng đã chọn "Luôn đồng ý danh mục này trong phiên" (approve_all_session):
+    // Vẫn hiển thị Diff View trực quan để người dùng theo dõi thay đổi mã nguồn trong thời gian thực!
     if (this.sessionApprovedCategories.has(request.category)) {
+      if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
+        CLI.renderSessionAutoApprovedDiff(request);
+      }
       return {
         allowed: true,
         permissionGranted: toolName === 'run_command',
@@ -229,6 +257,50 @@ export class PermissionManager {
         target,
         summary: `Tạo mới hoặc ghi đè file "${target}"`,
         riskLevel: isCritical ? 'HIGH' : 'MEDIUM',
+        details: args,
+        timestamp,
+      };
+    }
+
+    if (toolName === 'create_file') {
+      const target = String(args.path || args.filePath || args.targetFile || 'unknown file');
+      return {
+        id,
+        toolName,
+        category: 'file_write',
+        target,
+        summary: `Tạo mới file "${target}"`,
+        riskLevel: 'MEDIUM',
+        details: args,
+        timestamp,
+      };
+    }
+
+    if (toolName === 'delete_file') {
+      const target = String(args.path || args.filePath || args.targetFile || 'unknown file');
+      const reasonSuffix = args.reason ? `: ${args.reason}` : '';
+      return {
+        id,
+        toolName,
+        category: 'destructive',
+        target,
+        summary: `Xóa file "${target}" khỏi workspace${reasonSuffix}`,
+        riskLevel: 'HIGH',
+        details: args,
+        timestamp,
+      };
+    }
+
+    if (toolName === 'move_file') {
+      const source = String(args.sourcePath || args.from || 'unknown source');
+      const target = String(args.targetPath || args.to || 'unknown target');
+      return {
+        id,
+        toolName,
+        category: 'file_edit',
+        target: `${source} -> ${target}`,
+        summary: `Di chuyển / đổi tên file từ "${source}" sang "${target}"`,
+        riskLevel: 'MEDIUM',
         details: args,
         timestamp,
       };

@@ -56,6 +56,12 @@ export function classifyToolEvidence(
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
   }
+  if (toolName === 'get_diagnostics') {
+    if (result.clean === true && (!result.totalErrors || result.totalErrors === 0)) {
+      return ['inspection', 'verification'];
+    }
+    return ['inspection'];
+  }
   if (toolName === 'git_status' || toolName === 'git_diff' || toolName === 'get_workspace_diff') {
     return ['inspection', 'git'];
   }

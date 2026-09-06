@@ -13,6 +13,7 @@ export interface PromptAssemblyContext {
   isFrontend?: boolean;
   hasComputerTool?: boolean;
   hasGitTools?: boolean;
+  hasSubagentTools?: boolean;
 }
 
 const projectContextCache = new Map<string, { isUnity: boolean; isFrontend: boolean }>();
@@ -63,6 +64,7 @@ export function detectPromptContext(
 
   const hasComputerTool = toolNames.includes('computer');
   const hasGitTools = toolNames.some((name) => name.startsWith('git_'));
+  const hasSubagentTools = toolNames.some((name) => name.includes('agent') || name.includes('subagent') || name === 'allocate_agent_task' || name === 'delegate_agent' || name === 'brainstorm_design');
   const isArchitectureAnalysis = Boolean(request && detectArchitectureAnalysisIntent(request).isArchitectureQuery);
 
   return {
@@ -74,6 +76,7 @@ export function detectPromptContext(
     isFrontend: cachedProject.isFrontend,
     hasComputerTool,
     hasGitTools,
+    hasSubagentTools,
   };
 }
 
@@ -106,7 +109,7 @@ Core Architectural Invariants:
 
 4. SURGICAL MUTATION DISCIPLINE:
    - Inspect target lines with read_file first to secure contentHash and line offsets. Use read_file(symbol='...') for 1-shot function extraction or read 150-300 line windows (never slice 50-line micro-windows with sed).
-   - create_file (new files, no overwrite), delete_file (requires expectedFileHash), move_file (safe rename).
+   - create_file (new files, no overwrite), delete_file (requires expectedFileHash; NEVER use shell rm/del), move_file (safe rename; NEVER use shell mv).
    - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits).
    - apply_patch 1-Shot format:
      --- a/src/example.ts
@@ -145,7 +148,7 @@ export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Always verify with tsc --noEmit.`;
 
 export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
-   - run_command: Run fast commands (<5s) synchronously; set WaitMsBeforeAsync=5000 for servers/watchers. Do NOT use run_command to slice files with sed/cat (always use read_file).
+   - run_command: Run fast commands (<5s) synchronously; set WaitMsBeforeAsync=5000 for servers/watchers. Do NOT use run_command to slice files with sed/cat (always use read_file) or delete files with rm/del (always use delete_file).
    - manage_task: Manage background tasks (list, status, kill, send_input).
    - schedule: Event-driven delays via schedule(DurationSeconds=N, Prompt="...", TimerCondition="..."). Avoid polling.
    - Web retrieval: Use search_web and read_url_content for third-party docs and APIs.`;
@@ -161,7 +164,7 @@ export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
    - Playbook B (Root Cause): get_diagnostics / inspect_symbol -> query_call_graph(callers) -> read_file.
    - Playbook C (Mutation): get_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> test.
    - Playbook D (Long Tasks): run_command(WaitMsBeforeAsync=5000) -> manage_task -> schedule.
-   - Playbook E (Subagents): spawn_agent -> write_shared_context -> publish_agent_event -> wait_agent.
+   - Playbook E (Subagents & Multi-Agent): brainstorm_design -> allocate_agent_task(checkAntiDuplication, fileScope) -> write_shared_context -> publish_agent_event -> wait_agent -> verify_subagent_quality.
    - Playbook F (DAG Plan): create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`;
 
 export const SECTION_COMPUTER_USE = `13. COMPUTER USE AGENT PROTOCOL:
@@ -178,6 +181,14 @@ export const SECTION_ARCHITECTURE_ANALYSIS = `15. DEEP ARCHITECTURE, WORKFLOW & 
    - Step 3 [Synthesis]: 1.## 1. System Overview & Mission -> 2.## 2. End-to-End Workflow & Dataflow -> 3.## 3. Design Patterns & Component Roles -> 4.## 4. Invariants & Guardrails.
    - Step 4 [Depth]: Full-output enforcement with factual code citations in user prompt language.`;
 
+export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & NOT-BLOCK BOUNDARIES:
+   - Orchestrator Role: Decompose tasks, route to specialists, prevent file-level conflicts, and enforce quality gates.
+   - WHAT YOU ARE NOT (when acting as orchestrator):
+     * NOT a code writer — delegate coding/refactoring to specialized agents (e.g. Qwen2.5-Coder / Codestral).
+     * NOT a researcher — delegate deep research to specialized agents (e.g. DeepSeek-R1).
+     * NOT a tester — delegate test execution and quality validation to verify_subagent_quality.
+   - Structured Peer-Review: Use brainstorm_design before major architecture changes (Primary Designer, Skeptic, Constraint Guardian, User Advocate, Integrator/Arbiter).`;
+
 /**
  * Cấu hình khởi tạo các Prompt Sections mặc định vào PromptAssembler
  */
@@ -188,6 +199,7 @@ export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300 },
   { id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE, priority: 400 },
   { id: 'tool-playbooks', content: SECTION_TOOL_PLAYBOOKS, priority: 500 },
+  { id: 'task-orchestrator-boundaries', content: SECTION_TASK_ORCHESTRATOR_BOUNDARIES, priority: 550, condition: (ctx: PromptAssemblyContext) => ctx.hasSubagentTools ?? false },
   { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },
   { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },
   { id: 'architecture-analysis', content: SECTION_ARCHITECTURE_ANALYSIS, priority: 1000, condition: (ctx: PromptAssemblyContext) => ctx.isArchitectureAnalysis ?? false },

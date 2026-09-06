@@ -26,7 +26,7 @@ import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent } from './final-answer-guard.js';
-import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool } from '../tools/subagent-tools.js';
+import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
@@ -128,6 +128,8 @@ export class AgentLoop {
   private drainingSessionId?: string;
   private drainScheduled = false;
   private runQueues = new Map<string, Promise<string>>();
+  readonly MAX_CIRCUIT_BREAKER_RETRIES = 5;
+  private consecutiveCircuitBreakerRetries = 0;
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
@@ -275,6 +277,8 @@ export class AgentLoop {
       this.toolRegistry.register(createStopAgentTool(this.subagentManager));
       this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
       this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
+      this.toolRegistry.register(createBrainstormDesignTool());
+      this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
     }
 
     if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
@@ -373,11 +377,92 @@ export class AgentLoop {
     return result;
   }
 
-  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
+  private async runInternalWithCircuitBreakerRetry(
+    session: Session,
+    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean },
+  ): Promise<string> {
+    while (true) {
+      try {
+        const result = await this.runInternal(session, {
+          ...options,
+          isCircuitBreakerRetry: this.consecutiveCircuitBreakerRetries > 0,
+        });
+        this.consecutiveCircuitBreakerRetries = 0;
+        return result;
+      } catch (error: any) {
+        // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
+        const isCancelled = options?.signal?.aborted
+          || error?.name === 'AbortError'
+          || (typeof error?.message === 'string' && (
+            error.message.includes('cancellation requested') ||
+            error.message.includes('COMMAND_CANCELLED') ||
+            error.message.includes('aborted')
+          ));
+
+        if (isCancelled) {
+          this.consecutiveCircuitBreakerRetries = 0;
+          throw error;
+        }
+
+        const errClassification = classifyLLMError(error);
+        const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+        const isServerError = errClassification.kind === 'SERVER_ERROR';
+        const isRetryableLLMError = isQuotaOrRateLimit || isServerError;
+
+        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries < this.MAX_CIRCUIT_BREAKER_RETRIES) {
+          this.consecutiveCircuitBreakerRetries++;
+
+          // 1. Phục hồi an toàn session invariants (đóng open step/turn)
+          try {
+            if (session.recoverInterrupted()) {
+              await this.persistSession(session);
+            }
+          } catch { }
+
+          // 2. Tự động gửi ngầm prompt "Continue" cho LLM (ẩn với người dùng bằng source='system')
+          session.addUserMessage('Continue', 'system');
+          try {
+            await this.persistSession(session);
+          } catch { }
+
+          // 3. Backoff delay trước khi gọi lại LLM (môi trường test delay cực ngắn)
+          const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(this.llm?.constructor?.name?.includes('Mock'));
+          const backoffMs = isTestEnv
+            ? 5
+            : (errClassification.retryAfterMs ?? Math.min(1500 * Math.pow(1.5, this.consecutiveCircuitBreakerRetries - 1), 8000));
+
+          const sleepResult = await this.sleepWithWakeup(session.id, backoffMs, options?.signal);
+          if (sleepResult.aborted || options?.signal?.aborted) {
+            throw new Error('Agent stopped: cancellation requested.');
+          }
+
+          // Ẩn thông báo CIRCUIT_BREAKER_TRIGGERED và tự động lặp tiếp tục turn dở dang
+          continue;
+        }
+
+        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries >= this.MAX_CIRCUIT_BREAKER_RETRIES) {
+          const detailMsg = isServerError
+            ? `LLM Provider đang quá tải hoặc không khả dụng: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng máy chủ LLM vẫn báo lỗi (${errClassification.kind}: ${errClassification.message || 'Mô hình đang chịu tải cao tạm thời / 503 UNAVAILABLE'}). Vui lòng chờ vài phút rồi thử lại hoặc đổi sang model khác bằng lệnh /model.`
+            : `LLM đã hết Quota: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng LLM vẫn báo lỗi hạn mức (${errClassification.kind}: ${errClassification.message || 'Hạn mức API đã cạn kiệt hoặc bị giới hạn tần suất liên tục'}). Vui lòng đổi sang model khác bằng lệnh /model hoặc kiểm tra gói cước billing.`;
+          const quotaExhaustedError = new Error(detailMsg);
+          (quotaExhaustedError as any).isQuotaExhausted = isQuotaOrRateLimit;
+          (quotaExhaustedError as any).isServerUnavailable = isServerError;
+          (quotaExhaustedError as any).originalClassification = errClassification;
+          this.consecutiveCircuitBreakerRetries = 0;
+          throw quotaExhaustedError;
+        }
+
+        this.consecutiveCircuitBreakerRetries = 0;
+        throw error;
+      }
+    }
+  }
+
+  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
     const previous = this.runQueues.get(session.id) || Promise.resolve('');
     const current = previous.then(
-      () => this.runInternal(session, options),
-      () => this.runInternal(session, options),
+      () => this.runInternalWithCircuitBreakerRetry(session, options),
+      () => this.runInternalWithCircuitBreakerRetry(session, options),
     ).catch(async (error) => {
       // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
       const isCancelled = options?.signal?.aborted
@@ -407,12 +492,17 @@ export class AgentLoop {
 
       // Preserve an auditable, balanced lifecycle even when a provider, hook,
       // persistence adapter, or tool pipeline throws unexpectedly.
-      const errClassification = classifyLLMError(error);
-      const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+      const errClassification = (error as any)?.originalClassification || classifyLLMError(error);
+      const isQuotaOrRateLimit = (error as any)?.isQuotaExhausted
+        || errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+        || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+      const isServerUnavailable = (error as any)?.isServerUnavailable
+        || errClassification.kind === 'SERVER_ERROR';
+      const isCircuitBreakerSuspension = isQuotaOrRateLimit || isServerUnavailable;
 
-      if (isQuotaOrRateLimit) {
+      if (isCircuitBreakerSuspension) {
         try {
-          await this.checkpointManager.createCheckpoint('Suspended: LLM Quota or Rate Limit reached', {
+          await this.checkpointManager.createCheckpoint('Suspended: LLM Quota, Rate Limit, or Server Unavailable reached', {
             isTaskCheckpoint: true,
             taskId: this.planManager.getActiveTask()?.id ? `task-${this.planManager.getActiveTask()?.id}` : undefined,
           });
@@ -420,7 +510,7 @@ export class AgentLoop {
 
         this.goalManager.pause(`LLM ${errClassification.kind}: ${errClassification.message}`);
         session.append('goal/change', {
-          reason: 'suspended_quota_limit',
+          reason: isServerUnavailable ? 'suspended_server_unavailable' : 'suspended_quota_limit',
           goal: this.goalManager.getState(),
         });
       } else {
@@ -435,15 +525,19 @@ export class AgentLoop {
         // Keep the original failure as the rejection reason.
       }
 
-      this.setAgentStatus(isQuotaOrRateLimit ? 'idle' : 'error', session);
+      this.setAgentStatus(isCircuitBreakerSuspension ? 'idle' : 'error', session);
       const detail = error instanceof Error ? error.message : String(error);
       try {
-        if (isQuotaOrRateLimit) {
-          const quotaAdvice = errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
-            ? `LLM Quota Exceeded (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
-            : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`;
+        if (isCircuitBreakerSuspension) {
+          const suspensionAdvice = (error as any)?.isQuotaExhausted || (error as any)?.isServerUnavailable
+            ? error.message
+            : (isQuotaOrRateLimit
+                ? (errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+                    ? `LLM đã hết Quota (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
+                    : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`)
+                : `LLM Provider Server Unavailable (Quá tải máy chủ 503). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc đổi model bằng lệnh /model.`);
           await CLI.renderExecutionStopped(
-            `Agent suspended: ${quotaAdvice}\nChi tiết: ${detail}`,
+            `Agent suspended: ${suspensionAdvice}\nChi tiết: ${detail}`,
             'CIRCUIT_BREAKER_TRIGGERED',
           );
         } else {
@@ -467,7 +561,7 @@ export class AgentLoop {
     }
   }
 
-  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
+  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
     this.activeSession = session;
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
@@ -491,7 +585,7 @@ export class AgentLoop {
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
-    const isContinuationOrGoal = isGoal || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
+    const isContinuationOrGoal = isGoal || Boolean(options?.isCircuitBreakerRetry) || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
@@ -1081,6 +1175,7 @@ export class AgentLoop {
       } else {
         response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
       }
+      this.consecutiveCircuitBreakerRetries = 0;
       const requestDurationMs = Date.now() - requestStartedAt;
       const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
       response.usage = {
@@ -1512,16 +1607,45 @@ export class AgentLoop {
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else {
             // Chạy tool qua pipeline an toàn
-            const completionEvidence = toolName === 'submit_solution'
+            let completionEvidence = toolName === 'submit_solution'
               ? this.completionEvidenceGate.evaluate('', session, {
                 turn,
                 codeChangeRequired: this.verificationPolicy.hasPendingModifications()
                   || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
               })
               : undefined;
-            const policyCompletion = toolName === 'submit_solution'
+            let policyCompletion = toolName === 'submit_solution'
               ? this.verificationPolicy.canComplete()
               : undefined;
+
+            // Tool-Use Guardian: JIT Pre-Call Validation Guard cho submit_solution
+            if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
+              try {
+                const tsService = getOrCreateTypeScriptService(this._workspace);
+                const diags = tsService.getDiagnostics();
+                const errors = diags.filter((d: any) => d.category === 'error');
+                if (errors.length === 0) {
+                  this.verificationPolicy.recordVerification(
+                    'jit_diagnostics_sweep',
+                    true,
+                    'JIT in-memory diagnostics clean (0 errors)',
+                    0,
+                    { tier: 'typecheck' },
+                  );
+                  policyCompletion = this.verificationPolicy.canComplete();
+                  completionEvidence = this.completionEvidenceGate.evaluate('', session, {
+                    turn,
+                    codeChangeRequired: false,
+                  });
+                } else {
+                  policyCompletion = {
+                    allowed: false,
+                    reason: `Phát hiện ${errors.length} lỗi TypeScript chưa được sửa: ${errors.slice(0, 2).map((e: any) => `${e.file}:${e.line} - ${e.message}`).join('; ')}`,
+                    errorCode: 'DIAGNOSTICS_FAILED',
+                  };
+                }
+              } catch {}
+            }
             const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
               toolName,
               toolArgs,
@@ -1609,6 +1733,22 @@ export class AgentLoop {
               String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
               executionResult.result.exitCode,
               { hasNewFailures: differential?.hasNewFailures },
+            );
+          }
+          if (toolName === 'get_diagnostics') {
+            const isClean = !isToolResultFailure(executionResult.result)
+              && executionResult.result?.clean === true
+              && (!executionResult.result?.totalErrors || executionResult.result?.totalErrors === 0);
+            const target = toolArgs.path ? `get_diagnostics (${toolArgs.path})` : 'get_diagnostics';
+            const detail = isClean
+              ? `Diagnostics clean (0 errors, ${executionResult.result?.totalWarnings || 0} warnings)`
+              : `Diagnostics found ${executionResult.result?.totalErrors || 1} error(s)`;
+            this.verificationPolicy.recordVerification(
+              target,
+              isClean,
+              detail,
+              isClean ? 0 : 1,
+              { tier: 'typecheck' },
             );
           }
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {

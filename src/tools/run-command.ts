@@ -216,6 +216,40 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     };
   }
 
+  // 4. Xóa file / thư mục qua shell (rm, del, erase, rmdir, rd, Remove-Item, ri)
+  if (/^(?:rm|del|erase|rmdir|rd|Remove-Item|ri)\b/i.test(trimmed) && !/[;&|]/.test(trimmed)) {
+    const parsed = parseRmCommand(trimmed);
+    const targetPath = parsed?.targetPaths?.[0];
+    return {
+      tool: 'delete_file',
+      reason: 'Xóa file/thư mục an toàn qua Node.js I/O (kiểm tra hash, isProtectedFile, cross-platform) thay vì dùng lệnh shell không tồn tại trên Windows hoặc tốn quyền',
+      suggestedArgs: targetPath ? { path: targetPath, reason: 'Dọn dẹp tệp tin qua tool chuyên dụng' } : undefined,
+    };
+  }
+
+  // 5. Di chuyển / đổi tên file qua shell (mv, move, Move-Item, mi)
+  const mvMatch = trimmed.match(/^(?:mv|move|Move-Item|mi)\s+(?:-[a-zA-Z0-9-]+\s+)*((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (mvMatch && !/[;&|]/.test(trimmed)) {
+    const sourcePath = mvMatch[1].replace(/^["']|["']$/g, '');
+    const targetPath = mvMatch[2].replace(/^["']|["']$/g, '');
+    return {
+      tool: 'move_file',
+      reason: 'Di chuyển hoặc đổi tên file an toàn trong workspace (chống ghi đè vô ý)',
+      suggestedArgs: { sourcePath, targetPath },
+    };
+  }
+
+  // 6. Tạo file rỗng qua shell (touch, New-Item, ni)
+  const touchMatch = trimmed.match(/^(?:touch|New-Item|ni)\s+(?:-[a-zA-Z0-9-]+\s+)*((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (touchMatch && !/[;&|]/.test(trimmed)) {
+    const filePath = touchMatch[1].replace(/^["']|["']$/g, '');
+    return {
+      tool: 'create_file',
+      reason: 'Tạo file mới an toàn trong workspace không cần phụ thuộc POSIX shell binary',
+      suggestedArgs: { path: filePath, content: '' },
+    };
+  }
+
   return undefined;
 }
 
@@ -273,19 +307,147 @@ export async function executeSedSliceEmulation(
   }
 }
 
+export interface RmParsedOptions {
+  targetPaths: string[];
+  recursive: boolean;
+  force: boolean;
+}
+
+/**
+ * Phân tích cú pháp lệnh xóa file/thư mục qua shell (rm, del, erase, rmdir, rd, Remove-Item, ri)
+ */
+export function parseRmCommand(command: string): RmParsedOptions | null {
+  const trimmed = command.trim();
+  const prefixMatch = trimmed.match(/^(rm|del|erase|rmdir|rd|Remove-Item|ri)\b/i);
+  if (!prefixMatch) return null;
+
+  // Lệnh phức tạp có pipe/chaining không xử lý qua emulator đơn
+  if (/[;&|]/.test(trimmed)) return null;
+
+  const rawArgs = trimmed.slice(prefixMatch[0].length).trim();
+  if (!rawArgs) return null;
+
+  const tokens = (rawArgs.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((t) => t.trim());
+  if (tokens.length === 0) return null;
+
+  let recursive = false;
+  let force = false;
+  const pathTokens: string[] = [];
+
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower === '-r' || lower === '-rf' || lower === '-fr' || lower === '--recursive' || lower === '/s') {
+      recursive = true;
+      if (lower.includes('f')) force = true;
+    } else if (lower === '-f' || lower === '--force' || lower === '/f' || lower === '/q') {
+      force = true;
+    } else if (lower === '-recurse') {
+      recursive = true;
+    } else if (lower === '-force') {
+      force = true;
+    } else if (token.startsWith('-') || token.startsWith('/')) {
+      if (/r/i.test(token)) recursive = true;
+      if (/f|q/i.test(token)) force = true;
+    } else {
+      pathTokens.push(token.replace(/^["']|["']$/g, ''));
+    }
+  }
+
+  if (/^(rmdir|rd)$/i.test(prefixMatch[1])) {
+    recursive = true;
+  }
+
+  if (pathTokens.length === 0) return null;
+
+  return {
+    targetPaths: pathTokens,
+    recursive,
+    force,
+  };
+}
+
+/**
+ * Giả lập thực thi rm/del siêu tốc qua Node.js I/O (<5ms)
+ * Đảm bảo an toàn:
+ * 1. Không vượt ra ngoài workspace (resolveSafePath)
+ * 2. Bảo vệ file cấu hình hệ thống nhạy cảm (workspace.isProtectedFile)
+ * 3. Tương thích chéo đa nền tảng (không phụ thuộc rm.exe hay cmd.exe trên Windows)
+ */
+export async function executeRmEmulation(
+  parsed: RmParsedOptions,
+  workspace: Workspace,
+): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; suggestion?: string }> {
+  const startTime = Date.now();
+  const deletedPaths: string[] = [];
+  try {
+    for (const targetPath of parsed.targetPaths) {
+      const safePath = workspace.resolveSafePath(targetPath);
+      if (workspace.isProtectedFile(safePath)) {
+        return {
+          stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
+          stderr: `Security violation: Không được phép xóa file cấu hình nhạy cảm hoặc file được bảo vệ "${targetPath}".`,
+          success: false,
+          durationMs: Date.now() - startTime,
+          exitCode: 1,
+          suggestion: 'File này thuộc danh sách bảo vệ hệ thống của workspace và không thể xóa.',
+        };
+      }
+
+      try {
+        await fs.access(safePath);
+      } catch {
+        if (!parsed.force) {
+          return {
+            stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
+            stderr: `rm: cannot remove '${targetPath}': No such file or directory`,
+            success: false,
+            durationMs: Date.now() - startTime,
+            exitCode: 1,
+            suggestion: 'Kiểm tra lại đường dẫn tệp tin hoặc sử dụng tool chuyên dụng "delete_file".',
+          };
+        }
+        continue;
+      }
+
+      await fs.rm(safePath, { recursive: parsed.recursive, force: parsed.force });
+      deletedPaths.push(targetPath);
+    }
+
+    const count = deletedPaths.length;
+    return {
+      stdout: count > 0
+        ? `Đã xóa ${count} mục (${deletedPaths.join(', ')}) an toàn qua RmEmulation (${Date.now() - startTime}ms).`
+        : '',
+      stderr: '',
+      success: true,
+      durationMs: Date.now() - startTime,
+      exitCode: 0,
+      suggestion: 'Mẹo: Hãy dùng trực tiếp tool chuyên dụng "delete_file" (cross-platform, an toàn hash, <2ms) để tối ưu hóa.',
+    };
+  } catch (err: any) {
+    return {
+      stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
+      stderr: `rm: failed to remove: ${err.message}`,
+      success: false,
+      durationMs: Date.now() - startTime,
+      exitCode: 1,
+    };
+  }
+}
+
 /**
  * Tạo Tool run_command có tích hợp SandboxManager và TaskManager (Chuẩn Antigravity CLI Unified Command Execution)
  */
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu sang background task. LƯU Ý QUAN TRỌNG: Để đọc hoặc kiểm tra mã nguồn (file inspection), BẮT BUỘC dùng tool "read_file" (hỗ trợ trích xuất toàn bộ hàm qua "symbol" trong 1-shot hoặc dải dòng 150-300 dòng). KHÔNG dùng run_command với sed/cat/head để chia nhỏ file thành từng khúc 50 dòng gây lãng phí step.',
+    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu sang background task. LƯU Ý QUAN TRỌNG: Để đọc hoặc kiểm tra mã nguồn, BẮT BUỘC dùng tool "read_file" (hỗ trợ trích xuất toàn bộ hàm qua "symbol" trong 1-shot hoặc dải dòng 150-300 dòng). Để xóa file hoặc thư mục, BẮT BUỘC dùng tool "delete_file" (an toàn hash, cross-platform). Để di chuyển hoặc đổi tên file, dùng "move_file". KHÔNG dùng run_command với sed/cat để đọc file, hoặc rm/del để xóa file.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v"). Không dùng để đọc file (hãy dùng read_file).',
+          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v"). Không dùng để đọc file (dùng read_file) hoặc xóa file (dùng delete_file).',
         },
         CommandLine: {
           type: Type.STRING,
@@ -370,12 +532,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
         const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
+        const misuse = detectFileCommandMisuse(rawCommand);
         return {
           command: rawCommand,
           error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) từ người dùng. Các phân đoạn ngoài allowlist: ${deniedSegments.join(', ')}`,
           errorCode: 'COMMAND_NOT_ALLOWED',
           deniedSegments,
-          suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+          suggestion: misuse
+            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
+            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
         };
       }
 
@@ -445,6 +610,24 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
       }
 
+      // Tự động tối ưu hoá / giả lập lệnh xóa file (rm / del) siêu tốc qua Node.js I/O (<5ms)
+      const parsedRm = parseRmCommand(rawCommand);
+      if (parsedRm) {
+        const emulatedRm = await executeRmEmulation(parsedRm, workspace);
+        return {
+          command: rawCommand,
+          stdout: truncateOutput(emulatedRm.stdout),
+          stderr: truncateOutput(emulatedRm.stderr),
+          exitCode: emulatedRm.exitCode,
+          durationMs: emulatedRm.durationMs,
+          sandbox: 'local',
+          executionTarget,
+          success: emulatedRm.success,
+          emulated: true,
+          suggestion: emulatedRm.suggestion,
+        };
+      }
+
       if (executionTarget === 'host') {
         if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
@@ -463,11 +646,14 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           }
         }
         if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+          const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host.`,
             errorCode: 'COMMAND_NOT_ALLOWED',
-            suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+            suggestion: misuse
+              ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
+              : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
           };
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
@@ -494,6 +680,28 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               executionTarget: 'host',
               success: emulated.success,
               emulated: true,
+            };
+          }
+        }
+
+        // Tự động kích hoạt Built-in Rm Emulator nếu native command thất bại trên Host
+        if (parsedRm && hostResult.exitCode !== 0) {
+          const emulatedRm = await executeRmEmulation(parsedRm, workspace);
+          const nativeCommandMissing = hostResult.exitCode === 127
+            || hostResult.stderr.includes('not found')
+            || hostResult.stderr.includes('not recognized');
+          if (emulatedRm.success || nativeCommandMissing) {
+            return {
+              command: rawCommand,
+              stdout: truncateOutput(emulatedRm.stdout),
+              stderr: truncateOutput(emulatedRm.stderr),
+              exitCode: emulatedRm.exitCode,
+              durationMs: emulatedRm.durationMs,
+              sandbox: 'local',
+              executionTarget: 'host',
+              success: emulatedRm.success,
+              emulated: true,
+              suggestion: emulatedRm.suggestion,
             };
           }
         }
@@ -533,11 +741,14 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
 
         if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+          const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
             error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host. (Hoặc bật Docker Sandbox để chạy lệnh không giới hạn).`,
             errorCode: 'COMMAND_NOT_ALLOWED',
-            suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+            suggestion: misuse
+              ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
+              : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
           };
         }
 
@@ -608,11 +819,14 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        const misuse = detectFileCommandMisuse(rawCommand);
         return {
           command: rawCommand,
           error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) trước khi thực thi.`,
           errorCode: 'COMMAND_NOT_ALLOWED',
-          suggestion: 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+          suggestion: misuse
+            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
+            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
         };
       }
 
@@ -655,6 +869,25 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     sandbox: 'local',
                     success: emulated.success,
                     emulated: true,
+                  });
+                });
+                return;
+              }
+
+              const isRm = parseRmCommand(rawCommand);
+              if (isRm) {
+                executeRmEmulation(isRm, workspace).then((emulatedRm) => {
+                  resolve({
+                    command: rawCommand,
+                    stdout: truncateOutput(emulatedRm.stdout),
+                    stderr: truncateOutput(emulatedRm.stderr),
+                    exitCode: emulatedRm.exitCode,
+                    durationMs: emulatedRm.durationMs,
+                    sandboxType: 'local' as const,
+                    sandbox: 'local',
+                    success: emulatedRm.success,
+                    emulated: true,
+                    suggestion: emulatedRm.suggestion,
                   });
                 });
                 return;
