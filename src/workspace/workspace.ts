@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import { getNativeCore } from '../native/index.js';
 
 /**
  * Workspace quản lý thư mục làm việc và thiết lập ranh giới an toàn cho Coding Agent.
@@ -79,6 +80,23 @@ export class Workspace {
    * Ném ra lỗi Security Exception nếu đường dẫn cố tình thoát ra ngoài workspace hoặc trỏ qua symlink ra ngoài.
    */
   resolveSafePath(targetPath: string): string {
+    const native = getNativeCore();
+    if (native) {
+      try {
+        const res = native.rsResolveSafePath(this.rootDir, targetPath);
+        if (!res.success && res.error) {
+          throw new Error(res.error);
+        }
+        if (res.resolvedPath) {
+          return path.resolve(res.resolvedPath);
+        }
+      } catch (err: any) {
+        if (err.message && err.message.startsWith('Security Exception:')) {
+          throw err;
+        }
+      }
+    }
+
     const resolved = path.resolve(this.rootDir, targetPath);
     const relative = path.relative(this.rootDir, resolved);
 

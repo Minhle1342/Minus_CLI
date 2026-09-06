@@ -4,10 +4,20 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Workspace } from './workspace.js';
+import { getNativeCore } from '../native/index.js';
 
 const execFileAsync = promisify(execFile);
 
 export async function computeFileHash(filePath: string): Promise<string> {
+  const native = getNativeCore();
+  if (native) {
+    try {
+      const h = native.rsComputeFileHash(filePath);
+      if (h) return `sha256:${h}`;
+    } catch {
+      // Fallback
+    }
+  }
   try {
     const buffer = await fs.readFile(filePath);
     return `sha256:${crypto.createHash('sha256').update(buffer).digest('hex')}`;
@@ -17,6 +27,15 @@ export async function computeFileHash(filePath: string): Promise<string> {
 }
 
 export function computeStringHash(content: string): string {
+  const native = getNativeCore();
+  if (native) {
+    try {
+      const h = native.rsComputeStringHash(content);
+      if (h) return `sha256:${h}`;
+    } catch {
+      // Fallback
+    }
+  }
   return `sha256:${crypto.createHash('sha256').update(content, 'utf8').digest('hex')}`;
 }
 
