@@ -271,7 +271,9 @@ export function classifyToolFailure(
     lower.includes('validation error') ||
     lower.includes('missing required') ||
     lower.includes('expected string') ||
-    lower.includes('expected number')
+    lower.includes('expected number') ||
+    lower.includes('not declared by the tool schema') ||
+    lower.includes('invalid arguments')
   ) {
     return {
       category: 'SCHEMA_MISMATCH',
@@ -414,12 +416,62 @@ export class ToolUseGuardian {
 
     // Top-level semantic aliases
     if (actualSchema.properties.path && !('path' in coerced)) {
-      const pathAlias = coerced.filePath || coerced.file_path || coerced.filename;
+      const pathAlias = coerced.filePath || coerced.file_path || coerced.filename || coerced.file;
       if (typeof pathAlias === 'string') {
         coerced.path = pathAlias;
         changed = true;
         coercedKeys.push('path');
+        if (coerced.filePath && !actualSchema.properties.filePath) delete coerced.filePath;
+        if (coerced.file_path && !actualSchema.properties.file_path) delete coerced.file_path;
+        if (coerced.filename && !actualSchema.properties.filename) delete coerced.filename;
+        if (coerced.file && !actualSchema.properties.file) delete coerced.file;
       }
+    }
+    if (actualSchema.properties.filePath && !('filePath' in coerced)) {
+      const pathAlias = coerced.path || coerced.file_path || coerced.filename || coerced.file;
+      if (typeof pathAlias === 'string') {
+        coerced.filePath = pathAlias;
+        changed = true;
+        coercedKeys.push('filePath');
+        if (coerced.path && !actualSchema.properties.path) delete coerced.path;
+        if (coerced.file_path && !actualSchema.properties.file_path) delete coerced.file_path;
+        if (coerced.filename && !actualSchema.properties.filename) delete coerced.filename;
+        if (coerced.file && !actualSchema.properties.file) delete coerced.file;
+      }
+    }
+    if (actualSchema.properties.paths && !('paths' in coerced)) {
+      const pathsCandidate = coerced.files || coerced.file || coerced.path || coerced.filePaths || coerced.file_paths;
+      if (Array.isArray(pathsCandidate)) {
+        coerced.paths = pathsCandidate.map(String);
+        changed = true;
+        coercedKeys.push('paths');
+      } else if (typeof pathsCandidate === 'string' && pathsCandidate.trim()) {
+        coerced.paths = [pathsCandidate.trim()];
+        changed = true;
+        coercedKeys.push('paths');
+      }
+      if (coerced.files && !actualSchema.properties.files) delete coerced.files;
+      if (coerced.file && !actualSchema.properties.file) delete coerced.file;
+      if (coerced.path && !actualSchema.properties.path) delete coerced.path;
+      if (coerced.filePaths && !actualSchema.properties.filePaths) delete coerced.filePaths;
+      if (coerced.file_paths && !actualSchema.properties.file_paths) delete coerced.file_paths;
+    }
+    if (actualSchema.properties.files && !('files' in coerced)) {
+      const filesCandidate = coerced.paths || coerced.file || coerced.path || coerced.filePaths || coerced.file_paths;
+      if (Array.isArray(filesCandidate)) {
+        coerced.files = filesCandidate.map(String);
+        changed = true;
+        coercedKeys.push('files');
+      } else if (typeof filesCandidate === 'string' && filesCandidate.trim()) {
+        coerced.files = [filesCandidate.trim()];
+        changed = true;
+        coercedKeys.push('files');
+      }
+      if (coerced.paths && !actualSchema.properties.paths) delete coerced.paths;
+      if (coerced.file && !actualSchema.properties.file) delete coerced.file;
+      if (coerced.path && !actualSchema.properties.path) delete coerced.path;
+      if (coerced.filePaths && !actualSchema.properties.filePaths) delete coerced.filePaths;
+      if (coerced.file_paths && !actualSchema.properties.file_paths) delete coerced.file_paths;
     }
     if (actualSchema.properties.command && !('command' in coerced)) {
       const cmdAlias = coerced.cmd;
@@ -427,6 +479,7 @@ export class ToolUseGuardian {
         coerced.command = cmdAlias;
         changed = true;
         coercedKeys.push('command');
+        if (coerced.cmd && !actualSchema.properties.cmd) delete coerced.cmd;
       }
     }
 
@@ -459,18 +512,26 @@ export class ToolUseGuardian {
             val = false;
           }
         }
-        // Chuỗi JSON thành object / array (ví dụ: "{\"a\":1}" -> {a: 1})
+        // Chuỗi JSON thành object / array (ví dụ: "{\"a\":1}" -> {a: 1}) hoặc chuỗi đơn thành mảng (ví dụ: "file.ts" -> ["file.ts"])
         else if ((targetType === 'object' || targetType === 'array') && typeof val === 'string') {
           const trimmed = val.trim();
+          let parsed = false;
           if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
             try {
               val = JSON.parse(trimmed);
               coerced[key] = val;
               changed = true;
               coercedKeys.push(key);
+              parsed = true;
             } catch {
               // Bỏ qua nếu parse thất bại
             }
+          }
+          if (!parsed && targetType === 'array' && trimmed !== '') {
+            val = [trimmed];
+            coerced[key] = val;
+            changed = true;
+            coercedKeys.push(key);
           }
         }
 

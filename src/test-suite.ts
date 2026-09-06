@@ -20,6 +20,7 @@ import { findReferencesTool } from './tools/find-references.js';
 import { getDiagnosticsTool } from './tools/get-diagnostics.js';
 import { analyzeImpactTool } from './tools/blast-radius.js';
 import { ToolUseGuardian, classifyToolFailure, DEFAULT_TOOL_ALTERNATIVES } from './tools/tool-use-guardian.js';
+import { validateSchemaValue } from './tools/schema-validator.js';
 import { generateFileToolDiff, isMutationTool } from './tools/diff-generator.js';
 import { ContextGuardian, ContextAgent } from './context/index.js';
 import { createInspectImageTool, extractImageDimensions, detectMimeType } from './tools/inspect-image.js';
@@ -6746,6 +6747,32 @@ Always write tests first!`;
   assert(Array.isArray(planRunResult.result.tasks) && planRunResult.result.tasks.length === 2, 'Tạo thành công 2 task trong DAG');
   assert(planRunResult.result.tasks[0].id === 1 && planRunResult.result.tasks[0].title === 'Kiểm tra file cấu hình', 'Task 1 bảo toàn thông tin');
   assert(planRunResult.result.tasks[1].id === 2 && planRunResult.result.tasks[1].title === 'Triển khai bản vá và chạy test', 'Task 2 bảo toàn thông tin');
+
+  // 40.7. Tool Use Guardian & Git Tools: Tự động ánh xạ files -> paths và khắc phục Schema Mismatch cho git_add
+  const gitToolsTest = createGitTools(workspace);
+  const gitAddDef = gitToolsTest.find((t) => t.name === 'git_add')!;
+  assert(gitAddDef !== undefined, 'git_add tool được định nghĩa trong GitTools');
+  
+  // Kiểm tra Schema Validation trực tiếp chấp nhận files, file, path
+  const filesValidation = validateSchemaValue({ files: ['src/index.ts'] }, gitAddDef.parameters as any, '$', { rejectUnknownProperties: true });
+  assert(filesValidation.valid === true, 'Schema git_add chấp nhận tham số files');
+  const fileValidation = validateSchemaValue({ file: 'src/index.ts' }, gitAddDef.parameters as any, '$', { rejectUnknownProperties: true });
+  assert(fileValidation.valid === true, 'Schema git_add chấp nhận tham số file');
+
+  // Kiểm tra Guardian coerceParameters tự động ánh xạ files -> paths khi schema chỉ có paths
+  const strictPathsSchema = {
+    type: 'OBJECT',
+    properties: {
+      paths: { type: 'ARRAY', items: { type: 'STRING' } },
+    },
+  };
+  const coercedPaths = guardian.coerceParameters('paths_only_tool', { files: ['src/app.ts', 'src/main.ts'] }, strictPathsSchema);
+  assert(Array.isArray(coercedPaths.paths) && coercedPaths.paths.length === 2, 'Guardian tự động ánh xạ files thành paths');
+  assert(coercedPaths.files === undefined, 'Guardian dọn dẹp key files cũ tránh lỗi rejectUnknownProperties');
+
+  // Kiểm tra phân loại lỗi SCHEMA_MISMATCH cho thông báo "not declared by the tool schema"
+  const schemaMismatchDiag = classifyToolFailure('git_add', 'Invalid arguments for tool "git_add": $.files is not declared by the tool schema');
+  assert(schemaMismatchDiag.category === 'SCHEMA_MISMATCH', 'Phân loại chính xác SCHEMA_MISMATCH cho lỗi undeclared property');
 
   // 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)
   console.log('\n========================================');

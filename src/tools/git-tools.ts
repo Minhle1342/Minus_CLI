@@ -260,15 +260,37 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           items: { type: Type.STRING },
           description: 'Optional workspace-relative paths to stage selectively.',
         },
+        files: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Alias for paths: workspace-relative files to stage.',
+        },
+        file: {
+          type: Type.STRING,
+          description: 'Alias for single workspace-relative file to stage.',
+        },
+        path: {
+          type: Type.STRING,
+          description: 'Alias for single workspace-relative path to stage.',
+        },
       },
     },
     execute: async (args: Record<string, any>, _workspace: Workspace, context?: ToolExecutionContext) => {
       const denied = requireAuthorization(context, 'stage');
       if (denied) return denied;
       try {
-        const requestedPaths = Array.isArray(args.paths)
-          ? args.paths.map(String).filter((item: string) => item.trim().length > 0)
-          : [];
+        const rawPaths: string[] = [];
+        if (Array.isArray(args.paths)) rawPaths.push(...args.paths);
+        if (Array.isArray(args.files)) rawPaths.push(...args.files);
+        else if (typeof args.files === 'string' && args.files.trim()) rawPaths.push(args.files);
+        if (typeof args.file === 'string' && args.file.trim()) rawPaths.push(args.file);
+        if (typeof args.path === 'string' && args.path.trim()) rawPaths.push(args.path);
+
+        const requestedPaths = rawPaths
+          .map(String)
+          .map((item: string) => item.trim())
+          .filter((item: string) => item.length > 0);
+
         const cmdArgs = ['add'];
         if (args.all === true || requestedPaths.length === 0) {
           cmdArgs.push('--all');
