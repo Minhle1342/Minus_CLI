@@ -32,7 +32,7 @@ export function createSaveRepositoryMemoryTool(memory: CitationValidatedReposito
       type: Type.OBJECT,
       properties: {
         statement: { type: Type.STRING, description: 'Stable repository fact to remember.' },
-        category: { type: Type.STRING, enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight'] },
+        category: { type: Type.STRING, enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight', 'episodic'] },
         confidence: { type: Type.NUMBER, minimum: 0, maximum: 1 },
         concepts: { type: Type.ARRAY, items: { type: Type.STRING } },
         relatedFiles: { type: Type.ARRAY, items: { type: Type.STRING } },

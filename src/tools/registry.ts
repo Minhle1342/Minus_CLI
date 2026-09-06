@@ -20,6 +20,8 @@ import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { runTestSuiteTool } from './run-test-suite.js';
 import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
+import { createWebSearchTool } from './web-search.js';
+import { createWebFetchTool } from './web-fetch.js';
 import { searchWebTool } from './search-web.js';
 import { readUrlContentTool } from './read-url-content.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
@@ -32,6 +34,8 @@ import { TaskManager } from '../tasks/task-manager.js';
 import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
+import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
+import { createAllocateAgentTaskTool, createVerifySubagentQualityTool, createBrainstormDesignTool } from './subagent-tools.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -42,6 +46,14 @@ import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
+import { ComputerController, createComputerTool } from '../computer/index.js';
+import {
+  gameTilemapStudioTool,
+  gamePixelSpriteStudioTool,
+  game2DPhysicsConfigTool,
+  gameScaffoldEngineTool,
+} from './game-tools.js';
+import { unityGameplayStudioTool } from './unity-tools.js';
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -63,18 +75,23 @@ export interface ToolProvider {
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
   private retriever: ToolRetriever;
+  private computerController: ComputerController;
+  private sandboxManager?: any;
+  private taskManager?: TaskManager;
+  private permissionManager?: any;
 
   constructor(
     planManager?: PlanManager,
     memoryManager?: ProjectMemoryManager,
-    retrieverConfig?: ToolRetrieverConfig
+    retrieverConfig?: ToolRetrieverConfig,
+    options?: { enableGameTools?: boolean }
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
+    this.computerController = new ComputerController();
 
     // Đăng ký mặc định các tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
-    this.register(searchTextTool);
     this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
@@ -95,9 +112,14 @@ export class ToolRegistry implements ToolProvider {
     this.register(getRouteMapTool);
     this.register(getSymbolContext360Tool);
     this.register(getArchitectureTopologyTool);
+    this.register(createSearchCodebaseFastTool());
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
+
+    if (options?.enableGameTools) {
+      this.registerGameTools();
+    }
 
     // Đăng ký các planning tools nếu có PlanManager
     if (planManager) {
@@ -112,6 +134,27 @@ export class ToolRegistry implements ToolProvider {
 
   attachSession(session: any): void {
     this.register(createInspectImageTool(() => session));
+    this.computerController.setSessionAccessor(() => session);
+  }
+
+  /**
+   * Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine theo nguyên lý Progressive Disclosure.
+   */
+  registerGameTools(): void {
+    if (!this.tools.has(gameTilemapStudioTool.name)) this.register(gameTilemapStudioTool);
+    if (!this.tools.has(gamePixelSpriteStudioTool.name)) this.register(gamePixelSpriteStudioTool);
+    if (!this.tools.has(game2DPhysicsConfigTool.name)) this.register(game2DPhysicsConfigTool);
+    if (!this.tools.has(gameScaffoldEngineTool.name)) this.register(gameScaffoldEngineTool);
+    if (!this.tools.has(unityGameplayStudioTool.name)) this.register(unityGameplayStudioTool);
+  }
+
+  attachComputerController(controller: ComputerController): void {
+    this.computerController = controller;
+    this.register(createComputerTool(this.computerController));
+  }
+
+  getComputerController(): ComputerController {
+    return this.computerController;
   }
 
   attachPlanManager(planManager: PlanManager): void {
@@ -131,12 +174,19 @@ export class ToolRegistry implements ToolProvider {
   }
 
   attachSandboxManager(sandboxManager: any): void {
-    this.register(createRunCommandTool(sandboxManager));
+    this.sandboxManager = sandboxManager;
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
   attachTaskManager(taskManager: TaskManager): void {
+    this.taskManager = taskManager;
     this.register(createManageTaskTool(taskManager));
-    this.register(createRunCommandTool(undefined, taskManager));
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+  }
+
+  attachPermissionManager(permissionManager: any): void {
+    this.permissionManager = permissionManager;
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
   attachScheduleManager(scheduleManager: ScheduleManager): void {
@@ -150,6 +200,12 @@ export class ToolRegistry implements ToolProvider {
 
   attachAgentEventBus(eventBus: AgentEventBus): void {
     this.register(createPublishAgentEventTool(eventBus));
+  }
+
+  attachAgentOrchestrator(orchestrator: AgentOrchestrator): void {
+    this.register(createAllocateAgentTaskTool(orchestrator));
+    this.register(createVerifySubagentQualityTool(orchestrator));
+    this.register(createBrainstormDesignTool());
   }
 
   createScope(scopeId: string, allowedToolNames?: string[]): ToolScope {
@@ -167,12 +223,28 @@ export class ToolRegistry implements ToolProvider {
   /**
    * Lấy tool theo tên
    */
+  /**
+   * Lấy tool theo tên (ưu tiên exact match, sau đó hỗ trợ alias tương thích 2 chiều: search_web <-> web_search, read_url_content <-> web_fetch)
+   */
   has(name: string): boolean {
-    return this.tools.has(name);
+    if (this.tools.has(name)) return true;
+    if (name === 'search_web') return this.tools.has('web_search');
+    if (name === 'web_search') return this.tools.has('search_web');
+    if (name === 'read_url_content') return this.tools.has('web_fetch');
+    if (name === 'web_fetch') return this.tools.has('read_url_content');
+    if (name === 'search_text') return this.tools.has('search_codebase_fast') || this.tools.has('search_text');
+    return false;
   }
 
   get(name: string): ToolDefinition | undefined {
-    return this.tools.get(name);
+    const exact = this.tools.get(name);
+    if (exact) return exact;
+    if (name === 'search_web') return this.tools.get('web_search');
+    if (name === 'web_search') return this.tools.get('search_web');
+    if (name === 'read_url_content') return this.tools.get('web_fetch');
+    if (name === 'web_fetch') return this.tools.get('read_url_content');
+    if (name === 'search_text') return this.tools.get('search_codebase_fast') || searchTextTool;
+    return undefined;
   }
 
   /**
@@ -215,7 +287,30 @@ export class ToolRegistry implements ToolProvider {
    * Thực thi trực tiếp tool với workspace context (fallback method)
    */
   async execute(name: string, args: Record<string, any>, workspace: Workspace = new Workspace()): Promise<Record<string, any>> {
-    const tool = this.get(name);
+    let resolvedName = name;
+    let resolvedArgs = args;
+
+    if (!this.tools.has(name)) {
+      if (name === 'search_web' && this.tools.has('web_search')) {
+        resolvedName = 'web_search';
+      } else if (name === 'web_search' && this.tools.has('search_web')) {
+        resolvedName = 'search_web';
+      } else if (name === 'read_url_content' && this.tools.has('web_fetch')) {
+        resolvedName = 'web_fetch';
+        if (!resolvedArgs.url && resolvedArgs.Url) {
+          resolvedArgs = { ...resolvedArgs, url: resolvedArgs.Url };
+        }
+      } else if (name === 'web_fetch' && this.tools.has('read_url_content')) {
+        resolvedName = 'read_url_content';
+        if (!resolvedArgs.Url && resolvedArgs.url) {
+          resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
+        }
+      } else if (name === 'search_text') {
+        resolvedName = 'search_text';
+      }
+    }
+
+    const tool = this.get(resolvedName);
     if (!tool) {
       return {
         error: `Tool "${name}" không tồn tại trong ToolRegistry. Các tool hiện có: ${Array.from(this.tools.keys()).join(', ')}`,
@@ -224,7 +319,7 @@ export class ToolRegistry implements ToolProvider {
     }
 
     try {
-      return await tool.execute(args, workspace);
+      return await tool.execute(resolvedArgs, workspace);
     } catch (err: any) {
       return {
         error: `Lỗi khi thực thi tool "${name}": ${err.message}`,
@@ -261,7 +356,16 @@ export class ToolScope implements ToolProvider {
   get(name: string): ToolDefinition | undefined {
     const local = this.localTools.get(name);
     if (local) return local;
-    if (this.allowed && !this.allowed.has(name)) return undefined;
+    if (this.allowed && !this.allowed.has(name)) {
+      // Check alias permission
+      const alias = name === 'search_web' ? 'web_search'
+        : name === 'web_search' ? 'search_web'
+        : name === 'read_url_content' ? 'web_fetch'
+        : name === 'web_fetch' ? 'read_url_content'
+        : name === 'search_text' ? 'search_codebase_fast'
+        : undefined;
+      if (!alias || !this.allowed.has(alias)) return undefined;
+    }
     return this.base.get(name);
   }
 

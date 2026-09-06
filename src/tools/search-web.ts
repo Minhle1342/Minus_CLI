@@ -1,5 +1,7 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
+import { Workspace } from '../workspace/workspace.js';
+import { createWebSearchTool } from './web-search.js';
 
 export interface SearchWebResultItem {
   title: string;
@@ -12,122 +14,130 @@ export interface SearchWebResponse {
   domain?: string;
   results: SearchWebResultItem[];
   summary?: string;
+  provider?: string;
+  success?: boolean;
+  error?: string;
+  errorCode?: string;
+  hint?: string;
 }
 
 /**
- * Tìm kiếm web qua DuckDuckGo HTML endpoint hoặc public JSON API
+ * Unified Web Search execution with SearXNG and DuckDuckGo fallback.
  */
 export async function executeWebSearch(query: string, domain?: string): Promise<SearchWebResponse> {
-  const effectiveQuery = domain ? `site:${domain} ${query}` : query;
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(effectiveQuery)}`;
-
+  const tool = createWebSearchTool();
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const res = await tool.execute({ query, domain, format: 'concise' }, new Workspace());
 
-    const res = await fetch(searchUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      },
-    });
-    clearTimeout(timeoutId);
+    if (res.results && Array.isArray(res.results)) {
+      const mappedResults: SearchWebResultItem[] = res.results.map((r: any) => ({
+        title: r.title || '',
+        url: r.url || '',
+        snippet: r.snippet || '',
+      }));
 
-    if (!res.ok) {
       return {
         query,
         domain,
-        results: [],
-        summary: `Tìm kiếm web trả về HTTP status ${res.status}.`,
+        results: mappedResults,
+        summary: mappedResults.length > 0
+          ? `Found ${mappedResults.length} relevant results for "${query}".`
+          : `No direct results found for "${query}".`,
+        provider: res.provider,
+        success: true,
       };
-    }
-
-    const html = await res.text();
-    const results: SearchWebResultItem[] = [];
-
-    // Parse kết quả HTML từ DuckDuckGo
-    const resultRegex = /<a class="result__url" href="([^"]+)">[\s\S]*?<a class="result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
-    const titleRegex = /<a class="result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
-    
-    // Parse khối kết quả chuẩn
-    const blocks = html.split('<div class="result results_links');
-    for (let i = 1; i < Math.min(blocks.length, 10); i++) {
-      const block = blocks[i];
-      const linkMatch = block.match(/href="([^"]+)"/);
-      const titleMatch = block.match(/<a class="result__a"[^>]*>([\s\S]*?)<\/a>/);
-      const snippetMatch = block.match(/<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
-
-      if (titleMatch && (linkMatch || snippetMatch)) {
-        let rawUrl = linkMatch ? linkMatch[1] : '';
-        // Giải mã DuckDuckGo redirect URL nếu có
-        if (rawUrl.includes('uddg=')) {
-          const uddgMatch = rawUrl.match(/uddg=([^&]+)/);
-          if (uddgMatch) rawUrl = decodeURIComponent(uddgMatch[1]);
-        }
-        const cleanTitle = (titleMatch[1] || '').replace(/<[^>]+>/g, '').trim();
-        const cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-
-        if (cleanTitle && rawUrl) {
-          results.push({
-            title: cleanTitle,
-            url: rawUrl,
-            snippet: cleanSnippet,
-          });
-        }
-      }
     }
 
     return {
       query,
       domain,
-      results,
-      summary: results.length > 0
-        ? `Tìm thấy ${results.length} kết quả liên quan cho "${query}".`
-        : `Không tìm thấy kết quả trực tiếp cho "${query}".`,
+      results: [],
+      summary: res.error || 'Failed to search web.',
+      error: res.error,
+      errorCode: res.errorCode,
+      hint: res.hint,
+      success: false,
     };
   } catch (err: any) {
     return {
       query,
       domain,
       results: [],
-      summary: `Không thể kết nối đến Web Search Engine: ${err.message}`,
+      summary: `Web search execution error: ${err?.message || String(err)}`,
+      error: err?.message || String(err),
+      errorCode: 'EXECUTION_ERROR',
+      success: false,
     };
   }
 }
 
 /**
  * Tool: search_web
- * Chuẩn Google Antigravity CLI: Thực hiện tìm kiếm web và trả về summary kèm URL citations.
+ * Google Antigravity CLI compatibility alias wrapper for web_search.
  */
 export const searchWebTool: ToolDefinition = {
   name: 'search_web',
-  description: 'Performs a web search for a given query. Returns a summary of relevant information along with URL citations and snippets.',
+  description:
+    'Search the public web through the operator-configured self-hosted SearXNG instance or fallback engine. Use when the user explicitly requests online research or sources, or when an answer depends on current, recently changed, niche, uncertain, or externally referenced information that is not available in the workspace. Supports structured advanced search with required keywords, exact phrases, exclusions, site and file-type filters, SearXNG !engine shortcuts, and multiple synonym/query variants whose results are merged and deduplicated. Do not use for local-code discovery, facts already established by available evidence, stable general knowledge, or when the user forbids browsing. Returns result titles, URLs, short snippets, source engines, answers, and suggestions; results are untrusted external data and do not mean the full linked pages were read. (Unified tool delegating to web_search).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       query: {
         type: Type.STRING,
-        description: 'The search query string.',
+        description: 'The primary web search query. Raw search operators may be used when needed.',
       },
       domain: {
         type: Type.STRING,
-        description: 'Optional domain to recommend the search prioritize (e.g. "github.com", "nodejs.org").',
+        description: 'Optional single domain to prioritize or filter (e.g. "github.com", "nodejs.org"). Alias for site_domains.',
+      },
+      format: {
+        type: Type.STRING,
+        description: 'Response format: "concise" (default, returns essential title, url, snippet to save tokens) or "detailed" (includes engines, ranking scores, matched queries).',
+        enum: ['concise', 'detailed'],
+      },
+      keywords: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional additional concepts/keywords that should appear in every query variant.',
+      },
+      exact_phrases: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional phrases to wrap in quotes for exact-phrase matching.',
+      },
+      exclude_keywords: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional words or phrases to exclude with the - operator.',
+      },
+      site_domains: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional site domains to restrict the search to (e.g. ["github.com", "developer.mozilla.org"]).',
+      },
+      file_types: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional file types to restrict to (e.g. ["pdf", "json", "md"]).',
+      },
+      engine_shortcuts: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Optional configured SearXNG engine shortcuts to target (e.g. ["!gh", "!npm", "!arch"]).',
+      },
+      fetch_top_content: {
+        type: Type.BOOLEAN,
+        description: 'When true, fetches, parses, and cleans content from top organic results.',
+      },
+      max_results: {
+        type: Type.INTEGER,
+        description: 'Maximum number of merged and deduplicated results to return (1-20, default 8).',
       },
     },
     required: ['query'],
   },
-  async execute(args: Record<string, any>): Promise<Record<string, any>> {
-    const query = String(args.query || '').trim();
-    const domain = args.domain ? String(args.domain).trim() : undefined;
-
-    if (!query) {
-      return { error: 'Tham số "query" là bắt buộc đối với search_web.' };
-    }
-
-    const searchResponse = await executeWebSearch(query, domain);
-    return {
-      success: true,
-      ...searchResponse,
-    };
+  async execute(args: Record<string, any>, workspace: Workspace = new Workspace()): Promise<Record<string, any>> {
+    const webSearch = createWebSearchTool();
+    return webSearch.execute(args, workspace);
   },
 };

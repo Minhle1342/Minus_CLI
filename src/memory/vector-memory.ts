@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { writeFileAtomically } from './atomic-write.js';
+import { getNativeCore } from '../native/index.js';
 
 export interface VectorDocument {
   id: string;
@@ -36,6 +37,14 @@ export interface VectorReplacement {
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (!a || !b || a.length !== b.length || a.length === 0) {
     return 0;
+  }
+  const native = getNativeCore();
+  if (native) {
+    try {
+      return native.rsCosineSimilarity(a, b);
+    } catch {
+      // Fallback xuống JS loop
+    }
   }
   let dot = 0;
   let normA = 0;
@@ -97,6 +106,18 @@ export class EmbeddingService {
    * Kết hợp Bag-of-Words, Subword Stemming, và Character 3-Gram / 4-Gram Hashing
    */
   generateLocalSubwordEmbedding(text: string): number[] {
+    const native = getNativeCore();
+    if (native) {
+      try {
+        const v = native.rsGenerateSubwordEmbedding(text);
+        if (v && v.length === EmbeddingService.VECTOR_DIMENSIONS) {
+          return v;
+        }
+      } catch {
+        // Fallback xuống JS tokenizer
+      }
+    }
+
     const dims = EmbeddingService.VECTOR_DIMENSIONS;
     const vector = new Array<number>(dims).fill(0);
     const normalized = text.toLowerCase();

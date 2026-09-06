@@ -50,6 +50,7 @@ import {
   resolveThinkingTokensPreset,
   normalizePresetTier,
 } from './llm/token-config.js';
+import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -74,7 +75,7 @@ const anthropicApiKeys = Array.from(new Set([
   ...Array.from({ length: 9 }, (_, index) => process.env[`ANTHROPIC_API_KEY_${index + 2}`]),
 ].filter((key): key is string => Boolean(key?.trim()))));
 const anthropicApiKey = anthropicApiKeys[0] || '';
-const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : 30;
+const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : Infinity;
 
 let activeWorkspaceRef: Workspace | undefined;
 
@@ -256,14 +257,14 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
     if (openrouterApiKey) {
       tiers.push({
-        name: 'openrouter/poolside/laguna-s-2.1:free',
-        provider: 'OpenRouter (Poolside Laguna S 2.1)',
+        name: 'openrouter/z-ai/glm-5.3-flash',
+        provider: 'OpenRouter (Z.ai GLM-5.3 Flash)',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'poolside/laguna-s-2.1:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'z-ai/glm-5.3-flash', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
       tiers.push({
         name: 'openrouter/free',
-        provider: 'OpenRouter Free Router',
+        provider: 'OpenRouter Free',
         tier: 3,
         createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
@@ -629,6 +630,8 @@ async function main() {
 
   // Bộ điều khiển hủy tác vụ chủ động trong lúc đang chạy (Antigravity CLI Style Cancellation)
   let activeExecutionController: AbortController | null = null;
+  let lastCancellationTimestamp = 0;
+  let isPromptingPermission = false;
 
   const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
     const controller = new AbortController();
@@ -636,14 +639,16 @@ async function main() {
     try {
       return await fn(controller.signal);
     } catch (err: any) {
-      if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED')) {
-        CLI.renderTaskCancelledToast();
+      if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED') || err?.message?.includes('aborted')) {
+        lastCancellationTimestamp = Date.now();
+        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
         return undefined;
       }
       throw err;
     } finally {
       if (activeExecutionController === controller) {
         activeExecutionController = null;
+        lastCancellationTimestamp = Date.now();
       }
     }
   };
@@ -715,6 +720,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           agentLoop.goalManager.complete(agentLoop.planManager);
           if (activeSession) {
             sessionPersistence.save(activeSession).catch(() => {});
+            void agentLoop.summarizeSessionEpisodic(activeSession).catch(() => {});
           }
           console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
         }
@@ -723,34 +729,6 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
     }
   };
-
-  // Đăng ký hook Graceful Shutdown và Intercept SIGINT
-  let isShuttingDown = false;
-  const handleGracefulShutdown = async (signal: string) => {
-    if (activeExecutionController) {
-      activeExecutionController.abort();
-      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (SIGINT / Ctrl+C).');
-      return;
-    }
-    if (isShuttingDown) return;
-    isShuttingDown = true;
-    try {
-      if (agentLoop.goalManager.getState()?.phase === 'active') {
-        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
-      }
-      if (activeSession) {
-        await sessionPersistence.save(activeSession).catch(() => {});
-      }
-      saveSession({
-        modelName,
-        workspacePath: workspace.rootDir,
-        activeSessionId: activeSession?.id,
-      }, workspace.rootDir);
-    } catch {}
-    process.exit(0);
-  };
-  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
 
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
@@ -810,27 +788,47 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     });
   }
 
-  let rl = readline.createInterface({ input, output, completer: completeSlashCommand });
-  const setupReadlineListeners = (rlInstance: readline.Interface): void => {
-    rlInstance.on('SIGINT', () => {
-      if (activeExecutionController) {
-        activeExecutionController.abort();
-        slashHints.clear(promptWidth);
-        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
-      } else {
-        const curLine = (rlInstance as any).line || '';
-        if (curLine.length > 0) {
-          (rlInstance as any).line = '';
-          (rlInstance as any).cursor = 0;
-          (rlInstance as any)._refreshLine?.();
-        } else {
-          void handleGracefulShutdown('SIGINT');
-        }
-      }
-    });
+  const completer = (line: string): [string[], string] => {
+    if (activeWorkspaceRef && FileMentionEngine.extractActiveMention(line)) {
+      return FileMentionEngine.completeMention(line, activeWorkspaceRef);
+    }
+    return completeSlashCommand(line);
   };
-  setupReadlineListeners(rl);
+  const rl = readline.createInterface({ input, output, completer });
+  rl.setPrompt(CLI.getPromptSymbol());
 
+  // Cơ chế Concurrent Input Queuing (Google Antigravity Standard):
+  // Lắng nghe câu lệnh người dùng nhập vào ô prompt trong lúc Turn đang thực thi để đưa vào hàng chờ (Mid-Turn Steerability)
+  rl.on('line', (line: string) => {
+    // Chỉ xử lý khi có tác vụ đang chạy ngầm và không nằm trong hộp thoại phân quyền
+    if (!activeExecutionController || isPromptingPermission) {
+      return;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    // Lệnh hủy tác vụ nhanh khi đang chạy
+    if (trimmed === '/cancel' || trimmed === '/stop' || trimmed === '/abort') {
+      activeExecutionController.abort();
+      lastCancellationTimestamp = Date.now();
+      slashHints.clear();
+      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (/cancel).');
+      return;
+    }
+
+    // Đưa câu lệnh vào hàng đợi Queued Messages của active session
+    if (activeSession) {
+      const enqueuedItem = agentLoop.inbox.enqueue(activeSession.id, trimmed, 'human', { isSteering: true });
+      activeSession.append('input/queued', {
+        inputId: enqueuedItem.id,
+        inputText: trimmed,
+        source: 'human',
+        isSteering: true,
+      });
+      void sessionPersistence.save(activeSession).catch(() => {});
+      CLI.renderQueuedMessageEnqueued(trimmed, enqueuedItem.id);
+    }
+  });
   const getActiveModelInfo = () => ({
     modelName,
     effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
@@ -842,6 +840,80 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     getActiveModelInfo,
     () => promptWidth,
   );
+
+  // Đăng ký hook Graceful Shutdown và Intercept SIGINT (Hỗ trợ Antigravity CLI Cancellation & Non-terminating Prompt)
+  let isShuttingDown = false;
+  let lastExitPromptTimestamp = 0;
+
+  const handleGracefulShutdown = async (signal: string) => {
+    const now = Date.now();
+
+    // 1. Nếu đang có tác vụ đang thực thi (activeExecutionController):
+    // Dừng tác vụ ngay lập tức, KHÔNG đóng chương trình, tự động hiển thị thông báo sẵn sàng nhận prompt mới!
+    if (activeExecutionController) {
+      activeExecutionController.abort();
+      lastCancellationTimestamp = now;
+      slashHints.clear(promptWidth);
+      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+      return;
+    }
+
+    // 2. Chống race condition: Bỏ qua tín hiệu trễ (trailing SIGINT) trong vòng 1500ms sau khi vừa hủy tác vụ
+    if (now - lastCancellationTimestamp < 1500) {
+      return;
+    }
+
+    // 3. Nếu người dùng bấm Ctrl+C tại dấu nhắc lệnh prompt (không có tác vụ nào đang chạy):
+    // Không thoát đột ngột làm mất phiên làm việc. Xóa dòng nhập hiện tại, nhắc người dùng và mời tiếp tục nhập prompt.
+    if (signal === 'SIGINT') {
+      const elapsed = now - lastExitPromptTimestamp;
+      // Bỏ qua nếu event bị lặp trong vòng 300ms do readline / process emitter
+      if (elapsed < 300) {
+        return;
+      }
+      // Nếu bấm Ctrl+C lần thứ 2 trong khoảng 300ms đến 2000ms -> Người dùng thực sự muốn thoát
+      if (elapsed > 2000) {
+        lastExitPromptTimestamp = now;
+        try {
+          (rl as any).line = '';
+          (rl as any).cursor = 0;
+          slashHints.clear(promptWidth);
+        } catch {}
+        console.log(`\n  ${c.yellow}⚠️  Nhấn Ctrl+C thêm 1 lần nữa trong 2 giây để thoát chương trình, hoặc tiếp tục nhập lệnh / prompt.${c.reset}`);
+        CLI.renderPromptInputNotice('Sẵn sàng nhận lệnh mới. Mời bạn nhập yêu cầu / prompt:');
+        try {
+          rl.setPrompt(CLI.getPromptSymbol());
+          rl.prompt(true);
+        } catch {}
+        return;
+      }
+    }
+
+    // 4. Thoát an toàn (SIGTERM từ hệ thống hoặc bấm Ctrl+C 2 lần liên tiếp để xác nhận):
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    try {
+      if (agentLoop.goalManager.getState()?.phase === 'active') {
+        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
+      }
+      if (activeSession) {
+        await sessionPersistence.save(activeSession).catch(() => {});
+      }
+      saveSession({
+        modelName,
+        workspacePath: workspace.rootDir,
+        activeSessionId: activeSession?.id,
+      }, workspace.rootDir);
+      await kernel.dispose().catch(() => {});
+    } catch {}
+    console.log(`\n${c.green}Tạm biệt! Phiên làm việc đã được lưu trữ an toàn. 👋${c.reset}\n`);
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
+  rl.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
+
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
     // Phím tắt Ctrl+C hoặc Escape trong lúc đang thực thi: Hủy tác vụ hiện tại ngay lập tức (Antigravity CLI style)
@@ -849,6 +921,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
       if (isCancelKey) {
         activeExecutionController.abort();
+        lastCancellationTimestamp = Date.now();
         slashHints.clear(promptWidth);
         CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
         return;
@@ -879,13 +952,26 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
       return;
     }
-    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, Escape, v.v.) tránh vỡ UI
-    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'escape', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
+    // Phím Escape khi đang gõ: Đóng popup gợi ý ngay lập tức hoặc xóa sạch dòng nhập nếu đã đóng gợi ý
+    if (key?.name === 'escape' || _sequence === '\x1b') {
+      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
+      if (typeof (rl as any).line === 'string' && (rl as any).line.length > 0) {
+        (rl as any).line = '';
+        (rl as any).cursor = 0;
+        try {
+          rl.setPrompt(CLI.getPromptSymbol());
+          rl.prompt(true);
+        } catch {}
+      }
       return;
     }
-    const removesOnlySlash = rl.line === '/'
+    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, v.v.) tránh vỡ UI
+    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
+      return;
+    }
+    const removesOnlyTrigger = (rl.line === '/' || rl.line === '@')
       && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
-    if (removesOnlySlash) {
+    if (removesOnlyTrigger) {
       slashHints.clear(promptWidth);
       return;
     }
@@ -920,39 +1006,19 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     // Bảo đảm con trỏ terminal luôn hiển thị nhấp nháy cho người dùng
     process.stdout.write('\x1b[?25h');
     slashHints.clear(0);
+    rlInterface.setPrompt(promptSymbol);
     const promptLen = getVisibleWidth(promptSymbol);
-
-    let activeRl = rlInterface;
-    if ((activeRl as any).closed) {
-      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
-      setupReadlineListeners(rl);
-      activeRl = rl;
-    }
-
-    let firstLine = '';
-    try {
-      firstLine = await activeRl.question(promptSymbol);
-    } catch (err: any) {
-      if (err?.code === 'ERR_USE_AFTER_CLOSE' || (activeRl as any).closed) {
-        rl = readline.createInterface({ input, output, completer: completeSlashCommand });
-        setupReadlineListeners(rl);
-        activeRl = rl;
-        firstLine = await activeRl.question(promptSymbol);
-      } else {
-        throw err;
-      }
-    }
-
+    const firstLine = await rlInterface.question(promptSymbol);
     slashHints.clear(promptLen + getVisibleWidth(firstLine));
     const lines: string[] = [firstLine];
 
     // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây
     while (true) {
-      const pendingLine = (activeRl as any).line;
+      const pendingLine = (rlInterface as any).line;
       if (typeof pendingLine === 'string' && pendingLine.length > 0) {
         lines.push(pendingLine);
-        (activeRl as any).line = '';
-        (activeRl as any).cursor = 0;
+        (rlInterface as any).line = '';
+        (rlInterface as any).cursor = 0;
         continue;
       }
 
@@ -960,15 +1026,15 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         let timer: NodeJS.Timeout;
         const onLine = (extraLine: string) => {
           clearTimeout(timer);
-          activeRl.removeListener('line', onLine);
+          rlInterface.removeListener('line', onLine);
           lines.push(extraLine);
           resolve(true);
         };
         timer = setTimeout(() => {
-          activeRl.removeListener('line', onLine);
+          rlInterface.removeListener('line', onLine);
           resolve(false);
         }, 30);
-        activeRl.on('line', onLine);
+        rlInterface.on('line', onLine);
       });
 
       if (!hasMore) {
@@ -976,38 +1042,32 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }
     }
 
-    flushStdin(activeRl);
+    flushStdin(rlInterface);
     return lines.join('\n');
   }
 
   // Đăng ký Permission Prompt Handler cho interactive CLI mode
   kernel.ctx.permissions.setPromptHandler(async (request) => {
-    slashHints.clear();
-    if ((rl as any).closed) {
-      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
-      setupReadlineListeners(rl);
-    }
-    // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
-    flushStdin(rl);
-
-    CLI.renderPermissionPrompt(request);
-    let answer = '';
+    isPromptingPermission = true;
     try {
-      answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
-    } catch {
-      rl = readline.createInterface({ input, output, completer: completeSlashCommand });
-      setupReadlineListeners(rl);
-      answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
-    }
-    flushStdin(rl);
+      slashHints.clear();
+      // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
+      flushStdin(rl);
 
-    if (answer === 'y' || answer === 'yes' || answer === '') {
-      return 'approve';
+      CLI.renderPermissionPrompt(request);
+      const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+      flushStdin(rl);
+
+      if (answer === 'y' || answer === 'yes' || answer === '') {
+        return 'approve';
+      }
+      if (answer === 'a' || answer === 'all' || answer === 'always') {
+        return 'approve_all_session';
+      }
+      return 'reject';
+    } finally {
+      isPromptingPermission = false;
     }
-    if (answer === 'a' || answer === 'all' || answer === 'always') {
-      return 'approve_all_session';
-    }
-    return 'reject';
   });
 
   const switchComposeWorkspace = async (targetPath: string, saveCurrent = true): Promise<void> => {
@@ -1110,6 +1170,179 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/tasks') {
         CLI.renderTasks(kernel.ctx.tasks.listTasks());
+        continue;
+      }
+
+      // Lệnh Thẩm định Thiết kế Đa Tác tử (Structured Peer-Review 5 Personas & Decision Log)
+      if (
+        trimmed === '/brainstorm' ||
+        trimmed.startsWith('/brainstorm ') ||
+        trimmed === '/review-design' ||
+        trimmed.startsWith('/review-design ')
+      ) {
+        const goalArg = trimmed.replace(/^\/(?:brainstorm|review-design)\s*/i, '').trim();
+        if (!goalArg) {
+          console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu thiết kế cần thẩm định. Ví dụ: /brainstorm Kiến trúc bộ nhớ đa tác tử${c.reset}\n`);
+          continue;
+        }
+        console.log(`\n${c.brightCyan}⏳ Đang khởi chạy quy trình Multi-Agent Structured Peer-Review (5 Personas)...${c.reset}`);
+        const bEngine = new MultiAgentBrainstormingEngine();
+        const bResult = await bEngine.runReview(goalArg);
+        CLI.renderBrainstormResult(bResult);
+        continue;
+      }
+
+      // Lệnh Quản lý và Điều phối Subagents & Benchmark Specialists (/agents hoặc /subagents)
+      if (
+        trimmed === '/agents' ||
+        trimmed.startsWith('/agents ') ||
+        trimmed === '/subagents' ||
+        trimmed.startsWith('/subagents ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const subCmd = parts[0]?.toLowerCase();
+        const targetId = parts[1];
+
+        if (subCmd === 'resume' && targetId) {
+          const success = agentLoop.subagentManager.resume(targetId);
+          if (success) {
+            console.log(`\n${c.green}✔ Đã kích hoạt tiếp tục subagent:${c.reset} ${targetId}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không thể tiếp tục subagent "${targetId}" (không tồn tại hoặc không ở trạng thái stopped).\n${c.reset}`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'stop' && targetId) {
+          const success = agentLoop.subagentManager.stop(targetId);
+          if (success) {
+            console.log(`\n${c.yellow}🛑 Đã dừng subagent:${c.reset} ${targetId}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không thể dừng subagent "${targetId}".\n${c.reset}`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'inspect' && targetId) {
+          const agent = agentLoop.agentRegistry.get(targetId);
+          if (!agent) {
+            console.log(`\n${c.yellow}⚠️ Không tìm thấy agent với ID "${targetId}".\n${c.reset}`);
+          } else {
+            CLI.renderAgents([agent]);
+            if (agent.metadata?.systemInstruction) {
+              console.log(`${c.brightCyan}${c.bold}System Instruction:${c.reset}`);
+              console.log(`${c.dim}${agent.metadata.systemInstruction}${c.reset}\n`);
+            }
+          }
+          continue;
+        }
+
+        if (subCmd === 'locks') {
+          CLI.renderFileLocks(agentLoop.orchestrator.fileLockManager.getLocks());
+          continue;
+        }
+
+        if (subCmd === 'heartbeats') {
+          CLI.renderHeartbeats(agentLoop.orchestrator.checkHeartbeats());
+          continue;
+        }
+
+        if (subCmd === 'spawn') {
+          const objective = parts.slice(1).join(' ').trim();
+          if (!objective) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu cho subagent. Ví dụ: /agents spawn Viết unit test song song${c.reset}\n`);
+          } else {
+            const handle = agentLoop.subagentManager.start(objective);
+            console.log(`\n${c.green}✔ Đã khởi chạy Subagent:${c.reset} ${handle.id} [${handle.status}] (${handle.sessionId})\n`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'allocate') {
+          const objective = parts.slice(1).join(' ').trim();
+          if (!objective) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu cho task. Ví dụ: /agents allocate Tối ưu thuật toán DP${c.reset}\n`);
+          } else {
+            try {
+              const handle = agentLoop.orchestrator.allocateTask(objective, [], { checkAntiDuplication: true });
+              console.log(`\n${c.green}✔ Đã điều phối task qua Capability Matching:${c.reset} ${handle.id} [${handle.status}]\n`);
+            } catch (err: any) {
+              console.log(`\n${c.crimson}✖ Không thể phân bổ tác vụ:${c.reset} ${err.message}\n`);
+            }
+          }
+          continue;
+        }
+
+        const agents = agentLoop.agentRegistry.list();
+        CLI.renderAgents(agents);
+        continue;
+      }
+
+      // Lệnh Quản lý Queued Messages (/queue hoặc /q)
+      if (
+        trimmed === '/queue' ||
+        trimmed.startsWith('/queue ') ||
+        trimmed === '/q' ||
+        trimmed.startsWith('/q ')
+      ) {
+        const parts = trimmed.split(/\s+/).slice(1);
+        const subCmd = parts[0]?.toLowerCase();
+        const arg = parts.slice(1).join(' ');
+
+        if (!subCmd || subCmd === 'list' || subCmd === 'status') {
+          const queueItems = activeSession ? agentLoop.inbox.getQueue(activeSession.id) : [];
+          CLI.renderQueueStatus(queueItems);
+          continue;
+        }
+
+        if (subCmd === 'cancel' || subCmd === 'remove' || subCmd === 'rm') {
+          if (!arg) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp ID tin nhắn cần hủy. Ví dụ: /queue cancel input-12345${c.reset}\n`);
+            continue;
+          }
+          const cancelled = activeSession ? agentLoop.inbox.cancel(activeSession.id, arg.trim()) : false;
+          if (cancelled) {
+            console.log(`\n${c.green}✔ Đã hủy thành công tin nhắn [${arg.trim()}] khỏi hàng đợi.${c.reset}\n`);
+          } else {
+            console.log(`\n${c.yellow}⚠️ Không tìm thấy tin nhắn với ID "${arg.trim()}" trong hàng đợi.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        if (subCmd === 'clear' || subCmd === 'clean') {
+          const count = activeSession ? agentLoop.inbox.clear(activeSession.id) : 0;
+          console.log(`\n${c.green}✔ Đã xóa toàn bộ ${count} tin nhắn đang chờ trong hàng đợi.${c.reset}\n`);
+          continue;
+        }
+
+        if (subCmd === 'add' || subCmd === 'push') {
+          if (!arg) {
+            console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung tin nhắn cần đưa vào hàng đợi. Ví dụ: /queue add Hãy tập trung sửa file tests${c.reset}\n`);
+            continue;
+          }
+          if (activeSession) {
+            const item = agentLoop.inbox.enqueue(activeSession.id, arg, 'human');
+            console.log(`\n${c.green}✔ Đã thêm tin nhắn vào hàng đợi [ID: ${item.id}]. Tin nhắn sẽ được xử lý hoặc tiêm bẻ lái vào bước tiếp theo.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        console.log(`\n${c.yellow}⚠️ Cú pháp chưa đúng. Hỗ trợ: /queue [list|cancel <id>|clear|add <text>]${c.reset}\n`);
+        continue;
+      }
+
+      // Lệnh bẻ lái tức thì (/steer <text>)
+      if (trimmed === '/steer' || trimmed.startsWith('/steer ')) {
+        const steerText = trimmed.replace(/^\/steer\s*/i, '').trim();
+        if (!steerText) {
+          console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung điều chỉnh hướng đi. Ví dụ: /steer Dừng việc chỉnh sửa file đó, hãy kiểm tra file config trước.${c.reset}\n`);
+          continue;
+        }
+        if (activeSession) {
+          const item = agentLoop.inbox.enqueue(activeSession.id, steerText, 'human', { isSteering: true });
+          console.log(`\n${c.bgCyan}${c.bold} ⚡ ĐÃ ĐƯA VÀO HÀNG ĐỢI BẺ LÁI (MID-TURN STEERING) ${c.reset}`);
+          console.log(`  ${c.brightCyan}Tin nhắn [${item.id}]: "${steerText}" sẽ được tiêm vào Agent ngay tại bước kế tiếp.${c.reset}\n`);
+        }
         continue;
       }
 
@@ -1386,12 +1619,15 @@ ${planPrompt}`;
         continue;
       }
 
-      if (trimmed === '/new-session') {
-        activeSession = await kernel.ctx.sessions.create();
-        agentLoop.bindSession(activeSession);
-        await sessionPersistence.save(activeSession);
+      if (trimmed === '/new-session' || trimmed === '/reset-session') {
+        const { episodicRecord, newSession } = await agentLoop.resetSessionWithEpisodicEpilogue(activeSession);
+        activeSession = newSession;
         saveSession({ activeSessionId: activeSession.id });
-        console.log(`\n${c.green}✔ Đã tạo session mới:${c.reset} ${activeSession.id}\n`);
+        console.log(`\n${c.green}✔ Đã lưu tóm tắt Episodic Memory từ phiên cũ và tạo session mới sạch:${c.reset} ${activeSession.id}`);
+        if (episodicRecord) {
+          console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
+        }
+        console.log('');
         continue;
       }
 
@@ -1416,6 +1652,7 @@ ${planPrompt}`;
           modelName,
           preservePrefixCache: agentLoop.contextCompactor.getConfig().preservePrefixCache,
           sessionId: activeSession.id,
+          workspaceRoot: workspace.rootDir,
         });
         continue;
       }
@@ -2186,14 +2423,14 @@ ${planPrompt}`;
           continue;
         }
 
-        if (domain === 'tasks' || domain === 'agents' || domain === 'subagents') {
-          const agents = (agentLoop.agentRegistry?.list?.() || []).map((a: any) => ({
-            id: a.id,
-            command: a.name || a.role || a.objective || 'subagent',
-            status: a.status || 'idle',
-            startedAt: a.createdAt || new Date().toISOString(),
-          }));
-          CLI.renderTasks(agents);
+        if (domain === 'tasks') {
+          CLI.renderTasks(kernel.ctx.tasks.listTasks());
+          continue;
+        }
+
+        if (domain === 'agents' || domain === 'subagents') {
+          const agents = agentLoop.agentRegistry.list();
+          CLI.renderAgents(agents);
           continue;
         }
 
@@ -2232,15 +2469,67 @@ ${planPrompt}`;
         continue;
       }
 
-      // Lệnh kiểm soát và phân tích ngữ cảnh (/context hoặc /ctx)
+      // Lệnh kiểm soát và phân tích ngữ cảnh (/context, /snapshot, /briefing)
       if (
         trimmed === '/context' ||
         trimmed.startsWith('/context ') ||
         trimmed === '/ctx' ||
-        trimmed.startsWith('/ctx ')
+        trimmed.startsWith('/ctx ') ||
+        trimmed === '/snapshot' ||
+        trimmed.startsWith('/snapshot ') ||
+        trimmed === '/briefing' ||
+        trimmed.startsWith('/briefing ')
       ) {
         const parts = trimmed.split(/\s+/).slice(1);
-        const sub = parts[0]?.toLowerCase();
+        const isSnapshotCmd = trimmed.startsWith('/snapshot');
+        const isBriefingCmd = trimmed.startsWith('/briefing');
+        const sub = isSnapshotCmd ? 'snapshot' : (isBriefingCmd ? 'briefing' : parts[0]?.toLowerCase());
+
+        if (sub === 'snapshot' || sub === 'guardian') {
+          try {
+            console.log(`\n${c.cyan}🛡️ Đang kích hoạt Context Guardian để chụp Snapshot & lập Thẻ Chuyển Giao...${c.reset}`);
+            const guardianRes = await agentLoop.contextGuardian.protectPreCompaction(activeSession);
+            console.log(`\n${c.green}✔ Đã chụp thành công Context Guardian Snapshot:${c.reset} ${c.bold}${guardianRes.snapshotId}${c.reset}`);
+            console.log(`  ${c.gray}↳ File: ${guardianRes.snapshotPath}${c.reset}`);
+            console.log(`  ${c.gray}↳ Toàn vẹn (Integrity Score): ${guardianRes.integrity.score}% (${guardianRes.integrity.checks.length} checks passing)${c.reset}\n`);
+            console.log(guardianRes.briefing);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi kích hoạt Context Guardian:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'briefing' || sub === 'load') {
+          try {
+            const briefing = await agentLoop.contextAgent.loadBriefing();
+            console.log(`\n${briefing}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi tải Briefing:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'save') {
+          try {
+            console.log(`\n${c.cyan}💾 Đang kích hoạt Context Agent để lưu tóm tắt phiên làm việc...${c.reset}`);
+            const saveRes = await agentLoop.contextAgent.saveSessionSummary(activeSession);
+            console.log(`${c.green}✔ Đã lưu tóm tắt phiên: ${saveRes.sessionFile}${c.reset}`);
+            console.log(`${c.green}✔ Đã đồng bộ ACTIVE_CONTEXT.md: ${saveRes.activeContextFile}${c.reset}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi lưu phiên làm việc:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        if (sub === 'status') {
+          try {
+            const statusStr = await agentLoop.contextAgent.getStatus();
+            console.log(`\n${c.cyan}${statusStr}${c.reset}\n`);
+          } catch (err: any) {
+            console.error(`\n${c.red}✖ Lỗi khi đọc trạng thái:${c.reset}`, err.message);
+          }
+          continue;
+        }
 
         if (sub === 'compact' || sub === 'prune' || sub === 'compress') {
           try {
@@ -2298,6 +2587,24 @@ ${planPrompt}`;
         } else if (err.message && err.message.includes('401')) {
           console.log(`\n${c.yellow}💡 Gợi ý: API Key của nhà cung cấp này không hợp lệ hoặc đã hết hạn.`);
           console.log(`👉 Vui lòng kiểm tra lại file .env hoặc gõ ${c.brightCyan}/model 1${c.yellow} để dùng Gemini.${c.reset}\n`);
+        }
+      }
+
+      // Tự động rút và thực thi các câu lệnh còn lại trong hàng đợi Queued Messages (Post-turn Drain)
+      while (activeSession && agentLoop.inbox.pending(activeSession.id) > 0 && !isShuttingDown) {
+        const nextPending = agentLoop.inbox.peek(activeSession.id);
+        if (!nextPending) break;
+        console.log(`\n  ${c.bgCyan}${c.bold} ⚡ ĐANG XỬ LÝ CÂU LỆNH TỒN ĐỌNG TỪ HÀNG ĐỢI ${c.reset} [${nextPending.id}]`);
+        console.log(`  ${c.brightCyan}"${nextPending.text}"${c.reset}\n`);
+        sessionCount++;
+        try {
+          await runWithCancellation(async (signal) => {
+            await agentLoop.resumePending(activeSession, { signal });
+            checkAndAutoCompleteGoal();
+          });
+        } catch (drainErr: any) {
+          console.error(`\n${c.red}${c.bold}❌ Lỗi xử lý hàng đợi Queued Messages:${c.reset}`, drainErr.message);
+          break;
         }
       }
     }

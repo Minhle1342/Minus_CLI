@@ -25,7 +25,7 @@ interface CachedPage {
 
 const memoryCache = new Map<string, CachedPage>();
 
-function decodeHtmlEntities(text: string): string {
+export function decodeHtmlEntities(text: string): string {
   return text
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')

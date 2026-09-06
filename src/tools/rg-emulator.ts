@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
+import { getNativeCore } from '../native/index.js';
 
 export interface RgParsedOptions {
   query: string;
@@ -222,6 +223,46 @@ export async function executeRipgrepEmulation(
   const outputLines: string[] = [];
   let totalMatches = 0;
   const maxLimit = options.maxTotalMatches || 200;
+
+  // 1. Thử nghiệm tìm kiếm siêu tốc với Rust Native Ripgrep Core nếu khả dụng
+  const native = getNativeCore();
+  if (
+    native &&
+    options.targetPaths.length === 1 &&
+    (options.targetPaths[0] === '.' || options.targetPaths[0] === './') &&
+    !options.globFilter &&
+    !options.typeFilter &&
+    !options.invertMatch &&
+    !options.countOnly &&
+    !options.filesWithMatchesOnly
+  ) {
+    try {
+      const nativeRes = native.rsSearchCodebase(
+        workspace.rootDir,
+        options.query,
+        options.isRegex,
+        options.ignoreCase,
+        maxLimit,
+        [...workspace.ignoredDirectories]
+      );
+      if (nativeRes && nativeRes.matches && nativeRes.matches.length > 0) {
+        const lines = nativeRes.matches.map((m) => {
+          const rel = workspace.toRelativePath(m.file);
+          return `${rel}:${m.lineNumber}:${m.lineContent}`;
+        });
+        return {
+          stdout: lines.join('\n'),
+          stderr: '',
+          exitCode: 0,
+          durationMs: Date.now() - startTime,
+          success: true,
+          matchCount: nativeRes.matches.length,
+        };
+      }
+    } catch {
+      // Fallback xuống trình giả lập TypeScript thuần
+    }
+  }
 
   // Thu thập danh sách files cần tìm kiếm
   const targetFiles: string[] = [];

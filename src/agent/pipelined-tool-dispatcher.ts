@@ -78,7 +78,7 @@ export class PipelinedToolDispatcher {
     const startTime = Date.now();
     this.telemetry.earlyDispatchedCount++;
 
-    const promise = toolRunner.run(toolName, args, context).then((res: ToolExecutionResult) => {
+    const promise = toolRunner.run(toolName, args, context).then((res: any) => {
       this.inFlightExecutions.delete(key);
       this.completedExecutions.set(key, { result: res, readyAt: Date.now() });
       return res;

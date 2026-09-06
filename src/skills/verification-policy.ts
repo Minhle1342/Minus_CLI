@@ -54,11 +54,26 @@ export class VerificationPolicy {
     return this.repairCycles;
   }
 
+  private pendingTargetedTests: Set<string> = new Set();
+
   /**
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
-  recordModification(filePath?: string): void {
+  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string }): void {
     this.hasUnverifiedModifications = true;
+    if (options?.impactedTestSuites) {
+      for (const t of options.impactedTestSuites) {
+        this.pendingTargetedTests.add(t);
+      }
+    }
+  }
+
+  getPendingTargetedTests(): string[] {
+    return Array.from(this.pendingTargetedTests);
+  }
+
+  clearPendingTargetedTests(): void {
+    this.pendingTargetedTests.clear();
   }
 
   hasPendingModifications(): boolean {
@@ -80,7 +95,9 @@ export class VerificationPolicy {
     exitCode?: number,
     options?: { diffHash?: string; tier?: VerificationLadderTier; hasNewFailures?: boolean },
   ): void {
-    const isVerification = isVerificationCommand(command);
+    const isVerification = isVerificationCommand(command)
+      || Boolean(options?.tier)
+      || /\b(?:get_diagnostics|submit_solution)\b/i.test(command);
     const effectiveSuccess = success && isVerification && options?.hasNewFailures !== true;
 
     this.lastVerification = {
@@ -165,7 +182,7 @@ export class VerificationPolicy {
     if (/\b(?:test|pytest|cargo\s+test|dotnet\s+test)\b/i.test(command)) {
       return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-])/i.test(command) ? 'targeted_test' : 'full_test';
     }
-    if (/\b(?:tsc|typecheck)\b/i.test(command)) return 'typecheck';
+    if (/\b(?:tsc|typecheck|get_diagnostics)\b/i.test(command)) return 'typecheck';
     if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';
     return 'structural';
   }

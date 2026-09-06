@@ -1,3 +1,5 @@
+import { getNativeCore } from '../native/index.js';
+
 export interface ShellAnalysis {
   segments: string[];
   operators: string[];
@@ -7,6 +9,21 @@ export interface ShellAnalysis {
 
 /** Quote-aware segmentation; substitutions and groups are marked complex for fail-closed policy. */
 export function analyzeShellCommand(command: string): ShellAnalysis {
+  const native = getNativeCore();
+  if (native) {
+    try {
+      const res = native.rsAnalyzeShellCommand(command);
+      return {
+        segments: res.segments,
+        operators: res.operators,
+        complex: res.complex,
+        error: res.error || undefined,
+      };
+    } catch {
+      // Fallback xuống TypeScript thuần nếu có lỗi
+    }
+  }
+
   const segments: string[] = [];
   const operators: string[] = [];
   let current = '';

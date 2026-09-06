@@ -1,11 +1,86 @@
+# Dependencies
 node_modules/
+.pnp
+.pnp.js
+
+# Production & TypeScript Build Artifacts
 dist/
+build/
+*.tsbuildinfo
+
+# Rust & Cargo Build Artifacts
+**/target/
+target/
+*.rs.bk
+*.node
+*.dll
+*.dylib
+*.so
+*.pdb
+*.exp
+*.lib
+
+# Environment, Secrets & Credentials (CRITICAL SECURITY)
 .env
 .env.*
 !.env.example
-*.log
-.gemini/
-temp/
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.pkcs12
+*credentials*.json
+*token*.json
+auth.json
+*secret*.json
+service-account*.json
+id_rsa*
+id_ed25519*
+secrets/
+.secrets/
+
+# Local Runtime Data, Sessions, Memory & Checkpoints
+.minus/
 .codingagent/
+.sessions/
+sessions/
+.checkpoints/
+checkpoints/
+.speculative/
+speculative/
+data/
+local_data/
+storage/
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+
+# Logs & Diagnostics
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary Files, Dumps & Scratch
+temp/
+tmp/
+.cache/
+cache/
+repomix-output.xml
 test-image.png
 CURRENT_MUTATION_INVARIANTS.md
+
+# Operating System & IDE Caches
+.DS_Store
+Thumbs.db
+desktop.ini
+.gemini/
+.idea/
+*.swp
+*~
+*.bak

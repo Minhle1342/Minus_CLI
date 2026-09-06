@@ -6,6 +6,11 @@ import { Workspace } from '../workspace/workspace.js';
 import { computeStringHash } from '../workspace/workspace-digest.js';
 import { toolError, toolSuccess } from './tool-result.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
+import {
+  detectChangedSymbols,
+  calculateComprehensiveBlastRadius,
+  invalidateTopologyCache,
+} from './mutation-blast-radius.js';
 
 /**
  * Tool 5: write_file
@@ -14,7 +19,7 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Tạo một file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Tự động kiểm tra chống Lazy Code Placeholder và bảo vệ chống ghi đè mù lên file lớn có sẵn.',
+  description: 'Tạo file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Hỗ trợ tham số overwrite: false để bảo đảm an toàn chống ghi đè nhầm file đã tồn tại.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -28,28 +33,18 @@ export const writeFileTool: ToolDefinition = {
       },
       overwrite: {
         type: Type.BOOLEAN,
-        description: 'Bắt buộc truyền true nếu muốn ghi đè lên file lớn đã có sẵn (> 30 dòng). Mặc định false để bảo vệ mã nguồn cũ.',
+        description: 'Cho phép ghi đè nếu file đã tồn tại (mặc định: true). Nếu đặt false, tool sẽ từ chối ghi đè nếu file đã có sẵn.',
       },
     },
     required: ['path', 'content'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '');
+    const rawPath = String(args.path || args.filePath || '').trim();
     const content = String(args.content ?? '');
-    const overwrite = args.overwrite === true;
+    const overwrite = args.overwrite !== false;
 
     if (!rawPath) {
       return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
-    }
-
-    // 1. Chống Lazy Code Placeholder (Claude Code & OpenHands standard)
-    const LAZY_CODE_REGEX = /(?:\/\/|\/\*|#|<!--)\s*\.\.\.\s*(?:existing|rest|unchanged|remains|more|other|code\s+remains|implementation\s+remains)/i;
-    if (LAZY_CODE_REGEX.test(content)) {
-      return toolError(
-        `Phát hiện Lazy Code Placeholder trong content (ví dụ: "// ... existing code ..."). write_file yêu cầu toàn bộ nội dung mã nguồn đầy đủ, không chấp nhận comment viết tắt. Để sửa đổi cục bộ, hãy sử dụng tool "replace_text".`,
-        'LAZY_CODE_PLACEHOLDER_DETECTED',
-        { path: rawPath },
-      );
     }
 
     try {
@@ -65,27 +60,27 @@ export const writeFileTool: ToolDefinition = {
       // Kiểm tra xem file đã tồn tại trước đó chưa
       let isExisting = false;
       try {
-        const existingStat = await fs.stat(safePath);
+        await fs.access(safePath);
         isExisting = true;
-
-        // 2. Chống ghi đè mù lên file lớn có sẵn (SWE-agent standard)
-        if (!overwrite) {
-          const existingContent = await fs.readFile(safePath, 'utf-8');
-          const lineCount = existingContent.split('\n').length;
-          if (lineCount > 30 || existingStat.size > 1024) {
-            return toolError(
-              `File "${rawPath}" đã tồn tại và có dung lượng lớn (${lineCount} dòng, ${existingStat.size} bytes). Để tránh vô tình xóa mất logic cũ khi ghi đè toàn bộ, hãy dùng tool "replace_text" để sửa đổi chính xác từng phần. Nếu bạn thực sự muốn ghi đè toàn bộ file, hãy truyền thêm tham số overwrite: true.`,
-              'LARGE_FILE_OVERWRITE_PROTECTION',
-              { path: rawPath, lineCount, sizeBytes: existingStat.size },
-              'Use replace_text for surgical updates, or set overwrite: true to force rewrite.',
-            );
-          }
-        }
-      } catch (err: any) {
-        if (err.code !== 'ENOENT') {
-          // Ignore other stat errors
-        }
+      } catch {
         isExisting = false;
+      }
+
+      if (isExisting && !overwrite) {
+        return toolError(
+          `File "${rawPath}" đã tồn tại trên đĩa. Để cập nhật một phần nội dung, hãy dùng replace_text; hoặc đặt overwrite: true nếu muốn ghi đè toàn bộ.`,
+          'FILE_ALREADY_EXISTS',
+          { path: rawPath },
+          'Sử dụng replace_text để sửa đổi chính xác từng phần hoặc đặt overwrite=true để ghi đè.',
+        );
+      }
+
+      // Đọc nội dung cũ nếu file đã tồn tại để so sánh symbol
+      let oldContent: string | undefined;
+      if (isExisting) {
+        try {
+          oldContent = await fs.readFile(safePath, 'utf-8');
+        } catch {}
       }
 
       // Đảm bảo thư mục cha tồn tại
@@ -94,6 +89,32 @@ export const writeFileTool: ToolDefinition = {
 
       // Ghi nội dung file
       await fs.writeFile(safePath, content, 'utf-8');
+      invalidateTopologyCache();
+
+      let blastRadiusSummary: any;
+      try {
+        const modifiedSymbols = detectChangedSymbols(rawPath, oldContent, content);
+        const blast = calculateComprehensiveBlastRadius({
+          workspace,
+          filePath: rawPath,
+          modifiedSymbols,
+          depth: 2,
+        });
+        blastRadiusSummary = {
+          risk: blast.risk,
+          score: blast.score,
+          depth: blast.depth,
+          modifiedSymbols: blast.modifiedSymbols.map((s) => s.name),
+          directConsumers: blast.directConsumers,
+          transitiveFiles: blast.transitiveFiles,
+          impactedTestSuites: blast.impactedTestSuites,
+          callersCount: blast.callers.length,
+          publicApiAffected: blast.publicApiAffected,
+          breakingChange: blast.breakingChange,
+          warnings: blast.warnings,
+          recommendedActions: blast.recommendedActions,
+        };
+      } catch {}
 
       const bytesWritten = Buffer.byteLength(content, 'utf-8');
       const contentHash = computeStringHash(content);
@@ -118,6 +139,7 @@ export const writeFileTool: ToolDefinition = {
         message: isExisting
           ? `Đã ghi đè thành công file "${rawPath}".`
           : `Đã tạo mới thành công file "${rawPath}".`,
+        ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {

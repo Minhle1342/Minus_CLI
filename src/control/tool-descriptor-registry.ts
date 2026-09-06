@@ -55,6 +55,9 @@ export class ToolDescriptorRegistry {
       descriptor = { name, capabilities: ['memory'], phases: savesMemory ? ['implement', 'verify'] : ALL_PHASES, minimumRisk: savesMemory ? 'R1' : 'R0', mutates: savesMemory, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
     } else if (/agent|shared_context/.test(name)) {
       descriptor = { name, capabilities: ['delegate'], phases: ALL_PHASES, minimumRisk: 'R1', mutates: true, reversible: false, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+    } else if (name.startsWith('game_') || name.startsWith('unity_')) {
+      const mutates = /write|create|scaffold|compose|assemble|wire|execute/.test(name);
+      descriptor = { name, capabilities: mutates ? ['edit', 'execute'] : ['inspect', 'plan'], phases: ['explore', 'plan', 'implement', 'verify'], minimumRisk: mutates ? 'R1' : 'R0', mutates, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
     } else {
       descriptor = { name, capabilities: ['execute'], phases: ['implement', 'verify'], minimumRisk: 'R2', mutates: true, reversible: false, requiresApproval: true, deferLoading: true, schemaCost: this.cost(tool) };
     }

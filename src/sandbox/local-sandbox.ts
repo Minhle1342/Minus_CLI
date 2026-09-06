@@ -1,6 +1,7 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
+import { getNativeCore } from '../native/index.js';
 
 const execAsync = promisify(exec);
 
@@ -55,6 +56,24 @@ export class LocalProcessSandbox implements ISandboxProvider {
         success: false,
         errorCode: 'COMMAND_CANCELLED',
       };
+    }
+
+    const native = getNativeCore();
+    if (native && !options?.signal) {
+      try {
+        const res = native.rsExecuteIsolated(command, cwd, timeout, 5 * 1024 * 1024);
+        return {
+          stdout: res.stdout.trim(),
+          stderr: res.stderr.trim(),
+          exitCode: res.exitCode,
+          durationMs: res.durationMs,
+          sandboxType: 'local',
+          success: res.exitCode === 0,
+          timedOut: res.timedOut,
+        };
+      } catch {
+        // Fallback xuống execAsync của Node.js
+      }
     }
 
     try {

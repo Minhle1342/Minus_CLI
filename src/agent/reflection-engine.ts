@@ -1,6 +1,7 @@
 import type { Workspace } from '../workspace/workspace.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
+import { ErrorDetective, type ErrorDetectiveReport } from './error-detective.js';
 
 export interface ToolExecutionFeedback {
   toolName: string;
@@ -16,20 +17,24 @@ export interface ReflectionAnalysis {
   advice?: string;
   diagnostics?: DiagnosticItem[];
   hypothesisFalsified?: boolean;
+  detectiveReport?: ErrorDetectiveReport;
 }
 
 /**
- * ReflectionEngine - Động cơ Tự vấn & Quy trình Gỡ lỗi Thông minh (Codex CLI Standard)
+ * ReflectionEngine - Động cơ Tự vấn & Quy trình Gỡ lỗi Thông minh (Codex CLI Standard + Error Detective)
  * 
  * Ngăn chặn tình trạng Agent "đoán mò" và lặp lại thao tác sai:
  * 1. Nhận diện các thất bại khi chạy lệnh (exitCode !== 0) hoặc lỗi sửa file.
  * 2. Tích hợp trực tiếp Language Server Protocol (LSP / TypeScript Diagnostics) theo thời gian thực.
- * 3. Tự động sinh ra hướng dẫn Debugging Protocol & Hypothesis Falsification có cấu trúc cho LLM.
- * 4. Đếm số lần thất bại liên tiếp và cảnh báo khi Agent đi vào ngõ cụt.
+ * 3. Tích hợp ErrorDetective: bóc tách stack trace đa ngôn ngữ và truy vết nguyên nhân gốc rễ (Causal RCA).
+ * 4. Tự động sinh ra hướng dẫn Debugging Protocol & Hypothesis Falsification có cấu trúc cho LLM.
+ * 5. Đếm số lần thất bại liên tiếp và cảnh báo khi Agent đi vào ngõ cụt.
  */
 export class ReflectionEngine {
   private consecutiveFailures: number = 0;
   private maxConsecutiveFailuresBeforeWarning: number = 2;
+  readonly detective = new ErrorDetective();
+  private lastDetectiveReport?: ErrorDetectiveReport;
 
   /**
    * Trích xuất các lỗi TypeScript (TSxxxx) từ output hoặc Language Service trong RAM
@@ -85,6 +90,7 @@ export class ReflectionEngine {
     let reflectionPrompt: string | undefined;
     let advice: string | undefined;
     let diagnostics: DiagnosticItem[] = [];
+    let detectiveReport: ErrorDetectiveReport | undefined;
 
     const environmentFailureCodes = new Set([
       'COMMAND_NOT_FOUND',
@@ -111,27 +117,41 @@ export class ReflectionEngine {
       ].join('\n');
       advice = `${result.errorCode}: ${details}`;
     }
-    // 2. Phân tích lệnh run_command thất bại (test failed, build error, syntax error)
+    // 2. Phân tích lệnh run_command thất bại (test failed, build error, syntax error) qua Error Detective
     else if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
       isFailure = true;
       this.consecutiveFailures++;
 
+      const rawCombined = `${result.stderr || ''}\n${result.stdout || ''}\n${result.error || ''}`;
+      detectiveReport = this.detective.investigate(rawCombined, workspace);
+      this.lastDetectiveReport = detectiveReport;
+
       const errorSnippet = (result.stderr || result.stdout || '').trim().slice(0, 1000);
 
-      reflectionPrompt = [
+      const promptParts = [
         `\n⚠️ [DEBUGGING PROTOCOL TRIGGERED - COMMAND EXECUTION FAILED (Exit Code: ${result.exitCode})]`,
         `Error output:`,
         `----------------------------------------`,
         errorSnippet || '(No stderr output)',
         `----------------------------------------`,
-        `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
-        `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
-        `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
-        `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
-        `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
-      ].join('\n');
+      ];
 
-      advice = `Command failed (exit: ${result.exitCode}). Triggering debugging protocol and stack trace analysis.`;
+      if (detectiveReport.promptGuidance) {
+        promptParts.push(detectiveReport.promptGuidance);
+      } else {
+        promptParts.push(
+          `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
+          `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
+          `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
+          `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
+          `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
+        );
+      }
+
+      reflectionPrompt = promptParts.join('\n');
+      advice = detectiveReport.primaryDefect
+        ? `Command failed (exit: ${result.exitCode}): ${detectiveReport.primaryDefect}`
+        : `Command failed (exit: ${result.exitCode}). Triggering debugging protocol and stack trace analysis.`;
     } 
     // 3. Phân tích lỗi áp dụng patch apply_patch
     else if (toolName === 'apply_patch' && (result.error || result.errorCode)) {
@@ -213,9 +233,18 @@ export class ReflectionEngine {
       this.consecutiveFailures = 0;
     }
 
-    // 7. Bổ sung LSP / TypeScript Diagnostics vào Reflection Prompt nếu phát hiện lỗi compiler
+    // 7. Bổ sung LSP / TypeScript Diagnostics & ErrorDetective vào Reflection Prompt nếu phát hiện lỗi compiler
     if (isFailure) {
       diagnostics = this.extractLspDiagnostics(feedback, workspace);
+      if (detectiveReport?.extractedErrors && detectiveReport.extractedErrors.length > 0) {
+        const detectiveDiags = this.detective.toDiagnosticItems(detectiveReport.extractedErrors);
+        for (const d of detectiveDiags) {
+          if (!diagnostics.some((existing) => existing.file === d.file && existing.line === d.line)) {
+            diagnostics.push(d);
+          }
+        }
+      }
+
       if (diagnostics.length > 0) {
         const diagLines = diagnostics.map(
           (d) => `  • [TS${d.code}] ${d.file}:${d.line}:${d.character} - ${d.message}`,
@@ -244,7 +273,12 @@ export class ReflectionEngine {
       advice,
       diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
       hypothesisFalsified: isFailure,
+      detectiveReport,
     };
+  }
+
+  getLastDetectiveReport(): ErrorDetectiveReport | undefined {
+    return this.lastDetectiveReport;
   }
 
   getConsecutiveFailures(): number {

@@ -14,13 +14,13 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
  */
 export const applyPatchTool: ToolDefinition = {
   name: 'apply_patch',
-  description: 'Áp dụng Unified Diff patch (chuẩn Codex CLI) để sửa đổi, tạo mới, hoặc xóa file với engine Fuzz Matching thông minh. Hỗ trợ multi-file diff, tự động bù trừ lệch dòng (line offset), chuẩn hóa thụt đầu dòng (indentation tolerance), và matching mờ (fuzzy context matching).',
+  description: 'Áp dụng Unified Diff patch (chuẩn Codex CLI) để sửa đổi, tạo mới, hoặc xóa file với engine Fuzz Matching thông minh. Hỗ trợ multi-file diff, tự động bù trừ lệch dòng (line offset), chuẩn hóa thụt đầu dòng (indentation tolerance), và matching mờ (fuzzy context matching).\n\nVí dụ 1-Shot Unified Diff mẫu:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
   parameters: {
     type: Type.OBJECT,
     properties: {
       patch: {
         type: Type.STRING,
-        description: 'Nội dung Unified Diff patch (bao gồm --- / +++ / @@ hunks) hoặc khối diff. Có thể chứa nhiều file trong cùng một patch.',
+        description: 'Nội dung Unified Diff patch (bao gồm --- / +++ / @@ hunks) hoặc khối diff. Có thể chứa nhiều file trong cùng một patch. Ví dụ 1-Shot:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
       },
       path: {
         type: Type.STRING,

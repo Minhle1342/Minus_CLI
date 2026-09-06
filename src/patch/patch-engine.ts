@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
+import { getNativeCore } from '../native/index.js';
 
 export interface PatchHunk {
   oldStart: number;

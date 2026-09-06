@@ -159,7 +159,7 @@ export class CriticGate {
     let critiquePrompt: string | undefined;
     if (!approved) {
       const promptParts: string[] = [
-        `\n🛑 [HARD CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
+        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
         `Task completion rejected by independent Verifier due to unsatisfied invariants:`,
       ];
 
@@ -290,7 +290,7 @@ export class CriticGate {
     let critiquePrompt: string | undefined;
     if (!approved) {
       const promptParts: string[] = [
-        `\n🛑 [HARD CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
+        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
         `Task completion rejected by independent Verifier due to unsatisfied invariants:`,
       ];
 

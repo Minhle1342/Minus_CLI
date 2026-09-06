@@ -19,24 +19,32 @@ export function createGetSymbolContext360Tool(service?: CodebaseIntelligenceServ
     parameters: {
       type: Type.OBJECT,
       properties: {
+        symbol: {
+          type: Type.STRING,
+          description: 'Tên symbol cần lấy ngữ cảnh 360 độ (function, class, interface, type, variable). Có thể dùng alias symbolName.',
+        },
         symbolName: {
           type: Type.STRING,
-          description: 'Tên symbol cần lấy ngữ cảnh 360 độ (function, class, interface, type, variable).',
+          description: 'Alias cho symbol: tên symbol cần tra cứu.',
+        },
+        path: {
+          type: Type.STRING,
+          description: 'Đường dẫn tương đối tới file gợi ý nơi định nghĩa symbol. Có thể dùng alias filePath.',
         },
         filePath: {
           type: Type.STRING,
-          description: 'Đường dẫn file gợi ý nơi định nghĩa symbol.',
+          description: 'Alias cho path: đường dẫn file gợi ý.',
         },
       },
-      required: ['symbolName'],
+      required: [],
     },
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-      const symbolName = String(args.symbolName || '').trim();
+      const symbolName = String(args.symbol || args.symbolName || '').trim();
       if (!symbolName) {
-        return { error: 'Tham số "symbolName" là bắt buộc.' };
+        return { error: 'Tham số "symbol" (hoặc "symbolName") là bắt buộc.' };
       }
 
-      const filePath = args.filePath ? String(args.filePath).trim() : undefined;
+      const filePath = String(args.path || args.filePath || '').trim() || undefined;
       const engine = service || getIntelligenceService(workspace);
       const result = engine.getSymbolContext360(symbolName, filePath);
 

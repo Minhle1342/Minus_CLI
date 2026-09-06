@@ -26,21 +26,35 @@ export const inspectSymbolTool: ToolDefinition = {
     properties: {
       path: {
         type: Type.STRING,
-        description: 'File path containing or importing the symbol (e.g. "src/services/user-service.ts")',
+        description: 'File path containing or importing the symbol (e.g. "src/services/user-service.ts"). Alias: "filePath".',
+      },
+      filePath: {
+        type: Type.STRING,
+        description: 'Alias for "path": File path containing or importing the symbol.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Symbol name to look up (e.g. "findUser" or "AgentLoop")',
+        description: 'Symbol name to look up (e.g. "findUser" or "AgentLoop"). Alias: "symbolName".',
+      },
+      symbolName: {
+        type: Type.STRING,
+        description: 'Alias for "symbol": Symbol name to look up.',
       },
     },
-    required: ['path', 'symbol'],
+    required: [],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '').trim();
-    const symbol = String(args.symbol || '').trim();
+    const rawPath = String(args.path || args.filePath || '').trim();
+    let symbol = String(args.symbol || args.symbolName || '').trim();
+
+    if (!symbol && rawPath) {
+      const baseName = rawPath.split(/[/\\]/).pop() || '';
+      const dotIndex = baseName.lastIndexOf('.');
+      symbol = dotIndex > 0 ? baseName.substring(0, dotIndex) : baseName;
+    }
 
     if (!rawPath || !symbol) {
-      return toolError('Both "path" and "symbol" parameters are required.', 'INVALID_ARGS');
+      return toolError('Both "path" (or "filePath") and "symbol" (or "symbolName") parameters are required.', 'INVALID_ARGS');
     }
 
     try {

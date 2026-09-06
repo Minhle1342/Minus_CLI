@@ -1,4 +1,4 @@
-﻿import { Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { ToolRegistry } from './registry.js';
 
@@ -27,6 +27,18 @@ export function createDiscoverToolsTool(registry: ToolRegistry): ToolDefinition 
     async execute(args: Record<string, any>) {
       const query = String(args.query || '').trim().toLowerCase();
       const category = args.category ? String(args.category).toLowerCase() : undefined;
+
+      // Nạp động công cụ Game/Unity nếu Agent tìm kiếm khả năng này
+      if (
+        query.includes('game') || query.includes('unity') || query.includes('tilemap') ||
+        query.includes('sprite') || query.includes('physics') || query.includes('prefab') ||
+        category?.includes('game')
+      ) {
+        if (typeof (registry as any).registerGameTools === 'function') {
+          (registry as any).registerGameTools();
+        }
+      }
+
       const allTools = registry.getAll();
 
       const matched = allTools.filter((t) => {

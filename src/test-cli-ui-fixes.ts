@@ -431,6 +431,60 @@ go 1.22
       }
     });
   });
+
+  describe('8. Task Cancellation & Automatic Prompt Input Notice', () => {
+    it('should render cancellation toast and prompt input notice', () => {
+      CLI.resetToastDebounceTimestamps();
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: any[]) => logs.push(args.map(String).join(' '));
+
+      try {
+        CLI.renderTaskCancelledToast('Tác vụ bị hủy bởi Ctrl+C.');
+        assert.ok(logs.some((l) => l.includes('🛑 [Cancelled]')), 'Must include [Cancelled] badge');
+        assert.ok(logs.some((l) => l.includes('Tác vụ bị hủy bởi Ctrl+C.')), 'Must include cancel message');
+        assert.ok(logs.some((l) => l.includes('💬')), 'Must include prompt input notice icon');
+        assert.ok(logs.some((l) => l.includes('/help') && l.includes('/exit')), 'Must include commands hint');
+      } finally {
+        console.log = originalLog;
+      }
+    });
+
+    it('should debounce rapid cancellation toasts within 400ms', () => {
+      CLI.resetToastDebounceTimestamps();
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: any[]) => logs.push(args.map(String).join(' '));
+
+      try {
+        CLI.renderTaskCancelledToast('Lần 1');
+        const countFirst = logs.filter((l) => l.includes('[Cancelled]')).length;
+        assert.strictEqual(countFirst, 1);
+
+        // Immediate subsequent call within debounce threshold
+        CLI.renderTaskCancelledToast('Lần 2');
+        const countSecond = logs.filter((l) => l.includes('[Cancelled]')).length;
+        assert.strictEqual(countSecond, 1, 'Should debounce rapid duplicate cancellation toasts');
+      } finally {
+        console.log = originalLog;
+      }
+    });
+
+    it('should display prompt notice when renderExecutionStopped is called with CANCELLED', async () => {
+      CLI.resetToastDebounceTimestamps();
+      const logs: string[] = [];
+      const originalLog = console.log;
+      console.log = (...args: any[]) => logs.push(args.map(String).join(' '));
+
+      try {
+        await CLI.renderExecutionStopped('Agent stopped: cancellation requested.', 'CANCELLED');
+        assert.ok(logs.some((l) => l.includes('🛑 AGENT EXECUTION STOPPED (CANCELLED)')));
+        assert.ok(logs.some((l) => l.includes('💬') || l.includes('Sẵn sàng nhận')));
+      } finally {
+        console.log = originalLog;
+      }
+    });
+  });
 });
 
 

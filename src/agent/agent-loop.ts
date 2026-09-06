@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
@@ -7,22 +8,25 @@ import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
+import { ContextGuardian, ContextAgent } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
+import type { MemoryRecord } from '../memory/types.js';
 import { AgentKernel, KernelContext } from '../kernel/kernel.js';
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
-import { AgentInbox, AgentInputSource } from './agent-inbox.js';
+import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
+import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
-import { FinalAnswerGuard } from './final-answer-guard.js';
-import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool } from '../tools/subagent-tools.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent } from './final-answer-guard.js';
+import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
@@ -51,7 +55,8 @@ import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
-import { EvidenceDrivenControlPlane, type RiskLevel } from '../control-plane/index.js';
+import { CognitiveHarness } from './cognitive-harness.js';
+import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
@@ -89,6 +94,8 @@ export class AgentLoop {
   readonly maxSteps: number;
   readonly checkpointManager: CheckpointManager;
   readonly contextCompactor: ContextCompactor;
+  readonly contextGuardian: ContextGuardian;
+  readonly contextAgent: ContextAgent;
   readonly planManager: PlanManager;
   readonly goalManager: GoalManager;
   readonly agentHooks: AgentHookRegistry;
@@ -97,6 +104,7 @@ export class AgentLoop {
   readonly agentRegistry: AgentRegistry;
   readonly agentId: string;
   readonly subagentManager: SubagentManager;
+  readonly orchestrator: AgentOrchestrator;
   readonly effectLedger: EffectLedger;
   readonly progressGuard = new LoopProgressGuard();
   readonly finalAnswerGuard = new FinalAnswerGuard();
@@ -110,7 +118,9 @@ export class AgentLoop {
   readonly adaptiveReasoning = new AdaptiveReasoningController();
   readonly rollbackOrchestrator: HypothesisRollbackOrchestrator;
   readonly workspaceVerifier: WorkspaceStateVerifier;
-  readonly controlPlane: EvidenceDrivenControlPlane;
+  readonly cognitiveHarness = new CognitiveHarness();
+  readonly contextSnapshotManager: ContextSnapshotManager;
+  private targetFilesModifiedInTurn = new Set<string>();
   readonly kernel?: AgentKernel;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
@@ -118,12 +128,14 @@ export class AgentLoop {
   private drainingSessionId?: string;
   private drainScheduled = false;
   private runQueues = new Map<string, Promise<string>>();
+  readonly MAX_CIRCUIT_BREAKER_RETRIES = 5;
+  private consecutiveCircuitBreakerRetries = 0;
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
   readonly repositoryMap: GraphRankedRepositoryMap;
   readonly repositoryMemory: CitationValidatedRepositoryMemory;
-  private lastToolExecution?: { toolName: string; result: any };
+  private lastToolExecution?: { toolName: string; result: any; guardianDiagnosis?: any };
   readonly classificationEngine = new ClassificationEngine();
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
@@ -136,6 +148,9 @@ export class AgentLoop {
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
+  private cachedTurnNumber?: number;
+  private cachedTurnToolDeclarations?: any[];
+  private cachedTurnToolProviderSize?: number;
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
@@ -162,7 +177,7 @@ export class AgentLoop {
       this._workspace = this.kernel.ctx.workspace;
       this.toolProvider = options?.toolScope || this.toolRegistry;
       this.toolRunner = options?.toolScope
-        ? new ToolRunner(this.toolProvider, this._workspace, undefined, this.kernel.ctx.compose)
+        ? new ToolRunner(this.toolProvider, this._workspace, this.kernel.ctx.permissions, this.kernel.ctx.compose)
         : this.kernel.ctx.toolRunner;
       this.checkpointManager = this.kernel.ctx.checkpoints;
       this.contextCompactor = this.kernel.ctx.compactor;
@@ -182,25 +197,33 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
-      this.controlPlane = this.kernel.ctx.controlPlane;
-      this.maxSteps = options?.maxSteps ?? 30;
+      this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
+      this.contextSnapshotManager.init().catch(() => { });
+      this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
+      this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
+      this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
-      this.kernel.init().catch(() => {});
+      this.kernel.init().catch(() => { });
     } else {
       this.llm = kernelOrLLM;
       this._workspace = options?.workspace ?? new Workspace();
       this.toolRegistry = toolRegistry ?? new ToolRegistry();
       this.toolProvider = options?.toolScope || this.toolRegistry;
       this.toolRunner = new ToolRunner(this.toolProvider, this._workspace);
-      this.maxSteps = options?.maxSteps ?? 30;
+      this.maxSteps = options?.maxSteps ?? Infinity;
       this.checkpointManager = options?.checkpointManager ?? new CheckpointManager(this._workspace.rootDir);
       this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
+      this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
+      this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
       this.planManager = new PlanManager();
       this.goalManager = new GoalManager();
       this.agentHooks = new AgentHookRegistry();
       this.inbox = new AgentInbox();
-      this.promptAssembler = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
+      this.promptAssembler = new PromptAssembler();
+      for (const section of DEFAULT_PROMPT_SECTIONS) {
+        this.promptAssembler.register(section);
+      }
       this.agentRegistry = options?.agentRegistry || new AgentRegistry();
       this.agentId = options?.agentId || 'coding-agent';
       this.reflectionEngine = new ReflectionEngine();
@@ -212,11 +235,8 @@ export class AgentLoop {
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
       this.repositoryMap = new GraphRankedRepositoryMap(this._workspace);
-      this.controlPlane = new EvidenceDrivenControlPlane({
-        workspace: this._workspace,
-        checkpointManager: this.checkpointManager,
-        speculativeManager: this.speculativeManager,
-      });
+      this.contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
+      this.contextSnapshotManager.init().catch(() => { });
       this.sessionPersistence = options?.sessionPersistence;
 
       // Đăng ký các planning và memory tools vào toolRegistry
@@ -225,9 +245,9 @@ export class AgentLoop {
       this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
 
-      this.checkpointManager.init().catch(() => {});
-      this.memoryManager.init(this._workspace).catch(() => {});
-      this.repositoryMemory.init().catch(() => {});
+      this.checkpointManager.init().catch(() => { });
+      this.memoryManager.init(this._workspace).catch(() => { });
+      this.repositoryMemory.init().catch(() => { });
     }
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
@@ -242,11 +262,13 @@ export class AgentLoop {
     });
 
     this.agentRegistry.register(this.agentId, this.agentId);
+    this.agentRegistry.registerBenchmarkSpecialists();
     this.subagentManager = new SubagentManager(
       this.agentRegistry,
       (agentId, session, subagentOptions, signal) => this.createSubagentLoop(agentId, session, subagentOptions, signal),
       (session) => this.persistSession(session),
     );
+    this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     if (options?.enableSubagents !== false) {
       this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
       this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
@@ -254,6 +276,18 @@ export class AgentLoop {
       this.toolRegistry.register(createGetAgentResultTool(this.subagentManager));
       this.toolRegistry.register(createStopAgentTool(this.subagentManager));
       this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
+      this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
+      this.toolRegistry.register(createBrainstormDesignTool());
+      this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
+    }
+
+    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
+      try {
+        const ctx = detectPromptContext(this._workspace);
+        if (ctx.isUnity) {
+          (this.toolRegistry as any).registerGameTools();
+        }
+      } catch { }
     }
   }
 
@@ -274,23 +308,29 @@ export class AgentLoop {
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
+    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
+      try {
+        const ctx = detectPromptContext(workspace);
+        if (ctx.isUnity) {
+          (this.toolRegistry as any).registerGameTools();
+        }
+      } catch { }
+    }
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
-      this.controlPlane.workspaceManager.setWorkspace(workspace);
       if (this.toolProvider === this.toolRegistry) {
         this.toolRunner = this.kernel.ctx.toolRunner;
       } else {
-        this.toolRunner = new ToolRunner(this.toolProvider, workspace, undefined, this.kernel.ctx.compose);
+        this.toolRunner = new ToolRunner(this.toolProvider, workspace, this.kernel.ctx.permissions, this.kernel.ctx.compose);
       }
     } else {
-      this.toolRunner = new ToolRunner(this.toolProvider, this._workspace);
+      this.toolRunner = new ToolRunner(this.toolProvider, this._workspace, this.toolRunner.getPermissionManager?.());
       (this as any).checkpointManager = new CheckpointManager(workspace.rootDir);
       (this as any).memoryManager = new ProjectMemoryManager(workspace.rootDir);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
-      this.controlPlane.workspaceManager.setWorkspace(workspace);
-      this.checkpointManager.init().catch(() => {});
-      this.memoryManager.init(workspace).catch(() => {});
-      this.repositoryMemory.init().catch(() => {});
+      this.checkpointManager.init().catch(() => { });
+      this.memoryManager.init(workspace).catch(() => { });
+      this.repositoryMemory.init().catch(() => { });
     }
   }
 
@@ -337,11 +377,92 @@ export class AgentLoop {
     return result;
   }
 
-  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
+  private async runInternalWithCircuitBreakerRetry(
+    session: Session,
+    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean },
+  ): Promise<string> {
+    while (true) {
+      try {
+        const result = await this.runInternal(session, {
+          ...options,
+          isCircuitBreakerRetry: this.consecutiveCircuitBreakerRetries > 0,
+        });
+        this.consecutiveCircuitBreakerRetries = 0;
+        return result;
+      } catch (error: any) {
+        // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
+        const isCancelled = options?.signal?.aborted
+          || error?.name === 'AbortError'
+          || (typeof error?.message === 'string' && (
+            error.message.includes('cancellation requested') ||
+            error.message.includes('COMMAND_CANCELLED') ||
+            error.message.includes('aborted')
+          ));
+
+        if (isCancelled) {
+          this.consecutiveCircuitBreakerRetries = 0;
+          throw error;
+        }
+
+        const errClassification = classifyLLMError(error);
+        const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+        const isServerError = errClassification.kind === 'SERVER_ERROR';
+        const isRetryableLLMError = isQuotaOrRateLimit || isServerError;
+
+        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries < this.MAX_CIRCUIT_BREAKER_RETRIES) {
+          this.consecutiveCircuitBreakerRetries++;
+
+          // 1. Phục hồi an toàn session invariants (đóng open step/turn)
+          try {
+            if (session.recoverInterrupted()) {
+              await this.persistSession(session);
+            }
+          } catch { }
+
+          // 2. Tự động gửi ngầm prompt "Continue" cho LLM (ẩn với người dùng bằng source='system')
+          session.addUserMessage('Continue', 'system');
+          try {
+            await this.persistSession(session);
+          } catch { }
+
+          // 3. Backoff delay trước khi gọi lại LLM (môi trường test delay cực ngắn)
+          const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(this.llm?.constructor?.name?.includes('Mock'));
+          const backoffMs = isTestEnv
+            ? 5
+            : (errClassification.retryAfterMs ?? Math.min(1500 * Math.pow(1.5, this.consecutiveCircuitBreakerRetries - 1), 8000));
+
+          const sleepResult = await this.sleepWithWakeup(session.id, backoffMs, options?.signal);
+          if (sleepResult.aborted || options?.signal?.aborted) {
+            throw new Error('Agent stopped: cancellation requested.');
+          }
+
+          // Ẩn thông báo CIRCUIT_BREAKER_TRIGGERED và tự động lặp tiếp tục turn dở dang
+          continue;
+        }
+
+        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries >= this.MAX_CIRCUIT_BREAKER_RETRIES) {
+          const detailMsg = isServerError
+            ? `LLM Provider đang quá tải hoặc không khả dụng: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng máy chủ LLM vẫn báo lỗi (${errClassification.kind}: ${errClassification.message || 'Mô hình đang chịu tải cao tạm thời / 503 UNAVAILABLE'}). Vui lòng chờ vài phút rồi thử lại hoặc đổi sang model khác bằng lệnh /model.`
+            : `LLM đã hết Quota: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng LLM vẫn báo lỗi hạn mức (${errClassification.kind}: ${errClassification.message || 'Hạn mức API đã cạn kiệt hoặc bị giới hạn tần suất liên tục'}). Vui lòng đổi sang model khác bằng lệnh /model hoặc kiểm tra gói cước billing.`;
+          const quotaExhaustedError = new Error(detailMsg);
+          (quotaExhaustedError as any).isQuotaExhausted = isQuotaOrRateLimit;
+          (quotaExhaustedError as any).isServerUnavailable = isServerError;
+          (quotaExhaustedError as any).originalClassification = errClassification;
+          this.consecutiveCircuitBreakerRetries = 0;
+          throw quotaExhaustedError;
+        }
+
+        this.consecutiveCircuitBreakerRetries = 0;
+        throw error;
+      }
+    }
+  }
+
+  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
     const previous = this.runQueues.get(session.id) || Promise.resolve('');
     const current = previous.then(
-      () => this.runInternal(session, options),
-      () => this.runInternal(session, options),
+      () => this.runInternalWithCircuitBreakerRetry(session, options),
+      () => this.runInternalWithCircuitBreakerRetry(session, options),
     ).catch(async (error) => {
       // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
       const isCancelled = options?.signal?.aborted
@@ -360,7 +481,7 @@ export class AgentLoop {
           if (session.recoverInterrupted()) {
             await this.persistSession(session);
           }
-        } catch {}
+        } catch { }
         this.setAgentStatus('idle', session);
         await CLI.renderExecutionStopped(
           'Agent stopped: cancellation requested.',
@@ -371,20 +492,25 @@ export class AgentLoop {
 
       // Preserve an auditable, balanced lifecycle even when a provider, hook,
       // persistence adapter, or tool pipeline throws unexpectedly.
-      const errClassification = classifyLLMError(error);
-      const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+      const errClassification = (error as any)?.originalClassification || classifyLLMError(error);
+      const isQuotaOrRateLimit = (error as any)?.isQuotaExhausted
+        || errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+        || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
+      const isServerUnavailable = (error as any)?.isServerUnavailable
+        || errClassification.kind === 'SERVER_ERROR';
+      const isCircuitBreakerSuspension = isQuotaOrRateLimit || isServerUnavailable;
 
-      if (isQuotaOrRateLimit) {
+      if (isCircuitBreakerSuspension) {
         try {
-          await this.checkpointManager.createCheckpoint('Suspended: LLM Quota or Rate Limit reached', {
+          await this.checkpointManager.createCheckpoint('Suspended: LLM Quota, Rate Limit, or Server Unavailable reached', {
             isTaskCheckpoint: true,
             taskId: this.planManager.getActiveTask()?.id ? `task-${this.planManager.getActiveTask()?.id}` : undefined,
           });
-        } catch {}
+        } catch { }
 
         this.goalManager.pause(`LLM ${errClassification.kind}: ${errClassification.message}`);
         session.append('goal/change', {
-          reason: 'suspended_quota_limit',
+          reason: isServerUnavailable ? 'suspended_server_unavailable' : 'suspended_quota_limit',
           goal: this.goalManager.getState(),
         });
       } else {
@@ -399,15 +525,19 @@ export class AgentLoop {
         // Keep the original failure as the rejection reason.
       }
 
-      this.setAgentStatus(isQuotaOrRateLimit ? 'idle' : 'error', session);
+      this.setAgentStatus(isCircuitBreakerSuspension ? 'idle' : 'error', session);
       const detail = error instanceof Error ? error.message : String(error);
       try {
-        if (isQuotaOrRateLimit) {
-          const quotaAdvice = errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
-            ? `LLM Quota Exceeded (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
-            : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`;
+        if (isCircuitBreakerSuspension) {
+          const suspensionAdvice = (error as any)?.isQuotaExhausted || (error as any)?.isServerUnavailable
+            ? error.message
+            : (isQuotaOrRateLimit
+                ? (errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+                    ? `LLM đã hết Quota (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
+                    : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`)
+                : `LLM Provider Server Unavailable (Quá tải máy chủ 503). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc đổi model bằng lệnh /model.`);
           await CLI.renderExecutionStopped(
-            `Agent suspended: ${quotaAdvice}\nChi tiết: ${detail}`,
+            `Agent suspended: ${suspensionAdvice}\nChi tiết: ${detail}`,
             'CIRCUIT_BREAKER_TRIGGERED',
           );
         } else {
@@ -431,7 +561,7 @@ export class AgentLoop {
     }
   }
 
-  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<string> {
+  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
     this.activeSession = session;
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
@@ -450,14 +580,17 @@ export class AgentLoop {
     this.progressGuard.reset();
     this.finalAnswerGuard.reset();
     this.verificationPolicy.reset();
+    this.cognitiveHarness.reset();
+    this.targetFilesModifiedInTurn.clear();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
-    const effectiveMaxSteps = options?.maxSteps ?? (isGoal ? Infinity : this.maxSteps);
+    const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
-    const isContinuationOrGoal = isGoal || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
+    const isContinuationOrGoal = isGoal || Boolean(options?.isCircuitBreakerRetry) || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
     }
+    let consecutiveUnproductiveSteps = 0;
     let consecutiveEmptyTurns = 0;
     let consecutiveIncompleteFinals = 0;
     let consecutivePlanCompletionRejects = 0;
@@ -486,6 +619,24 @@ export class AgentLoop {
     const maxPlanCompletionRetries = 3;
     const maxNoProgressStrategyChanges = 3;
 
+    const claimedSteerItems: AgentInboxItem[] = [];
+    const resolveSteerItems = (answer: string) => {
+      while (claimedSteerItems.length > 0) {
+        const item = claimedSteerItems.shift();
+        try {
+          item?.resolve(answer);
+        } catch { }
+      }
+    };
+    const rejectSteerItems = (err: unknown) => {
+      while (claimedSteerItems.length > 0) {
+        const item = claimedSteerItems.shift();
+        try {
+          item?.reject(err);
+        } catch { }
+      }
+    };
+
     this.setAgentStatus('running', session, turn);
 
     const isRootAgent = this.agentId === 'root'
@@ -512,13 +663,17 @@ export class AgentLoop {
       await CLI.renderExecutionStopped(rejectionMessage, 'TURN_REJECTED');
       await this.endTurn(session, turn, effectiveMaxSteps, isGoal, turnStartDecision.reason || 'turn-rejected');
       this.goalManager.disarm();
+      rejectSteerItems(new Error(rejectionMessage));
       return rejectionMessage;
     }
 
-    try {
-      await this.controlPlane.captureBaseline(`Turn ${turn} baseline`);
-    } catch {
-      // Baseline capture failure must not block execution
+    // 0. Context Drift & Inter-Task Semantic Handoff (context-management-context-save)
+    const latestSnapshot = await this.contextSnapshotManager.getLatestSnapshot().catch(() => undefined);
+    if (latestSnapshot) {
+      const drift = await this.contextSnapshotManager.detectDrift(latestSnapshot).catch(() => undefined);
+      if (drift?.hasDrift) {
+        CLI.renderContextDriftWarning(drift);
+      }
     }
 
     // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
@@ -532,14 +687,24 @@ export class AgentLoop {
           .filter((item) => item.scope !== 'project');
         const scopedMemory = relevantMemory.length > 0
           ? `\n[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]\n${relevantMemory
-              .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
-              .join('\n')}\n`
+            .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
+            .join('\n')}\n`
           : '';
         let prefix = `${digest}\n\n`;
         prefix += scopedMemory;
+        if (latestSnapshot) {
+          prefix += `${this.contextSnapshotManager.generateHandoffDigest([latestSnapshot])}\n\n`;
+        }
         if (isGoal) {
           prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
+        } else if (!isFinite(effectiveMaxSteps)) {
+          prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
         }
+        const initialScaffold = this.cognitiveHarness.createScaffold({
+          request: userText,
+          phase: 'explore',
+        });
+        prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
         const rewrittenHistory = history.map((message, index) =>
           index === 0
             ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
@@ -556,8 +721,40 @@ export class AgentLoop {
         await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
         this.goalManager.disarm();
+        rejectSteerItems(new Error(cancellationMessage));
         return cancellationMessage;
       }
+
+      // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
+      // Check if user submitted a queued steering message while the loop was executing
+      const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
+      if (steerItem) {
+        claimedSteerItems.push(steerItem);
+        const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
+        session.addUserMessage(steerPrompt, steerItem.source, steerItem.id);
+        session.append('input/claimed', {
+          inputId: steerItem.id,
+          isSteering: true,
+          step,
+          turn,
+        });
+        await this.persistSession(session);
+        CLI.renderSteeringNotice(steerItem.text);
+        this.kernel?.ctx.events.emit('model:steered', {
+          sessionId: session.id,
+          inputId: steerItem.id,
+          text: steerItem.text,
+          step,
+          turn,
+        });
+        consecutiveUnproductiveSteps = 0;
+        consecutiveEmptyTurns = 0;
+        consecutiveIncompleteFinals = 0;
+        consecutivePlanCompletionRejects = 0;
+        consecutiveIncompleteFinishes = 0;
+        consecutiveNoProgressStrategyChanges = 0;
+      }
+
       session.append('step/start', { turn, step });
       await this.persistSession(session);
       this.setAgentStatus('running', session, turn, step);
@@ -583,10 +780,42 @@ export class AgentLoop {
         this.goalManager.disarm();
         return rejectionMessage;
       }
-      CLI.renderStepHeader(step, effectiveMaxSteps);
-      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
+      // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - context-management-context-save)
+      const currentHistory = session.getHistory();
+      let totalHistoryChars = 0;
+      for (const m of currentHistory) {
+        for (const p of m.parts || []) {
+          if (typeof p?.text === 'string') totalHistoryChars += p.text.length;
+          if (p?.functionResponse) totalHistoryChars += JSON.stringify(p.functionResponse).length;
+        }
+      }
+      const estimatedHistoryTokens = ContextCompactor.estimateTokens(' '.repeat(totalHistoryChars));
+      const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
+      const compactionThreshold = maxBudget * 0.70;
 
-      // 2. Tối ưu hoá ngữ cảnh và nén Token (Context Compaction)
+      if (estimatedHistoryTokens > compactionThreshold && currentHistory.length > 4) {
+        // Context Guardian: Bảo vệ toàn vẹn ngữ cảnh trước khi nén (Pre-Compaction Zero Loss)
+        try {
+          const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
+            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+            projectPhase: `Turn ${turn} Execution`,
+          });
+          session.append('context/snapshot', {
+            reason: 'Context Guardian captured pre-compaction snapshot and generated transition briefing.',
+            snapshotId: guardianResult.snapshotId,
+          });
+        } catch {}
+
+        const compactRes = this.contextCompactor.compact(currentHistory, {
+          triggerRatio: 0.70,
+        });
+        if (compactRes.stats.tokensSaved > 0) {
+          session.replaceHistory(compactRes.messages, 'auto-compaction');
+          CLI.renderAutoCompactionNotice(compactRes.stats.tokensSaved, compactRes.stats.compactedTokens);
+          await this.persistSession(session);
+        }
+      }
+
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
         const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
@@ -623,24 +852,60 @@ export class AgentLoop {
         previous: previousClassification,
       });
       previousClassification = classification;
+
+      const adviceInfo = this.toolAdvisor.advise({
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        hasErrors: this.lastToolExecution?.result?.error !== undefined,
+        activeTaskTitle: activeTask?.title,
+      });
+
+      // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
+      CLI.renderStepHeader(step, effectiveMaxSteps, {
+        phase: classification.phase,
+        activeTask: activeTask?.title,
+        playbook: adviceInfo.playbook,
+        risk: classification.risk,
+        isGoal,
+      });
+
+      if (step === 1 || this.reflectionEngine.getConsecutiveFailures() > 1) {
+        const activeScaffold = this.cognitiveHarness.createScaffold({
+          request: turnUserRequest,
+          phase: classification.phase,
+          activeTask: activeTask?.title,
+          consecutiveFailures: this.reflectionEngine.getConsecutiveFailures(),
+        });
+        CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+      }
+
+
+
+      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
       this.verificationPolicy.setRequiredRisk(classification.risk);
-      const mappedRiskLevel: RiskLevel = (classification.risk === 'R0' || classification.risk === 'R1')
-        ? 'MINIMAL'
-        : (classification.risk === 'R2' || classification.risk === 'R3')
-        ? 'STANDARD'
-        : classification.risk === 'R4'
-        ? 'HIGH_RISK'
-        : 'CRITICAL';
-      this.controlPlane.setTaskRiskLevel(mappedRiskLevel);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
       const candidateProvider = toolControlMode === 'enforce'
         ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, recommendedToolDecision.allowedToolNames)
         : this.toolProvider;
-      const dynamicRetrievalEnabled = toolControlMode === 'enforce' || this.loopOptions?.enableDynamicToolRetrieval === true;
-      const activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
-        ? candidateProvider.getRelevantTools(activeStepQuery)
-        : candidateProvider.getFunctionDeclarations();
+      const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
+        && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
+      const providerSize = candidateProvider.getAll().length;
+      let activeToolDeclarations: any[];
+      if (
+        this.cachedTurnNumber === turn
+        && this.cachedTurnToolDeclarations
+        && this.cachedTurnToolProviderSize === providerSize
+      ) {
+        activeToolDeclarations = this.cachedTurnToolDeclarations;
+      } else {
+        activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
+          ? candidateProvider.getRelevantTools(activeStepQuery)
+          : candidateProvider.getFunctionDeclarations();
+        this.cachedTurnNumber = turn;
+        this.cachedTurnToolDeclarations = activeToolDeclarations;
+        this.cachedTurnToolProviderSize = providerSize;
+      }
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
@@ -668,8 +933,13 @@ export class AgentLoop {
       }
 
       let response;
-      // System Prompt 100% STATIC để tối đa hóa KV-Cache Hit Rate (>80%) theo chuẩn OpenAI Codex
-      const assembledSystemPrompt = this.promptAssembler.assemble();
+      // Progressive System Prompt: Tiết kiệm >70% token/turn với Zero Cache Invalidation (Core Invariant Prefix tại -1000)
+      const promptAssemblyCtx = detectPromptContext(
+        this._workspace,
+        this.toolProvider,
+        turnUserRequest,
+      );
+      const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
       const rawPlanContext = this.planManager.renderExecutionContext();
       const advicePrompt = this.toolAdvisor.formatAdvicePrompt({
         lastToolName: this.lastToolExecution?.toolName,
@@ -677,17 +947,53 @@ export class AgentLoop {
         hasErrors: this.lastToolExecution?.result?.error !== undefined,
         activeTaskTitle: activeTask?.title,
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
+        guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
       });
-      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, 4);
+      // Intent-Gated Memory Retrieval:
+      // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
+      // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
+      //   + Tắt Graph Repository Map (tiết kiệm 1.600 tokens)
+      //   + Thu nhỏ ngân sách Repository Memory xuống ~300 tokens
+      //   + Giảm số lượng relevantMemory xuống tối đa 2
+      // - Phase 'explore' / 'plan' hoặc complexity 'large' -> Tác vụ bao quát: Nạp đầy đủ ngân sách
+      const isLocalizedExecution = classification.phase === 'implement'
+        || classification.phase === 'verify'
+        || classification.phase === 'release'
+        || classification.complexity === 'trivial'
+        || classification.complexity === 'small'
+        || classification.fastPath;
+
+      const configuredRepoMemTokens = this.loopOptions?.repositoryMemoryTokens ?? 1_000;
+      const configuredRepoMapTokens = this.loopOptions?.repositoryMapTokens ?? 1_600;
+
+      const explicitRepoMap = this.loopOptions?.enableGraphRepositoryMap === true;
+      const explicitRepoMem = this.loopOptions?.enableRepositoryMemory === true;
+
+      const effectiveRepoMemTokens = (isLocalizedExecution && !explicitRepoMem)
+        ? Math.min(300, configuredRepoMemTokens)
+        : configuredRepoMemTokens;
+      const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
+        ? 0
+        : configuredRepoMapTokens;
+
+      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      const shouldRecallRepoMem = explicitRepoMem
+        ? (effectiveRepoMemTokens > 0)
+        : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
+      const shouldRenderRepoMap = explicitRepoMap
+        ? (effectiveRepoMapTokens > 0)
+        : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0);
+
+      const memoryLimit = isLocalizedExecution ? 2 : 4;
+      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
       const memoryPrompt = relevantMemory.length > 0
         ? [
-            '[VERIFIED RELEVANT PROJECT MEMORY]',
-            ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
-          ].join('\n')
+          '[VERIFIED RELEVANT PROJECT MEMORY]',
+          ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
+        ].join('\n')
         : '';
       const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
       const composeState = this.kernel?.ctx.compose.getState();
-      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
       let repositoryMemoryContext = '';
       let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
       let repositoryContext = '';
@@ -704,10 +1010,10 @@ export class AgentLoop {
         } : undefined,
         relevantMemory: relevantMemory.map((item) => [item.key, item.confidence, item.insight]),
         registeredFiles: composeState?.registeredFiles || [],
-        repositoryMemoryEnabled: this.loopOptions?.enableRepositoryMemory !== false,
-        repositoryMemoryTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
-        repositoryMapEnabled: this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel,
-        repositoryMapTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+        repositoryMemoryEnabled: shouldRecallRepoMem,
+        repositoryMemoryTokens: effectiveRepoMemTokens,
+        repositoryMapEnabled: shouldRenderRepoMap,
+        repositoryMapTokens: effectiveRepoMapTokens,
       });
       const cachedDynamicContext = dynamicCacheEnabled
         ? this.dynamicContextCache.get(dynamicCacheKey)
@@ -717,11 +1023,11 @@ export class AgentLoop {
         repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
         repositoryContext = cachedDynamicContext.repositoryContext;
       } else {
-        if (this.loopOptions?.enableRepositoryMemory !== false) {
+        if (shouldRecallRepoMem) {
           try {
             const recalled = await this.repositoryMemory.recall(activeStepQuery, {
-              limit: 12,
-              maxTokens: this.loopOptions?.repositoryMemoryTokens ?? 1_000,
+              limit: isLocalizedExecution && !explicitRepoMem ? 4 : 12,
+              maxTokens: effectiveRepoMemTokens,
             });
             repositoryMemoryContext = recalled.rendered;
             repositoryMemoryRecords = recalled.records;
@@ -729,7 +1035,7 @@ export class AgentLoop {
             // Repository memory is an independent, fail-open context source.
           }
         }
-        if (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel) {
+        if (shouldRenderRepoMap) {
           try {
             const repositoryQuery = [
               activeStepQuery,
@@ -737,7 +1043,7 @@ export class AgentLoop {
               ...repositoryMemoryRecords.map((item) => item.statement),
             ].filter(Boolean).join('\n');
             repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
-              maxTokens: this.loopOptions?.repositoryMapTokens ?? 1_600,
+              maxTokens: effectiveRepoMapTokens,
               seedFiles: [
                 ...(activeTask?.readSet || []),
                 ...(activeTask?.writeSet || []),
@@ -798,19 +1104,12 @@ export class AgentLoop {
 
       // Budget the complete model-visible request, not history alone. This is
       // proactive compaction at a safe provider-turn boundary, not a timeout.
-      const reinjectInvariants = [
-        activeTask ? `Active Task: "${activeTask.title}"` : undefined,
-        this.goalManager.getState()?.objective ? `Goal Objective: "${this.goalManager.getState()?.objective}"` : undefined,
-        'Strict Invariants: No unrequested git push to main. No unrequested automated browser test subagents.',
-      ].filter(Boolean).join('\n');
-
       const compactionResult = this.contextCompactor.compact(session.getHistory(), {
         requestOverheadTokens: requestFootprint.nonHistoryTokens,
         outputReserveTokens: requestFootprint.outputReserveTokens,
         triggerRatio: this.loopOptions?.requestCompactionRatio
           ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
-          ?? 0.75, // Proactive 75% context compaction trigger (Claude Code standard)
-        reinjectInvariants,
+          ?? 0.82,
       });
       if (compactionResult.stats.charsSaved > 0) {
         session.setHistory(compactionResult.messages);
@@ -854,7 +1153,7 @@ export class AgentLoop {
             firstTokenAt ??= Date.now();
             this.kernel?.ctx.events.emit('model:token', token);
           },
-          onToolCallEarly: (earlyCall: { name: string; args: Record<string, any>; id?: string }) => {
+          onToolCallEarly: (earlyCall: any) => {
             if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
               const runContext = {
                 sessionId: session.id,
@@ -876,6 +1175,7 @@ export class AgentLoop {
       } else {
         response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
       }
+      this.consecutiveCircuitBreakerRetries = 0;
       const requestDurationMs = Date.now() - requestStartedAt;
       const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
       response.usage = {
@@ -917,6 +1217,11 @@ export class AgentLoop {
           taskPhase: classification.phase,
           dynamicContextCache: this.dynamicContextCache.getStats(),
           dynamicContextCacheHit: Boolean(cachedDynamicContext),
+          promptTokens: response.usage?.promptTokens,
+          cachedTokens: response.usage?.cachedTokens,
+          cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
+          cacheReadInputTokens: response.usage?.cacheReadInputTokens,
+          cacheHitRate: response.usage?.cacheHitRate,
           hardTimeoutApplied: false,
         },
       });
@@ -930,6 +1235,9 @@ export class AgentLoop {
         latencyProfile,
         taskPhase: classification.phase,
         dynamicContextCacheHit: Boolean(cachedDynamicContext),
+        promptTokens: response.usage?.promptTokens,
+        cachedTokens: response.usage?.cachedTokens,
+        cacheHitRate: response.usage?.cacheHitRate,
       });
 
       // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
@@ -1158,15 +1466,15 @@ export class AgentLoop {
               preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
                 ? outcome.value
                 : {
-                    toolName: scheduled.name,
-                    args: scheduled.args,
-                    durationMs: 0,
-                    result: {
-                      error: outcome.reason?.message || String(outcome.reason),
-                      errorCode: 'TOOL_EXECUTION_REJECTED',
-                      retryable: true,
-                    },
-                  });
+                  toolName: scheduled.name,
+                  args: scheduled.args,
+                  durationMs: 0,
+                  result: {
+                    error: outcome.reason?.message || String(outcome.reason),
+                    errorCode: 'TOOL_EXECUTION_REJECTED',
+                    retryable: true,
+                  },
+                });
             });
           }
 
@@ -1299,16 +1607,45 @@ export class AgentLoop {
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else {
             // Chạy tool qua pipeline an toàn
-            const completionEvidence = toolName === 'submit_solution'
+            let completionEvidence = toolName === 'submit_solution'
               ? this.completionEvidenceGate.evaluate('', session, {
-                  turn,
-                  codeChangeRequired: this.verificationPolicy.hasPendingModifications()
-                    || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
-                })
+                turn,
+                codeChangeRequired: this.verificationPolicy.hasPendingModifications()
+                  || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
+              })
               : undefined;
-            const policyCompletion = toolName === 'submit_solution'
+            let policyCompletion = toolName === 'submit_solution'
               ? this.verificationPolicy.canComplete()
               : undefined;
+
+            // Tool-Use Guardian: JIT Pre-Call Validation Guard cho submit_solution
+            if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
+              try {
+                const tsService = getOrCreateTypeScriptService(this._workspace);
+                const diags = tsService.getDiagnostics();
+                const errors = diags.filter((d: any) => d.category === 'error');
+                if (errors.length === 0) {
+                  this.verificationPolicy.recordVerification(
+                    'jit_diagnostics_sweep',
+                    true,
+                    'JIT in-memory diagnostics clean (0 errors)',
+                    0,
+                    { tier: 'typecheck' },
+                  );
+                  policyCompletion = this.verificationPolicy.canComplete();
+                  completionEvidence = this.completionEvidenceGate.evaluate('', session, {
+                    turn,
+                    codeChangeRequired: false,
+                  });
+                } else {
+                  policyCompletion = {
+                    allowed: false,
+                    reason: `Phát hiện ${errors.length} lỗi TypeScript chưa được sửa: ${errors.slice(0, 2).map((e: any) => `${e.file}:${e.line} - ${e.message}`).join('; ')}`,
+                    errorCode: 'DIAGNOSTICS_FAILED',
+                  };
+                }
+              } catch {}
+            }
             const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
               toolName,
               toolArgs,
@@ -1329,6 +1666,7 @@ export class AgentLoop {
                 } : {}),
                 ...(toolName === 'submit_solution' ? {
                   completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
+                  completionEvidenceReason: policyCompletion?.reason || completionEvidence?.reasons?.filter(Boolean).join('; ') || undefined,
                 } : {}),
               },
               toolCallId,
@@ -1371,8 +1709,11 @@ export class AgentLoop {
           }
           if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
             const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || '');
-            this.verificationPolicy.recordModification(mutatedPath);
-            this.controlPlane.recordMutation({ filePath: mutatedPath });
+            const blast = executionResult.result?.blastRadius;
+            this.verificationPolicy.recordModification(mutatedPath, {
+              impactedTestSuites: blast?.impactedTestSuites,
+              risk: blast?.risk,
+            });
             hasSubmittedSolution = false;
             if (mutatedPath) {
               this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);
@@ -1386,23 +1727,28 @@ export class AgentLoop {
                 differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
               }
             }
-            if (isVerificationCommand(toolArgs.command)) {
-              this.controlPlane.recordEvidence({
-                type: 'test',
-                command: String(toolArgs.command || ''),
-                sourceTool: toolName,
-                status: isToolResultFailure(executionResult.result) ? 'FAIL' : 'PASS',
-                summary: String(executionResult.result.stdout || executionResult.result.stderr || executionResult.result.error || '').slice(0, 150),
-                affectedFiles: [],
-                rawDetails: executionResult.result,
-              });
-            }
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
               !isToolResultFailure(executionResult.result),
               String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
               executionResult.result.exitCode,
               { hasNewFailures: differential?.hasNewFailures },
+            );
+          }
+          if (toolName === 'get_diagnostics') {
+            const isClean = !isToolResultFailure(executionResult.result)
+              && executionResult.result?.clean === true
+              && (!executionResult.result?.totalErrors || executionResult.result?.totalErrors === 0);
+            const target = toolArgs.path ? `get_diagnostics (${toolArgs.path})` : 'get_diagnostics';
+            const detail = isClean
+              ? `Diagnostics clean (0 errors, ${executionResult.result?.totalWarnings || 0} warnings)`
+              : `Diagnostics found ${executionResult.result?.totalErrors || 1} error(s)`;
+            this.verificationPolicy.recordVerification(
+              target,
+              isClean,
+              detail,
+              isClean ? 0 : 1,
+              { tier: 'typecheck' },
             );
           }
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
@@ -1418,7 +1764,25 @@ export class AgentLoop {
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
+            if (reflectionAnalysis.detectiveReport) {
+              CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
+            }
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
+          }
+
+          const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+          const falsifiedCount = this.hypothesisTracker.getFalsifiedHypotheses().length;
+          const cognitiveBrake = this.cognitiveHarness.evaluateCognitiveBrake({
+            consecutiveFailures: reflectionAnalysis.consecutiveFailures,
+            hypothesisFailedCount: falsifiedCount,
+            currentHypothesis: activeHypothesis?.statement,
+          });
+
+          if (cognitiveBrake.active) {
+            CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
+            if (activeHypothesis) {
+              this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
+            }
           }
 
           const progressDecision = this.progressGuard.observe({
@@ -1426,6 +1790,18 @@ export class AgentLoop {
             args: toolArgs,
             result: executionResult.result,
           });
+
+          const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'submit_solution'].includes(toolName)
+            || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
+          if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
+            consecutiveUnproductiveSteps = 0;
+            const targetPath = toolArgs.path || toolArgs.target_path || toolArgs.file_path || toolArgs.targetFile;
+            if (targetPath) {
+              this.targetFilesModifiedInTurn.add(String(targetPath));
+            }
+          } else if (!isMutatingOrVerification) {
+            consecutiveUnproductiveSteps++;
+          }
 
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
           if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
@@ -1436,9 +1812,19 @@ export class AgentLoop {
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
           const payloadToRecord = {
             ...executionResult.result,
+            ...(executionResult.guardianDiagnosis?.errorAs200Unmasked
+              ? { _system_guardian_unmasked_error: `[GUARDIAN UNMASKED ERROR]: Tool returned HTTP 200 / success but contained embedded error: "${executionResult.guardianDiagnosis.message}".` }
+              : {}),
+            ...(executionResult.guardianDiagnosis && isToolResultFailure(executionResult.result)
+              ? { _system_guardian_recovery: `[GUARDIAN RECOVERY GUIDANCE]: Category: ${executionResult.guardianDiagnosis.category}. Action: ${executionResult.guardianDiagnosis.recoveryAction}${executionResult.guardianDiagnosis.suggestedAlternative ? ` Recommended alternative: ${executionResult.guardianDiagnosis.suggestedAlternative}` : ''}` }
+              : {}),
             ...(reflectionAnalysis.reflectionPrompt
               ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
               : {}),
+            ...(cognitiveBrake.active
+              ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
+              : {}),
+
             ...(progressDecision.message
               ? { _system_loop_guard: progressDecision.message }
               : {}),
@@ -1446,9 +1832,13 @@ export class AgentLoop {
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
           if (this.loopOptions?.enableRepositoryMemory !== false) {
-            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => {});
+            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
           }
-          this.lastToolExecution = { toolName, result: executionResult.result };
+          this.lastToolExecution = {
+            toolName,
+            result: executionResult.result,
+            guardianDiagnosis: executionResult.guardianDiagnosis,
+          };
           if (readPartition && partitionStartIndex !== undefined) {
             readBatchToolDurationMs.set(
               partitionStartIndex,
@@ -1524,8 +1914,10 @@ export class AgentLoop {
         // submit_solution already contains a comprehensive, evidence-backed
         // summary. Reusing it avoids an otherwise redundant provider request
         // whose only purpose is to restate the same result.
+        const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
         if (
-          hasSubmittedSolution
+          !isArchQuery
+          && hasSubmittedSolution
           && isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
           && (this.loopOptions?.enableSubmitAutoFinalization
             ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION'))
@@ -1714,13 +2106,15 @@ export class AgentLoop {
 
       // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
       const rawText = response.text ? response.text.trim() : '';
+      const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
       const isGenericStub = !rawText
         || /^(each task must be atomic|execution sequence satisfied|\(nhiệm vụ đã hoàn tất\)|\(task completed\)|\(solution submitted\))/i.test(rawText)
-        || (rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40);
+        || (!isArchQuery && rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40)
+        || (isArchQuery && rawText.length < 200);
 
-      const finalAnswer = (isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
+      const finalAnswer = (!isArchQuery && isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
         ? submittedSolutionSummary
-        : (rawText || (hasSubmittedSolution && submittedSolutionSummary ? submittedSolutionSummary : '(Nhiệm vụ đã hoàn tất)'));
+        : (rawText || (hasSubmittedSolution && !isArchQuery && submittedSolutionSummary ? submittedSolutionSummary : '(Nhiệm vụ đã hoàn tất)'));
       consecutiveEmptyTurns = 0;
 
       const planBlocker = this.planManager.getCompletionBlocker();
@@ -1762,28 +2156,60 @@ export class AgentLoop {
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
-            userRequest: turnUserRequest,
-            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-            hasSubmittedSolution,
-          });
-
-      const edcpOutcome = (isSubagent || isMockLLM)
-        ? { authorized: true, decision: { approved: true, score: 100, hardBlockers: [], staleEvidence: [], missingEvidence: [], reasons: [], critiquePrompt: undefined } }
-        : this.controlPlane.authorizeCompletion({
-            hasSubmittedSolution,
-            finalAnswerText: finalAnswer,
-            registeredFiles: this.kernel?.ctx.compose?.getState()?.registeredFiles,
-          });
-
-      const finalAnswerDecision = !policyDecision.allow
-        ? policyDecision
-        : !edcpOutcome.authorized
-        ? {
-            allow: false,
-            reason: 'unverified-evidence' as const,
-            continuationPrompt: edcpOutcome.decision.critiquePrompt || `[CONTROL PLANE CRITIC]: Task verification incomplete. Action required:\n${edcpOutcome.decision.reasons.map((r) => `- ${r}`).join('\n')}`,
-          }
-        : { allow: true };
+          userRequest: turnUserRequest,
+          availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
+          hasSubmittedSolution,
+          workspace: this._workspace,
+        });
+      const evidenceDecision = (isSubagent || isMockLLM)
+        ? { allow: true, reasons: [] }
+        : this.completionEvidenceGate.evaluate(finalAnswer, session, {
+          turn,
+          codeChangeRequired: this.planManager.getRequirements().required,
+          userRequest: turnUserRequest,
+          hasSubmittedSolution,
+        });
+      const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
+      if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
+        activeSkills.push('verification-before-completion');
+      }
+      const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM)
+        ? { allowed: true }
+        : this.verificationPolicy.canComplete(activeSkills);
+      const criticDecision = (isSubagent || isMockLLM)
+        ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
+        : this.criticGate.evaluate({
+          finalAnswer,
+          session,
+          workspace: this._workspace,
+          hypothesisTracker: this.hypothesisTracker,
+          userRequest: turnUserRequest,
+          turn,
+          hasSubmittedSolution,
+        });
+      const finalAnswerDecision = (isSubagent || isMockLLM)
+        ? (policyDecision.allow ? { allow: true } : policyDecision)
+        : (!policyDecision.allow
+          ? policyDecision
+          : !criticDecision.approved
+            ? {
+              allow: false,
+              reason: 'unverified-evidence' as const,
+              continuationPrompt: criticDecision.critiquePrompt,
+            }
+            : (!hasSubmittedSolution && !evidenceDecision.allow)
+              ? {
+                allow: false,
+                reason: 'unverified-evidence' as const,
+                continuationPrompt: evidenceDecision.continuationPrompt,
+              }
+              : (!hasSubmittedSolution && !verificationDecision.allowed)
+                ? {
+                  allow: false,
+                  reason: 'unverified-evidence' as const,
+                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
+                }
+                : { allow: true });
 
       if (!finalAnswerDecision.allow) {
         consecutiveIncompleteFinals++;
@@ -1836,7 +2262,7 @@ export class AgentLoop {
       }
       consecutiveIncompleteFinals = 0;
       this.adaptiveReasoning.reset();
-      
+
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
       await CLI.renderFinalAnswer(finalAnswer);
@@ -1860,7 +2286,13 @@ export class AgentLoop {
       } else {
         this.goalManager.disarm();
       }
-      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed', turnUserRequest, finalAnswer);
+
+      resolveSteerItems(finalAnswer);
+      if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
+        this.drainScheduled = true;
+        void this.drainInbox(session, options);
+      }
 
       return finalAnswer;
     }
@@ -1868,13 +2300,21 @@ export class AgentLoop {
     // 7. Nếu đạt maxSteps mà chưa hoàn thành
     const timeoutMessage = isGoal
       ? `Agent stopped: Goal execution finished.`
-      : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
+      : !isFinite(effectiveMaxSteps)
+        ? `Agent stopped: Dynamic convergence limit reached without final answer.`
+        : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
     CLI.renderModelAction('max_steps');
     CLI.renderStepFooter();
     await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
     await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
     this.goalManager.disarm();
-    
+
+    resolveSteerItems(timeoutMessage);
+    if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
+      this.drainScheduled = true;
+      void this.drainInbox(session, options);
+    }
+
     return timeoutMessage;
   }
 
@@ -1895,7 +2335,8 @@ export class AgentLoop {
       inputText: item.text,
       source: item.source,
     });
-    const shouldStartDrain = !this.drainingInbox && !this.drainScheduled;
+    const isRunning = this.drainingInbox || this.runQueues.has(session.id);
+    const shouldStartDrain = !isRunning && !this.drainScheduled;
     if (shouldStartDrain) this.drainScheduled = true;
     try {
       await this.persistSession(session);
@@ -1906,6 +2347,54 @@ export class AgentLoop {
     }
     if (shouldStartDrain) void this.drainInbox(session, options);
     return item.promise;
+  }
+
+  /**
+   * Chờ đợi có hỗ trợ Reactive Wakeup (Google Antigravity Standard):
+   * Nếu người dùng enqueue tin nhắn mới vào session inbox trong lúc đang ngủ/chờ,
+   * hàm sẽ lập tức thức tỉnh (resolve early với { awakenedByQueue: true }) thay vì chờ hết thời gian timeout.
+   */
+  async sleepWithWakeup(
+    sessionId: string,
+    ms: number,
+    signal?: AbortSignal,
+  ): Promise<{ awakenedByQueue: boolean; aborted: boolean }> {
+    if (signal?.aborted) return { awakenedByQueue: false, aborted: true };
+    if (this.inbox.pending(sessionId) > 0) {
+      return { awakenedByQueue: true, aborted: false };
+    }
+
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
+      let unsubscribeWakeup: (() => void) | undefined;
+      let onAbort: (() => void) | undefined;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (unsubscribeWakeup) unsubscribeWakeup();
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve({ awakenedByQueue: false, aborted: false });
+      }, ms);
+
+      unsubscribeWakeup = this.inbox.onWakeup((enqueuedSessionId) => {
+        if (enqueuedSessionId === sessionId) {
+          cleanup();
+          resolve({ awakenedByQueue: true, aborted: false });
+        }
+      });
+
+      if (signal) {
+        onAbort = () => {
+          cleanup();
+          resolve({ awakenedByQueue: false, aborted: true });
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
   }
 
   /** Restore durable queued inputs and explicitly continue draining them. */
@@ -1935,6 +2424,106 @@ export class AgentLoop {
     for (const input of session.getPendingInputs()) {
       this.inbox.restore(session.id, input);
     }
+  }
+
+  /**
+   * Đúc kết một Session thành bản ghi Episodic Memory súc tích
+   * Ghi lại mục tiêu, các file đã sửa đổi, kết quả test và kết luận để tái sử dụng ở các phiên sau.
+   */
+  async summarizeSessionEpisodic(session: Session): Promise<MemoryRecord | null> {
+    const events = session.getEvents();
+    if (events.length === 0) return null;
+
+    // 1. Tìm mục tiêu ban đầu từ tin nhắn user
+    const firstUserEvent = events.find((e) => e.type === 'user/message' && e.data.source !== 'system');
+    let objective = '';
+    if (firstUserEvent?.data.content?.parts) {
+      for (const p of firstUserEvent.data.content.parts) {
+        if (typeof p?.text === 'string') {
+          // Bỏ phần warm start prefix nếu có
+          const rawText = p.text;
+          const userIdx = rawText.indexOf('[USER INSTRUCTION]:');
+          objective = userIdx >= 0 ? rawText.slice(userIdx + 19).trim() : rawText.trim();
+          break;
+        }
+      }
+    }
+    if (!objective) objective = 'Tác vụ lập trình';
+    const compactObjective = objective.slice(0, 150).replace(/\s+/g, ' ');
+
+    // 2. Thu thập các files đã chỉnh sửa qua tool calls
+    const modifiedFiles = new Set<string>();
+    let testsPassed = false;
+    let testsFailed = false;
+
+    for (const e of events) {
+      if (e.type === 'tool/call') {
+        const name = e.data.toolName;
+        const args = e.data.args || {};
+        if (['replace_text', 'write_file', 'patch_file'].includes(name || '')) {
+          const p = args.path || args.filePath || args.targetFile;
+          if (p && typeof p === 'string') modifiedFiles.add(path.basename(p));
+        }
+      }
+      if (e.type === 'tool/result') {
+        const res = e.data.result || {};
+        if (typeof res.exitCode === 'number') {
+          if (res.exitCode === 0) testsPassed = true;
+          else testsFailed = true;
+        }
+      }
+    }
+
+    // 3. Xác định outcome
+    const filesList = Array.from(modifiedFiles);
+    const verificationOutcome = testsPassed
+      ? 'Đã xác thực test thành công (exitCode: 0)'
+      : testsFailed
+        ? 'Test chưa pass hoàn toàn'
+        : filesList.length > 0 ? 'Đã chỉnh sửa code' : 'Đã khảo sát';
+
+    // 4. Tìm tóm tắt cuối cùng từ model nếu có
+    const lastAssistant = [...events].reverse().find((e) => e.type === 'assistant/message');
+    let finalSummary = '';
+    if (lastAssistant?.data.content?.parts) {
+      for (const p of lastAssistant.data.content.parts) {
+        if (typeof p?.text === 'string' && p.text.trim()) {
+          finalSummary = p.text.slice(0, 160).replace(/\s+/g, ' ');
+          break;
+        }
+      }
+    }
+
+    const summaryStatement = `[Phiên ${session.id.slice(0, 10)}] Mục tiêu: "${compactObjective}". Files sửa: ${filesList.join(', ') || 'không'}. Kết quả: ${verificationOutcome}.${finalSummary ? ` Tóm tắt: ${finalSummary}` : ''}`;
+
+    return this.memoryManager.saveEpisodicSummary(session.id, summaryStatement, {
+      outcome: testsPassed ? 'success' : testsFailed ? 'failure' : 'completed',
+      filesModified: filesList,
+      confidence: testsPassed ? 0.95 : 0.8,
+    });
+  }
+
+  /**
+   * Reset Session an toàn kèm Episodic Epilogue:
+   * 1. Đúc kết phiên hiện tại thành Episodic Memory ghi vào ProjectMemoryManager
+   * 2. Tạo một Session mới sạch sẽ, giải phóng toàn bộ history tokens cũ
+   * 3. Phiên mới sẽ nhận được bản tóm tắt phiên trước qua Warm-Start Digest
+   */
+  async resetSessionWithEpisodicEpilogue(
+    session: Session,
+    newSessionId?: string,
+  ): Promise<{ episodicRecord: MemoryRecord | null; newSession: Session }> {
+    const episodicRecord = await this.summarizeSessionEpisodic(session);
+    const newSession = this.kernel
+      ? await this.kernel.ctx.sessions.create(newSessionId)
+      : new Session(newSessionId);
+
+    this.bindSession(newSession);
+    if (this.sessionPersistence) {
+      await this.sessionPersistence.save(newSession);
+    }
+
+    return { episodicRecord, newSession };
   }
 
   private async persistSession(session: Session): Promise<void> {
@@ -1986,6 +2575,8 @@ export class AgentLoop {
     maxSteps: number,
     isGoalMode: boolean,
     reason: string,
+    turnUserRequest?: string,
+    finalAnswer?: string,
   ): Promise<void> {
     await this.agentHooks.run('agent/turn-stopping', {
       session,
@@ -1998,6 +2589,32 @@ export class AgentLoop {
     session.append('turn/end', { turn, reason });
     session.assertRuntimeInvariants();
     await this.persistSession(session);
+    if (reason === 'goal-completed' || reason === 'task-completed' || reason === 'completed' || (isGoalMode && reason === 'goal-stopped')) {
+      void this.summarizeSessionEpisodic(session).catch(() => { });
+
+      // Auto Context Save (Task Boundary Snapshot - context-management-context-save)
+      if (turnUserRequest || finalAnswer) {
+        try {
+          const snapshot = await this.contextSnapshotManager.captureSnapshot({
+            sessionId: session.id,
+            turn,
+            taskPrompt: turnUserRequest || 'Task Execution',
+            finalAnswer: finalAnswer || 'Task completed.',
+            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+            verificationStatus: this.verificationPolicy.canComplete().allowed ? 'verified' : 'unverified',
+          });
+          CLI.renderContextSnapshotSaved(snapshot);
+          session.append('context/snapshot', {
+            snapshotId: snapshot.snapshotId,
+            contextFingerprint: snapshot.contextFingerprint,
+          });
+          await this.persistSession(session);
+        } catch {
+          // Non-blocking snapshot
+        }
+      }
+    }
+    this.targetFilesModifiedInTurn.clear();
     this.setAgentStatus('idle', session, turn);
   }
 

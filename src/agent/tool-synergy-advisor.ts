@@ -1,3 +1,5 @@
+import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
+
 export interface ToolSynergyContext {
   lastToolName?: string;
   lastToolResult?: any;
@@ -6,6 +8,7 @@ export interface ToolSynergyContext {
   activeTaskAcceptance?: string;
   hasRunningBackgroundTasks?: boolean;
   hasSharedContextConflicts?: boolean;
+  guardianDiagnosis?: ToolFailureDiagnosis;
 }
 
 export interface ToolAdvice {
@@ -64,12 +67,67 @@ export class ToolSynergyAdvisor {
       ['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file'].includes(lastToolName)
     ) {
       if (lastToolResult && !lastToolResult.error) {
+        const blast = lastToolResult.blastRadius;
+        if (blast) {
+          const testAdvice = blast.impactedTestSuites?.length > 0
+            ? ` Impacted test suite(s): ${blast.impactedTestSuites.slice(0, 2).join(', ')}. Run targeted test via "run_command".`
+            : ' Next, call "get_diagnostics" or targeted tests to verify.';
+          const consumerAdvice = blast.directConsumers?.length > 0
+            ? ` ${blast.directConsumers.length} direct consumer file(s) affected.`
+            : '';
+          const symbolAdvice = blast.modifiedSymbols?.length > 0
+            ? ` Modified symbols: ${blast.modifiedSymbols.slice(0, 3).join(', ')}.`
+            : '';
+          const riskPrefix = blast.risk ? `[Blast Radius: ${blast.risk}] ` : '';
+
+          return {
+            playbook: 'C_MUTATION',
+            guidance: `${riskPrefix}Code mutation applied.${symbolAdvice}${consumerAdvice}${testAdvice}`,
+            suggestedTools: blast.impactedTestSuites?.length > 0
+              ? ['run_command', 'get_diagnostics', 'get_symbol_context_360']
+              : ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
+          };
+        }
+
         return {
           playbook: 'C_MUTATION',
           guidance: 'Code was modified. Next, call "get_diagnostics" to check for compiler/type errors, then run relevant test suites via "run_command".',
           suggestedTools: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
         };
       }
+    }
+
+    // 3.4. Vừa chạy get_diagnostics (Playbook C: Verification Transition)
+    if (lastToolName === 'get_diagnostics') {
+      const isClean = lastToolResult && !lastToolResult.error && lastToolResult.clean === true && (!lastToolResult.totalErrors || lastToolResult.totalErrors === 0);
+      if (isClean) {
+        return {
+          playbook: 'C_MUTATION',
+          guidance: 'Diagnostics clean (0 syntax and type errors). Verification passed! You can now call "submit_solution" with empirical proof and summary, or run specific test suites via "run_command" if required.',
+          suggestedTools: ['submit_solution', 'run_command'],
+        };
+      }
+      const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: `Diagnostics detected ${errCount} compiler/type error(s). Use "replace_text" or "apply_patch" to resolve errors before submitting.`,
+        suggestedTools: ['replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
+      };
+    }
+
+    // 3.5. Cảnh báo lỗi và gợi ý công cụ thay thế từ Tool Use Guardian (Playbook B: Root Cause Debugging)
+    const guardianDiag = context.guardianDiagnosis || lastToolResult?.guardianDiagnosis;
+    if (guardianDiag) {
+      const alternatives = guardianDiag.suggestedAlternative
+        ? [guardianDiag.suggestedAlternative]
+        : [];
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: `[TOOL GUARDIAN ADVISORY]: Tool "${lastToolName || 'unknown'}" failed with ${guardianDiag.category}. ${guardianDiag.recoveryAction}`,
+        suggestedTools: alternatives.length > 0
+          ? alternatives
+          : ['get_diagnostics', 'inspect_symbol', 'query_call_graph'],
+      };
     }
 
     // 4. Phát hiện lỗi Compiler / Test Failure / Lỗi Thực thi (Playbook B: Root Cause Debugging)

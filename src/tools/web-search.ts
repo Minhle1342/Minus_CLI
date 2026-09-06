@@ -1,6 +1,6 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
-import { htmlToCleanMarkdown, extractCodeBlocksFromHtml } from './web-fetch.js';
+import { htmlToCleanMarkdown, extractCodeBlocksFromHtml, decodeHtmlEntities } from './web-fetch.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8080';
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -138,7 +138,11 @@ function buildAdvancedQueries(args: Record<string, any>, primaryQuery: string): 
   const keywords = normalizeStringList(args.keywords).map((value) => value.replace(/[\r\n]/g, ' '));
   const exactPhrases = normalizeStringList(args.exact_phrases).map(quoteSearchTerm);
   const exclusions = normalizeStringList(args.exclude_keywords).map((value) => `-${quoteSearchTerm(value)}`);
-  const domains = normalizeStringList(args.site_domains)
+  const rawDomains = [
+    ...(args.domain ? [String(args.domain).trim()] : []),
+    ...(Array.isArray(args.site_domains) ? args.site_domains : []),
+  ];
+  const domains = normalizeStringList(rawDomains)
     .map(normalizeDomain)
     .filter((value): value is string => Boolean(value));
   const fileTypes = normalizeStringList(args.file_types)
@@ -280,6 +284,163 @@ function mergeUniqueStrings(values: unknown[], limit = 10): string[] {
   return [...new Set(values.flatMap((value) => normalizeStringList(value, limit)))].slice(0, limit);
 }
 
+export interface DuckDuckGoSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/**
+ * Executes a DuckDuckGo HTML search as a zero-configuration fallback
+ * when local SearXNG is unavailable or not running.
+ */
+export async function executeDuckDuckGoFallback(
+  query: string,
+  options: {
+    timeoutMs?: number;
+    fetchImpl?: FetchImplementation;
+    siteDomains?: string[];
+    domain?: string;
+  } = {},
+): Promise<{ ok: boolean; results: DuckDuckGoSearchResult[]; error?: string }> {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+
+  const rawDomains = [
+    ...(options.domain ? [options.domain] : []),
+    ...(options.siteDomains || []),
+  ];
+  const domains = rawDomains
+    .map(normalizeDomain)
+    .filter((d): d is string => Boolean(d));
+
+  let effectiveQuery = query;
+  if (domains.length > 0) {
+    const siteFilter = domains.map((d) => `site:${d}`).join(' OR ');
+    effectiveQuery = domains.length === 1 ? `${siteFilter} ${query}` : `(${siteFilter}) ${query}`;
+  }
+
+  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(effectiveQuery)}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetchImpl(searchUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      return { ok: false, results: [], error: `DuckDuckGo fallback returned HTTP status ${res.status}` };
+    }
+
+    const html = await res.text();
+    const results: DuckDuckGoSearchResult[] = [];
+
+    const blocks = html.split('<div class="result results_links');
+    for (let i = 1; i < Math.min(blocks.length, 15); i++) {
+      const block = blocks[i];
+      const linkMatch = block.match(/href="([^"]+)"/);
+      const titleMatch = block.match(/<a class="result__a"[^>]*>([\s\S]*?)<\/a>/);
+      const snippetMatch = block.match(/<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+
+      if (titleMatch && (linkMatch || snippetMatch)) {
+        let rawUrl = linkMatch ? linkMatch[1] : '';
+        if (rawUrl.includes('uddg=')) {
+          const uddgMatch = rawUrl.match(/uddg=([^&]+)/);
+          if (uddgMatch) rawUrl = decodeURIComponent(uddgMatch[1]);
+        }
+        const cleanTitle = (titleMatch[1] || '').replace(/<[^>]+>/g, '').trim();
+        const cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+
+        if (cleanTitle && rawUrl && !rawUrl.includes('duckduckgo.com/y.js')) {
+          results.push({
+            title: decodeHtmlEntities(cleanTitle),
+            url: rawUrl,
+            snippet: decodeHtmlEntities(cleanSnippet),
+          });
+        }
+      }
+    }
+
+    return { ok: true, results };
+  } catch (err: any) {
+    const timedOut = err?.name === 'AbortError' || controller.signal.aborted;
+    return {
+      ok: false,
+      results: [],
+      error: timedOut ? `DuckDuckGo fallback timed out after ${timeoutMs}ms.` : (err?.message || String(err)),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildInvestigationLeads(results: Array<{ url: string; title: string }>): Array<{ url: string; title: string; leadType: string; suggestedAction: string }> {
+  return results.slice(0, 5).map((r) => {
+    let leadType = 'general_reference';
+    try {
+      const parsed = new URL(r.url);
+      const host = parsed.hostname.toLowerCase();
+      const path = parsed.pathname.toLowerCase();
+      if (host.includes('github.com') || host.includes('gitlab.com')) {
+        leadType = (path.includes('/issues') || path.includes('/pull')) ? 'issue_tracker' : (path.includes('/releases') ? 'release_notes' : 'source_repository');
+      } else if (host.startsWith('docs.') || path.includes('/docs/') || path.includes('/api/') || host.includes('nodejs.org') || host.includes('readthedocs') || host.includes('developer.mozilla.org')) {
+        leadType = 'official_documentation';
+      } else if (host.includes('stackoverflow.com') || host.includes('stackexchange.com')) {
+        leadType = 'community_solution';
+      } else if (host.includes('npmjs.com') || host.includes('pypi.org') || host.includes('crates.io')) {
+        leadType = 'package_registry';
+      }
+    } catch {
+      leadType = 'general_reference';
+    }
+    return {
+      url: r.url,
+      title: r.title,
+      leadType,
+      suggestedAction: `Use web_fetch(url="${r.url}") for complete documentation and code extraction.`,
+    };
+  });
+}
+
+async function extractTopContentFromResults(
+  results: Array<{ url: string; title: string }>,
+  fetchImpl: FetchImplementation,
+  signal: AbortSignal,
+): Promise<Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined> {
+  if (results.length === 0) return undefined;
+  const targets = results.slice(0, 1);
+  const fetchedItems = await Promise.all(targets.map(async (item) => {
+    try {
+      const res = await fetchImpl(item.url, {
+        method: 'GET',
+        headers: { 'User-Agent': 'CodingAgent-DeepInvestigator/2.0', Accept: 'text/html,application/xhtml+xml,text/plain;q=0.8' },
+        signal,
+      });
+      if (!res.ok) return null;
+      const text = await res.text();
+      const { markdown, title } = htmlToCleanMarkdown(text, item.url);
+      const codeBlocks = extractCodeBlocksFromHtml(text);
+      return {
+        url: item.url,
+        title: title || item.title,
+        markdown: markdown.slice(0, 3000),
+        codeBlocks: codeBlocks.slice(0, 5),
+      };
+    } catch {
+      return null;
+    }
+  }));
+  const filtered = fetchedItems.filter((i): i is NonNullable<typeof i> => Boolean(i));
+  return filtered.length > 0 ? filtered : undefined;
+}
+
 /** Creates a web_search tool backed by an operator-controlled SearXNG instance. */
 export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDefinition {
   const baseUrl = options.baseUrl ?? process.env.SEARXNG_BASE_URL ?? DEFAULT_BASE_URL;
@@ -294,6 +455,15 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
       type: Type.OBJECT,
       properties: {
         query: { type: Type.STRING, description: 'The primary web search query. Raw search operators may be used when needed.' },
+        domain: {
+          type: Type.STRING,
+          description: 'Optional single domain to prioritize or filter (e.g. "github.com", "nodejs.org"). Alias for site_domains.',
+        },
+        format: {
+          type: Type.STRING,
+          description: 'Response format: "concise" (default, returns essential title, url, snippet to save tokens) or "detailed" (includes engines, ranking scores, matched queries).',
+          enum: ['concise', 'detailed'],
+        },
         keywords: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
@@ -410,7 +580,82 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
         const attempts = await Promise.all(queries.map((query, index) => searchOnce(query, urls[index])));
         const successes = attempts.filter((attempt): attempt is SearchSuccess => attempt.ok);
         const failures = attempts.filter((attempt): attempt is SearchFailure => !attempt.ok);
-        if (successes.length === 0) return { ...failures[0]?.error, queries, queryCount: queries.length };
+        const isConcise = args.format === 'concise';
+
+        if (successes.length === 0) {
+          // If JSON format is explicitly disabled in SearXNG settings (HTTP 403), return error directly so operator can configure it
+          if (failures[0]?.error?.errorCode === 'SEARXNG_JSON_DISABLED') {
+            return { ...failures[0]?.error, queries, queryCount: queries.length };
+          }
+
+          // Automatic Graceful Fallback: SearXNG unavailable or timed out -> DuckDuckGo fallback
+          const rawDomains = [
+            ...(args.domain ? [String(args.domain).trim()] : []),
+            ...(Array.isArray(args.site_domains) ? args.site_domains : []),
+          ];
+          const fallbackRes = await executeDuckDuckGoFallback(primaryQuery, {
+            timeoutMs: Math.min(timeoutMs, 10_000),
+            fetchImpl,
+            siteDomains: rawDomains,
+          });
+
+          if (fallbackRes.ok && fallbackRes.results.length > 0) {
+            const maxResults = clampInteger(args.max_results, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
+            const fallbackResults: NormalizedSearchResult[] = fallbackRes.results.slice(0, maxResults).map((item) => ({
+              title: item.title,
+              url: item.url,
+              snippet: item.snippet,
+              engines: ['duckduckgo_fallback'],
+              category: 'general',
+            }));
+
+            const leads = buildInvestigationLeads(fallbackResults);
+            let fallbackTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
+            if (Boolean(args.fetch_top_content)) {
+              fallbackTopContent = await extractTopContentFromResults(fallbackResults, fetchImpl, controller.signal);
+            }
+
+            if (isConcise) {
+              return {
+                provider: 'duckduckgo_fallback',
+                query: primaryQuery,
+                returnedResults: fallbackResults.length,
+                results: fallbackResults.map((r, i) => ({ position: i + 1, title: r.title, url: r.url, snippet: r.snippet })),
+                investigationLeads: leads,
+                ...(fallbackTopContent ? { extractedTopContent: fallbackTopContent } : {}),
+                fallbackNote: 'SearXNG is unavailable; results were retrieved via DuckDuckGo public fallback.',
+              };
+            }
+
+            return {
+              provider: 'duckduckgo_fallback',
+              query: primaryQuery,
+              queries: [primaryQuery],
+              queryCount: 1,
+              successfulQueries: 1,
+              page: 1,
+              returnedResults: fallbackResults.length,
+              estimatedTotalResults: fallbackResults.length,
+              results: fallbackResults.map((r, i) => ({ position: i + 1, ...r })),
+              investigationLeads: leads,
+              ...(fallbackTopContent ? { extractedTopContent: fallbackTopContent } : {}),
+              fallbackNote: 'SearXNG is unavailable; results were retrieved via DuckDuckGo public fallback.',
+            };
+          }
+
+          // Structured, actionable error when all providers fail
+          return {
+            success: false,
+            error: `All web search providers failed. SearXNG: ${failures[0]?.error?.error || 'unreachable'}. DuckDuckGo fallback: ${fallbackRes.error || 'no results'}.`,
+            errorCode: 'ALL_WEB_SEARCH_PROVIDERS_UNAVAILABLE',
+            searxngError: failures[0]?.error,
+            fallbackError: fallbackRes.error,
+            hint: 'Verify internet connection, or start local SearXNG container on port 8080. If offline, use local code search tools (search_codebase_fast, search_text, read_file).',
+            retryable: true,
+            queries,
+            queryCount: queries.length,
+          };
+        }
 
         const merged = new Map<string, NormalizedSearchResult & { matchedQueries: string[]; reciprocalRankScore: number }>();
         for (const success of successes) {
@@ -444,56 +689,29 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
 
         let extractedTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
         if (Boolean(args.fetch_top_content) && results.length > 0) {
-          const targets = results.slice(0, 1);
-          const fetchedItems = await Promise.all(targets.map(async (item) => {
-            try {
-              const res = await fetchImpl(item.url, {
-                method: 'GET',
-                headers: { 'User-Agent': 'CodingAgent-DeepInvestigator/2.0', Accept: 'text/html,application/xhtml+xml,text/plain;q=0.8' },
-                signal: controller.signal,
-              });
-              if (!res.ok) return null;
-              const text = await res.text();
-              const { markdown, title } = htmlToCleanMarkdown(text, item.url);
-              const codeBlocks = extractCodeBlocksFromHtml(text);
-              return {
-                url: item.url,
-                title: title || item.title,
-                markdown: markdown.slice(0, 3000),
-                codeBlocks: codeBlocks.slice(0, 5),
-              };
-            } catch {
-              return null;
-            }
-          }));
-          extractedTopContent = fetchedItems.filter((i): i is NonNullable<typeof i> => Boolean(i));
+          extractedTopContent = await extractTopContentFromResults(results, fetchImpl, controller.signal);
         }
 
-        const investigationLeads = results.slice(0, 5).map((r) => {
-          let leadType = 'general_reference';
-          try {
-            const parsed = new URL(r.url);
-            const host = parsed.hostname.toLowerCase();
-            const path = parsed.pathname.toLowerCase();
-            if (host.includes('github.com') || host.includes('gitlab.com')) {
-              leadType = (path.includes('/issues') || path.includes('/pull')) ? 'issue_tracker' : (path.includes('/releases') ? 'release_notes' : 'source_repository');
-            } else if (host.startsWith('docs.') || path.includes('/docs/') || path.includes('/api/') || host.includes('nodejs.org') || host.includes('readthedocs') || host.includes('developer.mozilla.org')) {
-              leadType = 'official_documentation';
-            } else if (host.includes('stackoverflow.com') || host.includes('stackexchange.com')) {
-              leadType = 'community_solution';
-            } else if (host.includes('npmjs.com') || host.includes('pypi.org') || host.includes('crates.io')) {
-              leadType = 'package_registry';
-            }
-          } catch {
-            leadType = 'general_reference';
-          }
+        const investigationLeads = buildInvestigationLeads(results);
+
+        if (isConcise) {
           return {
-            url: r.url,
-            title: r.title,
-            leadType,
-            suggestedAction: `Use web_fetch(url="${r.url}") for complete documentation and code extraction.`,
+            provider: 'searxng',
+            query: queries[0],
+            returnedResults: results.length,
+            ...(estimatedTotals.length > 0
+              ? { estimatedTotalResults: Math.max(...estimatedTotals) }
+              : {}),
+            results: results.map((r) => ({
+              position: r.position,
+              title: r.title,
+              url: r.url,
+              ...(r.snippet ? { snippet: r.snippet } : {}),
+            })),
+            investigationLeads,
+            ...(extractedTopContent && extractedTopContent.length > 0 ? { extractedTopContent } : {}),
           };
-        });
+        }
 
         return {
           provider: 'searxng',

@@ -39,7 +39,10 @@ function resolvePrimaryWorktree(workspaceRoot: string): string {
   const resolved = path.resolve(workspaceRoot);
   try {
     const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      cwd: resolved, encoding: 'utf8', timeout: 5000,
+      cwd: resolved,
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     return path.basename(commonDir).toLowerCase() === '.git' ? path.resolve(path.dirname(commonDir)) : resolved;
   } catch {

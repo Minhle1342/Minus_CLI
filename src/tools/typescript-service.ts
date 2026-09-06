@@ -32,6 +32,10 @@ export interface DiagnosticItem {
   category: 'error' | 'warning' | 'suggestion' | 'message';
 }
 
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
 /**
  * TypeScriptService
  * 
@@ -53,9 +57,12 @@ export class TypeScriptService {
 
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => Array.from(this.rootFileNames),
-      getScriptVersion: (fileName) => this.files.get(path.normalize(fileName))?.version.toString() || '0',
+      getScriptVersion: (fileName) => {
+        const norm = normalizePath(fileName);
+        return this.files.get(norm)?.version.toString() || '0';
+      },
       getScriptSnapshot: (fileName) => {
-        const normalized = path.normalize(fileName);
+        const normalized = normalizePath(fileName);
         let file = this.files.get(normalized);
         if (!file && fs.existsSync(normalized)) {
           try {
@@ -70,13 +77,19 @@ export class TypeScriptService {
         if (!file) return undefined;
         return ts.ScriptSnapshot.fromString(file.content);
       },
-      getCurrentDirectory: () => this.workspace.rootDir,
+      getCurrentDirectory: () => normalizePath(this.workspace.rootDir),
       getCompilationSettings: () => this.compilerOptions,
       getDefaultLibFileName: (options) => ts.getDefaultLibFilePath(options),
-      fileExists: (fileName) => fs.existsSync(fileName),
+      fileExists: (fileName) => {
+        const norm = normalizePath(fileName);
+        return this.files.has(norm) || fs.existsSync(norm);
+      },
       readFile: (fileName) => {
+        const norm = normalizePath(fileName);
+        const inMemory = this.files.get(norm);
+        if (inMemory) return inMemory.content;
         try {
-          return fs.readFileSync(fileName, 'utf8');
+          return fs.readFileSync(norm, 'utf8');
         } catch {
           return undefined;
         }
@@ -92,6 +105,7 @@ export class TypeScriptService {
 
   private loadCompilerOptions(): ts.CompilerOptions {
     const configPath = path.join(this.workspace.rootDir, 'tsconfig.json');
+    let loadedOptions: ts.CompilerOptions = {};
     if (fs.existsSync(configPath)) {
       try {
         const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -101,11 +115,16 @@ export class TypeScriptService {
             ts.sys,
             this.workspace.rootDir,
           );
-          return parsed.options;
+          loadedOptions = parsed.options || {};
         }
       } catch {}
     }
 
+    // Industrial-Grade Tool-Use Guardian:
+    // 1. allowJs: true để chấp nhận và phân tích các file .js, .jsx, .mjs, .cjs (như bin/yt-translate.js)
+    // 2. rootDir: undefined để tránh từ chối các file nằm ngoài src/ (như bin/, scripts/, test/)
+    // 3. skipLibCheck: true để tránh kiểm tra d.ts hệ thống làm chậm hoặc lỗi
+    // 4. noEmit: true vì đây là service phân tích trong RAM
     return {
       target: ts.ScriptTarget.ES2022,
       module: ts.ModuleKind.NodeNext,
@@ -113,7 +132,10 @@ export class TypeScriptService {
       strict: true,
       esModuleInterop: true,
       skipLibCheck: true,
+      ...loadedOptions,
       allowJs: true,
+      rootDir: undefined,
+      noEmit: true,
     };
   }
 
@@ -126,8 +148,11 @@ export class TypeScriptService {
           const fullPath = path.join(dir, entry.name);
           if (entry.isDirectory()) {
             scanDir(fullPath);
-          } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.js') || entry.name.endsWith('.tsx') || entry.name.endsWith('.jsx'))) {
-            const normalized = path.normalize(fullPath);
+          } else if (
+            entry.isFile() &&
+            /\.[cm]?[jt]sx?$/i.test(entry.name)
+          ) {
+            const normalized = normalizePath(fullPath);
             this.rootFileNames.add(normalized);
           }
         }
@@ -136,53 +161,96 @@ export class TypeScriptService {
     } catch {}
   }
 
-  updateFile(filePath: string, content?: string): void {
-    const safePath = this.workspace.resolveSafePath(filePath);
-    const normalized = path.normalize(safePath);
-    const fileContent = content !== undefined ? content : fs.readFileSync(normalized, 'utf8');
-    const existing = this.files.get(normalized);
-
-    if (existing) {
-      existing.version++;
-      existing.content = fileContent;
-    } else {
-      this.files.set(normalized, { version: 1, content: fileContent });
-      this.rootFileNames.add(normalized);
+  private normalizeAndResolve(filePath: string): string {
+    let resolved: string;
+    try {
+      resolved = this.workspace.resolveSafePath(filePath);
+    } catch {
+      resolved = path.isAbsolute(filePath)
+        ? path.normalize(filePath)
+        : path.resolve(this.workspace.rootDir, filePath);
     }
+    return normalizePath(resolved);
+  }
+
+  updateFile(filePath: string, content?: string): void {
+    try {
+      const normalized = this.normalizeAndResolve(filePath);
+      if (!fs.existsSync(normalized) && content === undefined) return;
+      const fileContent = content !== undefined ? content : fs.readFileSync(normalized, 'utf8');
+      const existing = this.files.get(normalized);
+
+      if (existing) {
+        existing.version++;
+        existing.content = fileContent;
+      } else {
+        this.files.set(normalized, { version: 1, content: fileContent });
+        this.rootFileNames.add(normalized);
+      }
+    } catch {}
   }
 
   getDiagnostics(filePath?: string): DiagnosticItem[] {
     const results: DiagnosticItem[] = [];
     const targetFiles = filePath
-      ? [path.normalize(this.workspace.resolveSafePath(filePath))]
+      ? [this.normalizeAndResolve(filePath)]
       : Array.from(this.rootFileNames);
 
     for (const file of targetFiles) {
       if (!fs.existsSync(file)) continue;
       this.updateFile(file);
 
-      const syntactic = this.services.getSyntacticDiagnostics(file);
-      const semantic = this.services.getSemanticDiagnostics(file);
-      const allDiag = [...syntactic, ...semantic];
+      try {
+        const program = this.services.getProgram();
+        if (!program) continue;
 
-      for (const diag of allDiag) {
-        if (!diag.file || diag.start === undefined) continue;
-        const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start);
-        const categoryMap: Record<ts.DiagnosticCategory, DiagnosticItem['category']> = {
-          [ts.DiagnosticCategory.Error]: 'error',
-          [ts.DiagnosticCategory.Warning]: 'warning',
-          [ts.DiagnosticCategory.Suggestion]: 'suggestion',
-          [ts.DiagnosticCategory.Message]: 'message',
-        };
+        let sourceFile = program.getSourceFile(file);
+        if (!sourceFile) {
+          // Thử refresh file trong host registry
+          this.rootFileNames.add(file);
+          const refreshedProgram = this.services.getProgram();
+          sourceFile = refreshedProgram?.getSourceFile(file);
+          if (!sourceFile) {
+            // Không tìm thấy SourceFile trong TypeScript Program (file non-source hoặc bị ts bỏ qua)
+            continue;
+          }
+        }
 
-        results.push({
-          file: this.workspace.toRelativePath(diag.file.fileName),
-          line: line + 1,
-          character: character + 1,
-          message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-          code: diag.code,
-          category: categoryMap[diag.category] || 'error',
-        });
+        const syntactic = this.services.getSyntacticDiagnostics(file);
+        const semantic = this.services.getSemanticDiagnostics(file);
+        const allDiag = [...syntactic, ...semantic];
+
+        for (const diag of allDiag) {
+          if (!diag.file || diag.start === undefined) continue;
+          const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start);
+          const categoryMap: Record<ts.DiagnosticCategory, DiagnosticItem['category']> = {
+            [ts.DiagnosticCategory.Error]: 'error',
+            [ts.DiagnosticCategory.Warning]: 'warning',
+            [ts.DiagnosticCategory.Suggestion]: 'suggestion',
+            [ts.DiagnosticCategory.Message]: 'message',
+          };
+
+          results.push({
+            file: this.workspace.toRelativePath(diag.file.fileName),
+            line: line + 1,
+            character: character + 1,
+            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+            code: diag.code,
+            category: categoryMap[diag.category] || 'error',
+          });
+        }
+      } catch (err: any) {
+        // Defensive Guardian: Không bao giờ để lỗi của 1 file (ví dụ Could not find source file) làm sập toàn bộ tool
+        if (filePath) {
+          results.push({
+            file: this.workspace.toRelativePath(file),
+            line: 1,
+            character: 1,
+            message: `TypeScript Language Service warning: ${err.message}`,
+            code: 0,
+            category: 'warning',
+          });
+        }
       }
     }
 
@@ -190,124 +258,138 @@ export class TypeScriptService {
   }
 
   inspectSymbol(filePath: string, symbolName: string): SymbolDefinitionResult {
-    const safePath = this.workspace.resolveSafePath(filePath);
-    const normalized = path.normalize(safePath);
-    this.updateFile(normalized);
+    try {
+      const normalized = this.normalizeAndResolve(filePath);
+      this.updateFile(normalized);
 
-    const program = this.services.getProgram();
-    if (!program) return { found: false, name: symbolName };
+      const program = this.services.getProgram();
+      if (!program) return { found: false, name: symbolName };
 
-    const sourceFile = program.getSourceFile(normalized);
-    if (!sourceFile) return { found: false, name: symbolName };
-
-    const typeChecker = program.getTypeChecker();
-    let foundResult: SymbolDefinitionResult = { found: false, name: symbolName };
-
-    function visit(node: ts.Node) {
-      if (foundResult.found) return;
-
-      if (
-        (ts.isFunctionDeclaration(node) && node.name?.text === symbolName) ||
-        (ts.isClassDeclaration(node) && node.name?.text === symbolName) ||
-        (ts.isInterfaceDeclaration(node) && node.name?.text === symbolName) ||
-        (ts.isTypeAliasDeclaration(node) && node.name?.text === symbolName) ||
-        (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName)
-      ) {
-        const { line, character } = sourceFile!.getLineAndCharacterOfPosition(node.getStart());
-        const symbol = typeChecker.getSymbolAtLocation(node.name || node);
-        let typeSignature = '';
-        let docComment = '';
-        let isExported = false;
-
-        if (symbol) {
-          const type = typeChecker.getTypeOfSymbolAtLocation(symbol, node);
-          typeSignature = typeChecker.typeToString(type);
-          docComment = ts.displayPartsToString(symbol.getDocumentationComment(typeChecker));
-        }
-
-        // Check exported
-        const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
-        if (modifiers) {
-          isExported = modifiers.some((m: ts.Modifier) => m.kind === ts.SyntaxKind.ExportKeyword);
-        }
-
-        let kind = 'unknown';
-        if (ts.isFunctionDeclaration(node)) kind = 'function';
-        else if (ts.isClassDeclaration(node)) kind = 'class';
-        else if (ts.isInterfaceDeclaration(node)) kind = 'interface';
-        else if (ts.isTypeAliasDeclaration(node)) kind = 'type';
-        else if (ts.isVariableDeclaration(node)) kind = 'variable';
-
-        foundResult = {
-          found: true,
-          name: symbolName,
-          kind,
-          line: line + 1,
-          character: character + 1,
-          file: path.relative(process.cwd(), sourceFile!.fileName).replace(/\\/g, '/'),
-          typeSignature,
-          isExported,
-          docComment: docComment || undefined,
-        };
-        return;
+      let sourceFile = program.getSourceFile(normalized);
+      if (!sourceFile) {
+        this.rootFileNames.add(normalized);
+        sourceFile = this.services.getProgram()?.getSourceFile(normalized);
+        if (!sourceFile) return { found: false, name: symbolName };
       }
 
-      ts.forEachChild(node, visit);
-    }
+      const typeChecker = program.getTypeChecker();
+      let foundResult: SymbolDefinitionResult = { found: false, name: symbolName };
 
-    visit(sourceFile);
-    return foundResult;
+      function visit(node: ts.Node) {
+        if (foundResult.found) return;
+
+        if (
+          (ts.isFunctionDeclaration(node) && node.name?.text === symbolName) ||
+          (ts.isClassDeclaration(node) && node.name?.text === symbolName) ||
+          (ts.isInterfaceDeclaration(node) && node.name?.text === symbolName) ||
+          (ts.isTypeAliasDeclaration(node) && node.name?.text === symbolName) ||
+          (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName)
+        ) {
+          const { line, character } = sourceFile!.getLineAndCharacterOfPosition(node.getStart());
+          const symbol = typeChecker.getSymbolAtLocation(node.name || node);
+          let typeSignature = '';
+          let docComment = '';
+          let isExported = false;
+
+          if (symbol) {
+            const type = typeChecker.getTypeOfSymbolAtLocation(symbol, node);
+            typeSignature = typeChecker.typeToString(type);
+            docComment = ts.displayPartsToString(symbol.getDocumentationComment(typeChecker));
+          }
+
+          // Check exported
+          const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+          if (modifiers) {
+            isExported = modifiers.some((m: ts.Modifier) => m.kind === ts.SyntaxKind.ExportKeyword);
+          }
+
+          let kind = 'unknown';
+          if (ts.isFunctionDeclaration(node)) kind = 'function';
+          else if (ts.isClassDeclaration(node)) kind = 'class';
+          else if (ts.isInterfaceDeclaration(node)) kind = 'interface';
+          else if (ts.isTypeAliasDeclaration(node)) kind = 'type';
+          else if (ts.isVariableDeclaration(node)) kind = 'variable';
+
+          foundResult = {
+            found: true,
+            name: symbolName,
+            kind,
+            line: line + 1,
+            character: character + 1,
+            file: path.relative(process.cwd(), sourceFile!.fileName).replace(/\\/g, '/'),
+            typeSignature,
+            isExported,
+            docComment: docComment || undefined,
+          };
+          return;
+        }
+
+        ts.forEachChild(node, visit);
+      }
+
+      visit(sourceFile);
+      return foundResult;
+    } catch {
+      return { found: false, name: symbolName };
+    }
   }
 
   findReferences(filePath: string, symbolName: string, limit: number = 50): SymbolReferenceResult[] {
-    const safePath = this.workspace.resolveSafePath(filePath);
-    const normalized = path.normalize(safePath);
-    this.updateFile(normalized);
+    try {
+      const normalized = this.normalizeAndResolve(filePath);
+      this.updateFile(normalized);
 
-    const program = this.services.getProgram();
-    if (!program) return [];
+      const program = this.services.getProgram();
+      if (!program) return [];
 
-    const sourceFile = program.getSourceFile(normalized);
-    if (!sourceFile) return [];
-
-    let targetPos: number | undefined;
-
-    function findNodePos(node: ts.Node) {
-      if (targetPos !== undefined) return;
-      if (ts.isIdentifier(node) && node.text === symbolName) {
-        targetPos = node.getStart();
-        return;
+      let sourceFile = program.getSourceFile(normalized);
+      if (!sourceFile) {
+        this.rootFileNames.add(normalized);
+        sourceFile = this.services.getProgram()?.getSourceFile(normalized);
+        if (!sourceFile) return [];
       }
-      ts.forEachChild(node, findNodePos);
-    }
-    findNodePos(sourceFile);
 
-    if (targetPos === undefined) return [];
+      let targetPos: number | undefined;
 
-    const refEntries = this.services.findReferences(normalized, targetPos);
-    if (!refEntries) return [];
-
-    const results: SymbolReferenceResult[] = [];
-
-    for (const entry of refEntries) {
-      for (const ref of entry.references) {
-        if (results.length >= limit) break;
-        const refSource = program.getSourceFile(ref.fileName);
-        if (!refSource) continue;
-
-        const { line, character } = refSource.getLineAndCharacterOfPosition(ref.textSpan.start);
-        const lineText = refSource.text.split('\n')[line]?.trim() || '';
-
-        results.push({
-          file: this.workspace.toRelativePath(ref.fileName),
-          line: line + 1,
-          character: character + 1,
-          preview: lineText.slice(0, 160),
-          isDefinition: Boolean(ref.isDefinition),
-        });
+      function findNodePos(node: ts.Node) {
+        if (targetPos !== undefined) return;
+        if (ts.isIdentifier(node) && node.text === symbolName) {
+          targetPos = node.getStart();
+          return;
+        }
+        ts.forEachChild(node, findNodePos);
       }
-    }
+      findNodePos(sourceFile);
 
-    return results;
+      if (targetPos === undefined) return [];
+
+      const refEntries = this.services.findReferences(normalized, targetPos);
+      if (!refEntries) return [];
+
+      const results: SymbolReferenceResult[] = [];
+
+      for (const entry of refEntries) {
+        for (const ref of entry.references) {
+          if (results.length >= limit) break;
+          const refSource = program.getSourceFile(ref.fileName);
+          if (!refSource) continue;
+
+          const { line, character } = refSource.getLineAndCharacterOfPosition(ref.textSpan.start);
+          const lineText = refSource.text.split('\n')[line]?.trim() || '';
+
+          results.push({
+            file: this.workspace.toRelativePath(ref.fileName),
+            line: line + 1,
+            character: character + 1,
+            preview: lineText.slice(0, 160),
+            isDefinition: Boolean(ref.isDefinition),
+          });
+        }
+      }
+
+      return results;
+    } catch {
+      return [];
+    }
   }
 }

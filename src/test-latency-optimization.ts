@@ -366,7 +366,7 @@ async function main(): Promise<void> {
     const anthropicSession = new Session('anthropic-cache-test');
     anthropicSession.addUserMessage('hello');
     const response = await anthropic.generateStream(anthropicSession, [], undefined, { enablePromptCaching: true });
-    assert.deepEqual(capturedAnthropicBody.cache_control, { type: 'ephemeral' });
+    assert.deepEqual(capturedAnthropicBody.system[0]?.cache_control, { type: 'ephemeral' });
     assert.equal(response.usage?.promptTokens, 100);
     assert.equal(response.usage?.cacheReadInputTokens, 70);
     assert.equal(response.usage?.cacheHitRate, 70);

@@ -15,7 +15,7 @@ import { GoalManager } from '../agent/goal-manager.js';
 import { AgentHookRegistry } from '../agent/agent-hooks.js';
 import { AgentInbox } from '../agent/agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS } from '../llm/prompts.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { SessionManager } from '../session/session-manager.js';
 import { SuperpowersPlugin } from './plugins/superpowers-plugin.js';
@@ -25,16 +25,15 @@ import { CriticGate } from '../agent/critic-gate.js';
 import { ScheduleManager } from '../tasks/schedule-manager.js';
 import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
+import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { DreamManager } from '../dream/dream-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
-import { IExecutionSubstrate, ExecutionSubstrateFactory } from '../execution/index.js';
-import { TestEngineeringHarness } from '../testing/index.js';
-import { EvidenceDrivenControlPlane } from '../control-plane/index.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
+  'kernel:disposed': () => void;
   'plugin:registered': (pluginName: string) => void;
   'step:before': (step: number, maxSteps: number) => void;
   'step:after': (step: number) => void;
@@ -60,6 +59,9 @@ export interface KernelEvents {
     latencyProfile: import('../agent/latency-orchestrator.js').ModelLatencyProfile;
     taskPhase: import('../control/classification-types.js').TaskPhase;
     dynamicContextCacheHit: boolean;
+    promptTokens?: number;
+    cachedTokens?: number;
+    cacheHitRate?: number;
   }) => void;
   'tools:batch': (telemetry: {
     mode: string;
@@ -73,6 +75,7 @@ export interface KernelEvents {
     persistenceWrites: number;
   }) => void;
   'model:final_answer': (answer: string) => void;
+  'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;
   'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
@@ -142,9 +145,7 @@ export interface KernelContext {
   schedules: ScheduleManager;
   sharedContext: SharedContextService;
   agentEvents: AgentEventBus;
-  executionSubstrate: IExecutionSubstrate;
-  testHarness: TestEngineeringHarness;
-  controlPlane: EvidenceDrivenControlPlane;
+  orchestrator: AgentOrchestrator;
   llm: any;
   events: KernelEventBus;
   registerTool: (tool: ToolDefinition) => void;
@@ -164,7 +165,7 @@ export interface AgentPlugin {
  * AgentKernel - Vi nhân điều phối trung tâm theo chuẩn Cordis (Micro-Kernel Architecture)
  * 
  * Quản lý:
- * 1. KernelContext và toàn bộ các subsystem (Tools, Workspace, Sandbox, Tasks, Plan, Memory, Substrate, Test Harness).
+ * 1. KernelContext và toàn bộ các subsystem (Tools, Workspace, Sandbox, Tasks, Plan, Memory).
  * 2. Event Bus đa luồng.
  * 3. Hot-pluggable Plugin Lifecycle.
  */
@@ -175,13 +176,16 @@ export class AgentKernel {
 
   constructor(workspace: Workspace = new Workspace(), llm?: any) {
     const events = new KernelEventBus();
-    const systemPrompt = new PromptAssembler(CODING_AGENT_SYSTEM_PROMPT);
-
     const plan = new PlanManager();
     const goal = new GoalManager();
     const agentHooks = new AgentHookRegistry();
     const inbox = new AgentInbox();
+    const systemPrompt = new PromptAssembler();
+    for (const section of DEFAULT_PROMPT_SECTIONS) {
+      systemPrompt.register(section);
+    }
     const agents = new AgentRegistry();
+    agents.registerBenchmarkSpecialists();
     const sessions = new SessionManager(workspace.rootDir);
     const memory = new ProjectMemoryManager(workspace.rootDir);
     const repositoryMemory = new CitationValidatedRepositoryMemory(workspace);
@@ -197,20 +201,7 @@ export class AgentKernel {
     const schedules = new ScheduleManager();
     const sharedContext = new SharedContextService();
     const agentEvents = new AgentEventBus();
-    const executionSubstrate = ExecutionSubstrateFactory.create({
-      workspaceRoot: workspace.rootDir,
-      policyMode: 'workspace-write',
-    });
-    const testHarness = new TestEngineeringHarness({
-      workspaceRoot: workspace.rootDir,
-      substrate: executionSubstrate,
-      hypothesisTracker: hypothesis,
-      criticGate: critic,
-    });
-    const controlPlane = new EvidenceDrivenControlPlane({
-      workspace,
-      checkpointManager: checkpoints,
-    });
+    const orchestrator = new AgentOrchestrator(agents);
     const tools = new ToolRegistry(plan, memory);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
@@ -218,7 +209,9 @@ export class AgentKernel {
     tools.attachScheduleManager(schedules);
     tools.attachSharedContextService(sharedContext);
     tools.attachAgentEventBus(agentEvents);
+    tools.attachAgentOrchestrator(orchestrator);
     const permissions = new PermissionManager();
+    tools.attachPermissionManager(permissions);
     const toolRunner = new ToolRunner(tools, workspace, permissions, compose);
 
     this.ctx = {
@@ -247,9 +240,7 @@ export class AgentKernel {
       schedules,
       sharedContext,
       agentEvents,
-      executionSubstrate,
-      testHarness,
-      controlPlane,
+      orchestrator,
       llm,
       events,
       registerTool: (tool: ToolDefinition) => {
@@ -260,10 +251,6 @@ export class AgentKernel {
         const oldPath = this.ctx.workspace.rootDir;
         void disposeLspManager(oldWorkspace);
         this.ctx.workspace = newWs;
-        this.ctx.controlPlane = new EvidenceDrivenControlPlane({
-          workspace: newWs,
-          checkpointManager: (this.ctx as any).checkpoints,
-        });
         this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, this.ctx.compose);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
@@ -271,10 +258,10 @@ export class AgentKernel {
         this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory, this.ctx.repositoryMemory);
         this.ctx.sessions.setWorkspace(newWs.rootDir);
         (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
-        this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => {});
-        this.ctx.checkpoints.init().catch(() => {});
-        this.ctx.memory.init(newWs).catch(() => {});
-        this.ctx.repositoryMemory.init().catch(() => {});
+        this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => { });
+        this.ctx.checkpoints.init().catch(() => { });
+        this.ctx.memory.init(newWs).catch(() => { });
+        this.ctx.repositoryMemory.init().catch(() => { });
         this.ctx.events.emit('workspace:changed', oldPath, newWs.rootDir);
       },
       setLLM: (newLlm: any, newModelName?: string) => {
@@ -343,4 +330,20 @@ export class AgentKernel {
     this.plugins.delete(pluginName);
     return true;
   }
+
+  /**
+   * Dọn dẹp và giải phóng toàn bộ tài nguyên (Sandbox containers, Background tasks, Plugins)
+   */
+  async dispose(): Promise<void> {
+    for (const plugin of this.plugins.values()) {
+      if (plugin.dispose) {
+        await Promise.resolve(plugin.dispose(this.ctx)).catch(() => {});
+      }
+    }
+    await this.ctx.sandbox.dispose().catch(() => {});
+    await this.ctx.tasks.dispose().catch(() => {});
+    this.isInitialized = false;
+    this.ctx.events.emit('kernel:disposed');
+  }
 }
+

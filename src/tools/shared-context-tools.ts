@@ -78,6 +78,14 @@ export function createWriteSharedContextTool(sharedContext: SharedContextService
           type: Type.STRING,
           description: 'Mã băm phiên bản kỳ vọng (OCC versionHash) để đảm bảo không bị Agent khác ghi đè giữa chừng.',
         },
+        filePath: {
+          type: Type.STRING,
+          description: 'Đường dẫn file liên kết (tùy chọn) để kích hoạt cơ chế File-bound OCC.',
+        },
+        expectedFileHash: {
+          type: Type.STRING,
+          description: 'Mã băm SHA-256 kỳ vọng của file liên kết để chống xung đột ghi đè dữ liệu tệp.',
+        },
       },
       required: ['key', 'value'],
     },
@@ -86,6 +94,8 @@ export function createWriteSharedContextTool(sharedContext: SharedContextService
       const rawValue = args.value;
       const agentId = String(args.agentId || 'agent').trim();
       const expectedVersionHash = args.expectedVersionHash ? String(args.expectedVersionHash).trim() : undefined;
+      const filePath = args.filePath ? String(args.filePath).trim() : undefined;
+      const expectedFileHash = args.expectedFileHash ? String(args.expectedFileHash).trim() : undefined;
 
       if (!key) {
         return { error: 'Tham số "key" là bắt buộc.' };
@@ -104,7 +114,11 @@ export function createWriteSharedContextTool(sharedContext: SharedContextService
       }
 
       try {
-        const entry = sharedContext.set(key, parsedValue, agentId, expectedVersionHash);
+        const entry = sharedContext.set(key, parsedValue, agentId, {
+          expectedVersionHash,
+          filePath,
+          expectedFileHash,
+        });
         return {
           success: true,
           message: `Đã ghi thành công key '${key}' vào shared context.`,
