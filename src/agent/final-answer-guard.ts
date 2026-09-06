@@ -8,7 +8,8 @@ export type FinalAnswerGuardRejectionReason =
   | 'unverified-capability-denial'
   | 'empty-answer'
   | 'insufficient-architecture-answer'
-  | 'unverified-architecture-claims';
+  | 'unverified-architecture-claims'
+  | 'insufficient-analysis-answer';
 
 export interface FinalAnswerGuardDecision {
   allow: boolean;
@@ -55,9 +56,17 @@ const DEFERRED_WORK_PATTERNS = [
 
   // 7. General promise to execute ("sẽ tiếp tục bằng cách...", "cần tiếp tục xử lý...")
   /\b(?:se|can)\s+tiep tuc\s+(?:bang cach|xu ly|thuc hien|chay|kiem tra|dieu tra|sua|test|do|trien khai|thiet ke|viet|code)\b/,
+
+  // 8. Meta-reporting promises & pseudo-completion claims without body
+  // e.g. "Đã cung cấp câu trả lời chi tiết và chính xác bằng tiếng Việt về nguyên nhân...",
+  // "... và báo cáo chi tiết bằng tiếng Việt cho người dùng", "sẽ báo cáo chi tiết..."
+  /\b(?:va\s+)?(?:se|da|vua)?\s*(?:bao cao|trinh bay|giai thich|cung cap|tra loi)\s+(?:cau tra loi\s+)?(?:chi tiet|day du|chinh xac|ro rang)(?:\s+(?:va\s+(?:chinh xac|ro rang|day du)))?(?:\s+bang tieng viet)?(?:\s+(?:cho|ve|voi)\b)/,
+  /\b(?:and\s+)?(?:will|have|already)?\s*(?:report|present|explain|provide|answer)\s+(?:a |the )?(?:in detail|detailed findings|detailed report|detailed answer|detailed response)(?:\s+(?:to|for|about)\b)/,
+  /\b(?:se\s+)?xac dinh (?:cac\s+)?nguyen nhan(?: tiem an)? va bao cao\b/,
+  /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+.*?(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/,
 ];
 
-const FULFILLED_INTRO_PATTERN = /^\s*(?:toi|chung toi|minh|em|i|we|agent)?\s*(?:se|will|shall|am going to|plan to)?[^\n]{0,140}?(?:duoi day la|ket qua|here is|here are|below is|results?:)[^\n]*/i;
+const FULFILLED_INTRO_PATTERN = /^\s*(?:toi|chung toi|minh|em|i|we|agent)?\s*(?:se|will|shall|am going to|plan to|da)?[^\n]{0,140}?(?:duoi day la|ket qua|nhu sau|sau day|here is|here are|below is|results?:|as follows:)[^\n]*/i;
 
 function hasUnfulfilledDeferredPromise(normalizedText: string): boolean {
   // Strip opening intro greetings that are immediately fulfilled in the same message
@@ -114,41 +123,46 @@ export class FinalAnswerGuard {
       };
     }
 
-    const isArchQuery = detectArchitectureAnalysisIntent(context?.userRequest).isArchitectureQuery;
-
-    // 2. Nếu đã submit_solution thành công (Codex CLI Standard) và KHÔNG PHẢI query phân tích kiến trúc/workflow
-    if (context?.hasSubmittedSolution && !isArchQuery) {
-      return { allow: true };
-    }
-
     const normalized = normalizeForMatching(answer);
     const withoutOptionalOffers = normalized.replace(OPTIONAL_OFFER_PATTERN, ' ');
     const promisesFutureToolWork = hasUnfulfilledDeferredPromise(withoutOptionalOffers);
-    if (!promisesFutureToolWork) {
-      const gitDenial = this.evaluateGitCapabilityDenial(normalized, context);
-      if (gitDenial) return gitDenial;
 
-      // 3. Kiểm định tính chuyên sâu, có cấu trúc và đúng sự thật cho query kiến trúc / workflow / pattern
-      const archDecision = evaluateArchitectureAnalysis(answer, context);
-      if (archDecision) return archDecision;
+    // 2. Chặn lời hứa hoãn việc / thông báo hứa hẹn: BẤT KỂ hasSubmittedSolution = true, KHÔNG BAO GIỜ CHO PHÉP lời hứa hoãn việc
+    if (promisesFutureToolWork) {
+      const failureContext = this.latestFailure
+        ? `The latest tool failure was ${this.latestFailure.toolName}${this.latestFailure.errorCode ? ` (${this.latestFailure.errorCode})` : ''}${this.latestFailure.detail ? `: ${this.latestFailure.detail}` : '.'}`
+        : undefined;
 
+      return {
+        allow: false,
+        reason: 'deferred-work',
+        continuationPrompt: [
+          '[SYSTEM FINAL ANSWER GUARD]: Your previous response described work you will do later, or merely announced an intention to report without providing the actual detailed report. It was not accepted as a final answer.',
+          'Provide the complete, detailed findings and analysis now, or continue the work with the appropriate tools.',
+          'Do not merely announce the next action, echo the prompt, or promise a future report.',
+          failureContext,
+        ].filter(Boolean).join('\n'),
+      };
+    }
+
+    // 3. Kiểm tra từ chối năng lực Git trái phép
+    const gitDenial = this.evaluateGitCapabilityDenial(normalized, context);
+    if (gitDenial) return gitDenial;
+
+    // 4. Kiểm định tính chuyên sâu, có cấu trúc và đúng sự thật cho query kiến trúc / workflow / pattern
+    const archDecision = evaluateArchitectureAnalysis(answer, context);
+    if (archDecision) return archDecision;
+
+    // 5. Kiểm định tính chuyên sâu cho query điều tra nguyên nhân / phân tích sự cố
+    const analysisDecision = evaluateAnalysisOrInvestigationAnswer(answer, context);
+    if (analysisDecision) return analysisDecision;
+
+    // 6. Nếu đã submit_solution thành công và vượt qua toàn bộ các kiểm định chất lượng trên
+    if (context?.hasSubmittedSolution) {
       return { allow: true };
     }
 
-    const failureContext = this.latestFailure
-      ? `The latest tool failure was ${this.latestFailure.toolName}${this.latestFailure.errorCode ? ` (${this.latestFailure.errorCode})` : ''}${this.latestFailure.detail ? `: ${this.latestFailure.detail}` : '.'}`
-      : undefined;
-
-    return {
-      allow: false,
-      reason: 'deferred-work',
-      continuationPrompt: [
-        '[SYSTEM FINAL ANSWER GUARD]: Your previous response described work you will do later, so it was not accepted as a final answer.',
-        'Continue the work now by calling the appropriate tools. Do not merely announce the next action.',
-        'If no safe or valid execution path remains, provide a truthful terminal blocker report with evidence and no promise of future execution.',
-        failureContext,
-      ].filter(Boolean).join('\n'),
-    };
+    return { allow: true };
   }
 
   private evaluateGitCapabilityDenial(
@@ -457,7 +471,7 @@ export function evaluateArchitectureAnalysis(
   };
 }
 
-function normalizeForMatching(value: string): string {
+export function normalizeForMatching(value: string): string {
   return value
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -470,4 +484,117 @@ function normalizeForMatching(value: string): string {
 
 function firstNonEmptyString(...values: unknown[]): string | undefined {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
+}
+
+export interface AnalysisIntentResult {
+  isAnalysisQuery: boolean;
+  categories: string[];
+}
+
+export function detectAnalysisOrInvestigationIntent(userRequest?: string): AnalysisIntentResult {
+  if (!userRequest || typeof userRequest !== 'string') {
+    return { isAnalysisQuery: false, categories: [] };
+  }
+
+  const normalized = normalizeForMatching(userRequest);
+  const categories: string[] = [];
+
+  // 1. Nhóm mục tiêu điều tra nguyên nhân / sự cố / bug / bất cập
+  const hasInvestigationTarget = /\b(?:nguyen nhan|vi sao|tai sao|ly do|loi|bug|van de|issue|su co|tiem an|diem yeu|bat cap|cause|root cause|why)\b/.test(
+    normalized,
+  );
+
+  // 1b. Nhóm câu hỏi trực diện về nguyên nhân / lý do ("Tại sao...", "Vì sao...", "Lý do gì...", "Nguyên nhân khiến...")
+  const hasDirectWhyQuestion = /\b(?:tai sao|vi sao|ly do (?:gi|nao|khien)?|nguyen nhan (?:gi|nao|khien)?|tai vi sao|how come)\b/.test(
+    normalized,
+  );
+
+  // 1c. Nhóm sự cố không hoạt động / không hiển thị / lỗi giao diện hoặc logic
+  const hasMalfunctionTarget = /\b(?:khong (?:hien thi|hoat dong|chay|goi y|click|bam|nhan|an|chuyen|load|tai|tim thay)|bi (?:loi|treo|an|mat|crash|freeze)|not (?:showing|working|displaying|rendering|suggesting))\b/.test(
+    normalized,
+  );
+
+  // 2. Nhóm hành động phân tích / khảo sát / tìm hiểu / kiểm tra
+  const hasAnalyticalAction = /\b(?:phan tich|giai thich|tim hieu|khao sat|dieu tra|xac dinh|tim|kiem tra|soi|nghiem thu|audit|inspect|investigate|diagnose|find|analyze|explain|report|breakdown)\b/.test(
+    normalized,
+  );
+
+  // 3. Nhóm yêu cầu báo cáo / trình bày chi tiết
+  const requestsDetailedReport = /\b(?:bao cao|trinh bay|chi tiet|day du|tieng viet|report|in detail|detailed)\b/.test(
+    normalized,
+  );
+
+  if (hasDirectWhyQuestion) {
+    categories.push('direct-why-question');
+  }
+  if (hasInvestigationTarget && hasAnalyticalAction) {
+    categories.push('root-cause-investigation');
+  }
+  if (hasMalfunctionTarget) {
+    categories.push('malfunction-investigation');
+  }
+  if (requestsDetailedReport && hasAnalyticalAction) {
+    categories.push('detailed-report');
+  }
+
+  // Nếu người dùng yêu cầu sửa mã trực tiếp và không yêu cầu báo cáo chi tiết
+  const isDirectCodeFixRequest = /\b(?:sua loi|fix loi|fix bug|viet code|viet ham|code giup|chinh sua file|sua file|tao file|thay the)\b/.test(
+    normalized,
+  ) && !requestsDetailedReport;
+
+  const isAnalysisQuery = categories.length > 0 && !isDirectCodeFixRequest;
+
+  return {
+    isAnalysisQuery,
+    categories,
+  };
+}
+
+export function evaluateAnalysisOrInvestigationAnswer(
+  answer: string,
+  context?: FinalAnswerGuardContext,
+): FinalAnswerGuardDecision | undefined {
+  const intent = detectAnalysisOrInvestigationIntent(context?.userRequest);
+  if (!intent.isAnalysisQuery) return undefined;
+
+  const trimmed = answer.trim();
+
+  // 1. Tiêu chuẩn độ dài tối thiểu: Một báo cáo phân tích/điều tra nguyên nhân phải từ 300 ký tự trở lên
+  if (trimmed.length < 300) {
+    return {
+      allow: false,
+      reason: 'insufficient-analysis-answer',
+      continuationPrompt: [
+        '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì quá ngắn và sơ sài so với yêu cầu điều tra / phân tích nguyên nhân của người dùng.',
+        `Độ dài phản hồi: ${trimmed.length} ký tự (yêu cầu tối thiểu 300 ký tự có phân tích thực tế).`,
+        'Yêu cầu của người dùng là điều tra nguyên nhân và báo cáo chi tiết. Bạn KHÔNG ĐƯỢC chỉ đưa ra 1-2 câu tóm tắt hoặc thông báo hứa hẹn.',
+        'Hãy trình bày đầy đủ:',
+        '1. Các nguyên nhân tiềm ẩn hoặc cơ chế gây lỗi (kèm trích dẫn hàm, file cụ thể).',
+        '2. Luồng thực thi / phân tích logic chi tiết.',
+        '3. Hướng khắc phục hoặc giải pháp đề xuất.',
+      ].join('\n'),
+    };
+  }
+
+  // 2. Chặn câu echo stub / hứa hẹn không có thân bài (Meta-Reporting Stub / Pseudo-Completion Claim)
+  const normalized = normalizeForMatching(answer);
+  const isMetaEchoOnly = trimmed.length < 450 && (
+    /\b(?:va\s+)?(?:se\s+)?bao cao chi tiet(?:\s+bang tieng viet)?(?:\s+cho nguoi dung)?\.?$/i.test(normalized) ||
+    /\b(?:xac dinh (?:cac\s+)?nguyen nhan(?: tiem an)? va bao cao)\b/i.test(normalized) ||
+    /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+.*?(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/i.test(normalized) ||
+    /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalized)
+  ) && !/[-*•\d]\.\s|```|\*\*|###/.test(answer);
+
+  if (isMetaEchoOnly) {
+    return {
+      allow: false,
+      reason: 'insufficient-analysis-answer',
+      continuationPrompt: [
+        '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì chỉ là câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...", "sẽ báo cáo chi tiết...") mà không có nội dung phân tích thực tế.',
+        'Hãy viết trực tiếp bản phân tích chi tiết cho người dùng ngay tại đây với các mục phân tích cụ thể, mã nguồn liên quan và giải pháp đề xuất.',
+      ].join('\n'),
+    };
+  }
+
+  return undefined;
 }

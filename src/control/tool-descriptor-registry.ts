@@ -14,8 +14,11 @@ export interface ToolDescriptor {
 }
 
 const ALL_PHASES: TaskPhase[] = ['explore', 'plan', 'implement', 'verify', 'release'];
-const READ = new Set(['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'find_references', 'get_diagnostics', 'lsp_query', 'analyze_impact', 'query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology', 'read_compressed_code', 'pack_codebase', 'inspect_image', 'get_workspace_diff']);
-const EDIT = new Set(['apply_patch', 'replace_text', 'write_file', 'create_file', 'delete_file', 'move_file']);
+export const READ_TOOL_NAMES = new Set(['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'find_references', 'get_diagnostics', 'lsp_query', 'analyze_impact', 'query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology', 'read_compressed_code', 'pack_codebase', 'inspect_image', 'get_workspace_diff']);
+export const EDIT_TOOL_NAMES = new Set(['apply_patch', 'replace_text', 'write_file', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content']);
+export const TOOL_SETS = { READ: READ_TOOL_NAMES, EDIT: EDIT_TOOL_NAMES };
+const READ = READ_TOOL_NAMES;
+const EDIT = EDIT_TOOL_NAMES;
 
 export class ToolDescriptorRegistry {
   private readonly overrides = new Map<string, Partial<ToolDescriptor>>();
@@ -35,6 +38,10 @@ export class ToolDescriptorRegistry {
       descriptor = { name, capabilities: ['execute', 'verify'], phases: ['explore', 'implement', 'verify', 'release'], minimumRisk: 'R1', mutates: true, reversible: false, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'submit_solution') {
       descriptor = { name, capabilities: ['complete'], phases: ['verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+    } else if (name === 'report_investigation_findings') {
+      descriptor = { name, capabilities: ['inspect', 'verify', 'complete'], phases: ['explore', 'verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+    } else if (name === 'formulate_and_verify_hypothesis') {
+      descriptor = { name, capabilities: ['inspect', 'verify', 'plan'], phases: ['explore', 'plan'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'discover_tools') {
       descriptor = { name, capabilities: ['inspect', 'search'], phases: ALL_PHASES, minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'manage_task' || name === 'schedule') {

@@ -30,6 +30,7 @@ export interface DiagnosticItem {
   message: string;
   code: number;
   category: 'error' | 'warning' | 'suggestion' | 'message';
+  codeSnippet?: string;
 }
 
 function normalizePath(filePath: string): string {

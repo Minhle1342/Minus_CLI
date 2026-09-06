@@ -210,6 +210,7 @@ export class AgentKernel {
     tools.attachSharedContextService(sharedContext);
     tools.attachAgentEventBus(agentEvents);
     tools.attachAgentOrchestrator(orchestrator);
+    tools.attachGitTools(workspace);
     const permissions = new PermissionManager();
     tools.attachPermissionManager(permissions);
     const toolRunner = new ToolRunner(tools, workspace, permissions, compose);

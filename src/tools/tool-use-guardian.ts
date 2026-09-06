@@ -9,6 +9,8 @@
  * 5. Learning & Tool Reliability Tracking (3+ failures marks tool degraded with alternative suggestions)
  */
 
+import { normalizeForMatching } from '../agent/final-answer-guard.js';
+
 export type ToolFailureCategory =
   | 'TRUNCATED_JSON'
   | 'API_TIMEOUT'
@@ -45,14 +47,23 @@ export interface ToolReliabilityStats {
   lastFailureCategory?: ToolFailureCategory;
 }
 
+export interface PreMutationGateContext {
+  isBugfixTask?: boolean;
+  taskIntent?: string;
+  hasValidatedHypothesis: boolean;
+  hypothesisCount?: number;
+}
+
 export interface GuardianPreCallResult {
   valid: boolean;
+  allowed?: boolean;
   coercedArgs: Record<string, any>;
   wasCoerced: boolean;
   coercedKeys: string[];
   warning?: string;
   error?: string;
   errorCode?: string;
+  reason?: string;
   isUnreliable?: boolean;
   suggestedAlternative?: string;
 }
@@ -61,11 +72,21 @@ export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
   search_codebase_fast: ['grep_search', 'run_command (rg)', 'read_file'],
   grep_search: ['search_codebase_fast', 'run_command (rg)'],
   search_text: ['grep_search', 'read_file', 'run_command (rg)'],
-  read_file: ['run_command (cat/head)', 'inspect_symbol'],
+  read_file: ['read_compressed_code', 'run_command (cat/head)', 'inspect_symbol'],
+  read_compressed_code: ['read_file', 'inspect_symbol'],
+  pack_codebase: ['list_files', 'read_compressed_code'],
   replace_text: ['apply_patch', 'write_file'],
   apply_patch: ['replace_text', 'write_file'],
-  query_call_graph: ['inspect_symbol', 'read_file', 'find_references'],
+  query_call_graph: ['get_symbol_context_360', 'inspect_symbol', 'read_file', 'find_references'],
+  get_symbol_context_360: ['inspect_symbol', 'query_call_graph', 'find_references'],
   get_route_map: ['grep_search', 'read_file'],
+  git_status: ['git_command', 'run_command (git status)'],
+  git_diff: ['git_command', 'run_command (git diff)'],
+  submit_solution: ['report_investigation_findings'],
+  report_investigation_findings: ['submit_solution'],
+  formulate_and_verify_hypothesis: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact'],
+  replace_file_content: ['formulate_and_verify_hypothesis', 'get_symbol_context_360'],
+  write_to_file: ['formulate_and_verify_hypothesis', 'replace_file_content'],
   web_search: ['search_web', 'read_url_content'],
   search_web: ['read_url_content', 'run_command (curl)'],
   read_url_content: ['search_web', 'run_command (curl)'],
@@ -326,6 +347,7 @@ export class ToolUseGuardian {
   private reliabilityMap = new Map<string, ToolReliabilityStats>();
   private readonly maxPayloadBytes: number;
   private readonly maxConsecutiveFailuresThreshold: number;
+  private preMutationGateContext?: PreMutationGateContext;
 
   constructor(options?: {
     maxPayloadBytes?: number;
@@ -335,6 +357,14 @@ export class ToolUseGuardian {
     this.maxConsecutiveFailuresThreshold = options?.maxConsecutiveFailuresThreshold ?? 3;
   }
 
+  setPreMutationGateContext(ctx?: PreMutationGateContext): void {
+    this.preMutationGateContext = ctx;
+  }
+
+  getPreMutationGateContext(): PreMutationGateContext | undefined {
+    return this.preMutationGateContext;
+  }
+
   /**
    * Step 1: Pre-Call Validation & Parameter Auto-Coercion
    */
@@ -342,18 +372,22 @@ export class ToolUseGuardian {
     toolName: string,
     args: Record<string, any>,
     schema?: any,
+    options?: { preMutationGate?: PreMutationGateContext },
   ): GuardianPreCallResult {
     // 1. Kiểm tra kích thước payload
     try {
       const serialized = JSON.stringify(args || {});
       if (serialized.length > this.maxPayloadBytes) {
+        const errorMsg = `Tool request size (${serialized.length} bytes) exceeds maximum limit (${this.maxPayloadBytes} bytes).`;
         return {
           valid: false,
+          allowed: false,
           coercedArgs: args,
           wasCoerced: false,
           coercedKeys: [],
-          error: `Tool request size (${serialized.length} bytes) exceeds maximum limit (${this.maxPayloadBytes} bytes).`,
+          error: errorMsg,
           errorCode: 'PAYLOAD_TOO_LARGE',
+          reason: errorMsg,
         };
       }
     } catch {
@@ -366,11 +400,68 @@ export class ToolUseGuardian {
       ? stats.suggestedAlternatives[0] || DEFAULT_TOOL_ALTERNATIVES[toolName]?.[0]
       : undefined;
 
+    // 2b. Tool-Use Guardian: Semantic check for submit_solution summary (Reject pseudo-completion stubs)
+    if (toolName === 'submit_solution' && typeof args.summary === 'string') {
+      const summary = args.summary.trim();
+      const normalizedSummary = normalizeForMatching(summary);
+      const isPseudoClaim = /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalizedSummary)
+        || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(normalizedSummary);
+      if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
+        const errorMsg = 'Tool "submit_solution" bị Tool-Use Guardian từ chối: trường "summary" chỉ chứa câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...") mà không có nội dung phân tích nguyên nhân, vị trí mã nguồn hoặc giải pháp thực tế. Hãy đưa toàn bộ phát hiện kỹ thuật vào summary hoặc trả lời chi tiết cho người dùng.';
+        return {
+          valid: false,
+          allowed: false,
+          coercedArgs: args,
+          wasCoerced: false,
+          coercedKeys: [],
+          error: errorMsg,
+          errorCode: 'INVALID_SUMMARY_CONTENT',
+          reason: errorMsg,
+        };
+      }
+    }
+
+    // 2c. Tool-Use Guardian: Explore-to-Implement Pre-Mutation Gate (Pareto 80/20 Rule)
+    const gateContext = options?.preMutationGate || this.preMutationGateContext;
+    const isMutationTool = [
+      'write_to_file',
+      'replace_file_content',
+      'multi_replace_file_content',
+      'apply_patch',
+      'write_file',
+      'replace_text',
+      'create_file',
+      'delete_file',
+      'move_file',
+    ].includes(toolName);
+
+    const isBugfixOrRefactor = Boolean(
+      gateContext?.isBugfixTask ||
+      gateContext?.taskIntent === 'bugfix' ||
+      gateContext?.taskIntent === 'refactor'
+    );
+
+    if (isMutationTool && isBugfixOrRefactor && !gateContext?.hasValidatedHypothesis) {
+      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi/refactor nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph, sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code.`;
+      return {
+        valid: false,
+        allowed: false,
+        coercedArgs: args,
+        wasCoerced: false,
+        coercedKeys: [],
+        error: errorMsg,
+        errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
+        reason: errorMsg,
+        suggestedAlternative: 'formulate_and_verify_hypothesis',
+      };
+    }
+
     // 3. Tự động ép kiểu (Auto-coercion) cho schema không khớp phổ biến
     const { coerced, changed, coercedKeys } = this.coerceParameters(args || {}, schema, toolName);
 
     return {
       valid: true,
+      allowed: true,
       coercedArgs: coerced,
       wasCoerced: changed,
       coercedKeys,

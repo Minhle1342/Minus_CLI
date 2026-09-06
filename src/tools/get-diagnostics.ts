@@ -93,6 +93,17 @@ export const getDiagnosticsTool: ToolDefinition = {
       const errors = diagnostics.filter((d) => d.category === 'error');
       const warnings = diagnostics.filter((d) => d.category === 'warning');
 
+      const enrichedDiagnostics = diagnostics.slice(0, 30).map((item, idx) => {
+        // Context-Enriched Diagnostics: tự động đính kèm snippet 3 dòng cho 10 lỗi/cảnh báo đầu tiên
+        if (idx < 10 && item.file && item.line) {
+          const codeSnippet = extractCodeSnippet(workspace, item.file, item.line);
+          if (codeSnippet) {
+            return { ...item, codeSnippet };
+          }
+        }
+        return item;
+      });
+
       return toolSuccess({
         clean: errors.length === 0,
         totalErrors: errors.length,
@@ -102,7 +113,7 @@ export const getDiagnosticsTool: ToolDefinition = {
         message: errors.length === 0
           ? 'Diagnostics passed: 0 syntax and type errors found. Code is clean and verified.'
           : `Diagnostics detected ${errors.length} error(s). Review and resolve errors before submitting.`,
-        diagnostics: diagnostics.slice(0, 30),
+        diagnostics: enrichedDiagnostics,
         providers: [
           ...new Set([
             ...(lspResult.providers || []),
@@ -118,6 +129,36 @@ export const getDiagnosticsTool: ToolDefinition = {
     }
   },
 };
+
+function extractCodeSnippet(workspace: Workspace, filePath: string, targetLine: number): string | undefined {
+  if (!filePath || targetLine < 1) return undefined;
+  try {
+    let resolved: string;
+    try {
+      resolved = workspace.resolveSafePath(filePath);
+    } catch {
+      resolved = path.resolve(workspace.rootDir, filePath);
+    }
+    if (!fs.existsSync(resolved)) return undefined;
+    const content = fs.readFileSync(resolved, 'utf-8');
+    const lines = content.split(/\r?\n/);
+    const totalLines = lines.length;
+    if (targetLine > totalLines) return undefined;
+
+    const start = Math.max(1, targetLine - 1);
+    const end = Math.min(totalLines, targetLine + 1);
+
+    const snippetLines: string[] = [];
+    for (let l = start; l <= end; l++) {
+      const prefix = l === targetLine ? '> ' : '  ';
+      const lineNumStr = String(l).padStart(4, ' ');
+      snippetLines.push(`${prefix}${lineNumStr} | ${lines[l - 1]}`);
+    }
+    return snippetLines.join('\n');
+  } catch {
+    return undefined;
+  }
+}
 
 function dedupeDiagnostics<T extends { file: string; line: number; character: number; message: string; code?: string | number }>(items: T[]): T[] {
   const seen = new Set<string>();

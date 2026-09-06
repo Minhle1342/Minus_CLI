@@ -53,6 +53,8 @@ export interface AgentLoopOptions {
   enableNoProgressTermination?: boolean;
   /** Global Dynamic Budget for injected execution context in tokens (defaults to 2000). */
   dynamicContextBudget?: number;
+  /** Custom prompt sections to seed the PromptAssembler (used by Subagents for progressive specialization). */
+  promptSections?: any[];
 }
 
 export type AgentState =

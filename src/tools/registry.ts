@@ -44,6 +44,10 @@ import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.j
 import { createRecallRepositoryMemoryTool, createSaveRepositoryMemoryTool, createVerifyRepositoryMemoryTool } from './repository-memory-tools.js';
 import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
+import { createReportFindingsTool } from './report-findings.js';
+import { createHypothesisTool } from './hypothesis-tool.js';
+import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
+import { createGitTools } from './git-tools.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
@@ -113,6 +117,10 @@ export class ToolRegistry implements ToolProvider {
     this.register(getSymbolContext360Tool);
     this.register(getArchitectureTopologyTool);
     this.register(createSearchCodebaseFastTool());
+    this.register(createReadCompressedCodeTool());
+    this.register(createPackCodebaseTool());
+    this.register(createReportFindingsTool());
+    this.register(createHypothesisTool());
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
@@ -171,6 +179,20 @@ export class ToolRegistry implements ToolProvider {
     this.register(createSaveRepositoryMemoryTool(memory));
     this.register(createRecallRepositoryMemoryTool(memory));
     this.register(createVerifyRepositoryMemoryTool(memory));
+  }
+
+  attachHypothesisTracker(tracker: HypothesisTracker, workspace?: Workspace): void {
+    this.register(createHypothesisTool(tracker, workspace));
+  }
+
+  /**
+   * Đăng ký bộ công cụ Git context & audit an toàn (git_status, git_diff, git_log, git_command...)
+   */
+  attachGitTools(workspace: Workspace): void {
+    const gitTools = createGitTools(workspace);
+    for (const tool of gitTools) {
+      this.register(tool);
+    }
   }
 
   attachSandboxManager(sandboxManager: any): void {

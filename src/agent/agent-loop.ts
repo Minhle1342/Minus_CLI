@@ -20,13 +20,13 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { DEFAULT_PROMPT_SECTIONS, detectPromptContext } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent } from './final-answer-guard.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -36,6 +36,7 @@ import { HypothesisTracker } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
 import { CriticGate } from './critic-gate.js';
 import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
+import { registerReportFindingsTool } from '../tools/report-findings.js';
 import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
@@ -211,6 +212,9 @@ export class AgentLoop {
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
+      registerReportFindingsTool(this.toolRegistry, this._workspace);
+      this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
+      this.toolRegistry.attachGitTools(this._workspace);
       this.kernel.init().catch(() => { });
     } else {
       this.llm = kernelOrLLM;
@@ -230,7 +234,8 @@ export class AgentLoop {
       this.agentHooks = new AgentHookRegistry();
       this.inbox = new AgentInbox();
       this.promptAssembler = new PromptAssembler();
-      for (const section of DEFAULT_PROMPT_SECTIONS) {
+      const sectionsToRegister = options?.promptSections || DEFAULT_PROMPT_SECTIONS;
+      for (const section of sectionsToRegister) {
         this.promptAssembler.register(section);
       }
       this.agentRegistry = options?.agentRegistry || new AgentRegistry();
@@ -253,6 +258,9 @@ export class AgentLoop {
       this.toolRegistry.attachMemoryManager(this.memoryManager);
       this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
+      registerReportFindingsTool(this.toolRegistry, this._workspace);
+      this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
+      this.toolRegistry.attachGitTools(this._workspace);
 
       this.checkpointManager.init().catch(() => { });
       this.memoryManager.init(this._workspace).catch(() => { });
@@ -610,6 +618,8 @@ export class AgentLoop {
     let consecutiveNoProgressStrategyChanges = 0;
     let hasSubmittedSolution = false;
     let submittedSolutionSummary: string | undefined;
+    let hasReportedFindings = false;
+    let reportedFindingsMarkdown: string | undefined;
     let previousClassification: ClassificationDecision | undefined;
     const configuredControlMode = this.loopOptions?.toolControlMode || process.env.MINUS_TOOL_CONTROL_MODE || 'shadow';
     const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
@@ -856,6 +866,7 @@ export class AgentLoop {
         activeTask?.acceptanceCriteria || '',
         activeTask?.notes || '',
       ].filter(Boolean).join(' ');
+      const hasValidatedHypothesis = this.hypothesisTracker.getValidatedHypotheses().length > 0;
       const classification = this.classificationEngine.classify({
         request: turnUserRequest,
         activeTask: activeTask?.title,
@@ -865,8 +876,15 @@ export class AgentLoop {
         lastToolName: this.lastToolExecution?.toolName,
         lastToolFailed: Boolean(this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})),
         previous: previousClassification,
+        hasValidatedHypothesis,
       });
       previousClassification = classification;
+
+      // Cập nhật ngữ cảnh Cổng Pareto 80/20 cho ToolUseGuardian
+      this.toolRunner.guardian.setPreMutationGateContext({
+        isBugfixTask: classification.taskClass === 'bugfix' || classification.taskClass === 'refactor',
+        hasValidatedHypothesis,
+      });
 
       const adviceInfo = this.toolAdvisor.advise({
         lastToolName: this.lastToolExecution?.toolName,
@@ -921,6 +939,20 @@ export class AgentLoop {
         this.cachedTurnToolDeclarations = activeToolDeclarations;
         this.cachedTurnToolProviderSize = providerSize;
       }
+
+      // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
+      // Khi yêu cầu là điều tra nguyên nhân / phân tích sự cố / khảo sát mà không có mutation,
+      // ẩn hoàn toàn submit_solution để LLM tập trung vào phân tích chi tiết hoặc gọi tool báo cáo chuyên biệt.
+      const analysisIntent = detectAnalysisOrInvestigationIntent(turnUserRequest);
+      const hasFileMutationsInSession = session.getEvents().some((e) =>
+        e.type === 'tool/call' &&
+        ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch'].includes(e.data?.toolName || '')
+      );
+      const isPureInvestigation = analysisIntent.isAnalysisQuery && !hasFileMutationsInSession && !classification.requiredCapabilities.includes('edit');
+      if (isPureInvestigation) {
+        activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
+      }
+
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
@@ -963,6 +995,7 @@ export class AgentLoop {
         activeTaskTitle: activeTask?.title,
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
         guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
+        userRequest: turnUserRequest,
       });
       // Intent-Gated Memory Retrieval:
       // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
@@ -1108,6 +1141,11 @@ export class AgentLoop {
         repositoryContext,
       }, activeModelName);
       let dynamicExecutionContext = arbitration.renderedContext;
+      const hypothesisContext = this.hypothesisTracker.toScratchpad();
+      const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
+      if (hypothesisContext || hypothesisGuidance) {
+        dynamicExecutionContext = [dynamicExecutionContext, hypothesisContext, hypothesisGuidance].filter(Boolean).join('\n\n');
+      }
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
       let requestFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
@@ -1805,6 +1843,26 @@ export class AgentLoop {
               0,
             );
           }
+          if (toolName === 'report_investigation_findings' && !isToolResultFailure(executionResult.result)) {
+            hasReportedFindings = true;
+            reportedFindingsMarkdown = String(toolArgs.userFacingReport || '').trim();
+            this.verificationPolicy.recordVerification(
+              'report_investigation_findings',
+              true,
+              String(toolArgs.rootCause || 'Investigation findings recorded').slice(0, 240),
+              0,
+            );
+          }
+          if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
+            const hId = executionResult.result?.hypothesisId || 'H';
+            const hStatus = executionResult.result?.status;
+            this.verificationPolicy.recordVerification(
+              `hypothesis_${hId}`,
+              hStatus === 'validated',
+              String(toolArgs.statement || 'Hypothesis verified').slice(0, 240),
+              hStatus === 'validated' ? 0 : 1,
+            );
+          }
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
@@ -2019,9 +2077,74 @@ export class AgentLoop {
 
       // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
       if (!hasValidText) {
+        // Post-Investigation-Report Graceful Auto-Finalization (Cơ chế 2 - AutoCodeRover Model):
+        // Nếu đã gọi report_investigation_findings thành công, chốt ngay báo cáo hoàn chỉnh làm Final Answer
+        if (hasReportedFindings && reportedFindingsMarkdown) {
+          const earlyGuardDecision = this.finalAnswerGuard.evaluate(reportedFindingsMarkdown, {
+            userRequest: turnUserRequest,
+            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
+            hasSubmittedSolution: true,
+            workspace: this._workspace,
+          });
+          if (earlyGuardDecision.allow) {
+            const finalAnswer = reportedFindingsMarkdown;
+            CLI.renderModelAction('final_answer');
+            CLI.renderStepFooter();
+            await CLI.renderFinalAnswer(finalAnswer);
+            this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
+            session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+            await this.persistSession(session);
+            session.append('step/end', { turn, step, reason: 'reported-findings-final-answer' });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: 'reported-findings-final-answer',
+            });
+            if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+              try {
+                this.goalManager.complete(this.planManager);
+              } catch {
+                this.goalManager.disarm();
+              }
+            } else {
+              this.goalManager.disarm();
+            }
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+            return finalAnswer;
+          }
+        }
+
         // Post-Submission Graceful Auto-Finalization (Codex CLI Standard):
         // Nếu đã submit_solution thành công và có summary đầy đủ mà model sinh turn rỗng/chỉ reasoning, chốt Final Answer ngay lập tức
         if (hasSubmittedSolution && submittedSolutionSummary) {
+          const earlyGuardDecision = this.finalAnswerGuard.evaluate(submittedSolutionSummary, {
+            userRequest: turnUserRequest,
+            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
+            hasSubmittedSolution: true,
+            workspace: this._workspace,
+          });
+          if (!earlyGuardDecision.allow) {
+            CLI.renderReflectionAlert(
+              1,
+              `Post-submission summary check failed (${earlyGuardDecision.reason || 'insufficient'}). Requiring complete response...`,
+            );
+            session.addUserMessage(
+              earlyGuardDecision.continuationPrompt
+                || 'Submitted solution summary is insufficient or contains deferred/meta claims. Please provide the complete, detailed analytical response directly in your final message.',
+              'system',
+            );
+            await this.persistSession(session);
+            CLI.renderStepFooter();
+            session.append('step/end', { turn, step, reason: 'insufficient-submitted-summary' });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: 'insufficient-submitted-summary',
+            });
+            this.kernel?.ctx.events.emit('step:after', step);
+            continue;
+          }
+
           const earlyCritic = this.criticGate.evaluate({
             finalAnswer: submittedSolutionSummary,
             session,
@@ -2163,14 +2286,18 @@ export class AgentLoop {
       // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
       const rawText = response.text ? response.text.trim() : '';
       const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
+      const isAnalysisQuery = detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery;
       const isGenericStub = !rawText
         || /^(each task must be atomic|execution sequence satisfied|\(nhiệm vụ đã hoàn tất\)|\(task completed\)|\(solution submitted\))/i.test(rawText)
-        || (!isArchQuery && rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40)
-        || (isArchQuery && rawText.length < 200);
+        || (!isArchQuery && !isAnalysisQuery && rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40)
+        || (isArchQuery && rawText.length < 200)
+        || (isAnalysisQuery && rawText.length < 300);
 
-      const finalAnswer = (!isArchQuery && isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
-        ? submittedSolutionSummary
-        : (rawText || (hasSubmittedSolution && !isArchQuery && submittedSolutionSummary ? submittedSolutionSummary : '(Nhiệm vụ đã hoàn tất)'));
+      const finalAnswer = (hasReportedFindings && reportedFindingsMarkdown && (isGenericStub || rawText.length < reportedFindingsMarkdown.length))
+        ? reportedFindingsMarkdown
+        : ((!isArchQuery && !isAnalysisQuery && isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
+          ? submittedSolutionSummary
+          : (rawText || (hasSubmittedSolution && !isArchQuery && !isAnalysisQuery && submittedSolutionSummary ? submittedSolutionSummary : (hasReportedFindings && reportedFindingsMarkdown ? reportedFindingsMarkdown : '(Nhiệm vụ đã hoàn tất)'))));
       consecutiveEmptyTurns = 0;
 
       const planBlocker = this.planManager.getCompletionBlocker();
@@ -2209,12 +2336,13 @@ export class AgentLoop {
       }
       consecutivePlanCompletionRejects = 0;
 
+      const effectiveSubmissionState = hasSubmittedSolution || hasReportedFindings;
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
           userRequest: turnUserRequest,
           availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-          hasSubmittedSolution,
+          hasSubmittedSolution: effectiveSubmissionState,
           workspace: this._workspace,
         });
       const evidenceDecision = (isSubagent || isMockLLM)
@@ -2223,7 +2351,7 @@ export class AgentLoop {
           turn,
           codeChangeRequired: this.planManager.getRequirements().required,
           userRequest: turnUserRequest,
-          hasSubmittedSolution,
+          hasSubmittedSolution: effectiveSubmissionState,
         });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
       if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
@@ -2699,6 +2827,11 @@ export class AgentLoop {
     const availableNames = childRegistry.getAll().map((tool) => tool.name);
     const allowedNames = (options.toolNames || availableNames).filter((name) => !forbidden.has(name));
     const childScope = childRegistry.createScope(`subagent-scope:${agentId}`, allowedNames);
+    const subagentSections = resolveSubagentPromptSections({
+      capabilities: options.capabilities || options.requiredCapabilities,
+      toolNames: allowedNames,
+      brief: options.brief,
+    });
     return new AgentLoop(this.llm, childRegistry, {
       workspace: options.worktreePath ? new Workspace(options.worktreePath) : this._workspace,
       maxSteps: options.maxSteps ?? this.maxSteps,
@@ -2708,6 +2841,7 @@ export class AgentLoop {
       sessionPersistence: this.sessionPersistence,
       enableSubagents: false,
       enableStepSummarization: false,
+      promptSections: subagentSections,
     });
   }
 }

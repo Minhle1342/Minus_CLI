@@ -1,4 +1,5 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
+import { SECTION_PATCH_FORMAT_SPEC } from '../llm/prompt-sections.js';
 
 export interface ToolSynergyContext {
   lastToolName?: string;
@@ -9,12 +10,19 @@ export interface ToolSynergyContext {
   hasRunningBackgroundTasks?: boolean;
   hasSharedContextConflicts?: boolean;
   guardianDiagnosis?: ToolFailureDiagnosis;
+  userRequest?: string;
 }
 
 export interface ToolAdvice {
   playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'GENERAL';
   guidance: string;
   suggestedTools: string[];
+}
+
+export function detectBugReportIntent(text?: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return /\b(lỗi|bị lỗi|fix bug|sửa bug|bug|crash|crashed|exception|traceback|failed|failing|error|bị hỏng|không chạy được|fail)\b/i.test(lower);
 }
 
 /**
@@ -37,7 +45,17 @@ export class ToolSynergyAdvisor {
       activeTaskTitle,
       hasRunningBackgroundTasks,
       hasSharedContextConflicts,
+      userRequest,
     } = context;
+
+    // 0. Phát hiện người dùng báo lỗi trong prompt (User Bug Report Intent) ngay turn đầu
+    if (!lastToolName && detectBugReportIntent(userRequest)) {
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] User reported a bug or error. Do not guess or monkey-patch! Protocol: 1.[Extract Coordinates / Locate defect] -> 2.[Backward Causal Trace via search/read_file/query_call_graph] -> 3.[Formulate Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verify via get_diagnostics/test]. Max 3 repair cycles.',
+        suggestedTools: ['search_codebase_fast', 'read_file', 'get_diagnostics', 'query_call_graph'],
+      };
+    }
 
     // 1. Xung đột Khóa Lạc Quan OCC trong Multi-Agent (Playbook E)
     if (hasSharedContextConflicts || (lastToolResult && lastToolResult.conflict)) {
@@ -58,6 +76,23 @@ export class ToolSynergyAdvisor {
         playbook: 'D_ASYNC_CLI',
         guidance: 'Background task is active. Use "schedule" (with TimerCondition) to wait reactively without polling, or "manage_task(send_input)" if interactive prompt is waiting.',
         suggestedTools: ['schedule', 'manage_task'],
+      };
+    }
+
+    // 2.5. Sự cố apply_patch (Lỗi format patch hoặc FUZZY_CANDIDATE_FOUND)
+    if (
+      lastToolName === 'apply_patch' &&
+      lastToolResult &&
+      (lastToolResult.error || lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND')
+    ) {
+      const isFuzzy = Boolean(lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND');
+      const reason = isFuzzy
+        ? 'FUZZY_CANDIDATE_FOUND (Fuzz Level 3 match). Disk was NOT mutated to avoid accidental corruption.'
+        : `Patch application failed: ${lastToolResult.error || 'Invalid patch structure'}`;
+      return {
+        playbook: 'C_MUTATION',
+        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${SECTION_PATCH_FORMAT_SPEC}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide an exact patch hunk with matching context lines.`,
+        suggestedTools: ['read_file', 'apply_patch', 'replace_text'],
       };
     }
 
@@ -137,8 +172,8 @@ export class ToolSynergyAdvisor {
     ) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without modifying hypothesis! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Max 3 repair cycles.',
-        suggestedTools: ['get_diagnostics', 'inspect_symbol', 'query_call_graph', 'search_web'],
+        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without modifying hypothesis! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Max 3 repair cycles.',
+        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'replace_text'],
       };
     }
 
@@ -151,21 +186,37 @@ export class ToolSynergyAdvisor {
       };
     }
 
-    // 6. Vừa đọc file mã nguồn (Playbook G: Blast Radius & Impact Awareness)
-    if (lastToolName === 'read_file' && lastToolResult && !lastToolResult.error) {
-      if (lastToolResult.symbolsCount > 0 || lastToolResult.isTruncated || (Array.isArray(lastToolResult.outline) && lastToolResult.outline.length > 0)) {
-        return {
-          playbook: 'G_BLAST_RADIUS',
-          guidance: 'File inspected with symbols outline. Before modifying any function or class, verify upstream callers via "query_call_graph(direction=\'callers\')" or "get_symbol_context_360".',
-          suggestedTools: ['query_call_graph', 'get_symbol_context_360', 'replace_text', 'get_diagnostics'],
-        };
-      }
+    // 6. Vừa nén đọc nhiều file (read_compressed_code)
+    if (lastToolName === 'read_compressed_code' && lastToolResult && !lastToolResult.error) {
+      return {
+        playbook: 'A_DISCOVERY',
+        guidance: 'Compressed code structures analyzed. To inspect full 360-degree context for any specific symbol (definition, type signature, callers, callees, dependencies, and tests in 1 single payload), call "get_symbol_context_360".',
+        suggestedTools: ['get_symbol_context_360', 'read_file', 'replace_text', 'get_diagnostics'],
+      };
     }
 
-    // 7. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
+    // 7. Vừa tra cứu symbol đơn lẻ (inspect_symbol)
+    if (lastToolName === 'inspect_symbol' && lastToolResult && !lastToolResult.error) {
+      return {
+        playbook: 'G_BLAST_RADIUS',
+        guidance: 'Symbol definition inspected. For full cross-codebase 360-degree context (all callers, outgoing callees, dependencies, and test coverage in 1 payload), use "get_symbol_context_360".',
+        suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact', 'replace_text'],
+      };
+    }
+
+    // 8. Vừa đọc file mã nguồn (Playbook G: Blast Radius & Impact Awareness)
+    if (lastToolName === 'read_file' && lastToolResult && !lastToolResult.error) {
+      return {
+        playbook: 'G_BLAST_RADIUS',
+        guidance: 'File inspected. Before modifying any function or class, verify upstream callers, dependencies, and contracts via "get_symbol_context_360" or "query_call_graph(direction=\'callers\')".',
+        suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'replace_text', 'get_diagnostics'],
+      };
+    }
+
+    // 9. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
-      guidance: 'Choose the most precise high-level tool: "get_symbol_context_360" for symbol analysis, "get_route_map" for APIs, or "get_architecture_topology" for system structure.',
+      guidance: 'Choose the most precise high-level tool: "get_symbol_context_360" for complete 360-degree symbol analysis, "get_route_map" for APIs, or "get_architecture_topology" for system structure.',
       suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'replace_text', 'get_diagnostics'],
     };
   }

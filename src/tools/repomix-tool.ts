@@ -24,19 +24,29 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           items: { type: Type.STRING },
           description: 'Danh sách các đường dẫn tệp tương đối hoặc tuyệt đối cần đọc ở dạng nén (vd: ["src/agent/agent-loop.ts", "src/llm/gemini.ts"]).',
         },
+        path: {
+          type: Type.STRING,
+          description: 'Alias cho paths khi chỉ đọc 1 file đơn lẻ (vd: "src/agent/agent-loop.ts").',
+        },
         compress: {
           type: Type.BOOLEAN,
           description: 'Có bật chế độ nén Tree-sitter hay không (mặc định: true).',
         },
       },
-      required: ['paths'],
+      required: [],
     },
     async execute(args, workspace: Workspace) {
-      const filePaths: string[] = Array.isArray(args.paths) ? args.paths : [String(args.paths)];
+      // Tool-Use Guardian: Parameter Coercion cho paths, path, filePath, file
+      const rawPaths = args.paths ?? args.path ?? args.filePath ?? args.file;
+      const filePaths: string[] = Array.isArray(rawPaths)
+        ? rawPaths.map(String).map(s => s.trim()).filter((p) => p && p !== 'undefined')
+        : rawPaths && String(rawPaths).trim() !== 'undefined'
+          ? [String(rawPaths).trim()]
+          : [];
       const shouldCompress = args.compress !== false;
 
       if (!filePaths || filePaths.length === 0) {
-        return { error: 'Tham số "paths" là bắt buộc và phải chứa ít nhất 1 đường dẫn file.' };
+        return { error: 'Tham số "paths" (hoặc "path") là bắt buộc và phải chứa ít nhất 1 đường dẫn file.' };
       }
 
       // Chuẩn hóa đường dẫn tương đối theo workspace root

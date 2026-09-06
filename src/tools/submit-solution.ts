@@ -2,6 +2,7 @@ import type { ToolRegistry } from './registry.js';
 import type { ToolDefinition } from './types.js';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
+import { normalizeForMatching } from '../agent/final-answer-guard.js';
 
 export interface SubmitSolutionArgs {
   summary: string;
@@ -65,6 +66,19 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
 
       if (!summary) {
         throw new Error('Missing required argument: "summary" cannot be empty.');
+      }
+      // Tool-Use Guardian: Semantic Pre-Validation cho summary của submit_solution
+      const normalizedSummary = normalizeForMatching(summary);
+      const isPseudoClaim = /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalizedSummary)
+        || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(normalizedSummary);
+      if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
+        return {
+          success: false,
+          submitted: false,
+          error: 'submit_solution bị từ chối: trường "summary" chỉ chứa câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...", "sẽ báo cáo...") mà không có nội dung phân tích, trích dẫn file/hàm hay giải pháp cụ thể.',
+          errorCode: 'INVALID_SUMMARY_CONTENT',
+          suggestion: 'Hãy đưa trực tiếp kết quả phân tích nguyên nhân gốc rễ, vị trí phát sinh lỗi và giải pháp vào trường "summary" hoặc cung cấp toàn bộ nội dung cho người dùng bằng văn bản trực tiếp.',
+        } as any;
       }
       if (!verificationEvidence) {
         throw new Error('Missing required argument: "verificationEvidence" is mandatory. Provide the test/build command and its passing result.');

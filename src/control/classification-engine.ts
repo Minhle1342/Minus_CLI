@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
-  request: string;
+  request?: string;
+  userPrompt?: string;
+  prompt?: string;
   activeTask?: string;
   activeAcceptance?: string;
   hasPlan?: boolean;
@@ -10,6 +12,7 @@ export interface ClassificationInput {
   lastToolName?: string;
   lastToolFailed?: boolean;
   previous?: ClassificationDecision;
+  hasValidatedHypothesis?: boolean;
 }
 
 const mutationIntent = /\b(?:implement|fix|change|modify|update|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sửa|triển khai|thực hiện|cập nhật|tạo|xóa|đổi tên|tích hợp)\b/i;
@@ -21,7 +24,8 @@ const exploreIntent = /\b(?:explain|inspect|investigate|review|analy[sz]e|how|wh
 
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
-    const text = [input.request, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
+    const rawPrompt = input.request || input.userPrompt || input.prompt || '';
+    const text = [rawPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
     const reasons: string[] = [];
     let taskClass: TaskClass = 'question';
     let phase: TaskPhase = 'explore';
@@ -46,9 +50,19 @@ export class ClassificationEngine {
       taskClass = refactorIntent.test(text) ? 'refactor' : bugIntent.test(text) ? 'bugfix' : 'feature';
       complexity = /\b(?:architecture|system|migration|multiple|all|kiến trúc|hệ thống|lộ trình|toàn bộ)\b/i.test(text) ? 'large' : 'medium';
       risk = complexity === 'large' ? 'R3' : 'R2';
-      phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
-      capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
-      reasons.push(refactorIntent.test(text) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
+
+      // Pareto 80/20 Rule: Nếu là bugfix hoặc refactor nhưng chưa có validated hypothesis và chưa có plan hoàn thiện,
+      // bắt buộc khởi đầu ở Phase 'explore' (80% nỗ lực khảo sát) và không cấp quyền 'edit' sớm!
+      const requiresHypothesisFirst = (taskClass === 'bugfix' || taskClass === 'refactor') && !input.hasValidatedHypothesis && !input.hasPlan;
+      if (requiresHypothesisFirst) {
+        phase = 'explore';
+        capabilities = ['inspect', 'search', 'plan', 'memory', 'verify'];
+        reasons.push('PARETO_80_20_EXPLORE_FIRST_BEFORE_MUTATION');
+      } else {
+        phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
+        capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        reasons.push(refactorIntent.test(text) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
+      }
     } else if (bugIntent.test(text)) {
       taskClass = 'bugfix'; phase = 'explore'; complexity = 'medium'; risk = 'R1';
       capabilities = ['inspect', 'search', 'execute', 'verify', 'memory'];

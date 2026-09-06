@@ -111,6 +111,18 @@ export class HypothesisTracker {
     return this.hypotheses.filter((h) => h.status === 'validated');
   }
 
+  getStats(): { total: number; validatedCount: number; falsifiedCount: number; activeCount: number } {
+    const validatedCount = this.hypotheses.filter((h) => h.status === 'validated').length;
+    const falsifiedCount = this.hypotheses.filter((h) => h.status === 'falsified').length;
+    const activeCount = this.hypotheses.filter((h) => h.status === 'formulated' || h.status === 'testing').length;
+    return {
+      total: this.hypotheses.length,
+      validatedCount,
+      falsifiedCount,
+      activeCount,
+    };
+  }
+
   /**
    * Xuất chuỗi định dạng Scratchpad ngắn gọn cho LLM / Terminal CLI
    */

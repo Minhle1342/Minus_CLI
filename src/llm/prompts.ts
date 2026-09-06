@@ -87,6 +87,8 @@ export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `4. SEMANTIC INTELLIGENCE & BL
      * Use \`analyze_impact\` to calculate the Blast Radius and risk level (LOW/MEDIUM/HIGH/CRITICAL) before modifying exported APIs.`;
 
 export const SECTION_SURGICAL_MUTATION_FULL = `5. SURGICAL & ATOMIC MUTATION DISCIPLINE (CODEX CLI STANDARD):
+   - PARETO 80/20 PRINCIPLE: Spend 80% reasoning and verification effort in Phase Explore to empirically prove root cause; Phase Implement must take only 1-2 surgical mutation steps.
+   - PRE-MUTATION HYPOTHESIS GATE: For any bugfix or refactor task, you MUST activate \`formulate_and_verify_hypothesis\` with explicit falsification test and concrete source evidence before editing code. Unverified edits will trigger UNVERIFIED_MUTATION_BLOCKED.
    - Always inspect relevant source lines with \`read_file\` before modifying code to obtain the \`contentHash\` and exact context.
    - DEDICATED CRUD SEPARATION:
      * Creating new files: Use \`create_file\` (refuses silent overwrite of existing files).
@@ -210,11 +212,14 @@ export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT C
 - TWO-TIER ERROR TRIAGING:
   * Tier 1 - Environment/Sandbox Failure (\`COMMAND_NOT_FOUND\`, \`NATIVE_DEPENDENCY_MISSING\`, \`PACKAGE_DEPENDENCY_MISSING\`, timeout): Resolve environment dependencies or select matching runtime profile; DO NOT modify application source code.
   * Tier 2 - Application/Logic Failure (test assertion failure, typecheck error, runtime exception): Enter the 5-Stage Error Detective Protocol.
-- 5-STAGE ERROR DETECTIVE PROTOCOL:
+- 5-STAGE ERROR DETECTIVE PROTOCOL (PARETO 80/20):
   1. [Extract Coordinates]: Parse exact file, line number, column, and diagnostic code from error output or \`get_diagnostics\`.
   2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`git_diff\` to find the origin of invalid state.
-  3. [Falsifiable Hypothesis (System 2 Thinking)]: Formulate an explicit hypothesis describing the exact causal mechanism before calling any mutation tool.
-  4. [Surgical Root Invariant Fix]: Apply the minimal surgical change at the root source to restore the intended invariant without side effects.
+  3. [Falsifiable Hypothesis & Empirical Proof (System 2 Thinking)]:
+     * YOU MUST call \`formulate_and_verify_hypothesis\` with your hypothesized statement, falsification test criteria, target files, and code evidence.
+     * If a reproduction test command is available, run it via the tool to prove the bug exists prior to fixing.
+     * The Pre-Mutation Gate will block any file modifications until at least one hypothesis is verified.
+  4. [Surgical Root Invariant Fix]: Apply the minimal surgical change (1-2 steps max) at the root source to restore the intended invariant without side effects.
   5. [Empirical Verification & Anti-Regression]: Run the Verification Ladder to prove the fix and ensure no new regressions.
 - ANTI-LOOP & REPAIR BUDGET:
   * Never repeat the exact same failing command or tool arguments unchanged.
@@ -280,6 +285,67 @@ export function createStandardSystemPrompt(ctx?: PromptAssemblyContext): string 
     assembler.register(s);
   }
   return assembler.assembleForContext(ctx || {});
+}
+
+export interface SubagentPromptResolutionOptions {
+  capabilities?: string[];
+  toolNames?: string[];
+  brief?: string;
+}
+
+/**
+ * Tự động phân giải các Prompt Sections chuyên biệt cho Subagents dựa trên vai trò & capabilities.
+ * Kết nối danh mục ON_DEMAND_PROMPT_MODULES với vòng đời khởi tạo Subagent.
+ */
+export function resolveSubagentPromptSections(options: SubagentPromptResolutionOptions = {}): Array<{ id: string; content: string; priority?: number }> {
+  const sections: Array<{ id: string; content: string; priority?: number }> = [
+    { id: 'core', content: CORE_SYSTEM_PROMPT, priority: -1000 },
+  ];
+
+  const caps = (options.capabilities || []).map((c) => c.toLowerCase());
+  const tools = (options.toolNames || []).map((t) => t.toLowerCase());
+  const brief = (options.brief || '').toLowerCase();
+
+  // 1. Phân giải công cụ Git
+  if (tools.some((t) => t.startsWith('git_'))) {
+    sections.push({ id: 'git-operations', content: SECTION_GIT_OPERATIONS, priority: 100 });
+  }
+
+  // 2. Chuyên gia Lập trình / Refactor / Sửa mã (Code Writer / Refactoring Specialist)
+  const isCoder = caps.some((c) => c.includes('code') || c.includes('refactor') || c.includes('humaneval') || c.includes('fim'))
+    || tools.some((t) => ['apply_patch', 'replace_text', 'create_file'].includes(t));
+  if (isCoder) {
+    sections.push({ id: 'patch-format-spec', content: SECTION_PATCH_FORMAT_SPEC, priority: 150 });
+    sections.push({ id: 'semantic-blast-radius', content: SECTION_SEMANTIC_BLAST_RADIUS_FULL, priority: 200 });
+  }
+
+  // 3. Chuyên gia Gỡ lỗi / Root Cause / Verification (Debugger / SWE-bench)
+  const isDebugger = caps.some((c) => c.includes('debug') || c.includes('swe-bench') || c.includes('test'))
+    || brief.includes('debug') || brief.includes('fix');
+  if (isDebugger) {
+    sections.push({ id: 'error-detective', content: SECTION_ERROR_DETECTIVE_PROTOCOL, priority: 250 });
+  }
+
+  // 4. Chuyên gia Nghiên cứu / Kiến trúc / Toán học (Deep Researcher / Reasoning Specialist)
+  const isArchitectOrResearcher = caps.some((c) => c.includes('math') || c.includes('reasoning') || c.includes('research') || c.includes('architecture'))
+    || tools.some((t) => ['query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology'].includes(t));
+  if (isArchitectOrResearcher) {
+    sections.push({ id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE_FULL, priority: 300 });
+  }
+
+  // 5. Chuyên gia Terminal / Lệnh nền / DevOps
+  const isTerminalOrDevOps = tools.some((t) => ['run_command', 'manage_task', 'schedule'].includes(t));
+  if (isTerminalOrDevOps) {
+    sections.push({ id: 'terminal-sandbox', content: SECTION_TERMINAL_SANDBOX_FULL, priority: 350 });
+    sections.push({ id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLCHAIN_FULL, priority: 400 });
+  }
+
+  // 6. Chuyên gia GUI Desktop
+  if (tools.includes('computer')) {
+    sections.push({ id: 'computer-use', content: SECTION_COMPUTER_USE_FULL, priority: 500 });
+  }
+
+  return sections;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = LEGACY_MONOLITHIC_SYSTEM_PROMPT;
