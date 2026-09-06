@@ -2,12 +2,16 @@ import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
+import { ExactTokenizer } from './exact-tokenizer.js';
+import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
   preserveLastNToolResults?: number;
   maxTotalHistoryTokens?: number;
   preservePrefixCache?: boolean;
+  enableRollingTurnCompaction?: boolean;
+  preserveLastNTurns?: number;
 }
 
 export interface CompactionStats {
@@ -18,9 +22,11 @@ export interface CompactionStats {
   compactedLength: number;
   charsSaved: number;
   prunedPartsCount: number;
+  prunedTurnsCount?: number;
   requestOverheadTokens: number;
   outputReserveTokens: number;
   effectiveHistoryBudgetTokens: number;
+  archivedTurns?: ArchivedTurnDocument[];
 }
 
 export interface CompactionOptions {
@@ -29,6 +35,9 @@ export interface CompactionOptions {
   outputReserveTokens?: number;
   triggerRatio?: number;
   reinjectInvariants?: string;
+  enableRollingTurns?: boolean;
+  preserveLastNTurns?: number;
+  modelName?: string;
 }
 
 /**
@@ -37,8 +46,10 @@ export interface CompactionOptions {
  * Áp dụng các kỹ thuật:
  * 1. Prefix-Safe KV-Cache Preservation: Bảo toàn tiền tố lịch sử tin nhắn tránh vỡ KV-Cache của OpenAI/Codex.
  * 2. Selective Sliding Window: Giữ nguyên 100% chi tiết của các bước mới nhất (Last N observations).
- * 3. AST-level Semantic Slicing: Nén các file code lớn cũ thành sơ đồ Outline các Symbols/Functions/Classes.
- * 4. Tail-Preserving Log Truncation: Giữ lại phần đuôi của Stack Trace lỗi thay vì cắt bừa bãi.
+ * 3. Rolling Turn Compaction: Tóm tắt và đóng gói các turn đối thoại (User - Assistant) quá cũ theo cửa sổ trượt.
+ * 4. AST-level Semantic Slicing: Nén các file code lớn cũ thành sơ đồ Outline các Symbols/Functions/Classes.
+ * 5. Tail-Preserving Log Truncation: Giữ lại phần đuôi của Stack Trace lỗi thay vì cắt bừa bãi.
+ * 6. Exact Tokenizer Integration: Tích hợp ExactTokenizer đa mô hình thay cho heuristic chars / 3.8.
  */
 export class ContextCompactor {
   private config: Required<CompactionConfig>;
@@ -49,6 +60,8 @@ export class ContextCompactor {
       preserveLastNToolResults: config?.preserveLastNToolResults ?? 3,
       maxTotalHistoryTokens: config?.maxTotalHistoryTokens ?? 32000,
       preservePrefixCache: config?.preservePrefixCache ?? false,
+      enableRollingTurnCompaction: config?.enableRollingTurnCompaction ?? true,
+      preserveLastNTurns: config?.preserveLastNTurns ?? 8,
     };
   }
 
@@ -75,15 +88,154 @@ export class ContextCompactor {
     if (config.preservePrefixCache !== undefined) {
       this.config.preservePrefixCache = config.preservePrefixCache;
     }
+    if (config.enableRollingTurnCompaction !== undefined) {
+      this.config.enableRollingTurnCompaction = config.enableRollingTurnCompaction;
+    }
+    if (config.preserveLastNTurns !== undefined) {
+      this.config.preserveLastNTurns = config.preserveLastNTurns;
+    }
   }
 
   /**
-   * Ước lượng số lượng tokens theo quy tắc Heuristic (1 token ~ 3.8 - 4 ký tự)
-   * Nhận trực tiếp chuỗi hoặc số lượng ký tự để tránh cấp phát bộ nhớ chuỗi trắng
+   * Ước lượng số lượng tokens theo ExactTokenizer hoặc Heuristic fallback
    */
-  static estimateTokens(textOrLength: string | number): number {
-    const len = typeof textOrLength === 'number' ? textOrLength : (textOrLength?.length || 0);
-    return Math.ceil(Math.max(0, len) / 3.8);
+  static estimateTokens(textOrLength: string | number, modelOrFamily?: string): number {
+    if (typeof textOrLength === 'string') {
+      return ExactTokenizer.countTokens(textOrLength, modelOrFamily);
+    }
+    return Math.ceil(Math.max(0, typeof textOrLength === 'number' ? textOrLength : 0) / 3.8);
+  }
+
+  /**
+   * Trích xuất thông tin tóm tắt một turn đối thoại cũ
+   */
+  private extractTurnSynopsis(
+    turnMessages: SessionMessage[],
+    turnNum: number,
+  ): { synopsis: string; doc: ArchivedTurnDocument } {
+    let userPrompt = '';
+    const assistantThoughts: string[] = [];
+    const toolsUsed: string[] = [];
+    const filesTouched: string[] = [];
+    const keyDecisions: string[] = [];
+
+    for (const msg of turnMessages) {
+      if (msg.role === 'user') {
+        for (const p of msg.parts || []) {
+          if (p.text && !p.functionResponse) {
+            userPrompt += (userPrompt ? ' ' : '') + p.text;
+          }
+        }
+      } else if (msg.role === 'model') {
+        for (const p of msg.parts || []) {
+          if (p.text) {
+            assistantThoughts.push(p.text);
+          }
+          if (p.functionCall) {
+            if (p.functionCall.name) {
+              toolsUsed.push(p.functionCall.name);
+            }
+            const args = p.functionCall.args as Record<string, any> | undefined;
+            const pathArg = args?.path || args?.filePath || args?.targetFile;
+            if (pathArg && typeof pathArg === 'string') {
+              filesTouched.push(pathArg);
+            }
+          }
+        }
+      }
+    }
+
+    const uniqueFiles = Array.from(new Set(filesTouched));
+    const uniqueTools = Array.from(new Set(toolsUsed));
+    const summaryText = assistantThoughts.slice(-1)[0]
+      || (uniqueTools.length > 0 ? `Đã thực thi công cụ: ${uniqueTools.join(', ')}` : 'Đã hoàn tất bước trao đổi.');
+
+    const doc: ArchivedTurnDocument = {
+      id: `archived-turn-${turnNum}-${Date.now().toString(36)}`,
+      turnNumber: turnNum,
+      userPrompt: userPrompt.trim() || `Yêu cầu turn #${turnNum}`,
+      assistantSummary: summaryText.trim(),
+      toolsUsed: uniqueTools,
+      filesTouched: uniqueFiles,
+      keyDecisions,
+      timestamp: new Date().toISOString(),
+    };
+
+    const synopsis = `• Turn #${turnNum}: Yêu cầu: "${userPrompt.slice(0, 100)}${userPrompt.length > 100 ? '...' : ''}" ➔ Kết quả: ${summaryText.slice(0, 120)}${summaryText.length > 120 ? '...' : ''}${uniqueFiles.length > 0 ? ` [Files: ${uniqueFiles.slice(0, 3).join(', ')}]` : ''}`;
+
+    return { synopsis, doc };
+  }
+
+  /**
+   * Áp dụng Rolling Turn Compaction:
+   * Giữ lại Turn 0 (Goal ban đầu) + N turns đối thoại gần nhất (Preserved Tail Window).
+   * Các turn cũ nằm ở giữa được tóm tắt thành Synopsis và chuyển vào kho lưu trữ (Archived Turns).
+   */
+  private applyRollingTurnCompaction(
+    messages: SessionMessage[],
+    preserveLastNTurns: number
+  ): { messages: SessionMessage[]; archivedTurns: ArchivedTurnDocument[]; prunedTurnsCount: number } {
+    const userTurnIndices: number[] = [];
+    messages.forEach((msg, idx) => {
+      if (msg.role === 'user' && !msg.parts?.some((p) => p.functionResponse)) {
+        userTurnIndices.push(idx);
+      }
+    });
+
+    // Cần ít nhất preserveLastNTurns + 2 turns (Turn 0 + các turns cũ + các turns được giữ lại)
+    if (userTurnIndices.length <= preserveLastNTurns + 1) {
+      return { messages, archivedTurns: [], prunedTurnsCount: 0 };
+    }
+
+    // Turn 0 luôn được giữ nguyên (từ đầu đến trước turn 1 của user)
+    const turn0EndIndex = userTurnIndices[1];
+    const turn0Messages = messages.slice(0, turn0EndIndex);
+
+    // Điểm bắt đầu của cửa sổ trượt (các turn được bảo toàn ở đuôi)
+    const cutoffTurnIdx = userTurnIndices[userTurnIndices.length - preserveLastNTurns];
+    const preservedTailMessages = messages.slice(cutoffTurnIdx);
+
+    // Các turn cũ cần được thu gọn thành tóm tắt
+    const archivedTurns: ArchivedTurnDocument[] = [];
+    const synopsisLines: string[] = [];
+
+    const oldUserTurnIndices = userTurnIndices.slice(1, userTurnIndices.length - preserveLastNTurns);
+    for (let i = 0; i < oldUserTurnIndices.length; i++) {
+      const startIdx = oldUserTurnIndices[i];
+      const endIdx = (i + 1 < oldUserTurnIndices.length)
+        ? oldUserTurnIndices[i + 1]
+        : cutoffTurnIdx;
+      const singleTurnMessages = messages.slice(startIdx, endIdx);
+      const turnNum = i + 1;
+      const { synopsis, doc } = this.extractTurnSynopsis(singleTurnMessages, turnNum);
+      archivedTurns.push(doc);
+      synopsisLines.push(synopsis);
+    }
+
+    const rollingSynopsisMessage: SessionMessage = {
+      role: 'user',
+      parts: [{
+        text: `[ROLLING DIALOGUE SYNOPSIS - TURNS 1 to ${oldUserTurnIndices.length} ARCHIVED]:\n` +
+          `> Ngữ cảnh các lượt trao đổi cũ đã được nén vào kho lưu trữ tập (Archived Turns Memory):\n` +
+          synopsisLines.join('\n') +
+          `\n> (Hệ thống sẽ tự động re-inject thông tin chi tiết nếu người dùng đề cập đến các bước trên)`
+      }]
+    };
+
+    const newMessages: SessionMessage[] = [
+      ...turn0Messages,
+      rollingSynopsisMessage,
+      ...preservedTailMessages,
+    ];
+
+    // Xác nhận tính toàn vẹn cặp gọi tool sau khi loại bỏ turn cũ
+    assertHistoryToolPairing(newMessages);
+
+    return {
+      messages: newMessages,
+      archivedTurns,
+      prunedTurnsCount: oldUserTurnIndices.length,
+    };
   }
 
   /**
@@ -95,10 +247,12 @@ export class ContextCompactor {
     assertHistoryToolPairing(messages);
     let compactedLength = 0;
     let prunedPartsCount = 0;
+    let prunedTurnsCount = 0;
+    let archivedTurns: ArchivedTurnDocument[] = [];
 
     // 1. Tính tổng dung lượng ban đầu qua O(1) WeakMap cache
     const originalLength = getHistoryTotalChars(messages);
-    const originalTokens = ContextCompactor.estimateTokens(originalLength);
+    const originalTokens = ContextCompactor.estimateTokens(originalLength, options?.modelName);
     const requestOverheadTokens = Math.max(0, options?.requestOverheadTokens || 0);
     const outputReserveTokens = Math.max(0, options?.outputReserveTokens || 0);
     const triggerRatio = Math.min(1, Math.max(0.5, options?.triggerRatio ?? 1));
@@ -119,16 +273,30 @@ export class ContextCompactor {
           compactedLength: originalLength,
           charsSaved: 0,
           prunedPartsCount: 0,
+          prunedTurnsCount: 0,
           requestOverheadTokens,
           outputReserveTokens,
           effectiveHistoryBudgetTokens,
+          archivedTurns: [],
         },
       };
     }
 
+    // 1.5. Kỹ thuật Rolling Turn Compaction: Thu gọn các cặp Turn (User - Assistant) quá cũ theo cửa sổ trượt
+    let workingMessages = messages;
+    const shouldRunRollingTurns = options?.enableRollingTurns ?? this.config.enableRollingTurnCompaction;
+    const preserveTurns = options?.preserveLastNTurns ?? this.config.preserveLastNTurns;
+
+    if (shouldRunRollingTurns && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
+      const rollingResult = this.applyRollingTurnCompaction(messages, preserveTurns);
+      workingMessages = rollingResult.messages;
+      archivedTurns = rollingResult.archivedTurns;
+      prunedTurnsCount = rollingResult.prunedTurnsCount;
+    }
+
     // 2. Tìm các index của tool responses gần nhất
     const toolResultIndices: number[] = [];
-    messages.forEach((msg, idx) => {
+    workingMessages.forEach((msg, idx) => {
       if (msg.parts?.some((p) => p.functionResponse)) {
         toolResultIndices.push(idx);
       }
@@ -139,7 +307,7 @@ export class ContextCompactor {
       : -1;
 
     // 3. Tiến hành Selective Sliding Window Pruning
-    const compactedMessages: SessionMessage[] = messages.map((msg, msgIdx) => {
+    const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
       const isOldToolResult = cutoffIndex >= 0 && msgIdx < cutoffIndex && msg.parts?.some((p) => p.functionResponse);
 
       if (!isOldToolResult) {
@@ -260,9 +428,11 @@ export class ContextCompactor {
       compactedLength,
       charsSaved,
       prunedPartsCount,
+      prunedTurnsCount,
       requestOverheadTokens,
       outputReserveTokens,
       effectiveHistoryBudgetTokens,
+      archivedTurns,
     };
 
     assertHistoryToolPairing(compactedMessages);

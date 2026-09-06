@@ -9,7 +9,7 @@ import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
-import { ContextGuardian, ContextAgent } from '../context/index.js';
+import { ContextGuardian, ContextAgent, TurnMemoryRetriever } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -97,6 +97,7 @@ export class AgentLoop {
   readonly contextCompactor: ContextCompactor;
   readonly contextGuardian: ContextGuardian;
   readonly contextAgent: ContextAgent;
+  readonly turnMemoryRetriever: TurnMemoryRetriever;
   readonly planManager: PlanManager;
   readonly goalManager: GoalManager;
   readonly agentHooks: AgentHookRegistry;
@@ -202,6 +203,8 @@ export class AgentLoop {
       this.contextSnapshotManager.init().catch(() => { });
       this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
       this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
+      this.turnMemoryRetriever = new TurnMemoryRetriever(this._workspace.rootDir);
+      this.turnMemoryRetriever.init().catch(() => { });
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
@@ -217,6 +220,8 @@ export class AgentLoop {
       this.contextCompactor = options?.contextCompactor ?? new ContextCompactor();
       this.contextGuardian = options?.contextGuardian ?? new ContextGuardian(this._workspace.rootDir);
       this.contextAgent = options?.contextAgent ?? new ContextAgent(this._workspace.rootDir);
+      this.turnMemoryRetriever = new TurnMemoryRetriever(this._workspace.rootDir);
+      this.turnMemoryRetriever.init().catch(() => { });
       this.planManager = new PlanManager();
       this.goalManager = new GoalManager();
       this.agentHooks = new AgentHookRegistry();
@@ -801,10 +806,19 @@ export class AgentLoop {
           });
         } catch {}
 
+        const activeModelName = this.llm?.getActiveProvider?.()?.name
+          || this.llm?.modelName
+          || this.llm?.constructor?.name
+          || 'unknown';
+
         const compactRes = this.contextCompactor.compact(currentHistory, {
           triggerRatio: 0.70,
+          modelName: activeModelName,
         });
         if (compactRes.stats.tokensSaved > 0) {
+          if (compactRes.stats.archivedTurns && compactRes.stats.archivedTurns.length > 0) {
+            await this.turnMemoryRetriever.archiveTurns(compactRes.stats.archivedTurns).catch(() => {});
+          }
           session.replaceHistory(compactRes.messages, 'auto-compaction');
           CLI.renderAutoCompactionNotice(compactRes.stats.tokensSaved, compactRes.stats.compactedTokens);
           await this.persistSession(session);
@@ -1059,7 +1073,19 @@ export class AgentLoop {
           });
         }
       }
-      let dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
+      // Selective Re-injection: Truy hồi các turn cũ nếu có độ tương đồng cao với query bước hiện tại
+      let recalledTurnContext = '';
+      if (this.turnMemoryRetriever.getArchivedTurnCount() > 0) {
+        try {
+          recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
+            topK: 2,
+            minScore: 0.55,
+          });
+        } catch {
+          // Fail-open
+        }
+      }
+      let dynamicExecutionContext = [memoryPrompt, repositoryMemoryContext, recalledTurnContext, rawPlanContext, composeContext, repositoryContext, advicePrompt].filter(Boolean).join('\n\n');
       const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
         ? (this.llm.getTokenConfig() || {})
         : {};
@@ -1105,8 +1131,12 @@ export class AgentLoop {
         triggerRatio: this.loopOptions?.requestCompactionRatio
           ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
           ?? 0.82,
+        modelName: activeModelName,
       });
       if (compactionResult.stats.charsSaved > 0) {
+        if (compactionResult.stats.archivedTurns && compactionResult.stats.archivedTurns.length > 0) {
+          await this.turnMemoryRetriever.archiveTurns(compactionResult.stats.archivedTurns).catch(() => {});
+        }
         session.setHistory(compactionResult.messages);
         await this.persistSession(session);
         requestFootprint = this.latencyOrchestrator.estimateRequest({

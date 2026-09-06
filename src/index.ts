@@ -563,6 +563,15 @@ async function main() {
     activeSessionId: activeSession.id,
   });
 
+  // Tự động dọn dẹp các session cũ quá 2 tuần trong các workspace (chạy ngầm không chặn luồng chính)
+  const candidateWorkspaces = [workspace.rootDir];
+  if (globalSavedSession.workspacePath && globalSavedSession.workspacePath !== workspace.rootDir) {
+    candidateWorkspaces.push(globalSavedSession.workspacePath);
+  }
+  SessionPersistence.pruneWorkspaces(candidateWorkspaces, {
+    activeSessionId: activeSession.id,
+  }).catch(() => {});
+
   const kernel = new AgentKernel(workspace, llm);
   await kernel.use(WorkspacePlugin);
   await kernel.use(PlanningPlugin);

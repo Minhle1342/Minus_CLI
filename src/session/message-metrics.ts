@@ -1,8 +1,10 @@
 import type { Content } from '@google/genai';
 import { nativeFastHistoryStats } from '../native/index.js';
+import { ExactTokenizer } from '../agent/exact-tokenizer.js';
 
 const partCharLengthCache = new WeakMap<object, number>();
 const messageCharLengthCache = new WeakMap<object, number>();
+const messageTokenLengthCache = new WeakMap<object, number>();
 
 /**
  * Lấy độ dài ký tự của một ContentPart với bộ đệm WeakMap O(1) zero-leak
@@ -72,10 +74,45 @@ export function estimateTokensFromChars(totalChars: number): number {
 }
 
 /**
- * Ước lượng tokens của toàn bộ lịch sử
+ * Ước lượng tokens của toàn bộ lịch sử (Heuristic fallback)
  */
 export function estimateHistoryTokens(messages: Content[]): number {
   return estimateTokensFromChars(getHistoryTotalChars(messages));
+}
+
+/**
+ * Đếm chính xác token cho một Message bằng ExactTokenizer có bộ đệm WeakMap
+ */
+export function getExactMessageTokens(message: Content, modelFamily?: string): number {
+  if (!message || typeof message !== 'object') return 0;
+  const cached = messageTokenLengthCache.get(message);
+  if (cached !== undefined) return cached;
+
+  let total = 0;
+  for (const part of message.parts || []) {
+    if (!part || typeof part !== 'object') continue;
+    if (typeof (part as any).text === 'string') {
+      total += ExactTokenizer.countTokens((part as any).text, modelFamily);
+    } else if ((part as any).functionResponse) {
+      total += ExactTokenizer.countTokens(JSON.stringify((part as any).functionResponse), modelFamily);
+    } else if ((part as any).functionCall) {
+      total += ExactTokenizer.countTokens(JSON.stringify((part as any).functionCall), modelFamily);
+    }
+  }
+
+  messageTokenLengthCache.set(message, total);
+  return total;
+}
+
+/**
+ * Ước lượng token chính xác cho toàn bộ lịch sử hội thoại bằng ExactTokenizer
+ */
+export function estimateExactHistoryTokens(messages: Content[], modelFamily?: string): number {
+  let total = 0;
+  for (const msg of messages) {
+    total += getExactMessageTokens(msg, modelFamily);
+  }
+  return total;
 }
 
 /**

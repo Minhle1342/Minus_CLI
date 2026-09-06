@@ -2,6 +2,7 @@ import type { Content, FunctionDeclaration } from '@google/genai';
 import type { TaskPhase } from '../control/classification-types.js';
 import type { TokenConfig } from '../llm/token-config.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
+import { ExactTokenizer } from './exact-tokenizer.js';
 
 export type ModelLatencyTier = 'fast' | 'standard' | 'deep-reasoning';
 
@@ -120,9 +121,9 @@ export class LatencyOrchestrator {
     maxOutputTokens?: number;
   }): RequestFootprint {
     const historyTokens = estimateTokensFromCharacters(getHistoryTotalChars(input.history));
-    const systemPromptTokens = estimateTokensFromCharacters(input.systemPrompt.length);
+    const systemPromptTokens = input.systemPrompt ? ExactTokenizer.countTokens(input.systemPrompt) : 0;
     const toolSchemaTokens = getToolSchemaTokens(input.tools);
-    const dynamicContextTokens = estimateTokensFromCharacters(input.dynamicContext?.length || 0);
+    const dynamicContextTokens = input.dynamicContext ? ExactTokenizer.countTokens(input.dynamicContext) : 0;
     const nonHistoryTokens = systemPromptTokens + toolSchemaTokens + dynamicContextTokens;
     const outputReserveTokens = Math.max(0, input.maxOutputTokens || 0);
     const contextWindow = Math.max(1, input.maxInputTokens || 32_000);

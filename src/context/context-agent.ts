@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Session, SessionMessage } from '../session/session.js';
+import { SessionPersistence } from '../session/session-persistence.js';
 
 export interface SessionSummaryData {
   sessionId: string;
@@ -25,6 +26,7 @@ export interface MaintenanceReport {
   activeContextLinesCount: number;
   activeContextTrimmed: boolean;
   projectRegistryUpdated: boolean;
+  expiredSessionsDeletedCount?: number;
 }
 
 /**
@@ -317,11 +319,33 @@ export class ContextAgent {
       }
     } catch {}
 
+    // Dọn dẹp tự động các session quá hạn (trên 2 tuần = 14 ngày)
+    let expiredSessionsDeletedCount = 0;
+    try {
+      const persistence = new SessionPersistence(this.workspaceDir);
+      const pruneRes = await persistence.pruneExpiredSessions();
+      expiredSessionsDeletedCount = pruneRes.deletedCount;
+
+      // Xóa các file session markdown lưu trữ cũ hơn 2 tuần
+      const twoWeeksMs = 14 * 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - twoWeeksMs;
+      const archivedFiles = await fs.readdir(this.archiveDir).catch(() => []);
+      for (const file of archivedFiles) {
+        const filePath = path.join(this.archiveDir, file);
+        const stat = await fs.stat(filePath).catch(() => null);
+        if (stat && stat.mtimeMs < cutoff) {
+          await fs.unlink(filePath).catch(() => {});
+          expiredSessionsDeletedCount++;
+        }
+      }
+    } catch {}
+
     return {
       archivedSessionsCount: archivedCount,
       activeContextLinesCount,
       activeContextTrimmed,
       projectRegistryUpdated: true,
+      expiredSessionsDeletedCount,
     };
   }
 

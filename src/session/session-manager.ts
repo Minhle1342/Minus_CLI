@@ -1,5 +1,5 @@
 import { Session } from './session.js';
-import { SessionPersistence } from './session-persistence.js';
+import { SessionPersistence, type SessionPruneOptions, type SessionPruneResult } from './session-persistence.js';
 
 /**
  * Session capability exposed to the Kernel.
@@ -67,5 +67,16 @@ export class SessionManager {
   setWorkspace(workspaceDir: string): void {
     this.persistence = new SessionPersistence(workspaceDir);
     this.sessions.clear();
+  }
+
+  /**
+   * Tự động dọn dẹp các session cũ quá 2 tuần trong workspace
+   */
+  async pruneExpiredSessions(options?: SessionPruneOptions): Promise<SessionPruneResult> {
+    const result = await this.persistence.pruneExpiredSessions(options);
+    for (const id of result.deletedSessionIds) {
+      this.sessions.delete(id);
+    }
+    return result;
   }
 }

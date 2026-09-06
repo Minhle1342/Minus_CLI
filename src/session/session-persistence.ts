@@ -9,9 +9,27 @@ interface SessionFileHeader {
   createdAt: string;
 }
 
-interface PersistedSessionState {
+export interface PersistedSessionState {
   persistedSeq: number;
   fileSize: number;
+}
+
+export interface SessionPruneOptions {
+  /** Thời hạn tối đa tính bằng milliseconds (mặc định: 14 ngày = 2 tuần) */
+  maxAgeMs?: number;
+  /** Session ID đang hoạt động cần được bảo vệ không xóa */
+  activeSessionId?: string;
+  /** Chế độ chạy thử, không thực sự xóa file */
+  dryRun?: boolean;
+}
+
+export interface SessionPruneResult {
+  workspaceDir: string;
+  deletedCount: number;
+  deletedSessionIds: string[];
+  preservedCount: number;
+  preservedSessionIds: string[];
+  totalScanned: number;
 }
 
 /**
@@ -22,6 +40,9 @@ interface PersistedSessionState {
  * flushed to disk.
  */
 export class SessionPersistence {
+  /** Thời hạn lưu trữ mặc định: 2 tuần (14 ngày) */
+  static readonly DEFAULT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
   readonly sessionsDir: string;
   private saveQueues = new Map<string, Promise<void>>();
   private persistedState = new Map<string, PersistedSessionState>();
@@ -244,6 +265,104 @@ export class SessionPersistence {
       this.persistedState.delete(sessionId);
       return false;
     }
+  }
+
+  /**
+   * Tự động dọn dẹp các session cũ hơn thời hạn quy định (mặc định 2 tuần = 14 ngày)
+   */
+  async pruneExpiredSessions(options?: SessionPruneOptions): Promise<SessionPruneResult> {
+    const maxAgeMs = options?.maxAgeMs ?? SessionPersistence.DEFAULT_RETENTION_MS;
+    const cutoffTime = Date.now() - maxAgeMs;
+    const activeSessionId = options?.activeSessionId;
+    const workspaceDir = path.dirname(path.dirname(this.sessionsDir));
+
+    const result: SessionPruneResult = {
+      workspaceDir,
+      deletedCount: 0,
+      deletedSessionIds: [],
+      preservedCount: 0,
+      preservedSessionIds: [],
+      totalScanned: 0,
+    };
+
+    const sessionIds = await this.list();
+    result.totalScanned = sessionIds.length;
+
+    for (const sessionId of sessionIds) {
+      // 1. Bảo vệ tuyệt đối session đang hoạt động
+      if (activeSessionId && sessionId === activeSessionId) {
+        result.preservedCount++;
+        result.preservedSessionIds.push(sessionId);
+        continue;
+      }
+
+      const filePath = this.getSessionPath(sessionId);
+      let sessionTime = 0;
+
+      try {
+        const stat = await fs.stat(filePath);
+        sessionTime = stat.mtimeMs;
+
+        // Đọc header hoặc sự kiện cuối cùng để xác định mốc hoạt động thực tế
+        const parsed = await this.readFile(filePath);
+        if (parsed) {
+          const lastEventTime = parsed.events.at(-1)?.createdAt
+            ? new Date(parsed.events.at(-1)!.createdAt).getTime()
+            : 0;
+          const headerTime = parsed.header.createdAt
+            ? new Date(parsed.header.createdAt).getTime()
+            : 0;
+          sessionTime = Math.max(sessionTime, lastEventTime, headerTime);
+        }
+      } catch {
+        // Nếu không đọc được stat, bảo toàn để tránh mất mát ngoài ý muốn
+        result.preservedCount++;
+        result.preservedSessionIds.push(sessionId);
+        continue;
+      }
+
+      // 2. Kiểm tra nếu thời gian hoạt động cuối cùng cũ hơn 2 tuần
+      if (sessionTime > 0 && sessionTime < cutoffTime) {
+        if (!options?.dryRun) {
+          const removed = await this.remove(sessionId);
+          if (removed) {
+            result.deletedCount++;
+            result.deletedSessionIds.push(sessionId);
+          } else {
+            result.preservedCount++;
+            result.preservedSessionIds.push(sessionId);
+          }
+        } else {
+          result.deletedCount++;
+          result.deletedSessionIds.push(sessionId);
+        }
+      } else {
+        result.preservedCount++;
+        result.preservedSessionIds.push(sessionId);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Quét và dọn dẹp các session quá hạn (trên 2 tuần) trên nhiều workspace
+   */
+  static async pruneWorkspaces(
+    workspaceDirs: string[],
+    options?: SessionPruneOptions
+  ): Promise<SessionPruneResult[]> {
+    const results: SessionPruneResult[] = [];
+    for (const dir of workspaceDirs) {
+      try {
+        const persistence = new SessionPersistence(dir);
+        const res = await persistence.pruneExpiredSessions(options);
+        results.push(res);
+      } catch {
+        // Bỏ qua nếu thư mục workspace không hợp lệ
+      }
+    }
+    return results;
   }
 
   private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[]; fileSize: number } | undefined> {
