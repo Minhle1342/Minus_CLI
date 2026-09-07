@@ -802,12 +802,14 @@ export class AgentLoop {
         this.goalManager.disarm();
         return rejectionMessage;
       }
-      // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - context-management-context-save)
+      // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - Phase 2 Hierarchical Token Pruning)
       const currentHistory = session.getHistory();
       const totalHistoryChars = getHistoryTotalChars(currentHistory);
       const estimatedHistoryTokens = ContextCompactor.estimateTokens(totalHistoryChars);
       const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
-      const compactionThreshold = maxBudget * 0.70;
+      // Phase 2: Hierarchical Working-Memory Budget - giới hạn working history tối đa 24K tokens để kích hoạt nén sớm
+      const workingHistoryBudget = Math.min(maxBudget, 24000);
+      const compactionThreshold = workingHistoryBudget * 0.70;
 
       if (estimatedHistoryTokens > compactionThreshold && currentHistory.length > 4) {
         // Context Guardian: Bảo vệ toàn vẹn ngữ cảnh trước khi nén (Pre-Compaction Zero Loss)
@@ -829,6 +831,7 @@ export class AgentLoop {
 
         const compactRes = this.contextCompactor.compact(currentHistory, {
           triggerRatio: 0.70,
+          force: true,
           modelName: activeModelName,
         });
         if (compactRes.stats.tokensSaved > 0) {
@@ -960,7 +963,7 @@ export class AgentLoop {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
 
-      // Pre-Call Predictive Guardrails (Phase 1):
+      // Pre-Call Predictive Guardrails (Phase 1/2):
       // Khi đã có verification thành công sau mutation, ẩn các tool chỉnh sửa code để tránh redundant mutations
       const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
         && hasFileMutationsInSession
@@ -1162,6 +1165,8 @@ export class AgentLoop {
         hasValidatedHypothesis: (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) > 0,
       });
 
+      // Phase 2: Hierarchical Dynamic Context Budgeting (Giảm token bloat của stepDynamicSuffixes)
+      const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
       const arbitration = this.dynamicContextArbiter.arbitrate({
         advicePrompt,
         phaseGuidance,
@@ -1171,7 +1176,10 @@ export class AgentLoop {
         composeContext,
         repositoryMemoryContext,
         repositoryContext,
-      }, activeModelName);
+      }, {
+        maxBudgetTokens: dynamicBudgetTokens,
+        modelName: activeModelName,
+      });
       let dynamicExecutionContext = arbitration.renderedContext;
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
@@ -1210,12 +1218,14 @@ export class AgentLoop {
 
       // Budget the complete model-visible request, not history alone. This is
       // proactive compaction at a safe provider-turn boundary, not a timeout.
+      const isHistoryExceeded = ContextCompactor.estimateTokens(getHistoryTotalChars(session.getHistory())) > workingHistoryBudget * 0.75;
       const compactionResult = this.contextCompactor.compact(session.getHistory(), {
         requestOverheadTokens: requestFootprint.nonHistoryTokens,
         outputReserveTokens: requestFootprint.outputReserveTokens,
+        force: isHistoryExceeded,
         triggerRatio: this.loopOptions?.requestCompactionRatio
           ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
-          ?? 0.82,
+          ?? (maxBudget > 32_000 ? (18_000 / maxBudget) : 0.82),
         modelName: activeModelName,
       });
       if (compactionResult.stats.charsSaved > 0) {
@@ -1660,6 +1670,7 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('tool:error', toolName, invalidResult);
             continue;
           }
+
 
           const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
             write_file: { reversible: true, checkpoint: true },

@@ -102,8 +102,7 @@ export class DynamicContextArbiter {
         name: 'Active Plan DAG (P2)',
         content: (inputs.rawPlanContext || '').trim(),
         priority: 2,
-        allowTruncation: true,
-        minPreserveLines: 3,
+        allowTruncation: false, // P2 chứa Acceptance Criteria quan trọng của task, không bị cắt tỉa
       },
       {
         key: 'recalledTurnContext',

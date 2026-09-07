@@ -348,12 +348,14 @@ export class ContextCompactor {
               hint: '[Nội dung đã được nén thành Outline ngữ nghĩa. Dùng read_file với startLine/endLine nếu cần xem chi tiết]',
             };
           }
-          // Case B: Log chạy lệnh dài -> Giữ Header + Tail của Stack Trace
+          // Case B: Log chạy lệnh dài -> Giữ Header + Tail của Stack Trace (Phase 2 Hierarchical Pruning)
           else if (r.stdout !== undefined || r.stderr !== undefined) {
             const rawLog = String(r.stderr || r.stdout || '').trim();
             const logLines = rawLog.split('\n');
             let logTail = rawLog;
-            if (logLines.length > 12) {
+            if (r.exitCode === 0 && logLines.length > 6) {
+              logTail = logLines.slice(0, 2).join('\n') + '\n... [Command/Test thành công: đã ẩn ' + (logLines.length - 4) + ' dòng log] ...\n' + logLines.slice(-2).join('\n');
+            } else if (logLines.length > 12) {
               logTail = logLines.slice(0, 3).join('\n') + '\n... [Cắt ' + (logLines.length - 8) + ' dòng log] ...\n' + logLines.slice(-5).join('\n');
             } else if (rawLog.length > this.config.maxCharactersPerToolResult) {
               logTail = rawLog.slice(0, 150) + '\n... [Cắt ' + (rawLog.length - 300) + ' ký tự] ...\n' + rawLog.slice(-150);
