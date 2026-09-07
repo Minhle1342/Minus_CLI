@@ -53,6 +53,12 @@ export class CognitiveHarness {
       || lowerReq.includes('hardcode')
       || lowerReq.includes('asap')
       || lowerReq.includes('urgently')
+      || lowerReq.includes('không cần tốn thời gian')
+      || lowerReq.includes('không cần đọc file')
+      || lowerReq.includes('không cần chạy')
+      || lowerReq.includes('xác nhận giúp tôi')
+      || lowerReq.includes('sycophancy')
+      || lowerReq.includes('gấp để release')
     );
 
     const isCodingTask = (

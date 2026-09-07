@@ -2,14 +2,15 @@
  * Kiểu dữ liệu chuẩn cho Evaluation & Benchmarking Pipeline của Coding Agent
  */
 
-export type TaskDifficulty = 'easy' | 'medium' | 'hard';
+export type TaskDifficulty = 'easy' | 'medium' | 'hard' | 'extreme';
 
 export type BenchmarkTaskCategory =
   | 'bugfix'
   | 'feature'
   | 'refactor'
   | 'resilience'
-  | 'security';
+  | 'security'
+  | 'hallucination';
 
 export interface BenchmarkTaskFile {
   path: string;
