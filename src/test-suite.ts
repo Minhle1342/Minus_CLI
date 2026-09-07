@@ -6839,6 +6839,41 @@ Always write tests first!`;
   const allowRefactor = await adaptiveRunner.run('write_file', { path: 'src/utils.ts', content: 'refactored code' });
   assert(allowRefactor.result.success === true, 'Tác vụ refactor không bị chặn bởi cổng kiểm chứng lỗi');
 
+  // 40.8. Kiểm thử Post-Submission Tool Locking & Playbook (Khắc phục triệt để lỗ hổng sau submit_solution)
+  console.log('\n--- 40.8. Post-Submission Tool Locking & Playbook Guidance ---');
+  const postSubmitAdvisor = new ToolSynergyAdvisor();
+
+  // Test 1: ToolSynergyAdvisor kích hoạt Playbook POST_SUBMISSION khi vừa gọi submit_solution
+  const adviceSubmit = postSubmitAdvisor.advise({ lastToolName: 'submit_solution' });
+  assert(adviceSubmit.playbook === 'POST_SUBMISSION', 'ToolSynergyAdvisor chuyển sang playbook POST_SUBMISSION khi vừa gọi submit_solution');
+  assert(adviceSubmit.suggestedTools.length === 0, 'POST_SUBMISSION không gợi ý bất kỳ công cụ nào (suggestedTools = [])');
+
+  // Test 2: ToolSynergyAdvisor giữ vững POST_SUBMISSION khi cờ hasSubmittedSolution = true
+  const adviceAfterSubmit = postSubmitAdvisor.advise({ hasSubmittedSolution: true, lastToolName: 'read_file' });
+  assert(adviceAfterSubmit.playbook === 'POST_SUBMISSION', 'ToolSynergyAdvisor duy trì POST_SUBMISSION khi hasSubmittedSolution = true');
+  assert(adviceAfterSubmit.suggestedTools.length === 0, 'POST_SUBMISSION khóa toàn bộ suggestedTools');
+
+  // Test 3: formatAdvicePrompt hiển thị rõ ràng hướng dẫn chốt Final Answer
+  const postSubmitAdvicePrompt = postSubmitAdvisor.formatAdvicePrompt({ lastToolName: 'submit_solution' });
+  assert(postSubmitAdvicePrompt.includes('[TOOL PLAYBOOK GUIDANCE - POST_SUBMISSION]'), 'formatAdvicePrompt chứa header POST_SUBMISSION');
+  assert(postSubmitAdvicePrompt.includes('(None - Conclude with Final Answer)'), 'formatAdvicePrompt hiển thị rõ ràng (None - Conclude with Final Answer)');
+
+  // Test 4: ToolUseGuardian chặn mọi tool call khi đã submit_solution (hasSubmittedSolution = true)
+  adaptiveGuardian.setPreMutationGateContext({
+    hasSubmittedSolution: true,
+    hasValidatedHypothesis: true,
+    hasPlan: true,
+  });
+  const blockedPostSubmitRead = await adaptiveRunner.run('read_file', { path: 'server.js' });
+  assert(blockedPostSubmitRead.result.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED', 'ToolUseGuardian chặn gọi read_file sau khi submit_solution thành công');
+  assert(blockedPostSubmitRead.guardianDiagnosis?.category === 'POST_SUBMISSION_TOOL_CALL_BLOCKED', 'Phân loại lỗi chuẩn POST_SUBMISSION_TOOL_CALL_BLOCKED');
+  assert(blockedPostSubmitRead.guardianDiagnosis?.isRetryable === false, 'POST_SUBMISSION_TOOL_CALL_BLOCKED không được phép retry');
+
+  // Test 5: Không gây nhiễm độc độ tin cậy của tool đọc (Zero Failure Poisoning)
+  assert(adaptiveGuardian.isToolUnreliable('read_file') === false, 'read_file KHÔNG bị dán nhãn isUnreliable sau khi bị chặn bởi Post-Submission Gate');
+  const readFileStats = adaptiveGuardian.getStats('read_file');
+  assert(readFileStats.consecutiveFailures === 0, 'consecutiveFailures của read_file vẫn bằng 0 (Zero Tool Poisoning)');
+
   // 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)
   console.log('\n========================================');
   console.log('🧪 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)');
