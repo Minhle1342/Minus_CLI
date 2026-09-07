@@ -102,7 +102,18 @@ export class ErrorDetective {
           const lines = fileContent.split(/\r?\n/);
           const lineIdx = primary.line - 1;
           if (lines[lineIdx] !== undefined) {
-            failingSourceLine = lines[lineIdx].trim();
+            const targetLine = lines[lineIdx].trim();
+            // Provide 1-2 lines before as context if they contain assignment or function call
+            if (lineIdx > 0 && lines[lineIdx - 1]?.trim()) {
+              const prevLine = lines[lineIdx - 1].trim();
+              if (prevLine.includes('=') || prevLine.includes('(') || prevLine.includes('const') || prevLine.includes('let')) {
+                failingSourceLine = `${prevLine} \n     • Failing Assertion: ${targetLine}`;
+              } else {
+                failingSourceLine = targetLine;
+              }
+            } else {
+              failingSourceLine = targetLine;
+            }
           }
         }
       } catch {
@@ -298,10 +309,25 @@ export class ErrorDetective {
     const assertMatch = /AssertionError(?:\s*\[[^\]]+\])?:\s*([^\n]+)/.exec(text);
     if (assertMatch && results.length === 0) {
       const fileMatch = /at\s+.*?(?:file:\/\/\/?)?([a-zA-Z]:[^\s)]+|[a-zA-Z0-9_\-\/\.\\]+\.[jt]sx?):(\d+):(\d+)/.exec(text);
+      let message = assertMatch[1].trim();
+
+      // Extract specific inequality if message is generic "Expected values to be strictly equal:"
+      const inequalityMatch = /(?:Expected values to be strictly equal:[\s\r\n]+)([^\r\n]+)/.exec(text);
+      if (inequalityMatch && inequalityMatch[1].trim()) {
+        message = `${message} (${inequalityMatch[1].trim()})`;
+      }
+
+      // Check for structured actual vs expected in Node.js assertion payload
+      const actualMatch = /\bactual:\s*([^\r\n,]+)/.exec(text);
+      const expectedMatch = /\bexpected:\s*([^\r\n,]+)/.exec(text);
+      if (actualMatch && expectedMatch) {
+        message += ` [Expected: ${expectedMatch[1].trim()}, Actual: ${actualMatch[1].trim()}]`;
+      }
+
       results.push({
         language: 'javascript',
         errorType: 'AssertionError',
-        message: assertMatch[1].trim(),
+        message,
         file: fileMatch ? normalizeFilePath(fileMatch[1]) : undefined,
         line: fileMatch ? parseInt(fileMatch[2], 10) : undefined,
         column: fileMatch ? parseInt(fileMatch[3], 10) : undefined,

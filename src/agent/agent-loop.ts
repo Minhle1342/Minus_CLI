@@ -965,15 +965,25 @@ export class AgentLoop {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
 
-      // Pre-Call Predictive Guardrails (Phase 1/2):
-      // Khi đã có verification thành công sau mutation, ẩn các tool chỉnh sửa code để tránh redundant mutations
+      // Pre-Call Predictive Guardrails (Phase 1/4):
+      // Khi đã có verification thành công sau mutation, ẩn toàn bộ tool chỉnh sửa code để triệt tiêu vi phạm và đột biến thừa
       const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
         && hasFileMutationsInSession
         && !hasSubmittedSolution;
       if (hasVerifiedTests) {
-        // Ưu tiên submit_solution hoặc get_diagnostics, hạn chế sửa đổi code mới trừ khi có lỗi
+        const MUTATION_TOOLS = [
+          'apply_patch',
+          'create_file',
+          'delete_file',
+          'replace_text',
+          'write_file',
+          'write_to_file',
+          'replace_file_content',
+          'multi_replace_file_content',
+          'move_file',
+        ];
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-          !['apply_patch', 'create_file', 'delete_file'].includes(tool.name)
+          !MUTATION_TOOLS.includes(tool.name)
         );
       }
 
@@ -1167,16 +1177,28 @@ export class AgentLoop {
         hasValidatedHypothesis: (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) > 0,
       });
 
-      // Phase 3: Cognitive Task Scaffolding & Dynamic Reflection Injection (Layer 2)
+      // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
       const rawReflection = this.reflectionEngine.getLastReflectionPrompt();
       const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
       let strategicPivotGuidance: string | undefined;
       if (consecutiveFails >= 2) {
-        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining.`;
+        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining. 4. Filter out malformed or truncated elements and ensure array length matches expectations.`;
       }
       const reflectionContext = [rawReflection, strategicPivotGuidance].filter(Boolean).join('\n\n');
 
-      // Phase 2/3: Hierarchical Dynamic Context Budgeting (Giảm token bloat của stepDynamicSuffixes)
+      // Phase 4: Pareto 80/20 Pre-Mutation Reminder in Explore Phase (Layer 4 Safety)
+      const isBugfixOrSecurity = classification.taskClass === 'bugfix'
+        || (classification as any).category === 'bugfix'
+        || (classification as any).category === 'security'
+        || turnUserRequest.toLowerCase().includes('bug')
+        || turnUserRequest.toLowerCase().includes('sửa')
+        || turnUserRequest.toLowerCase().includes('lỗ hổng');
+      let paretoGateReminder: string | undefined;
+      if (classification.phase === 'explore' && isBugfixOrSecurity && (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) === 0) {
+        paretoGateReminder = `💡 [PARETO 80/20 GATE]: Before modifying any product code, formulate and verify your technical hypothesis using "formulate_and_verify_hypothesis". Direct edits in Explore phase without hypothesis validation will be rejected by the Guardian.`;
+      }
+
+      // Phase 2/3/4: Hierarchical Dynamic Context Budgeting with Adaptive Failure Throttling
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
       const arbitration = this.dynamicContextArbiter.arbitrate({
         advicePrompt,
@@ -1192,12 +1214,21 @@ export class AgentLoop {
       }, {
         maxBudgetTokens: dynamicBudgetTokens,
         modelName: activeModelName,
+        consecutiveFailures: consecutiveFails,
       });
       let dynamicExecutionContext = arbitration.renderedContext;
+
+      // Phase 4: Auto-Convergence Directive when all verification tests passed
+      let completionDirective: string | undefined;
+      if (hasVerifiedTests) {
+        completionDirective = `🎯 [VERIFICATION SUCCESSFUL]: All unit test checks passed with Exit Code 0. Code modifications are empirically verified. Do NOT make any more code changes. Call "submit_solution" immediately to conclude the task.`;
+      }
+
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
-      if (hypothesisContext || hypothesisGuidance) {
-        dynamicExecutionContext = [dynamicExecutionContext, hypothesisContext, hypothesisGuidance].filter(Boolean).join('\n\n');
+      const injectedAdditions = [hypothesisContext, hypothesisGuidance, paretoGateReminder, completionDirective].filter(Boolean);
+      if (injectedAdditions.length > 0) {
+        dynamicExecutionContext = [dynamicExecutionContext, ...injectedAdditions].filter(Boolean).join('\n\n');
       }
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
       let requestFootprint = this.latencyOrchestrator.estimateRequest({

@@ -30,6 +30,8 @@ export interface DynamicContextArbiterOptions {
   modelName?: string;
   /** Khử trùng lặp chéo giữa các tầng trí nhớ (mặc định: true) */
   enableDeduplication?: boolean;
+  /** Số lần thất bại liên tiếp của lượt chạy hiện tại để điều tiết ngân sách động */
+  consecutiveFailures?: number;
 }
 
 export interface DynamicContextArbiterResult {
@@ -163,6 +165,17 @@ export class DynamicContextArbiter {
         minPreserveLines: 2,
       },
     ];
+
+    // Phase 4 Adaptive Failure Budgeting: Khi có lỗi liên tiếp, dọn dẹp các nguồn nền để LLM tập trung vào lỗi
+    const isUnderFailurePressure = Boolean(optObj?.consecutiveFailures && optObj.consecutiveFailures >= 2);
+    if (isUnderFailurePressure) {
+      for (const s of rawSources) {
+        if (['composeContext', 'repositoryMemoryContext', 'repositoryContext'].includes(s.key)) {
+          s.minPreserveLines = 0;
+        }
+      }
+    }
+
     const rankedSources: RankedSource[] = rawSources.filter((s) => s.content.length > 0);
 
     // 2. Khử trùng lặp chéo giữa các tầng trí nhớ nếu bật

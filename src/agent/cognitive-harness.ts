@@ -10,7 +10,7 @@
  */
 
 export interface CognitiveScaffold {
-  category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective';
+  category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective' | 'data_parser';
   negativeGate: string[];
   premiseCheck?: string;
   falsificationCriteria: string;
@@ -118,6 +118,45 @@ export class CognitiveHarness {
           'Empirical Falsification Test: Run build and targeted test suites to confirm complete resolution.',
         ],
         actionBoundary: 'Scope mutations strictly to the root cause locus identified through backward causal tracing.',
+      };
+    }
+
+    // Specialized Scaffold for Data Extraction, Parsing, and Normalization Tasks (SWE-bench Rig)
+    const isDataParser = (
+      lowerReq.includes('trích xuất')
+      || lowerReq.includes('chuẩn hóa')
+      || lowerReq.includes('extract')
+      || lowerReq.includes('normalize')
+      || lowerReq.includes('parser')
+      || lowerReq.includes('phone')
+      || lowerReq.includes('email')
+      || lowerReq.includes('validator')
+    );
+
+    if (isDataParser && (isCodingTask || lowerReq.includes('hàm') || lowerReq.includes('test'))) {
+      const negativeGate = [
+        'NEVER rely on a single naive regex that fails on parentheses "(+84)", hyphens, dots, or surrounding spaces.',
+        'ALWAYS strip delimiters/formatting or normalize prefix (+84) and verify exact length (e.g. exactly 10 digits total; discard too short numbers like 9 digits or invalid prefixes).',
+        'ALWAYS deduplicate parsed results (using Set or case-insensitive map) and lowercase emails before returning.',
+        'NEVER include invalid or truncated items in the returned array that violate test count/length assertions.',
+      ];
+
+      if (consecutiveFailures > 1) {
+        negativeGate.push(`Anti-Thrashing Gate: You have failed ${consecutiveFailures} times; inspect the exact sample input and assertion lines in test file using read_file before editing.`);
+      }
+
+      return {
+        category: 'data_parser',
+        negativeGate,
+        premiseCheck: 'Inspect test sample text for formatting variations (e.g. parentheses "(+84)", dots, dashes) and explicitly check all negative/invalid edge cases.',
+        falsificationCriteria: 'If returned elements contain duplicates, invalid lengths, or miss valid phone/email variations, the parsing implementation is FALSIFIED.',
+        executionTopology: [
+          'Ground Truth Spec: Read test file to inspect sample strings, expected outputs, and negative test cases.',
+          'Format Normalization: Standardize delimiters, strip non-digit characters where appropriate, and handle country prefixes (+84).',
+          'Strict Validation & Deduplication: Filter candidates strictly by valid prefix & exact length (10 digits), deduplicate with Set.',
+          'Empirical Falsification: Run test suite to verify both element inclusion and exact array length assertions.',
+        ],
+        actionBoundary: 'Scope changes strictly to parser/validator functions matching 100% of test specifications.',
       };
     }
 

@@ -44,6 +44,15 @@ async function runCognitiveHarnessTests(): Promise<void> {
   assert(reasoningScaffold.negativeGate.some(g => g.includes('generic')), 'Chặn câu trả lời chung chung thiếu bằng chứng thực tế');
   console.log('  ✅ PASS: CognitiveHarness tạo reasoning scaffold grounded trong workspace');
 
+  // 1.4 Scaffold cho data_parser / trích xuất dữ liệu
+  const parserScaffold = harness.createScaffold({
+    request: 'Xây dựng hàm trích xuất email và chuẩn hóa số điện thoại Việt Nam',
+    phase: 'implement',
+  });
+  assert.strictEqual(parserScaffold.category, 'data_parser', 'Nhận diện tác vụ data_parser');
+  assert(parserScaffold.negativeGate.some(g => g.includes('parentheses') || g.includes('deduplicate')), 'Negative gate chặn lỗi regex và yêu cầu deduplicate');
+  console.log('  ✅ PASS: CognitiveHarness kích hoạt data_parser scaffold với tiêu chí validation nghiêm ngặt');
+
   // 2. Kiểm thử Cognitive Brake (Tự ngắt nhánh suy luận sai / Branch Pruning)
   const normalBrake = harness.evaluateCognitiveBrake({
     consecutiveFailures: 1,
