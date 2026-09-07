@@ -91,7 +91,15 @@ export class CriticGate {
     try {
       const tsService = getOrCreateTypeScriptService(workspace);
       const allDiags = tsService.getDiagnostics();
-      const tsErrors = allDiags.filter((d) => d.category === 'error');
+      const tsErrors = allDiags.filter((d) =>
+        d.category === 'error' &&
+        !d.file.startsWith('scratch') &&
+        !d.file.startsWith('temp') &&
+        !d.file.includes('/scratch/') &&
+        !d.file.includes('\\scratch\\') &&
+        !d.file.includes('/temp/') &&
+        !d.file.includes('\\temp\\')
+      );
       lspErrors.push(...tsErrors);
     } catch {
       // Ignore if workspace is not a TS project
@@ -232,7 +240,15 @@ export class CriticGate {
     try {
       const tsService = getOrCreateTypeScriptService(workspace);
       const allDiags = tsService.getDiagnostics();
-      const tsErrors = allDiags.filter((d) => d.category === 'error');
+      const tsErrors = allDiags.filter((d) =>
+        d.category === 'error' &&
+        !d.file.startsWith('scratch') &&
+        !d.file.startsWith('temp') &&
+        !d.file.includes('/scratch/') &&
+        !d.file.includes('\\scratch\\') &&
+        !d.file.includes('/temp/') &&
+        !d.file.includes('\\temp\\')
+      );
       // Tránh trùng lặp
       for (const tErr of tsErrors) {
         if (!lspErrors.some((e) => e.file === tErr.file && e.line === tErr.line && e.code === tErr.code)) {

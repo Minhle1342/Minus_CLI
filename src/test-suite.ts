@@ -182,6 +182,7 @@ import { PromptAssembler } from './llm/prompt-assembler.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
+process.env.NODE_ENV = 'test';
 
 const execFileAsync = promisify(execFile);
 
@@ -6772,6 +6773,71 @@ Always write tests first!`;
   // Kiểm tra phân loại lỗi SCHEMA_MISMATCH cho thông báo "not declared by the tool schema"
   const schemaMismatchDiag = classifyToolFailure('git_add', 'Invalid arguments for tool "git_add": $.files is not declared by the tool schema');
   assert(schemaMismatchDiag.category === 'SCHEMA_MISMATCH', 'Phân loại chính xác SCHEMA_MISMATCH cho lỗi undeclared property');
+
+  // 40.7. Cổng Pareto 80/20 Thích Ứng (Adaptive Pareto Gate & Zero Failure Poisoning)
+  const adaptiveGuardian = new ToolUseGuardian();
+  const adaptiveRegistry = new ToolRegistry();
+  adaptiveRegistry.register({
+    name: 'write_file',
+    description: 'Write file content',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        path: { type: 'STRING' },
+        content: { type: 'STRING' },
+      },
+      required: ['path', 'content'],
+    } as any,
+    execute: async (args) => ({ success: true, path: args.path }),
+  });
+  const adaptiveRunner = new ToolRunner(adaptiveRegistry, workspace, undefined, undefined, adaptiveGuardian);
+
+  // Kịch bản 1: Bugfix chưa có giả thuyết sửa file sản phẩm -> BỊ CHẶN đúng mã UNVERIFIED_MUTATION_BLOCKED
+  adaptiveGuardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    taskClass: 'bugfix',
+    phase: 'explore',
+    hasPlan: false,
+    hasValidatedHypothesis: false,
+  });
+  const blockedProd = await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'bugfix' });
+  assert(blockedProd.result.errorCode === 'UNVERIFIED_MUTATION_BLOCKED', 'Chặn sửa file mã nguồn sản phẩm khi chưa có giả thuyết');
+  assert(blockedProd.guardianDiagnosis?.category === 'PRE_MUTATION_GATE_BLOCKED', 'Phân loại lỗi chuẩn PRE_MUTATION_GATE_BLOCKED');
+
+  // Kịch bản 2: Bị chặn nhiều lần KHÔNG làm tăng consecutiveFailures (Zero Tool Poisoning)
+  await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'bugfix 2' });
+  await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'bugfix 3' });
+  assert(adaptiveGuardian.isToolUnreliable('write_file') === false, 'Tool write_file KHÔNG bị dán nhãn isUnreliable sau 3 lần bị chặn bởi policy gate');
+  const writeStats = adaptiveGuardian.getStats('write_file');
+  assert(writeStats.consecutiveFailures === 0, 'consecutiveFailures của write_file vẫn bằng 0');
+
+  // Kịch bản 3: TDD Fast-Pass - Cho phép tạo/sửa file test và scratch mà không bị chặn
+  const allowTestFile = await adaptiveRunner.run('write_file', { path: 'tests/unit/bug.test.ts', content: 'test repro' });
+  assert(allowTestFile.result.success === true && allowTestFile.result.path === 'tests/unit/bug.test.ts', 'TDD Fast-Pass cho phép tạo file trong tests/');
+  const allowScratchFile = await adaptiveRunner.run('write_file', { path: 'scratch/repro.ts', content: 'script repro' });
+  assert(allowScratchFile.result.success === true, 'TDD Fast-Pass cho phép tạo file trong scratch/');
+
+  // Kịch bản 4: Plan & Phase Fast-Pass - Cho phép can thiệp khi hasPlan = true hoặc phase = implement
+  adaptiveGuardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    taskClass: 'bugfix',
+    phase: 'implement',
+    hasPlan: true,
+    hasValidatedHypothesis: false,
+  });
+  const allowImplementPhase = await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'planned fix' });
+  assert(allowImplementPhase.result.success === true, 'Mở cổng khi Agent đã có Plan hoặc chuyển sang Phase Implement');
+
+  // Kịch bản 5: Refactor không bị chặn bởi cổng kiểm chứng giả thuyết lỗi
+  adaptiveGuardian.setPreMutationGateContext({
+    isBugfixTask: false,
+    taskClass: 'refactor',
+    phase: 'explore',
+    hasPlan: false,
+    hasValidatedHypothesis: false,
+  });
+  const allowRefactor = await adaptiveRunner.run('write_file', { path: 'src/utils.ts', content: 'refactored code' });
+  assert(allowRefactor.result.success === true, 'Tác vụ refactor không bị chặn bởi cổng kiểm chứng lỗi');
 
   // 41. KIỂM THỬ CONTEXT GUARDIAN & CONTEXT AGENT (ZERO LOSS & SESSION CONTINUITY)
   console.log('\n========================================');

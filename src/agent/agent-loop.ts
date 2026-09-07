@@ -880,10 +880,15 @@ export class AgentLoop {
       });
       previousClassification = classification;
 
-      // Cập nhật ngữ cảnh Cổng Pareto 80/20 cho ToolUseGuardian
+      // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng cho ToolUseGuardian
       this.toolRunner.guardian.setPreMutationGateContext({
-        isBugfixTask: classification.taskClass === 'bugfix' || classification.taskClass === 'refactor',
+        isBugfixTask: classification.taskClass === 'bugfix',
+        taskIntent: classification.taskClass,
+        taskClass: classification.taskClass,
+        phase: classification.phase,
+        hasPlan: this.planManager.hasPlan(),
         hasValidatedHypothesis,
+        targetFiles: this.hypothesisTracker.getValidatedHypotheses().flatMap((h) => h.targetFiles || []),
       });
 
       const adviceInfo = this.toolAdvisor.advise({

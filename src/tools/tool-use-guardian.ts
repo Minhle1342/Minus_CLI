@@ -20,6 +20,7 @@ export type ToolFailureCategory =
   | 'ERROR_AS_200'
   | 'SCHEMA_MISMATCH'
   | 'NETWORK_FAILURE'
+  | 'PRE_MUTATION_GATE_BLOCKED'
   | 'UNKNOWN_ERROR';
 
 export interface ToolFailureDiagnosis {
@@ -50,8 +51,13 @@ export interface ToolReliabilityStats {
 export interface PreMutationGateContext {
   isBugfixTask?: boolean;
   taskIntent?: string;
+  taskClass?: string;
+  phase?: string;
+  hasPlan?: boolean;
   hasValidatedHypothesis: boolean;
   hypothesisCount?: number;
+  targetFiles?: string[];
+  isTrivialEdit?: boolean;
 }
 
 export interface GuardianPreCallResult {
@@ -119,6 +125,19 @@ export function classifyToolFailure(
     result.status === 'failed' ||
     result.isError === true
   )) {
+    // Nếu bị chặn bởi Cổng Pareto 80/20, phân loại thành PRE_MUTATION_GATE_BLOCKED sạch sẽ (không phải disguised HTTP error)
+    if (result.errorCode === 'UNVERIFIED_MUTATION_BLOCKED') {
+      return {
+        category: 'PRE_MUTATION_GATE_BLOCKED',
+        message,
+        isRetryable: false,
+        maxRetries: 0,
+        backoffMs: 0,
+        recoveryAction: 'Hãy khảo sát bằng get_symbol_context_360/inspect_symbol và gọi "formulate_and_verify_hypothesis", hoặc viết test tái hiện lỗi trong test/ / scratch/.',
+        suggestedAlternative: 'formulate_and_verify_hypothesis',
+      };
+    }
+
     // Nếu có mã lỗi cụ thể bên trong kết quả, phân loại sâu hơn
     if (result.errorCode === 'INVALID_ARGS' || lower.includes('invalid argument') || lower.includes('validation')) {
       return {
@@ -421,7 +440,7 @@ export class ToolUseGuardian {
       }
     }
 
-    // 2c. Tool-Use Guardian: Explore-to-Implement Pre-Mutation Gate (Pareto 80/20 Rule)
+    // 2c. Tool-Use Guardian: Explore-to-Implement Pre-Mutation Gate (Adaptive Pareto 80/20 Rule)
     const gateContext = options?.preMutationGate || this.preMutationGateContext;
     const isMutationTool = [
       'write_to_file',
@@ -435,14 +454,52 @@ export class ToolUseGuardian {
       'move_file',
     ].includes(toolName);
 
-    const isBugfixOrRefactor = Boolean(
+    const isBugfix = Boolean(
       gateContext?.isBugfixTask ||
       gateContext?.taskIntent === 'bugfix' ||
-      gateContext?.taskIntent === 'refactor'
+      gateContext?.taskClass === 'bugfix'
     );
 
-    if (isMutationTool && isBugfixOrRefactor && !gateContext?.hasValidatedHypothesis) {
-      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi/refactor nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph, sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code.`;
+    // Trích xuất đường dẫn file mục tiêu từ các tham số phổ biến
+    const targetPath = String(
+      args?.path ||
+      args?.filePath ||
+      args?.file_path ||
+      args?.targetFile ||
+      args?.file ||
+      ''
+    ).trim();
+
+    // 1. TDD Fast-Pass: Cho phép tạo/sửa file kiểm thử, spec, reproduction script hoặc scratch file tự do
+    const isTestOrReproFile = Boolean(
+      targetPath &&
+      (
+        /([._-](?:test|spec)\.[a-zA-Z0-9]+$)|([\\/](?:tests?|__tests__|scratch|\.scratch)[\\/])/i.test(targetPath) ||
+        targetPath.startsWith('scratch/') ||
+        targetPath.startsWith('scratch\\') ||
+        targetPath.startsWith('tests/') ||
+        targetPath.startsWith('tests\\') ||
+        targetPath.startsWith('test/') ||
+        targetPath.startsWith('test\\')
+      )
+    );
+
+    // 2. Plan & Phase Fast-Pass: Cho phép can thiệp nếu đã có Kế hoạch được kích hoạt hoặc đã chuyển sang Phase Implement/Verify/Release
+    const isAuthorizedPhaseOrPlan = Boolean(
+      gateContext?.hasPlan ||
+      gateContext?.phase === 'implement' ||
+      gateContext?.phase === 'verify' ||
+      gateContext?.phase === 'release'
+    );
+
+    // 3. Đã có giả thuyết được kiểm chứng
+    const hasValidated = Boolean(gateContext?.hasValidatedHypothesis);
+
+    // 4. Trivial fix / Explicit patch bypass
+    const isTrivialBypass = Boolean(gateContext?.isTrivialEdit);
+
+    if (isMutationTool && isBugfix && !isTestOrReproFile && !isAuthorizedPhaseOrPlan && !hasValidated && !isTrivialBypass) {
+      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph (hoặc tạo test case tái hiện lỗi trong tests/ hoặc scratch/), sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code sản phẩm.`;
       return {
         valid: false,
         allowed: false,

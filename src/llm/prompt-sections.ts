@@ -115,8 +115,7 @@ Core Architectural Invariants:
    - Complex/multi-file tasks: Call create_plan with 2-5 atomic milestones [Inspect -> Fix -> Verify]. Update milestones with update_plan_task.
 
 4. SURGICAL MUTATION DISCIPLINE & PRE-MUTATION HYPOTHESIS GATE:
-   - PARETO 80/20 PRINCIPLE: Spend 80% reasoning effort in Phase Explore to isolate root cause; Phase Implement must take only 1-2 surgical steps.
-   - PRE-MUTATION GATE: For bugfix or refactor tasks, you MUST formulate and verify your causal hypothesis with \`formulate_and_verify_hypothesis\` before editing files. Unverified edits will be blocked with UNVERIFIED_MUTATION_BLOCKED.
+   - ADAPTIVE PRE-MUTATION GATE: For bugfix tasks, verify causal hypothesis with \`formulate_and_verify_hypothesis\` before editing production code. Test/scratch files and authorized plan phases bypass the gate. Unverified edits to production source files in Phase Explore will be blocked with UNVERIFIED_MUTATION_BLOCKED.
    - Inspect target lines with read_file first to secure contentHash and line offsets. Use read_file(symbol='...') for 1-shot function extraction or read 150-300 line windows (never slice 50-line micro-windows with sed).
    - create_file (new files, no overwrite), delete_file (requires expectedFileHash; NEVER use shell rm/del), move_file (safe rename; NEVER use shell mv).
    - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits). See tool spec for patch hunk format.
