@@ -889,6 +889,7 @@ export class AgentLoop {
         hasPlan: this.planManager.hasPlan(),
         hasValidatedHypothesis,
         targetFiles: this.hypothesisTracker.getValidatedHypotheses().flatMap((h) => h.targetFiles || []),
+        hasSubmittedSolution,
       });
 
       const adviceInfo = this.toolAdvisor.advise({
@@ -896,6 +897,7 @@ export class AgentLoop {
         lastToolResult: this.lastToolExecution?.result,
         hasErrors: this.lastToolExecution?.result?.error !== undefined,
         activeTaskTitle: activeTask?.title,
+        hasSubmittedSolution,
       });
 
       // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
@@ -958,6 +960,11 @@ export class AgentLoop {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
 
+      // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
+      if (hasSubmittedSolution) {
+        activeToolDeclarations = [];
+      }
+
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
@@ -1001,6 +1008,7 @@ export class AgentLoop {
         activeTaskAcceptance: activeTask?.acceptanceCriteria,
         guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
         userRequest: turnUserRequest,
+        hasSubmittedSolution,
       });
       // Intent-Gated Memory Retrieval:
       // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
@@ -1686,17 +1694,18 @@ export class AgentLoop {
           }
 
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
-          // Chặn các lệnh kiểm thử / submit dư thừa nếu nhiệm vụ đã được submit_solution hoàn tất và không có thay đổi file mới
+          // Chặn toàn bộ các tool call dư thừa (kể cả read_file, run_command) nếu nhiệm vụ đã được submit_solution hoàn tất
           let executionResult: ToolExecutionResult;
           if (preexecutedReadResult) {
             executionResult = preexecutedReadResult;
-          } else if (hasSubmittedSolution && (toolName === 'submit_solution' || (toolName === 'run_command' && isVerificationCommand(toolArgs.command)))) {
+          } else if (hasSubmittedSolution) {
             const redundantPayload = {
-              success: true,
+              success: false,
               submitted: true,
               summary: submittedSolutionSummary || 'Task completed and submitted.',
               nextAction: 'final_answer',
-              message: 'Solution has already been submitted and verified. No files have changed since submission. Do not execute further verification tools; conclude your turn with your final response to the user immediately.',
+              errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+              message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else {
@@ -2029,10 +2038,16 @@ export class AgentLoop {
         // summary. Reusing it avoids an otherwise redundant provider request
         // whose only purpose is to restate the same result.
         const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
+        const hasCodeMutations = this.targetFilesModifiedInTurn.size > 0 || session.getEvents().some((e) =>
+          e.type === 'tool/call' &&
+          ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch', 'write_file', 'replace_text'].includes(e.data?.toolName || '')
+        );
+        const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
+          || (hasCodeMutations && (submittedSolutionSummary?.trim().length || 0) >= 40);
         if (
           !isArchQuery
           && hasSubmittedSolution
-          && isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
+          && isSummarySufficient
           && (this.loopOptions?.enableSubmitAutoFinalization
             ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION'))
         ) {

@@ -21,6 +21,7 @@ export type ToolFailureCategory =
   | 'SCHEMA_MISMATCH'
   | 'NETWORK_FAILURE'
   | 'PRE_MUTATION_GATE_BLOCKED'
+  | 'POST_SUBMISSION_TOOL_CALL_BLOCKED'
   | 'UNKNOWN_ERROR';
 
 export interface ToolFailureDiagnosis {
@@ -58,6 +59,7 @@ export interface PreMutationGateContext {
   hypothesisCount?: number;
   targetFiles?: string[];
   isTrivialEdit?: boolean;
+  hasSubmittedSolution?: boolean;
 }
 
 export interface GuardianPreCallResult {
@@ -135,6 +137,18 @@ export function classifyToolFailure(
         backoffMs: 0,
         recoveryAction: 'Hãy khảo sát bằng get_symbol_context_360/inspect_symbol và gọi "formulate_and_verify_hypothesis", hoặc viết test tái hiện lỗi trong test/ / scratch/.',
         suggestedAlternative: 'formulate_and_verify_hypothesis',
+      };
+    }
+
+    // Nếu bị chặn sau khi đã submit_solution thành công
+    if (result.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED') {
+      return {
+        category: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+        message,
+        isRetryable: false,
+        maxRetries: 0,
+        backoffMs: 0,
+        recoveryAction: 'Giải pháp đã được nghiệm thu. Toàn bộ tool calls đã bị khóa. Hãy lập tức hoàn tất lượt và gửi câu trả lời phân tích cuối cùng cho người dùng.',
       };
     }
 
@@ -419,6 +433,22 @@ export class ToolUseGuardian {
       ? stats.suggestedAlternatives[0] || DEFAULT_TOOL_ALTERNATIVES[toolName]?.[0]
       : undefined;
 
+    // 2a. Tool-Use Guardian: Post-Submission Terminal Gate Check
+    const gateContext = options?.preMutationGate || this.preMutationGateContext;
+    if (gateContext?.hasSubmittedSolution === true) {
+      const errorMsg = 'Tool call bị Tool-Use Guardian từ chối: Giải pháp đã được submit_solution nghiệm thu thành công. Toàn bộ công cụ đã bị khóa. Hãy lập tức hoàn tất lượt (conclude turn) và trả về câu trả lời phân tích tổng kết cho người dùng.';
+      return {
+        valid: false,
+        allowed: false,
+        coercedArgs: args,
+        wasCoerced: false,
+        coercedKeys: [],
+        error: errorMsg,
+        errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+        reason: errorMsg,
+      };
+    }
+
     // 2b. Tool-Use Guardian: Semantic check for submit_solution summary (Reject pseudo-completion stubs)
     if (toolName === 'submit_solution' && typeof args.summary === 'string') {
       const summary = args.summary.trim();
@@ -441,7 +471,6 @@ export class ToolUseGuardian {
     }
 
     // 2c. Tool-Use Guardian: Explore-to-Implement Pre-Mutation Gate (Adaptive Pareto 80/20 Rule)
-    const gateContext = options?.preMutationGate || this.preMutationGateContext;
     const isMutationTool = [
       'write_to_file',
       'replace_file_content',

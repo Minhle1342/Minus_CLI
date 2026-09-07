@@ -11,10 +11,11 @@ export interface ToolSynergyContext {
   hasSharedContextConflicts?: boolean;
   guardianDiagnosis?: ToolFailureDiagnosis;
   userRequest?: string;
+  hasSubmittedSolution?: boolean;
 }
 
 export interface ToolAdvice {
-  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'GENERAL';
+  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'POST_SUBMISSION' | 'GENERAL';
   guidance: string;
   suggestedTools: string[];
 }
@@ -46,9 +47,19 @@ export class ToolSynergyAdvisor {
       hasRunningBackgroundTasks,
       hasSharedContextConflicts,
       userRequest,
+      hasSubmittedSolution,
     } = context;
 
-    // 0. Phát hiện người dùng báo lỗi trong prompt (User Bug Report Intent) ngay turn đầu
+    // 0a. Vừa gọi submit_solution hoặc đã submit giải pháp thành công (Playbook POST_SUBMISSION)
+    if (lastToolName === 'submit_solution' || hasSubmittedSolution) {
+      return {
+        playbook: 'POST_SUBMISSION',
+        guidance: 'Solution has been submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Conclude your turn immediately with your final comprehensive response to the user.',
+        suggestedTools: [],
+      };
+    }
+
+    // 0b. Phát hiện người dùng báo lỗi trong prompt (User Bug Report Intent) ngay turn đầu
     if (!lastToolName && detectBugReportIntent(userRequest)) {
       return {
         playbook: 'B_DEBUGGING',
@@ -226,6 +237,9 @@ export class ToolSynergyAdvisor {
    */
   formatAdvicePrompt(context: ToolSynergyContext): string {
     const advice = this.advise(context);
-    return `[TOOL PLAYBOOK GUIDANCE - ${advice.playbook}]\n→ Recommended next actions: ${advice.guidance}\n→ Suggested tools: ${advice.suggestedTools.join(', ')}`;
+    const toolsText = advice.suggestedTools.length > 0
+      ? advice.suggestedTools.join(', ')
+      : '(None - Conclude with Final Answer)';
+    return `[TOOL PLAYBOOK GUIDANCE - ${advice.playbook}]\n→ Recommended next actions: ${advice.guidance}\n→ Suggested tools: ${toolsText}`;
   }
 }

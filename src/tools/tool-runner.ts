@@ -157,8 +157,9 @@ export class ToolRunner {
     const guardianPreCheck = this.guardian.preCallValidate(toolName, args, tool.parameters);
     if (!guardianPreCheck.valid) {
       const errRes = { error: guardianPreCheck.error, errorCode: guardianPreCheck.errorCode || 'INVALID_ARGS' };
-      // Chính sách từ chối (Policy Denial / Pre-Mutation Gate) KHÔNG tính vào chỉ số lỗi kỹ thuật của công cụ
-      const isPolicyDenial = guardianPreCheck.errorCode === 'UNVERIFIED_MUTATION_BLOCKED';
+      // Chính sách từ chối (Policy Denial / Pre-Mutation Gate / Post-Submission Gate) KHÔNG tính vào chỉ số lỗi kỹ thuật của công cụ
+      const isPolicyDenial = guardianPreCheck.errorCode === 'UNVERIFIED_MUTATION_BLOCKED'
+        || guardianPreCheck.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED';
       const diagnosis = isPolicyDenial
         ? classifyToolFailure(toolName, errRes.error, errRes)
         : this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
