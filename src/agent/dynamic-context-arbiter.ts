@@ -3,6 +3,10 @@ import { ExactTokenizer } from './exact-tokenizer.js';
 export interface DynamicContextInputs {
   /** P1: Chỉ dẫn công cụ kế tiếp từ ToolSynergyAdvisor (CRITICAL - Bảo toàn 100%) */
   advicePrompt?: string;
+  /** P1.1: Phản tư lỗi chuyên sâu và chi tiết test assertion từ ErrorDetective/ReflectionEngine (CRITICAL - Bảo toàn) */
+  reflectionContext?: string;
+  /** P1.2: Cognitive Scaffold (Negative Gates, Anti-Deception, Topology) từ CognitiveHarness (HIGH - Bảo toàn) */
+  cognitiveScaffold?: string;
   /** P1.5: Chỉ dẫn hành vi chuyên biệt theo Phase (Explore 80% reasoning / Implement patch spec / Verify gate) (CRITICAL - Bảo toàn 100%) */
   phaseGuidance?: string;
   /** P2: Trạng thái DAG plan, acceptance criteria từ PlanManager (HIGH - Bảo toàn) */
@@ -89,6 +93,20 @@ export class DynamicContextArbiter {
         content: (inputs.advicePrompt || '').trim(),
         priority: 1,
         allowTruncation: false, // P1 không bao giờ bị cắt
+      },
+      {
+        key: 'reflectionContext',
+        name: 'Dynamic Reflection (P1.1)',
+        content: (inputs.reflectionContext || '').trim(),
+        priority: 1.1,
+        allowTruncation: false, // P1.1 Phản tư lỗi không bao giờ bị cắt
+      },
+      {
+        key: 'cognitiveScaffold',
+        name: 'Cognitive Task Scaffold (P1.2)',
+        content: (inputs.cognitiveScaffold || '').trim(),
+        priority: 1.2,
+        allowTruncation: false, // P1.2 Khung lập luận System 2 không bao giờ bị cắt
       },
       {
         key: 'phaseGuidance',

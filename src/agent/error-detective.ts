@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Workspace } from '../workspace/workspace.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 
@@ -34,6 +36,7 @@ export interface ErrorDetectiveReport {
   immediateFix?: string;
   prevention?: string;
   promptGuidance?: string;
+  failingSourceLine?: string;
 }
 
 /**
@@ -86,11 +89,32 @@ export class ErrorDetective {
     // Select primary defect (prefer compiler/runtime errors on recently mutated files)
     const primary = this.selectPrimaryDefect(extractedErrors, recentlyMutatedFiles);
 
+    // Inspect actual source line if location is identified (especially for test assertion failures)
+    let failingSourceLine: string | undefined;
+    if (primary?.file && primary?.line) {
+      try {
+        let absPath = primary.file;
+        if (!path.isAbsolute(absPath) && workspace?.rootDir) {
+          absPath = path.resolve(workspace.rootDir, absPath);
+        }
+        if (fs.existsSync(absPath)) {
+          const fileContent = fs.readFileSync(absPath, 'utf8');
+          const lines = fileContent.split(/\r?\n/);
+          const lineIdx = primary.line - 1;
+          if (lines[lineIdx] !== undefined) {
+            failingSourceLine = lines[lineIdx].trim();
+          }
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
     // Classify anti-pattern category
     const pattern = this.classifyPattern(primary, text);
 
     // Perform backward causal analysis
-    const causalAnalysis = this.analyzeCausality(primary, pattern, recentlyMutatedFiles, text);
+    const causalAnalysis = this.analyzeCausality(primary, pattern, recentlyMutatedFiles, text, failingSourceLine);
 
     // Construct high-signal prompt guidance
     const promptGuidance = this.buildPromptGuidance({
@@ -98,6 +122,7 @@ export class ErrorDetective {
       pattern,
       causalAnalysis,
       extractedErrors,
+      failingSourceLine,
     });
 
     const locationStr = primary?.file
@@ -121,6 +146,7 @@ export class ErrorDetective {
       immediateFix: causalAnalysis.immediateFix,
       prevention: causalAnalysis.prevention,
       promptGuidance,
+      failingSourceLine,
     };
   }
 
@@ -187,8 +213,8 @@ export class ErrorDetective {
   private extractNodeRuntimeExceptions(text: string): ExtractedErrorItem[] {
     const results: ExtractedErrorItem[] = [];
 
-    // Match: ErrorName: message \n at ...
-    const errRegex = /(?:^|\n)(TypeError|ReferenceError|SyntaxError|RangeError|URIError|AssertionError|Error):\s*([^\n]+)/g;
+    // Match: ErrorName: message \n at ... (support [ERR_CODE] like [ERR_ASSERTION])
+    const errRegex = /(?:^|\n)(TypeError|ReferenceError|SyntaxError|RangeError|URIError|AssertionError|Error)(?:\s*\[[^\]]+\])?:\s*([^\n]+)/g;
     let errMatch;
 
     while ((errMatch = errRegex.exec(text)) !== null) {
@@ -196,8 +222,8 @@ export class ErrorDetective {
       const startIndex = errMatch.index;
       const snippet = text.slice(startIndex, startIndex + 600);
 
-      // Find call sites in stack trace
-      const callSiteRegex = /at\s+(?:([^\s(]+)\s+\()?([a-zA-Z0-9_\-\/\.\\]+\.[jt]sx?):(\d+):(\d+)\)?/;
+      // Find call sites in stack trace (support Windows file:/// URLs and standard paths)
+      const callSiteRegex = /at\s+(?:([^\s(]+)\s+\()?(?:file:\/\/\/?)?([a-zA-Z]:[^\s)]+|[a-zA-Z0-9_\-\/\.\\]+\.[jt]sx?):(\d+):(\d+)\)?/;
       const callSiteMatch = callSiteRegex.exec(snippet);
 
       results.push({
@@ -269,9 +295,9 @@ export class ErrorDetective {
     }
 
     // Node assert / Chai
-    const assertMatch = /AssertionError(?:\s*\[ERR_ASSERTION\])?:\s*([^\n]+)/.exec(text);
+    const assertMatch = /AssertionError(?:\s*\[[^\]]+\])?:\s*([^\n]+)/.exec(text);
     if (assertMatch && results.length === 0) {
-      const fileMatch = /at\s+.*?([a-zA-Z0-9_\-\/\.\\]+\.[jt]sx?):(\d+):(\d+)/.exec(text);
+      const fileMatch = /at\s+.*?(?:file:\/\/\/?)?([a-zA-Z]:[^\s)]+|[a-zA-Z0-9_\-\/\.\\]+\.[jt]sx?):(\d+):(\d+)/.exec(text);
       results.push({
         language: 'javascript',
         errorType: 'AssertionError',
@@ -411,7 +437,8 @@ export class ErrorDetective {
 
     if (
       msg.includes('assertionerror')
-      || msg.includes('expected') && msg.includes('received')
+      || (msg.includes('expected') && msg.includes('received'))
+      || msg.includes('err_assertion')
     ) {
       return 'ASSERTION_FAILURE';
     }
@@ -432,6 +459,7 @@ export class ErrorDetective {
     pattern?: ErrorPatternCategory,
     mutatedFiles: string[] = [],
     fullText = '',
+    failingSourceLine?: string,
   ): {
     rootCause: string;
     cascadingChain: string[];
@@ -476,16 +504,20 @@ export class ErrorDetective {
           prevention: `Verify all callers with "find_references" when modifying function signatures.`,
         };
 
-      case 'ASSERTION_FAILURE':
+      case 'ASSERTION_FAILURE': {
+        const lineSnippet = failingSourceLine ? `\n   • Failing Assertion Code: \`${failingSourceLine}\`` : '';
         return {
-          rootCause: `Output state returned by business logic diverges from unit test expectations at ${loc}.`,
+          rootCause: `Output state returned by business logic diverges from unit test expectations at ${loc}.${lineSnippet}`,
           cascadingChain: [
             `1. Logic implementation returned unexpected value.`,
-            `2. Test assertion detected contract violation.`,
+            `2. Test assertion failed: ${failingSourceLine || primary?.message || 'expected condition failed'}.`,
           ],
-          immediateFix: `Read ${loc} using read_file to inspect expected vs received values. Fix the return logic.`,
+          immediateFix: failingSourceLine
+            ? `Inspect ${loc} and adjust logic to satisfy the failing assertion: "${failingSourceLine}".`
+            : `Read ${loc} using read_file to inspect expected vs received values. Fix the return logic.`,
           prevention: `DO NOT comment out or delete failing assertions; fix the underlying business logic.`,
         };
+      }
 
       case 'MODULE_RESOLUTION':
         return {
@@ -521,8 +553,9 @@ export class ErrorDetective {
       prevention: string;
     };
     extractedErrors: ExtractedErrorItem[];
+    failingSourceLine?: string;
   }): string {
-    const { primary, pattern, causalAnalysis, extractedErrors } = params;
+    const { primary, pattern, causalAnalysis, extractedErrors, failingSourceLine } = params;
     const lines: string[] = [
       `\n🕵️ [ERROR DETECTIVE - CAUSAL ROOT CAUSE ANALYSIS ACTIVATED]:`,
     ];
@@ -531,6 +564,7 @@ export class ErrorDetective {
       lines.push(
         `1. [SURFACE SYMPTOM]: ${primary.errorType || primary.errorCode || 'Error'}: ${primary.message}`,
         primary.file ? `   📍 Location: ${primary.file}${primary.line ? `:${primary.line}:${primary.column || 0}` : ''}` : '',
+        failingSourceLine ? `   🔍 Failing Code Line: \`${failingSourceLine}\`` : '',
         `2. [ANTI-PATTERN DETECTED]: ${pattern || 'GENERIC_FAILURE'}`,
         `3. [BACKWARD CAUSAL TRACE (ROOT CAUSE)]:`,
         `   • Root Cause: ${causalAnalysis.rootCause}`,
@@ -555,5 +589,9 @@ export class ErrorDetective {
 }
 
 function normalizeFilePath(file: string): string {
-  return file.replace(/\\/g, '/').replace(/^\.\//, '');
+  let cleaned = file.replace(/^file:\/\/\/?/, '').replace(/\\/g, '/').replace(/^\.\//, '');
+  if (/^\/[a-zA-Z]:/.test(cleaned)) {
+    cleaned = cleaned.slice(1);
+  }
+  return cleaned;
 }

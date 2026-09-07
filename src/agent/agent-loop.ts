@@ -912,6 +912,7 @@ export class AgentLoop {
         isGoal,
       });
 
+      let cognitiveScaffoldText: string | undefined;
       if (step === 1 || this.reflectionEngine.getConsecutiveFailures() > 1) {
         const activeScaffold = this.cognitiveHarness.createScaffold({
           request: turnUserRequest,
@@ -920,6 +921,7 @@ export class AgentLoop {
           consecutiveFailures: this.reflectionEngine.getConsecutiveFailures(),
         });
         CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+        cognitiveScaffoldText = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
       }
 
 
@@ -1165,10 +1167,21 @@ export class AgentLoop {
         hasValidatedHypothesis: (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) > 0,
       });
 
-      // Phase 2: Hierarchical Dynamic Context Budgeting (Giảm token bloat của stepDynamicSuffixes)
+      // Phase 3: Cognitive Task Scaffolding & Dynamic Reflection Injection (Layer 2)
+      const rawReflection = this.reflectionEngine.getLastReflectionPrompt();
+      const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
+      let strategicPivotGuidance: string | undefined;
+      if (consecutiveFails >= 2) {
+        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining.`;
+      }
+      const reflectionContext = [rawReflection, strategicPivotGuidance].filter(Boolean).join('\n\n');
+
+      // Phase 2/3: Hierarchical Dynamic Context Budgeting (Giảm token bloat của stepDynamicSuffixes)
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
       const arbitration = this.dynamicContextArbiter.arbitrate({
         advicePrompt,
+        reflectionContext,
+        cognitiveScaffold: cognitiveScaffoldText,
         phaseGuidance,
         rawPlanContext,
         recalledTurnContext,
@@ -1914,6 +1927,8 @@ export class AgentLoop {
               CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
             }
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
+          } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
+            this.reflectionEngine.reset();
           }
 
           const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();

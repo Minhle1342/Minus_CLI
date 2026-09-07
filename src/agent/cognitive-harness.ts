@@ -231,6 +231,21 @@ export class CognitiveHarness {
   }
 
   /**
+   * Formats a token-efficient compact scaffold for dynamic prompt injection (~60-90 tokens)
+   */
+  formatScaffoldForCompactPrompt(scaffold: CognitiveScaffold): string {
+    const gates = scaffold.negativeGate.slice(0, 3).map((gate) => `   - 💡 ${gate}`).join('\n');
+    const topo = scaffold.executionTopology.slice(0, 4).map((s, idx) => `${idx + 1}. ${s}`).join(' ➔ ');
+    return [
+      `🧠 [COGNITIVE SCAFFOLD - ${scaffold.category.toUpperCase()}]:`,
+      gates,
+      `   - ⚖️ Falsification: ${scaffold.falsificationCriteria}`,
+      `   - 🧭 Topology: ${topo}`,
+      `   - 🎯 Boundary: ${scaffold.actionBoundary}`,
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
    * Formats scaffold for terminal UI display (human-visible)
    */
   formatScaffoldForUI(scaffold: CognitiveScaffold): string[] {

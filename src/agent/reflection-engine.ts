@@ -35,6 +35,7 @@ export class ReflectionEngine {
   private maxConsecutiveFailuresBeforeWarning: number = 2;
   readonly detective = new ErrorDetective();
   private lastDetectiveReport?: ErrorDetectiveReport;
+  private lastReflectionPrompt?: string;
 
   /**
    * Trích xuất các lỗi TypeScript (TSxxxx) từ output hoặc Language Service trong RAM
@@ -150,7 +151,7 @@ export class ReflectionEngine {
 
       reflectionPrompt = promptParts.join('\n');
       advice = detectiveReport.primaryDefect
-        ? `Command failed (exit: ${result.exitCode}): ${detectiveReport.primaryDefect}`
+        ? `Command failed (exit: ${result.exitCode}): ${detectiveReport.primaryDefect}${detectiveReport.failingSourceLine ? ` | Failing code: ${detectiveReport.failingSourceLine}` : ''}`
         : `Command failed (exit: ${result.exitCode}). Triggering debugging protocol and stack trace analysis.`;
     } 
     // 3. Phân tích lỗi áp dụng patch apply_patch
@@ -266,6 +267,8 @@ export class ReflectionEngine {
       reflectionPrompt += `\n🚨 [WARNING]: You have failed ${this.consecutiveFailures} consecutive times! Stop, re-evaluate your strategy, or break the task into simpler steps.`;
     }
 
+    this.lastReflectionPrompt = reflectionPrompt;
+
     return {
       isFailure,
       reflectionPrompt,
@@ -281,11 +284,17 @@ export class ReflectionEngine {
     return this.lastDetectiveReport;
   }
 
+  getLastReflectionPrompt(): string | undefined {
+    return this.lastReflectionPrompt;
+  }
+
   getConsecutiveFailures(): number {
     return this.consecutiveFailures;
   }
 
   reset(): void {
     this.consecutiveFailures = 0;
+    this.lastDetectiveReport = undefined;
+    this.lastReflectionPrompt = undefined;
   }
 }
