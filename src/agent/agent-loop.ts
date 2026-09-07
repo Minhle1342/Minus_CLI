@@ -953,11 +953,23 @@ export class AgentLoop {
       const analysisIntent = detectAnalysisOrInvestigationIntent(turnUserRequest);
       const hasFileMutationsInSession = session.getEvents().some((e) =>
         e.type === 'tool/call' &&
-        ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch'].includes(e.data?.toolName || '')
+        ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch', 'replace_text', 'create_file'].includes(e.data?.toolName || '')
       );
       const isPureInvestigation = analysisIntent.isAnalysisQuery && !hasFileMutationsInSession && !classification.requiredCapabilities.includes('edit');
       if (isPureInvestigation) {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
+      }
+
+      // Pre-Call Predictive Guardrails (Phase 1):
+      // Khi đã có verification thành công sau mutation, ẩn các tool chỉnh sửa code để tránh redundant mutations
+      const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
+        && hasFileMutationsInSession
+        && !hasSubmittedSolution;
+      if (hasVerifiedTests) {
+        // Ưu tiên submit_solution hoặc get_diagnostics, hạn chế sửa đổi code mới trừ khi có lỗi
+        activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+          !['apply_patch', 'create_file', 'delete_file'].includes(tool.name)
+        );
       }
 
       // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần

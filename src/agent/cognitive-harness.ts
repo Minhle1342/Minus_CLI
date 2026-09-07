@@ -212,8 +212,8 @@ export class CognitiveHarness {
   formatScaffoldForPrompt(scaffold: CognitiveScaffold): string {
     const lines: string[] = [
       `🧠 [COGNITIVE SCAFFOLD ACTIVE - ${scaffold.category.toUpperCase()}]:`,
-      `1. [NEGATIVE GATE (SUPPRESSION VECTORS)]:`,
-      ...scaffold.negativeGate.map((gate) => `   - ⛔ ${gate}`),
+      `1. [QUALITY GUARDRAILS & GUIDELINES]:`,
+      ...scaffold.negativeGate.map((gate) => `   - 💡 ${gate}`),
     ];
 
     if (scaffold.premiseCheck) {
@@ -236,7 +236,7 @@ export class CognitiveHarness {
   formatScaffoldForUI(scaffold: CognitiveScaffold): string[] {
     return [
       `🧠 [COGNITIVE SCAFFOLD: ${scaffold.category.toUpperCase()}]`,
-      `├── [Negative Gate]: ${scaffold.negativeGate[0]}`,
+      `├── [Quality Guideline]: ${scaffold.negativeGate[0]}`,
       scaffold.premiseCheck ? `├── [Premise Check]: ${scaffold.premiseCheck}` : '',
       `├── [Falsification]: ${scaffold.falsificationCriteria}`,
       `└── [Topology]: ${scaffold.executionTopology.join(' ➔ ')}`,
