@@ -107,6 +107,22 @@ export class ToolSynergyAdvisor {
       };
     }
 
+    // 2.7. Fast-path: run_command vừa chạy test thành công → gợi ý submit_solution ngay (Step Efficiency Boost)
+    if (
+      lastToolName === 'run_command' &&
+      lastToolResult &&
+      !lastToolResult.error &&
+      (lastToolResult.exitCode === 0 || lastToolResult.exitCode === undefined) &&
+      typeof lastToolResult.command === 'string' &&
+      /\b(?:test|spec|check|verify)\b/i.test(lastToolResult.command)
+    ) {
+      return {
+        playbook: 'C_MUTATION',
+        guidance: 'Test/verification command passed successfully (exit 0). You have empirical proof of correctness. Call "submit_solution" immediately with verification evidence. Do NOT run additional exploration or redundant tests.',
+        suggestedTools: ['submit_solution'],
+      };
+    }
+
     // 3. Vừa sửa đổi code (Playbook C: Safe Mutation & Verification)
     if (
       lastToolName &&

@@ -30,7 +30,7 @@ const INSPECTION_TOOLS = new Set([
 ]);
 
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
-const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify))\b|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|tsc(?:\s|$)|make\s+(?:test|check))\b/i;
+const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify))\b|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|tsc(?:\s|$)|make\s+(?:test|check))\b|\b(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|test\/)|\b(?:npx\s+(?:vitest|jest|mocha|ava)\b)|\bnode\s+--test\b/i;
 
 export function isToolResultFailure(result: Record<string, any>): boolean {
   return Boolean(
