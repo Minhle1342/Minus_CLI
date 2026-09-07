@@ -10,7 +10,8 @@ export type BenchmarkTaskCategory =
   | 'refactor'
   | 'resilience'
   | 'security'
-  | 'hallucination';
+  | 'hallucination'
+  | 'context';
 
 export interface BenchmarkTaskFile {
   path: string;

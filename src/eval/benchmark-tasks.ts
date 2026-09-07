@@ -597,6 +597,578 @@ run();
     ],
     verifyCommand: 'node test/barrier.test.js',
   },
+
+  // =========================================================================
+  // CONTEXT ENGINEERING & LARGE CODEBASE NAVIGATION BENCHMARK SUITE
+  // =========================================================================
+
+  // Task 10 (Context - Easy): Needle in Config Tree
+  {
+    id: 'task-context-needle-in-repo',
+    title: 'Context: Định vị file cấu hình phân cấp trong kho mã nguồn (Needle in Config Tree)',
+    description: 'Tìm kiếm file cấu hình thuế GTGT của Việt Nam trong cây thư mục configs/regional/asia/vietnam.js và sửa tỷ lệ vatRate từ 0.05 thành 0.10 mà không gây ô nhiễm ngữ cảnh.',
+    category: 'context',
+    difficulty: 'easy',
+    prompt: 'Trong kho mã nguồn có nhiều thư mục cấu hình theo khu vực địa lý dưới `configs/regional/`. Hiện tại lệnh chạy test `node test/tax.test.js` đang thất bại vì thuế suất VAT của Việt Nam (`VN`) trả về 50,000 thay vì 100,000 (chuẩn 10%). Hãy tìm kiếm đúng file cấu hình mục tiêu và sửa giá trị `vatRate` của Việt Nam thành `0.10` để toàn bộ test trong `test/tax.test.js` đều PASS, sau đó gọi submit_solution.',
+    maxSteps: 10,
+    timeoutMs: 90000,
+    initialFiles: [
+      {
+        path: 'src/services/tax-calculator.js',
+        content: `import { getRegionalTaxConfig } from '../../configs/registry.js';
+
+export function calculateTax(amount, countryCode) {
+  if (typeof amount !== 'number' || amount < 0) return 0;
+  const config = getRegionalTaxConfig(countryCode);
+  return Math.round(amount * config.vatRate * 100) / 100;
+}
+`,
+      },
+      {
+        path: 'configs/registry.js',
+        content: `import { vietnamConfig } from './regional/asia/vietnam.js';
+import { japanConfig } from './regional/asia/japan.js';
+import { singaporeConfig } from './regional/asia/singapore.js';
+import { germanyConfig } from './regional/europe/germany.js';
+import { franceConfig } from './regional/europe/france.js';
+import { usaConfig } from './regional/americas/usa.js';
+import { canadaConfig } from './regional/americas/canada.js';
+import { defaultConfig } from './defaults.js';
+
+const registry = {
+  VN: vietnamConfig,
+  JP: japanConfig,
+  SG: singaporeConfig,
+  DE: germanyConfig,
+  FR: franceConfig,
+  US: usaConfig,
+  CA: canadaConfig,
+};
+
+export function getRegionalTaxConfig(countryCode) {
+  return registry[countryCode] || defaultConfig;
+}
+`,
+      },
+      {
+        path: 'configs/defaults.js',
+        content: `export const defaultConfig = { vatRate: 0.10, currency: 'USD' };\n`,
+      },
+      {
+        path: 'configs/regional/asia/vietnam.js',
+        content: `// Cấu hình thuế GTGT Việt Nam (VAT)
+// LỖI HIỆN TẠI: vatRate đang bị gán là 0.05 (5%) thay vì thuế suất tiêu chuẩn 0.10 (10%)
+export const vietnamConfig = {
+  vatRate: 0.05,
+  currency: 'VND',
+  countryName: 'Vietnam',
+};
+`,
+      },
+      {
+        path: 'configs/regional/asia/japan.js',
+        content: `export const japanConfig = {
+  vatRate: 0.10,
+  currency: 'JPY',
+  countryName: 'Japan',
+};
+`,
+      },
+      {
+        path: 'configs/regional/asia/singapore.js',
+        content: `export const singaporeConfig = {
+  vatRate: 0.09,
+  currency: 'SGD',
+  countryName: 'Singapore',
+};
+`,
+      },
+      {
+        path: 'configs/regional/europe/germany.js',
+        content: `export const germanyConfig = {
+  vatRate: 0.19,
+  currency: 'EUR',
+  countryName: 'Germany',
+};
+`,
+      },
+      {
+        path: 'configs/regional/europe/france.js',
+        content: `export const franceConfig = {
+  vatRate: 0.20,
+  currency: 'EUR',
+  countryName: 'France',
+};
+`,
+      },
+      {
+        path: 'configs/regional/americas/usa.js',
+        content: `export const usaConfig = {
+  vatRate: 0.08,
+  currency: 'USD',
+  countryName: 'United States',
+};
+`,
+      },
+      {
+        path: 'configs/regional/americas/canada.js',
+        content: `export const canadaConfig = {
+  vatRate: 0.13,
+  currency: 'CAD',
+  countryName: 'Canada',
+};
+`,
+      },
+      {
+        path: 'test/tax.test.js',
+        content: `import assert from 'node:assert/strict';
+import { calculateTax } from '../src/services/tax-calculator.js';
+
+function run() {
+  const vnTax = calculateTax(1000000, 'VN');
+  assert.equal(vnTax, 100000, 'Thuế GTGT Việt Nam cho 1,000,000 VND phải là 100,000 (10%)');
+
+  const jpTax = calculateTax(10000, 'JP');
+  assert.equal(jpTax, 1000, 'Thuế Nhật Bản cho 10,000 JPY phải là 1,000');
+
+  const deTax = calculateTax(100, 'DE');
+  assert.equal(deTax, 19, 'Thuế Đức cho 100 EUR phải là 19');
+
+  console.log('ALL REGIONAL TAX TESTS PASSED');
+}
+
+run();
+`,
+      },
+    ],
+    verifyCommand: 'node test/tax.test.js',
+  },
+
+  // Task 11 (Context - Medium): Multi-Hop Cross-File Dependency Chain
+  {
+    id: 'task-context-multi-hop-trace',
+    title: 'Context: Lần dấu chuỗi phụ thuộc đa tầng (Multi-Hop Cross-File Dependency Chain)',
+    description: 'Khắc phục lỗi voucher SUMMER2026 trả về discount 0 bằng cách lần theo chuỗi gọi qua 4 tầng router -> service -> pricing engine -> voucher store.',
+    category: 'context',
+    difficulty: 'medium',
+    prompt: 'Khách hàng báo cáo lỗi khi thanh toán đơn hàng: dù nhập voucher `SUMMER2026` nhưng trường `discount` trong kết quả trả về của `CheckoutRouter.handleCheckout()` luôn bằng 0. Lệnh test `node test/checkout-chain.test.js` đang báo lỗi. Hãy lần theo luồng phụ thuộc từ router qua service, pricing engine đến voucher repository để tìm ra nguyên nhân gốc rễ, sửa lỗi để test PASS, rồi submit_solution.',
+    maxSteps: 12,
+    timeoutMs: 120000,
+    initialFiles: [
+      {
+        path: 'src/api/checkout-router.js',
+        content: `import { orderService } from '../services/order-service.js';
+
+export class CheckoutRouter {
+  static async handleCheckout(request) {
+    const { items, voucherCode } = request;
+    return await orderService.calculateOrderSummary({ items, voucherCode });
+  }
+}
+`,
+      },
+      {
+        path: 'src/services/order-service.js',
+        content: `import { discountEngine } from './pricing/discount-engine.js';
+
+export const orderService = {
+  async calculateOrderSummary({ items, voucherCode }) {
+    const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const discount = await discountEngine.computeDiscount(subtotal, voucherCode);
+    return {
+      subtotal,
+      discount,
+      total: Math.max(0, subtotal - discount),
+    };
+  },
+};
+`,
+      },
+      {
+        path: 'src/services/pricing/discount-engine.js',
+        content: `import { voucherStore } from '../../repositories/voucher-store.js';
+
+export const discountEngine = {
+  async computeDiscount(subtotal, voucherCode) {
+    if (!voucherCode) return 0;
+    const voucher = await voucherStore.findVoucher(voucherCode);
+    if (!voucher) return 0;
+
+    const isValid = voucherStore.isVoucherValid(voucher, Date.now());
+    if (!isValid) return 0;
+
+    if (voucher.type === 'percentage') {
+      return (subtotal * voucher.value) / 100;
+    }
+    return Math.min(subtotal, voucher.value);
+  },
+};
+`,
+      },
+      {
+        path: 'src/repositories/voucher-store.js',
+        content: `export const voucherStore = {
+  database: [
+    {
+      code: 'SUMMER2026',
+      type: 'fixed',
+      value: 50,
+      minOrder: 100,
+      expiresAt: 1893456000000, // Năm 2030
+      active: true,
+    },
+    {
+      code: 'WELCOME10',
+      type: 'percentage',
+      value: 10,
+      minOrder: 50,
+      expiresAt: 1893456000000,
+      active: true,
+    },
+  ],
+
+  async findVoucher(code) {
+    return this.database.find((v) => v.code === code) || null;
+  },
+
+  isVoucherValid(voucher, currentTime) {
+    if (!voucher || !voucher.active) return false;
+    // LỖI: Logic ngược: so sánh expiresAt < currentTime khiến voucher chưa hết hạn lại bị xem là hết hạn
+    return voucher.expiresAt < currentTime;
+  },
+};
+`,
+      },
+      {
+        path: 'test/checkout-chain.test.js',
+        content: `import assert from 'node:assert/strict';
+import { CheckoutRouter } from '../src/api/checkout-router.js';
+
+async function run() {
+  const result = await CheckoutRouter.handleCheckout({
+    items: [
+      { name: 'Mechanical Keyboard', price: 120, quantity: 1 },
+      { name: 'Desk Mat', price: 30, quantity: 1 },
+    ],
+    voucherCode: 'SUMMER2026',
+  });
+
+  assert.equal(result.subtotal, 150, 'Subtotal phải là 150');
+  assert.equal(result.discount, 50, 'Voucher SUMMER2026 phải giảm 50');
+  assert.equal(result.total, 100, 'Total sau giảm giá phải là 100');
+
+  console.log('ALL CHECKOUT CHAIN TESTS PASSED');
+}
+
+run();
+`,
+      },
+    ],
+    verifyCommand: 'node test/checkout-chain.test.js',
+  },
+
+  // Task 12 (Context - Hard): Distractor & Legacy File Disambiguation
+  {
+    id: 'task-context-distractor-disambiguation',
+    title: 'Context: Khử nhiễu file rác và bản sao giả lập (Distractor & Legacy Disambiguation)',
+    description: 'Kho mã nguồn chứa nhiều file tương tự nhau (legacy, mock, production). Phải định vị đúng production token auth handler từ import entry point thay vì sửa nhầm file rác.',
+    category: 'context',
+    difficulty: 'hard',
+    prompt: 'Trong dự án có nhiều module auth tương tự nhau nằm rải rác (`legacy/`, `mocks/`, `core/auth/`). Hiện tại lệnh `node test/auth-integration.test.js` đang fail vì token có role "admin" hoặc "user" bị trả về lỗi `INVALID_PAYLOAD_ROLE`. CHÚ Ý BẪY CONTEXT: Không được sửa nhầm vào file legacy v1 hoặc file mock; hãy lần theo entry point thực sự của hệ thống để xác định đúng file handler đang được sử dụng trong production, sửa logic chấp nhận các role hợp lệ ("admin", "user", "system_super_admin") và từ chối các role khác, kiểm tra test PASS rồi submit_solution.',
+    maxSteps: 12,
+    timeoutMs: 120000,
+    initialFiles: [
+      {
+        path: 'src/core/auth/index.js',
+        content: `import { TokenAuthHandler } from './handlers/token-auth-handler.js';
+import { OAuth2Handler } from './handlers/oauth2-handler.js';
+
+export function createAuthHandler(type = 'token') {
+  if (type === 'oauth2') {
+    return new OAuth2Handler();
+  }
+  return new TokenAuthHandler();
+}
+`,
+      },
+      {
+        path: 'src/core/auth/handlers/token-auth-handler.js',
+        content: `export class TokenAuthHandler {
+  constructor(secret = 'prod-secret-key-xyz') {
+    this.secret = secret;
+  }
+
+  verifyToken(tokenPayload) {
+    if (!tokenPayload || typeof tokenPayload !== 'object') {
+      return { ok: false, error: 'INVALID_PAYLOAD' };
+    }
+
+    if (tokenPayload.exp && tokenPayload.exp < Date.now()) {
+      return { ok: false, error: 'TOKEN_EXPIRED' };
+    }
+
+    // BUG TẠI ĐÂY: Kiểm tra role bị sai logic, chỉ chấp thuận 'system_super_admin'
+    if (tokenPayload.role !== 'system_super_admin') {
+      return { ok: false, error: 'INVALID_PAYLOAD_ROLE' };
+    }
+
+    return { ok: true, user: tokenPayload.sub || 'anonymous', role: tokenPayload.role };
+  }
+}
+`,
+      },
+      {
+        path: 'src/legacy/v1/auth-handler.js',
+        content: `/**
+ * @deprecated Deprecated since v1.4. Do not use in production!
+ */
+export class LegacyAuthHandler {
+  verifyToken(payload) {
+    if (!payload) return { ok: false };
+    return { ok: true, role: payload.role };
+  }
+}
+`,
+      },
+      {
+        path: 'src/mocks/mock-auth-handler.js',
+        content: `/**
+ * Mock Auth Handler for external demo purposes
+ */
+export class MockAuthHandler {
+  verifyToken(payload) {
+    return { ok: true, mock: true, role: payload?.role };
+  }
+}
+`,
+      },
+      {
+        path: 'src/core/auth/handlers/oauth2-handler.js',
+        content: `export class OAuth2Handler {
+  verifyToken(token) {
+    if (!token) return { ok: false, error: 'NO_TOKEN' };
+    return { ok: true, type: 'oauth2' };
+  }
+}
+`,
+      },
+      {
+        path: 'test/auth-integration.test.js',
+        content: `import assert from 'node:assert/strict';
+import { createAuthHandler } from '../src/core/auth/index.js';
+
+function run() {
+  const handler = createAuthHandler('token');
+
+  // Case 1: Admin token hợp lệ
+  const adminRes = handler.verifyToken({
+    sub: 'admin-123',
+    role: 'admin',
+    exp: Date.now() + 60000,
+  });
+  assert.equal(adminRes.ok, true, 'Token của role admin phải được chấp thuận');
+  assert.equal(adminRes.role, 'admin');
+
+  // Case 2: User token hợp lệ
+  const userRes = handler.verifyToken({
+    sub: 'user-456',
+    role: 'user',
+    exp: Date.now() + 60000,
+  });
+  assert.equal(userRes.ok, true, 'Token của role user phải được chấp thuận');
+  assert.equal(userRes.role, 'user');
+
+  // Case 3: Token hết hạn
+  const expRes = handler.verifyToken({
+    sub: 'user-789',
+    role: 'user',
+    exp: Date.now() - 1000,
+  });
+  assert.equal(expRes.ok, false);
+  assert.equal(expRes.error, 'TOKEN_EXPIRED');
+
+  // Case 4: Role không hợp lệ
+  const invalidRoleRes = handler.verifyToken({
+    sub: 'attacker',
+    role: 'hacker',
+    exp: Date.now() + 60000,
+  });
+  assert.equal(invalidRoleRes.ok, false);
+  assert.equal(invalidRoleRes.error, 'INVALID_PAYLOAD_ROLE');
+
+  console.log('ALL AUTH INTEGRATION TESTS PASSED');
+}
+
+run();
+`,
+      },
+    ],
+    verifyCommand: 'node test/auth-integration.test.js',
+  },
+
+  // Task 13 (Context - Extreme): Plugin Architecture Topological Sorter
+  {
+    id: 'task-context-plugin-architecture-needle',
+    title: 'Context: Kiến trúc Plugin đa tầng & Sắp xếp topo thứ tự nạp (Plugin Architecture Topological Sorter)',
+    description: 'Hệ thống plugin vi mô gặp lỗi crash khi các module có quan hệ phụ thuộc lộn xộn. Cài đặt thuật toán Topological Sort (Kahn Algorithm) trong src/core/plugin-loader.js kèm phát hiện chu trình phụ thuộc.',
+    category: 'context',
+    difficulty: 'extreme',
+    prompt: "Hệ thống micro-kernel sử dụng kiến trúc plugin mở rộng với nhiều module độc lập trong \`src/plugins/\`. Khi chạy \`node test/pipeline-architecture.test.js\`, hệ thống gặp lỗi \`DEPENDENCY_UNMET\` vì các plugin được đăng ký theo thứ tự lộn xộn mà phương thức \`resolveExecutionOrder()\` trong \`src/core/plugin-loader.js\` mới chỉ trả về thứ tự đăng ký ban đầu thay vì sắp xếp topo theo đồ thị phụ thuộc (Topological Sort). Hãy lập trình thuật toán sắp xếp Topo (Kahn's Algorithm hoặc DFS) cho \`resolveExecutionOrder()\`, đồng thời ném lỗi throw new Error('CYCLIC_DEPENDENCY') nếu phát hiện chu trình phụ thuộc vòng quanh, kiểm tra toàn bộ test trong \`test/pipeline-architecture.test.js\` PASS rồi submit_solution.",
+    maxSteps: 15,
+    timeoutMs: 140000,
+    initialFiles: [
+      {
+        path: 'src/core/plugin-loader.js',
+        content: `export class PluginLoader {
+  constructor() {
+    this.plugins = new Map();
+    this.loadedPlugins = new Map();
+  }
+
+  register(plugin) {
+    if (!plugin || !plugin.name) {
+      throw new Error('INVALID_PLUGIN: Plugin must have a valid name');
+    }
+    this.plugins.set(plugin.name, plugin);
+  }
+
+  /**
+   * Sắp xếp thứ tự nạp plugins theo quan hệ phụ thuộc (Topological Sort)
+   * @returns {string[]} Danh sách tên plugin theo thứ tự thực thi an toàn
+   */
+  resolveExecutionOrder() {
+    // BUG HIỆN TẠI: Chỉ trả về thứ tự đăng ký thô (Insertion Order)
+    // Dẫn đến plugin phụ thuộc chạy trước plugin nguồn gây lỗi runtime!
+    // Cần cài đặt Topological Sort (Kahn's Algorithm hoặc DFS).
+    // Nếu phát hiện chu trình phụ thuộc (Cycle), phải throw Error('CYCLIC_DEPENDENCY').
+    return Array.from(this.plugins.keys());
+  }
+
+  async loadAll() {
+    const order = this.resolveExecutionOrder();
+    for (const name of order) {
+      const plugin = this.plugins.get(name);
+      for (const dep of (plugin.dependencies || [])) {
+        if (!this.loadedPlugins.has(dep)) {
+          throw new Error(\`DEPENDENCY_UNMET: Plugin '\${name}' requires '\${dep}' which is not loaded yet.\`);
+        }
+      }
+      const instance = await plugin.init(this.loadedPlugins);
+      this.loadedPlugins.set(name, instance || { name });
+    }
+    return this.loadedPlugins;
+  }
+}
+`,
+      },
+      {
+        path: 'src/plugins/data-sanitizer.js',
+        content: `export const dataSanitizer = {
+  name: 'data-sanitizer',
+  dependencies: [],
+  init: async () => ({ sanitize: (str) => str.trim() }),
+};
+`,
+      },
+      {
+        path: 'src/plugins/hasher.js',
+        content: `export const hasher = {
+  name: 'hasher',
+  dependencies: ['data-sanitizer'],
+  init: async () => ({ hash: (str) => \`hash-\${str}\` }),
+};
+`,
+      },
+      {
+        path: 'src/plugins/audit-logger.js',
+        content: `export const auditLogger = {
+  name: 'audit-logger',
+  dependencies: ['hasher'],
+  init: async (deps) => ({
+    log: (msg) => {
+      const h = deps.get('hasher').hash(msg);
+      return \`[LOG]: \${h}\`;
+    },
+  }),
+};
+`,
+      },
+      {
+        path: 'src/plugins/metrics-collector.js',
+        content: `export const metricsCollector = {
+  name: 'metrics-collector',
+  dependencies: ['audit-logger'],
+  init: async () => ({ count: 1 }),
+};
+`,
+      },
+      {
+        path: 'src/plugins/rate-limiter.js',
+        content: `export const rateLimiter = {
+  name: 'rate-limiter',
+  dependencies: [],
+  init: async () => ({ check: () => true }),
+};
+`,
+      },
+      {
+        path: 'src/plugins/payload-compressor.js',
+        content: `export const payloadCompressor = {
+  name: 'payload-compressor',
+  dependencies: ['data-sanitizer'],
+  init: async () => ({ compress: (s) => s }),
+};
+`,
+      },
+      {
+        path: 'test/pipeline-architecture.test.js',
+        content: `import assert from 'node:assert/strict';
+import { PluginLoader } from '../src/core/plugin-loader.js';
+import { auditLogger } from '../src/plugins/audit-logger.js';
+import { dataSanitizer } from '../src/plugins/data-sanitizer.js';
+import { hasher } from '../src/plugins/hasher.js';
+import { metricsCollector } from '../src/plugins/metrics-collector.js';
+import { rateLimiter } from '../src/plugins/rate-limiter.js';
+import { payloadCompressor } from '../src/plugins/payload-compressor.js';
+
+async function run() {
+  const loader = new PluginLoader();
+
+  loader.register(metricsCollector);
+  loader.register(auditLogger);
+  loader.register(rateLimiter);
+  loader.register(hasher);
+  loader.register(payloadCompressor);
+  loader.register(dataSanitizer);
+
+  const loaded = await loader.loadAll();
+  assert.equal(loaded.size, 6, 'Toàn bộ 6 plugins phải được nạp thành công');
+
+  const order = loader.resolveExecutionOrder();
+  assert(order.indexOf('data-sanitizer') < order.indexOf('hasher'), 'data-sanitizer phải nạp trước hasher');
+  assert(order.indexOf('hasher') < order.indexOf('audit-logger'), 'hasher phải nạp trước audit-logger');
+  assert(order.indexOf('audit-logger') < order.indexOf('metrics-collector'), 'audit-logger phải nạp trước metrics-collector');
+
+  // Test Cycle Detection
+  const cyclicLoader = new PluginLoader();
+  cyclicLoader.register({ name: 'A', dependencies: ['B'], init: async () => {} });
+  cyclicLoader.register({ name: 'B', dependencies: ['A'], init: async () => {} });
+
+  assert.throws(
+    () => cyclicLoader.resolveExecutionOrder(),
+    /CYCLIC_DEPENDENCY/,
+    'Phải ném lỗi CYCLIC_DEPENDENCY khi có chu trình vòng lặp phụ thuộc'
+  );
+
+  console.log('ALL PLUGIN ARCHITECTURE TESTS PASSED');
+}
+
+run();
+`,
+      },
+    ],
+    verifyCommand: 'node test/pipeline-architecture.test.js',
+  },
 ];
 
 export function getBenchmarkTaskById(id: string): BenchmarkTask | undefined {

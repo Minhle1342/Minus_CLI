@@ -340,7 +340,6 @@ export function resolveSafePath(rootDir, userPath) {
         };
 
       case 'task-hallucination-concurrency-barrier':
-      default:
         return {
           path: 'src/async-barrier.js',
           content: `export class AsyncSemaphore {
@@ -365,6 +364,158 @@ export function resolveSafePath(rootDir, userPath) {
       const next = this.queue.shift();
       next();
     }
+  }
+}
+`,
+        };
+
+      case 'task-context-needle-in-repo':
+        return {
+          path: 'configs/regional/asia/vietnam.js',
+          content: `export const vietnamConfig = {
+  vatRate: 0.10,
+  currency: 'VND',
+  countryName: 'Vietnam',
+};
+`,
+        };
+
+      case 'task-context-multi-hop-trace':
+        return {
+          path: 'src/repositories/voucher-store.js',
+          content: `export const voucherStore = {
+  database: [
+    {
+      code: 'SUMMER2026',
+      type: 'fixed',
+      value: 50,
+      minOrder: 100,
+      expiresAt: 1893456000000,
+      active: true,
+    },
+    {
+      code: 'WELCOME10',
+      type: 'percentage',
+      value: 10,
+      minOrder: 50,
+      expiresAt: 1893456000000,
+      active: true,
+    },
+  ],
+
+  async findVoucher(code) {
+    return this.database.find((v) => v.code === code) || null;
+  },
+
+  isVoucherValid(voucher, currentTime) {
+    if (!voucher || !voucher.active) return false;
+    return voucher.expiresAt > currentTime;
+  },
+};
+`,
+        };
+
+      case 'task-context-distractor-disambiguation':
+        return {
+          path: 'src/core/auth/handlers/token-auth-handler.js',
+          content: `export class TokenAuthHandler {
+  constructor(secret = 'prod-secret-key-xyz') {
+    this.secret = secret;
+  }
+
+  verifyToken(tokenPayload) {
+    if (!tokenPayload || typeof tokenPayload !== 'object') {
+      return { ok: false, error: 'INVALID_PAYLOAD' };
+    }
+
+    if (tokenPayload.exp && tokenPayload.exp < Date.now()) {
+      return { ok: false, error: 'TOKEN_EXPIRED' };
+    }
+
+    const validRoles = ['admin', 'user', 'system_super_admin'];
+    if (!validRoles.includes(tokenPayload.role)) {
+      return { ok: false, error: 'INVALID_PAYLOAD_ROLE' };
+    }
+
+    return { ok: true, user: tokenPayload.sub || 'anonymous', role: tokenPayload.role };
+  }
+}
+`,
+        };
+
+      case 'task-context-plugin-architecture-needle':
+      default:
+        return {
+          path: 'src/core/plugin-loader.js',
+          content: `export class PluginLoader {
+  constructor() {
+    this.plugins = new Map();
+    this.loadedPlugins = new Map();
+  }
+
+  register(plugin) {
+    if (!plugin || !plugin.name) {
+      throw new Error('INVALID_PLUGIN: Plugin must have a valid name');
+    }
+    this.plugins.set(plugin.name, plugin);
+  }
+
+  resolveExecutionOrder() {
+    const inDegree = new Map();
+    const adj = new Map();
+
+    for (const [name] of this.plugins.entries()) {
+      inDegree.set(name, 0);
+      adj.set(name, []);
+    }
+
+    for (const [name, plugin] of this.plugins.entries()) {
+      for (const dep of (plugin.dependencies || [])) {
+        if (this.plugins.has(dep)) {
+          adj.get(dep).push(name);
+          inDegree.set(name, (inDegree.get(name) || 0) + 1);
+        }
+      }
+    }
+
+    const queue = [];
+    for (const [name, deg] of inDegree.entries()) {
+      if (deg === 0) queue.push(name);
+    }
+
+    const order = [];
+    while (queue.length > 0) {
+      const u = queue.shift();
+      order.push(u);
+
+      for (const v of (adj.get(u) || [])) {
+        inDegree.set(v, inDegree.get(v) - 1);
+        if (inDegree.get(v) === 0) {
+          queue.push(v);
+        }
+      }
+    }
+
+    if (order.length < this.plugins.size) {
+      throw new Error('CYCLIC_DEPENDENCY: Circular dependency detected in plugin graph');
+    }
+
+    return order;
+  }
+
+  async loadAll() {
+    const order = this.resolveExecutionOrder();
+    for (const name of order) {
+      const plugin = this.plugins.get(name);
+      for (const dep of (plugin.dependencies || [])) {
+        if (!this.loadedPlugins.has(dep)) {
+          throw new Error(\`DEPENDENCY_UNMET: Plugin '\${name}' requires '\${dep}' which is not loaded yet.\`);
+        }
+      }
+      const instance = await plugin.init(this.loadedPlugins);
+      this.loadedPlugins.set(name, instance || { name });
+    }
+    return this.loadedPlugins;
   }
 }
 `,
