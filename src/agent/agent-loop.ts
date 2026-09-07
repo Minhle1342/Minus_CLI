@@ -904,13 +904,15 @@ export class AgentLoop {
       });
 
       // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
-      CLI.renderStepHeader(step, effectiveMaxSteps, {
-        phase: classification.phase,
-        activeTask: activeTask?.title,
-        playbook: adviceInfo.playbook,
-        risk: classification.risk,
-        isGoal,
-      });
+      if (!this._collapsePreferences.compactSteps) {
+        CLI.renderStepHeader(step, effectiveMaxSteps, {
+          phase: classification.phase,
+          activeTask: activeTask?.title,
+          playbook: adviceInfo.playbook,
+          risk: classification.risk,
+          isGoal,
+        });
+      }
 
       let cognitiveScaffoldText: string | undefined;
       if (step === 1 || this.reflectionEngine.getConsecutiveFailures() > 1) {
@@ -920,7 +922,9 @@ export class AgentLoop {
           activeTask: activeTask?.title,
           consecutiveFailures: this.reflectionEngine.getConsecutiveFailures(),
         });
-        CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+        }
         cognitiveScaffoldText = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
       }
 
@@ -1442,14 +1446,16 @@ export class AgentLoop {
         toolCalls: response.toolCalls,
       });
 
-      if (!isSubagent) {
+      if (!isSubagent && !this._collapsePreferences.compactSteps) {
         CLI.renderLLMThinking(stepSummary);
       }
 
       // Giám sát và hiển thị Prompt Cache Hit Rate / Token Telemetry
       if (response.usage) {
         this.kernel?.ctx.events.emit('model:usage', response.usage);
-        CLI.renderCacheUsage(response.usage);
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderCacheUsage(response.usage);
+        }
       }
 
       // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
@@ -1460,7 +1466,9 @@ export class AgentLoop {
           step,
           turn: (session as any).turnsCount || 1,
         };
-        CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
+        }
         this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
       }
 
@@ -1532,7 +1540,9 @@ export class AgentLoop {
       // 4. Nếu model muốn gọi tool (System 1: Action)
       if (hasToolCalls) {
         consecutiveEmptyTurns = 0;
-        CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
+        }
 
         const normalizedToolCalls = response.toolCalls.map((call: any) => ({
           ...call,
@@ -1848,7 +1858,17 @@ export class AgentLoop {
           }
 
           if (this._collapsePreferences.compactSteps) {
-            CLI.renderCompactStepLine(toolName, toolArgs, executionResult.durationMs, executionResult.result);
+            CLI.renderCompactOneLiner({
+              step,
+              maxSteps: effectiveMaxSteps,
+              phase: classification.phase,
+              toolName,
+              args: toolArgs,
+              durationMs: executionResult.durationMs,
+              result: executionResult.result,
+              tokens: response.usage?.totalTokens,
+              cachedTokens: response.usage?.cachedTokens,
+            });
           } else {
             CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
           }
@@ -1997,7 +2017,9 @@ export class AgentLoop {
 
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
           if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
-            CLI.renderPlan(this.planManager.getTasks());
+            if (!this._collapsePreferences.compactSteps) {
+              CLI.renderPlan(this.planManager.getTasks());
+            }
           }
 
 
@@ -2085,7 +2107,9 @@ export class AgentLoop {
           reason: stepReason,
         });
 
-        CLI.renderStepFooter();
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderStepFooter();
+        }
         this.kernel?.ctx.events.emit('step:after', step);
 
         if (strategyChangeRequired) {

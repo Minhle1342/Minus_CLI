@@ -19,7 +19,7 @@ export const DEFAULT_COLLAPSE_PREFERENCES: UICollapsePreferences = {
   tools: true,
   diff: false,
   treeDepth: 3,
-  compactSteps: false,
+  compactSteps: true,
 };
 
 // ANSI escape codes for styling
@@ -81,7 +81,7 @@ export const colors = {
 export const c = colors;
 
 const BASE_TYPEWRITER_DELAY_MS = 8;
-export const FINAL_ANSWER_CHARACTER_DELAY_MS = BASE_TYPEWRITER_DELAY_MS / 2;
+export const FINAL_ANSWER_CHARACTER_DELAY_MS = 4;
 
 export interface SlashCommandDefinition {
   command: string;
@@ -372,12 +372,17 @@ export interface TypewriterOptions {
   wait?: (delayMs: number) => Promise<void>;
 }
 
+export const SHARED_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
 export async function writeTypewriterText(text: string, options: TypewriterOptions = {}): Promise<void> {
   const delayMs = Math.max(0, options.delayMs ?? FINAL_ANSWER_CHARACTER_DELAY_MS);
   const write = options.write ?? ((character: string) => process.stdout.write(character));
+  if (delayMs === 0) {
+    write(text);
+    return;
+  }
   const wait = options.wait ?? ((durationMs: number) => new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
-  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  const characters = Array.from(segmenter.segment(text), (entry) => entry.segment);
+  const characters = Array.from(SHARED_SEGMENTER.segment(text), (entry) => entry.segment);
 
   for (let index = 0; index < characters.length; index++) {
     write(characters[index]);
@@ -823,8 +828,7 @@ export function getVisibleWidth(text: string): number {
   const clean = stripAnsiForDisplay(text);
   let width = 0;
 
-  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  for (const { segment } of segmenter.segment(clean)) {
+  for (const { segment } of SHARED_SEGMENTER.segment(clean)) {
     const codePoint = segment.codePointAt(0);
     if (codePoint === undefined) continue;
 
@@ -898,6 +902,18 @@ export function renderContextProgressBar(usedTokens: number, maxTokens: number, 
   const filled = Math.round((percent / 100) * barWidth);
   const barColor = percent > 85 ? c.crimson : percent > 65 ? c.amber : c.emerald;
   return `${barColor}${'█'.repeat(filled)}${c.slate}${'░'.repeat(Math.max(0, barWidth - filled))}${c.reset} ${percent}%`;
+}
+
+export interface CompactStepOptions {
+  step: number;
+  maxSteps: number;
+  phase?: string;
+  toolName: string;
+  args: Record<string, any>;
+  durationMs: number;
+  result: Record<string, any>;
+  tokens?: number;
+  cachedTokens?: number;
 }
 
 /**
@@ -1468,6 +1484,64 @@ export class CLI {
     console.log(`  ${icon} ${name}${targetStr}${duration}`);
   }
 
+  /**
+   * Antigravity CLI Standard: Compact One-Liner Step Log
+   * Gộp Phase + Step + Tool + Target + Status + Duration + Telemetry thành 1 dòng duy nhất (giảm 75% I/O)
+   */
+  static renderCompactOneLiner(opts: CompactStepOptions): void {
+    const isError = isToolResultFailure(opts.result);
+    const p = (opts.phase || 'step').toUpperCase();
+    const isUnlimited = !isFinite(opts.maxSteps) || opts.maxSteps >= 9999;
+    const stepTag = isUnlimited ? `${opts.step}/∞` : `${opts.step}/${opts.maxSteps}`;
+
+    let phaseColor = c.slate;
+    if (p === 'EXPLORE') phaseColor = c.geminiCyan;
+    else if (p === 'IMPLEMENT') phaseColor = c.geminiAmber;
+    else if (p === 'VERIFY') phaseColor = c.emerald;
+    else if (p === 'RELEASE') phaseColor = c.brightMagenta;
+
+    const badge = `${phaseColor}[${p}:${stepTag}]${c.reset}`;
+    const toolPrefix = `${c.brightCyan}›${c.reset} ${c.bold}${opts.toolName}${c.reset}`;
+
+    const rawTarget = opts.args.path || opts.args.filePath || opts.args.targetFile
+      || opts.args.command || opts.args.query || opts.args.statement || opts.args.summary || '';
+    const targetStr = rawTarget ? ` "${c.white}${truncateDisplayText(String(rawTarget), 40)}${c.reset}"` : '';
+
+    const duration = opts.durationMs > 0 ? ` ${c.slate}(${opts.durationMs}ms)${c.reset}` : '';
+
+    let statusBadge = '';
+    if (isError) {
+      statusBadge = ` ${c.crimson}✖ failed${c.reset}`;
+    } else if (opts.result.stdout !== undefined) {
+      statusBadge = ` ${c.emerald}✔ ${opts.result.exitCode === 0 ? 'exit 0' : `exit ${opts.result.exitCode}`}${c.reset}`;
+    } else if (opts.result.replacements !== undefined) {
+      statusBadge = ` ${c.emerald}✔ ${opts.result.replacements} replaced${c.reset}`;
+    } else if (opts.result.created) {
+      statusBadge = ` ${c.emerald}✔ created${c.reset}`;
+    } else if (opts.result.hunksApplied !== undefined) {
+      statusBadge = ` ${c.emerald}✔ ${opts.result.hunksApplied} hunks${c.reset}`;
+    } else if (opts.result.matches !== undefined) {
+      statusBadge = ` ${c.emerald}✔ ${opts.result.totalMatches || opts.result.matches.length} matches${c.reset}`;
+    } else {
+      statusBadge = ` ${c.emerald}✔ OK${c.reset}`;
+    }
+
+    let telemetryStr = '';
+    if (typeof opts.tokens === 'number' && opts.tokens > 0) {
+      const tokStr = opts.tokens >= 1000 ? `${(opts.tokens / 1000).toFixed(1)}k tok` : `${opts.tokens} tok`;
+      telemetryStr = ` ${c.dim}· ${tokStr}${c.reset}`;
+    }
+
+    process.stdout.write(`  ${badge} ${toolPrefix}${targetStr}${statusBadge}${duration}${telemetryStr}\n`);
+
+    if (isError) {
+      const firstStderrLine = opts.result.stderr ? String(opts.result.stderr).trim().split('\n')[0] : '';
+      const exitDetail = typeof opts.result.exitCode === 'number' && opts.result.exitCode !== 0 ? `Process exited with code ${opts.result.exitCode}` : '';
+      const errDetail = opts.result.error || opts.result.message || firstStderrLine || exitDetail || 'Unknown error';
+      process.stdout.write(`    ${c.crimson}└─ ${truncateDisplayText(String(errDetail), 100)}${c.reset}\n`);
+    }
+  }
+
   static renderCtrlOToggleToast(isCompact: boolean): void {
     console.log(`  ${c.slate}[Ctrl+O] Compact Mode: ${isCompact ? 'ON' : 'OFF'}${c.reset}`);
   }
@@ -1699,32 +1773,33 @@ export class CLI {
       ? `└── ⚡ [AUTO-APPROVED SESSION ACTION] Thay đổi sẽ được tự động áp dụng ──────────┘`
       : `└── ⏳ [MINUS PERMISSION APPROVAL] Vui lòng đối chiếu trước khi cấp quyền ────────┘`;
 
-    console.log(`\n  ${c.brightCyan}${bannerHeader}${c.reset}`);
+    let buf = `\n  ${c.brightCyan}${bannerHeader}${c.reset}\n`;
 
     const maxLines = 50;
     const renderLines = lines.slice(0, maxLines);
 
     for (const line of renderLines) {
       if (line.startsWith('---') || line.startsWith('+++')) {
-        console.log(`  ${c.dim}${c.white}${line}${c.reset}`);
+        buf += `  ${c.dim}${c.white}${line}${c.reset}\n`;
       } else if (line.startsWith('@@')) {
-        console.log(`  ${c.brightCyan}${line}${c.reset}`);
+        buf += `  ${c.brightCyan}${line}${c.reset}\n`;
       } else if (line.startsWith('-')) {
-        console.log(`  ${c.crimson}${line}${c.reset}`);
+        buf += `  ${c.crimson}${line}${c.reset}\n`;
       } else if (line.startsWith('+')) {
-        console.log(`  ${c.emerald}${line}${c.reset}`);
+        buf += `  ${c.emerald}${line}${c.reset}\n`;
       } else if (line.startsWith('rename from ') || line.startsWith('rename to ') || line.startsWith('similarity index ')) {
-        console.log(`  ${c.brightYellow}${line}${c.reset}`);
+        buf += `  ${c.brightYellow}${line}${c.reset}\n`;
       } else {
-        console.log(`  ${c.slate}${line}${c.reset}`);
+        buf += `  ${c.slate}${line}${c.reset}\n`;
       }
     }
 
     if (lines.length > maxLines) {
-      console.log(`  ${c.slate}  ... (+${lines.length - maxLines} dòng thay đổi nữa)${c.reset}`);
+      buf += `  ${c.slate}  ... (+${lines.length - maxLines} dòng thay đổi nữa)${c.reset}\n`;
     }
 
-    console.log(`  ${c.brightCyan}${bannerFooter}${c.reset}\n`);
+    buf += `  ${c.brightCyan}${bannerFooter}${c.reset}`;
+    console.log(buf);
   }
 
   /**

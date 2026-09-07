@@ -176,12 +176,45 @@ describe('Antigravity CLI Collapse & Explore Mechanism', () => {
       assert.strictEqual(agentLoop.collapsePreferences.compactSteps, true);
     });
 
-    it('should render compact step line and Ctrl+O toast without throwing', () => {
+    it('should render compact step line, Antigravity one-liner, and Ctrl+O toast without throwing', () => {
       assert.doesNotThrow(() => {
         CLI.renderCompactStepLine('read_file', { path: 'src/agent.ts' }, 15, { success: true, content: 'export class ...' });
         CLI.renderCompactStepLine('replace_text', { path: 'src/main.py' }, 22, { success: true, hunksApplied: 1 });
         CLI.renderCompactStepLine('run_command', { command: 'cargo test' }, 1200, { success: true, stdout: 'test result: ok', exitCode: 0 });
         CLI.renderCompactStepLine('run_command', { command: 'npm test' }, 450, { success: false, error: 'Command failed', exitCode: 1 });
+
+        // Antigravity CLI compact one-liner tests
+        CLI.renderCompactOneLiner({
+          step: 1,
+          maxSteps: 10,
+          phase: 'EXPLORE',
+          toolName: 'read_file',
+          args: { path: 'src/agent.ts' },
+          durationMs: 15,
+          result: { success: true, content: 'export class ...' },
+          tokens: 1200,
+        });
+        CLI.renderCompactOneLiner({
+          step: 2,
+          maxSteps: 10,
+          phase: 'IMPLEMENT',
+          toolName: 'replace_text',
+          args: { targetFile: 'src/main.py' },
+          durationMs: 22,
+          result: { success: true, replacements: 1 },
+          tokens: 2500,
+        });
+        CLI.renderCompactOneLiner({
+          step: 3,
+          maxSteps: 10,
+          phase: 'VERIFY',
+          toolName: 'run_command',
+          args: { command: 'npm test' },
+          durationMs: 450,
+          result: { success: false, error: 'Command failed', exitCode: 1 },
+          tokens: 3100,
+        });
+
         CLI.renderCtrlOToggleToast(true);
         CLI.renderCtrlOToggleToast(false);
       });
