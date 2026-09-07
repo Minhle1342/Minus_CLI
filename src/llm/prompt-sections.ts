@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolProvider, ToolRegistry } from '../tools/registry.js';
+import type { TaskPhase } from '../control/classification-types.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 
 export interface PromptAssemblyContext {
@@ -218,3 +219,73 @@ export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },
   { id: 'architecture-analysis', content: SECTION_ARCHITECTURE_ANALYSIS, priority: 1000, condition: (ctx: PromptAssemblyContext) => ctx.isArchitectureAnalysis ?? false },
 ];
+
+/**
+ * TIER 2: PHASE-SPECIFIC DYNAMIC GUIDANCE (Pareto 80/20 & Cache-Safe Tail Injection)
+ * Tuyệt đối không nhét vào System Prompt để bảo toàn 100% KV-Cache (Prefix Invariance).
+ * Được tiêm động ở đuôi tin nhắn User (Dynamic Suffix) qua DynamicContextArbiter.
+ */
+export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (80% REASONING BUDGET)]:
+- Goal: Deeply inspect code, navigate symbols, and isolate causal mechanisms.
+- Primary Tools: get_symbol_context_360, inspect_symbol, query_call_graph, read_file, get_diagnostics.
+- Pareto Rule: Spend 80% of reasoning effort here. For bugfix/refactor tasks, formulate and verify your hypothesis with \`formulate_and_verify_hypothesis\` before attempting edits.
+- Constraint: Pre-Mutation Gate is active. Do NOT attempt to modify code until root cause is proven.`;
+
+export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
+- Goal: Break down complex, multi-file changes into 2-5 atomic milestones using \`create_plan\`.
+- Sequence: Inspect -> Surgical Fix -> Verification Ladder.
+- Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.`;
+
+export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (SURGICAL 1-2 SHOT MUTATION)]:
+- Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
+- Primary Tools: \`apply_patch\` (Unified Diff) or \`replace_file_content\` / \`replace_text\` (with expectedFileHash).
+- Pareto Rule: Limit mutations to 1-2 precise edits. Never perform wide speculative rewrites.`;
+
+export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
+- Goal: Empirically prove that changes resolve the issue without regressions.
+- Sequence: 1. In-memory diagnostics (\`get_diagnostics\`) -> 2. Typecheck/Build (\`tsc --noEmit\` / \`npm run build\`) -> 3. Targeted test suite.
+- Completion Gate: Once tests pass, YOU MUST call \`submit_solution\` with concrete verification proof (or \`report_investigation_findings\` for analysis tasks).
+- Anti-Pattern: Never emit pseudo-completion stubs without running verification.`;
+
+export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
+- Goal: Provide a clear, natural final summary matching the user's language.
+- Git: Perform git operations (git_commit, git_push) ONLY when explicitly requested by user.`;
+
+export interface PhaseGuidanceOptions {
+  taskClass?: string;
+  hasValidatedHypothesis?: boolean;
+  hasUnverifiedChanges?: boolean;
+  includePatchSpec?: boolean;
+}
+
+export function resolvePhaseDynamicGuidance(
+  phase: TaskPhase | string,
+  options?: PhaseGuidanceOptions,
+): string {
+  switch (phase) {
+    case 'explore': {
+      let extra = '';
+      if (options?.taskClass === 'bugfix' || options?.taskClass === 'refactor') {
+        extra = options.hasValidatedHypothesis
+          ? '\n✔ Causal hypothesis is VALIDATED. You may proceed to plan or implement.'
+          : '\n⚠️ Pre-Mutation Gate ACTIVE: Formulate and verify your causal hypothesis with `formulate_and_verify_hypothesis` before editing files.';
+      }
+      return `${SECTION_PHASE_EXPLORE_GUIDANCE}${extra}`;
+    }
+    case 'plan':
+      return SECTION_PHASE_PLAN_GUIDANCE;
+    case 'implement': {
+      const withPatchSpec = options?.includePatchSpec ?? true;
+      return withPatchSpec
+        ? `${SECTION_PHASE_IMPLEMENT_GUIDANCE}\n\n${SECTION_PATCH_FORMAT_SPEC}`
+        : SECTION_PHASE_IMPLEMENT_GUIDANCE;
+    }
+    case 'verify':
+      return SECTION_PHASE_VERIFY_GUIDANCE;
+    case 'release':
+      return SECTION_PHASE_RELEASE_GUIDANCE;
+    default:
+      return '';
+  }
+}
+

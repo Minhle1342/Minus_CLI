@@ -23,6 +23,13 @@ import {
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
   type PromptAssemblyContext,
+  SECTION_PHASE_EXPLORE_GUIDANCE,
+  SECTION_PHASE_PLAN_GUIDANCE,
+  SECTION_PHASE_IMPLEMENT_GUIDANCE,
+  SECTION_PHASE_VERIFY_GUIDANCE,
+  SECTION_PHASE_RELEASE_GUIDANCE,
+  resolvePhaseDynamicGuidance,
+  type PhaseGuidanceOptions,
 } from './prompt-sections.js';
 import { PromptAssembler } from './prompt-assembler.js';
 
@@ -42,6 +49,13 @@ export {
   detectPromptContext,
   type PromptAssemblyContext,
   PromptAssembler,
+  SECTION_PHASE_EXPLORE_GUIDANCE,
+  SECTION_PHASE_PLAN_GUIDANCE,
+  SECTION_PHASE_IMPLEMENT_GUIDANCE,
+  SECTION_PHASE_VERIFY_GUIDANCE,
+  SECTION_PHASE_RELEASE_GUIDANCE,
+  resolvePhaseDynamicGuidance,
+  type PhaseGuidanceOptions,
 };
 
 /**

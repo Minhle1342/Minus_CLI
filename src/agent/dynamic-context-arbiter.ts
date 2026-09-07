@@ -3,6 +3,8 @@ import { ExactTokenizer } from './exact-tokenizer.js';
 export interface DynamicContextInputs {
   /** P1: Chỉ dẫn công cụ kế tiếp từ ToolSynergyAdvisor (CRITICAL - Bảo toàn 100%) */
   advicePrompt?: string;
+  /** P1.5: Chỉ dẫn hành vi chuyên biệt theo Phase (Explore 80% reasoning / Implement patch spec / Verify gate) (CRITICAL - Bảo toàn 100%) */
+  phaseGuidance?: string;
   /** P2: Trạng thái DAG plan, acceptance criteria từ PlanManager (HIGH - Bảo toàn) */
   rawPlanContext?: string;
   /** P3: Turn cũ liên quan được re-inject từ TurnMemoryRetriever (MEDIUM-HIGH) */
@@ -72,13 +74,14 @@ export class DynamicContextArbiter {
 
   arbitrate(
     inputs: DynamicContextInputs,
-    options?: DynamicContextArbiterOptions,
+    options?: DynamicContextArbiterOptions | string,
   ): DynamicContextArbiterResult {
-    const budgetTokens = options?.maxBudgetTokens ?? this.defaultBudget;
-    const modelName = options?.modelName || 'gemini-2.5-flash';
-    const enableDedup = options?.enableDeduplication ?? true;
+    const optObj = typeof options === 'string' ? { modelName: options } : options;
+    const budgetTokens = optObj?.maxBudgetTokens ?? this.defaultBudget;
+    const modelName = optObj?.modelName || 'gemini-2.5-flash';
+    const enableDedup = optObj?.enableDeduplication ?? true;
 
-    // 1. Chuẩn hóa và xếp hạng 7 nguồn theo thứ tự ưu tiên
+    // 1. Chuẩn hóa và xếp hạng các nguồn theo thứ tự ưu tiên
     const rawSources: RankedSource[] = [
       {
         key: 'advicePrompt',
@@ -86,6 +89,13 @@ export class DynamicContextArbiter {
         content: (inputs.advicePrompt || '').trim(),
         priority: 1,
         allowTruncation: false, // P1 không bao giờ bị cắt
+      },
+      {
+        key: 'phaseGuidance',
+        name: 'Phase Guidance (P1.5)',
+        content: (inputs.phaseGuidance || '').trim(),
+        priority: 1.5,
+        allowTruncation: false, // P1.5 chỉ dẫn pha không bao giờ bị cắt
       },
       {
         key: 'rawPlanContext',
@@ -182,12 +192,12 @@ export class DynamicContextArbiter {
 
     let currentTotalTokens = beforeTokens;
 
-    // Duyệt ngược từ P7 -> P2 (bảo vệ P1 tuyệt đối)
+    // Duyệt ngược từ P7 -> P2 (bảo vệ P1 và P1.5 tuyệt đối)
     for (let i = rankedSources.length - 1; i >= 0; i--) {
       if (currentTotalTokens <= budgetTokens) break;
 
       const source = rankedSources[i];
-      if (source.priority === 1) break; // P1 là bất khả xâm phạm
+      if (source.priority <= 1.5) break; // P1 và P1.5 là bất khả xâm phạm
 
       const originalCost = sourceTokenCosts.get(source.key) || 0;
       const tokensNeededToSave = currentTotalTokens - budgetTokens;

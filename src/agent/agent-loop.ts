@@ -20,7 +20,7 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
@@ -1131,8 +1131,15 @@ export class AgentLoop {
         || this.llm?.modelName
         || this.llm?.constructor?.name
         || 'unknown';
+      // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
+      const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
+        taskClass: classification.taskClass,
+        hasValidatedHypothesis: (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) > 0,
+      });
+
       const arbitration = this.dynamicContextArbiter.arbitrate({
         advicePrompt,
+        phaseGuidance,
         rawPlanContext,
         recalledTurnContext,
         memoryPrompt,
