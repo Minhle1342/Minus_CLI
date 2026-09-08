@@ -70,9 +70,31 @@ export class TestEngineeringHarness {
       const pkgContent = await fs.readFile(pkgPath, 'utf-8').catch(() => null);
       if (pkgContent) {
         const pkg = JSON.parse(pkgContent);
-        if (pkg.scripts && pkg.scripts.test) {
-          return 'npm test';
+        if (pkg.scripts) {
+          if (pkg.scripts.test) return 'npm test';
+          if (pkg.scripts['test:unit']) return 'npm run test:unit';
+          if (pkg.scripts['test:all']) return 'npm run test:all';
         }
+      }
+
+      // Kiểm tra Monorepo workspaces (apps/*, packages/*)
+      for (const parentDir of ['apps', 'packages']) {
+        try {
+          const parentPath = path.join(this.workspaceRoot, parentDir);
+          const entries = await fs.readdir(parentPath, { withFileTypes: true }).catch(() => []);
+          for (const entry of entries) {
+            if (entry.isDirectory()) {
+              const subPkgPath = path.join(parentPath, entry.name, 'package.json');
+              const subPkgContent = await fs.readFile(subPkgPath, 'utf-8').catch(() => null);
+              if (subPkgContent) {
+                const subPkg = JSON.parse(subPkgContent);
+                if (subPkg.scripts && (subPkg.scripts.test || subPkg.scripts['test:unit'])) {
+                  return `npm test --workspace=${parentDir}/${entry.name}`;
+                }
+              }
+            }
+          }
+        } catch {}
       }
 
       // Kiểm tra Python pytest

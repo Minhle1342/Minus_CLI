@@ -73,7 +73,12 @@ function envFiniteNumber(name: string): number | undefined {
 }
 
 function isComprehensiveSubmissionSummary(value: string): boolean {
-  return value.trim().length >= 80 && value.trim().split(/\s+/).length >= 12;
+  const trimmed = value.trim();
+  if (trimmed.length < 200 || trimmed.split(/\s+/).length < 25) {
+    return false;
+  }
+  // Yêu cầu có cấu trúc phân tích (danh sách, định dạng markdown, hoặc ít nhất 2 câu phân tách)
+  return /[-*•\d]\.\s|###|\*\*|(?:\n\n)/.test(trimmed);
 }
 
 /**
@@ -1802,8 +1807,17 @@ export class AgentLoop {
             if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
               try {
                 const tsService = getOrCreateTypeScriptService(this._workspace);
-                const diags = tsService.getDiagnostics();
-                const errors = diags.filter((d: any) => d.category === 'error');
+                let errors: any[] = [];
+                if (this.targetFilesModifiedInTurn.size > 0) {
+                  for (const modFile of this.targetFilesModifiedInTurn) {
+                    if (/\.[cm]?[jt]sx?$/i.test(modFile)) {
+                      errors.push(...tsService.getDiagnostics(modFile).filter((d: any) => d.category === 'error'));
+                    }
+                  }
+                } else {
+                  // Pure read-only / investigation: 0 errors
+                  errors = [];
+                }
                 if (errors.length === 0) {
                   this.verificationPolicy.recordVerification(
                     'jit_diagnostics_sweep',
@@ -1897,8 +1911,8 @@ export class AgentLoop {
           if (sideEffect && !isToolResultFailure(executionResult.result)) {
             this.dynamicContextCache.invalidate();
           }
-          if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file'].includes(toolName)) {
-            const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || '');
+          if (!isToolResultFailure(executionResult.result) && ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName)) {
+            const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || toolArgs.TargetFile || '');
             const blast = executionResult.result?.blastRadius;
             this.verificationPolicy.recordModification(mutatedPath, {
               impactedTestSuites: blast?.impactedTestSuites,
@@ -1943,11 +1957,29 @@ export class AgentLoop {
           }
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
             hasSubmittedSolution = true;
-            submittedSolutionSummary = String(toolArgs.summary || '').trim();
+            const summaryText = String(toolArgs.summary || '').trim();
+            const rootCauseText = toolArgs.rootCause ? String(toolArgs.rootCause).trim() : '';
+            const filesModifiedList = Array.isArray(toolArgs.filesModified)
+              ? toolArgs.filesModified.map((f: any) => String(f).trim()).filter(Boolean)
+              : [];
+            const verificationText = toolArgs.verificationEvidence ? String(toolArgs.verificationEvidence).trim() : '';
+
+            // Xây dựng bản tóm tắt giải pháp giàu cấu trúc để dự phòng và hiển thị
+            const richSummaryParts: string[] = [];
+            if (summaryText) richSummaryParts.push(summaryText);
+            if (rootCauseText) richSummaryParts.push(`\n**Nguyên nhân cốt lõi (Root Cause):**\n${rootCauseText}`);
+            if (filesModifiedList.length > 0) {
+              richSummaryParts.push(`\n**Các tệp đã chỉnh sửa (Modified Files):**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
+            }
+            if (verificationText) {
+              richSummaryParts.push(`\n**Bằng chứng kiểm chứng (Verification Evidence):**\n\`${verificationText}\``);
+            }
+            submittedSolutionSummary = richSummaryParts.length > 0 ? richSummaryParts.join('\n') : summaryText;
+
             this.verificationPolicy.recordVerification(
               String(toolArgs.verificationEvidence || 'submit_solution'),
               true,
-              submittedSolutionSummary.slice(0, 240),
+              summaryText.slice(0, 240),
               0,
             );
           }
@@ -2003,11 +2035,11 @@ export class AgentLoop {
             result: executionResult.result,
           });
 
-          const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'submit_solution'].includes(toolName)
+          const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
             consecutiveUnproductiveSteps = 0;
-            const targetPath = toolArgs.path || toolArgs.target_path || toolArgs.file_path || toolArgs.targetFile;
+            const targetPath = toolArgs.path || toolArgs.target_path || toolArgs.file_path || toolArgs.targetFile || toolArgs.TargetFile;
             if (targetPath) {
               this.targetFilesModifiedInTurn.add(String(targetPath));
             }
@@ -2131,18 +2163,14 @@ export class AgentLoop {
         // summary. Reusing it avoids an otherwise redundant provider request
         // whose only purpose is to restate the same result.
         const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
-        const hasCodeMutations = this.targetFilesModifiedInTurn.size > 0 || session.getEvents().some((e) =>
-          e.type === 'tool/call' &&
-          ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch', 'write_file', 'replace_text'].includes(e.data?.toolName || '')
-        );
-        const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '')
-          || (hasCodeMutations && (submittedSolutionSummary?.trim().length || 0) >= 40);
+        const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
+        const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
+          ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', false);
         if (
           !isArchQuery
           && hasSubmittedSolution
           && isSummarySufficient
-          && (this.loopOptions?.enableSubmitAutoFinalization
-            ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION'))
+          && enableSubmitAutoFinalization
         ) {
           const finalAnswer = submittedSolutionSummary!;
           CLI.renderModelAction('final_answer');
@@ -2235,8 +2263,10 @@ export class AgentLoop {
         }
 
         // Post-Submission Graceful Auto-Finalization (Codex CLI Standard):
-        // Nếu đã submit_solution thành công và có summary đầy đủ mà model sinh turn rỗng/chỉ reasoning, chốt Final Answer ngay lập tức
-        if (hasSubmittedSolution && submittedSolutionSummary) {
+        // Nếu đã submit_solution thành công mà model sinh turn rỗng/chỉ reasoning,
+        // chỉ chốt Final Answer dự phòng khi đã kích hoạt Continuation Protocol ít nhất 1 lần (consecutiveEmptyTurns > 0)
+        // để luôn ưu tiên cho model cơ hội tạo câu trả lời hoàn chỉnh sau 1 turn.
+        if (hasSubmittedSolution && submittedSolutionSummary && consecutiveEmptyTurns > 0) {
           const earlyGuardDecision = this.finalAnswerGuard.evaluate(submittedSolutionSummary, {
             userRequest: turnUserRequest,
             availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
@@ -2271,6 +2301,7 @@ export class AgentLoop {
             workspace: this._workspace,
             turn,
             hasSubmittedSolution: true,
+            filesModified: Array.from(this.targetFilesModifiedInTurn),
           });
           if (!earlyCritic.approved) {
             CLI.renderReflectionAlert(
@@ -2320,24 +2351,26 @@ export class AgentLoop {
 
         if (consecutiveEmptyTurns <= maxEmptyRetries) {
           if (hasReasoning) {
-            if (consecutiveEmptyTurns > 1) {
-              CLI.renderReflectionAlert(
-                consecutiveEmptyTurns,
-                'Model sinh suy luận System 2 nhưng chưa phát sinh tool_calls. Đang tự động kích hoạt Continuation Protocol...'
-              );
-            }
+            CLI.renderReflectionAlert(
+              consecutiveEmptyTurns,
+              hasSubmittedSolution
+                ? 'Giải pháp đã submit_solution thành công nhưng model chưa sinh câu trả lời văn bản. Đang kích hoạt Continuation Protocol...'
+                : 'Model sinh suy luận System 2 nhưng chưa phát sinh tool_calls. Đang tự động kích hoạt Continuation Protocol...',
+            );
             const noteText = hasSubmittedSolution
-              ? `[SYSTEM NOTE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Present your findings, file paths, code logic, and verification proof clearly.`
+              ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
               : '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.';
             session.addUserMessage(noteText);
             await this.persistSession(session);
           } else {
             CLI.renderReflectionAlert(
               consecutiveEmptyTurns,
-              'Model trả về phản hồi rỗng. Đang tự động kích hoạt Continuation Protocol để tiếp tục tác vụ...'
+              hasSubmittedSolution
+                ? 'Model trả về phản hồi rỗng sau khi submit_solution. Đang gửi lời nhắc yêu cầu báo cáo kết quả hoàn chỉnh...'
+                : 'Model trả về phản hồi rỗng. Đang tự động kích hoạt Continuation Protocol để tiếp tục tác vụ...',
             );
             const noteText = hasSubmittedSolution
-              ? `[SYSTEM NOTE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Present your findings, file paths, code logic, and verification proof clearly.`
+              ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
               : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
             session.addUserMessage(noteText);
             await this.persistSession(session);
@@ -2457,12 +2490,17 @@ export class AgentLoop {
       consecutivePlanCompletionRejects = 0;
 
       const effectiveSubmissionState = hasSubmittedSolution || hasReportedFindings;
+      const hasCodeMutations = this.targetFilesModifiedInTurn.size > 0 || session.getEvents().some((e) =>
+        e.type === 'tool/call' &&
+        ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch', 'write_file', 'replace_text', 'create_file', 'delete_file'].includes(e.data?.toolName || '')
+      );
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
           userRequest: turnUserRequest,
           availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
           hasSubmittedSolution: effectiveSubmissionState,
+          hasCodeMutations,
           workspace: this._workspace,
         });
       const evidenceDecision = (isSubagent || isMockLLM)
@@ -2490,12 +2528,13 @@ export class AgentLoop {
           userRequest: turnUserRequest,
           turn,
           hasSubmittedSolution,
+          filesModified: Array.from(this.targetFilesModifiedInTurn),
         });
       const finalAnswerDecision = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
           ? policyDecision
-          : !criticDecision.approved
+          : (!hasSubmittedSolution && !criticDecision.approved)
             ? {
               allow: false,
               reason: 'unverified-evidence' as const,
@@ -2521,12 +2560,19 @@ export class AgentLoop {
         this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
         const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt();
 
-        const actionMandate = [
-          `⛔ [CODEX ACTION MANDATE - MANDATORY TOOL CALL REQUIRED]`,
-          `Your response was REJECTED by the Completion Gate: ${finalAnswerDecision.reason || 'Missing empirical verification or tool execution'}.`,
-          `You MUST NOT return conversational progress text or unfulfilled promises.`,
-          `You MUST execute a concrete tool call in this step (e.g. run_command to run test/build, read_file to inspect, replace_text/apply_patch to edit, or submit_solution when all empirical proof is verified).`,
-        ].join('\n');
+        const actionMandate = hasSubmittedSolution
+          ? [
+              `⛔ [CODEX ACTION MANDATE - FINAL ANSWER QUALITY REQUIRED]`,
+              `Your final answer was REJECTED: ${finalAnswerDecision.reason || 'Insufficient detail or quality'}.`,
+              `You have already submitted the verified solution. All tool calls are locked.`,
+              `Do NOT attempt to call tools. You MUST conclude your turn with a complete, detailed final answer in the user's natural language.`,
+            ].join('\n')
+          : [
+              `⛔ [CODEX ACTION MANDATE - MANDATORY TOOL CALL REQUIRED]`,
+              `Your response was REJECTED by the Completion Gate: ${finalAnswerDecision.reason || 'Missing empirical verification or tool execution'}.`,
+              `You MUST NOT return conversational progress text or unfulfilled promises.`,
+              `You MUST execute a concrete tool call in this step (e.g. run_command to run test/build, read_file to inspect, replace_text/apply_patch to edit, or submit_solution when all empirical proof is verified).`,
+            ].join('\n');
 
         const fullContinuationPrompt = [
           actionMandate,

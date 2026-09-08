@@ -27,6 +27,20 @@ const INSPECTION_TOOLS = new Set([
   'get_diagnostics',
   'get_workspace_diff',
   'analyze_impact',
+  'query_call_graph',
+  'get_route_map',
+  'get_symbol_context_360',
+  'get_architecture_topology',
+  'lsp_query',
+  'inspect_image',
+  'read_shared_context',
+  'recall_repository_memory',
+  'verify_repository_memory',
+  'discover_tools',
+  'report_findings',
+  'report_investigation_findings',
+  'hypothesis_tool',
+  'formulate_and_verify_hypothesis',
 ]);
 
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
@@ -73,7 +87,9 @@ export function classifyToolEvidence(
     return ['git'];
   }
   if (GIT_TOOLS.has(toolName)) return ['git'];
-  if (toolName === 'web_search' || toolName === 'web_fetch') return ['external', 'inspection'];
+  if (toolName === 'web_search' || toolName === 'web_fetch' || toolName === 'search_web' || toolName === 'read_url_content') {
+    return ['external', 'inspection'];
+  }
   if (INSPECTION_TOOLS.has(toolName)) return ['inspection'];
   return ['other'];
 }

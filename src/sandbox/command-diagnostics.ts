@@ -97,6 +97,24 @@ export function diagnoseCommandFailure(
     };
   }
 
+  const scriptFailure = findPackageScriptFailure(command, combinedOutput);
+  if (scriptFailure) {
+    if (scriptFailure.isMissingPackageJson) {
+      return {
+        success: false,
+        errorCode: 'PACKAGE_JSON_NOT_FOUND',
+        diagnostic: 'No package.json file found in the execution directory.',
+        suggestion: 'If this project is a monorepo or multi-package repository, config files and scripts reside in subfolders (e.g. apps/<name>/package.json). Use "list_files" to inspect project structure, or run commands with workspace flags (e.g. "npm test --workspace=<app>").',
+      };
+    }
+    return {
+      success: false,
+      errorCode: 'PACKAGE_SCRIPT_MISSING',
+      diagnostic: `Script "${scriptFailure.scriptName || 'specified'}" is not defined in package.json.`,
+      suggestion: 'Inspect "package.json" with "read_file" to verify defined scripts, or check if the target script resides in a monorepo workspace (e.g. "npm test -w <workspace>"). Do not retry non-existent scripts.',
+    };
+  }
+
   const packageDependency = findPackageDependency(combinedOutput);
   if (packageDependency) {
     return {
@@ -171,6 +189,26 @@ export function findPackageDependency(output: string): string | undefined {
   for (const pattern of patterns) {
     const match = output.match(pattern);
     if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
+export interface PackageScriptFailure {
+  isMissingPackageJson: boolean;
+  isMissingScript: boolean;
+  scriptName?: string;
+}
+
+export function findPackageScriptFailure(command: string, output: string): PackageScriptFailure | undefined {
+  const isMissingPackageJson = /ENOENT.*package\.json|no such file or directory.*package\.json/i.test(output);
+  const scriptMatch = output.match(/(?:npm\s+error\s+Missing\s+script|npm\s+ERR!\s+missing\s+script|Missing\s+script):\s*["']?([^"'\r\n]+)["']?|error\s+Command\s*["']([^"'\r\n]+)["']\s*not\s+found|script\s*["']([^"'\r\n]+)["']\s*not\s+found|ERR_PNPM_NO_SCRIPT/i);
+
+  if (isMissingPackageJson) {
+    return { isMissingPackageJson: true, isMissingScript: false };
+  }
+  if (scriptMatch) {
+    const scriptName = (scriptMatch[1] || scriptMatch[2] || scriptMatch[3] || '').trim();
+    return { isMissingPackageJson: false, isMissingScript: true, scriptName: scriptName || undefined };
   }
   return undefined;
 }

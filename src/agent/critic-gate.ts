@@ -25,6 +25,41 @@ export interface ComposeAcceptanceContract {
   registeredFiles: string[];
 }
 
+function extractModifiedFiles(session: Session, filesModified?: string[]): Set<string> {
+  const targetFiles = new Set<string>(filesModified || []);
+  try {
+    const events = session.getEvents();
+    for (const event of events) {
+      const data = event.data as any;
+      if (event.type === 'tool/call') {
+        const toolName = typeof data?.toolName === 'string' ? data.toolName : '';
+        const mutatingTools = [
+          'write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file',
+          'write_to_file', 'replace_file_content', 'multi_replace_file_content'
+        ];
+        if (toolName && mutatingTools.includes(toolName)) {
+          const toolCalls = data?.toolCalls;
+          if (Array.isArray(toolCalls)) {
+            for (const call of toolCalls) {
+              const p = call?.args?.path || call?.args?.filePath || call?.args?.targetFile || call?.args?.TargetFile;
+              if (typeof p === 'string' && p.trim()) targetFiles.add(p.trim());
+            }
+          }
+          const directPath = data?.args?.path || data?.args?.filePath || data?.args?.targetFile || data?.args?.TargetFile;
+          if (typeof directPath === 'string' && directPath.trim()) targetFiles.add(directPath.trim());
+        }
+      }
+      if (Array.isArray(data?.filesModified)) {
+        for (const f of data.filesModified) if (typeof f === 'string' && f.trim()) targetFiles.add(f.trim());
+      }
+      if (event.type === 'effect/change' && data?.effect?.target) {
+        if (typeof data.effect.target === 'string') targetFiles.add(data.effect.target);
+      }
+    }
+  } catch {}
+  return targetFiles;
+}
+
 /**
  * CriticGate - Cổng Phản biện Độc lập (Actor-Critic Dual-Role Architecture)
  * 
@@ -74,35 +109,34 @@ export class CriticGate {
     let score = 100;
 
     // Trích xuất toàn bộ các file đã được chỉnh sửa từ Session History & Events
-    const targetFiles = new Set<string>(filesModified || []);
-    try {
-      const events = session.getEvents();
-      for (const event of events) {
-        const data = (event as any).data;
-        if (data?.path && typeof data.path === 'string') targetFiles.add(data.path);
-        if (data?.filePath && typeof data.filePath === 'string') targetFiles.add(data.filePath);
-        if (Array.isArray(data?.filesModified)) {
-          for (const f of data.filesModified) if (typeof f === 'string') targetFiles.add(f);
-        }
-      }
-    } catch {}
+    const targetFiles = extractModifiedFiles(session, filesModified);
 
     // 1. HARD INVARIANT: Kiểm tra In-Memory LSP / TypeScript Diagnostics & Multi-language Syntax
-    try {
-      const tsService = getOrCreateTypeScriptService(workspace);
-      const allDiags = tsService.getDiagnostics();
-      const tsErrors = allDiags.filter((d) =>
-        d.category === 'error' &&
-        !d.file.startsWith('scratch') &&
-        !d.file.startsWith('temp') &&
-        !d.file.includes('/scratch/') &&
-        !d.file.includes('\\scratch\\') &&
-        !d.file.includes('/temp/') &&
-        !d.file.includes('\\temp\\')
-      );
-      lspErrors.push(...tsErrors);
-    } catch {
-      // Ignore if workspace is not a TS project
+    // CHỈ kiểm tra diagnostics cho các file thực sự bị thay đổi (Targeted LSP Inspection).
+    // Nếu targetFiles.size === 0 (read-only query / tra cứu), bỏ qua hoàn toàn việc quét TypeScript diagnostics.
+    if (targetFiles.size > 0) {
+      try {
+        const tsService = getOrCreateTypeScriptService(workspace);
+        for (const file of targetFiles) {
+          if (/\.[cm]?[jt]sx?$/i.test(file)) {
+            try {
+              const fileDiags = tsService.getDiagnostics(file);
+              const tsErrors = fileDiags.filter((d) =>
+                d.category === 'error' &&
+                !d.file.startsWith('scratch') &&
+                !d.file.startsWith('temp') &&
+                !d.file.includes('/scratch/') &&
+                !d.file.includes('\\scratch\\') &&
+                !d.file.includes('/temp/') &&
+                !d.file.includes('\\temp\\')
+              );
+              lspErrors.push(...tsErrors);
+            } catch {}
+          }
+        }
+      } catch {
+        // Ignore if workspace is not a TS project
+      }
     }
 
     // Kiểm tra các file modified đối với Python, JSON và TS
@@ -218,44 +252,41 @@ export class CriticGate {
     let score = 100;
 
     // Trích xuất toàn bộ các file đã được chỉnh sửa từ Session History & Events
-    const targetFiles = new Set<string>(filesModified || []);
-    try {
-      const events = session.getEvents();
-      for (const event of events) {
-        const data = (event as any).data;
-        if (data?.path && typeof data.path === 'string') targetFiles.add(data.path);
-        if (data?.filePath && typeof data.filePath === 'string') targetFiles.add(data.filePath);
-        if (Array.isArray(data?.filesModified)) {
-          for (const f of data.filesModified) if (typeof f === 'string') targetFiles.add(f);
-        }
-      }
-    } catch {}
+    const targetFiles = extractModifiedFiles(session, filesModified);
 
-    // 1. HARD INVARIANT: Thẩm định cú pháp & missing imports toàn diện qua CodeSyntaxValidator
-    try {
-      const syntaxDiags = await CodeSyntaxValidator.validateFiles(Array.from(targetFiles), workspace);
-      lspErrors.push(...syntaxDiags);
-    } catch {}
+    // 1. HARD INVARIANT: Thẩm định cú pháp & missing imports toàn diện qua CodeSyntaxValidator & TypeScript Service
+    // CHỈ kiểm tra diagnostics cho các file thực sự bị thay đổi (Targeted LSP Inspection).
+    if (targetFiles.size > 0) {
+      try {
+        const syntaxDiags = await CodeSyntaxValidator.validateFiles(Array.from(targetFiles), workspace);
+        lspErrors.push(...syntaxDiags);
+      } catch {}
 
-    try {
-      const tsService = getOrCreateTypeScriptService(workspace);
-      const allDiags = tsService.getDiagnostics();
-      const tsErrors = allDiags.filter((d) =>
-        d.category === 'error' &&
-        !d.file.startsWith('scratch') &&
-        !d.file.startsWith('temp') &&
-        !d.file.includes('/scratch/') &&
-        !d.file.includes('\\scratch\\') &&
-        !d.file.includes('/temp/') &&
-        !d.file.includes('\\temp\\')
-      );
-      // Tránh trùng lặp
-      for (const tErr of tsErrors) {
-        if (!lspErrors.some((e) => e.file === tErr.file && e.line === tErr.line && e.code === tErr.code)) {
-          lspErrors.push(tErr);
+      try {
+        const tsService = getOrCreateTypeScriptService(workspace);
+        for (const file of targetFiles) {
+          if (/\.[cm]?[jt]sx?$/i.test(file)) {
+            try {
+              const fileDiags = tsService.getDiagnostics(file);
+              const tsErrors = fileDiags.filter((d) =>
+                d.category === 'error' &&
+                !d.file.startsWith('scratch') &&
+                !d.file.startsWith('temp') &&
+                !d.file.includes('/scratch/') &&
+                !d.file.includes('\\scratch\\') &&
+                !d.file.includes('/temp/') &&
+                !d.file.includes('\\temp\\')
+              );
+              for (const tErr of tsErrors) {
+                if (!lspErrors.some((e) => e.file === tErr.file && e.line === tErr.line && e.code === tErr.code)) {
+                  lspErrors.push(tErr);
+                }
+              }
+            } catch {}
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     if (lspErrors.length > 0) {
       score = 0; // HARD ZERO SCORE

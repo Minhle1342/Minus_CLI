@@ -9,7 +9,8 @@ export type FinalAnswerGuardRejectionReason =
   | 'empty-answer'
   | 'insufficient-architecture-answer'
   | 'unverified-architecture-claims'
-  | 'insufficient-analysis-answer';
+  | 'insufficient-analysis-answer'
+  | 'curt-final-answer';
 
 export interface FinalAnswerGuardDecision {
   allow: boolean;
@@ -21,6 +22,7 @@ export interface FinalAnswerGuardContext {
   userRequest?: string;
   availableToolNames?: string[];
   hasSubmittedSolution?: boolean;
+  hasCodeMutations?: boolean;
   workspace?: {
     rootDir: string;
     resolveSafePath?: (targetPath: string) => string;
@@ -156,6 +158,10 @@ export class FinalAnswerGuard {
     // 5. Kiểm định tính chuyên sâu cho query điều tra nguyên nhân / phân tích sự cố
     const analysisDecision = evaluateAnalysisOrInvestigationAnswer(answer, context);
     if (analysisDecision) return analysisDecision;
+
+    // 5b. Chặn câu trả lời cộc lốc / cụt ngủn cho tác vụ đã hoàn tất hoặc có can thiệp mã nguồn
+    const curtDecision = evaluateCurtFinalAnswer(answer, context);
+    if (curtDecision) return curtDecision;
 
     // 6. Nếu đã submit_solution thành công và vượt qua toàn bộ các kiểm định chất lượng trên
     if (context?.hasSubmittedSolution) {
@@ -592,6 +598,57 @@ export function evaluateAnalysisOrInvestigationAnswer(
       continuationPrompt: [
         '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì chỉ là câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...", "sẽ báo cáo chi tiết...") mà không có nội dung phân tích thực tế.',
         'Hãy viết trực tiếp bản phân tích chi tiết cho người dùng ngay tại đây với các mục phân tích cụ thể, mã nguồn liên quan và giải pháp đề xuất.',
+      ].join('\n'),
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Đánh giá tính đầy đủ của câu trả lời khi kết thúc tác vụ đã thực hiện chỉnh sửa mã hoặc submit_solution.
+ * Ngăn chặn câu trả lời cộc lốc, cụt ngủn hoặc chỉ là một dòng thông báo suông ("Đã sửa xong", "Fixed", "Hoàn thành").
+ */
+export function evaluateCurtFinalAnswer(
+  answer: string,
+  context?: FinalAnswerGuardContext,
+): FinalAnswerGuardDecision | undefined {
+  if (!context?.hasSubmittedSolution && !context?.hasCodeMutations) return undefined;
+
+  const trimmed = (answer || '').trim();
+  const normalized = normalizeForMatching(trimmed);
+
+  // 1. Chặn câu trả lời quá ngắn (< 30 ký tự) cho tác vụ đã có can thiệp mã hoặc submit_solution (ví dụ: "Đã sửa xong.", "Fixed.")
+  if (trimmed.length < 30) {
+    return {
+      allow: false,
+      reason: 'curt-final-answer',
+      continuationPrompt: [
+        '[SYSTEM QUALITY GUARD]: Câu trả lời cuối cùng của bạn quá ngắn hoặc cộc lốc so với tác vụ vừa thực hiện.',
+        `Độ dài hiện tại: ${trimmed.length} ký tự (yêu cầu giải thích kỹ thuật rõ ràng).`,
+        'TIÊU CHUẨN CÂU TRẢ LỜI HOÀN TẤT (FULL-OUTPUT CODEX STANDARD):',
+        '1. Nêu rõ nguyên nhân cốt lõi hoặc bối cảnh vấn đề.',
+        '2. Liệt kê cụ thể các tệp tin và logic đã thay đổi/bổ sung.',
+        '3. Báo cáo kết quả kiểm thử/xác thực (build, test) để người dùng yên tâm.',
+        '4. Trình bày tự nhiên, mạch lạc bằng đúng ngôn ngữ của người dùng (tiếng Việt). Tuyệt đối không chỉ trả về 1 dòng cụt ngủn như "Đã sửa xong" hay placeholder.',
+      ].join('\n'),
+    };
+  }
+
+  // 2. Chặn các câu kết thúc mang tính thủ tục suông không có nội dung kỹ thuật (ví dụ: "The task has been completed and submitted.")
+  const isGenericCompletionStub =
+    /^(?:da|vua)?\s*(?:hoan tat|hoan thanh|sua xong|xong|done|task completed|fixed|success|giai phap da duoc submit)\.?$/i.test(normalized) ||
+    /^(?:i have|we have|agent has)?\s*(?:completed|fixed|resolved|finished|submitted)\s*(?:the task|the bug|the issue)?\.?$/i.test(normalized);
+
+  const lacksAnyTechnicalDetail = !/(?:\/|\.ts|\.js|\.tsx|\.jsx|\.py|\.rs|\.json|\.css|\.md|```|hàm|function|class|lỗi|error|test|build|exit|evidence|step|plan|task|code)/i.test(trimmed);
+
+  if (isGenericCompletionStub && lacksAnyTechnicalDetail) {
+    return {
+      allow: false,
+      reason: 'curt-final-answer',
+      continuationPrompt: [
+        '[SYSTEM QUALITY GUARD]: Phản hồi của bạn chỉ là một câu thông báo hoàn tất hình thức mà không có giải thích kỹ thuật thực tế cho người dùng.',
+        'Hãy giải thích chi tiết: vấn đề được giải quyết thế nào, các tệp tin đã thay đổi, và kết quả kiểm chứng thực nghiệm.',
       ].join('\n'),
     };
   }

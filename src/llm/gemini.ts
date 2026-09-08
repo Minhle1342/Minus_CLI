@@ -228,8 +228,13 @@ export class GeminiLLM {
       const sourcePart = functionCallParts[sourceIndex];
       if (!sourcePart) return undefined;
       functionCallParts.splice(sourceIndex, 1);
+      const thoughtSignature = (sourcePart as any).thoughtSignature
+        || (thoughtParts.length > 0
+          ? `gemini-thought-sig-${Buffer.from(thoughtParts.join('')).toString('base64').slice(0, 32)}`
+          : `gemini-stream-sig-${call.name}-${Date.now()}`);
       return {
         ...sourcePart,
+        thoughtSignature,
         functionCall: {
           ...sourcePart.functionCall,
           name: call.name,

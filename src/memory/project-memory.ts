@@ -13,6 +13,13 @@ export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insi
   recordedAt?: string;
 }
 
+export interface MonorepoWorkspaceInfo {
+  name: string;
+  relativePath: string;
+  projectType?: string;
+  scripts: Record<string, string>;
+}
+
 export interface ProjectMemoryData {
   projectName: string;
   projectType: string;
@@ -23,6 +30,8 @@ export interface ProjectMemoryData {
   codingConventions: string[];
   learnedInsights: LearnedInsight[];
   lastIndexed: string;
+  isMonorepo?: boolean;
+  monorepoWorkspaces?: MonorepoWorkspaceInfo[];
 }
 
 export interface MemoryConsolidationPlan {
@@ -78,6 +87,8 @@ export class ProjectMemoryManager {
       ],
       learnedInsights: [],
       lastIndexed: new Date().toISOString(),
+      isMonorepo: false,
+      monorepoWorkspaces: [],
     };
   }
 
@@ -173,6 +184,52 @@ export class ProjectMemoryManager {
         dependenciesSummary.push(...Object.keys(pkg.devDependencies).slice(0, 10));
       }
     } catch {}
+
+    // 1.1. Quét Monorepo Workspaces (apps/*, packages/*, modules/*, services/*)
+    const monorepoWorkspaces: MonorepoWorkspaceInfo[] = [];
+    try {
+      const candidateDirs = ['apps', 'packages', 'modules', 'services'];
+      for (const parentDir of candidateDirs) {
+        const parentPath = path.join(rootDir, parentDir);
+        try {
+          const subEntries = await fs.readdir(parentPath, { withFileTypes: true });
+          for (const subEntry of subEntries) {
+            if (subEntry.isDirectory() && !subEntry.name.startsWith('.')) {
+              const subPkgPath = path.join(parentPath, subEntry.name, 'package.json');
+              try {
+                const subPkgRaw = await fs.readFile(subPkgPath, 'utf-8');
+                const subPkg = JSON.parse(subPkgRaw);
+                const relPath = `${parentDir}/${subEntry.name}`;
+                const subScripts: Record<string, string> = {};
+                if (subPkg.scripts && typeof subPkg.scripts === 'object') {
+                  Object.assign(subScripts, subPkg.scripts);
+                }
+                let subType = subPkg.devDependencies?.typescript || subPkg.dependencies?.typescript
+                  ? 'TypeScript'
+                  : 'JavaScript';
+                const subDeps = { ...(subPkg.dependencies || {}), ...(subPkg.devDependencies || {}) };
+                if (subDeps['next']) subType = 'Next.js';
+                else if (subDeps['react']) subType = 'React';
+                else if (subDeps['vue']) subType = 'Vue';
+                else if (subDeps['@nestjs/core']) subType = 'NestJS';
+                else if (subDeps['express']) subType = 'Express';
+
+                monorepoWorkspaces.push({
+                  name: subPkg.name || subEntry.name,
+                  relativePath: relPath,
+                  projectType: subType,
+                  scripts: subScripts,
+                });
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+
+    if (monorepoWorkspaces.length > 0 && (projectType === 'Generic' || projectType === 'Unknown')) {
+      projectType = `Monorepo (${monorepoWorkspaces.map((w) => w.relativePath).join(', ')})`;
+    }
 
     // 2. Quét Cargo.toml (Rust)
     try {
@@ -360,6 +417,8 @@ export class ProjectMemoryManager {
     this.memoryData.scripts = scripts;
     this.memoryData.keyDirectories = keyDirectories;
     this.memoryData.dependenciesSummary = dependenciesSummary;
+    this.memoryData.isMonorepo = monorepoWorkspaces.length > 0;
+    this.memoryData.monorepoWorkspaces = monorepoWorkspaces;
     this.memoryData.lastIndexed = new Date().toISOString();
   }
 
@@ -662,6 +721,18 @@ export class ProjectMemoryManager {
     const scriptKeys = Object.keys(this.memoryData.scripts).sort();
     if (scriptKeys.length > 0) {
       lines.push(`- Lệnh khả dụng: ${scriptKeys.map((k) => `"${k}": npm run ${k}`).slice(0, 5).join(', ')}`);
+    }
+
+    if (this.memoryData.isMonorepo && this.memoryData.monorepoWorkspaces && this.memoryData.monorepoWorkspaces.length > 0) {
+      lines.push(`- Kiến trúc Monorepo: [${this.memoryData.monorepoWorkspaces.map((w) => w.relativePath).join(', ')}]`);
+      lines.push(`- Lệnh khả dụng theo workspace:`);
+      for (const w of this.memoryData.monorepoWorkspaces.slice(0, 4)) {
+        const subScriptKeys = Object.keys(w.scripts).sort();
+        const scriptsFormatted = subScriptKeys.length > 0
+          ? subScriptKeys.slice(0, 4).map((k) => `"${k}": npm run ${k} --workspace=${w.relativePath}`).join(', ')
+          : 'Không có script định nghĩa';
+        lines.push(`  * ${w.relativePath} (${w.projectType || 'Package'}): ${scriptsFormatted}`);
+      }
     }
 
     const dirKeys = Object.keys(this.memoryData.keyDirectories).sort();

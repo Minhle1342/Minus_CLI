@@ -158,6 +158,8 @@ import { SuperpowersWorkflowMap } from './skills/workflow-map.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
+import { findPackageScriptFailure } from './sandbox/command-diagnostics.js';
+import { TestEngineeringHarness } from './testing/test-engineering-harness.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
 import { loadLspConfig } from './lsp/config.js';
@@ -2449,6 +2451,68 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Model-authored memory without supporting tool provenance is never trusted automatically',
   );
   await fs.rm(memoryTrustDir, { recursive: true, force: true });
+
+  console.log('\n========================================');
+  console.log('🧪 13.1. KIỂM THỬ MONOREPO AUTO-INDEXING & PACKAGE DIAGNOSTICS');
+  console.log('========================================');
+
+  // Test findPackageScriptFailure & diagnoseCommandFailure
+  const missingScriptDiag = diagnoseCommandFailure('npm test', {
+    exitCode: 1,
+    stdout: '',
+    stderr: 'npm error Missing script: "test"\nnpm error\nnpm error To see a list of scripts, run:\nnpm error   npm run',
+    durationMs: 10,
+    sandboxType: 'local',
+  });
+  assert(missingScriptDiag?.errorCode === 'PACKAGE_SCRIPT_MISSING', 'Chẩn đoán đúng lỗi PACKAGE_SCRIPT_MISSING');
+  assert(Boolean(missingScriptDiag?.diagnostic.includes('test')), 'Chẩn đoán chỉ rõ script "test" bị thiếu');
+  assert(Boolean(missingScriptDiag?.suggestion.includes('package.json')), 'Gợi ý kiểm tra package.json');
+
+  const missingPkgJsonDiag = diagnoseCommandFailure('npm run build', {
+    exitCode: 1,
+    stdout: '',
+    stderr: 'npm error enoent ENOENT: no such file or directory, open \'D:\\workspace\\package.json\'',
+    durationMs: 10,
+    sandboxType: 'local',
+  });
+  assert(missingPkgJsonDiag?.errorCode === 'PACKAGE_JSON_NOT_FOUND', 'Chẩn đoán đúng lỗi PACKAGE_JSON_NOT_FOUND');
+  assert(Boolean(missingPkgJsonDiag?.suggestion.includes('monorepo')), 'Gợi ý kiểm tra monorepo và subfolders');
+
+  // Test ProjectMemoryManager Monorepo Auto-indexing
+  const monorepoTestDir = path.join(workspace.rootDir, 'temp', 'monorepo-test-fixture');
+  await fs.rm(monorepoTestDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(monorepoTestDir, 'apps', 'web'), { recursive: true });
+  await fs.mkdir(path.join(monorepoTestDir, 'apps', 'api'), { recursive: true });
+  await fs.writeFile(
+    path.join(monorepoTestDir, 'apps', 'web', 'package.json'),
+    JSON.stringify({ name: '@monorepo/web', dependencies: { react: '^18.0.0' }, scripts: { test: 'vitest', build: 'vite build' } }, null, 2),
+    'utf-8',
+  );
+  await fs.writeFile(
+    path.join(monorepoTestDir, 'apps', 'api', 'package.json'),
+    JSON.stringify({ name: '@monorepo/api', dependencies: { express: '^4.18.0' }, scripts: { test: 'jest', dev: 'tsx watch' } }, null, 2),
+    'utf-8',
+  );
+
+  const monorepoMemory = new ProjectMemoryManager(monorepoTestDir);
+  const monorepoData = await monorepoMemory.init(new Workspace(monorepoTestDir));
+  assert(monorepoData.isMonorepo === true, 'ProjectMemoryManager nhận diện thành công Monorepo');
+  assert(monorepoData.monorepoWorkspaces?.length === 2, 'ProjectMemoryManager quét được 2 sub-workspaces');
+  assert(Boolean(monorepoData.monorepoWorkspaces?.some((w) => w.relativePath === 'apps/web')), 'Xác định đúng đường dẫn apps/web');
+
+  const monorepoDigest = monorepoMemory.getProjectDigest();
+  assert(monorepoDigest.includes('Kiến trúc Monorepo:') && monorepoDigest.includes('apps/web') && monorepoDigest.includes('apps/api'), 'Digest chứa danh mục Monorepo workspaces');
+  assert(monorepoDigest.includes('--workspace=apps/web'), 'Digest chứa hướng dẫn chạy lệnh với --workspace=apps/web');
+
+  // Test TestEngineeringHarness detectTestCommand in Monorepo
+  const harness = new TestEngineeringHarness({
+    workspaceRoot: monorepoTestDir,
+    substrate: {} as any,
+  });
+  const detectedCmd = await harness.detectTestCommand();
+  assert(detectedCmd.includes('--workspace=apps/web') || detectedCmd.includes('--workspace=apps/api'), 'detectTestCommand phát hiện lệnh test trong Monorepo');
+
+  await fs.rm(monorepoTestDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 13B. KIỂM THỬ DREAM MEMORY CONSOLIDATION');
