@@ -1,7 +1,16 @@
 import type { Workspace } from '../workspace/workspace.js';
 import { getOrCreateLspManager } from './lsp-manager.js';
 
-const MUTATION_TOOLS = new Set(['write_file', 'replace_text', 'create_file', 'apply_patch', 'move_file']);
+const MUTATION_TOOLS = new Set([
+  'write_file',
+  'replace_text',
+  'create_file',
+  'apply_patch',
+  'move_file',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+]);
 
 export async function enrichMutationResultWithLsp(
   toolName: string,
@@ -40,7 +49,7 @@ function extractPaths(toolName: string, args: Record<string, any>, result: Recor
       : [];
     return [...fromFileResults, ...(Array.isArray(result.filesModified) ? result.filesModified.map(String) : []), ...(Array.isArray(result.filesCreated) ? result.filesCreated.map(String) : [])];
   }
-  return [String(result.path || args.path || '')].filter(Boolean);
+  return [String(result.path || args.path || result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || '')].filter(Boolean);
 }
 
 function isFailure(result: Record<string, any>): boolean {

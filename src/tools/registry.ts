@@ -7,6 +7,9 @@ import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
 import { applyPatchTool } from './apply-patch.js';
 import { writeFileTool } from './write-file.js';
+import { writeToFileTool } from './write-to-file.js';
+import { replaceFileContentTool } from './replace-file-content.js';
+import { multiReplaceFileContentTool } from './multi-replace-file-content.js';
 import { createFileTool } from './create-file.js';
 import { deleteFileTool } from './delete-file.js';
 import { moveFileTool } from './move-file.js';
@@ -20,10 +23,8 @@ import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { runTestSuiteTool } from './run-test-suite.js';
 import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
-import { createWebSearchTool } from './web-search.js';
-import { createWebFetchTool } from './web-fetch.js';
-import { searchWebTool } from './search-web.js';
-import { readUrlContentTool } from './read-url-content.js';
+import { createWebSearchTool, searchWebTool, webSearchTool } from './web-search.js';
+import { createWebFetchTool, readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
 import { createPublishAgentEventTool } from './agent-event-tools.js';
 import { queryCallGraphTool } from './query-call-graph.js';
@@ -51,13 +52,7 @@ import { createGitTools } from './git-tools.js';
 import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
-import {
-  gameTilemapStudioTool,
-  gamePixelSpriteStudioTool,
-  game2DPhysicsConfigTool,
-  gameScaffoldEngineTool,
-} from './game-tools.js';
-import { unityGameplayStudioTool } from './unity-tools.js';
+
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -99,6 +94,9 @@ export class ToolRegistry implements ToolProvider {
     this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
+    this.register(writeToFileTool);
+    this.register(replaceFileContentTool);
+    this.register(multiReplaceFileContentTool);
     this.register(createFileTool);
     this.register(deleteFileTool);
     this.register(moveFileTool);
@@ -110,7 +108,9 @@ export class ToolRegistry implements ToolProvider {
     this.register(inspectImageTool);
     this.register(runCommandTool);
     this.register(runTestSuiteTool);
+    this.register(webSearchTool);
     this.register(searchWebTool);
+    this.register(webFetchTool);
     this.register(readUrlContentTool);
     this.register(queryCallGraphTool);
     this.register(getRouteMapTool);
@@ -147,13 +147,20 @@ export class ToolRegistry implements ToolProvider {
 
   /**
    * Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine theo nguyên lý Progressive Disclosure.
+   * Sử dụng dynamic import() để tránh tải game-tools.js và unity-tools.js vào bộ nhớ khi không cần thiết.
    */
-  registerGameTools(): void {
-    if (!this.tools.has(gameTilemapStudioTool.name)) this.register(gameTilemapStudioTool);
-    if (!this.tools.has(gamePixelSpriteStudioTool.name)) this.register(gamePixelSpriteStudioTool);
-    if (!this.tools.has(game2DPhysicsConfigTool.name)) this.register(game2DPhysicsConfigTool);
-    if (!this.tools.has(gameScaffoldEngineTool.name)) this.register(gameScaffoldEngineTool);
-    if (!this.tools.has(unityGameplayStudioTool.name)) this.register(unityGameplayStudioTool);
+  async registerGameTools(): Promise<void> {
+    try {
+      const [{ gameTilemapStudioTool, gamePixelSpriteStudioTool, game2DPhysicsConfigTool, gameScaffoldEngineTool }, { unityGameplayStudioTool }] = await Promise.all([
+        import('./game-tools.js'),
+        import('./unity-tools.js'),
+      ]);
+      if (!this.tools.has(gameTilemapStudioTool.name)) this.register(gameTilemapStudioTool);
+      if (!this.tools.has(gamePixelSpriteStudioTool.name)) this.register(gamePixelSpriteStudioTool);
+      if (!this.tools.has(game2DPhysicsConfigTool.name)) this.register(game2DPhysicsConfigTool);
+      if (!this.tools.has(gameScaffoldEngineTool.name)) this.register(gameScaffoldEngineTool);
+      if (!this.tools.has(unityGameplayStudioTool.name)) this.register(unityGameplayStudioTool);
+    } catch { /* Game tools unavailable – not critical */ }
   }
 
   attachComputerController(controller: ComputerController): void {
@@ -418,3 +425,5 @@ export class ToolScope implements ToolProvider {
     return this.retriever;
   }
 }
+
+export { writeToFileTool, replaceFileContentTool, multiReplaceFileContentTool };

@@ -208,8 +208,9 @@ export class ToolRunner {
     }
 
     // Stage 3: Workspace & Safety Policy Check
-    if (executionArgs.path) {
-      const rawPath = String(executionArgs.path);
+    const targetFilePath = executionArgs.path || executionArgs.TargetFile || executionArgs.targetFile;
+    if (targetFilePath) {
+      const rawPath = String(targetFilePath);
       try {
         this.workspace.resolveSafePath(rawPath);
       } catch (err: any) {
@@ -217,6 +218,7 @@ export class ToolRunner {
           toolName,
           args,
           result: {
+            success: false,
             error: err.message,
             errorCode: 'SECURITY_VIOLATION',
           },
@@ -225,11 +227,15 @@ export class ToolRunner {
       }
 
       // Nếu tool là thao tác ghi/sửa, kiểm tra xem file có thuộc danh sách bảo vệ không
-      if (['replace_text', 'write_file'].includes(toolName) && this.workspace.isProtectedFile(rawPath)) {
+      if (
+        ['replace_text', 'write_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName) &&
+        this.workspace.isProtectedFile(rawPath)
+      ) {
         return {
           toolName,
           args,
           result: {
+            success: false,
             error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
             errorCode: 'SECURITY_VIOLATION',
           },

@@ -499,9 +499,9 @@ export async function enrichMutationResultWithBlastRadius(
   options?: { oldContent?: string; newContent?: string },
 ): Promise<Record<string, any>> {
   if (result.success === false || result.error) return result;
-  if (!['replace_text', 'write_file', 'apply_patch', 'create_file'].includes(toolName)) return result;
+  if (!['replace_text', 'write_file', 'apply_patch', 'create_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName)) return result;
 
-  const rawPath = String(result.path || args.path || args.targetFile || '');
+  const rawPath = String(result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || result.path || args.path || '');
   if (!rawPath) return result;
 
   try {

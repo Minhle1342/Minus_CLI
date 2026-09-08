@@ -12,6 +12,9 @@ import { searchTextTool } from './tools/search-text.js';
 import { replaceTextTool } from './tools/replace-text.js';
 import { applyPatchTool } from './tools/apply-patch.js';
 import { writeFileTool } from './tools/write-file.js';
+import { writeToFileTool } from './tools/write-to-file.js';
+import { replaceFileContentTool } from './tools/replace-file-content.js';
+import { multiReplaceFileContentTool } from './tools/multi-replace-file-content.js';
 import { createFileTool } from './tools/create-file.js';
 import { deleteFileTool } from './tools/delete-file.js';
 import { moveFileTool } from './tools/move-file.js';
@@ -4507,6 +4510,32 @@ Always write tests first!`;
     'SkillActivator tạo prompt section cho unity-ai-game-creator',
   );
 
+  // Kiểm tra GamePlugin & UnityPlugin (Optional Kernel Plugins)
+  const { GamePlugin: GamePluginTest } = await import('./kernel/plugins/game-plugin.js');
+  const { UnityPlugin: UnityPluginTest, GameStudioPlugin: GameStudioPluginTest } = await import('./kernel/plugins/unity-plugin.js');
+  const gameKernel = new AgentKernel(workspace);
+  await gameKernel.use(GamePluginTest);
+  assert(gameKernel.getLoadedPlugins().includes('game-plugin'), 'GamePlugin nạp thành công vào AgentKernel');
+  assert(gameKernel.ctx.tools.get('game_tilemap_studio') !== undefined, 'GamePlugin đăng ký game_tilemap_studio');
+  assert(gameKernel.ctx.tools.get('game_pixel_sprite_studio') !== undefined, 'GamePlugin đăng ký game_pixel_sprite_studio');
+  assert(gameKernel.ctx.tools.get('game_2d_physics_config') !== undefined, 'GamePlugin đăng ký game_2d_physics_config');
+  assert(gameKernel.ctx.tools.get('game_scaffold_engine') !== undefined, 'GamePlugin đăng ký game_scaffold_engine');
+  await gameKernel.unuse('game-plugin');
+  assert(!gameKernel.getLoadedPlugins().includes('game-plugin'), 'GamePlugin unuse thành công');
+
+  const unityKernel = new AgentKernel(workspace);
+  await unityKernel.use(UnityPluginTest);
+  assert(unityKernel.getLoadedPlugins().includes('unity-plugin'), 'UnityPlugin nạp thành công vào AgentKernel');
+  assert(unityKernel.ctx.tools.get('unity_gameplay_studio') !== undefined, 'UnityPlugin đăng ký unity_gameplay_studio');
+  await unityKernel.unuse('unity-plugin');
+  assert(!unityKernel.getLoadedPlugins().includes('unity-plugin'), 'UnityPlugin unuse thành công');
+
+  const studioKernel = new AgentKernel(workspace);
+  await studioKernel.use(GameStudioPluginTest);
+  assert(studioKernel.getLoadedPlugins().includes('game-studio'), 'GameStudioPlugin nạp thành công');
+  assert(studioKernel.ctx.tools.get('game_tilemap_studio') !== undefined, 'GameStudioPlugin đăng ký game tools');
+  assert(studioKernel.ctx.tools.get('unity_gameplay_studio') !== undefined, 'GameStudioPlugin đăng ký unity tools');
+
   // Kiểm tra thực thi 4 Game Tools
   const tilemapRes = await gameTilemapStudioTool.execute({
     generator: 'cellular_automata',
@@ -7581,6 +7610,188 @@ Always write tests first!`;
   CLI.renderFileLocks({ 'src/auth.ts': 'subagent-1' });
   CLI.renderHeartbeats([{ agentId: 'subagent-1', idleDurationMs: 5000, isStale: false }]);
   CLI.renderQualityGateResult(qgPass);
+
+  console.log('\n========================================');
+  console.log('🧪 47. KIỂM THỬ BỘ BA TOOL SỬA FILE CHUẨN ANTIGRAVITY (write_to_file, replace_file_content, multi_replace_file_content)');
+  console.log('========================================');
+
+  const testReg47 = new ToolRegistry();
+  const runner47 = new ToolRunner(testReg47, workspace);
+
+  // 1. Kiểm tra đăng ký & Tra cứu trong ToolRegistry
+  assert(testReg47.has('write_to_file'), 'Tool write_to_file đã được đăng ký trong ToolRegistry');
+  assert(testReg47.has('replace_file_content'), 'Tool replace_file_content đã được đăng ký trong ToolRegistry');
+  assert(testReg47.has('multi_replace_file_content'), 'Tool multi_replace_file_content đã được đăng ký trong ToolRegistry');
+  assert(isMutationTool('write_to_file'), 'write_to_file thuộc FILE_MUTATION_TOOLS');
+  assert(isMutationTool('replace_file_content'), 'replace_file_content thuộc FILE_MUTATION_TOOLS');
+  assert(isMutationTool('multi_replace_file_content'), 'multi_replace_file_content thuộc FILE_MUTATION_TOOLS');
+
+  // Thư mục tạm phục vụ test
+  const tempTestDir47 = path.join(workspace.rootDir, 'temp', 'antigravity-tools-test');
+  await fs.rm(tempTestDir47, { recursive: true, force: true });
+  await fs.mkdir(tempTestDir47, { recursive: true });
+
+  const testFilePath47 = 'temp/antigravity-tools-test/sample.ts';
+
+  // 2. Kiểm thử write_to_file
+  // 2.1 Tạo file mới
+  const writeRes1_47 = await runner47.run('write_to_file', {
+    TargetFile: testFilePath47,
+    CodeContent: 'export const initial = 1;\nexport function greet() {\n  return "hello";\n}\n',
+    Overwrite: false,
+    Description: 'Create sample test file',
+  });
+  assert(writeRes1_47.result.success === true, 'write_to_file tạo file mới thành công');
+  assert(writeRes1_47.result.isNewFile === true, 'write_to_file đánh dấu isNewFile = true');
+  assert(typeof writeRes1_47.result.bytesWritten === 'number' && writeRes1_47.result.bytesWritten > 0, 'write_to_file trả về bytesWritten');
+
+  // 2.2 Chặn ghi đè khi Overwrite = false
+  const writeResFail = await runner47.run('write_to_file', {
+    TargetFile: testFilePath47,
+    CodeContent: 'export const changed = 2;',
+    Overwrite: false,
+    Description: 'Attempt to overwrite without permission',
+  });
+  assert(writeResFail.result.success === false, 'write_to_file từ chối ghi đè khi Overwrite = false');
+  assert(writeResFail.result.errorCode === 'FILE_ALREADY_EXISTS', 'Mã lỗi là FILE_ALREADY_EXISTS');
+
+  // 2.3 Ghi đè thành công khi Overwrite = true
+  const initialCode47 = [
+    'export const alpha = 10;',
+    'export const beta = 20;',
+    'export const gamma = 30;',
+    'export function computeTotal() {',
+    '  return alpha + beta;',
+    '}',
+    'export function helper() {',
+    '  return "ok";',
+    '}',
+  ].join('\n');
+
+  const writeResOver = await runner47.run('write_to_file', {
+    TargetFile: testFilePath47,
+    CodeContent: initialCode47,
+    Overwrite: true,
+    Description: 'Overwrite file with initial multi-line code',
+  });
+  assert(writeResOver.result.success === true, 'write_to_file ghi đè thành công khi Overwrite = true');
+  assert(writeResOver.result.isNewFile === false, 'isNewFile = false khi ghi đè');
+  assert(writeResOver.result.blastRadius !== undefined, 'write_to_file tự động tính toán blastRadius');
+
+  // 2.4 Chặn ghi file cấu hình nhạy cảm / protected file (.env.vault)
+  const writeProtected = await runner47.run('write_to_file', {
+    TargetFile: '.env.vault',
+    CodeContent: 'SECRET=123',
+    Overwrite: true,
+    Description: 'Try to modify .env.vault',
+  });
+  assert(writeProtected.result.success === false, 'write_to_file chặn sửa đổi file nhạy cảm');
+  assert(writeProtected.result.errorCode === 'SECURITY_VIOLATION', 'Trả về SECURITY_VIOLATION cho file nhạy cảm');
+
+  // 3. Kiểm thử replace_file_content
+  // 3.1 Thay thế chính xác trong phạm vi dòng [1, 3]
+  const replaceRes1 = await runner47.run('replace_file_content', {
+    TargetFile: testFilePath47,
+    StartLine: 1,
+    EndLine: 3,
+    TargetContent: 'export const alpha = 10;',
+    ReplacementContent: 'export const alpha = 999;',
+    Instruction: 'Update alpha value to 999',
+    Description: 'Update constant alpha',
+    AllowMultiple: false,
+  });
+  assert(replaceRes1.result.success === true, 'replace_file_content thay thế chính xác dòng thành công');
+  assert(replaceRes1.result.occurrencesReplaced === 1, 'Số lần thay thế đúng là 1');
+
+  // Đọc lại file để xác minh
+  const updatedContent1 = await fs.readFile(path.join(workspace.rootDir, testFilePath47), 'utf-8');
+  assert(updatedContent1.includes('export const alpha = 999;'), 'Nội dung file trên đĩa đã được cập nhật');
+
+  // 3.2 Báo lỗi khi TargetContent không tồn tại
+  const replaceResNotFound = await runner47.run('replace_file_content', {
+    TargetFile: testFilePath47,
+    StartLine: 1,
+    EndLine: 5,
+    TargetContent: 'non_existent_symbol_xyz',
+    ReplacementContent: 'replacement',
+    Instruction: 'Try invalid target',
+    Description: 'Testing not found error',
+    AllowMultiple: false,
+  });
+  assert(replaceResNotFound.result.success === false, 'replace_file_content báo lỗi khi không tìm thấy target');
+  assert(replaceResNotFound.result.errorCode === 'PATCH_ERROR', 'Mã lỗi là PATCH_ERROR');
+
+  // 4. Kiểm thử multi_replace_file_content
+  // 4.1 Kiểm tra validation: Chunk bị trống TargetContent
+  const multiInvalid1 = await runner47.run('multi_replace_file_content', {
+    TargetFile: testFilePath47,
+    Instruction: 'Invalid chunks test',
+    Description: 'Test empty chunk target',
+    ReplacementChunks: [
+      { StartLine: 1, EndLine: 2, TargetContent: '', ReplacementContent: 'foo', AllowMultiple: false },
+    ],
+  });
+  assert(multiInvalid1.result.success === false, 'multi_replace_file_content từ chối chunk có TargetContent rỗng');
+  assert(multiInvalid1.result.errorCode === 'INVALID_ARGS', 'Mã lỗi INVALID_ARGS khi chunk rỗng');
+
+  // 4.2 Kiểm tra validation: Chunks bị chồng lấn (Overlapping)
+  const multiOverlap = await runner47.run('multi_replace_file_content', {
+    TargetFile: testFilePath47,
+    Instruction: 'Overlapping chunks test',
+    Description: 'Test overlapping ranges',
+    ReplacementChunks: [
+      { StartLine: 1, EndLine: 4, TargetContent: 'export const beta = 20;', ReplacementContent: 'export const beta = 22;', AllowMultiple: false },
+      { StartLine: 3, EndLine: 6, TargetContent: 'export const gamma = 30;', ReplacementContent: 'export const gamma = 33;', AllowMultiple: false },
+    ],
+  });
+  assert(multiOverlap.result.success === false, 'multi_replace_file_content từ chối chunks bị chồng lấn phạm vi dòng');
+  assert(multiOverlap.result.errorCode === 'INVALID_ARGS', 'Mã lỗi INVALID_ARGS khi chunks chồng lấn');
+
+  // 4.3 Thực hiện thay thế nhiều chunk không chồng lấn thành công
+  const multiSuccess = await runner47.run('multi_replace_file_content', {
+    TargetFile: testFilePath47,
+    Instruction: 'Update beta and helper simultaneously',
+    Description: 'Batch update beta constant and helper function',
+    ReplacementChunks: [
+      {
+        StartLine: 2,
+        EndLine: 3,
+        TargetContent: 'export const beta = 20;',
+        ReplacementContent: 'export const beta = 555;',
+        AllowMultiple: false,
+      },
+      {
+        StartLine: 6,
+        EndLine: 9,
+        TargetContent: 'export function helper() {\n  return "ok";\n}',
+        ReplacementContent: 'export function helper() {\n  return "improved";\n}',
+        AllowMultiple: false,
+      },
+    ],
+  });
+  assert(multiSuccess.result.success === true, 'multi_replace_file_content thực thi thành công');
+  assert(multiSuccess.result.chunksApplied === 2, 'Cả 2 chunks đều được áp dụng');
+
+  const finalContent47 = await fs.readFile(path.join(workspace.rootDir, testFilePath47), 'utf-8');
+  assert(finalContent47.includes('export const beta = 555;'), 'Chunk 1 (beta) đã được áp dụng đúng trên đĩa');
+  assert(finalContent47.includes('return "improved";'), 'Chunk 2 (helper) đã được áp dụng đúng trên đĩa');
+
+  // 5. Kiểm thử generateFileToolDiff
+  const diffWrite = await generateFileToolDiff('write_to_file', {
+    TargetFile: 'sample.txt',
+    CodeContent: 'Line A\nLine B\n',
+  }, workspace.rootDir);
+  assert(Boolean(diffWrite && diffWrite.includes('--- /dev/null')), 'generateFileToolDiff tạo diff cho file mới với write_to_file');
+
+  const diffReplace = await generateFileToolDiff('replace_file_content', {
+    TargetFile: testFilePath47,
+    TargetContent: 'export const beta = 555;',
+    ReplacementContent: 'export const beta = 888;',
+  }, workspace.rootDir);
+  assert(Boolean(diffReplace && diffReplace.includes('-export const beta = 555;') && diffReplace.includes('+export const beta = 888;')), 'generateFileToolDiff tạo unified diff cho replace_file_content');
+
+  // Dọn dẹp thư mục test tạm
+  await fs.rm(tempTestDir47, { recursive: true, force: true });
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

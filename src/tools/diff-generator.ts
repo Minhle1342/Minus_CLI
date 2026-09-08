@@ -11,6 +11,9 @@ export const FILE_MUTATION_TOOLS = new Set([
   'create_file',
   'delete_file',
   'move_file',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
 ]);
 
 /**
@@ -254,6 +257,106 @@ export async function generateFileToolDiff(
       `rename from ${sourcePath}`,
       `rename to ${targetPath}`,
     ].join('\n');
+  }
+
+  // 7. write_to_file
+  if (toolName === 'write_to_file') {
+    const target = String(args.TargetFile || args.targetFile || args.path || args.filePath || '').trim();
+    const newContent = String(args.CodeContent ?? args.codeContent ?? args.content ?? '');
+
+    if (!target) return undefined;
+
+    let existingContent: string | null = null;
+    try {
+      const fullPath = resolvePath(target);
+      existingContent = await fs.readFile(fullPath, 'utf-8');
+    } catch {
+      existingContent = null;
+    }
+
+    if (existingContent !== null) {
+      return computeLineDiff(existingContent, newContent, target);
+    }
+
+    const lines = newContent.replace(/\r\n/g, '\n').split('\n');
+    const hunk: string[] = [
+      '--- /dev/null',
+      `+++ b/${target}`,
+      `@@ -0,0 +1,${lines.length} @@`,
+      ...lines.map(l => `+${l}`),
+    ];
+    return hunk.join('\n');
+  }
+
+  // 8. replace_file_content
+  if (toolName === 'replace_file_content') {
+    const target = String(args.TargetFile || args.targetFile || args.path || args.filePath || '').trim();
+    const targetContent = String(args.TargetContent ?? args.targetContent ?? '');
+    const replacementContent = String(args.ReplacementContent ?? args.replacementContent ?? '');
+
+    if (!target) return undefined;
+
+    let existingContent: string | null = null;
+    try {
+      const fullPath = resolvePath(target);
+      existingContent = await fs.readFile(fullPath, 'utf-8');
+    } catch {
+      existingContent = null;
+    }
+
+    if (existingContent !== null) {
+      const normExisting = existingContent.replace(/\r\n/g, '\n');
+      const normTarget = targetContent.replace(/\r\n/g, '\n');
+      const normReplacement = replacementContent.replace(/\r\n/g, '\n');
+
+      if (normExisting.includes(normTarget)) {
+        const updated = normExisting.replace(normTarget, normReplacement);
+        return computeLineDiff(normExisting, updated, target);
+      }
+    }
+
+    const oldLines = targetContent.replace(/\r\n/g, '\n').split('\n');
+    const newLines = replacementContent.replace(/\r\n/g, '\n').split('\n');
+    const hunk: string[] = [
+      `--- a/${target}`,
+      `+++ b/${target}`,
+      `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+      ...oldLines.map(l => `-${l}`),
+      ...newLines.map(l => `+${l}`),
+    ];
+    return hunk.join('\n');
+  }
+
+  // 9. multi_replace_file_content
+  if (toolName === 'multi_replace_file_content') {
+    const target = String(args.TargetFile || args.targetFile || args.path || args.filePath || '').trim();
+    const chunks = Array.isArray(args.ReplacementChunks)
+      ? args.ReplacementChunks
+      : (Array.isArray(args.replacementChunks) ? args.replacementChunks : []);
+
+    if (!target || chunks.length === 0) return undefined;
+
+    let existingContent: string | null = null;
+    try {
+      const fullPath = resolvePath(target);
+      existingContent = await fs.readFile(fullPath, 'utf-8');
+    } catch {
+      existingContent = null;
+    }
+
+    if (existingContent !== null) {
+      let current = existingContent.replace(/\r\n/g, '\n');
+      for (const chunk of chunks) {
+        const tc = String(chunk.TargetContent ?? chunk.targetContent ?? '').replace(/\r\n/g, '\n');
+        const rc = String(chunk.ReplacementContent ?? chunk.replacementContent ?? '').replace(/\r\n/g, '\n');
+        if (tc && current.includes(tc)) {
+          current = current.replace(tc, rc);
+        }
+      }
+      return computeLineDiff(existingContent, current, target);
+    }
+
+    return undefined;
   }
 
   return undefined;

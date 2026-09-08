@@ -114,7 +114,24 @@ export class VerificationPolicy {
     this.verificationHistory.push(this.lastVerification);
 
     if (effectiveSuccess) {
-      this.hasUnverifiedModifications = false;
+      if (this.pendingTargetedTests.size > 0) {
+        const tier = options?.tier || this.inferTier(command);
+        if (tier === 'full_test' || tier === 'build') {
+          this.pendingTargetedTests.clear();
+          this.hasUnverifiedModifications = false;
+        } else {
+          for (const t of Array.from(this.pendingTargetedTests)) {
+            if (command.includes(t) || t.includes(command)) {
+              this.pendingTargetedTests.delete(t);
+            }
+          }
+          if (this.pendingTargetedTests.size === 0) {
+            this.hasUnverifiedModifications = false;
+          }
+        }
+      } else {
+        this.hasUnverifiedModifications = false;
+      }
     }
   }
 
@@ -123,6 +140,7 @@ export class VerificationPolicy {
    */
   canComplete(activeSkillIds: string[] = []): { allowed: boolean; reason?: string; errorCode?: string } {
     const mandatesVerification = this.hasUnverifiedModifications
+      || this.pendingTargetedTests.size > 0
       || activeSkillIds.some((id) => this.requiredSkills.has(id));
 
     if (mandatesVerification && !this.lastVerification) {
@@ -157,6 +175,22 @@ export class VerificationPolicy {
       }
     }
 
+    if (mandatesVerification && this.pendingTargetedTests.size > 0) {
+      const pendingList = Array.from(this.pendingTargetedTests);
+      const hasMatchingTest = this.verificationHistory.some((v) => {
+        if (!v.success) return false;
+        if (v.tier === 'full_test' || v.tier === 'build') return true;
+        return pendingList.some((t) => v.command.includes(t) || t.includes(v.command));
+      });
+      if (!hasMatchingTest) {
+        return {
+          allowed: false,
+          reason: `IMPACTED_TESTS_REQUIRED: Blast radius identified impacted test suite(s): ${pendingList.slice(0, 3).join(', ')}. Execute the impacted tests or full test suite before completion.`,
+          errorCode: 'IMPACTED_TESTS_REQUIRED',
+        };
+      }
+    }
+
     return { allowed: true };
   }
 
@@ -179,8 +213,8 @@ export class VerificationPolicy {
 
   private inferTier(command: string): VerificationLadderTier {
     if (/\b(?:build|compile)\b/i.test(command)) return 'build';
-    if (/\b(?:test|pytest|cargo\s+test|dotnet\s+test)\b/i.test(command)) {
-      return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-])/i.test(command) ? 'targeted_test' : 'full_test';
+    if (/\b(?:run_test_suite|vitest|jest|mocha|ava|test|pytest|cargo\s+test|dotnet\s+test|go\s+test)\b/i.test(command)) {
+      return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-]|\bvitest\s+run\s+[^\s-]|\bjest\s+[^\s-]|\b(?:run\s+)?[a-zA-Z0-9_./-]+\.(?:spec|test)\.[cm]?[jt]sx?)/i.test(command) ? 'targeted_test' : 'full_test';
     }
     if (/\b(?:tsc|typecheck|get_diagnostics)\b/i.test(command)) return 'typecheck';
     if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';

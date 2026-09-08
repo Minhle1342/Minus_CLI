@@ -739,3 +739,87 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
     },
   };
 }
+
+export interface SearchWebResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface SearchWebResponse {
+  query: string;
+  domain?: string;
+  results: SearchWebResultItem[];
+  summary?: string;
+  provider?: string;
+  success?: boolean;
+  error?: string;
+  errorCode?: string;
+  hint?: string;
+}
+
+/**
+ * Creates a search_web tool (Google Antigravity CLI compatibility alias delegating to web_search).
+ */
+export function createSearchWebTool(options: WebSearchToolOptions = {}): ToolDefinition {
+  const tool = createWebSearchTool(options);
+  return {
+    ...tool,
+    name: 'search_web',
+    description:
+      'Search the public web through the operator-configured self-hosted SearXNG instance or fallback engine. Supports advanced filtering by keywords, exact phrases, domain/site, file types, and freshness. (Unified tool delegating to web_search).',
+  };
+}
+
+/** Pre-instantiated default tools */
+export const webSearchTool = createWebSearchTool();
+export const searchWebTool = createSearchWebTool();
+
+/**
+ * Unified Web Search execution helper with SearXNG and DuckDuckGo fallback.
+ */
+export async function executeWebSearch(query: string, domain?: string): Promise<SearchWebResponse> {
+  try {
+    const res = await webSearchTool.execute({ query, domain, format: 'concise' }, undefined as any);
+    if (res.results && Array.isArray(res.results)) {
+      const mappedResults: SearchWebResultItem[] = res.results.map((r: any) => ({
+        title: r.title || '',
+        url: r.url || '',
+        snippet: r.snippet || '',
+      }));
+
+      return {
+        query,
+        domain,
+        results: mappedResults,
+        summary: mappedResults.length > 0
+          ? `Found ${mappedResults.length} relevant results for "${query}".`
+          : `No direct results found for "${query}".`,
+        provider: res.provider,
+        success: true,
+      };
+    }
+
+    return {
+      query,
+      domain,
+      results: [],
+      summary: res.error || 'Failed to search web.',
+      error: res.error,
+      errorCode: res.errorCode,
+      hint: res.hint,
+      success: false,
+    };
+  } catch (err: any) {
+    return {
+      query,
+      domain,
+      results: [],
+      summary: `Web search execution error: ${err?.message || String(err)}`,
+      error: err?.message || String(err),
+      errorCode: 'EXECUTION_ERROR',
+      success: false,
+    };
+  }
+}
+

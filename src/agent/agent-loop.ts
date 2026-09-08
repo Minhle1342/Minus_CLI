@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
@@ -309,7 +310,7 @@ export class AgentLoop {
       try {
         const ctx = detectPromptContext(this._workspace);
         if (ctx.isUnity) {
-          (this.toolRegistry as any).registerGameTools();
+          (this.toolRegistry as any).registerGameTools().catch(() => {});
         }
       } catch { }
     }
@@ -336,7 +337,7 @@ export class AgentLoop {
       try {
         const ctx = detectPromptContext(workspace);
         if (ctx.isUnity) {
-          (this.toolRegistry as any).registerGameTools();
+          (this.toolRegistry as any).registerGameTools().catch(() => {});
         }
       } catch { }
     }
@@ -1819,18 +1820,45 @@ export class AgentLoop {
                   errors = [];
                 }
                 if (errors.length === 0) {
-                  this.verificationPolicy.recordVerification(
-                    'jit_diagnostics_sweep',
-                    true,
-                    'JIT in-memory diagnostics clean (0 errors)',
-                    0,
-                    { tier: 'typecheck' },
+                  // Kiểm tra xem dự án có test runner / test suite cấu hình sẵn hay không khi có thay đổi mã nguồn
+                  let testScript: string | undefined = this.memoryManager?.getMemoryData?.()?.scripts?.test;
+                  if (!testScript) {
+                    try {
+                      const pkgPath = path.join(this._workspace.rootDir, 'package.json');
+                      if (fs.existsSync(pkgPath)) {
+                        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+                        if (typeof pkg.scripts?.test === 'string') {
+                          testScript = pkg.scripts.test;
+                        }
+                      }
+                    } catch {}
+                  }
+                  const hasRealTestScript = Boolean(testScript && !/no test specified/i.test(testScript));
+                  const verificationHistory = this.verificationPolicy.getVerificationHistory();
+                  const hasSuccessfulTest = verificationHistory.some(
+                    (v) => v.success && (v.tier === 'targeted_test' || v.tier === 'full_test')
                   );
-                  policyCompletion = this.verificationPolicy.canComplete();
-                  completionEvidence = this.completionEvidenceGate.evaluate('', session, {
-                    turn,
-                    codeChangeRequired: false,
-                  });
+
+                  if (this.targetFilesModifiedInTurn.size > 0 && hasRealTestScript && !hasSuccessfulTest) {
+                    policyCompletion = {
+                      allowed: false,
+                      reason: `Dự án có cấu hình test suite ("${testScript}") và bạn đã chỉnh sửa mã nguồn (${Array.from(this.targetFilesModifiedInTurn).join(', ')}). Bắt buộc phải thực thi lệnh kiểm thử thành công trước khi hoàn thành nhiệm vụ qua submit_solution.`,
+                      errorCode: 'TEST_EXECUTION_REQUIRED',
+                    };
+                  } else {
+                    this.verificationPolicy.recordVerification(
+                      'jit_diagnostics_sweep',
+                      true,
+                      'JIT in-memory diagnostics clean (0 errors)',
+                      0,
+                      { tier: 'typecheck' },
+                    );
+                    policyCompletion = this.verificationPolicy.canComplete();
+                    completionEvidence = this.completionEvidenceGate.evaluate('', session, {
+                      turn,
+                      codeChangeRequired: false,
+                    });
+                  }
                 } else {
                   policyCompletion = {
                     allowed: false,

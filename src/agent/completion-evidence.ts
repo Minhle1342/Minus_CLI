@@ -9,12 +9,18 @@ const MUTATION_TOOLS = new Set([
   'apply_patch',
   'delete_file',
   'move_file',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
 ]);
 
 const INSPECTION_TOOLS = new Set([
   'read_file',
+  'view_file',
   'list_files',
+  'list_dir',
   'search_text',
+  'grep_search',
   'search_codebase_fast',
   'read_compressed_code',
   'pack_codebase',
@@ -66,7 +72,7 @@ export function classifyToolEvidence(
 ): EvidenceKind[] {
   if (isToolResultFailure(result)) return [];
   if (MUTATION_TOOLS.has(toolName)) return ['mutation'];
-  if (toolName === 'submit_solution') return ['verification'];
+  if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
   }

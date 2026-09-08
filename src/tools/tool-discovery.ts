@@ -35,7 +35,7 @@ export function createDiscoverToolsTool(registry: ToolRegistry): ToolDefinition 
         category?.includes('game')
       ) {
         if (typeof (registry as any).registerGameTools === 'function') {
-          (registry as any).registerGameTools();
+          await (registry as any).registerGameTools();
         }
       }
 

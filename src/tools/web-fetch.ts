@@ -133,9 +133,13 @@ export function htmlToCleanMarkdown(html: string, baseUrl?: string): { markdown:
     return `[${linkText}](${resolvedHref})`;
   });
 
+  // Convert Bold & Italic
+  content = content.replace(/<(?:strong|b)\b[^>]*>([\s\S]*?)<\/(?:strong|b)>/gi, '**$1**');
+  content = content.replace(/<(?:em|i)\b[^>]*>([\s\S]*?)<\/(?:em|i)>/gi, '*$1*');
+
   // Convert Blockquotes & Paragraphs
   content = content.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, text) => `\n> ${decodeHtmlEntities(text.replace(/<[^>]+>/g, '')).trim()}\n\n`);
-  content = content.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_, text) => `\n\n${decodeHtmlEntities(text.replace(/<[^>]+>/g, '')).trim()}\n\n`);
+  content = content.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, '\n\n$1\n\n');
   content = content.replace(/<br\s*\/?>/gi, '\n');
   content = content.replace(/<hr\s*\/?>/gi, '\n---\n');
 
@@ -192,11 +196,15 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
       properties: {
         url: {
           type: Type.STRING,
-          description: 'The target HTTP or HTTPS URL to fetch and read (e.g. "https://docs.python.org/3/library/asyncio.html" or "https://github.com/nodejs/node/issues/12345").',
+          description: 'The HTTP or HTTPS URL to fetch content from.',
+        },
+        Url: {
+          type: Type.STRING,
+          description: 'Alias for url (Google Antigravity CLI standard casing).',
         },
         extract_mode: {
           type: Type.STRING,
-          description: 'Extraction mode: "markdown" for structured markdown (default), "code_blocks" to extract only code/pre blocks, or "text" for plain text.',
+          description: 'Extraction mode: "markdown" for full cleaned markdown, "code_blocks" for extracted code blocks only, or "text" for stripped text.',
           enum: ['markdown', 'code_blocks', 'text'],
         },
         selector: {
@@ -216,12 +224,12 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
           description: 'Set to true to force a fresh fetch from the network and bypass in-memory cache.',
         },
       },
-      required: ['url'],
+      required: [],
     },
     async execute(args: Record<string, any>): Promise<Record<string, any>> {
-      const rawUrl = String(args.url || '').trim();
+      const rawUrl = String(args.url || args.Url || '').trim();
       if (!rawUrl) {
-        return { error: 'Parameter "url" is required and must not be empty.', errorCode: 'INVALID_URL' };
+        return { error: 'Parameter "url" (or "Url") is required and must not be empty.', errorCode: 'INVALID_URL' };
       }
 
       let parsedUrl: URL;
@@ -351,3 +359,28 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
 export function clearWebFetchCache(): void {
   memoryCache.clear();
 }
+
+/**
+ * HTML to Clean Markdown conversion helper.
+ */
+export function htmlToMarkdown(html: string): string {
+  return htmlToCleanMarkdown(html).markdown;
+}
+
+/**
+ * Creates read_url_content tool (Google Antigravity CLI compatibility alias delegating to web_fetch).
+ */
+export function createReadUrlContentTool(options: WebFetchToolOptions = {}): ToolDefinition {
+  const tool = createWebFetchTool(options);
+  return {
+    ...tool,
+    name: 'read_url_content',
+    description:
+      'Fetch content from a URL via HTTP request. Converts HTML to clean markdown for fast reading without browser overhead. (Unified tool delegating to web_fetch).',
+  };
+}
+
+/** Pre-instantiated default tools */
+export const webFetchTool = createWebFetchTool();
+export const readUrlContentTool = createReadUrlContentTool();
+
