@@ -15,6 +15,8 @@
     "search:up": "tsx src/scripts/start-searxng.ts",
     "search:down": "docker compose -f deploy/searxng/compose.yaml down",
     "sandbox:build": "docker build -t minus-sandbox:latest -f deploy/sandbox/Dockerfile .",
+    "eval": "tsx src/eval/cli.ts",
+    "eval:mock": "tsx src/eval/cli.ts --mock",
     "9router": "node scripts/start-9router.js",
     "start": "node dist/index.js"
   },
@@ -29,11 +31,14 @@
   "dependencies": {
     "@google/genai": "^2.18.0",
     "dotenv": "^16.4.7",
+    "ink": "^7.1.1",
     "minisearch": "^7.2.0",
+    "react": "^19.2.8",
     "repomix": "^1.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/react": "^19.2.18",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
