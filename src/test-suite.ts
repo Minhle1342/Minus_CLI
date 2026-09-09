@@ -66,6 +66,7 @@ import { ReflectionEngine, isExploratoryCommand } from './agent/reflection-engin
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
 import { ProcessFailureDetector } from './agent/process-failure-detector.js';
 import { LivingPlaybookManager, PlaybookReflector, PlaybookCurator } from './context/living-playbook.js';
+import { DomainIntentGuardian } from './agent/domain-intent-guardian.js';
 import {
   FinalAnswerGuard,
   detectArchitectureAnalysisIntent,
@@ -197,6 +198,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 process.env.NODE_ENV = 'test';
+process.env.SANDBOX_MODE = 'local';
 
 const execFileAsync = promisify(execFile);
 
@@ -8286,6 +8288,85 @@ Always write tests first!`;
   assert(committedBullets.length >= 1, 'PlaybookCurator cam kết thành công delta updates vào Living Playbook');
 
   await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => {});
+
+  console.log('\n========================================');
+  console.log('🧪 52. KIỂM THỬ DOMAIN INTENT & SEMANTIC MISUNDERSTANDING GUARDIAN (Wink & SCAFFOLD-CEGIS)');
+  console.log('========================================');
+
+  const intentGuardian = new DomainIntentGuardian();
+
+  // 1. Contract-Driven Intent Anchoring & Freezing
+  const contract1 = intentGuardian.extractAndFreezeContract(
+    'Fix precision calculation bug in src/finance.ts. Do not alter currency conversion rates, must not change API return types, and keep existing test assertions unchanged.'
+  );
+  assert(contract1.isFrozen === true, 'Hợp đồng ý định nghiệp vụ được đóng băng bất biến ngay sau khi khởi tạo');
+  assert(contract1.allowTestFileModification === false, 'Mặc định cấm sửa đổi file test khi người dùng yêu cầu sửa lỗi mã nguồn');
+  assert(contract1.nonNegotiableConstraints.length >= 2, 'Tự động trích xuất đầy đủ các ràng buộc tối hậu (non-negotiable constraints)');
+  assert(
+    Boolean(contract1.coreGoal.toLowerCase().includes('src/finance.ts')),
+    'Mục tiêu cốt lõi (coreGoal) trích xuất chính xác phạm vi tập tin cần xử lý',
+  );
+
+  const contractPromptContext = intentGuardian.formatContractForPromptContext();
+  assert(
+    Boolean(contractPromptContext.includes('DOMAIN INTENT CONTRACT - FROZEN')) &&
+    Boolean(contractPromptContext.includes('src/finance.ts')),
+    'Khối ngữ cảnh mỏ neo nghiệp vụ đóng băng sẵn sàng được đưa vào dynamic execution context',
+  );
+
+  // 2. SCAFFOLD-CEGIS Test Tampering Protection
+  // Cố tình sửa file test khi không được phép
+  const tamperIntervention = intentGuardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/finance.test.ts',
+      TargetContent: 'expect(res).toBe(100)',
+      ReplacementContent: 'expect(res).toBe(90)',
+    },
+  });
+  assert(
+    tamperIntervention !== null && tamperIntervention?.type === 'TEST_TAMPERING' && tamperIntervention?.severity === 'BLOCKING',
+    'SCAFFOLD-CEGIS Test Tampering Auditor chặn đứng hành vi sửa đổi file test khi chỉ có yêu cầu sửa logic mã nguồn',
+  );
+  assert(
+    Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('sửa mã nguồn')),
+    'Hướng dẫn chỉnh hướng yêu cầu Agent tập trung sửa mã nguồn thay vì sửa test case để ép pass',
+  );
+
+  // Thử lại khi người dùng cho phép sửa test
+  const permissiveGuardian = new DomainIntentGuardian();
+  const contract2 = permissiveGuardian.extractAndFreezeContract(
+    'Update test suite in tests/finance.spec.ts to cover the new negative balance scenarios'
+  );
+  assert(contract2.allowTestFileModification === true, 'Cho phép sửa đổi file test khi prompt của người dùng có chỉ định rõ ràng');
+  const allowedTestMutation = permissiveGuardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'tests/finance.spec.ts',
+      TargetContent: 'test("old")',
+      ReplacementContent: 'test("new")',
+    },
+  });
+  assert(allowedTestMutation === null, 'Quan sát tool call không chặn sửa file test khi đã có quyền hợp lệ');
+
+  // 3. Wink-Style Specification Drift & Goal Substitution Nudge
+  const mockThought = 'I cannot fix this tax edge case, so I will temporarily mock the tax rate to return 0 to pass the check.';
+  const driftNudge = intentGuardian.observeModelThoughts(mockThought);
+  assert(
+    driftNudge !== null && driftNudge?.type === 'GOAL_DRIFT',
+    'Wink Nudge phát hiện tư tưởng bỏ cuộc hoặc mock tạm thời (Goal Substitution / Specification Drift) trong CoT',
+  );
+  assert(
+    Boolean(driftNudge?.courseCorrectionGuidance?.includes('Mục tiêu nghiệp vụ')),
+    'Wink Nudge sinh hướng dẫn tái neo đậu (re-anchoring guidance) dựa trên hợp đồng đóng băng',
+  );
+
+  // 4. Kiểm tra tích hợp AgentLoop
+  const loopInstance = new AgentLoop({} as any, new ToolRegistry());
+  assert(
+    loopInstance.domainIntentGuardian !== undefined && typeof loopInstance.domainIntentGuardian.extractAndFreezeContract === 'function',
+    'AgentLoop tích hợp thành công DomainIntentGuardian trong micro-kernel',
+  );
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

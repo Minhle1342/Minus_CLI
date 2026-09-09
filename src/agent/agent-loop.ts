@@ -28,6 +28,7 @@ import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { ProcessFailureDetector } from './process-failure-detector.js';
+import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, type FinalAnswerGuardDecision } from './final-answer-guard.js';
@@ -232,6 +233,7 @@ export class AgentLoop {
   readonly effectLedger: EffectLedger;
   readonly progressGuard = new LoopProgressGuard();
   readonly processFailureDetector = new ProcessFailureDetector();
+  readonly domainIntentGuardian = new DomainIntentGuardian();
   readonly finalAnswerGuard = new FinalAnswerGuard();
   readonly completionEvidenceGate = new CompletionEvidenceGate();
   readonly verificationPolicy = new VerificationPolicy();
@@ -721,6 +723,8 @@ export class AgentLoop {
     this.progressGuard.reset();
     this.processFailureDetector.reset();
     this.processFailureDetector.initTaskKeywords(turnUserRequest);
+    this.domainIntentGuardian.reset();
+    this.domainIntentGuardian.extractAndFreezeContract(turnUserRequest);
     this.finalAnswerGuard.reset();
     this.verificationPolicy.reset();
     this.cognitiveHarness.reset();
@@ -1399,9 +1403,11 @@ export class AgentLoop {
 
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
+      const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
       const injectedAdditions = [
         hypothesisContext,
         hypothesisGuidance,
+        domainContractContext,
         harnessProfile.guidance,
         paretoGateReminder,
         completionDirective,
@@ -1648,6 +1654,12 @@ export class AgentLoop {
           CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
         }
         this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
+
+        // Wink-Style Specification Drift & Goal Substitution Nudge
+        const thoughtDrift = this.domainIntentGuardian.observeModelThoughts(response.reasoningContent);
+        if (thoughtDrift) {
+          CLI.renderReflectionAlert(1, `[Wink Course-Correction Nudge]: ${thoughtDrift.message}`);
+        }
       }
 
       const hasToolCalls = Boolean(response.toolCalls && response.toolCalls.length > 0);
@@ -2288,6 +2300,25 @@ export class AgentLoop {
                 executionResult.result = {
                   ...executionResult.result,
                   processFailureIntervention: interventionMsg,
+                };
+              }
+            } catch { }
+          }
+
+          // SCAFFOLD-CEGIS & Domain Intent Drift Detection
+          const domainIntentIntervention = this.domainIntentGuardian.observeToolCall({
+            toolName,
+            args: toolArgs,
+          });
+          if (domainIntentIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
+            try {
+              const driftMsg = `${domainIntentIntervention.message}\n👉 Hướng dẫn chỉnh hướng: ${domainIntentIntervention.courseCorrectionGuidance}`;
+              if (Object.isExtensible(executionResult.result)) {
+                (executionResult.result as any).domainIntentIntervention = driftMsg;
+              } else {
+                executionResult.result = {
+                  ...executionResult.result,
+                  domainIntentIntervention: driftMsg,
                 };
               }
             } catch { }

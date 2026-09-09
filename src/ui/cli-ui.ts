@@ -1609,8 +1609,73 @@ export class CLI {
     // Giảm thiểu khoảng trắng thừa giữa các step
   }
 
+  static formatMarkdownTables(text: string): string {
+    const lines = text.split('\n');
+    const result: string[] = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+        const tableLines: string[] = [];
+        while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+          tableLines.push(lines[i].trim());
+          i++;
+        }
+
+        if (tableLines.length >= 2) {
+          const rows = tableLines.map(tLine => 
+            tLine.slice(1, -1).split('|').map(cell => cell.trim())
+          );
+
+          const isSeparator = rows[1]?.every(cell => /^:?-+:?$/.test(cell));
+          const header = rows[0];
+          const dataRows = isSeparator ? rows.slice(2) : rows.slice(1);
+          const allRows = [header, ...dataRows];
+
+          if (header && header.length > 0) {
+            const colCount = Math.max(...allRows.map(r => r.length));
+            const colWidths: number[] = new Array(colCount).fill(3);
+
+            for (const row of allRows) {
+              for (let c = 0; c < colCount; c++) {
+                const cellVal = row[c] || '';
+                colWidths[c] = Math.max(colWidths[c], cellVal.length);
+              }
+            }
+
+            const topBorder = '┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
+            const midBorder = '├' + colWidths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
+            const botBorder = '└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘';
+
+            const formattedLines: string[] = [topBorder];
+            const headerCells = header.map((cell, c) => ` ${cell.padEnd(colWidths[c])} `).join('│');
+            formattedLines.push(`│${headerCells}│`);
+            formattedLines.push(midBorder);
+
+            for (const row of dataRows) {
+              const dataCells = row.map((cell, c) => ` ${(cell || '').padEnd(colWidths[c])} `).join('│');
+              formattedLines.push(`│${dataCells}│`);
+            }
+
+            formattedLines.push(botBorder);
+            result.push(formattedLines.join('\n'));
+            continue;
+          }
+        }
+        result.push(...tableLines);
+      } else {
+        result.push(line);
+        i++;
+      }
+    }
+
+    return result.join('\n');
+  }
+
   static formatMarkdownTerminal(text: string): string {
-    const parts = text.split(/(```[\s\S]*?```)/g);
+    const tableProcessed = CLI.formatMarkdownTables(text);
+    const parts = tableProcessed.split(/(```[\s\S]*?```)/g);
     return parts
       .map((part) => {
         if (part.startsWith('```') && part.endsWith('```')) {
