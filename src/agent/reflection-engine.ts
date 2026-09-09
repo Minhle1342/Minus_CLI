@@ -20,6 +20,31 @@ export interface ReflectionAnalysis {
   detectiveReport?: ErrorDetectiveReport;
 }
 
+export function isExploratoryCommand(
+  command: string,
+  context?: { hasCodeMutations?: boolean; phase?: string; isReproduction?: boolean },
+): boolean {
+  const trimmed = (command || '').trim();
+  if (!trimmed) return false;
+
+  // 1. Lệnh tìm kiếm / định vị (exit code 1 thường chỉ là không tìm thấy kết quả)
+  if (/^(?:grep|rg|ripgrep|findstr|find|where|which|dir|ls)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 2. Lệnh Git kiểm tra trạng thái / diff / log
+  if (/^git\s+(?:status|diff|log|show|rev-parse|branch)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 3. Lệnh chạy test khi đang ở pha tái hiện lỗi (reproduce phase) hoặc chưa có bất kỳ code mutation nào
+  if (context?.isReproduction || context?.phase === 'reproduce' || context?.hasCodeMutations === false) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * ReflectionEngine - Động cơ Tự vấn & Quy trình Gỡ lỗi Thông minh (Codex CLI Standard + Error Detective)
  * 
@@ -60,8 +85,8 @@ export class ReflectionEngine {
       }
     }
 
-    // 2. Parse nhanh regex TSxxxx từ stderr / stdout
-    const rawText = `${feedback.result.stderr || ''}\n${feedback.result.stdout || ''}\n${feedback.result.error || ''}`;
+    // 2. Fallback: Parse từ stderr/stdout bằng Regex
+    const rawText = `${feedback.result.stderr || ''}\n${feedback.result.stdout || ''}`;
     const tsRegex = /([a-zA-Z0-9_\-\/\.]+\.tsx?)\((\d+),(\d+)\):\s*error\s*(TS\d+):\s*(.+)/g;
     let match;
     while ((match = tsRegex.exec(rawText)) !== null) {
@@ -85,7 +110,11 @@ export class ReflectionEngine {
   /**
    * Phân tích kết quả thực thi của Tool và xác định xem có cần kích hoạt Self-Reflection hay không
    */
-  analyze(feedback: ToolExecutionFeedback, workspace?: Workspace): ReflectionAnalysis {
+  analyze(
+    feedback: ToolExecutionFeedback,
+    workspace?: Workspace,
+    context?: { hasCodeMutations?: boolean },
+  ): ReflectionAnalysis {
     const { toolName, result } = feedback;
     let isFailure = false;
     let reflectionPrompt: string | undefined;
@@ -120,6 +149,21 @@ export class ReflectionEngine {
     }
     // 2. Phân tích lệnh run_command thất bại (test failed, build error, syntax error) qua Error Detective
     else if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
+      const commandStr = String(feedback.args?.command || result.command || '');
+      const isExploratory = isExploratoryCommand(commandStr, context);
+
+      if (isExploratory) {
+        // Miễn trừ: Lệnh tìm kiếm / Git diff hoặc test ở pha tái hiện lỗi ban đầu không bị coi là failure nghiêm trọng
+        isFailure = false;
+        this.lastDetectiveReport = undefined;
+        this.lastReflectionPrompt = undefined;
+        return {
+          isFailure: false,
+          consecutiveFailures: this.consecutiveFailures,
+          advice: `Exploratory command returned exit code ${result.exitCode} (non-blocking).`,
+        };
+      }
+
       isFailure = true;
       this.consecutiveFailures++;
 
@@ -137,22 +181,34 @@ export class ReflectionEngine {
         `----------------------------------------`,
       ];
 
-      if (detectiveReport.promptGuidance) {
-        promptParts.push(detectiveReport.promptGuidance);
-      } else {
+      if (detectiveReport.primaryDefect) {
         promptParts.push(
-          `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
-          `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
-          `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
-          `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
-          `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
+          `Defect: ${detectiveReport.primaryDefect}${detectiveReport.location ? ` at ${detectiveReport.location}` : ''}${detectiveReport.immediateFix ? ` | Suggested Fix: ${detectiveReport.immediateFix}` : ''}`,
         );
+      }
+
+      // Level 1: Lần lỗi đầu tiên - giữ context gọn gàng, không nhồi nhét quy tắc phương pháp luận
+      if (this.consecutiveFailures <= 1) {
+        promptParts.push(`👉 Inspect the error output above and resolve the defect.`);
+      } else {
+        // Level 2+: Khi lỗi lặp lại từ lần 2 trở đi - mới bổ sung hướng dẫn phương pháp luận sâu và chặn lặp
+        if (detectiveReport.promptGuidance) {
+          promptParts.push(detectiveReport.promptGuidance);
+        } else {
+          promptParts.push(
+            `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
+            `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
+            `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
+            `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
+            `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
+          );
+        }
       }
 
       reflectionPrompt = promptParts.join('\n');
       advice = detectiveReport.primaryDefect
         ? `Command failed (exit: ${result.exitCode}): ${detectiveReport.primaryDefect}${detectiveReport.failingSourceLine ? ` | Failing code: ${detectiveReport.failingSourceLine}` : ''}`
-        : `Command failed (exit: ${result.exitCode}). Triggering debugging protocol and stack trace analysis.`;
+        : `Command failed (exit: ${result.exitCode}).`;
     } 
     // 3. Phân tích lỗi áp dụng patch apply_patch
     else if (toolName === 'apply_patch' && (result.error || result.errorCode)) {

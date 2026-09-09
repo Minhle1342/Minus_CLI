@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import MiniSearch from 'minisearch';
 import { getNativeCore } from '../native/index.js';
+import type { MaskedObservationRecord } from '../agent/context-compactor.js';
 
 export interface ArchivedTurnDocument {
   id: string;
@@ -37,20 +38,25 @@ export interface TurnMemoryOptions {
  *    để tìm lại các turn trong quá khứ liên quan trực tiếp đến câu hỏi / thao tác hiện tại của người dùng.
  * 3. Tái nạp có chọn lọc (Selective Re-injection): Chỉ chèn vào Dynamic Execution Context khi độ tương đồng
  *    vượt ngưỡng an toàn (>= 0.55), giữ cho context window luôn tinh gọn và tránh lãng phí token.
+ * 4. Memory-Augmented On-Demand Retrieval: Tự động lưu trữ và phục hồi các observation đã bị mask
+ *    khi agent hoặc user nhắc lại đến đối tượng cũ.
  */
 export class TurnMemoryRetriever {
   readonly workspaceDir: string;
   readonly storageDir: string;
   readonly storageFilePath: string;
+  readonly maskedStorageFilePath: string;
 
   private miniSearch: MiniSearch<ArchivedTurnDocument>;
   private turnsMap: Map<string, ArchivedTurnDocument> = new Map();
+  private maskedObservationsMap: Map<string, MaskedObservationRecord> = new Map();
   private initialized = false;
 
   constructor(workspaceDir?: string) {
     this.workspaceDir = workspaceDir ? path.resolve(workspaceDir) : process.cwd();
     this.storageDir = path.join(this.workspaceDir, '.codingagent', 'memory');
     this.storageFilePath = path.join(this.storageDir, 'archived_turns.json');
+    this.maskedStorageFilePath = path.join(this.storageDir, 'masked_observations.json');
 
     this.miniSearch = this.createMiniSearch();
   }
@@ -98,6 +104,18 @@ export class TurnMemoryRetriever {
     } catch {
       // File chưa tồn tại hoặc rỗng, bỏ qua
     }
+
+    try {
+      const maskedRaw = await fs.readFile(this.maskedStorageFilePath, 'utf8');
+      const maskedDocs: MaskedObservationRecord[] = JSON.parse(maskedRaw);
+      if (Array.isArray(maskedDocs) && maskedDocs.length > 0) {
+        for (const doc of maskedDocs) {
+          this.maskedObservationsMap.set(doc.id, doc);
+        }
+      }
+    } catch {
+      // File chưa tồn tại hoặc rỗng, bỏ qua
+    }
   }
 
   /**
@@ -137,6 +155,99 @@ export class TurnMemoryRetriever {
       this.miniSearch.addAll(newDocs);
       await this.persist();
     }
+  }
+
+  /**
+   * Lưu trữ các observations đã bị mask vào bộ nhớ on-demand
+   */
+  async archiveMaskedObservations(records: MaskedObservationRecord[]): Promise<void> {
+    await this.init();
+    if (!records || records.length === 0) return;
+
+    let hasNew = false;
+    for (const rec of records) {
+      if (!this.maskedObservationsMap.has(rec.id)) {
+        this.maskedObservationsMap.set(rec.id, rec);
+        hasNew = true;
+      }
+    }
+
+    // Giữ tối đa 100 observations gần nhất để tối ưu bộ nhớ
+    if (this.maskedObservationsMap.size > 100) {
+      const keys = Array.from(this.maskedObservationsMap.keys());
+      const toRemove = keys.slice(0, keys.length - 100);
+      for (const k of toRemove) {
+        this.maskedObservationsMap.delete(k);
+      }
+    }
+
+    if (hasNew) {
+      await this.persistMaskedObservations();
+    }
+  }
+
+  private async persistMaskedObservations(): Promise<void> {
+    try {
+      const allDocs = Array.from(this.maskedObservationsMap.values());
+      await fs.writeFile(this.maskedStorageFilePath, JSON.stringify(allDocs, null, 2), 'utf8');
+    } catch {
+      // Không làm sập tiến trình nếu ghi file lỗi
+    }
+  }
+
+  /**
+   * Truy hồi chính xác 1 observation theo ID hoặc targetPath
+   */
+  retrieveMaskedObservation(idOrTarget: string): MaskedObservationRecord | undefined {
+    if (!idOrTarget) return undefined;
+    if (this.maskedObservationsMap.has(idOrTarget)) {
+      return this.maskedObservationsMap.get(idOrTarget);
+    }
+    const normalizedTarget = path.normalize(idOrTarget).toLowerCase();
+    for (const record of this.maskedObservationsMap.values()) {
+      if (record.targetPath && path.normalize(record.targetPath).toLowerCase() === normalizedTarget) {
+        return record;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Tìm kiếm các observations đã bị mask liên quan đến query
+   */
+  searchMaskedObservations(query: string, limit: number = 2): MaskedObservationRecord[] {
+    if (!query || this.maskedObservationsMap.size === 0) return [];
+
+    const lowerQuery = query.toLowerCase();
+    const queryTokens = lowerQuery.split(/\s+/).filter((t) => t.length >= 3);
+    const scored: Array<{ record: MaskedObservationRecord; score: number }> = [];
+
+    for (const record of this.maskedObservationsMap.values()) {
+      let score = 0;
+      const target = (record.targetPath || '').toLowerCase();
+      const command = (record.command || '').toLowerCase();
+      const summary = (record.summary || '').toLowerCase();
+      const toolName = (record.toolName || '').toLowerCase();
+
+      // Khớp chính xác target file hoặc command
+      if (target && lowerQuery.includes(target)) score += 10;
+      if (command && lowerQuery.includes(command)) score += 8;
+
+      // Khớp từng token trong query
+      for (const token of queryTokens) {
+        if (target.includes(token)) score += 3;
+        if (command.includes(token)) score += 2;
+        if (summary.includes(token)) score += 1;
+        if (toolName === token) score += 1;
+      }
+
+      if (score > 0) {
+        scored.push({ record, score });
+      }
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).map((s) => s.record);
   }
 
   /**
@@ -262,14 +373,66 @@ export class TurnMemoryRetriever {
   }
 
   /**
-   * Truy vấn và sinh trực tiếp đoạn ngữ cảnh re-injection nếu có turn liên quan
+   * Định dạng dữ liệu Observation đã bị Mask để Re-inject on-demand
+   */
+  formatMaskedObservationForContext(record: MaskedObservationRecord): string {
+    const lines: string[] = [
+      `📦 [ON-DEMAND UNMASKED OBSERVATION: ${record.toolName} (ID: ${record.id})]`,
+    ];
+    if (record.targetPath) {
+      lines.push(`  - Target: ${record.targetPath}`);
+    }
+    if (record.command) {
+      lines.push(`  - Command: ${record.command} (exitCode: ${record.exitCode ?? 0})`);
+    }
+    lines.push(`  - Summary: ${record.summary}`);
+
+    // Trích xuất preview an toàn từ originalPayload để Agent có đủ dữ liệu mà không tràn context
+    if (record.originalPayload) {
+      const p = record.originalPayload;
+      if (p.content && typeof p.content === 'string') {
+        const preview = p.content.slice(0, 400);
+        lines.push(`  - Cached Content Preview:\n\`\`\`\n${preview}${p.content.length > 400 ? '\n... [truncated]' : ''}\n\`\`\``);
+      } else if (p.stdout || p.stderr) {
+        const out = String(p.stdout || p.stderr || '').trim();
+        const preview = out.slice(0, 400);
+        lines.push(`  - Cached Output Preview:\n\`\`\`\n${preview}${out.length > 400 ? '\n... [truncated]' : ''}\n\`\`\``);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Truy vấn và sinh trực tiếp đoạn ngữ cảnh re-injection nếu có turn hoặc observation liên quan
    */
   async retrieveContextSnippet(query: string, options?: TurnMemoryOptions): Promise<string> {
+    await this.init();
+    const snippets: string[] = [];
+
+    // 1. Episodic past turns
     const results = await this.retrieveRelevantTurns(query, options);
-    return this.formatForContextInjection(results);
+    if (results.length > 0) {
+      snippets.push(this.formatForContextInjection(results));
+    }
+
+    // 2. On-demand masked observations
+    const matchedObs = this.searchMaskedObservations(query, 2);
+    if (matchedObs.length > 0) {
+      const obsSnippets = matchedObs.map((obs) => this.formatMaskedObservationForContext(obs));
+      snippets.push(
+        `🔍 [ON-DEMAND RETRIEVED OBSERVATIONS - EPISODIC CACHE]:\n> Previously masked observations retrieved on-demand to avoid re-running tools:\n` +
+        obsSnippets.join('\n\n')
+      );
+    }
+
+    return snippets.join('\n\n');
   }
 
   getArchivedTurnCount(): number {
     return this.turnsMap.size;
+  }
+
+  getMaskedObservationCount(): number {
+    return this.maskedObservationsMap.size;
   }
 }

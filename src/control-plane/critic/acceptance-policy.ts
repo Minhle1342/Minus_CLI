@@ -1,4 +1,5 @@
 import type { DiagnosticSnapshot, ChangedFileState } from '../control-plane-state.js';
+import { stripMarkdownFormattingForGuard } from '../../agent/final-answer-guard.js';
 
 const OPTIONAL_OFFER_PATTERN = /(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?\n]{0,180}/g;
 
@@ -50,7 +51,8 @@ export class AcceptancePolicy {
       if (!trimmed) {
         violations.push('Empty final response received. Must execute a tool or provide substantive explanation.');
       } else {
-        const normalized = removeAccents(trimmed).replace(OPTIONAL_OFFER_PATTERN, '');
+        const cleanProse = stripMarkdownFormattingForGuard(trimmed);
+        const normalized = removeAccents(cleanProse).replace(OPTIONAL_OFFER_PATTERN, '');
         const remainingText = normalized.replace(FULFILLED_INTRO_PATTERN, '').trim();
         const hasDeferred = DEFERRED_WORK_PATTERNS.some((p) => p.test(remainingText));
         if (hasDeferred) {

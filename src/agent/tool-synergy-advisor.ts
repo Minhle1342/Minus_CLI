@@ -1,5 +1,6 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
 import { SECTION_PATCH_FORMAT_SPEC } from '../llm/prompt-sections.js';
+import { isMutationTool } from '../tools/diff-generator.js';
 
 export interface ToolSynergyContext {
   lastToolName?: string;
@@ -124,10 +125,7 @@ export class ToolSynergyAdvisor {
     }
 
     // 3. Vừa sửa đổi code (Playbook C: Safe Mutation & Verification)
-    if (
-      lastToolName &&
-      ['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file'].includes(lastToolName)
-    ) {
+    if (lastToolName && isMutationTool(lastToolName)) {
       if (lastToolResult && !lastToolResult.error) {
         const blast = lastToolResult.blastRadius;
         if (blast) {

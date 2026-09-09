@@ -506,10 +506,13 @@ export class ToolUseGuardian {
         /([._-](?:test|spec)\.[a-zA-Z0-9]+$)|([\\/](?:tests?|__tests__|scratch|\.scratch)[\\/])/i.test(targetPath) ||
         targetPath.startsWith('scratch/') ||
         targetPath.startsWith('scratch\\') ||
+        targetPath.startsWith('.scratch/') ||
+        targetPath.startsWith('.scratch\\') ||
         targetPath.startsWith('tests/') ||
         targetPath.startsWith('tests\\') ||
         targetPath.startsWith('test/') ||
-        targetPath.startsWith('test\\')
+        targetPath.startsWith('test\\') ||
+        /(?:^|[\\/])(?:scratch|throwaway)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(targetPath)
       )
     );
 
@@ -528,7 +531,7 @@ export class ToolUseGuardian {
     const isTrivialBypass = Boolean(gateContext?.isTrivialEdit);
 
     if (isMutationTool && isBugfix && !isTestOrReproFile && !isAuthorizedPhaseOrPlan && !hasValidated && !isTrivialBypass) {
-      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph (hoặc tạo test case tái hiện lỗi trong tests/ hoặc scratch/), sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code sản phẩm.`;
+      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph, HOẶC tạo bài kiểm thử tạm thời trong "scratch/" để tái hiện/cô lập lỗi trước (hệ thống sẽ tự động dọn dẹp file scratch sau khi kiểm thử thành công mà không tốn thêm bước xóa). Sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code sản phẩm.`;
       return {
         valid: false,
         allowed: false,

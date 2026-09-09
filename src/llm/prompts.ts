@@ -101,7 +101,7 @@ export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `4. SEMANTIC INTELLIGENCE & BL
      * Use \`analyze_impact\` to calculate the Blast Radius and risk level (LOW/MEDIUM/HIGH/CRITICAL) before modifying exported APIs.`;
 
 export const SECTION_SURGICAL_MUTATION_FULL = `5. SURGICAL & ATOMIC MUTATION DISCIPLINE (CODEX CLI STANDARD):
-    - ADAPTIVE PRE-MUTATION HYPOTHESIS GATE: For bugfix tasks on production code, you MUST activate formulate_and_verify_hypothesis with explicit falsification test and concrete source evidence before editing code (or create a reproduction test in tests/ or scratch/ first). Creating tests or having an active plan automatically grants implementation access. Unverified edits to production code in Phase Explore trigger UNVERIFIED_MUTATION_BLOCKED.
+    - ADAPTIVE PRE-MUTATION HYPOTHESIS GATE & SCRATCH TESTING: For bugfix tasks on production code, you MUST activate formulate_and_verify_hypothesis with explicit falsification test and concrete source evidence before editing code (or freely create an isolated reproduction test in tests/ or scratch/ first; scratch tests are automatically cleaned up upon passing without extra delete steps). Creating tests or having an active plan automatically grants implementation access. Unverified edits to production code in Phase Explore trigger UNVERIFIED_MUTATION_BLOCKED.
    - Always inspect relevant source lines with \`read_file\` before modifying code to obtain the \`contentHash\` and exact context.
    - DEDICATED CRUD SEPARATION:
      * Creating new files: Use \`create_file\` (refuses silent overwrite of existing files).

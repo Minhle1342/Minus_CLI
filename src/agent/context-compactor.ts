@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing } from '../session/session-invariants.js';
@@ -12,6 +13,19 @@ export interface CompactionConfig {
   preservePrefixCache?: boolean;
   enableRollingTurnCompaction?: boolean;
   preserveLastNTurns?: number;
+  enableObservationMasking?: boolean;
+  maskOldObservationsBeyondN?: number;
+}
+
+export interface MaskedObservationRecord {
+  id: string;
+  toolName: string;
+  targetPath?: string;
+  command?: string;
+  exitCode?: number;
+  timestamp: string;
+  originalPayload: any;
+  summary: string;
 }
 
 export interface CompactionStats {
@@ -27,6 +41,7 @@ export interface CompactionStats {
   outputReserveTokens: number;
   effectiveHistoryBudgetTokens: number;
   archivedTurns?: ArchivedTurnDocument[];
+  maskedObservations?: MaskedObservationRecord[];
 }
 
 export interface CompactionOptions {
@@ -38,6 +53,9 @@ export interface CompactionOptions {
   enableRollingTurns?: boolean;
   preserveLastNTurns?: number;
   modelName?: string;
+  mutatedFiles?: string[];
+  cognitivePhase?: 'explore' | 'plan' | 'implement' | 'verify';
+  enableObservationMasking?: boolean;
 }
 
 /**
@@ -62,6 +80,8 @@ export class ContextCompactor {
       preservePrefixCache: config?.preservePrefixCache ?? false,
       enableRollingTurnCompaction: config?.enableRollingTurnCompaction ?? true,
       preserveLastNTurns: config?.preserveLastNTurns ?? 8,
+      enableObservationMasking: config?.enableObservationMasking ?? true,
+      maskOldObservationsBeyondN: config?.maskOldObservationsBeyondN ?? 3,
     };
   }
 
@@ -93,6 +113,12 @@ export class ContextCompactor {
     }
     if (config.preserveLastNTurns !== undefined) {
       this.config.preserveLastNTurns = config.preserveLastNTurns;
+    }
+    if (config.enableObservationMasking !== undefined) {
+      this.config.enableObservationMasking = config.enableObservationMasking;
+    }
+    if (config.maskOldObservationsBeyondN !== undefined) {
+      this.config.maskOldObservationsBeyondN = config.maskOldObservationsBeyondN;
     }
   }
 
@@ -249,6 +275,7 @@ export class ContextCompactor {
     let prunedPartsCount = 0;
     let prunedTurnsCount = 0;
     let archivedTurns: ArchivedTurnDocument[] = [];
+    const maskedObservations: MaskedObservationRecord[] = [];
 
     // 1. Tính tổng dung lượng ban đầu qua O(1) WeakMap cache
     const originalLength = getHistoryTotalChars(messages);
@@ -294,7 +321,18 @@ export class ContextCompactor {
       prunedTurnsCount = rollingResult.prunedTurnsCount;
     }
 
-    // 2. Tìm các index của tool responses gần nhất
+    // 2. Chuẩn bị danh sách file bị sửa đổi và cấu hình Phase-Aware
+    const mutatedFilesNormalized = new Set(
+      (options?.mutatedFiles || []).map((f) => path.normalize(f).toLowerCase())
+    );
+
+    let effectivePreserveLastN = options?.cognitivePhase === 'explore'
+      ? Math.min(this.config.preserveLastNToolResults, 2)
+      : this.config.preserveLastNToolResults;
+
+    const isObservationMaskingActive = options?.enableObservationMasking ?? this.config.enableObservationMasking;
+
+    // Tìm các index của tool responses gần nhất
     const toolResultIndices: number[] = [];
     workingMessages.forEach((msg, idx) => {
       if (msg.parts?.some((p) => p.functionResponse)) {
@@ -302,11 +340,11 @@ export class ContextCompactor {
       }
     });
 
-    const cutoffIndex = toolResultIndices.length > this.config.preserveLastNToolResults
-      ? toolResultIndices[toolResultIndices.length - this.config.preserveLastNToolResults]
+    const cutoffIndex = toolResultIndices.length > effectivePreserveLastN
+      ? toolResultIndices[toolResultIndices.length - effectivePreserveLastN]
       : -1;
 
-    // 3. Tiến hành Selective Sliding Window Pruning
+    // 3. Tiến hành Adaptive Context Pruning (Observation Masking & Superseded Deduplication)
     const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
       const isOldToolResult = cutoffIndex >= 0 && msgIdx < cutoffIndex && msg.parts?.some((p) => p.functionResponse);
 
@@ -322,15 +360,113 @@ export class ContextCompactor {
         const resp = part.functionResponse;
         const respStr = JSON.stringify(resp.response || {});
 
-        if (respStr.length <= this.config.maxCharactersPerToolResult) {
-          return part;
-        }
-
-        prunedPartsCount++;
-        let compressedPayload: any;
-
         if (typeof resp.response === 'object' && resp.response !== null) {
           const r = resp.response as Record<string, any>;
+          const rawFilePath = r.path || r.filePath || r.targetFile;
+          const normalizedPath = rawFilePath ? path.normalize(String(rawFilePath)).toLowerCase() : '';
+
+          // Cơ chế 1: Superseded State Deduplication (Khử trạng thái cũ của file đã bị sửa)
+          if (normalizedPath && mutatedFilesNormalized.has(normalizedPath)) {
+            prunedPartsCount++;
+            const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" đã được sửa đổi ở bước sau. Vui lòng đọc lại file nếu cần nội dung mới nhất]`;
+            maskedObservations.push({
+              id: resp.id || `obs-${msgIdx}`,
+              toolName: resp.name || 'unknown',
+              targetPath: rawFilePath,
+              timestamp: new Date().toISOString(),
+              originalPayload: resp.response,
+              summary: supersededMask,
+            });
+            return {
+              functionResponse: {
+                name: resp.name,
+                id: resp.id,
+                response: {
+                  path: rawFilePath,
+                  status: 'superseded',
+                  observationMask: supersededMask,
+                },
+              },
+            };
+          }
+
+          // Cơ chế 2: Dynamic Observation Masking cho các tool cũ ngoài cửa sổ N
+          if (isObservationMaskingActive) {
+            prunedPartsCount++;
+            let compressedPayload: any;
+
+            // 2a: Đọc file cũ -> Nén thành Observation Stub ngắn gọn
+            if (r.content !== undefined && typeof r.content === 'string') {
+              const outline = SemanticSlicer.extractOutline(r.path || 'file', r.content);
+              const topSymbols = outline.symbols.slice(0, 3).map((s) => `${s.kind} ${s.name}`);
+              compressedPayload = {
+                path: r.path,
+                totalLines: outline.totalLines,
+                status: 'masked',
+                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Đọc lại bằng view_file nếu cần]`,
+              };
+            }
+            // 2b: Command log cũ -> Giữ status gọn
+            else if (r.stdout !== undefined || r.stderr !== undefined) {
+              const rawLog = String(r.stderr || r.stdout || '').trim();
+              if (r.exitCode === 0) {
+                compressedPayload = {
+                  exitCode: 0,
+                  status: 'masked',
+                  observationMask: `[OBSERVATION MASKED: Lệnh thực thi thành công (exit 0). Log dài (${rawLog.length} chars) đã được ẩn]`,
+                };
+              } else {
+                const logLines = rawLog.split('\n');
+                compressedPayload = {
+                  exitCode: r.exitCode,
+                  status: 'masked',
+                  observationMask: `[OBSERVATION MASKED: Lệnh thất bại (exit ${r.exitCode})]`,
+                  errorTail: logLines.slice(-3).join('\n'),
+                };
+              }
+            }
+            // 2c: Search result cũ
+            else if (Array.isArray(r.matches)) {
+              compressedPayload = {
+                status: 'masked',
+                observationMask: `[OBSERVATION MASKED: Kết quả tìm kiếm (${r.totalMatches || r.matches.length} matches) đã được ẩn]`,
+              };
+            }
+            // 2d: Khác
+            else {
+              compressedPayload = {
+                status: 'masked',
+                observationMask: `[OBSERVATION MASKED: Dữ liệu cũ (${respStr.length} chars) đã được nén]`,
+              };
+            }
+
+            maskedObservations.push({
+              id: resp.id || `obs-${msgIdx}`,
+              toolName: resp.name || 'unknown',
+              targetPath: r.path || r.filePath || r.targetFile,
+              command: r.command,
+              exitCode: r.exitCode,
+              timestamp: new Date().toISOString(),
+              originalPayload: resp.response,
+              summary: compressedPayload.observationMask || `Masked observation of ${resp.name}`,
+            });
+
+            return {
+              functionResponse: {
+                name: resp.name,
+                id: resp.id,
+                response: compressedPayload,
+              },
+            };
+          }
+
+          // Cơ chế 3: Fallback Semantic Slicing & Log Tail Truncation nếu observation masking không bật
+          if (respStr.length <= this.config.maxCharactersPerToolResult) {
+            return part;
+          }
+
+          prunedPartsCount++;
+          let compressedPayload: any;
 
           // Case A: File content dài -> Áp dụng AST-level Semantic Slicing
           if (r.content !== undefined && typeof r.content === 'string') {
@@ -383,19 +519,29 @@ export class ContextCompactor {
               preview: respStr.slice(0, 250) + '...',
             };
           }
+
+          return {
+            functionResponse: {
+              name: resp.name,
+              id: resp.id,
+              response: compressedPayload,
+            },
+          };
         } else {
-          compressedPayload = {
-            summary: `[Dữ liệu nén: ${String(resp.response).slice(0, 200)}...]`,
+          if (respStr.length <= this.config.maxCharactersPerToolResult) {
+            return part;
+          }
+          prunedPartsCount++;
+          return {
+            functionResponse: {
+              name: resp.name,
+              id: resp.id,
+              response: {
+                summary: `[Dữ liệu nén: ${String(resp.response).slice(0, 200)}...]`,
+              },
+            },
           };
         }
-
-        return {
-          functionResponse: {
-            name: resp.name,
-            id: resp.id,
-            response: compressedPayload,
-          },
-        };
       });
 
       return {
@@ -435,6 +581,7 @@ export class ContextCompactor {
       outputReserveTokens,
       effectiveHistoryBudgetTokens,
       archivedTurns,
+      maskedObservations,
     };
 
     assertHistoryToolPairing(compactedMessages);
@@ -476,4 +623,52 @@ export class ContextCompactor {
 
     return { messages: updatedMessages, distilledSummary };
   }
+
+  static computeElasticThresholdRatio(params: ElasticThresholdParams): number {
+    return computeElasticThresholdRatio(params);
+  }
 }
+
+export interface ElasticThresholdParams {
+  tokenVelocity?: number;
+  cognitivePhase?: 'explore' | 'plan' | 'implement' | 'verify' | string;
+  baseRatio?: number;
+}
+
+/**
+ * Tính toán tỉ lệ kích hoạt nén co giãn thích ứng (Adaptive Threshold Elasticity)
+ * Dựa trên vận tốc tiêu thụ token (Token Velocity) và Pha nhận thức (Cognitive Phase).
+ * 
+ * - Vận tốc cao (> 3000 tokens/step): Giảm ngưỡng xuống 50% - 60% để tạo đệm an toàn, tránh tràn context đột ngột.
+ * - Vận tốc thấp (< 800 tokens/step): Nới lỏng lên tới 75% - 80% để tránh nén thừa và bảo toàn KV-Cache.
+ * - Phase explore: Giảm thêm 0.05 để tăng khả năng đọc nhiều file cấu trúc.
+ * - Phase verify: Tăng thêm 0.05 để bảo tồn tối đa chi tiết bằng chứng kiểm thử.
+ * - Giới hạn an toàn: Luôn nằm trong đoạn [0.50, 0.85].
+ */
+export function computeElasticThresholdRatio(params: ElasticThresholdParams): number {
+  const baseRatio = typeof params.baseRatio === 'number' ? params.baseRatio : 0.70;
+  let ratio = baseRatio;
+  const velocity = Math.max(0, params.tokenVelocity || 0);
+
+  // 1. Điều chỉnh theo Vận tốc tiêu thụ token (Velocity Adjustment)
+  if (velocity >= 4000) {
+    ratio -= 0.15;
+  } else if (velocity >= 2500) {
+    ratio -= 0.10;
+  } else if (velocity >= 1500) {
+    ratio -= 0.05;
+  } else if (velocity <= 600 && velocity > 0) {
+    ratio += 0.05;
+  }
+
+  // 2. Điều chỉnh theo Pha nhận thức (Phase Tuning)
+  if (params.cognitivePhase === 'explore') {
+    ratio -= 0.05;
+  } else if (params.cognitivePhase === 'verify') {
+    ratio += 0.05;
+  }
+
+  // 3. Giới hạn trong khoảng an toàn [0.50, 0.85]
+  return Math.min(0.85, Math.max(0.50, Number(ratio.toFixed(2))));
+}
+

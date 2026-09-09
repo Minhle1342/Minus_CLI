@@ -1,4 +1,5 @@
 import { isVerificationCommand } from './completion-evidence.js';
+import { isMutationTool } from '../tools/diff-generator.js';
 
 export interface ToolProgressObservation {
   toolName: string;
@@ -24,6 +25,9 @@ const WORKSPACE_MUTATING_TOOLS = new Set([
   'create_file',
   'delete_file',
   'move_file',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
   'create_worktree',
   'remove_worktree',
   'git_commit',
@@ -103,7 +107,7 @@ export class LoopProgressGuard {
     // Pure verification run_commands (e.g. npm test, npm run build, pytest) are treated as guarded observations rather than workspace mutations
     const isPureVerification = toolName === 'run_command' && isVerificationCommand(args.command);
 
-    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || (toolName === 'run_command' && !isPureVerification)) {
+    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || (toolName === 'run_command' && !isPureVerification)) {
       this.reset();
       return { repetitionCount: 0, shouldStop: false };
     }
@@ -115,7 +119,7 @@ export class LoopProgressGuard {
     const callFingerprint = stableStringify({ toolName, args });
     const resultFingerprint = stableStringify(result);
 
-    // Track alternating call patterns (e.g. A -> B -> A -> B)
+    // Track alternating call patterns (e.g. A -> B -> A -> B -> A -> B)
     this.callHistory.push({ toolName, callFingerprint });
     if (this.callHistory.length > 8) this.callHistory.shift();
 
@@ -128,8 +132,10 @@ export class LoopProgressGuard {
   }
 
   private checkAlternatingLoop(): ToolProgressDecision {
-    if (this.callHistory.length >= 4) {
-      const len = this.callHistory.length;
+    const len = this.callHistory.length;
+
+    // 1. Nếu có submit_solution trong cặp xen kẽ, ngắt ngay sau 2 chu kỳ (4 bước) vì giải pháp đã được nộp
+    if (len >= 4) {
       const c0 = this.callHistory[len - 4];
       const c1 = this.callHistory[len - 3];
       const c2 = this.callHistory[len - 2];
@@ -140,8 +146,33 @@ export class LoopProgressGuard {
         && c1.callFingerprint === c3.callFingerprint
         && c0.callFingerprint !== c1.callFingerprint
       ) {
+        const involvesTerminalSubmission = c0.toolName === 'submit_solution' || c1.toolName === 'submit_solution';
+        if (involvesTerminalSubmission) {
+          return {
+            repetitionCount: 2,
+            message: `[SYSTEM LOOP GUARD]: Detected alternating loop between '${c0.toolName}' and '${c1.toolName}'. The verification outcome is already settled; do not repeat these tools. Conclude your work and output the final response now.`,
+            shouldStop: true,
+          };
+        }
+      }
+    }
+
+    // 2. Đối với các công cụ quan sát/khảo sát thông thường, cho phép tối đa 3 chu kỳ (6 bước) trước khi ngắt hẳn
+    if (len >= 6) {
+      const c0 = this.callHistory[len - 6];
+      const c1 = this.callHistory[len - 5];
+      const c2 = this.callHistory[len - 4];
+      const c3 = this.callHistory[len - 3];
+      const c4 = this.callHistory[len - 2];
+      const c5 = this.callHistory[len - 1];
+
+      if (
+        c0.callFingerprint === c2.callFingerprint && c2.callFingerprint === c4.callFingerprint
+        && c1.callFingerprint === c3.callFingerprint && c3.callFingerprint === c5.callFingerprint
+        && c0.callFingerprint !== c1.callFingerprint
+      ) {
         return {
-          repetitionCount: 2,
+          repetitionCount: 3,
           message: `[SYSTEM LOOP GUARD]: Detected alternating loop between '${c0.toolName}' and '${c1.toolName}'. The verification outcome is already settled; do not repeat these tools. Conclude your work and output the final response now.`,
           shouldStop: true,
         };

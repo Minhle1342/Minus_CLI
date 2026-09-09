@@ -62,10 +62,17 @@ import { PlanManager } from './agent/plan-manager.js';
 import { createPlanTool } from './tools/plan-tools.js';
 import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js';
 import { GoalManager } from './agent/goal-manager.js';
-import { ReflectionEngine } from './agent/reflection-engine.js';
+import { ReflectionEngine, isExploratoryCommand } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent, verifyWorkspaceGrounding } from './agent/final-answer-guard.js';
-import { CompletionEvidenceGate, classifyToolEvidence } from './agent/completion-evidence.js';
+import {
+  FinalAnswerGuard,
+  detectArchitectureAnalysisIntent,
+  verifyWorkspaceGrounding,
+  stripMarkdownFormattingForGuard,
+  hasUnfulfilledDeferredPromise,
+} from './agent/final-answer-guard.js';
+import { CompletionEvidenceGate, classifyToolEvidence, isNonExecutableFile } from './agent/completion-evidence.js';
+import { AcceptancePolicy } from './control-plane/critic/acceptance-policy.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { SemanticSlicer } from './agent/semantic-slicer.js';
 import { HypothesisTracker } from './agent/hypothesis-tracker.js';
@@ -162,7 +169,7 @@ import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
 import { findPackageScriptFailure } from './sandbox/command-diagnostics.js';
-import { TestEngineeringHarness } from './testing/test-engineering-harness.js';
+import { TestEngineeringHarness, detectWorkspaceTestCommand } from './testing/test-engineering-harness.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
 import { loadLspConfig } from './lsp/config.js';
@@ -2516,6 +2523,97 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(detectedCmd.includes('--workspace=apps/web') || detectedCmd.includes('--workspace=apps/api'), 'detectTestCommand phát hiện lệnh test trong Monorepo');
 
   await fs.rm(monorepoTestDir, { recursive: true, force: true });
+
+  console.log('\n========================================');
+  console.log('🧪 13.2. KIỂM THỬ ĐA PACKAGE MANAGER, ĐA NGÔN NGỮ & CENTRALIZED MUTATION TOOLS');
+  console.log('========================================');
+
+  const polyglotDir = path.join(workspace.rootDir, 'temp', 'polyglot-test-fixture');
+  await fs.rm(polyglotDir, { recursive: true, force: true });
+  await fs.mkdir(polyglotDir, { recursive: true });
+
+  // Test 1: pnpm detection qua pnpm-lock.yaml
+  await fs.writeFile(path.join(polyglotDir, 'package.json'), JSON.stringify({ name: 'pnpm-test', scripts: { test: 'vitest' } }));
+  await fs.writeFile(path.join(polyglotDir, 'pnpm-lock.yaml'), 'lockfileVersion: 5.4');
+  const pnpmCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(pnpmCmd === 'pnpm test', 'Nhận diện đúng pnpm test khi có pnpm-lock.yaml');
+
+  // Test 2: yarn detection qua yarn.lock
+  await fs.rm(path.join(polyglotDir, 'pnpm-lock.yaml'), { force: true });
+  await fs.writeFile(path.join(polyglotDir, 'yarn.lock'), '# yarn lockfile v1');
+  const yarnCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(yarnCmd === 'yarn test', 'Nhận diện đúng yarn test khi có yarn.lock');
+
+  // Test 3: bun detection qua bun.lockb
+  await fs.rm(path.join(polyglotDir, 'yarn.lock'), { force: true });
+  await fs.writeFile(path.join(polyglotDir, 'bun.lockb'), '');
+  const bunCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(bunCmd === 'bun test', 'Nhận diện đúng bun test khi có bun.lockb');
+
+  // Dọn dẹp Node files
+  await fs.rm(path.join(polyglotDir, 'package.json'), { force: true });
+  await fs.rm(path.join(polyglotDir, 'bun.lockb'), { force: true });
+
+  // Test 4: .NET detection qua .csproj
+  await fs.writeFile(path.join(polyglotDir, 'MyProject.csproj'), '<Project Sdk="Microsoft.NET.Sdk"></Project>');
+  const dotnetCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(dotnetCmd === 'dotnet test', 'Nhận diện đúng dotnet test khi có .csproj');
+  await fs.rm(path.join(polyglotDir, 'MyProject.csproj'), { force: true });
+
+  // Test 5: Rust detection qua Cargo.toml
+  await fs.writeFile(path.join(polyglotDir, 'Cargo.toml'), '[package]\nname = "test_crate"');
+  const cargoCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(cargoCmd === 'cargo test', 'Nhận diện đúng cargo test khi có Cargo.toml');
+  await fs.rm(path.join(polyglotDir, 'Cargo.toml'), { force: true });
+
+  // Test 6: Go detection qua go.mod
+  await fs.writeFile(path.join(polyglotDir, 'go.mod'), 'module example.com/test');
+  const goCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(goCmd === 'go test ./...', 'Nhận diện đúng go test ./... khi có go.mod');
+  await fs.rm(path.join(polyglotDir, 'go.mod'), { force: true });
+
+  // Test 7: Java Maven detection qua pom.xml
+  await fs.writeFile(path.join(polyglotDir, 'pom.xml'), '<project></project>');
+  const mvnCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(mvnCmd === 'mvn test', 'Nhận diện đúng mvn test khi có pom.xml');
+  await fs.rm(path.join(polyglotDir, 'pom.xml'), { force: true });
+
+  // Test 8: C/C++ CMake detection qua CMakeLists.txt
+  await fs.writeFile(path.join(polyglotDir, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.10)');
+  const cmakeCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(cmakeCmd === 'ctest', 'Nhận diện đúng ctest khi có CMakeLists.txt');
+  await fs.rm(path.join(polyglotDir, 'CMakeLists.txt'), { force: true });
+
+  // Test 9: Python Poetry detection qua pyproject.toml
+  await fs.writeFile(path.join(polyglotDir, 'pyproject.toml'), '[tool.poetry]\nname = "my-app"');
+  const poetryCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(poetryCmd === 'poetry run pytest', 'Nhận diện đúng poetry run pytest khi có [tool.poetry]');
+  await fs.rm(path.join(polyglotDir, 'pyproject.toml'), { force: true });
+
+  // Test 10: Environment override MINUS_TEST_COMMAND
+  process.env.MINUS_TEST_COMMAND = 'custom-runner --ci';
+  const customCmd = await detectWorkspaceTestCommand(polyglotDir);
+  assert(customCmd === 'custom-runner --ci', 'MINUS_TEST_COMMAND có độ ưu tiên cao nhất');
+  delete process.env.MINUS_TEST_COMMAND;
+
+  await fs.rm(polyglotDir, { recursive: true, force: true });
+
+  // Test 11: Đồng bộ hóa ToolSynergyAdvisor với các mutation tools mới
+  const synergyAdvisor = new ToolSynergyAdvisor();
+  const adviseWriteToFile = synergyAdvisor.advise({ lastToolName: 'write_to_file', lastToolResult: { success: true } });
+  assert(adviseWriteToFile.playbook === 'C_MUTATION', 'ToolSynergyAdvisor nhận diện write_to_file thuộc C_MUTATION');
+  assert(adviseWriteToFile.suggestedTools.includes('run_command'), 'Gợi ý run_command sau khi gọi write_to_file');
+
+  const adviseReplaceContent = synergyAdvisor.advise({ lastToolName: 'replace_file_content', lastToolResult: { success: true } });
+  assert(adviseReplaceContent.playbook === 'C_MUTATION', 'ToolSynergyAdvisor nhận diện replace_file_content thuộc C_MUTATION');
+
+  const adviseMultiReplace = synergyAdvisor.advise({ lastToolName: 'multi_replace_file_content', lastToolResult: { success: true } });
+  assert(adviseMultiReplace.playbook === 'C_MUTATION', 'ToolSynergyAdvisor nhận diện multi_replace_file_content thuộc C_MUTATION');
+
+  // Test 12: Kiểm tra isMutationTool tập trung
+  assert(isMutationTool('write_file') && isMutationTool('replace_text') && isMutationTool('apply_patch'), 'isMutationTool nhận diện các tool cơ bản');
+  assert(isMutationTool('write_to_file') && isMutationTool('replace_file_content') && isMutationTool('multi_replace_file_content'), 'isMutationTool nhận diện bộ ba tool nâng cao');
+  assert(!isMutationTool('read_file') && !isMutationTool('run_command') && !isMutationTool('web_search'), 'isMutationTool loại trừ chính xác các read/exec tools');
 
   console.log('\n========================================');
   console.log('🧪 13B. KIỂM THỬ DREAM MEMORY CONSOLIDATION');
@@ -7792,6 +7890,218 @@ Always write tests first!`;
 
   // Dọn dẹp thư mục test tạm
   await fs.rm(tempTestDir47, { recursive: true, force: true });
+
+  console.log('\n========================================');
+  console.log('🧪 48. KIỂM THỬ LINH HOẠT HÓA CORRECTION PROTOCOL & FINAL ANSWER GUARD');
+  console.log('========================================');
+
+  // 1. Kiểm thử isExploratoryCommand
+  assert(isExploratoryCommand('grep "pattern" src/file.ts'), 'isExploratoryCommand nhận diện đúng grep');
+  assert(isExploratoryCommand('rg -i "something" ./'), 'isExploratoryCommand nhận diện đúng ripgrep (rg)');
+  assert(isExploratoryCommand('findstr /i "foo" *.*'), 'isExploratoryCommand nhận diện đúng findstr');
+  assert(isExploratoryCommand('where tsc') && isExploratoryCommand('which node'), 'isExploratoryCommand nhận diện đúng where/which');
+  assert(isExploratoryCommand('dir /s') && isExploratoryCommand('ls -la'), 'isExploratoryCommand nhận diện đúng dir/ls');
+  assert(isExploratoryCommand('git diff --stat') && isExploratoryCommand('git status'), 'isExploratoryCommand nhận diện đúng git inspect');
+  assert(!isExploratoryCommand('git commit -m "fix"'), 'isExploratoryCommand loại trừ lệnh git commit');
+  assert(!isExploratoryCommand('npm test'), 'npm test mặc định không phải exploratory khi đã có code mutation');
+  assert(isExploratoryCommand('npm test', { isReproduction: true }), 'npm test được miễn trừ khi đang chạy tái hiện lỗi (reproduction)');
+  assert(isExploratoryCommand('npm test', { hasCodeMutations: false }), 'npm test được miễn trừ khi chưa có bất kỳ code mutation nào');
+
+  // 2. Kiểm thử ReflectionEngine với lệnh exploratory exit code 1
+  const exploratoryEngine = new ReflectionEngine();
+  const searchResult1 = exploratoryEngine.analyze({
+    toolName: 'run_command',
+    args: { command: 'rg -i "non_existent_symbol" src/' },
+    result: { exitCode: 1, stdout: '', stderr: '' },
+    durationMs: 25,
+  });
+  assert(searchResult1.isFailure === false, 'Lệnh rg exitCode 1 (không tìm thấy) không bị coi là lỗi hệ thống');
+  assert(exploratoryEngine.getConsecutiveFailures() === 0, 'consecutiveFailures không tăng với lệnh exploratory');
+
+  // 3. Kiểm thử Progressive Correction: Level 1 vs Level 2
+  const progressiveEngine = new ReflectionEngine();
+  const level1Analysis = progressiveEngine.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 1, stderr: 'TypeError: undefined is not a function at src/calc.ts:42' },
+    durationMs: 60,
+  });
+  assert(level1Analysis.isFailure === true, 'Level 1 nhận diện đúng lệnh thất bại');
+  assert(
+    Boolean(level1Analysis.reflectionPrompt?.includes('COMMAND EXECUTION FAILED (Exit Code: 1)')),
+    'Level 1 chứa thông báo lỗi trực tiếp',
+  );
+  assert(
+    !level1Analysis.reflectionPrompt?.includes('SELF-REFLECTION & DEBUGGING PROTOCOL'),
+    'Level 1 không nhồi nhét quy trình 4 bước cồng kềnh khi mới lỗi lần 1',
+  );
+
+  const level2Analysis = progressiveEngine.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 1, stderr: 'TypeError: still failing at src/calc.ts:42' },
+    durationMs: 70,
+  });
+  assert(progressiveEngine.getConsecutiveFailures() === 2, 'consecutiveFailures tăng lên 2');
+  assert(
+    Boolean(
+      level2Analysis.reflectionPrompt?.includes('SELF-REFLECTION & DEBUGGING PROTOCOL') ||
+      level2Analysis.reflectionPrompt?.includes('WARNING'),
+    ),
+    'Level 2 kích hoạt quy trình điều tra sâu và cảnh báo lặp lỗi',
+  );
+
+  // 4. Kiểm thử stripMarkdownFormattingForGuard & hasUnfulfilledDeferredPromise
+  const rawMarkdownWithCode = [
+    'Dưới đây là phương án sửa đổi:',
+    '```typescript',
+    '// Trong tương lai se bao cao nguyen nhan chi tiet cho he thong',
+    'const x = 1;',
+    '```',
+    'Chúng tôi đã hoàn thành việc sửa mã nguồn theo đúng yêu cầu.',
+  ].join('\n');
+  assert(
+    hasUnfulfilledDeferredPromise(rawMarkdownWithCode) === false,
+    'stripMarkdownFormattingForGuard loại bỏ code block và không báo động giả từ code/comment bên trong',
+  );
+
+  // 5. Kiểm thử FinalAnswerGuard miễn trừ khi đã submit_solution thành công và báo cáo đầy đủ
+  const guard = new FinalAnswerGuard();
+  const substantialReport = [
+    '# Báo cáo kỹ thuật chi tiết',
+    '',
+    '## 1. Nguyên nhân gốc rễ',
+    'Đã cung cấp và phân tích nguyên nhân lỗi logic trong hệ thống: function calculateTotal chưa kiểm tra mảng rỗng.',
+    '',
+    '## 2. Giải pháp đã thực hiện',
+    'Đã cập nhật logic kiểm tra điều kiện biên và bổ sung unit test xác minh.',
+    '',
+    '## 3. Kết quả nghiệm thu',
+    'Toàn bộ test suite đã chạy thành công 100% với exit code 0.',
+  ].join('\n');
+
+  const guardResult = guard.evaluate(substantialReport, {
+    hasSubmittedSolution: true,
+    hasCodeMutations: true,
+  });
+  assert(guardResult.allow === true, 'FinalAnswerGuard chấp thuận câu trả lời hoàn tất khi hasSubmittedSolution = true');
+
+  console.log('\n========================================');
+  console.log('🧪 49. KIỂM THỬ NỚI LỎNG RÀO CHẮN CHỐNG ẢO GIÁC TỰ MÃN (COMPLACENT HALLUCINATION)');
+  console.log('========================================');
+
+  // 1. Kiểm thử LoopProgressGuard: Reset khi dùng các tool đột biến mới
+  const loopGuard = new LoopProgressGuard();
+  loopGuard.observe({
+    toolName: 'read_file',
+    args: { path: 'README.md' },
+    result: { content: 'hello' },
+  });
+  // Đột biến với write_to_file
+  const mutDecision = loopGuard.observe({
+    toolName: 'write_to_file',
+    args: { TargetFile: 'README.md', CodeContent: 'hello world' },
+    result: { success: true },
+  });
+  assert(mutDecision.repetitionCount === 0 && mutDecision.shouldStop === false, 'LoopProgressGuard reset khi gọi write_to_file');
+
+  // Đột biến với replace_file_content
+  loopGuard.observe({
+    toolName: 'read_file',
+    args: { path: 'README.md' },
+    result: { content: 'hello world' },
+  });
+  const mutDecision2 = loopGuard.observe({
+    toolName: 'replace_file_content',
+    args: { TargetFile: 'README.md', StartLine: 1, EndLine: 1, TargetContent: 'hello', ReplacementContent: 'hi' },
+    result: { success: true },
+  });
+  assert(mutDecision2.repetitionCount === 0 && mutDecision2.shouldStop === false, 'LoopProgressGuard reset khi gọi replace_file_content');
+
+  // 2. Kiểm thử LoopProgressGuard: Không ngắt sớm ở chu kỳ xen kẽ thứ 2 (4 bước)
+  const pingPongGuard = new LoopProgressGuard();
+  pingPongGuard.observe({ toolName: 'read_file', args: { path: 'a.ts' }, result: { content: 'A' } });
+  pingPongGuard.observe({ toolName: 'inspect_symbol', args: { symbol: 'foo' }, result: { found: true } });
+  pingPongGuard.observe({ toolName: 'read_file', args: { path: 'a.ts' }, result: { content: 'A' } });
+  const step4Decision = pingPongGuard.observe({ toolName: 'inspect_symbol', args: { symbol: 'foo' }, result: { found: true } });
+  assert(step4Decision.shouldStop === false, 'LoopProgressGuard không ngắt vội ở chu kỳ thứ 2 (4 bước)');
+
+  // 3. Kiểm thử isNonExecutableFile
+  assert(isNonExecutableFile('README.md') === true, 'isNonExecutableFile nhận diện đúng README.md');
+  assert(isNonExecutableFile('docs/guide.txt') === true, 'isNonExecutableFile nhận diện đúng file .txt');
+  assert(isNonExecutableFile('.gitignore') === true, 'isNonExecutableFile nhận diện đúng .gitignore');
+  assert(isNonExecutableFile('.env.local') === true, 'isNonExecutableFile nhận diện đúng .env.local');
+  assert(isNonExecutableFile('src/index.ts') === false, 'isNonExecutableFile loại trừ file thực thi .ts');
+  assert(isNonExecutableFile('app/main.py') === false, 'isNonExecutableFile loại trừ file thực thi .py');
+
+  // 4. Kiểm thử CompletionEvidenceGate: Miễn trừ verification khi chỉ sửa file tài liệu/cấu hình
+  const docSession = new Session('doc-mutation-session');
+  docSession.append('tool/call', {
+    toolName: 'write_to_file',
+    args: { TargetFile: 'README.md', CodeContent: '# Docs Updated' },
+  });
+  docSession.addToolResult('write_to_file', { success: true });
+
+  const evidenceGate49 = new CompletionEvidenceGate();
+  const docEvidenceDecision = evidenceGate49.evaluate(
+    'Tôi đã cập nhật tài liệu trong tệp README.md theo yêu cầu.',
+    docSession,
+    { userRequest: 'Cập nhật README.md' },
+  );
+  assert(
+    docEvidenceDecision.allow === true,
+    'CompletionEvidenceGate cho phép hoàn tất khi chỉ sửa file tài liệu mà không cần chạy lệnh test',
+  );
+
+  // 5. Kiểm thử AcceptancePolicy: Không bị chặn bởi code block có deferred work
+  const policyCheck = AcceptancePolicy.checkHardInvariants({
+    diagnostics: { errors: [], syntaxErrors: [], unresolvedImports: [], warnings: [], timestamp: Date.now() },
+    changedFiles: [],
+    finalAnswerText: [
+      'Dưới đây là phương án sửa đổi:',
+      '```typescript',
+      '// I will modify this handler in future',
+      'const handler = () => {};',
+      '```',
+      'Tôi đã hoàn thành giải pháp phân tích kiến trúc.',
+    ].join('\n'),
+  });
+  assert(
+    policyCheck.passed === true,
+    'AcceptancePolicy không đánh trượt khi cụm từ tương lai nằm bên trong code block',
+  );
+
+  // 6. Kiểm thử FinalAnswerGuard: Chấp thuận câu trả lời chẩn đoán ngắn gọn (>= 120 ký tự) có nguyên nhân trực tiếp
+  const conciseCausalAnswer = 'Nguyên nhân khiến lệnh git push thất bại là do nhánh main đang được bảo vệ bởi rule Branch Protection trên GitHub và yêu cầu mở Pull Request.';
+  const causalDecision = guard.evaluate(conciseCausalAnswer, {
+    userRequest: 'Tại sao push lên main bị lỗi?',
+  });
+  assert(
+    causalDecision.allow === true,
+    'FinalAnswerGuard chấp thuận câu trả lời chẩn đoán súc tích (>= 120 ký tự) có giải thích nguyên nhân trực tiếp',
+  );
+
+  // 7. Kiểm thử FinalAnswerGuard: Insecure Code Confidence (Chống tự tin thái quá vào code nhiễm độc)
+  const sqliAnswer = 'Mã nguồn đã hoàn toàn an toàn và bảo mật tuyệt đối chống mọi hình thức tấn công.\n```ts\nfunction getUser(req) { return db.query("SELECT * FROM users WHERE id = " + req.query.id); }\n```';
+  const sqliDecision = guard.evaluate(sqliAnswer, { userRequest: 'Viết API lấy user' });
+  assert(
+    sqliDecision.allow === false && sqliDecision.reason === 'insecure-code-confidence',
+    'FinalAnswerGuard chặn câu trả lời tự tin thái quá vào code nhiễm độc SQL Injection',
+  );
+
+  const safeSqliWithDisclaimer = 'Dưới đây là mã mẫu. Lưu ý: Đây chỉ là ví dụ demo, cần bổ sung parameterized query để an toàn.\n```ts\nfunction getUser(req) { return db.query("SELECT * FROM users WHERE id = " + req.query.id); }\n```';
+  const disclaimerDecision = guard.evaluate(safeSqliWithDisclaimer, { userRequest: 'Viết API lấy user' });
+  assert(
+    disclaimerDecision.allow === true,
+    'FinalAnswerGuard chấp thuận khi Agent có security disclaimer cảnh báo rủi ro trung thực',
+  );
+
+  const parameterizedAnswer = 'Mã nguồn đã hoàn toàn an toàn và đã tối ưu bảo mật.\n```ts\nfunction getUser(req) { return db.query("SELECT * FROM users WHERE id = $1", [req.query.id]); }\n```';
+  const parameterizedDecision = guard.evaluate(parameterizedAnswer, { userRequest: 'Viết API lấy user' });
+  assert(
+    parameterizedDecision.allow === true,
+    'FinalAnswerGuard chấp thuận khi code dùng Parameterized Query chuẩn mực',
+  );
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

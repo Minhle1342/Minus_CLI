@@ -10,7 +10,8 @@ export type FinalAnswerGuardRejectionReason =
   | 'insufficient-architecture-answer'
   | 'unverified-architecture-claims'
   | 'insufficient-analysis-answer'
-  | 'curt-final-answer';
+  | 'curt-final-answer'
+  | 'insecure-code-confidence';
 
 export interface FinalAnswerGuardDecision {
   allow: boolean;
@@ -23,6 +24,7 @@ export interface FinalAnswerGuardContext {
   availableToolNames?: string[];
   hasSubmittedSolution?: boolean;
   hasCodeMutations?: boolean;
+  filesModified?: string[];
   workspace?: {
     rootDir: string;
     resolveSafePath?: (targetPath: string) => string;
@@ -65,14 +67,23 @@ const DEFERRED_WORK_PATTERNS = [
   /\b(?:va\s+)?(?:se|da|vua)?\s*(?:bao cao|trinh bay|giai thich|cung cap|tra loi)\s+(?:cau tra loi\s+)?(?:chi tiet|day du|chinh xac|ro rang)(?:\s+(?:va\s+(?:chinh xac|ro rang|day du)))?(?:\s+bang tieng viet)?(?:\s+(?:cho|ve|voi)\b)/,
   /\b(?:and\s+)?(?:will|have|already)?\s*(?:report|present|explain|provide|answer)\s+(?:a |the )?(?:in detail|detailed findings|detailed report|detailed answer|detailed response)(?:\s+(?:to|for|about)\b)/,
   /\b(?:se\s+)?xac dinh (?:cac\s+)?nguyen nhan(?: tiem an)? va bao cao\b/,
-  /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+.*?(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/,
+  /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+[^\n.!?]{0,80}\b(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/,
 ];
 
 const FULFILLED_INTRO_PATTERN = /^\s*(?:toi|chung toi|minh|em|i|we|agent)?\s*(?:se|will|shall|am going to|plan to|da)?[^\n]{0,140}?(?:duoi day la|ket qua|nhu sau|sau day|here is|here are|below is|results?:|as follows:)[^\n]*/i;
 
-function hasUnfulfilledDeferredPromise(normalizedText: string): boolean {
+export function stripMarkdownFormattingForGuard(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]+`/g, ' ')
+    .replace(/^>.*$/gm, ' ');
+}
+
+export function hasUnfulfilledDeferredPromise(normalizedText: string): boolean {
+  // Strip code blocks and blockquotes first so quoted source code or examples do not trigger false positives
+  const cleanProse = stripMarkdownFormattingForGuard(normalizedText);
   // Strip opening intro greetings that are immediately fulfilled in the same message
-  const remainingText = normalizedText.replace(FULFILLED_INTRO_PATTERN, '').trim();
+  const remainingText = cleanProse.replace(FULFILLED_INTRO_PATTERN, '').trim();
   return DEFERRED_WORK_PATTERNS.some((pattern) => pattern.test(remainingText));
 }
 
@@ -129,8 +140,16 @@ export class FinalAnswerGuard {
     const withoutOptionalOffers = normalized.replace(OPTIONAL_OFFER_PATTERN, ' ');
     const promisesFutureToolWork = hasUnfulfilledDeferredPromise(withoutOptionalOffers);
 
-    // 2. Chặn lời hứa hoãn việc / thông báo hứa hẹn: BẤT KỂ hasSubmittedSolution = true, KHÔNG BAO GIỜ CHO PHÉP lời hứa hoãn việc
-    if (promisesFutureToolWork) {
+    // 2. Chặn lời hứa hoãn việc / thông báo hứa hẹn
+    // Nếu hasSubmittedSolution = true và câu trả lời đã có độ dài và cấu trúc giải pháp đầy đủ (>= 250 ký tự với markdown structure),
+    // không được chặn vì bài báo cáo kỹ thuật hoàn tất đã được submit thành công.
+    const isSubstantialCompletedAnswer = Boolean(
+      context?.hasSubmittedSolution &&
+      trimmed.length >= 250 &&
+      (trimmed.includes('\n\n') || trimmed.includes('#') || trimmed.includes('*') || trimmed.includes('-'))
+    );
+
+    if (promisesFutureToolWork && !isSubstantialCompletedAnswer) {
       const failureContext = this.latestFailure
         ? `The latest tool failure was ${this.latestFailure.toolName}${this.latestFailure.errorCode ? ` (${this.latestFailure.errorCode})` : ''}${this.latestFailure.detail ? `: ${this.latestFailure.detail}` : '.'}`
         : undefined;
@@ -162,6 +181,10 @@ export class FinalAnswerGuard {
     // 5b. Chặn câu trả lời cộc lốc / cụt ngủn cho tác vụ đã hoàn tất hoặc có can thiệp mã nguồn
     const curtDecision = evaluateCurtFinalAnswer(answer, context);
     if (curtDecision) return curtDecision;
+
+    // 5c. Kiểm soát Ảo giác ở cấp độ Bảo mật: Chặn Tự tin thái quá vào code nhiễm độc (Insecure Code Confidence)
+    const securityDecision = evaluateInsecureCodeConfidence(answer, context);
+    if (securityDecision) return securityDecision;
 
     // 6. Nếu đã submit_solution thành công và vượt qua toàn bộ các kiểm định chất lượng trên
     if (context?.hasSubmittedSolution) {
@@ -447,9 +470,18 @@ export function evaluateArchitectureAnalysis(
 
   // 3. Tiêu chí kiểm định thực tế trong workspace (Grounding Verification)
   if (context?.workspace) {
+    const isRepoSpecific = Boolean(
+      context?.userRequest &&
+      /\b(?:trong du an|trong repo|trong workspace|trong he thong nay|trong code|ma nguon|source code|project|nay|hien tai|our|this repo|this project|file|thu muc)\b/i.test(
+        normalizeForMatching(context.userRequest)
+      )
+    );
     const grounding = verifyWorkspaceGrounding(answer, context.workspace);
     if (!grounding.isGrounded) {
-      deficiencies.push(...grounding.reasons);
+      // Nếu câu hỏi là câu hỏi lý thuyết/mô hình chung và không bịa đặt file sai (invalidFiles.length === 0), miễn trừ bắt buộc validFiles > 0
+      if (isRepoSpecific || grounding.invalidFiles.length > 0) {
+        deficiencies.push(...grounding.reasons);
+      }
     }
   }
 
@@ -565,14 +597,21 @@ export function evaluateAnalysisOrInvestigationAnswer(
 
   const trimmed = answer.trim();
 
-  // 1. Tiêu chuẩn độ dài tối thiểu: Một báo cáo phân tích/điều tra nguyên nhân phải từ 300 ký tự trở lên
-  if (trimmed.length < 300) {
+  // 1. Tiêu chuẩn độ dài tối thiểu: Báo cáo thông thường yêu cầu từ 300 ký tự trở lên.
+  // Nếu câu trả lời mang tính chẩn đoán trực tiếp (có chỉ ra nguyên nhân/lý do rõ ràng) và không phải lời hứa suông,
+  // cho phép ngưỡng linh hoạt từ 120 ký tự.
+  const hasDirectCausalReason = /\b(?:nguyen nhan|do|boi vi|vi|caused by|because|reason|due to|loi do)\b/i.test(
+    normalizeForMatching(answer)
+  );
+  const minLength = hasDirectCausalReason ? 120 : 300;
+
+  if (trimmed.length < minLength) {
     return {
       allow: false,
       reason: 'insufficient-analysis-answer',
       continuationPrompt: [
         '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì quá ngắn và sơ sài so với yêu cầu điều tra / phân tích nguyên nhân của người dùng.',
-        `Độ dài phản hồi: ${trimmed.length} ký tự (yêu cầu tối thiểu 300 ký tự có phân tích thực tế).`,
+        `Độ dài phản hồi: ${trimmed.length} ký tự (yêu cầu tối thiểu ${minLength} ký tự có phân tích thực tế).`,
         'Yêu cầu của người dùng là điều tra nguyên nhân và báo cáo chi tiết. Bạn KHÔNG ĐƯỢC chỉ đưa ra 1-2 câu tóm tắt hoặc thông báo hứa hẹn.',
         'Hãy trình bày đầy đủ:',
         '1. Các nguyên nhân tiềm ẩn hoặc cơ chế gây lỗi (kèm trích dẫn hàm, file cụ thể).',
@@ -655,3 +694,197 @@ export function evaluateCurtFinalAnswer(
 
   return undefined;
 }
+
+export function detectSecurityAuditIntent(userRequest?: string): boolean {
+  if (!userRequest || typeof userRequest !== 'string') return false;
+  const normalized = normalizeForMatching(userRequest);
+  return /\b(?:audit|kiem tra bao mat|quet lo hong|security audit|security review|vulnerability scan|pentest|tim lo hong|tim bug bao mat|kiem thu bao mat)\b/.test(
+    normalized,
+  );
+}
+
+export function claimsAbsoluteSecurity(text: string): boolean {
+  const normalized = normalizeForMatching(text);
+  return /\b(?:hoan toan an toan|an toan tuyet doi|bao mat tuyet doi|hoan toan bao mat|an toan 100%|bao mat 100%|da toi uu bao mat|chong (?:sql injection|xss|tan cong) tuyet doi|khong the bi tan cong|khong co lo hong|fully secure|completely secure|100% secure|bulletproof|immune to (?:sql injection|xss|vulnerabilities|attacks)|no vulnerabilities?|safest? implementation)\b/i.test(
+    normalized,
+  );
+}
+
+export function hasSecurityDisclaimer(text: string): boolean {
+  const normalized = normalizeForMatching(text);
+  return /\b(?:luu y|canh bao|chu y|khuyen nghi|demo|minh hoa|tam thoi|chua xu ly|can bo sung|can loc|can validate|can parameter|chua an toan|warning|caution|note|disclaimer|for illustration|only for testing|not production ready|should sanitize|must parameterize|insecure for production)\b/i.test(
+    normalized,
+  );
+}
+
+export interface DetectedVulnerability {
+  type: 'sql-injection' | 'hardcoded-credentials' | 'unsafe-eval-xss';
+  description: string;
+}
+
+export function detectClassicVulnerabilities(codeSnippet: string): DetectedVulnerability[] {
+  const vulns: DetectedVulnerability[] = [];
+
+  // 1. SQL Injection: Ghép trực tiếp biến đầu vào vào câu lệnh SQL
+  const hasSqlKeywords = /\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(codeSnippet);
+  if (hasSqlKeywords) {
+    const hasInterpolatedSqlInput = /`[^`]*\b(?:SELECT|INSERT|UPDATE|DELETE)\b[^`]*\$\{[^}]*(?:req\.|params|query|body|userInput|input\b|payload\b|username\b|password\b|email\b)[^}]*\}[^`]*`/i.test(
+      codeSnippet,
+    );
+    const hasConcatSqlInput = /["']\s*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)[\s\S]{0,60}["']\s*\+\s*(?:req\.|params|query|body|userInput|input\b|payload\b|username\b|password\b|email\b)/i.test(
+      codeSnippet,
+    );
+
+    const hasParameterized = /\$1|\?|:\w+|prepare\(|query\([^,]+,\s*\[|\bprisma\.|\bknex\(|\bdrizzle\(/i.test(codeSnippet);
+
+    if ((hasInterpolatedSqlInput || hasConcatSqlInput) && !hasParameterized) {
+      vulns.push({
+        type: 'sql-injection',
+        description: 'SQL Injection: Ghép trực tiếp biến đầu vào người dùng vào câu lệnh SQL (chưa dùng Parameterized Queries / Prepared Statements)',
+      });
+    }
+  }
+
+  // 2. Hardcoded Real Credentials / Private Keys
+  const isMockToken = /dummy|mock|fake|test|example|placeholder|SAMPLE_|YOUR_|xxxx/i.test(codeSnippet);
+  if (!isMockToken) {
+    if (/-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(codeSnippet)) {
+      vulns.push({
+        type: 'hardcoded-credentials',
+        description: 'Hardcoded Secret: Khóa bảo mật Private Key được nhúng trực tiếp trong mã nguồn',
+      });
+    } else if (/\bAKIA[0-9A-Z]{16}\b/.test(codeSnippet) && !codeSnippet.includes('AKIAIOSFODNN7EXAMPLE')) {
+      vulns.push({
+        type: 'hardcoded-credentials',
+        description: 'Hardcoded Secret: AWS Access Key ID thực tế được nhúng trực tiếp trong mã nguồn',
+      });
+    } else if (/\bghp_[a-zA-Z0-9]{36}\b/.test(codeSnippet)) {
+      vulns.push({
+        type: 'hardcoded-credentials',
+        description: 'Hardcoded Secret: GitHub Personal Access Token được nhúng trực tiếp trong mã nguồn',
+      });
+    } else if (/\bsk-[a-zA-Z0-9]{32,}\b|\bsk-ant-[a-zA-Z0-9]{32,}\b/.test(codeSnippet)) {
+      vulns.push({
+        type: 'hardcoded-credentials',
+        description: 'Hardcoded Secret: Khóa bí mật API Key (OpenAI/Anthropic) được nhúng trực tiếp trong mã nguồn',
+      });
+    }
+  }
+
+  // 3. Raw Dangerous Code Execution / Direct XSS
+  const hasRawEval = /\beval\s*\(\s*(?:req\.|userInput|input\b|params\.|query\.|body\.)\b/i.test(codeSnippet);
+  const hasRawInnerHTML = /dangerouslySetInnerHTML\s*=\s*\{\s*\{\s*__html\s*:\s*(?:req\.|userInput|input\b|params\.|query\.|body\.)\b/i.test(
+    codeSnippet,
+  );
+  const hasSanitize = /DOMPurify|sanitize|escapeHtml/i.test(codeSnippet);
+
+  if ((hasRawEval || hasRawInnerHTML) && !hasSanitize) {
+    vulns.push({
+      type: 'unsafe-eval-xss',
+      description: 'Dangerous Execution / XSS: eval hoặc dangerouslySetInnerHTML trực tiếp từ dữ liệu người dùng mà không sanitize',
+    });
+  }
+
+  return vulns;
+}
+
+function isTestOrDocFile(filePath: string): boolean {
+  return /(?:^|[\\/])(?:test|tests|__tests__|scratch)[\\/]|(?:\.(?:test|spec)\.[a-z0-9]+$)|\.(?:md|txt|json|yaml|yml)$/i.test(
+    filePath,
+  );
+}
+
+/**
+ * Đánh giá tính chân thực bảo mật (Insecure Code Confidence Guard):
+ * Ngăn chặn hiện tượng Agent tạo ra các lỗ hổng bảo mật kinh điển (SQLi, Hardcoded Key, XSS)
+ * nhưng lại khẳng định tuyệt đối là code hoàn toàn an toàn / đã tối ưu bảo mật.
+ *
+ * Tiêu chí nới lỏng linh hoạt (Non-Pedantic):
+ * 1. Bỏ qua nếu query của user là audit / pentest / security review.
+ * 2. Chỉ kích hoạt khi Agent đưa ra tuyên bố an toàn tuyệt đối (claimsAbsoluteSecurity).
+ * 3. Miễn trừ nếu Agent có kèm Security Disclaimer / cảnh báo rủi ro trung thực.
+ * 4. Miễn trừ các file kiểm thử (test, tests, scratch) và dummy tokens.
+ */
+export function evaluateInsecureCodeConfidence(
+  answer: string,
+  context?: FinalAnswerGuardContext,
+): FinalAnswerGuardDecision | undefined {
+  // 1. Miễn trừ nếu người dùng yêu cầu security audit / pentest / scan lỗ hổng
+  if (detectSecurityAuditIntent(context?.userRequest)) {
+    return undefined;
+  }
+
+  // 2. Fast Path: Nếu Agent không đưa ra khẳng định an toàn tuyệt đối, bỏ qua ngay
+  if (!claimsAbsoluteSecurity(answer)) {
+    return undefined;
+  }
+
+  // 3. Miễn trừ nếu Agent có cảnh báo / disclaimer trung thực về bảo mật
+  if (hasSecurityDisclaimer(answer)) {
+    return undefined;
+  }
+
+  // 4. Thu thập các đoạn mã cần kiểm tra
+  const codeSnippets: string[] = [];
+
+  // 4a. Thu thập code blocks trong câu trả lời (answer)
+  const codeBlockMatches = answer.match(/```[\s\S]*?```/g) || [];
+  for (const block of codeBlockMatches) {
+    codeSnippets.push(block);
+  }
+  if (codeSnippets.length === 0 && answer.length < 5000) {
+    codeSnippets.push(answer);
+  }
+
+  // 4b. Thu thập nội dung từ các file mã nguồn đã sửa (loại trừ file test, scratch, docs)
+  if (context?.filesModified && Array.isArray(context.filesModified)) {
+    for (const filePath of context.filesModified) {
+      if (isTestOrDocFile(filePath)) continue;
+
+      let absolutePath = filePath;
+      if (!path.isAbsolute(filePath) && context.workspace?.rootDir) {
+        absolutePath = path.resolve(context.workspace.rootDir, filePath);
+      }
+
+      try {
+        if (fs.existsSync(absolutePath)) {
+          const content = fs.readFileSync(absolutePath, 'utf8');
+          // Giới hạn 5000 ký tự đầu tiên để tối ưu hiệu năng
+          codeSnippets.push(content.slice(0, 5000));
+        }
+      } catch {
+        // Bỏ qua lỗi đọc file nếu không truy cập được
+      }
+    }
+  }
+
+  // 5. Quét tìm các lỗ hổng kinh điển
+  const allVulns: DetectedVulnerability[] = [];
+  for (const snippet of codeSnippets) {
+    const vulns = detectClassicVulnerabilities(snippet);
+    for (const v of vulns) {
+      if (!allVulns.some((existing) => existing.type === v.type)) {
+        allVulns.push(v);
+      }
+    }
+  }
+
+  // 6. Nếu phát hiện mâu thuẫn trực diện: Tuyên bố an toàn tuyệt đối nhưng chứa lỗ hổng kinh điển
+  if (allVulns.length > 0) {
+    return {
+      allow: false,
+      reason: 'insecure-code-confidence',
+      continuationPrompt: [
+        '[SYSTEM SECURITY GUARD]: Phản hồi của bạn bị TỪ CHỐI do hiện tượng "Tự tin thái quá vào code nhiễm độc" (Insecure Code Confidence).',
+        'Bạn đã tuyên bố đoạn mã là "hoàn toàn an toàn" hoặc "đã tối ưu bảo mật", nhưng mã nguồn lại chứa lỗ hổng bảo mật nghiêm trọng kinh điển:',
+        ...allVulns.map((v) => `- ${v.description}`),
+        'HƯỚNG DẪN KHẮC PHỤC:',
+        '1. Nếu đây là code đưa vào vận hành: Bắt buộc sửa chữa lỗ hổng (dùng Parameterized Query / Prepared Statements, đưa Secret vào biến môi trường, hoặc sanitize đầu vào).',
+        '2. HOẶC nếu đây là mã minh họa / ví dụ đơn giản: Hãy nêu rõ cảnh báo rủi ro (Security Disclaimer) một cách trung thực thay vì khẳng định an toàn tuyệt đối.',
+      ].join('\n'),
+    };
+  }
+
+  return undefined;
+}
+
