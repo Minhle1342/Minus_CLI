@@ -10,7 +10,7 @@ import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
-import { ContextGuardian, ContextAgent, TurnMemoryRetriever } from '../context/index.js';
+import { ContextGuardian, ContextAgent, TurnMemoryRetriever, PlaybookReflector, PlaybookCurator } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
@@ -27,7 +27,10 @@ import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent } from './final-answer-guard.js';
+import { ProcessFailureDetector } from './process-failure-detector.js';
+import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
+import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -228,6 +231,7 @@ export class AgentLoop {
   readonly orchestrator: AgentOrchestrator;
   readonly effectLedger: EffectLedger;
   readonly progressGuard = new LoopProgressGuard();
+  readonly processFailureDetector = new ProcessFailureDetector();
   readonly finalAnswerGuard = new FinalAnswerGuard();
   readonly completionEvidenceGate = new CompletionEvidenceGate();
   readonly verificationPolicy = new VerificationPolicy();
@@ -715,6 +719,8 @@ export class AgentLoop {
     this.effectLedger.bindSession(session);
     this.reflectionEngine.reset();
     this.progressGuard.reset();
+    this.processFailureDetector.reset();
+    this.processFailureDetector.initTaskKeywords(turnUserRequest);
     this.finalAnswerGuard.reset();
     this.verificationPolicy.reset();
     this.cognitiveHarness.reset();
@@ -1115,12 +1121,10 @@ export class AgentLoop {
       // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
       // Khi yêu cầu là điều tra nguyên nhân / phân tích sự cố / khảo sát mà không có mutation,
       // ẩn hoàn toàn submit_solution để LLM tập trung vào phân tích chi tiết hoặc gọi tool báo cáo chuyên biệt.
-      const analysisIntent = detectAnalysisOrInvestigationIntent(turnUserRequest);
-      const hasFileMutationsInSession = session.getEvents().some((e) =>
-        e.type === 'tool/call' &&
-        ['write_to_file', 'replace_file_content', 'multi_replace_file_content', 'apply_patch', 'replace_text', 'create_file'].includes(e.data?.toolName || '')
-      );
-      const isPureInvestigation = analysisIntent.isAnalysisQuery && !hasFileMutationsInSession && !classification.requiredCapabilities.includes('edit');
+      const stepCompletionState = getTurnCompletionState(session, turn);
+      const isPureInvestigation = !stepCompletionState.hasMutations
+        && !classification.requiredCapabilities.includes('edit')
+        && ['question', 'exploration'].includes(classification.taskClass);
       if (isPureInvestigation) {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
@@ -1128,7 +1132,7 @@ export class AgentLoop {
       // Pre-Call Predictive Guardrails (Phase 1/4):
       // Khi đã có verification thành công sau mutation, ẩn toàn bộ tool chỉnh sửa code để triệt tiêu vi phạm và đột biến thừa
       const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
-        && hasFileMutationsInSession
+        && stepCompletionState.hasMutations
         && !hasSubmittedSolution;
       if (hasVerifiedTests) {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
@@ -1306,7 +1310,8 @@ export class AgentLoop {
       if (
         this.turnMemoryRetriever.getArchivedTurnCount() > 0 ||
         this.turnMemoryRetriever.getMaskedObservationCount() > 0 ||
-        this.turnMemoryRetriever.getAntiPatternCount() > 0
+        this.turnMemoryRetriever.getAntiPatternCount() > 0 ||
+        this.turnMemoryRetriever.getLivingPlaybook().getBulletCount() > 0
       ) {
         try {
           recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
@@ -2080,9 +2085,8 @@ export class AgentLoop {
           );
 
           // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol + LSP Diagnostics)
-          const hasMutationsSoFar = this.targetFilesModifiedInTurn.size > 0 || session.getEvents().some((e) =>
-            e.type === 'tool/call' && isMutationTool(e.data?.toolName || '')
-          );
+          const hasMutationsSoFar = getTurnCompletionState(session, turn).hasMutations
+            || hasObservedMutation(toolName, executionResult.result);
           const reflectionAnalysis = this.reflectionEngine.analyze({
             toolName,
             args: toolArgs,
@@ -2098,14 +2102,18 @@ export class AgentLoop {
           if (sideEffect && !isToolResultFailure(executionResult.result)) {
             this.dynamicContextCache.invalidate();
           }
-          if (!isToolResultFailure(executionResult.result) && isMutationTool(toolName)) {
-            const mutatedPath = String(toolArgs.path || toolArgs.filePath || toolArgs.targetFile || toolArgs.TargetFile || '');
+          if (hasObservedMutation(toolName, executionResult.result)) {
+            const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+            for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
+            const mutatedPath = mutatedFiles[0] || '';
             const blast = executionResult.result?.blastRadius;
             this.verificationPolicy.recordModification(mutatedPath, {
               impactedTestSuites: blast?.impactedTestSuites,
               risk: blast?.risk,
             });
             hasSubmittedSolution = false;
+            hasReportedFindings = false;
+            reportedFindingsMarkdown = '';
             if (mutatedPath) {
               if (isScratchFilePath(mutatedPath)) {
                 this.ephemeralScratchFiles.add(mutatedPath);
@@ -2210,12 +2218,7 @@ export class AgentLoop {
           if (toolName === 'report_investigation_findings' && !isToolResultFailure(executionResult.result)) {
             hasReportedFindings = true;
             reportedFindingsMarkdown = String(toolArgs.userFacingReport || '').trim();
-            this.verificationPolicy.recordVerification(
-              'report_investigation_findings',
-              true,
-              String(toolArgs.rootCause || 'Investigation findings recorded').slice(0, 240),
-              0,
-            );
+
           }
           if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
             const hId = executionResult.result?.hypothesisId || 'H';
@@ -2271,17 +2274,32 @@ export class AgentLoop {
             } catch { }
           }
 
+          const processIntervention = this.processFailureDetector.observe({
+            toolName,
+            args: toolArgs,
+            result: executionResult.result,
+          });
+          if (processIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
+            try {
+              const interventionMsg = `${processIntervention.message}\n👉 Hành động gợi ý: ${processIntervention.suggestedAction}`;
+              if (Object.isExtensible(executionResult.result)) {
+                (executionResult.result as any).processFailureIntervention = interventionMsg;
+              } else {
+                executionResult.result = {
+                  ...executionResult.result,
+                  processFailureIntervention: interventionMsg,
+                };
+              }
+            } catch { }
+          }
+
           const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
             consecutiveUnproductiveSteps = 0;
-            const targetPath = toolArgs.path || toolArgs.target_path || toolArgs.file_path || toolArgs.targetFile || toolArgs.TargetFile;
-            if (targetPath) {
-              const targetStr = String(targetPath);
+            for (const targetStr of observedMutationFiles(toolName, toolArgs, executionResult.result)) {
               this.targetFilesModifiedInTurn.add(targetStr);
-              if (isScratchFilePath(targetStr)) {
-                this.ephemeralScratchFiles.add(targetStr);
-              }
+              if (isScratchFilePath(targetStr)) this.ephemeralScratchFiles.add(targetStr);
             }
           } else if (!isMutatingOrVerification) {
             consecutiveUnproductiveSteps++;
@@ -2464,131 +2482,8 @@ export class AgentLoop {
       }
 
       // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
-      if (!hasValidText) {
-        // Post-Investigation-Report Graceful Auto-Finalization (Cơ chế 2 - AutoCodeRover Model):
-        // Nếu đã gọi report_investigation_findings thành công, chốt ngay báo cáo hoàn chỉnh làm Final Answer
-        if (hasReportedFindings && reportedFindingsMarkdown) {
-          const earlyGuardDecision = this.finalAnswerGuard.evaluate(reportedFindingsMarkdown, {
-            userRequest: turnUserRequest,
-            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-            hasSubmittedSolution: true,
-            filesModified: Array.from(this.targetFilesModifiedInTurn),
-            workspace: this._workspace,
-          });
-          if (earlyGuardDecision.allow) {
-            const finalAnswer = reportedFindingsMarkdown;
-            CLI.renderModelAction('final_answer');
-            CLI.renderStepFooter();
-            await CLI.renderFinalAnswer(finalAnswer);
-            this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
-            session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-            await this.persistSession(session);
-            session.append('step/end', { turn, step, reason: 'reported-findings-final-answer' });
-            await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
-              ...hookContext,
-              reason: 'reported-findings-final-answer',
-            });
-            if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
-              try {
-                this.goalManager.complete(this.planManager);
-              } catch {
-                this.goalManager.disarm();
-              }
-            } else {
-              this.goalManager.disarm();
-            }
-            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-            return finalAnswer;
-          }
-        }
-
-        // Post-Submission Graceful Auto-Finalization (Codex CLI Standard):
-        // Nếu đã submit_solution thành công mà model sinh turn rỗng/chỉ reasoning,
-        // chỉ chốt Final Answer dự phòng khi đã kích hoạt Continuation Protocol ít nhất 1 lần (consecutiveEmptyTurns > 0)
-        // để luôn ưu tiên cho model cơ hội tạo câu trả lời hoàn chỉnh sau 1 turn.
-        if (hasSubmittedSolution && submittedSolutionSummary && consecutiveEmptyTurns > 0) {
-          const earlyGuardDecision = this.finalAnswerGuard.evaluate(submittedSolutionSummary, {
-            userRequest: turnUserRequest,
-            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-            hasSubmittedSolution: true,
-            filesModified: Array.from(this.targetFilesModifiedInTurn),
-            workspace: this._workspace,
-          });
-          if (!earlyGuardDecision.allow) {
-            CLI.renderReflectionAlert(
-              1,
-              `Post-submission summary check failed (${earlyGuardDecision.reason || 'insufficient'}). Requiring complete response...`,
-            );
-            session.addUserMessage(
-              earlyGuardDecision.continuationPrompt
-                || 'Submitted solution summary is insufficient or contains deferred/meta claims. Please provide the complete, detailed analytical response directly in your final message.',
-              'system',
-            );
-            await this.persistSession(session);
-            CLI.renderStepFooter();
-            session.append('step/end', { turn, step, reason: 'insufficient-submitted-summary' });
-            await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
-              ...hookContext,
-              reason: 'insufficient-submitted-summary',
-            });
-            this.kernel?.ctx.events.emit('step:after', step);
-            continue;
-          }
-
-          const earlyCritic = this.criticGate.evaluate({
-            finalAnswer: submittedSolutionSummary,
-            session,
-            workspace: this._workspace,
-            turn,
-            hasSubmittedSolution: true,
-            filesModified: Array.from(this.targetFilesModifiedInTurn),
-          });
-          if (!earlyCritic.approved) {
-            CLI.renderReflectionAlert(
-              1,
-              `Post-submission syntax or missing import check failed. Continuing turn to fix compiler issues...`,
-            );
-            session.addUserMessage(earlyCritic.critiquePrompt || 'Please fix syntax / missing import errors before completing.', 'system');
-            await this.persistSession(session);
-            CLI.renderStepFooter();
-            session.append('step/end', { turn, step, reason: 'unresolved-syntax-error' });
-            await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
-              ...hookContext,
-              reason: 'unresolved-syntax-error',
-            });
-            this.kernel?.ctx.events.emit('step:after', step);
-            continue;
-          }
-
-          const finalAnswer = submittedSolutionSummary;
-          CLI.renderModelAction('final_answer');
-          CLI.renderStepFooter();
-          await CLI.renderFinalAnswer(finalAnswer);
-          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
-          session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-          await this.persistSession(session);
-          session.append('step/end', { turn, step, reason: 'submitted-solution-final-answer' });
-          await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
-            ...hookContext,
-            reason: 'submitted-solution-final-answer',
-          });
-          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
-            try {
-              this.goalManager.complete(this.planManager);
-            } catch {
-              this.goalManager.disarm();
-            }
-          } else {
-            this.goalManager.disarm();
-          }
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-          return finalAnswer;
-        }
-
+      // Reports and submission summaries are candidates, subject to the same gates below.
+      if (!hasValidText && !reportedFindingsMarkdown && !submittedSolutionSummary) {
         consecutiveEmptyTurns++;
 
         if (consecutiveEmptyTurns <= maxEmptyRetries) {
@@ -2629,70 +2524,26 @@ export class AgentLoop {
           continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
         }
 
-        // Nếu đã thử re-prompt 3 lần mà vẫn không có text nhưng có reasoning, dùng reasoning làm fallback
+        // Reasoning is not a user-facing answer and must never bypass completion checks.
         if (hasReasoning) {
-          const planBlocker = this.planManager.getCompletionBlocker();
-          if (planBlocker) {
-            consecutivePlanCompletionRejects++;
-            CLI.renderReflectionAlert(
-              consecutivePlanCompletionRejects,
-              `Reasoning-only output cannot finish the turn while the execution plan is incomplete. ${planBlocker}`,
-            );
-            session.addUserMessage(this.planManager.buildContinuationPrompt(planBlocker), 'system');
-            await this.persistSession(session);
-            CLI.renderStepFooter();
-            session.append('step/end', { turn, step, reason: 'plan-continuation-requested' });
-            await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
-              ...hookContext,
-              reason: 'plan-continuation-requested',
-            });
-            this.kernel?.ctx.events.emit('step:after', step);
-            continue;
-          }
-
-          const fallbackAnswer = `[Tóm tắt kết quả phân tích]:\n${response.reasoningContent}`;
-          CLI.renderModelAction('final_answer');
+          const message = 'Agent stopped: the model did not produce a user-facing answer after repeated requests.';
+          await CLI.renderExecutionStopped(message, 'MISSING_FINAL_ANSWER');
           CLI.renderStepFooter();
-          await CLI.renderFinalAnswer(fallbackAnswer);
-          this.kernel?.ctx.events.emit('model:final_answer', fallbackAnswer);
-          session.addModelMessage({ text: fallbackAnswer, rawContent: response.rawContent });
+          session.append('step/end', { turn, step, reason: 'missing-final-answer' });
           await this.persistSession(session);
-          session.append('step/end', { turn, step, reason: 'fallback-answer' });
-          await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
-            ...hookContext,
-            reason: 'fallback-answer',
-          });
-          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
-            try {
-              this.goalManager.complete(this.planManager);
-            } catch {
-              this.goalManager.disarm();
-            }
-          } else {
-            this.goalManager.disarm();
-          }
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-          return fallbackAnswer;
+          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
+          this.kernel?.ctx.events.emit('step:after', step);
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
+          this.goalManager.disarm();
+          return message;
         }
       }
 
       // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
       const rawText = response.text ? response.text.trim() : '';
-      const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
-      const isAnalysisQuery = detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery;
-      const isGenericStub = !rawText
-        || /^(each task must be atomic|execution sequence satisfied|\(nhiệm vụ đã hoàn tất\)|\(task completed\)|\(solution submitted\))/i.test(rawText)
-        || (!isArchQuery && !isAnalysisQuery && rawText.length < 40 && hasSubmittedSolution && (submittedSolutionSummary?.length || 0) > 40)
-        || (isArchQuery && rawText.length < 200)
-        || (isAnalysisQuery && rawText.length < 300);
-
-      let finalAnswer = (hasReportedFindings && reportedFindingsMarkdown && (isGenericStub || rawText.length < reportedFindingsMarkdown.length))
-        ? reportedFindingsMarkdown
-        : ((!isArchQuery && !isAnalysisQuery && isGenericStub && hasSubmittedSolution && submittedSolutionSummary)
-          ? submittedSolutionSummary
-          : (rawText || (hasSubmittedSolution && !isArchQuery && !isAnalysisQuery && submittedSolutionSummary ? submittedSolutionSummary : (hasReportedFindings && reportedFindingsMarkdown ? reportedFindingsMarkdown : '(Nhiệm vụ đã hoàn tất)'))));
+      let finalAnswer = selectFinalAnswer(rawText,
+        hasReportedFindings ? reportedFindingsMarkdown : undefined,
+        hasSubmittedSolution ? submittedSolutionSummary : undefined);
       consecutiveEmptyTurns = 0;
 
       const planBlocker = this.planManager.getCompletionBlocker();
@@ -2731,16 +2582,16 @@ export class AgentLoop {
       }
       consecutivePlanCompletionRejects = 0;
 
-      const effectiveSubmissionState = hasSubmittedSolution || hasReportedFindings;
-      const hasCodeMutations = this.targetFilesModifiedInTurn.size > 0 || session.getEvents().some((e) =>
-        e.type === 'tool/call' && isMutationTool(e.data?.toolName || '')
-      );
+      const completionState = getTurnCompletionState(session, turn);
+      const hasCodeMutations = completionState.hasMutations;
+      const codeChangeRequired = initialTurnClassification.requiredCapabilities.includes('edit')
+        || initialTurnClassification.reasonCodes.includes('PARETO_80_20_EXPLORE_FIRST_BEFORE_MUTATION');
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
           userRequest: turnUserRequest,
           availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-          hasSubmittedSolution: effectiveSubmissionState,
+          hasSubmittedSolution,
           hasCodeMutations,
           filesModified: Array.from(this.targetFilesModifiedInTurn),
           workspace: this._workspace,
@@ -2749,15 +2600,15 @@ export class AgentLoop {
         ? { allow: true, reasons: [] }
         : this.completionEvidenceGate.evaluate(finalAnswer, session, {
           turn,
-          codeChangeRequired: this.planManager.getRequirements().required,
+          codeChangeRequired,
           userRequest: turnUserRequest,
-          hasSubmittedSolution: effectiveSubmissionState,
+          hasSubmittedSolution,
         });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
       if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
         activeSkills.push('verification-before-completion');
       }
-      const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM)
+      const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM || (!hasCodeMutations && !codeChangeRequired))
         ? { allowed: true }
         : this.verificationPolicy.canComplete(activeSkills);
       const criticDecision = (isSubagent || isMockLLM)
@@ -2770,58 +2621,49 @@ export class AgentLoop {
           userRequest: turnUserRequest,
           turn,
           hasSubmittedSolution,
-          filesModified: Array.from(this.targetFilesModifiedInTurn),
+          filesModified: completionState.filesModified,
+          completionState,
+          evidenceDecision,
         });
-      const finalAnswerDecision = (isSubagent || isMockLLM)
+      const finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
           ? policyDecision
-          : (!hasSubmittedSolution && !criticDecision.approved)
+          : (!criticDecision.approved)
             ? {
               allow: false,
               reason: 'unverified-evidence' as const,
+              recovery: criticDecision.lspErrors.length ? 'verify-changes' : evidenceDecision.recovery || 'revise-answer',
               continuationPrompt: criticDecision.critiquePrompt,
             }
-            : (!hasSubmittedSolution && !evidenceDecision.allow)
+            : (!evidenceDecision.allow)
               ? {
                 allow: false,
                 reason: 'unverified-evidence' as const,
+                recovery: evidenceDecision.recovery,
                 continuationPrompt: evidenceDecision.continuationPrompt,
               }
               : (!hasSubmittedSolution && !verificationDecision.allowed)
                 ? {
                   allow: false,
                   reason: 'unverified-evidence' as const,
+                  recovery: 'verify-changes',
                   continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
                 }
                 : { allow: true });
 
       if (!finalAnswerDecision.allow) {
-        // Hybrid Soft-Synthesis: Nếu đã submit_solution thành công và có bản tóm tắt kiểm chứng,
-        // tự động chuyển sang dùng submittedSolutionSummary để hoàn tất ngay lập tức,
-        // loại bỏ hoàn toàn nguy cơ deadlock hoặc bị ngắt với incomplete-final-answer-terminal
-        if (hasSubmittedSolution && submittedSolutionSummary) {
-          finalAnswer = submittedSolutionSummary;
-          consecutiveIncompleteFinals = 0;
-        } else {
+        {
           consecutiveIncompleteFinals++;
           const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
           this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
           const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt();
 
-          const actionMandate = hasSubmittedSolution
-            ? [
-                `⛔ [CODEX ACTION MANDATE - FINAL ANSWER QUALITY REQUIRED]`,
-                `Your final answer was REJECTED: ${finalAnswerDecision.reason || 'Insufficient detail or quality'}.`,
-                `You have already submitted the verified solution. All tool calls are locked.`,
-                `Do NOT attempt to call tools. You MUST conclude your turn with a complete, detailed final answer in the user's natural language.`,
-              ].join('\n')
-            : [
-                `⛔ [CODEX ACTION MANDATE - MANDATORY TOOL CALL REQUIRED]`,
-                `Your response was REJECTED by the Completion Gate: ${finalAnswerDecision.reason || 'Missing empirical verification or tool execution'}.`,
-                `You MUST NOT return conversational progress text or unfulfilled promises.`,
-                `You MUST execute a concrete tool call in this step (e.g. run_command to run test/build, read_file to inspect, replace_text/apply_patch to edit, or submit_solution when all empirical proof is verified).`,
-              ].join('\n');
+          const actionMandate = buildCompletionRecoveryPrompt({
+            reason: finalAnswerDecision.reason,
+            recovery: finalAnswerDecision.recovery,
+            hasSubmittedSolution,
+          });
 
           const fullContinuationPrompt = [
             actionMandate,
@@ -2837,7 +2679,7 @@ export class AgentLoop {
           );
           session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
           if (canRetryIncompleteFinal && fullContinuationPrompt) {
-            session.addUserMessage(fullContinuationPrompt);
+            session.addUserMessage(fullContinuationPrompt, 'system');
           }
           await this.persistSession(session);
           CLI.renderStepFooter();
@@ -2853,15 +2695,7 @@ export class AgentLoop {
           this.kernel?.ctx.events.emit('step:after', step);
           if (canRetryIncompleteFinal) continue;
 
-          // Nếu giải pháp đã được submit thành công và có nội dung câu trả lời thực tế (hoặc submittedSolutionSummary),
-          // hoàn tất với câu trả lời đã nộp thay vì hủy bỏ với lỗi incomplete-final-answer-terminal
-          if (hasSubmittedSolution && (finalAnswer.trim().length >= 100 || submittedSolutionSummary)) {
-            finalAnswer = finalAnswer.trim().length >= 100 ? finalAnswer : submittedSolutionSummary;
-            consecutiveIncompleteFinals = 0;
-            break;
-          }
-
-          const incompleteFinalMessage = `Agent stopped: the model returned ${consecutiveIncompleteFinals} non-terminal progress updates instead of executing a tool, reporting evidence, or providing a concrete blocker.`;
+          const incompleteFinalMessage = `Agent stopped: completion remained unresolved after ${consecutiveIncompleteFinals} attempts (${finalAnswerDecision.reason || 'unknown'}).`;
           await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
           this.goalManager.disarm();
@@ -3220,6 +3054,40 @@ export class AgentLoop {
         } catch {
           // Non-blocking snapshot
         }
+      }
+
+      // Living Playbook Reflector & Curator (Agentic Context Engineering - ACE arXiv:2510.04618)
+      try {
+        const events = session.getEvents();
+        const toolsExecuted: Array<{ toolName: string; args?: any; result?: any }> = [];
+        let hadFailures = false;
+        for (const e of events) {
+          if (e.type === 'tool/call') {
+            const d = e.data as any;
+            toolsExecuted.push({ toolName: d.name || d.toolName || '', args: d.args });
+          } else if (e.type === 'tool/result') {
+            const d = e.data as any;
+            const last = toolsExecuted[toolsExecuted.length - 1];
+            if (last) {
+              last.result = d.result;
+            }
+            if (d.result?.exitCode && d.result.exitCode !== 0) {
+              hadFailures = true;
+            }
+          }
+        }
+        const deltas = PlaybookReflector.reflectOnTrace({
+          userRequest: turnUserRequest || '',
+          toolsExecuted,
+          hadTestFailuresThenPass: hadFailures && this.verificationPolicy.canComplete().allowed,
+          finalSuccess: true,
+        });
+        if (deltas.length > 0) {
+          const curator = new PlaybookCurator(this.turnMemoryRetriever.getLivingPlaybook());
+          await curator.commitDeltas(deltas);
+        }
+      } catch {
+        // Non-blocking playbook reflection
       }
     }
     this.cleanupEphemeralScratchFiles();

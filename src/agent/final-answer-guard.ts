@@ -17,6 +17,8 @@ export interface FinalAnswerGuardDecision {
   allow: boolean;
   reason?: FinalAnswerGuardRejectionReason;
   continuationPrompt?: string;
+  recovery?: 'revise-answer' | 'inspect-evidence' | 'execute-task' | 'verify-changes';
+  advisories?: string[];
 }
 
 export interface FinalAnswerGuardContext {
@@ -37,54 +39,44 @@ interface ToolFailureSummary {
   detail?: string;
 }
 
-const OPTIONAL_OFFER_PATTERN = /(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?\n]{0,180}/g;
-
-const DEFERRED_WORK_PATTERNS = [
-  // 1. English: Subject + future modal + verbs
-  /\b(?:i|we|agent|assistant)\s+(?:will|shall|am going to|are going to|plan to|aim to|need to|intend to|am about to|will now|shall now|will proceed to|will start to|will begin to|will move on to|will go ahead and|will next|am ready to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|construct|generate|add|remove|delete|setup|configure|install)\b/,
-
-  // 2. English contractions (I'll, We'll, I'm going to)
-  /\b(?:i'll|we'll|i'm going to|we're going to|i'm about to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|construct|generate|add|remove|delete|setup|configure|install)\b/,
-
-  // 3. English temporal sequence transitions ("Now I will...", "Next, I will...", "In the next step, I will...")
-  /\b(?:now|next|then|in the next step|moving forward|going forward)\s*,?\s*(?:i|we|agent)?\s*(?:will|shall|am going to|plan to|proceed to|start to|begin to)\s+(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|construct|generate|add|remove|delete|setup|configure|install)\b/,
-
-  // 4. Vietnamese subject + future modal + verbs
-  /\b(?:toi|chung toi|minh|em|agent)\s+(?:se|can phai|can|du dinh|chuan bi|dang chuan bi|du kien|len ke hoach|se tien hanh|se bat dau|se bat tay vao|se di vao)\s+(?:ngay\s+)?(?:tiep tuc|thu|chay|thuc hien|kiem thu|test|do|benchmark|kiem tra|dieu tra|chuyen|su dung|sua|phan tich|lam|tien hanh|thiet ke|thiet ke lai|trien khai|viet|code|tao|xay dung|chinh sua|sua doi|cap nhat|thay the|them|xoa|cai dat|cau hinh|refactor|tai cau truc|implement|debug|chuan doan)\b/,
-
-  // 5. Vietnamese temporal sequence transitions ("Bây giờ tôi sẽ...", "Tiếp theo tôi sẽ...", "Bước tiếp theo tôi sẽ...")
-  /\b(?:bay gio|gio|luc nay|hien tai|tiep theo|ke tiep|buoc tiep theo|sau day|sau do)\s*,?\s*(?:toi|chung toi|minh|em|agent)?\s*(?:se|can|chuan bi|du dinh|tien hanh|bat dau)\s+(?:tiep tuc|thu|chay|thuc hien|kiem thu|test|do|benchmark|kiem tra|dieu tra|chuyen|su dung|sua|phan tich|lam|tien hanh|thiet ke|thiet ke lai|trien khai|viet|code|tao|xay dung|chinh sua|sua doi|cap nhat|thay the|them|xoa|cai dat|cau hinh|refactor|tai cau truc|implement|debug|chuan doan)\b/,
-
-  // 6. Vietnamese explicit action intention without subject ("sẽ tiến hành thiết kế...", "chuẩn bị triển khai...", "sẽ thực hiện bước...")
-  /\b(?:se|chuan bi|du dinh)\s+(?:tien hanh|bat dau|trien khai|thuc hien|bat tay vao)\s+(?:thiet ke|thiet ke lai|viet|code|tao|xay dung|chinh sua|sua|cap nhat|thay the|them|xoa|cai dat|cau hinh|refactor|kiem thu|test|chay|khao sat|kiem tra|doc)\b/,
-
-  // 7. General promise to execute ("sẽ tiếp tục bằng cách...", "cần tiếp tục xử lý...")
-  /\b(?:se|can)\s+tiep tuc\s+(?:bang cach|xu ly|thuc hien|chay|kiem tra|dieu tra|sua|test|do|trien khai|thiet ke|viet|code)\b/,
-
-  // 8. Meta-reporting promises & pseudo-completion claims without body
-  // e.g. "Đã cung cấp câu trả lời chi tiết và chính xác bằng tiếng Việt về nguyên nhân...",
-  // "... và báo cáo chi tiết bằng tiếng Việt cho người dùng", "sẽ báo cáo chi tiết..."
-  /\b(?:va\s+)?(?:se|da|vua)?\s*(?:bao cao|trinh bay|giai thich|cung cap|tra loi)\s+(?:cau tra loi\s+)?(?:chi tiet|day du|chinh xac|ro rang)(?:\s+(?:va\s+(?:chinh xac|ro rang|day du)))?(?:\s+bang tieng viet)?(?:\s+(?:cho|ve|voi)\b)/,
-  /\b(?:and\s+)?(?:will|have|already)?\s*(?:report|present|explain|provide|answer)\s+(?:a |the )?(?:in detail|detailed findings|detailed report|detailed answer|detailed response)(?:\s+(?:to|for|about)\b)/,
-  /\b(?:se\s+)?xac dinh (?:cac\s+)?nguyen nhan(?: tiem an)? va bao cao\b/,
-  /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+[^\n.!?]{0,80}\b(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/,
-];
-
-const FULFILLED_INTRO_PATTERN = /^\s*(?:toi|chung toi|minh|em|i|we|agent)?\s*(?:se|will|shall|am going to|plan to|da)?[^\n]{0,140}?(?:duoi day la|ket qua|nhu sau|sau day|here is|here are|below is|results?:|as follows:)[^\n]*/i;
-
+/** Remove examples before normalizing whitespace; blockquote boundaries matter. */
 export function stripMarkdownFormattingForGuard(text: string): string {
   return text
-    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, ' ')
     .replace(/`[^`]+`/g, ' ')
-    .replace(/^>.*$/gm, ' ');
+    .replace(/^\s*>.*$/gm, ' ')
+    .replace(/(^|[\s:(])'[^'\n]+'(?=[\s.,;:!?)]|$)/g, ' ')
+    .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, ' ');
 }
 
-export function hasUnfulfilledDeferredPromise(normalizedText: string): boolean {
-  // Strip code blocks and blockquotes first so quoted source code or examples do not trigger false positives
-  const cleanProse = stripMarkdownFormattingForGuard(normalizedText);
-  // Strip opening intro greetings that are immediately fulfilled in the same message
-  const remainingText = cleanProse.replace(FULFILLED_INTRO_PATTERN, '').trim();
-  return DEFERRED_WORK_PATTERNS.some((pattern) => pattern.test(remainingText));
+/** Only an actual first-person commitment is a deferred action, not a proposed agent design. */
+export function hasUnfulfilledDeferredPromise(text: string): boolean {
+  const prose = stripMarkdownFormattingForGuard(text);
+  let lines = prose.split(/\r?\n/);
+  const intro = lines[0] || '';
+  const resultMarker = /(?:duoi day la|ket qua:|nhu sau:|here (?:is|are)|results?:|as follows:)/;
+  if (resultMarker.test(normalizeForMatching(intro)) && lines.slice(1).some((line) => line.trim())) {
+    // Remove the introductory sentence only. Later promises are still checked.
+    lines = lines.slice(1);
+  }
+  return lines.some((line) => {
+    const normalized = normalizeForMatching(line)
+      .replace(/(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?]*/g, ' ');
+    if (/^(?:if |suppose |neu |gia su )/.test(normalized)) return false;
+    if (/\b(?:proposed|proposal|recommendation|hypothetical|for example|de xuat|phuong an|gia dinh|vi du|minh hoa)\b/.test(normalized)
+      && !/\b(?:i|we|toi|minh|em|chung toi)\s+(?:will|shall|se|can phai)\b/.test(normalized)) return false;
+    return /\b(?:i|we)\s+(?:will|shall|am going to|are going to|plan to|need to|intend to|am about to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|generate|add|remove|delete|configure|install)\b/.test(normalized)
+      || /\b(?:i'll|we'll|i'm going to|we're going to)\s+(?:now\s+)?(?:continue|run|execute|test|inspect|investigate|fix|check|analy[sz]e|implement|create|write|design|refactor|modify|update|edit|build|add|remove|install)\b/.test(normalized)
+      || /\b(?:toi|chung toi|minh|em)\s+(?:se|can phai|can|du dinh|chuan bi|se tien hanh|se bat dau)\s+(?:ngay\s+)?(?:tiep tuc|thu|chay|thuc hien|kiem thu|test|do|benchmark|kiem tra|dieu tra|chuyen|su dung|sua|phan tich|lam|tien hanh|thiet ke|trien khai|viet|code|tao|xay dung|chinh sua|cap nhat|thay the|them|xoa|cai dat|cau hinh|refactor|chuan doan)\b/.test(normalized);
+  });
+}
+
+/** A completion receipt alone is not a user-facing answer; no length or heading quota. */
+export function isCompletionStub(answer: string): boolean {
+  const text = normalizeForMatching(answer).replace(/[.!]+$/, '');
+  return /^(?:\(?nhiem vu da hoan tat\)?|\(?task completed\)?|\(?solution submitted\)?|each task must be atomic|execution sequence satisfied|done|fixed|success|da (?:xong|sua xong|hoan tat|hoan thanh)|giai phap da duoc submit)$/.test(text)
+    || /^(?:i have|we have|agent has)?\s*(?:completed|fixed|resolved|finished|submitted)\s*(?:the task|the bug|the issue)?$/.test(text)
+    || /^(?:(?:da|vua)\s+)?(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)(?:\s+va\s+(?:chinh xac|day du))?(?:\s+bang tieng viet)?(?:\s+(?:cho|ve)\s+[^:;.!?]+)?$/.test(text);
 }
 
 const CAPABILITY_DENIAL_PATTERNS = [
@@ -132,24 +124,14 @@ export class FinalAnswerGuard {
       return {
         allow: false,
         reason: 'empty-answer',
+        recovery: 'revise-answer',
         continuationPrompt: '[SYSTEM GUARD]: Empty response received. Execute a tool or provide a concrete final answer to the user.',
       };
     }
 
     const normalized = normalizeForMatching(answer);
-    const withoutOptionalOffers = normalized.replace(OPTIONAL_OFFER_PATTERN, ' ');
-    const promisesFutureToolWork = hasUnfulfilledDeferredPromise(withoutOptionalOffers);
-
-    // 2. Chặn lời hứa hoãn việc / thông báo hứa hẹn
-    // Nếu hasSubmittedSolution = true và câu trả lời đã có độ dài và cấu trúc giải pháp đầy đủ (>= 250 ký tự với markdown structure),
-    // không được chặn vì bài báo cáo kỹ thuật hoàn tất đã được submit thành công.
-    const isSubstantialCompletedAnswer = Boolean(
-      context?.hasSubmittedSolution &&
-      trimmed.length >= 250 &&
-      (trimmed.includes('\n\n') || trimmed.includes('#') || trimmed.includes('*') || trimmed.includes('-'))
-    );
-
-    if (promisesFutureToolWork && !isSubstantialCompletedAnswer) {
+    const promisesFutureToolWork = hasUnfulfilledDeferredPromise(answer);
+    if (promisesFutureToolWork || isCompletionStub(answer)) {
       const failureContext = this.latestFailure
         ? `The latest tool failure was ${this.latestFailure.toolName}${this.latestFailure.errorCode ? ` (${this.latestFailure.errorCode})` : ''}${this.latestFailure.detail ? `: ${this.latestFailure.detail}` : '.'}`
         : undefined;
@@ -157,9 +139,10 @@ export class FinalAnswerGuard {
       return {
         allow: false,
         reason: 'deferred-work',
+        recovery: promisesFutureToolWork ? 'execute-task' : 'revise-answer',
         continuationPrompt: [
-          '[SYSTEM FINAL ANSWER GUARD]: Your previous response described work you will do later, or merely announced an intention to report without providing the actual detailed report. It was not accepted as a final answer.',
-          'Provide the complete, detailed findings and analysis now, or continue the work with the appropriate tools.',
+          '[SYSTEM FINAL ANSWER GUARD]: Your previous response described work you will do later, or merely announced an intention to report without providing the answer itself. It was not accepted as a final answer.',
+          'Provide the findings at the requested level of detail, or continue only the user-authorized work still needed.',
           'Do not merely announce the next action, echo the prompt, or promise a future report.',
           failureContext,
         ].filter(Boolean).join('\n'),
@@ -172,26 +155,22 @@ export class FinalAnswerGuard {
 
     // 4. Kiểm định tính chuyên sâu, có cấu trúc và đúng sự thật cho query kiến trúc / workflow / pattern
     const archDecision = evaluateArchitectureAnalysis(answer, context);
-    if (archDecision) return archDecision;
+    if (archDecision && !archDecision.allow) return archDecision;
 
     // 5. Kiểm định tính chuyên sâu cho query điều tra nguyên nhân / phân tích sự cố
     const analysisDecision = evaluateAnalysisOrInvestigationAnswer(answer, context);
-    if (analysisDecision) return analysisDecision;
+    if (analysisDecision && !analysisDecision.allow) return analysisDecision;
 
     // 5b. Chặn câu trả lời cộc lốc / cụt ngủn cho tác vụ đã hoàn tất hoặc có can thiệp mã nguồn
     const curtDecision = evaluateCurtFinalAnswer(answer, context);
-    if (curtDecision) return curtDecision;
+    if (curtDecision && !curtDecision.allow) return curtDecision;
 
     // 5c. Kiểm soát Ảo giác ở cấp độ Bảo mật: Chặn Tự tin thái quá vào code nhiễm độc (Insecure Code Confidence)
     const securityDecision = evaluateInsecureCodeConfidence(answer, context);
     if (securityDecision) return securityDecision;
 
-    // 6. Nếu đã submit_solution thành công và vượt qua toàn bộ các kiểm định chất lượng trên
-    if (context?.hasSubmittedSolution) {
-      return { allow: true };
-    }
-
-    return { allow: true };
+    const advisories = [archDecision, analysisDecision, curtDecision].flatMap((d) => d?.advisories || []);
+    return { allow: true, ...(advisories.length ? { advisories } : {}) };
   }
 
   private evaluateGitCapabilityDenial(
@@ -232,6 +211,7 @@ export class FinalAnswerGuard {
     return {
       allow: false,
       reason: 'unverified-capability-denial',
+      recovery: 'execute-task',
       continuationPrompt: [
         '[SYSTEM CAPABILITY GUARD]: Your previous answer denied access to Git tools or permissions without attempting the user-authorized operation.',
         `The following requested tools are available and untried: ${untriedTools.join(', ')}.`,
@@ -344,169 +324,71 @@ export function verifyWorkspaceGrounding(
   answer: string,
   workspace?: { rootDir: string; resolveSafePath?: (targetPath: string) => string },
 ): GroundingVerificationResult {
-  if (!workspace || !workspace.rootDir) {
-    return { isGrounded: true, validFiles: [], invalidFiles: [], reasons: [] };
+  if (!workspace) return { isGrounded: true, validFiles: [], invalidFiles: [], reasons: [] };
+  const candidates = new Set<string>();
+  let proposedSection = false;
+  let fencedExample = false;
+  for (const line of answer.split(/\r?\n/)) {
+    const normalized = normalizeForMatching(line);
+    if (/^\s*(?:```|~~~)/.test(line)) { fencedExample = !fencedExample; continue; }
+    if (fencedExample || /^\s*>/.test(line)) continue;
+    const isProposal = /\b(?:propos(?:al|ed)|recommend(?:ation|ed)|pseudocode|hypothetical|for example|de xuat|phuong an|gia ma|gia dinh|vi du|minh hoa)\b/.test(normalized);
+    if (/^\s*#{1,6}\s/.test(line)) proposedSection = isProposal;
+    if (proposedSection || isProposal || /\b(?:does not exist|doesn't exist|not found|absent|khong ton tai|chua co|khong tim thay)\b/.test(normalized)) continue;
+    const add = (raw: string) => {
+      let candidate = raw.trim().replace(/^<|>$/g, '').replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+)?)$/, '');
+      if (/^https?:|^app:|^codex:/i.test(candidate)) return;
+      try { candidate = decodeURIComponent(candidate); } catch { return; }
+      candidate = candidate.replace(/^file:\/\/\//i, '').replace(/\\/g, '/');
+      if (/^\/[a-z]:\//i.test(candidate)) candidate = candidate.slice(1);
+      if (candidate && !candidate.includes('node_modules/')) candidates.add(candidate);
+    };
+    // Markdown targets can contain spaces inside <...>; retain line anchors until add().
+    const withoutLinks = line.replace(/\[[^\]]*\]\((<[^>]+>|[^)]+)\)/g, (_, target: string) => {
+      add(target.replace(/\s+"[^"]*"$/, '')); return ' ';
+    });
+    for (const match of withoutLinks.replace(/https?:\/\/[^\s]+/g, ' ').matchAll(/(?:file:\/\/\/|[a-zA-Z]:[\/\\]|\.?\.?[\/\\]|\/)?[\w.-]+(?:[\/\\][\w.-]+)+\.[a-zA-Z0-9]+(?::\d+(?::\d+)?|#L\d+(?:-L?\d+)?)?|\b(?:package\.json|tsconfig\.json|README\.md)\b/g)) add(match[0]);
   }
-
-  // Quét các đường dẫn file được đề cập trong câu trả lời
-  const pathRegex = /(?:^|[\s`('"])([a-zA-Z0-9_.-]+(?:[\/\\][a-zA-Z0-9_.-]+)+\.[a-zA-Z0-9]+|package\.json|tsconfig\.json|README\.md)(?:[\s`')"]|$)/gm;
-  const rawCandidates = new Set<string>();
-  let match: RegExpExecArray | null;
-
-  while ((match = pathRegex.exec(answer)) !== null) {
-    const raw = match[1].replace(/^[('"`]|['"`)]$/g, '').trim();
-    if (!raw.startsWith('http') && !raw.includes('node_modules') && !raw.startsWith('file://')) {
-      rawCandidates.add(raw.replace(/\\/g, '/'));
-    }
-  }
-
-  const fileUrlRegex = /file:\/\/\/[^\s`"')]+/g;
-  while ((match = fileUrlRegex.exec(answer)) !== null) {
-    const rawUrl = match[0].replace(/^file:\/\/\//, '');
-    rawCandidates.add(rawUrl.replace(/\\/g, '/'));
-  }
-
   const validFiles: string[] = [];
   const invalidFiles: string[] = [];
-
-  for (const candidate of rawCandidates) {
+  for (const candidate of candidates) {
     try {
-      let resolved: string;
-      if (path.isAbsolute(candidate)) {
-        resolved = candidate;
-      } else if (workspace.resolveSafePath) {
-        resolved = workspace.resolveSafePath(candidate);
-      } else {
-        resolved = path.resolve(workspace.rootDir, candidate);
+      const resolved = workspace.resolveSafePath
+        ? workspace.resolveSafePath(candidate)
+        : path.resolve(workspace.rootDir, candidate);
+      const relative = path.relative(workspace.rootDir, resolved);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        invalidFiles.push(candidate); continue;
       }
-
-      if (fs.existsSync(resolved)) {
-        validFiles.push(candidate);
-      } else if (
-        candidate.startsWith('src/') ||
-        candidate.startsWith('lib/') ||
-        candidate.startsWith('app/') ||
-        candidate.startsWith('deploy/') ||
-        candidate.startsWith('docs/')
-      ) {
-        invalidFiles.push(candidate);
-      }
-    } catch {
-      if (
-        candidate.startsWith('src/') ||
-        candidate.startsWith('lib/') ||
-        candidate.startsWith('app/') ||
-        candidate.startsWith('deploy/') ||
-        candidate.startsWith('docs/')
-      ) {
-        invalidFiles.push(candidate);
-      }
-    }
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) validFiles.push(candidate);
+      else invalidFiles.push(candidate);
+    } catch { invalidFiles.push(candidate); }
   }
-
-  const reasons: string[] = [];
-  if (validFiles.length === 0) {
-    reasons.push(
-      'Câu trả lời phân tích không viện dẫn bất kỳ tệp nguồn hay module nào thực tế tồn tại trong workspace (thiếu empirical workspace grounding).',
-    );
-  }
-  if (invalidFiles.length > 0 && validFiles.length === 0) {
-    reasons.push(
-      `Câu trả lời viện dẫn các đường dẫn tệp không tồn tại trong workspace: ${invalidFiles.slice(0, 3).join(', ')}.`,
-    );
-  }
-
   return {
-    isGrounded: validFiles.length > 0,
-    validFiles,
-    invalidFiles,
-    reasons,
+    isGrounded: validFiles.length > 0 && invalidFiles.length === 0,
+    validFiles, invalidFiles,
+    reasons: invalidFiles.length
+      ? [`Referenced source files could not be resolved: ${invalidFiles.join(', ')}.`]
+      : validFiles.length ? [] : ['No file citation was recognized; symbol references or existing context may still support the answer.'],
   };
 }
 
-/**
- * Đánh giá tính chuyên sâu, cấu trúc và tính có căn cứ thực tế của bài phân tích kiến trúc / workflow.
- */
+/** Citation existence is a mechanical check, not a claim that the prose is true. */
 export function evaluateArchitectureAnalysis(
-  answer: string,
-  context?: FinalAnswerGuardContext,
+  answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
-  const intent = detectArchitectureAnalysisIntent(context?.userRequest);
-  if (!intent.isArchitectureQuery) return undefined;
-
-  const trimmed = answer.trim();
-  const deficiencies: string[] = [];
-
-  // 1. Tiêu chí độ dài tối thiểu: Một phân tích kiến trúc nghiêm túc tối thiểu phải từ 500 ký tự trở lên
-  if (trimmed.length < 500) {
-    deficiencies.push(
-      `Phản hồi quá ngắn (${trimmed.length} ký tự, yêu cầu tối thiểu 500 ký tự). Yêu cầu phân tích kiến trúc/workflow/pattern không được tóm tắt cụt ngủn hoặc trả lời sơ sài.`,
-    );
+  if (!detectArchitectureAnalysisIntent(context?.userRequest).isArchitectureQuery) return undefined;
+  const grounding = verifyWorkspaceGrounding(answer, context?.workspace);
+  if (grounding.invalidFiles.length) {
+    return {
+      allow: false, reason: 'unverified-architecture-claims', recovery: 'inspect-evidence',
+      continuationPrompt: `[SYSTEM SOURCE CHECK]: ${grounding.reasons.join(' ')} Correct the citations using existing evidence, inspect the specific missing source if necessary, or label hypothetical paths as proposals. No minimum length or fixed outline is required.`,
+    };
   }
-
-  // 2. Tiêu chí cấu trúc phân tích cốt lõi (Ít nhất 2 trong 4 khía cạnh)
-  const normalized = normalizeForMatching(answer);
-  const structuralSections = {
-    overview: /\b(?:tong quan|muc tieu|nhiem vu|gioi thieu|boi canh|overview|introduction|architecture overview|high-level|system overview)\b/.test(
-      normalized,
-    ),
-    workflow: /\b(?:workflow|luong|quy trinh|lifecycle|flow|sequence|cac buoc|buoc 1|step 1|dataflow|execution flow)\b/.test(
-      normalized,
-    ),
-    pattern: /\b(?:pattern|mau thiet ke|layer|tang|module|component|thanh phan|kien truc)\b/.test(
-      normalized,
-    ),
-    invariantsOrFiles: /\b(?:bat bien|invariant|guardrail|loi|error|file|ma nguon|source|src\/)\b/.test(
-      normalized,
-    ),
-  };
-
-  const sectionsCount = Object.values(structuralSections).filter(Boolean).length;
-  if (sectionsCount < 2) {
-    deficiencies.push(
-      'Thiếu cấu trúc phân tích chuyên sâu. Bài phân tích bắt buộc phải có các mục phân cấp rõ ràng (Tổng quan hệ thống/nghiệp vụ, Luồng workflow/thực thi, Các Pattern/Component cốt lõi, và Bất biến/File nguồn dẫn chứng).',
-    );
+  if (!grounding.validFiles.length && context?.workspace) {
+    return { allow: true, advisories: ['Anchor important repository claims in inspected code or reliable context; use the detail and format requested by the user.'] };
   }
-
-  // 3. Tiêu chí kiểm định thực tế trong workspace (Grounding Verification)
-  if (context?.workspace) {
-    const isRepoSpecific = Boolean(
-      context?.userRequest &&
-      /\b(?:trong du an|trong repo|trong workspace|trong he thong nay|trong code|ma nguon|source code|project|nay|hien tai|our|this repo|this project|file|thu muc)\b/i.test(
-        normalizeForMatching(context.userRequest)
-      )
-    );
-    const grounding = verifyWorkspaceGrounding(answer, context.workspace);
-    if (!grounding.isGrounded) {
-      // Nếu câu hỏi là câu hỏi lý thuyết/mô hình chung và không bịa đặt file sai (invalidFiles.length === 0), miễn trừ bắt buộc validFiles > 0
-      if (isRepoSpecific || grounding.invalidFiles.length > 0) {
-        deficiencies.push(...grounding.reasons);
-      }
-    }
-  }
-
-  if (deficiencies.length === 0) {
-    return undefined; // Đạt chuẩn
-  }
-
-  return {
-    allow: false,
-    reason: 'insufficient-architecture-answer',
-    continuationPrompt: [
-      '[SYSTEM ARCHITECTURE GUARD]: Phản hồi của bạn bị TỪ CHỐI vì chưa đạt tiêu chuẩn phân tích kiến trúc, workflow, pattern hoặc nghiệp vụ của workspace.',
-      'Các khiếm khuyết được phát hiện:',
-      ...deficiencies.map((d) => `- ${d}`),
-      '',
-      'TIÊU CHUẨN BẮT BUỘC KHI PHÂN TÍCH KIẾN TRÚC & WORKFLOW (FULL-OUTPUT CODEX STANDARD):',
-      '1. DẪN CHỨNG MÃ NGUỒN THỰC TẾ: Bạn PHẢI viện dẫn các file thực tế trong workspace (sử dụng read_file / search_text / query_call_graph nếu chưa khảo sát). Tuyệt đối không bịa đặt đường dẫn file hoặc thư viện ngoài.',
-      '2. CẤU TRÚC BÀI PHÂN TÍCH ĐẦY ĐỦ:',
-      '   - ## 1. Tổng quan & Sứ mệnh hệ thống (System Overview & Architecture Style)',
-      '   - ## 2. Cơ chế & Luồng thực thi chi tiết (End-to-End Workflow / Sequence Trace)',
-      '   - ## 3. Mẫu thiết kế & Trách nhiệm các thành phần (Design Patterns with File Anchors)',
-      '   - ## 4. Bất biến hệ thống, Rào chắn bảo vệ & Đánh đổi kỹ thuật (System Invariants & Guardrails)',
-      '3. KHÔNG RÚT GỌN: Nghiêm cấm câu trả lời cụt ngủn, cấm dùng placeholder như "...", "để ngắn gọn", "v.v.". Hãy viết đầy đủ, mạch lạc bằng đúng ngôn ngữ của người dùng.',
-    ].join('\n'),
-  };
+  return undefined;
 }
 
 export function normalizeForMatching(value: string): string {
@@ -558,7 +440,7 @@ export function detectAnalysisOrInvestigationIntent(userRequest?: string): Analy
   );
 
   // 3. Nhóm yêu cầu báo cáo / trình bày chi tiết
-  const requestsDetailedReport = /\b(?:bao cao|trinh bay|chi tiet|day du|tieng viet|report|in detail|detailed)\b/.test(
+  const requestsDetailedReport = /\b(?:bao cao|trinh bay|chi tiet|day du|report|in detail|detailed)\b/.test(
     normalized,
   );
 
@@ -589,110 +471,23 @@ export function detectAnalysisOrInvestigationIntent(userRequest?: string): Analy
 }
 
 export function evaluateAnalysisOrInvestigationAnswer(
-  answer: string,
-  context?: FinalAnswerGuardContext,
+  answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
-  const intent = detectAnalysisOrInvestigationIntent(context?.userRequest);
-  if (!intent.isAnalysisQuery) return undefined;
-
-  const trimmed = answer.trim();
-
-  // 1. Tiêu chuẩn độ dài tối thiểu: Báo cáo thông thường yêu cầu từ 300 ký tự trở lên.
-  // Nếu câu trả lời mang tính chẩn đoán trực tiếp (có chỉ ra nguyên nhân/lý do rõ ràng) và không phải lời hứa suông,
-  // cho phép ngưỡng linh hoạt từ 120 ký tự.
-  const hasDirectCausalReason = /\b(?:nguyen nhan|do|boi vi|vi|caused by|because|reason|due to|loi do)\b/i.test(
-    normalizeForMatching(answer)
-  );
-  const minLength = hasDirectCausalReason ? 120 : 300;
-
-  if (trimmed.length < minLength) {
-    return {
-      allow: false,
-      reason: 'insufficient-analysis-answer',
-      continuationPrompt: [
-        '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì quá ngắn và sơ sài so với yêu cầu điều tra / phân tích nguyên nhân của người dùng.',
-        `Độ dài phản hồi: ${trimmed.length} ký tự (yêu cầu tối thiểu ${minLength} ký tự có phân tích thực tế).`,
-        'Yêu cầu của người dùng là điều tra nguyên nhân và báo cáo chi tiết. Bạn KHÔNG ĐƯỢC chỉ đưa ra 1-2 câu tóm tắt hoặc thông báo hứa hẹn.',
-        'Hãy trình bày đầy đủ:',
-        '1. Các nguyên nhân tiềm ẩn hoặc cơ chế gây lỗi (kèm trích dẫn hàm, file cụ thể).',
-        '2. Luồng thực thi / phân tích logic chi tiết.',
-        '3. Hướng khắc phục hoặc giải pháp đề xuất.',
-      ].join('\n'),
-    };
+  if (!detectAnalysisOrInvestigationIntent(context?.userRequest).isAnalysisQuery) return undefined;
+  if (isCompletionStub(answer)) {
+    return { allow: false, reason: 'insufficient-analysis-answer', recovery: 'revise-answer',
+      continuationPrompt: '[SYSTEM ANALYSIS GUARD]: Provide the findings themselves. Distinguish confirmed causes, hypotheses, and remaining uncertainty; a concise answer is valid.' };
   }
-
-  // 2. Chặn câu echo stub / hứa hẹn không có thân bài (Meta-Reporting Stub / Pseudo-Completion Claim)
-  const normalized = normalizeForMatching(answer);
-  const isMetaEchoOnly = trimmed.length < 450 && (
-    /\b(?:va\s+)?(?:se\s+)?bao cao chi tiet(?:\s+bang tieng viet)?(?:\s+cho nguoi dung)?\.?$/i.test(normalized) ||
-    /\b(?:xac dinh (?:cac\s+)?nguyen nhan(?: tiem an)? va bao cao)\b/i.test(normalized) ||
-    /\b(?:da|vua)\s+(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+.*?(?:nguyen nhan|ly do|khong hien thi|khong goi y)\b/i.test(normalized) ||
-    /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalized)
-  ) && !/[-*•\d]\.\s|```|\*\*|###/.test(answer);
-
-  if (isMetaEchoOnly) {
-    return {
-      allow: false,
-      reason: 'insufficient-analysis-answer',
-      continuationPrompt: [
-        '[SYSTEM ANALYSIS GUARD]: Phản hồi của bạn bị TỪ CHỐI vì chỉ là câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...", "sẽ báo cáo chi tiết...") mà không có nội dung phân tích thực tế.',
-        'Hãy viết trực tiếp bản phân tích chi tiết cho người dùng ngay tại đây với các mục phân tích cụ thể, mã nguồn liên quan và giải pháp đề xuất.',
-      ].join('\n'),
-    };
-  }
-
   return undefined;
 }
 
-/**
- * Đánh giá tính đầy đủ của câu trả lời khi kết thúc tác vụ đã thực hiện chỉnh sửa mã hoặc submit_solution.
- * Ngăn chặn câu trả lời cộc lốc, cụt ngủn hoặc chỉ là một dòng thông báo suông ("Đã sửa xong", "Fixed", "Hoàn thành").
- */
 export function evaluateCurtFinalAnswer(
-  answer: string,
-  context?: FinalAnswerGuardContext,
+  answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
   if (!context?.hasSubmittedSolution && !context?.hasCodeMutations) return undefined;
-
-  const trimmed = (answer || '').trim();
-  const normalized = normalizeForMatching(trimmed);
-
-  // 1. Chặn câu trả lời quá ngắn (< 30 ký tự) cho tác vụ đã có can thiệp mã hoặc submit_solution (ví dụ: "Đã sửa xong.", "Fixed.")
-  if (trimmed.length < 30) {
-    return {
-      allow: false,
-      reason: 'curt-final-answer',
-      continuationPrompt: [
-        '[SYSTEM QUALITY GUARD]: Câu trả lời cuối cùng của bạn quá ngắn hoặc cộc lốc so với tác vụ vừa thực hiện.',
-        `Độ dài hiện tại: ${trimmed.length} ký tự (yêu cầu giải thích kỹ thuật rõ ràng).`,
-        'TIÊU CHUẨN CÂU TRẢ LỜI HOÀN TẤT (FULL-OUTPUT CODEX STANDARD):',
-        '1. Nêu rõ nguyên nhân cốt lõi hoặc bối cảnh vấn đề.',
-        '2. Liệt kê cụ thể các tệp tin và logic đã thay đổi/bổ sung.',
-        '3. Báo cáo kết quả kiểm thử/xác thực (build, test) để người dùng yên tâm.',
-        '4. Trình bày tự nhiên, mạch lạc bằng đúng ngôn ngữ của người dùng (tiếng Việt). Tuyệt đối không chỉ trả về 1 dòng cụt ngủn như "Đã sửa xong" hay placeholder.',
-      ].join('\n'),
-    };
-  }
-
-  // 2. Chặn các câu kết thúc mang tính thủ tục suông không có nội dung kỹ thuật (ví dụ: "The task has been completed and submitted.")
-  const isGenericCompletionStub =
-    /^(?:da|vua)?\s*(?:hoan tat|hoan thanh|sua xong|xong|done|task completed|fixed|success|giai phap da duoc submit)\.?$/i.test(normalized) ||
-    /^(?:i have|we have|agent has)?\s*(?:completed|fixed|resolved|finished|submitted)\s*(?:the task|the bug|the issue)?\.?$/i.test(normalized);
-
-  const lacksAnyTechnicalDetail = !/(?:\/|\.ts|\.js|\.tsx|\.jsx|\.py|\.rs|\.json|\.css|\.md|```|hàm|function|class|lỗi|error|test|build|exit|evidence|step|plan|task|code)/i.test(trimmed);
-
-  if (isGenericCompletionStub && lacksAnyTechnicalDetail) {
-    return {
-      allow: false,
-      reason: 'curt-final-answer',
-      continuationPrompt: [
-        '[SYSTEM QUALITY GUARD]: Phản hồi của bạn chỉ là một câu thông báo hoàn tất hình thức mà không có giải thích kỹ thuật thực tế cho người dùng.',
-        'Hãy giải thích chi tiết: vấn đề được giải quyết thế nào, các tệp tin đã thay đổi, và kết quả kiểm chứng thực nghiệm.',
-      ].join('\n'),
-    };
-  }
-
-  return undefined;
+  if (!isCompletionStub(answer)) return undefined;
+  return { allow: false, reason: 'curt-final-answer', recovery: 'revise-answer',
+    continuationPrompt: '[SYSTEM QUALITY GUARD]: State the concrete outcome and relevant verification status, using the level of detail requested by the user.' };
 }
 
 export function detectSecurityAuditIntent(userRequest?: string): boolean {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isReadOnlyRequest } from './request-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
@@ -33,7 +34,10 @@ export class ClassificationEngine {
     let risk: ControlRisk = 'R0';
     let capabilities: Capability[] = ['inspect', 'search', 'memory'];
 
-    if (releaseIntent.test(text)) {
+    if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
+      taskClass = 'exploration';
+      reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
+    } else if (releaseIntent.test(text)) {
       taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');

@@ -1,4 +1,5 @@
 import type { Session, SessionEvent } from '../session/session.js';
+import { collectCompletionObservations, hasObservedMutation, observedMutationFiles, toolResultFailed } from './completion-observations.js';
 import { FILE_MUTATION_TOOLS } from '../tools/diff-generator.js';
 
 export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'other';
@@ -44,12 +45,7 @@ const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
 const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify))\b|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)|ctest|make\s+(?:test|check)|composer\s+test|bundle\s+exec\s+rspec|phpunit|tsc(?:\s|$))\b|\b(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|test\/)|\b(?:npx\s+(?:vitest|jest|mocha|ava)\b)|\bnode\s+--test\b/i;
 
 export function isToolResultFailure(result: Record<string, any>): boolean {
-  return Boolean(
-    result.error
-    || result.errorCode
-    || result.success === false
-    || (typeof result.exitCode === 'number' && result.exitCode !== 0),
-  );
+  return toolResultFailed(result);
 }
 
 export function isVerificationCommand(command: unknown): boolean {
@@ -71,7 +67,7 @@ export function classifyToolEvidence(
   result: Record<string, any> = {},
 ): EvidenceKind[] {
   if (isToolResultFailure(result)) return [];
-  if (MUTATION_TOOLS.has(toolName)) return ['mutation'];
+  if (hasObservedMutation(toolName, result)) return ['mutation'];
   if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];
   if (toolName === 'run_command') {
     return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
@@ -104,6 +100,7 @@ export interface CompletionEvidenceDecision {
   allow: boolean;
   reasons: string[];
   continuationPrompt?: string;
+  recovery?: 'revise-answer' | 'inspect-evidence' | 'execute-task' | 'verify-changes';
 }
 
 interface ObservedExecution {
@@ -159,27 +156,19 @@ export class CompletionEvidenceGate {
     const failures = executions.filter((item) => isToolResultFailure(item.payload));
     const mutations = successful.filter((item) => item.kinds.includes('mutation'));
     const latestMutationSeq = mutations.at(-1)?.result.seq ?? -1;
-    const hasSubmitSolutionTool = successful.some((item) => item.toolName === 'submit_solution');
+    const hasSubmitSolutionTool = successful.some((item) => item.toolName === 'submit_solution' && item.result.seq > latestMutationSeq);
     const verifications = successful.filter(
       (item) => (item.kinds.includes('verification') || item.toolName === 'submit_solution') && item.result.seq > latestMutationSeq,
     );
 
-    if (options.hasSubmittedSolution || hasSubmitSolutionTool) {
-      // Đã có submit_solution được chứng nhận theo chuẩn OpenAI Codex CLI
-      return { allow: true, reasons: [] };
-    }
+    // A fresh submission certifies completion requirements, never unrelated Git or execution claims.
+    const hasCertifiedSubmission = hasSubmitSolutionTool || (options.hasSubmittedSolution === true && mutations.length === 0);
 
     const reasons: string[] = [];
 
     // Thu thập đường dẫn các file đã được chỉnh sửa
-    const mutatedFilePaths: string[] = [];
-    for (const m of mutations) {
-      const p = m.args?.path || m.args?.filePath || m.args?.targetFile || m.args?.TargetFile;
-      if (typeof p === 'string' && p.trim()) {
-        mutatedFilePaths.push(p.trim());
-      }
-    }
-    const allMutationsAreNonExecutable = mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile);
+    const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));
+    const allMutationsAreNonExecutable = mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile) && mutations.every((m) => observedMutationFiles(m.toolName, m.args, m.payload).length > 0);
     const userExplicitlyExemptsTesting = Boolean(
       options.userRequest &&
       /\b(?:khong can (?:chay )?(?:test|kiem thu|build)|no test(?:ing)? required|skip test(?:ing)?|do not run tests?)\b/i.test(
@@ -187,10 +176,10 @@ export class CompletionEvidenceGate {
       )
     );
 
-    if (options.codeChangeRequired && mutations.length === 0) {
+    if (!hasCertifiedSubmission && options.codeChangeRequired && mutations.length === 0) {
       reasons.push('The request requires a code change, but no successful mutation result exists in this turn.');
     }
-    if ((options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+    if (!hasCertifiedSubmission && (options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
 
@@ -292,7 +281,7 @@ export class CompletionEvidenceGate {
       return isDirect && !isPassiveOrHistorical;
     });
 
-    if (isFirstPersonMutationClaim && mutations.length === 0) {
+    if (isFirstPersonMutationClaim && mutations.length === 0 && !hasCertifiedSubmission) {
       reasons.push('The final answer claims workspace changes without a successful mutation tool result.');
     }
 
@@ -367,55 +356,25 @@ export class CompletionEvidenceGate {
     }
 
     if (reasons.length === 0) return { allow: true, reasons: [] };
+    const missingMutation = Boolean(options.codeChangeRequired && mutations.length === 0);
+    const missingVerification = mutations.length > 0 && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting;
+    const recovery = missingMutation ? 'execute-task' : missingVerification ? 'verify-changes' : 'revise-answer';
     return {
-      allow: false,
-      reasons,
+      allow: false, reasons, recovery,
       continuationPrompt: [
-        '[SYSTEM EVIDENCE GATE]: The previous final answer was not accepted because its completion claims are not supported by durable observations.',
+        '[SYSTEM EVIDENCE GATE]: Completion claims do not match observed outcomes.',
         ...reasons.map((reason) => `- ${reason}`),
-        'Continue with the missing mutation/verification/tool action, or provide a terminal blocker supported by an actual failed tool result.',
+        missingMutation ? 'Perform the requested code change, or report the concrete blocker honestly.'
+          : missingVerification ? 'Verify the changes with an appropriate check, or report the concrete verification blocker.'
+            : 'Correct unsupported claims using existing evidence. Do not run tools merely to justify wording; inspect more only if needed to answer the request.',
       ].join('\n'),
     };
   }
 
   private executionsForTurn(session: Session, turn?: number): ObservedExecution[] {
-    const calls = new Map<string, SessionEvent>();
-    const unkeyedCalls: SessionEvent[] = [];
-    const executions: ObservedExecution[] = [];
-    for (const event of session.getEvents()) {
-      if (event.type === 'tool/call' && (turn === undefined || event.data.turn === turn)) {
-        if (event.data.toolCallId) {
-          calls.set(event.data.toolCallId, event);
-        } else {
-          unkeyedCalls.push(event);
-        }
-      }
-      if (event.type !== 'tool/result') continue;
-      let call: SessionEvent | undefined;
-      if (event.data.toolCallId) {
-        call = calls.get(event.data.toolCallId);
-      } else {
-        const idx = unkeyedCalls.findIndex((c) => !event.data.toolName || c.data.toolName === event.data.toolName);
-        if (idx !== -1) {
-          call = unkeyedCalls.splice(idx, 1)[0];
-        } else if (unkeyedCalls.length > 0) {
-          call = unkeyedCalls.shift();
-        }
-      }
-      if (!call) continue;
-      const toolName = call.data.toolName || event.data.toolName || 'unknown_tool';
-      const args = call.data.args || {};
-      const payload = event.data.result || {};
-      executions.push({
-        call,
-        result: event,
-        toolName,
-        args,
-        payload,
-        kinds: classifyToolEvidence(toolName, args, payload),
-      });
-    }
-    return executions;
+    return collectCompletionObservations(session, turn).map((item) => ({
+      ...item, kinds: classifyToolEvidence(item.toolName, item.args, item.payload),
+    }));
   }
 
   /**

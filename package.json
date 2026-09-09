@@ -8,6 +8,7 @@
     "predev": "npm run search:up",
     "dev": "tsx src/index.ts",
     "test": "node --max-old-space-size=4096 node_modules/tsx/dist/cli.mjs src/test-suite.ts",
+    "test:completion": "node --import tsx --test src/agent/completion-policy.test.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "test:latency": "tsx src/test-latency-optimization.ts",
     "test:blast-radius": "tsx src/test-blast-radius.ts",

@@ -3,6 +3,7 @@ import path from 'node:path';
 import MiniSearch from 'minisearch';
 import { getNativeCore } from '../native/index.js';
 import type { MaskedObservationRecord } from '../agent/context-compactor.js';
+import { LivingPlaybookManager } from './living-playbook.js';
 
 export interface ArchivedTurnDocument {
   id: string;
@@ -73,8 +74,11 @@ export class TurnMemoryRetriever {
     this.maskedStorageFilePath = path.join(this.storageDir, 'masked_observations.json');
     this.antiPatternsFilePath = path.join(this.storageDir, 'anti_patterns.json');
 
+    this.livingPlaybook = new LivingPlaybookManager(this.workspaceDir);
     this.miniSearch = this.createMiniSearch();
   }
+
+  readonly livingPlaybook: LivingPlaybookManager;
 
   private createMiniSearch(): MiniSearch<ArchivedTurnDocument> {
     return new MiniSearch<ArchivedTurnDocument>({
@@ -544,7 +548,22 @@ export class TurnMemoryRetriever {
       snippets.push(this.formatAntiPatternsForContext(matchedAntiPatterns));
     }
 
+    // 4. Living Playbook Bullets (Agentic Context Engineering - ACE)
+    try {
+      await this.livingPlaybook.init();
+      const matchedBullets = this.livingPlaybook.subsetRelevantBullets(query, 3);
+      if (matchedBullets.length > 0) {
+        snippets.push(this.livingPlaybook.formatForPromptContext(matchedBullets));
+      }
+    } catch {
+      // Bỏ qua nếu lỗi đọc playbook
+    }
+
     return snippets.join('\n\n');
+  }
+
+  getLivingPlaybook(): LivingPlaybookManager {
+    return this.livingPlaybook;
   }
 
   getArchivedTurnCount(): number {

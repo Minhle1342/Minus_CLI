@@ -64,6 +64,8 @@ import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js
 import { GoalManager } from './agent/goal-manager.js';
 import { ReflectionEngine, isExploratoryCommand } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
+import { ProcessFailureDetector } from './agent/process-failure-detector.js';
+import { LivingPlaybookManager, PlaybookReflector, PlaybookCurator } from './context/living-playbook.js';
 import {
   FinalAnswerGuard,
   detectArchitectureAnalysisIntent,
@@ -1690,7 +1692,7 @@ async function runUnitTests() {
   });
   assert(
     persistentDeferredLLM.calls === 4
-    && persistentDeferredResult.includes('4 non-terminal progress updates')
+    && persistentDeferredResult.includes('completion remained unresolved after 4 attempts')
     && persistentDeferredSession.getEvents().some(
       (event) => event.type === 'turn/end' && event.data.reason === 'incomplete-final-answer-terminal',
     ),
@@ -3446,16 +3448,16 @@ export async function calculateTotal(items: any[]): Promise<number> {
     workspace,
   };
 
-  // Trường hợp 1: Câu trả lời quá ngắn (< 500 ký tự)
+  // Trường hợp 1: Câu trả lời ngắn vẫn hợp lệ, không áp đặt số ký tự hoặc heading
   const shortArchAnswer = 'Dự án này là một coding agent viết bằng TypeScript. Nó có agent loop, tools, và session. Hết.';
   const shortDecision = archGuard.evaluate(shortArchAnswer, archContext);
-  assert(shortDecision.allow === false, 'FinalAnswerGuard chặn câu trả lời phân tích kiến trúc cộc lốc/ngắn ngủn');
-  assert(shortDecision.reason === 'insufficient-architecture-answer', 'Lý do từ chối là insufficient-architecture-answer');
-  assert(Boolean(shortDecision.continuationPrompt?.includes('TIÊU CHUẨN BẮT BUỘC KHI PHÂN TÍCH KIẾN TRÚC')), 'Prompt tiếp tục có hướng dẫn cấu trúc bắt buộc');
+  assert(shortDecision.allow === true, 'FinalAnswerGuard cho phép giải thích kiến trúc ngắn gọn');
+  assert(shortDecision.reason === undefined, 'Không từ chối chỉ vì độ dài');
+  assert(!shortDecision.continuationPrompt, 'Không ép retry hay bố cục cho câu trả lời ngắn');
 
   // Trường hợp 2: Đã có submit_solution summary nhưng query là phân tích kiến trúc -> Không được short-circuit câu trả lời ngắn
   const autoFinalizeBlocked = archGuard.evaluate(
-    'Task completed with exit code 0.',
+    'Task completed.',
     { ...archContext, hasSubmittedSolution: true },
   );
   assert(autoFinalizeBlocked.allow === false, 'FinalAnswerGuard không cho phép auto-finalize summary ngắn đối với câu hỏi phân tích kiến trúc');
@@ -4889,7 +4891,7 @@ Always write tests first!`;
   } finally {
     const resolvedFixture = path.resolve(gitFixture);
     if (resolvedFixture.startsWith(path.resolve(workspace.rootDir) + path.sep)) {
-      await fs.rm(resolvedFixture, { recursive: true, force: true });
+      await fs.rm(resolvedFixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }
 
@@ -8102,6 +8104,188 @@ Always write tests first!`;
     parameterizedDecision.allow === true,
     'FinalAnswerGuard chấp thuận khi code dùng Parameterized Query chuẩn mực',
   );
+
+  console.log('\n========================================');
+  console.log('🧪 50. KIỂM THỬ PROCESS-LEVEL FAILURE DETECTION (SWE-REASONER arXiv:2503.23803)');
+  console.log('========================================');
+
+  // 1. Phase State Machine Transitions
+  const pfd = new ProcessFailureDetector('Fix memory leak in src/agent/agent-loop.ts');
+  assert(pfd.getCurrentPhase() === 'EXPLORATION', 'Pha khởi đầu phải là EXPLORATION');
+  pfd.registerHypothesis({
+    targetFile: 'src/agent/agent-loop.ts',
+    symbolOrLine: 'runRequest',
+    description: 'Stream unclosed in loop',
+  });
+  assert(pfd.getCurrentPhase() === 'FAULT_LOCALIZATION', 'Pha chuyển sang FAULT_LOCALIZATION sau khi registerHypothesis');
+  pfd.observe({
+    toolName: 'replace_file_content',
+    args: { TargetFile: 'src/agent/agent-loop.ts' },
+    result: { success: true },
+  });
+  assert(pfd.getCurrentPhase() === 'PATCH_GENERATION_AND_VERIFY', 'Pha chuyển sang PATCH_GENERATION_AND_VERIFY sau mutation');
+
+  // 2. Relevance Drift Detection
+  const driftPfd = new ProcessFailureDetector('Fix SQL injection in src/database/auth-service.ts');
+  let driftIntervention = null;
+  for (let i = 0; i < 3; i++) {
+    driftIntervention = driftPfd.observe({
+      toolName: 'view_file',
+      args: { AbsolutePath: `/var/log/random_${i}.log` },
+      result: { content: 'nothing' },
+    });
+    assert(driftIntervention === null, `Chưa đủ 4 bước không được kích hoạt drift intervention (bước ${i + 1})`);
+  }
+  driftIntervention = driftPfd.observe({
+    toolName: 'view_file',
+    args: { AbsolutePath: '/etc/irrelevant_config.json' },
+    result: { content: 'irrelevant' },
+  });
+  assert(
+    driftIntervention !== null && driftIntervention?.type === 'RELEVANCE_DRIFT',
+    'Relevance Drift Detection kích hoạt chính xác sau 4 bước khảo sát lạc đề',
+  );
+
+  // 3. Multi-Hypothesis Fault Localization & PRM Ranking
+  const prmPfd = new ProcessFailureDetector('Fix null pointer crash in payment-gateway.ts during checkout');
+  prmPfd.registerHypothesis({
+    targetFile: 'src/gateway/payment-gateway.ts',
+    symbolOrLine: 'processCheckout:L142',
+    description: 'Missing null check on user card token',
+    callGraphRelevance: true,
+    hasReproTest: true,
+  });
+  prmPfd.registerHypothesis({
+    targetFile: 'src/utils/string-helpers.ts',
+    description: 'String helper error',
+    callGraphRelevance: false,
+    hasReproTest: false,
+  });
+  const rankedHypos = prmPfd.rankHypotheses({
+    taskKeywords: ['payment-gateway.ts', 'checkout', 'null'],
+    stackTraceFiles: ['payment-gateway.ts'],
+    activeReproFiles: ['scratch/repro_checkout.ts'],
+  });
+  assert(rankedHypos.length === 2, 'PRM Scorer chấm điểm đủ 2 giả thuyết');
+  assert(rankedHypos[0].hypothesisId === 'hypo-1', 'Giả thuyết 1 khớp Call Graph phải đứng đầu bảng xếp hạng');
+  assert(rankedHypos[0].verdict === 'STRONG_CANDIDATE', 'Giả thuyết 1 đạt verdict STRONG_CANDIDATE');
+  assert(rankedHypos[0].score >= 70, 'Điểm PRM của giả thuyết 1 phải >= 70');
+  assert(rankedHypos[1].score < 40, 'Điểm PRM của giả thuyết 2 phải < 40 (LOW_CONFIDENCE)');
+
+  // 4. Trajectory Backtracking Trigger
+  const backtrackPfd = new ProcessFailureDetector('Fix tax engine VAT bug');
+  backtrackPfd.registerHypothesis({
+    targetFile: 'src/tax-engine.ts',
+    description: 'Hypothesis A: Sửa hàm calculateVAT',
+  });
+  backtrackPfd.registerHypothesis({
+    targetFile: 'src/tax-rules.ts',
+    description: 'Hypothesis B: Sửa bảng cấu hình biểu thuế',
+  });
+  backtrackPfd.observe({
+    toolName: 'replace_file_content',
+    args: { TargetFile: 'src/tax-engine.ts' },
+    result: { success: true },
+  });
+  for (let i = 1; i <= 2; i++) {
+    const res = backtrackPfd.observe({
+      toolName: 'run_command',
+      args: { CommandLine: 'npm test' },
+      result: { exitCode: 1, stderr: 'AssertionError: expected 110 but got 100' },
+    });
+    assert(res === null, `Test fail lần ${i} sau mutation chưa kích hoạt backtrack`);
+  }
+  const backtrackRes = backtrackPfd.observe({
+    toolName: 'run_command',
+    args: { CommandLine: 'npm test' },
+    result: { exitCode: 1, stderr: 'AssertionError: expected 110 but got 100' },
+  });
+  assert(
+    backtrackRes !== null && backtrackRes?.type === 'LOCALIZATION_FAILURE_BACKTRACK',
+    'Trajectory Backtracking kích hoạt sau 3 lần test fail liên tiếp sau mutation',
+  );
+  assert(
+    Boolean(backtrackRes?.suggestedAction?.includes('src/tax-rules.ts')),
+    'Gợi ý can thiệp tự động chuyển hướng sang giả thuyết thay thế kế tiếp',
+  );
+
+  console.log('\n========================================');
+  console.log('🧪 51. KIỂM THỬ AGENTIC CONTEXT ENGINEERING (ACE - arXiv:2510.04618)');
+  console.log('========================================');
+
+  const aceTestDir = path.join(process.cwd(), 'temp', `ace-suite-${Date.now()}`);
+  await fs.mkdir(aceTestDir, { recursive: true });
+
+  const acePlaybook = new LivingPlaybookManager(aceTestDir);
+  await acePlaybook.init();
+  assert(acePlaybook.getBulletCount() === 0, 'LivingPlaybookManager khởi đầu rỗng');
+
+  // 1. Incremental Delta Update - ADD
+  const b1 = await acePlaybook.applyDelta({
+    type: 'ADD',
+    reason: 'Ghi nhận bài học về TS18047',
+    bullet: {
+      category: 'type_safety',
+      trigger: 'Khi biến có thể nhận null trong assert hoặc runtime call',
+      actionRule: 'Dùng optional chaining (?.) hoặc Boolean() tường minh',
+      antiPattern: 'Không bọc try-catch mù quáng làm giấu lỗi compile',
+    },
+  });
+  assert(b1 !== null && b1?.id === 'PLB-001', 'Thao tác Delta ADD sinh đúng mã định danh PLB-001');
+  assert(b1?.utility.helpfulCount === 1, 'helpfulCount khởi tạo bằng 1');
+
+  // 2. Incremental Delta Update - REINFORCE & REFINE
+  const b1Reinforced = await acePlaybook.applyDelta({
+    type: 'REINFORCE',
+    bulletId: 'PLB-001',
+    reason: 'Vừa giúp vượt qua bài test thành công',
+  });
+  assert(b1Reinforced?.utility.helpfulCount === 2, 'Thao tác Delta REINFORCE tăng helpfulCount lên 2');
+
+  const b1Refined = await acePlaybook.applyDelta({
+    type: 'REFINE',
+    bulletId: 'PLB-001',
+    reason: 'Bổ sung mã lỗi TS18047 cụ thể',
+    bullet: {
+      category: 'type_safety',
+      trigger: 'Khi gặp lỗi TS18047: possibly null or undefined',
+      actionRule: 'Dùng optional chaining (?.) hoặc Boolean() tường minh',
+    },
+  });
+  assert(Boolean(b1Refined?.trigger.includes('TS18047')), 'Thao tác Delta REFINE cập nhật trigger mà không làm mất antiPattern (Chống Context Collapse)');
+
+  // 3. Dynamic Subsetting (Tiết kiệm Token & Chống Brevity Bias)
+  await acePlaybook.applyDelta({
+    type: 'ADD',
+    reason: 'Quy tắc git commit an toàn',
+    bullet: {
+      category: 'git_policy',
+      trigger: 'Khi thực hiện git commit trên nhánh',
+      actionRule: 'Chạy detect_changes() trước khi commit',
+      antiPattern: 'Không commit file rác vào repository',
+    },
+  });
+  const aceSubset = acePlaybook.subsetRelevantBullets('Lỗi biên dịch TS18047 trong file test', 1);
+  assert(aceSubset.length === 1 && aceSubset[0].id === 'PLB-001', 'Dynamic Subsetting chọn lọc chính xác Top-1 bullet liên quan');
+
+  // 4. Triad Reflector & Curator Loop
+  const aceDeltas = PlaybookReflector.reflectOnTrace({
+    userRequest: 'Fix null crash in auth service',
+    toolsExecuted: [
+      { toolName: 'replace_file_content', args: { TargetFile: 'src/auth.ts' } },
+      { toolName: 'run_command', result: { exitCode: 1, stderr: 'error TS18047: possibly null' } },
+      { toolName: 'replace_file_content', args: { TargetFile: 'src/auth.ts' } },
+      { toolName: 'run_command', result: { exitCode: 0, stdout: 'Pass' } },
+    ],
+    hadTestFailuresThenPass: true,
+    finalSuccess: true,
+  });
+  assert(aceDeltas.length >= 1, 'PlaybookReflector tự động chắt lọc bài học kinh nghiệm sau chu trình Red -> Green');
+  const aceCurator = new PlaybookCurator(acePlaybook);
+  const committedBullets = await aceCurator.commitDeltas(aceDeltas);
+  assert(committedBullets.length >= 1, 'PlaybookCurator cam kết thành công delta updates vào Living Playbook');
+
+  await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => {});
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

@@ -1,6 +1,7 @@
 import type { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
-import { CompletionEvidenceGate } from './completion-evidence.js';
+import { getTurnCompletionState, type TurnCompletionState } from './completion-observations.js';
+import { CompletionEvidenceGate, type CompletionEvidenceDecision } from './completion-evidence.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 import type { HypothesisTracker } from './hypothesis-tracker.js';
@@ -25,39 +26,8 @@ export interface ComposeAcceptanceContract {
   registeredFiles: string[];
 }
 
-function extractModifiedFiles(session: Session, filesModified?: string[]): Set<string> {
-  const targetFiles = new Set<string>(filesModified || []);
-  try {
-    const events = session.getEvents();
-    for (const event of events) {
-      const data = event.data as any;
-      if (event.type === 'tool/call') {
-        const toolName = typeof data?.toolName === 'string' ? data.toolName : '';
-        const mutatingTools = [
-          'write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file',
-          'write_to_file', 'replace_file_content', 'multi_replace_file_content'
-        ];
-        if (toolName && mutatingTools.includes(toolName)) {
-          const toolCalls = data?.toolCalls;
-          if (Array.isArray(toolCalls)) {
-            for (const call of toolCalls) {
-              const p = call?.args?.path || call?.args?.filePath || call?.args?.targetFile || call?.args?.TargetFile;
-              if (typeof p === 'string' && p.trim()) targetFiles.add(p.trim());
-            }
-          }
-          const directPath = data?.args?.path || data?.args?.filePath || data?.args?.targetFile || data?.args?.TargetFile;
-          if (typeof directPath === 'string' && directPath.trim()) targetFiles.add(directPath.trim());
-        }
-      }
-      if (Array.isArray(data?.filesModified)) {
-        for (const f of data.filesModified) if (typeof f === 'string' && f.trim()) targetFiles.add(f.trim());
-      }
-      if (event.type === 'effect/change' && data?.effect?.target) {
-        if (typeof data.effect.target === 'string') targetFiles.add(data.effect.target);
-      }
-    }
-  } catch {}
-  return targetFiles;
+function extractModifiedFiles(session: Session, filesModified?: string[], turn?: number): Set<string> {
+  return new Set([...getTurnCompletionState(session, turn).filesModified, ...(filesModified || [])]);
 }
 
 /**
@@ -101,6 +71,8 @@ export class CriticGate {
     filesModified?: string[];
     turn?: number;
     hasSubmittedSolution?: boolean;
+    completionState?: TurnCompletionState;
+    evidenceDecision?: CompletionEvidenceDecision;
   }): CriticEvaluation {
     const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
@@ -109,7 +81,9 @@ export class CriticGate {
     let score = 100;
 
     // Trích xuất toàn bộ các file đã được chỉnh sửa từ Session History & Events
-    const targetFiles = extractModifiedFiles(session, filesModified);
+    const targetFiles = params.completionState
+      ? new Set(params.completionState.filesModified)
+      : extractModifiedFiles(session, filesModified, turn);
 
     // 1. HARD INVARIANT: Kiểm tra In-Memory LSP / TypeScript Diagnostics & Multi-language Syntax
     // CHỈ kiểm tra diagnostics cho các file thực sự bị thay đổi (Targeted LSP Inspection).
@@ -161,9 +135,7 @@ export class CriticGate {
     }
 
     // 2. Thẩm định bằng chứng thực thi qua CompletionEvidenceGate
-    const evidenceDecision = hasSubmittedSolution
-      ? { allow: true, reasons: [] }
-      : this.evidenceGate.evaluate(finalAnswer, session, {
+    const evidenceDecision = params.evidenceDecision ?? this.evidenceGate.evaluate(finalAnswer, session, {
           userRequest,
           turn,
           hasSubmittedSolution,
@@ -190,7 +162,7 @@ export class CriticGate {
       turn: typeof turn === 'number' ? turn : 1,
       summary: finalAnswer.slice(0, 300),
       filesModified: Array.from(targetFiles),
-      verificationCommand: (hasSubmittedSolution || evidenceDecision.allow) ? 'verified' : 'unverified',
+      verificationCommand: targetFiles.size === 0 ? 'not-required' : (hasSubmittedSolution || evidenceDecision.allow) ? 'verified' : 'unverified',
       verificationExitCode: (hasSubmittedSolution || evidenceDecision.allow) ? 0 : 1,
       critiqueScore: Math.max(0, score),
       lspDiagnosticsCount: lspErrors.length,
@@ -216,7 +188,7 @@ export class CriticGate {
         }
         promptParts.push(`\n👉 CRITICAL ACTION REQUIRED: Add the missing import statement(s) at the top of the file(s) or fix the syntax errors before completing.`);
       } else {
-        promptParts.push(`\n👉 ACTION REQUIRED: Run the necessary test/build/typecheck commands to provide empirical verification evidence before concluding.`);
+        promptParts.push(evidenceDecision.continuationPrompt || 'State the findings and unresolved questions honestly using the available evidence.');
       }
       critiquePrompt = promptParts.join('\n');
     }
@@ -244,6 +216,8 @@ export class CriticGate {
     filesModified?: string[];
     turn?: number;
     hasSubmittedSolution?: boolean;
+    completionState?: TurnCompletionState;
+    evidenceDecision?: CompletionEvidenceDecision;
   }): Promise<CriticEvaluation> {
     const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
@@ -252,7 +226,9 @@ export class CriticGate {
     let score = 100;
 
     // Trích xuất toàn bộ các file đã được chỉnh sửa từ Session History & Events
-    const targetFiles = extractModifiedFiles(session, filesModified);
+    const targetFiles = params.completionState
+      ? new Set(params.completionState.filesModified)
+      : extractModifiedFiles(session, filesModified, turn);
 
     // 1. HARD INVARIANT: Thẩm định cú pháp & missing imports toàn diện qua CodeSyntaxValidator & TypeScript Service
     // CHỈ kiểm tra diagnostics cho các file thực sự bị thay đổi (Targeted LSP Inspection).
@@ -297,9 +273,7 @@ export class CriticGate {
     }
 
     // 2. Thẩm định bằng chứng thực thi qua CompletionEvidenceGate
-    const evidenceDecision = hasSubmittedSolution
-      ? { allow: true, reasons: [] }
-      : this.evidenceGate.evaluate(finalAnswer, session, {
+    const evidenceDecision = params.evidenceDecision ?? this.evidenceGate.evaluate(finalAnswer, session, {
           userRequest,
           turn,
           hasSubmittedSolution,
@@ -326,7 +300,7 @@ export class CriticGate {
       turn: typeof turn === 'number' ? turn : 1,
       summary: finalAnswer.slice(0, 300),
       filesModified: Array.from(targetFiles),
-      verificationCommand: (hasSubmittedSolution || evidenceDecision.allow) ? 'verified' : 'unverified',
+      verificationCommand: targetFiles.size === 0 ? 'not-required' : (hasSubmittedSolution || evidenceDecision.allow) ? 'verified' : 'unverified',
       verificationExitCode: (hasSubmittedSolution || evidenceDecision.allow) ? 0 : 1,
       critiqueScore: Math.max(0, score),
       lspDiagnosticsCount: lspErrors.length,
@@ -352,7 +326,7 @@ export class CriticGate {
         }
         promptParts.push(`\n👉 CRITICAL ACTION REQUIRED: Add the missing import statement(s) at the top of the file(s) or fix the syntax errors before completing.`);
       } else {
-        promptParts.push(`\n👉 ACTION REQUIRED: Run the necessary test/build/typecheck commands to provide empirical verification evidence before concluding.`);
+        promptParts.push(evidenceDecision.continuationPrompt || 'State the findings and unresolved questions honestly using the available evidence.');
       }
       critiquePrompt = promptParts.join('\n');
     }
