@@ -35,6 +35,7 @@ export class TestEngineeringHarness {
   private rollbackOrchestrator?: HypothesisRollbackOrchestrator;
   private completionEvidenceGate?: CompletionEvidenceGate;
   private criticGate?: CriticGate;
+  private reproManager = new ReproductionVerificationManager();
 
   constructor(config: TestEngineeringHarnessConfig) {
     this.workspaceRoot = path.resolve(config.workspaceRoot);
@@ -143,9 +144,234 @@ export class TestEngineeringHarness {
     return report;
   }
 
+  getReproductionManager(): ReproductionVerificationManager {
+    return this.reproManager;
+  }
+
+  /**
+   * Chạy bài test tái hiện (Reproduction Test) và cập nhật trạng thái kiểm chứng cho chu trình sửa lỗi.
+   */
+  async runReproductionTest(options: {
+    command: string;
+    isPostFix?: boolean;
+    useScratchWorkspace?: boolean;
+    timeoutMs?: number;
+  }): Promise<{ report: StructuredTestReport; reproStatus: ReproductionStatus }> {
+    const report = await this.runTests({
+      testCommand: options.command,
+      useScratchWorkspace: options.useScratchWorkspace,
+      timeoutMs: options.timeoutMs,
+    });
+    this.reproManager.recordAttempt(
+      options.command,
+      report.exitCode,
+      report.summaryText,
+      options.isPostFix
+    );
+    return {
+      report,
+      reproStatus: this.reproManager.getStatus(),
+    };
+  }
+
+  /**
+   * SWE-Reasoner Multi-Patch Sandbox Reranker (Phase 3):
+   * Thử nghiệm phân lập các bản vá (patch candidates) trên Sandbox,
+   * chạy bài kiểm thử tái hiện và bộ hồi quy, sau đó xếp hạng dựa trên tín hiệu thực thi.
+   */
+  async evaluateAndRerankPatches(
+    candidates: PatchCandidate[],
+    options: {
+      reproCommand: string;
+      regressionCommand?: string;
+      timeoutMs?: number;
+    }
+  ): Promise<RankedPatchReport> {
+    const rankings: RankedPatchEvaluation[] = [];
+    const timeoutMs = options.timeoutMs || 60000;
+
+    for (const candidate of candidates) {
+      const scratch = new EphemeralScratchWorkspace({
+        sourceWorkspaceRoot: this.workspaceRoot,
+        substrate: this.substrate,
+      });
+
+      let reproPassed = false;
+      let regressionPassed = true;
+      let feedback = '';
+
+      try {
+        await scratch.create();
+        const scratchTarget = path.join(scratch.scratchPath, candidate.targetFile);
+
+        // Áp dụng bản vá vào sandbox workspace
+        await fs.mkdir(path.dirname(scratchTarget), { recursive: true });
+        await fs.writeFile(scratchTarget, candidate.content, 'utf-8');
+
+        // 1. Chạy reproduction command
+        const reproExec = await scratch.exec(options.reproCommand, timeoutMs);
+        reproPassed = reproExec.exitCode === 0;
+
+        // 2. Chạy regression test (nếu có)
+        if (options.regressionCommand) {
+          const regExec = await scratch.exec(options.regressionCommand, timeoutMs);
+          regressionPassed = regExec.exitCode === 0;
+        }
+
+        // 3. Tính điểm chất lượng dựa trên execution feedback theo chuẩn SWE-Reasoner (arXiv:2503.23803):
+        // Bắt buộc phải vượt qua bài test tái hiện (Reproduction Test) mới có điểm.
+        const diffSizeChars = candidate.content.length;
+        let score = 0;
+        if (reproPassed) {
+          score = 50 + (regressionPassed ? 30 : 0);
+          // Điểm độ tinh gọn: tối đa 20 điểm nếu code không phình to bất thường (< 5000 ký tự)
+          const sizeBonus = Math.max(0, Math.min(20, Math.round(20 * (1 - Math.min(diffSizeChars, 5000) / 5000))));
+          score += sizeBonus;
+        }
+
+        feedback = reproPassed && regressionPassed
+          ? `Bản vá hoàn hảo: Vượt qua Repro Test và bảo toàn Regression Suite (Điểm: ${score}/100)`
+          : !reproPassed
+            ? `Bản vá thất bại: Chưa vượt qua bài test tái hiện (ExitCode ${reproExec.exitCode})`
+            : `Bản vá gây lỗi hồi quy (Regression Test ExitCode != 0)`;
+
+        rankings.push({
+          candidateId: candidate.id,
+          description: candidate.description,
+          reproPassed,
+          regressionPassed,
+          diffSizeChars,
+          score,
+          feedback,
+        });
+      } catch (err: any) {
+        rankings.push({
+          candidateId: candidate.id,
+          description: candidate.description,
+          reproPassed: false,
+          regressionPassed: false,
+          diffSizeChars: candidate.content.length,
+          score: 0,
+          feedback: `Lỗi trong quá trình thử nghiệm sandbox: ${err.message}`,
+        });
+      } finally {
+        await scratch.dispose();
+      }
+    }
+
+    // Sắp xếp các ứng viên điểm cao nhất lên đầu
+    rankings.sort((a, b) => b.score - a.score);
+
+    return {
+      evaluatedCount: candidates.length,
+      bestCandidate: rankings[0],
+      rankings,
+    };
+  }
+
   async dispose(): Promise<void> {
     await this.substrate.dispose();
   }
+}
+
+export interface ReproductionAttemptRecord {
+  id: string;
+  timestamp: number;
+  command: string;
+  exitCode: number;
+  output: string;
+  phase: 'pre-fix' | 'post-fix';
+  isPassed: boolean;
+}
+
+export interface ReproductionStatus {
+  hasPreFixRepro: boolean;
+  hasPostFixPass: boolean;
+  isVerified: boolean;
+  attemptsCount: number;
+  lastAttempt?: ReproductionAttemptRecord;
+  details: string;
+}
+
+/**
+ * Quản lý chu trình kiểm thử tái hiện lỗi (Automated Reproduction Code & Verification Gating)
+ * Theo nghiên cứu SWE-Reasoner (arXiv:2503.23803)
+ */
+export class ReproductionVerificationManager {
+  private attempts: ReproductionAttemptRecord[] = [];
+
+  recordAttempt(command: string, exitCode: number, output: string, isPostFix?: boolean): ReproductionAttemptRecord {
+    const isPassed = exitCode === 0;
+    const phase: 'pre-fix' | 'post-fix' = isPostFix ? 'post-fix' : 'pre-fix';
+    const record: ReproductionAttemptRecord = {
+      id: `repro-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: Date.now(),
+      command,
+      exitCode,
+      output,
+      phase,
+      isPassed,
+    };
+    this.attempts.push(record);
+    return record;
+  }
+
+  getAttempts(): ReproductionAttemptRecord[] {
+    return [...this.attempts];
+  }
+
+  hasVerifiedFix(): boolean {
+    const hasPreFail = this.attempts.some((a) => a.phase === 'pre-fix' && !a.isPassed);
+    const hasPostPass = this.attempts.some((a) => a.phase === 'post-fix' && a.isPassed);
+    return hasPreFail && hasPostPass;
+  }
+
+  getStatus(): ReproductionStatus {
+    const hasPreFail = this.attempts.some((a) => a.phase === 'pre-fix' && !a.isPassed);
+    const hasPostPass = this.attempts.some((a) => a.phase === 'post-fix' && a.isPassed);
+    const lastAttempt = this.attempts[this.attempts.length - 1];
+
+    let details = 'Chưa có bài kiểm thử tái hiện nào được ghi nhận.';
+    if (hasPreFail && hasPostPass) {
+      details = 'Đã xác minh đầy đủ: Lỗi được tái hiện thành công (pre-fix FAIL) và bản sửa đổi vượt qua kiểm thử (post-fix PASS).';
+    } else if (hasPreFail && !hasPostPass) {
+      details = 'Đã tái hiện lỗi thành công (pre-fix FAIL), đang chờ lượt kiểm thử xác nhận vượt qua sau khi sửa (post-fix PASS).';
+    } else if (!hasPreFail && hasPostPass) {
+      details = 'Đã kiểm thử thành công sau sửa nhưng thiếu bước chứng minh lỗi ban đầu (pre-fix FAIL).';
+    }
+
+    return {
+      hasPreFixRepro: hasPreFail,
+      hasPostFixPass: hasPostPass,
+      isVerified: hasPreFail && hasPostPass,
+      attemptsCount: this.attempts.length,
+      lastAttempt,
+      details,
+    };
+  }
+}
+
+export interface PatchCandidate {
+  id: string;
+  description?: string;
+  targetFile: string;
+  content: string;
+}
+
+export interface RankedPatchEvaluation {
+  candidateId: string;
+  description?: string;
+  reproPassed: boolean;
+  regressionPassed: boolean;
+  diffSizeChars: number;
+  score: number;
+  feedback: string;
+}
+
+export interface RankedPatchReport {
+  evaluatedCount: number;
+  bestCandidate?: RankedPatchEvaluation;
+  rankings: RankedPatchEvaluation[];
 }
 
 /**

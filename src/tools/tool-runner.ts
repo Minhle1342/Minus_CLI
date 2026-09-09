@@ -57,8 +57,10 @@ export class ToolRunner {
     this.registry = registry;
     this.workspace = workspace;
     this.permissionManager = permissionManager;
-    this.executionGuard = executionGuard;
-    this.guardian = guardian || new ToolUseGuardian();
+    this.guardian = guardian || new ToolUseGuardian({ workspaceDir: this.workspace?.rootDir });
+    if (this.workspace?.rootDir && typeof this.guardian.setWorkspaceDir === 'function') {
+      this.guardian.setWorkspaceDir(this.workspace.rootDir);
+    }
 
     if (this.permissionManager && typeof (this.permissionManager as any).setWorkspaceRoot === 'function') {
       (this.permissionManager as any).setWorkspaceRoot(this.workspace.rootDir);

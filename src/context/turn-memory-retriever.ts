@@ -28,6 +28,16 @@ export interface TurnMemoryOptions {
   maxTokens?: number;
 }
 
+export interface AntiPatternRecord {
+  id: string;
+  triggerPattern: string;
+  failedApproach: string;
+  negativeConstraint: string;
+  taskClass?: string;
+  timestamp: string;
+  repetitionCount?: number;
+}
+
 /**
  * TurnMemoryRetriever - Hệ thống Lưu trữ & Truy hồi Chọn lọc Ngữ cảnh các Turn cũ (Selective Re-injection)
  * 
@@ -40,16 +50,20 @@ export interface TurnMemoryOptions {
  *    vượt ngưỡng an toàn (>= 0.55), giữ cho context window luôn tinh gọn và tránh lãng phí token.
  * 4. Memory-Augmented On-Demand Retrieval: Tự động lưu trữ và phục hồi các observation đã bị mask
  *    khi agent hoặc user nhắc lại đến đối tượng cũ.
+ * 5. Episodic Anti-Pattern Memory (Meta-Harness 2026): Tự động lưu trữ và tái nạp các bài học/ràng buộc phủ định
+ *    từ các thất bại trước đó để ngăn Agent lặp lại cùng một sai lầm.
  */
 export class TurnMemoryRetriever {
   readonly workspaceDir: string;
   readonly storageDir: string;
   readonly storageFilePath: string;
   readonly maskedStorageFilePath: string;
+  readonly antiPatternsFilePath: string;
 
   private miniSearch: MiniSearch<ArchivedTurnDocument>;
   private turnsMap: Map<string, ArchivedTurnDocument> = new Map();
   private maskedObservationsMap: Map<string, MaskedObservationRecord> = new Map();
+  private antiPatternsMap: Map<string, AntiPatternRecord> = new Map();
   private initialized = false;
 
   constructor(workspaceDir?: string) {
@@ -57,6 +71,7 @@ export class TurnMemoryRetriever {
     this.storageDir = path.join(this.workspaceDir, '.codingagent', 'memory');
     this.storageFilePath = path.join(this.storageDir, 'archived_turns.json');
     this.maskedStorageFilePath = path.join(this.storageDir, 'masked_observations.json');
+    this.antiPatternsFilePath = path.join(this.storageDir, 'anti_patterns.json');
 
     this.miniSearch = this.createMiniSearch();
   }
@@ -111,6 +126,18 @@ export class TurnMemoryRetriever {
       if (Array.isArray(maskedDocs) && maskedDocs.length > 0) {
         for (const doc of maskedDocs) {
           this.maskedObservationsMap.set(doc.id, doc);
+        }
+      }
+    } catch {
+      // File chưa tồn tại hoặc rỗng, bỏ qua
+    }
+
+    try {
+      const apRaw = await fs.readFile(this.antiPatternsFilePath, 'utf8');
+      const apDocs: AntiPatternRecord[] = JSON.parse(apRaw);
+      if (Array.isArray(apDocs) && apDocs.length > 0) {
+        for (const doc of apDocs) {
+          this.antiPatternsMap.set(doc.id, doc);
         }
       }
     } catch {
@@ -403,7 +430,93 @@ export class TurnMemoryRetriever {
   }
 
   /**
-   * Truy vấn và sinh trực tiếp đoạn ngữ cảnh re-injection nếu có turn hoặc observation liên quan
+   * Lưu trữ một bài học thất bại (Anti-Pattern) vào cơ sở dữ liệu trí nhớ dài hạn
+   */
+  async recordAntiPattern(record: AntiPatternRecord): Promise<void> {
+    await this.init();
+    if (!record || !record.id) return;
+
+    const existing = this.antiPatternsMap.get(record.id);
+    if (existing) {
+      existing.repetitionCount = (existing.repetitionCount || 1) + 1;
+      existing.timestamp = record.timestamp || new Date().toISOString();
+      if (record.negativeConstraint) existing.negativeConstraint = record.negativeConstraint;
+    } else {
+      this.antiPatternsMap.set(record.id, {
+        ...record,
+        repetitionCount: record.repetitionCount || 1,
+      });
+    }
+
+    // Giới hạn tối đa 50 anti-patterns gần nhất
+    if (this.antiPatternsMap.size > 50) {
+      const keys = Array.from(this.antiPatternsMap.keys());
+      const toRemove = keys.slice(0, keys.length - 50);
+      for (const k of toRemove) {
+        this.antiPatternsMap.delete(k);
+      }
+    }
+
+    try {
+      const all = Array.from(this.antiPatternsMap.values());
+      await fs.writeFile(this.antiPatternsFilePath, JSON.stringify(all, null, 2), 'utf8');
+    } catch {
+      // Bỏ qua lỗi ghi đĩa
+    }
+  }
+
+  /**
+   * Tìm kiếm các Anti-Pattern liên quan đến câu lệnh / ngữ cảnh hiện tại
+   */
+  retrieveRelevantAntiPatterns(query: string, limit: number = 2): AntiPatternRecord[] {
+    if (!query || this.antiPatternsMap.size === 0) return [];
+    const lowerQuery = query.toLowerCase();
+    const queryTokens = lowerQuery.split(/\s+/).filter((t) => t.length >= 3);
+    const scored: Array<{ record: AntiPatternRecord; score: number }> = [];
+
+    for (const record of this.antiPatternsMap.values()) {
+      let score = 0;
+      const trigger = (record.triggerPattern || '').toLowerCase();
+      const failed = (record.failedApproach || '').toLowerCase();
+      const constraint = (record.negativeConstraint || '').toLowerCase();
+
+      if (trigger && lowerQuery.includes(trigger)) score += 10;
+      for (const token of queryTokens) {
+        if (trigger.includes(token)) score += 3;
+        if (failed.includes(token)) score += 2;
+        if (constraint.includes(token)) score += 1;
+      }
+
+      if (score > 0) {
+        scored.push({ record, score });
+      }
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).map((s) => s.record);
+  }
+
+  /**
+   * Định dạng khối Anti-Patterns thành hướng dẫn ràng buộc phủ định
+   */
+  formatAntiPatternsForContext(patterns: AntiPatternRecord[]): string {
+    if (patterns.length === 0) return '';
+    const lines: string[] = [
+      `🚫 [EPISODIC ANTI-PATTERNS - AVOID THESE PAST MISTAKES]:`,
+      `> Lessons learned from past failed trajectories on this codebase:`,
+    ];
+    for (const p of patterns) {
+      lines.push(
+        `• Context: "${p.triggerPattern}" (Failed times: ${p.repetitionCount || 1})`,
+        `  - Flawed Approach: ${p.failedApproach}`,
+        `  - MANDATORY NEGATIVE CONSTRAINT: ${p.negativeConstraint}`
+      );
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Truy vấn và sinh trực tiếp đoạn ngữ cảnh re-injection nếu có turn, observation hoặc anti-pattern liên quan
    */
   async retrieveContextSnippet(query: string, options?: TurnMemoryOptions): Promise<string> {
     await this.init();
@@ -425,6 +538,12 @@ export class TurnMemoryRetriever {
       );
     }
 
+    // 3. Episodic anti-patterns (Bài học từ thất bại quá khứ)
+    const matchedAntiPatterns = this.retrieveRelevantAntiPatterns(query, 2);
+    if (matchedAntiPatterns.length > 0) {
+      snippets.push(this.formatAntiPatternsForContext(matchedAntiPatterns));
+    }
+
     return snippets.join('\n\n');
   }
 
@@ -434,5 +553,9 @@ export class TurnMemoryRetriever {
 
   getMaskedObservationCount(): number {
     return this.maskedObservationsMap.size;
+  }
+
+  getAntiPatternCount(): number {
+    return this.antiPatternsMap.size;
   }
 }

@@ -94,6 +94,105 @@ function isComprehensiveSubmissionSummary(value: string): boolean {
   return /[-*•\d]\.\s|###|\*\*|(?:\n\n)/.test(trimmed);
 }
 
+export interface RuntimeHarnessProfile {
+  profileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
+  enforceScratchTest: boolean;
+  criticStrictness: 'strict' | 'standard' | 'lenient';
+  compactionRatioBias: number;
+  guidance: string;
+}
+
+export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string): RuntimeHarnessProfile {
+  const isBugfixOrSecurity = taskClass === 'bugfix' || taskClass === 'security';
+  const isExploration = phase === 'explore' || taskClass === 'exploration' || taskClass === 'docs';
+  const isScaffoldOrFeature = taskClass === 'feature' || taskClass === 'scaffold' || taskClass === 'greenfield';
+
+  if (isBugfixOrSecurity) {
+    return {
+      profileName: 'strict-verification',
+      enforceScratchTest: true,
+      criticStrictness: 'strict',
+      compactionRatioBias: -0.05,
+      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Tác vụ nhạy cảm về sửa lỗi/bảo mật. Quy tắc Popperian Falsification và kiểm thử cô lập (scratch test) được kích hoạt tối đa. Không sửa mã sản phẩm trước khi có bằng chứng tái hiện lỗi rõ ràng.',
+    };
+  }
+
+  if (isExploration) {
+    return {
+      profileName: 'read-only-guard',
+      enforceScratchTest: false,
+      criticStrictness: 'standard',
+      compactionRatioBias: -0.05,
+      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Ưu tiên khảo sát cấu trúc, gọi các công cụ đọc/tìm kiếm và trích xuất ngữ cảnh. Hạn chế can thiệp trực tiếp vào mã nguồn trước khi có kế hoạch.',
+    };
+  }
+
+  if (isScaffoldOrFeature) {
+    return {
+      profileName: 'velocity-first',
+      enforceScratchTest: false,
+      criticStrictness: 'lenient',
+      compactionRatioBias: +0.05,
+      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Tác vụ dựng khung/tính năng mới. Ưu tiên tốc độ kiến tạo mã nguồn và nới lỏng kiểm tra blocker kiểm thử ở các bước ban đầu.',
+    };
+  }
+
+  return {
+    profileName: 'balanced-default',
+    enforceScratchTest: false,
+    criticStrictness: 'standard',
+    compactionRatioBias: 0,
+    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Vận hành cân bằng theo quy trình TDD chuẩn.',
+  };
+}
+
+export interface TaskComplexityAssessment {
+  score: number;
+  scaleFactor: number;
+  reason: string;
+}
+
+/**
+ * SWE-Reasoner Dynamic Test-Time Compute Allocation (Phase 2):
+ * Đánh giá độ phức tạp tác vụ C_task dựa trên yêu cầu, phân loại và dấu vết stack trace
+ * để tự động co giãn ngân sách bước (step budget) và token window tương ứng.
+ */
+export function calculateTaskComplexity(
+  userRequest: string,
+  taskClass?: string
+): TaskComplexityAssessment {
+  let score = 0.2;
+  const reasons: string[] = [];
+
+  if (taskClass === 'bugfix' || taskClass === 'security') {
+    score += 0.35;
+    reasons.push('Tác vụ sửa lỗi/bảo mật đòi hỏi suy luận sâu & kiểm chứng thực thi');
+  } else if (taskClass === 'feature' || taskClass === 'refactor') {
+    score += 0.25;
+    reasons.push('Tác vụ tính năng mới/tái cấu trúc yêu cầu mở rộng không gian tìm kiếm');
+  }
+
+  const hasStackTrace = /(?:(?:Error|Exception):|at\s+[\w$./\\-]+\s*\([^)]+:\d+:\d+\)|Traceback \(most recent call last\):)/i.test(userRequest);
+  if (hasStackTrace) {
+    score += 0.25;
+    reasons.push('Phát hiện dấu vết Stack Trace lỗi trong yêu cầu');
+  }
+
+  if (userRequest.length > 500) {
+    score += 0.15;
+    reasons.push('Yêu cầu mô tả chi tiết với nhiều ràng buộc');
+  }
+
+  score = Math.min(1.0, Math.max(0.1, score));
+  const scaleFactor = 1.0 + Math.round(score * 10) / 10;
+
+  return {
+    score,
+    scaleFactor,
+    reason: reasons.length > 0 ? reasons.join('; ') : 'Tác vụ tiêu chuẩn',
+  };
+}
+
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
  * 
@@ -623,7 +722,15 @@ export class AgentLoop {
     this.targetFilesModifiedInTurn.clear();
     this.stepDynamicSuffixes.clear();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
-    const effectiveMaxSteps = options?.maxSteps ?? this.maxSteps;
+    const baseMaxSteps = options?.maxSteps ?? this.maxSteps;
+    const initialTurnClassification = this.classificationEngine.classify({
+      request: turnUserRequest,
+      hasPlan: this.planManager.hasPlan(),
+    });
+    const taskComplexity = calculateTaskComplexity(turnUserRequest, initialTurnClassification.taskClass);
+    const effectiveMaxSteps = Number.isFinite(baseMaxSteps)
+      ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor))
+      : baseMaxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
     const isContinuationOrGoal = isGoal || Boolean(options?.isCircuitBreakerRetry) || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
@@ -928,7 +1035,7 @@ export class AgentLoop {
       });
       previousClassification = classification;
 
-      // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng cho ToolUseGuardian
+      // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng & Reproduction Verification cho ToolUseGuardian
       this.toolRunner.guardian.setPreMutationGateContext({
         isBugfixTask: classification.taskClass === 'bugfix',
         taskIntent: classification.taskClass,
@@ -938,6 +1045,10 @@ export class AgentLoop {
         hasValidatedHypothesis,
         targetFiles: this.hypothesisTracker.getValidatedHypotheses().flatMap((h) => h.targetFiles || []),
         hasSubmittedSolution,
+        reproductionStatus: {
+          hasPostFixPass: this.completionEvidenceGate.hasVerifiedPassingTest(session, turn),
+          hasPreFixRepro: false,
+        },
       });
 
       const adviceInfo = this.toolAdvisor.advise({
@@ -1190,9 +1301,13 @@ export class AgentLoop {
           });
         }
       }
-      // Selective Re-injection: Truy hồi các turn cũ hoặc observation đã bị mask nếu có độ tương đồng cao với query bước hiện tại
+      // Selective Re-injection: Truy hồi các turn cũ, observation đã bị mask hoặc anti-pattern nếu có độ tương đồng cao với query bước hiện tại
       let recalledTurnContext = '';
-      if (this.turnMemoryRetriever.getArchivedTurnCount() > 0 || this.turnMemoryRetriever.getMaskedObservationCount() > 0) {
+      if (
+        this.turnMemoryRetriever.getArchivedTurnCount() > 0 ||
+        this.turnMemoryRetriever.getMaskedObservationCount() > 0 ||
+        this.turnMemoryRetriever.getAntiPatternCount() > 0
+      ) {
         try {
           recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
             topK: 2,
@@ -1209,6 +1324,10 @@ export class AgentLoop {
         || this.llm?.modelName
         || this.llm?.constructor?.name
         || 'unknown';
+
+      // Solve-Time Dynamic Harness Routing (Adaptive Auto-Harness 2026)
+      const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
+
       // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
       const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
         taskClass: classification.taskClass,
@@ -1221,6 +1340,17 @@ export class AgentLoop {
       let strategicPivotGuidance: string | undefined;
       if (consecutiveFails >= 2) {
         strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining. 4. Filter out malformed or truncated elements and ensure array length matches expectations.`;
+      }
+      if (consecutiveFails >= 3) {
+        // Tự động đúc kết lỗi lặp lại thành Anti-Pattern lưu vào bộ nhớ dài hạn
+        this.turnMemoryRetriever.recordAntiPattern({
+          id: `ap-${turn}-${step}`,
+          triggerPattern: turnUserRequest.slice(0, 80),
+          failedApproach: `Consecutive failures (${consecutiveFails}) in phase ${classification.phase} while handling: ${turnUserRequest.slice(0, 60)}`,
+          negativeConstraint: 'Avoid repeated unverified edits; verify each hypothesis with isolated test reproduction first.',
+          taskClass: classification.taskClass,
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
       }
       const reflectionContext = [rawReflection, strategicPivotGuidance].filter(Boolean).join('\n\n');
 
@@ -1264,7 +1394,13 @@ export class AgentLoop {
 
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
-      const injectedAdditions = [hypothesisContext, hypothesisGuidance, paretoGateReminder, completionDirective].filter(Boolean);
+      const injectedAdditions = [
+        hypothesisContext,
+        hypothesisGuidance,
+        harnessProfile.guidance,
+        paretoGateReminder,
+        completionDirective,
+      ].filter(Boolean);
       if (injectedAdditions.length > 0) {
         dynamicExecutionContext = [dynamicExecutionContext, ...injectedAdditions].filter(Boolean).join('\n\n');
       }
@@ -2122,6 +2258,18 @@ export class AgentLoop {
             args: toolArgs,
             result: executionResult.result,
           });
+          if (progressDecision.message && typeof executionResult.result === 'object' && executionResult.result !== null) {
+            try {
+              if (Object.isExtensible(executionResult.result)) {
+                (executionResult.result as any).trajectoryIntervention = progressDecision.message;
+              } else {
+                executionResult.result = {
+                  ...executionResult.result,
+                  trajectoryIntervention: progressDecision.message,
+                };
+              }
+            } catch { }
+          }
 
           const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));

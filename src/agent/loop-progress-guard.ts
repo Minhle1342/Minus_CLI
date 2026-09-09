@@ -52,18 +52,28 @@ const GUARDED_INSPECTION_TOOLS = new Set([
   'get_diagnostics',
 ]);
 
+export interface TrajectoryOscillationStatus {
+  isOscillating: boolean;
+  message?: string;
+  affectedFiles?: string[];
+  oscillationType?: 'ping-pong' | 'hyper-mutation';
+}
+
 /**
  * Detects successful tool calls that repeatedly return the same observation,
- * as well as alternating Ping-Pong loops (e.g. submit_solution <-> run_command).
+ * as well as alternating Ping-Pong loops (e.g. submit_solution <-> run_command),
+ * and Semantic Oscillation in File Mutations (Trajectory Dysregulation - Life-Harness 2026).
  * State is intentionally scoped to one live turn and reset before each run.
  */
 export class LoopProgressGuard {
   private readonly seen = new Map<string, SeenObservation>();
   private readonly callHistory: Array<{ toolName: string; callFingerprint: string }> = [];
+  private readonly fileMutationHistory: Array<{ file: string; toolName: string; timestamp: number }> = [];
 
   reset(): void {
     this.seen.clear();
     this.callHistory.length = 0;
+    this.fileMutationHistory.length = 0;
   }
 
   observe(observation: ToolProgressObservation): ToolProgressDecision {
@@ -107,8 +117,46 @@ export class LoopProgressGuard {
     // Pure verification run_commands (e.g. npm test, npm run build, pytest) are treated as guarded observations rather than workspace mutations
     const isPureVerification = toolName === 'run_command' && isVerificationCommand(args.command);
 
+    // Ghi nhận verification command để giải tỏa cảnh báo hyper-mutation
+    if (isPureVerification) {
+      if (this.fileMutationHistory.length > 0) {
+        this.fileMutationHistory.push({
+          file: '__verification__',
+          toolName: 'run_command',
+          timestamp: Date.now(),
+        });
+      }
+    }
+
     if (WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || (toolName === 'run_command' && !isPureVerification)) {
-      this.reset();
+      // Ghi nhận file mutation vào quỹ đạo Trajectory
+      const rawFile = String(args.path || args.filePath || args.TargetFile || args.targetFile || args.file || '').trim();
+      if (rawFile) {
+        const normalizedFile = rawFile.replace(/\\/g, '/').toLowerCase();
+        this.fileMutationHistory.push({
+          file: normalizedFile,
+          toolName,
+          timestamp: Date.now(),
+        });
+        if (this.fileMutationHistory.length > 10) {
+          this.fileMutationHistory.shift();
+        }
+
+        // Kiểm tra Semantic Oscillation (Trajectory Dysregulation - Life-Harness 2026)
+        const osc = this.checkSemanticOscillation();
+        if (osc.isOscillating) {
+          this.seen.clear();
+          this.callHistory.length = 0;
+          return {
+            repetitionCount: 2,
+            message: osc.message,
+            shouldStop: false,
+          };
+        }
+      }
+
+      this.seen.clear();
+      this.callHistory.length = 0;
       return { repetitionCount: 0, shouldStop: false };
     }
 
@@ -129,6 +177,49 @@ export class LoopProgressGuard {
     }
 
     return this.recordObservation(callFingerprint, resultFingerprint, toolName, false);
+  }
+
+  /**
+   * Phát hiện dao động con thoi (Ping-Pong Mutation) và đột biến quá mức trên 1 file (Hyper-Mutation)
+   */
+  checkSemanticOscillation(): TrajectoryOscillationStatus {
+    const validMutations = this.fileMutationHistory.filter((m) => m.file !== '__verification__');
+    const len = validMutations.length;
+    if (len < 4) {
+      return { isOscillating: false };
+    }
+
+    // Mẫu 1: Ping-Pong Mutation giữa 2 file (A -> B -> A -> B)
+    const m0 = validMutations[len - 4].file;
+    const m1 = validMutations[len - 3].file;
+    const m2 = validMutations[len - 2].file;
+    const m3 = validMutations[len - 1].file;
+
+    if (m0 === m2 && m1 === m3 && m0 !== m1) {
+      return {
+        isOscillating: true,
+        affectedFiles: [m0, m1],
+        oscillationType: 'ping-pong',
+        message: `[TRAJECTORY DYSREGULATION INTERVENTION]: Phát hiện chu kỳ dao động con thoi (Ping-Pong Mutation) liên tục giữa "${m0}" và "${m1}". Dừng việc thay đổi mã thử-sai lặp đi lặp lại giữa hai file này. Hãy dừng lại, tạo bài kiểm thử cô lập trong scratch/ hoặc đọc lại yêu cầu gốc để khảo sát nguyên nhân cốt lõi trước khi tiếp tục.`,
+      };
+    }
+
+    // Mẫu 2: Hyper-Mutation trên 1 file đơn lẻ (4 lần sửa liên tiếp mà không có bước kiểm thử xác minh)
+    const lastFour = this.fileMutationHistory.slice(-4);
+    if (lastFour.length === 4 && !lastFour.some((m) => m.file === '__verification__')) {
+      const targetFile = lastFour[0].file;
+      const allSame = lastFour.every((m) => m.file === targetFile);
+      if (allSame) {
+        return {
+          isOscillating: true,
+          affectedFiles: [targetFile],
+          oscillationType: 'hyper-mutation',
+          message: `[TRAJECTORY DYSREGULATION INTERVENTION]: File "${targetFile}" đã bị can thiệp 4 lần liên tiếp mà chưa có bước kiểm thử xác nhận. Hãy dừng việc sửa mã mò mẫm; hãy chạy test hoặc tạo scratch test để xác minh hành vi trước khi sửa tiếp.`,
+        };
+      }
+    }
+
+    return { isOscillating: false };
   }
 
   private checkAlternatingLoop(): ToolProgressDecision {

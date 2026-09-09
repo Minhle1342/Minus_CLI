@@ -9,6 +9,7 @@
  * 5. Learning & Tool Reliability Tracking (3+ failures marks tool degraded with alternative suggestions)
  */
 
+import path from 'node:path';
 import { normalizeForMatching } from '../agent/final-answer-guard.js';
 
 export type ToolFailureCategory =
@@ -60,6 +61,12 @@ export interface PreMutationGateContext {
   targetFiles?: string[];
   isTrivialEdit?: boolean;
   hasSubmittedSolution?: boolean;
+  reproductionStatus?: {
+    isVerified?: boolean;
+    hasPreFixRepro?: boolean;
+    hasPostFixPass?: boolean;
+    enforceReproductionPass?: boolean;
+  };
 }
 
 export interface GuardianPreCallResult {
@@ -381,13 +388,26 @@ export class ToolUseGuardian {
   private readonly maxPayloadBytes: number;
   private readonly maxConsecutiveFailuresThreshold: number;
   private preMutationGateContext?: PreMutationGateContext;
+  private workspaceDir: string;
 
   constructor(options?: {
     maxPayloadBytes?: number;
     maxConsecutiveFailuresThreshold?: number;
+    workspaceDir?: string;
   }) {
     this.maxPayloadBytes = options?.maxPayloadBytes ?? 5 * 1024 * 1024; // 5MB
     this.maxConsecutiveFailuresThreshold = options?.maxConsecutiveFailuresThreshold ?? 3;
+    this.workspaceDir = options?.workspaceDir ? path.resolve(options.workspaceDir) : process.cwd();
+  }
+
+  setWorkspaceDir(dir: string): void {
+    if (dir) {
+      this.workspaceDir = path.resolve(dir);
+    }
+  }
+
+  getWorkspaceDir(): string {
+    return this.workspaceDir;
   }
 
   setPreMutationGateContext(ctx?: PreMutationGateContext): void {
@@ -466,6 +486,25 @@ export class ToolUseGuardian {
           error: errorMsg,
           errorCode: 'INVALID_SUMMARY_CONTENT',
           reason: errorMsg,
+        };
+      }
+
+      // SWE-Reasoner Execution-Verified Gating (Phase 1):
+      if (
+        gateContext?.reproductionStatus?.enforceReproductionPass &&
+        !gateContext.reproductionStatus.hasPostFixPass
+      ) {
+        const errorMsg = 'Tool "submit_solution" bị Chặn bởi Reproduction Verification Gate (SWE-Reasoner): Tác vụ sửa lỗi yêu cầu xác minh thực thi rằng bài test tái hiện lỗi đã vượt qua thành công sau khi sửa (post-fix PASS). Hãy thực thi bài test kiểm chứng trước khi nộp giải pháp.';
+        return {
+          valid: false,
+          allowed: false,
+          coercedArgs: args,
+          wasCoerced: false,
+          coercedKeys: [],
+          error: errorMsg,
+          errorCode: 'REPRODUCTION_VERIFICATION_REQUIRED',
+          reason: errorMsg,
+          suggestedAlternative: 'run_tests',
         };
       }
     }
@@ -653,13 +692,40 @@ export class ToolUseGuardian {
       if (coerced.filePaths && !actualSchema.properties.filePaths) delete coerced.filePaths;
       if (coerced.file_paths && !actualSchema.properties.file_paths) delete coerced.file_paths;
     }
-    if (actualSchema.properties.command && !('command' in coerced)) {
-      const cmdAlias = coerced.cmd;
-      if (typeof cmdAlias === 'string') {
-        coerced.command = cmdAlias;
+    // Top-level semantic aliases cho TargetFile, AbsolutePath, SearchPath, DirectoryPath
+    const pathKeys = ['TargetFile', 'AbsolutePath', 'SearchPath', 'DirectoryPath', 'path', 'filePath', 'targetFile'];
+    for (const field of pathKeys) {
+      if (actualSchema.properties[field] && !(field in coerced)) {
+        const candidate = coerced.TargetFile || coerced.AbsolutePath || coerced.targetFile || coerced.path || coerced.filePath || coerced.file_path || coerced.file || coerced.SearchPath || coerced.DirectoryPath;
+        if (typeof candidate === 'string') {
+          coerced[field] = candidate;
+          changed = true;
+          coercedKeys.push(field);
+        }
+      }
+    }
+    if (actualSchema.properties.CommandLine && !('CommandLine' in coerced)) {
+      const cmd = coerced.command || coerced.cmd || coerced.commandLine;
+      if (typeof cmd === 'string') {
+        coerced.CommandLine = cmd;
         changed = true;
-        coercedKeys.push('command');
-        if (coerced.cmd && !actualSchema.properties.cmd) delete coerced.cmd;
+        coercedKeys.push('CommandLine');
+      }
+    }
+    if (actualSchema.properties.Cwd && !('Cwd' in coerced)) {
+      const cwd = coerced.cwd || coerced.workingDir || coerced.workdir;
+      if (typeof cwd === 'string') {
+        coerced.Cwd = cwd;
+        changed = true;
+        coercedKeys.push('Cwd');
+      }
+    }
+    if (actualSchema.properties.WaitMsBeforeAsync && !('WaitMsBeforeAsync' in coerced)) {
+      const wait = coerced.waitMs || coerced.timeout || coerced.waitMsBeforeAsync;
+      if (wait !== undefined) {
+        coerced.WaitMsBeforeAsync = wait;
+        changed = true;
+        coercedKeys.push('WaitMsBeforeAsync');
       }
     }
 
@@ -668,8 +734,39 @@ export class ToolUseGuardian {
         let val = coerced[key];
         const targetType = (prop.type || '').toLowerCase();
 
-        // Chuỗi số thành number (ví dụ: "10" -> 10)
-        if ((targetType === 'number' || targetType === 'integer') && typeof val === 'string' && val.trim() !== '') {
+        // Chuỗi string: loại bỏ quotes bọc ngoài và tự động resolve relative path sang absolute path nếu cần
+        if (targetType === 'string' && typeof val === 'string') {
+          let cleaned = val.trim();
+          if (
+            (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+            (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+            (cleaned.startsWith('`') && cleaned.endsWith('`'))
+          ) {
+            cleaned = cleaned.slice(1, -1).trim();
+            if (cleaned !== val) {
+              val = cleaned;
+              coerced[key] = val;
+              changed = true;
+              coercedKeys.push(key);
+            }
+          }
+
+          // Safe Parameter Resolution (Life-Harness Action Realization):
+          // Nếu trường yêu cầu đường dẫn tuyệt đối hoặc là TargetFile/AbsolutePath/SearchPath/DirectoryPath/Cwd, tự động resolve
+          const isAbsoluteField = ['targetfile', 'absolutepath', 'searchpath', 'directorypath', 'cwd'].includes(key.toLowerCase())
+            || (typeof prop.description === 'string' && prop.description.toLowerCase().includes('must be an absolute path'));
+          if (isAbsoluteField && val.length > 0 && !path.isAbsolute(val) && !val.startsWith('http://') && !val.startsWith('https://')) {
+            const resolved = path.resolve(this.workspaceDir, val);
+            if (resolved !== val) {
+              coerced[key] = resolved;
+              changed = true;
+              coercedKeys.push(key);
+              val = resolved;
+            }
+          }
+        }
+        // Chuỗi số thành number (ví dụ: "10" -> 10, "5000" -> 5000)
+        else if ((targetType === 'number' || targetType === 'integer') && typeof val === 'string' && val.trim() !== '') {
           const num = Number(val);
           if (Number.isFinite(num)) {
             coerced[key] = num;

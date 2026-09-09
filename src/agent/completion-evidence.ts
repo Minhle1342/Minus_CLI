@@ -325,7 +325,8 @@ export class CompletionEvidenceGate {
 
       const blockerChecks: Array<{ claimed: boolean; supported: boolean; label: string }> = [
         {
-          claimed: /\b(?:test|tests|build|lint|typecheck|verification|kiem\s+thu|bien\s+dich)\b.{0,60}\b(?:that\s+bai|fail|failed|error|loi)\b/.test(normalized),
+          claimed: /\b(?:test|tests|build|lint|typecheck|verification|kiem\s+thu|bien\s+dich)\b.{0,60}\b(?:that\s+bai|fail|failed|error|loi|blocked|bi\s+chan)\b/.test(normalized)
+            || /\b(?:blocked|cannot|unable|khong the|bi chan|that bai)\b.{0,40}\b(?:test|tests|build|lint|typecheck|verification)\b/.test(normalized),
           supported: failures.some((item) => (item.toolName === 'run_command' && isVerificationCommand(item.args.command)) || item.toolName === 'run_test_suite'),
           label: 'verification command failure',
         },
@@ -379,13 +380,28 @@ export class CompletionEvidenceGate {
 
   private executionsForTurn(session: Session, turn?: number): ObservedExecution[] {
     const calls = new Map<string, SessionEvent>();
+    const unkeyedCalls: SessionEvent[] = [];
     const executions: ObservedExecution[] = [];
     for (const event of session.getEvents()) {
-      if (event.type === 'tool/call' && event.data.toolCallId && (turn === undefined || event.data.turn === turn)) {
-        calls.set(event.data.toolCallId, event);
+      if (event.type === 'tool/call' && (turn === undefined || event.data.turn === turn)) {
+        if (event.data.toolCallId) {
+          calls.set(event.data.toolCallId, event);
+        } else {
+          unkeyedCalls.push(event);
+        }
       }
-      if (event.type !== 'tool/result' || !event.data.toolCallId) continue;
-      const call = calls.get(event.data.toolCallId);
+      if (event.type !== 'tool/result') continue;
+      let call: SessionEvent | undefined;
+      if (event.data.toolCallId) {
+        call = calls.get(event.data.toolCallId);
+      } else {
+        const idx = unkeyedCalls.findIndex((c) => !event.data.toolName || c.data.toolName === event.data.toolName);
+        if (idx !== -1) {
+          call = unkeyedCalls.splice(idx, 1)[0];
+        } else if (unkeyedCalls.length > 0) {
+          call = unkeyedCalls.shift();
+        }
+      }
       if (!call) continue;
       const toolName = call.data.toolName || event.data.toolName || 'unknown_tool';
       const args = call.data.args || {};
@@ -400,5 +416,18 @@ export class CompletionEvidenceGate {
       });
     }
     return executions;
+  }
+
+  /**
+   * Kiểm tra xem trong turn (hoặc toàn bộ session) đã có ít nhất một lệnh kiểm thử thành công sau lần sửa code cuối cùng hay chưa.
+   */
+  hasVerifiedPassingTest(session: Session, turn?: number): boolean {
+    const executions = this.executionsForTurn(session, turn);
+    const successful = executions.filter((item) => !isToolResultFailure(item.payload));
+    const mutations = successful.filter((item) => item.kinds.includes('mutation'));
+    const latestMutationSeq = mutations.at(-1)?.result.seq ?? -1;
+    return successful.some(
+      (item) => item.kinds.includes('verification') && item.result.seq > latestMutationSeq,
+    );
   }
 }
