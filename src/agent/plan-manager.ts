@@ -519,6 +519,211 @@ export class PlanManager {
     return this.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status)).map(cloneTask);
   }
 
+  /**
+   * Lấy danh sách các tác vụ sẵn sàng thực thi song song ngay tại thời điểm hiện tại (Dynamic Runnable Batch).
+   * Tiêu chuẩn:
+   * 1. Trạng thái PENDING, dependencies đã thỏa mãn (COMPLETED hoặc SKIPPED), không có permission blocker.
+   * 2. Sắp xếp theo thứ tự ưu tiên (Priority -> Risk -> Cost -> ID).
+   * 3. Không có Read/Write hazard conflict với bất kỳ task nào đang IN_PROGRESS.
+   * 4. Không có Read/Write hazard conflict giữa các task cùng được chọn trong batch.
+   * 5. Giới hạn số lượng bởi maxConcurrency.
+   */
+  getRunnableParallelBatch(options?: {
+    maxConcurrency?: number;
+    allowImplicitParallel?: boolean;
+  }): PlanTask[] {
+    const maxConcurrency = Math.max(1, options?.maxConcurrency ?? 8);
+    const allowImplicit = options?.allowImplicitParallel ?? false;
+
+    // Lấy các task đang IN_PROGRESS
+    const activeTasks = this.tasks.filter((task) => task.status === 'IN_PROGRESS');
+
+    const selectedBatch: PlanTask[] = [];
+
+    // 1. Thêm các active tasks hợp lệ vào batch (tối đa maxConcurrency)
+    for (const active of activeTasks) {
+      if (selectedBatch.length >= maxConcurrency) break;
+      if (selectedBatch.every((member) => this.canRunConcurrently(member, active, allowImplicit))) {
+        selectedBatch.push(active);
+      }
+    }
+
+    // 2. Lọc các task PENDING đã thỏa mãn điều kiện tiên quyết
+    const candidates = this.tasks
+      .filter((task) => task.status === 'PENDING' && this.isDependencySatisfied(task) && !task.permissionBlocker)
+      .sort((left, right) => this.compareSchedulingPriority(left, right));
+
+    for (const candidate of candidates) {
+      if (selectedBatch.length >= maxConcurrency) break;
+
+      // Kiểm tra an toàn đối với tất cả các task đã được chọn vào batch
+      const conflict = selectedBatch.some((member) => !this.canRunConcurrently(member, candidate, allowImplicit));
+      if (conflict) continue;
+
+      selectedBatch.push(candidate);
+    }
+
+    return selectedBatch.map(cloneTask);
+  }
+
+  /**
+   * Chuyển đổi đồng thời một tập hợp task sẵn sàng sang trạng thái IN_PROGRESS (Atomic Parallel Start).
+   */
+  startParallelBatch(taskIds: number[], notes?: string): PlanTask[] {
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      throw new Error('startParallelBatch requires a non-empty array of task IDs.');
+    }
+
+    const uniqueIds = [...new Set(taskIds.map(Number))];
+    const targetTasks: PlanTask[] = [];
+
+    for (const id of uniqueIds) {
+      const task = this.tasks.find((t) => t.id === id);
+      if (!task) {
+        throw new Error(`Task #${id} not found in plan.`);
+      }
+      if (task.status !== 'PENDING' && task.status !== 'IN_PROGRESS') {
+        throw new Error(`Task #${id} is neither PENDING nor IN_PROGRESS (current status: ${task.status}).`);
+      }
+      if (!this.isDependencySatisfied(task)) {
+        throw new Error(`Task #${id} dependencies are not yet satisfied.`);
+      }
+      if (task.permissionBlocker) {
+        throw new Error(`Task #${id} is blocked by permission: ${task.permissionBlocker}`);
+      }
+      targetTasks.push(task);
+    }
+
+    // Xác thực an toàn đồng thời giữa các task trong batch
+    for (let i = 0; i < targetTasks.length; i++) {
+      for (let j = i + 1; j < targetTasks.length; j++) {
+        if (!this.canRunConcurrently(targetTasks[i], targetTasks[j], true)) {
+          throw new Error(`Tasks #${targetTasks[i].id} and #${targetTasks[j].id} have conflicting read/write sets or dependencies and cannot run concurrently.`);
+        }
+      }
+    }
+
+    // Chuyển đổi trạng thái sang IN_PROGRESS
+    const normalizedNotes = notes ? notes.trim() : undefined;
+    for (const task of targetTasks) {
+      task.status = 'IN_PROGRESS';
+      if (normalizedNotes) {
+        task.notes = task.notes ? `${task.notes}; ${normalizedNotes}` : normalizedNotes;
+      }
+    }
+
+    this.persist('parallel-batch-started');
+    return targetTasks.map(cloneTask);
+  }
+
+  /**
+   * Hoàn thành một task đang thực thi, ghi nhận bằng chứng (evidence) và kích hoạt mở khóa
+   * các task phụ thuộc tiếp theo (Join Barrier).
+   */
+  completeTaskWithEvidence(
+    taskId: number,
+    evidence?: Partial<PlanEvidence> | PlanEvidence,
+    notes?: string,
+  ): { completedTask: PlanTask; newlyReadyTaskIds: number[] } {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      throw new Error(`Task #${taskId} not found in plan.`);
+    }
+    if (task.status !== 'IN_PROGRESS') {
+      throw new Error(`Task #${taskId} must be IN_PROGRESS before it can be completed (current status: ${task.status}).`);
+    }
+
+    // Ghi nhận evidence nếu có
+    if (evidence) {
+      const recorded: PlanEvidence = {
+        toolName: evidence.toolName || 'dag-scheduler',
+        kind: evidence.kind || 'verification',
+        outcome: evidence.outcome || 'success',
+        summary: evidence.summary || `Task #${taskId} executed successfully`,
+        recordedAt: evidence.recordedAt || new Date().toISOString(),
+        seq: ++this.evidenceSeq,
+        ...(evidence.permissionRequestId ? { permissionRequestId: evidence.permissionRequestId } : {}),
+      };
+      task.evidence.push(recorded);
+    }
+
+    // Xác định các task có dependencies được thỏa mãn trước khi hoàn tất task hiện tại
+    const previouslySatisfiedIds = new Set(
+      this.tasks
+        .filter((t) => t.id !== taskId && this.isDependencySatisfied(t))
+        .map((t) => t.id),
+    );
+
+    task.status = 'COMPLETED';
+    if (notes) {
+      task.notes = notes.trim();
+    }
+
+    this.reconcileRunnableState();
+    this.persist('task-completed-with-evidence');
+
+    // Xác định các task mới được thỏa mãn đầy đủ dependencies sau khi task hiện tại hoàn tất (Join Barrier)
+    const newlyReadyTaskIds = this.tasks
+      .filter(
+        (t) =>
+          t.id !== taskId
+          && t.status !== 'COMPLETED'
+          && t.status !== 'SKIPPED'
+          && !previouslySatisfiedIds.has(t.id)
+          && this.isDependencySatisfied(t),
+      )
+      .map((t) => t.id);
+
+    return {
+      completedTask: cloneTask(task),
+      newlyReadyTaskIds,
+    };
+  }
+
+  /**
+   * Đánh dấu task thất bại và lan truyền trạng thái (Cascade Failure)
+   * đến tất cả các task hạ nguồn phụ thuộc vào nó theo DAG.
+   */
+  failTaskWithCascade(
+    taskId: number,
+    reason: string,
+    options?: { cascadeToDependents?: boolean },
+  ): { failedTaskId: number; cascadedTaskIds: number[] } {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) {
+      throw new Error(`Task #${taskId} not found in plan.`);
+    }
+
+    const normalizedReason = reason.trim() || 'Task execution failed.';
+    task.status = 'FAILED';
+    task.notes = normalizedReason;
+
+    const cascadedTaskIds: number[] = [];
+    const shouldCascade = options?.cascadeToDependents !== false;
+
+    if (shouldCascade) {
+      // Tìm tất cả các task hạ nguồn (transitive downstream dependents)
+      for (const candidate of this.tasks) {
+        if (candidate.id === taskId || candidate.status === 'COMPLETED' || candidate.status === 'SKIPPED') {
+          continue;
+        }
+        if (this.hasDependencyPath(taskId, candidate.id)) {
+          candidate.status = 'FAILED';
+          candidate.notes = `Cascaded failure: blocked by upstream failed task #${taskId}: ${normalizedReason}`;
+          cascadedTaskIds.push(candidate.id);
+        }
+      }
+    }
+
+    this.reconcileRunnableState();
+    this.persist('task-cascade-failed');
+
+    return {
+      failedTaskId: taskId,
+      cascadedTaskIds,
+    };
+  }
+
   /** Ép buộc hoặc cập nhật yêu cầu phải có Plan */
   setPlanRequired(required: boolean, reason?: string): void {
     this.planRequired = required;
@@ -726,8 +931,11 @@ export class PlanManager {
       || left.id - right.id;
   }
 
-  private canRunConcurrently(left: PlanTask, right: PlanTask): boolean {
-    if (!left.parallelizable || !right.parallelizable) return false;
+  canRunConcurrently(left: PlanTask, right: PlanTask, allowImplicitParallel = false): boolean {
+    const isParallelizable = allowImplicitParallel
+      ? (left.parallelizable !== false && right.parallelizable !== false)
+      : (left.parallelizable && right.parallelizable);
+    if (!isParallelizable) return false;
     if (this.hasDependencyPath(left.id, right.id) || this.hasDependencyPath(right.id, left.id)) return false;
     const conflicts = (writes: string[], accesses: string[]): boolean => writes.some((write) => accesses.some((access) => {
       const normalizedWrite = write.toLowerCase().replace(/\/$/, '');
@@ -806,7 +1014,7 @@ export class PlanManager {
     return roots.map((task) => longest(task.id)).sort((left, right) => right.score - left.score)[0]?.path || [];
   }
 
-  private getParallelBatches(): number[][] {
+  getParallelBatches(): number[][] {
     // Structural schedule (including completed nodes) is retained for audit and Dream learning.
     const remaining = new Map(this.tasks.map((task) => [task.id, task]));
     const satisfied = new Set<number>();

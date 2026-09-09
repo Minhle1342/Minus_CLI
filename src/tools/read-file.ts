@@ -17,29 +17,29 @@ import { nativeBatchReadFiles } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Công cụ đọc file & mã nguồn chính trong workspace (an toàn tuyệt đối, zero-latency, cung cấp contentHash để sửa code). Hỗ trợ: (1) Trích xuất trọn vẹn thân hàm/lớp qua "symbol" trong 1 bước duy nhất (1-shot); (2) Đọc theo khoảng dòng startLine/endLine (khuyến nghị đọc 150-300 dòng/lần, không chia vụn 50 dòng); (3) Đọc sơ đồ tổng quan với "outlineOnly: true".',
+  description: 'Công cụ đọc file & mã nguồn chính trong workspace (an toàn tuyệt đối, zero-latency, cung cấp contentHash để sửa code). Hỗ trợ: (1) Trích xuất trọn vẹn thân hàm/lớp qua "symbol" trong 1 bước duy nhất (1-shot); (2) Đọc theo khoảng dòng startLine/endLine (khuyến nghị 150-300 dòng/lần, tối đa 800 dòng/lần để bảo vệ context); (3) Đọc sơ đồ tổng quan với "outlineOnly: true". Hỗ trợ đọc các file mã nguồn lớn (> 200KB như test-suite, bundles) linh hoạt bằng cách truyền startLine/endLine, outlineOnly hoặc symbol mà không bị lỗi tràn token.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới file cần đọc (ví dụ: "package.json" hoặc "src/index.ts")',
+        description: 'Đường dẫn tương đối tới file cần đọc (ví dụ: "package.json", "src/index.ts", "src/test-suite.ts")',
       },
       startLine: {
         type: Type.INTEGER,
-        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần để nắm trọn ngữ cảnh.',
+        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần. Tối đa 800 dòng/lần gọi để bảo vệ context token.',
       },
       endLine: {
         type: Type.INTEGER,
-        description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn).',
+        description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn). Nếu bỏ trống trên file lớn (>350 dòng), mặc định đọc 250 dòng tiếp theo.',
       },
       outlineOnly: {
         type: Type.BOOLEAN,
-        description: 'Nếu true, chỉ trả về sơ đồ Outline các hàm, lớp, interface kèm số dòng để tiết kiệm token.',
+        description: 'Nếu true, chỉ trả về sơ đồ Outline các hàm, lớp, interface kèm số dòng để tiết kiệm token (hoạt động tốt trên cả file lớn > 200KB).',
       },
       symbol: {
         type: Type.STRING,
-        description: 'ƯU TIÊN DÙNG: Tên hàm, lớp, hoặc interface cụ thể cần đọc phần thân (ví dụ: "runQueryPipeline", "AgentLoop"). Tool sẽ tự động trích xuất 100% trọn vẹn thân symbol qua AST trong 1 bước duy nhất mà không cần đoán dải dòng.',
+        description: 'ƯU TIÊN DÙNG: Tên hàm, lớp, hoặc interface cụ thể cần đọc phần thân (ví dụ: "runQueryPipeline", "AgentLoop", "runSuite1"). Tool sẽ tự động trích xuất 100% trọn vẹn thân symbol qua AST mà không cần đoán dải dòng (hoạt động tốt trên cả file lớn > 200KB).',
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,
@@ -62,8 +62,26 @@ export const readFileTool: ToolDefinition = {
         return { path: rawPath, error: `Đường dẫn "${rawPath}" là thư mục, không phải file.` };
       }
 
-      // Giới hạn kích thước file đọc để tránh tràn context LLM (tối đa 200KB)
-      if (stat.size > 200 * 1024) {
+      // Kiểm tra xem LLM có truyền phạm vi cụ thể (scoped read) hay không
+      const hasExplicitScope = args.startLine !== undefined
+        || args.endLine !== undefined
+        || Boolean(args.symbol)
+        || Boolean(args.outlineOnly);
+
+      // Ngưỡng cứng tuyệt đối 10MB để bảo vệ bộ nhớ hệ thống (tránh OOM đối với file nhị phân / log khổng lồ)
+      const MAX_SYSTEM_FILE_SIZE = 10 * 1024 * 1024;
+      if (stat.size > MAX_SYSTEM_FILE_SIZE) {
+        return {
+          path: rawPath,
+          error: `File quá lớn (${Math.round(stat.size / (1024 * 1024))}MB > 10MB). Không thể mở trực tiếp bằng read_file.`,
+          errorCode: 'FILE_EXCEEDS_SYSTEM_LIMIT',
+          fileSizeBytes: stat.size,
+          suggestion: 'Hãy sử dụng run_command với các tiện ích CLI như ripgrep, head, tail hoặc sed để trích xuất dữ liệu từ file ngoại cỡ này.',
+        };
+      }
+
+      // Giới hạn kích thước khi đọc TOÀN BỘ file mà không chỉ định phạm vi (unscoped read) để chống tràn context token LLM (tối đa 200KB)
+      if (!hasExplicitScope && stat.size > 200 * 1024) {
         return {
           path: rawPath,
           error: `File quá lớn (${Math.round(stat.size / 1024)}KB). Giới hạn tối đa mỗi lần đọc toàn bộ là 200KB để chống tràn context token.`,
@@ -76,7 +94,9 @@ export const readFileTool: ToolDefinition = {
       let fileContent: string;
       let contentHash: string;
 
-      const nativeBatch = nativeBatchReadFiles(workspace.rootDir, [rawPath], 200 * 1024);
+      // Nếu file <= 200KB, ưu tiên đọc siêu tốc qua nativeBatchReadFiles
+      const canUseNativeBatch = stat.size <= 200 * 1024;
+      const nativeBatch = canUseNativeBatch ? nativeBatchReadFiles(workspace.rootDir, [rawPath], 200 * 1024) : null;
       if (nativeBatch && nativeBatch[0] && nativeBatch[0].content !== null && nativeBatch[0].content !== undefined) {
         fileContent = nativeBatch[0].content;
         contentHash = nativeBatch[0].hash || `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
@@ -90,12 +110,18 @@ export const readFileTool: ToolDefinition = {
       // 1. Chế độ Outline Only (AST Semantic Outline)
       if (args.outlineOnly) {
         const outline = SemanticSlicer.extractOutline(rawPath, fileContent);
+        const MAX_OUTLINE_SYMBOLS = 100;
+        const isCapped = outline.symbols.length > MAX_OUTLINE_SYMBOLS;
+        const symbols = isCapped ? outline.symbols.slice(0, MAX_OUTLINE_SYMBOLS) : outline.symbols;
         return {
           path: rawPath,
           totalLines: outline.totalLines,
           symbolsCount: outline.symbols.length,
           summary: outline.summary,
-          symbols: outline.symbols,
+          symbols,
+          notice: isCapped
+            ? `[OUTLINE CAPPED]: File có ${outline.symbols.length} symbols. Đã giới hạn hiển thị ${MAX_OUTLINE_SYMBOLS} symbols đầu tiên để tối ưu context token.`
+            : undefined,
           contentHash,
           eol,
         };
@@ -103,7 +129,8 @@ export const readFileTool: ToolDefinition = {
 
       // 2. Chế độ Symbol Extraction (Trích xuất theo tên hàm/lớp)
       if (args.symbol) {
-        const sliced = SemanticSlicer.sliceSymbol(fileContent, String(args.symbol).trim());
+        const symbolName = String(args.symbol).trim();
+        const sliced = SemanticSlicer.sliceSymbol(fileContent, symbolName);
         if (sliced.found && sliced.code) {
           const lines = sliced.code.split('\n');
           const start = sliced.startLine || 1;
@@ -112,7 +139,7 @@ export const readFileTool: ToolDefinition = {
             : sliced.code;
           return {
             path: rawPath,
-            symbol: args.symbol,
+            symbol: symbolName,
             startLine: sliced.startLine,
             endLine: sliced.endLine,
             content,
@@ -121,9 +148,15 @@ export const readFileTool: ToolDefinition = {
             lineNumbersIncluded: includeLineNumbers,
           };
         } else {
+          // Khi không tìm thấy symbol, trích xuất outline để gợi ý các symbol khả dụng cho LLM tự phục hồi (Tool Design Error Recovery)
+          const outline = SemanticSlicer.extractOutline(rawPath, fileContent);
+          const availableSymbols = outline.symbols.slice(0, 25).map((s) => `${s.kind} ${s.name} (L${s.startLine})`);
           return {
             path: rawPath,
-            warning: `Không tìm thấy symbol "${args.symbol}" trong file. Đang trả về theo khoảng dòng bình thường.`,
+            warning: `Không tìm thấy symbol "${symbolName}" trong file "${rawPath}".`,
+            totalSymbolsFound: outline.symbols.length,
+            availableSymbolsSample: availableSymbols,
+            suggestion: 'Hãy sử dụng một trong các symbols khả dụng bên trên, hoặc sử dụng "outlineOnly: true" hoặc "startLine/endLine" để đọc.',
           };
         }
       }
@@ -135,15 +168,38 @@ export const readFileTool: ToolDefinition = {
       // Nếu file lớn (> 350 dòng) và không chỉ định khoảng dòng/symbol, tự động kích hoạt Windowing + AST Outline (SWE-agent & Cursor standard)
       const isUnscopedLargeFile = args.startLine === undefined && args.endLine === undefined && !args.symbol && !args.outlineOnly && totalLines > 350;
       const startLine = Math.max(1, Number(args.startLine) || 1);
-      const endLine = isUnscopedLargeFile
-        ? Math.min(120, totalLines)
-        : Math.min(totalLines, Number(args.endLine) || totalLines);
 
       if (startLine > totalLines) {
         return {
           path: rawPath,
           error: `startLine (${startLine}) vượt quá tổng số dòng của file (${totalLines}).`,
         };
+      }
+
+      // Xác định endLine với các Guardrail bảo vệ context:
+      // - Nếu unscoped large file: lấy 120 dòng đầu
+      // - Nếu có startLine nhưng không có endLine trên file lớn (>350 dòng): tự động gán cửa sổ 250 dòng
+      // - Nếu dải dòng > 800: giới hạn tối đa 800 dòng/lần gọi
+      const MAX_LINE_RANGE = 800;
+      let endLine: number;
+      let autoWindowNotice: string | undefined;
+
+      if (isUnscopedLargeFile) {
+        endLine = Math.min(120, totalLines);
+      } else if (args.endLine !== undefined) {
+        const requestedEndLine = Math.min(totalLines, Number(args.endLine) || totalLines);
+        if (requestedEndLine - startLine + 1 > MAX_LINE_RANGE) {
+          endLine = startLine + MAX_LINE_RANGE - 1;
+          autoWindowNotice = `[MAX_RANGE_CAPPED]: Khoảng dòng yêu cầu vượt quá giới hạn an toàn (${MAX_LINE_RANGE} dòng). Đã tự động giới hạn từ dòng ${startLine} đến ${endLine} để chống tràn context token.`;
+        } else {
+          endLine = requestedEndLine;
+        }
+      } else if (totalLines > 350) {
+        // Có startLine nhưng không truyền endLine trên file lớn
+        endLine = Math.min(totalLines, startLine + 249);
+        autoWindowNotice = `[AUTO_WINDOW_APPLIED]: Do không chỉ định endLine trên file lớn (${totalLines} dòng), hệ thống tự động đọc 250 dòng (L${startLine}-L${endLine}) để bảo vệ context window.`;
+      } else {
+        endLine = totalLines;
       }
 
       const selectedLines = lines.slice(startLine - 1, endLine);
@@ -169,7 +225,7 @@ export const readFileTool: ToolDefinition = {
         outline: outline?.symbols?.slice(0, 30),
         notice: isUnscopedLargeFile
           ? `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). Lines 1-120 and AST Symbol Outline are shown above to protect context window. To read other sections, pass startLine/endLine or symbol parameter.`
-          : undefined,
+          : autoWindowNotice,
       };
     } catch (err: any) {
       if (err.code === 'ENOENT' || String(err.message).includes('ENOENT')) {

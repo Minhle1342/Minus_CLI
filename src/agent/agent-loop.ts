@@ -32,7 +32,7 @@ import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, type FinalAnswerGuardDecision } from './final-answer-guard.js';
-import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from '../tools/subagent-tools.js';
+import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
@@ -413,6 +413,7 @@ export class AgentLoop {
       (session) => this.persistSession(session),
     );
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
+    this.orchestrator.bindPlanManager(this.planManager);
     if (options?.enableSubagents !== false) {
       this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
       this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
@@ -423,6 +424,7 @@ export class AgentLoop {
       this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
       this.toolRegistry.register(createBrainstormDesignTool());
       this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
+      this.toolRegistry.register(createScheduleDagParallelTool(this.orchestrator));
     }
 
     if (typeof (this.toolRegistry as any).registerGameTools === 'function') {

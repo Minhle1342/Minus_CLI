@@ -58,7 +58,7 @@ import {
   normalizePresetTier,
 } from './llm/token-config.js';
 import { ContextCompactor } from './agent/context-compactor.js';
-import { PlanManager } from './agent/plan-manager.js';
+import { PlanManager, type PlanTask } from './agent/plan-manager.js';
 import { createPlanTool } from './tools/plan-tools.js';
 import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js';
 import { GoalManager } from './agent/goal-manager.js';
@@ -143,10 +143,10 @@ import { AgentEventBus } from './agent/agent-event-bus.js';
 import { AgentOrchestrator, computeTaskSimilarity, FileConcurrencyLockManager, ORCHESTRATOR_NOT_BLOCKS } from './agent/agent-orchestrator.js';
 import { SubagentManager } from './agent/subagent-manager.js';
 import { AgentRegistry } from './agent/agent-registry.js';
-import { getBenchmarkSpecialists, findSpecialistForBenchmark } from './agent/benchmark-agents.js';
+import { getBenchmarkSpecialists, findSpecialistForBenchmark, registerBenchmarkSpecialists } from './agent/benchmark-agents.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './tools/shared-context-tools.js';
 import { createPublishAgentEventTool } from './tools/agent-event-tools.js';
-import { createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from './tools/subagent-tools.js';
+import { createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from './tools/subagent-tools.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
 import { CodebaseIntelligenceService, isUtilityNoiseSymbol } from './tools/codebase-intelligence.js';
 import { enrichLocationWithSnippet } from './lsp/lsp-manager.js';
@@ -2326,6 +2326,29 @@ export async function calculateTotal(items: any[]): Promise<number> {
   // Test read_file với symbol: 'AgentLoop'
   const readSymbolRes = await readFileTool.execute({ path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' }, workspace);
   assert(readSymbolRes.content?.includes('class AgentLoop') === true, 'read_file symbol trích xuất thành công class AgentLoop');
+
+  // Test read_file tối ưu hóa trên File lớn > 200KB (src/test-suite.ts ~501KB)
+  const readUnscopedLarge = await readFileTool.execute({ path: 'src/test-suite.ts' }, workspace);
+  assert(readUnscopedLarge.errorCode === 'FILE_TOO_LARGE', 'read_file từ chối đọc unscoped trên file > 200KB để chống tràn token');
+  assert(typeof readUnscopedLarge.suggestion === 'string', 'read_file cung cấp suggestion hướng dẫn LLM cách đọc từng phần');
+
+  const readRangeLarge = await readFileTool.execute({ path: 'src/test-suite.ts', startLine: 1, endLine: 30 }, workspace);
+  assert(readRangeLarge.startLine === 1 && readRangeLarge.endLine === 30, 'read_file hỗ trợ đọc dải dòng trên file lớn > 200KB');
+  assert(readRangeLarge.content.includes('import fs from'), 'Nội dung đọc dải dòng trên file lớn chính xác');
+
+  const readOutlineLarge = await readFileTool.execute({ path: 'src/test-suite.ts', outlineOnly: true }, workspace);
+  assert(readOutlineLarge.symbolsCount > 0, 'read_file outlineOnly hoạt động mượt mà trên file lớn 500KB');
+  assert(Array.isArray(readOutlineLarge.symbols), 'Trả về danh sách symbols của file lớn');
+
+  const readSymbolLarge = await readFileTool.execute({ path: 'src/test-suite.ts', symbol: 'runUnitTests' }, workspace);
+  assert(readSymbolLarge.symbol === 'runUnitTests' && readSymbolLarge.content?.includes('async function runUnitTests'), 'read_file trích xuất chính xác symbol từ file lớn > 200KB');
+
+  const readSymbolNotFound = await readFileTool.execute({ path: 'src/test-suite.ts', symbol: 'nonExistentTestSuiteSymbol' }, workspace);
+  assert(readSymbolNotFound.warning && Array.isArray(readSymbolNotFound.availableSymbolsSample), 'read_file gợi ý danh sách symbols khả dụng khi symbol không tồn tại để LLM tự phục hồi');
+
+  const readRangeCapped = await readFileTool.execute({ path: 'src/test-suite.ts', startLine: 100, endLine: 1500 }, workspace);
+  assert(readRangeCapped.endLine === 899, 'read_file tự động giới hạn 800 dòng mỗi lần đọc để bảo vệ context window');
+  assert(typeof readRangeCapped.notice === 'string' && readRangeCapped.notice.includes('[MAX_RANGE_CAPPED]'), 'read_file thông báo MAX_RANGE_CAPPED rõ ràng');
 
   console.log('\n========================================');
   console.log('🧪 12. KIỂM THỬ NÂNG CAO: MULTI-TURN COMPACTION & TOKEN BUDGET');
@@ -8648,6 +8671,347 @@ Always write tests first!`;
   );
 
   await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => {});
+
+  // =========================================================================
+  // 🧪 55. KIỂM THỬ ĐỒ THỊ ĐA TÁC TỬ DAG PARALLEL SCHEDULER (PlanManager & AgentOrchestrator)
+  // =========================================================================
+  console.log('\n========================================');
+  console.log('🧪 55. KIỂM THỬ ĐỒ THỊ ĐA TÁC TỬ DAG PARALLEL SCHEDULER (PlanManager & AgentOrchestrator)');
+  console.log('========================================');
+
+  // 1. Kiểm thử Dynamic DAG Runnable Batch (Fork Pattern & Join Barrier)
+  const dagPlanMgr = new PlanManager();
+  dagPlanMgr.createPlan([
+    {
+      id: 1,
+      title: 'Analyze Architecture & Interfaces',
+      acceptanceCriteria: 'Produce architecture topology',
+      dependsOn: [],
+      writeSet: [],
+      parallelizable: true,
+      priority: 10,
+    },
+    {
+      id: 2,
+      title: 'Synthesize Database Layer',
+      acceptanceCriteria: 'Implement repository and db client',
+      dependsOn: [1],
+      writeSet: ['src/db/repository.ts'],
+      parallelizable: true,
+      priority: 8,
+    },
+    {
+      id: 3,
+      title: 'Synthesize API Router Layer',
+      acceptanceCriteria: 'Implement express endpoints',
+      dependsOn: [1],
+      writeSet: ['src/api/routes.ts'],
+      parallelizable: true,
+      priority: 7,
+    },
+    {
+      id: 4,
+      title: 'Integrate & Verify End-to-End System',
+      acceptanceCriteria: 'Run test suite verification',
+      dependsOn: [2, 3],
+      writeSet: ['src/app.ts'],
+      parallelizable: false,
+      priority: 9,
+    },
+  ]);
+
+  // Kiểm tra Task 1 là runnable đầu tiên
+  const initialBatch = dagPlanMgr.getRunnableParallelBatch({ maxConcurrency: 4 });
+  assert(initialBatch.length === 1 && initialBatch[0].id === 1, 'Task #1 là root duy nhất runnable ban đầu');
+
+  // Bắt đầu Task 1
+  dagPlanMgr.startParallelBatch([1]);
+  assert(dagPlanMgr.getActiveTasks().length === 1 && dagPlanMgr.getActiveTasks()[0].id === 1, 'Task #1 chuyển sang IN_PROGRESS');
+
+  // Hoàn tất Task 1 với evidence -> Mở khóa Task 2 & Task 3 (Fork)
+  const completeT1 = dagPlanMgr.completeTaskWithEvidence(1, {
+    toolName: 'read_file',
+    kind: 'inspection',
+    outcome: 'success',
+    summary: 'Architecture analyzed',
+  });
+  assert(
+    completeT1.newlyReadyTaskIds.includes(2) && completeT1.newlyReadyTaskIds.includes(3),
+    'Hoàn tất Task #1 lập tức mở khóa Task #2 và Task #3',
+  );
+
+  // Fork: Lấy runnable batch gồm cả Task 2 và Task 3 chạy song song
+  const forkBatch = dagPlanMgr.getRunnableParallelBatch({ maxConcurrency: 4 });
+  assert(forkBatch.length === 2, 'DAG Parallel Scheduler phát hiện đúng 2 task độc lập chạy song song');
+  assert(
+    forkBatch.some((t) => t.id === 2) && forkBatch.some((t) => t.id === 3),
+    'Batch song song chứa cả Task #2 và Task #3',
+  );
+  assert(
+    dagPlanMgr.canRunConcurrently(forkBatch[0], forkBatch[1]),
+    'Hai task có writeSet độc lập được xác nhận canRunConcurrently = true',
+  );
+
+  // Bắt đầu đồng thời cả 2 task (Atomic Parallel Start)
+  dagPlanMgr.startParallelBatch([2, 3]);
+  assert(dagPlanMgr.getActiveTasks().length === 2, 'Cả Task #2 và Task #3 đều đồng thời ở trạng thái IN_PROGRESS');
+
+  // Join Barrier: Hoàn tất Task 2 nhưng chưa xong Task 3 -> Task 4 chưa được mở khóa
+  const completeT2 = dagPlanMgr.completeTaskWithEvidence(2, {
+    toolName: 'write_file',
+    kind: 'mutation',
+    outcome: 'success',
+  });
+  assert(
+    !completeT2.newlyReadyTaskIds.includes(4),
+    'Join Barrier giữ Task #4 ở trạng thái chờ khi Task #3 chưa hoàn tất',
+  );
+  assert(dagPlanMgr.getReadyTasks().length === 0, 'Chưa có task nào ready cho tới khi tất cả dependency hoàn tất');
+
+  // Hoàn tất Task 3 -> Join Barrier mở khóa Task 4
+  const completeT3 = dagPlanMgr.completeTaskWithEvidence(3, {
+    toolName: 'write_file',
+    kind: 'mutation',
+    outcome: 'success',
+  });
+  assert(
+    completeT3.newlyReadyTaskIds.includes(4),
+    'Join Barrier mở khóa Task #4 ngay khi Task #3 hoàn tất',
+  );
+
+  // Hoàn tất Task 4
+  dagPlanMgr.startParallelBatch([4]);
+  dagPlanMgr.completeTaskWithEvidence(4, {
+    toolName: 'run_command',
+    kind: 'verification',
+    outcome: 'success',
+  });
+  assert(dagPlanMgr.isAllTasksCompleted(), 'Toàn bộ 4 nodes trong đồ thị DAG đã hoàn tất thành công');
+
+  // 2. Kiểm thử Hazard & Lock Collision Prevention (Write-Write Conflict Isolation)
+  const conflictPlanMgr = new PlanManager();
+  conflictPlanMgr.createPlan([
+    {
+      id: 10,
+      title: 'Update Shared Config Schema',
+      acceptanceCriteria: 'Modify config types',
+      dependsOn: [],
+      writeSet: ['src/config.ts'],
+      parallelizable: true,
+      priority: 5,
+    },
+    {
+      id: 11,
+      title: 'Inject Secret Flags into Config',
+      acceptanceCriteria: 'Modify config values',
+      dependsOn: [],
+      writeSet: ['src/config.ts'],
+      parallelizable: true,
+      priority: 2,
+    },
+  ]);
+
+  const tasksConflict = conflictPlanMgr.getTasks();
+  assert(
+    !conflictPlanMgr.canRunConcurrently(tasksConflict[0], tasksConflict[1]),
+    'Hai task có chung file trong writeSet bị chặn song song hóa (canRunConcurrently = false)',
+  );
+
+  const safeConflictBatch = conflictPlanMgr.getRunnableParallelBatch({ maxConcurrency: 4 });
+  assert(
+    safeConflictBatch.length === 1 && safeConflictBatch[0].id === 10,
+    'getRunnableParallelBatch chỉ chọn task có độ ưu tiên cao hơn, ngăn chặn xung đột ghi đè đồng thời',
+  );
+
+  // 3. Kiểm thử Cascade Failure Propagation
+  const cascadePlanMgr = new PlanManager();
+  cascadePlanMgr.createPlan([
+    { id: 20, title: 'Compile Core Subsystem', acceptanceCriteria: 'Build core', dependsOn: [] },
+    { id: 21, title: 'Build Plugins Module', acceptanceCriteria: 'Build plugins', dependsOn: [20] },
+    { id: 22, title: 'Deploy Web Service', acceptanceCriteria: 'Deploy build', dependsOn: [21] },
+  ]);
+
+  cascadePlanMgr.startParallelBatch([20]);
+  const cascadeRes = cascadePlanMgr.failTaskWithCascade(20, 'TypeScript Syntax Error in core module');
+  assert(cascadeRes.failedTaskId === 20, 'Task #20 bị đánh dấu FAILED');
+  assert(
+    cascadeRes.cascadedTaskIds.includes(21) && cascadeRes.cascadedTaskIds.includes(22),
+    'Cascade Failure lan truyền chính xác đến cả Task #21 và Task #22 phụ thuộc',
+  );
+  const tasksAfterCascade = cascadePlanMgr.getTasks();
+  assert(
+    Boolean(tasksAfterCascade.find((t) => t.id === 21)?.notes?.includes('Cascaded failure')),
+    'Task #21 ghi nhận lý do thất bại dây chuyền',
+  );
+  assert(
+    Boolean(tasksAfterCascade.find((t) => t.id === 22)?.notes?.includes('Cascaded failure')),
+    'Task #22 ghi nhận lý do thất bại dây chuyền',
+  );
+  assert(cascadePlanMgr.isAllTasksCompleted() === false, 'Kế hoạch không hoàn thành khi có lỗi thất bại');
+
+  // 4. Kiểm thử AgentOrchestrator Binding & Specialist Capability Inference
+  const orchRegistry = new AgentRegistry();
+  registerBenchmarkSpecialists(orchRegistry);
+  const orchEventBus = new AgentEventBus();
+  const orchestrator55 = new AgentOrchestrator(orchRegistry);
+
+  orchestrator55.bindPlanManager(conflictPlanMgr);
+  orchestrator55.bindEventBus(orchEventBus);
+
+  assert(orchestrator55.getPlanManager() === conflictPlanMgr, 'AgentOrchestrator bindPlanManager thành công');
+  assert(orchestrator55.getEventBus() === orchEventBus, 'AgentOrchestrator bindEventBus thành công');
+
+  const mathTask: PlanTask = {
+    id: 30,
+    title: 'Solve dynamic programming complexity proof',
+    acceptanceCriteria: 'Verify algorithmic invariant',
+    status: 'PENDING',
+    evidence: [],
+    dependsOn: [],
+    readSet: [],
+    writeSet: [],
+    symbols: ['computeMatrixDP'],
+    parallelizable: true,
+    priority: 1,
+    estimatedCost: 1,
+    risk: 'LOW',
+    lastMutationSeq: 0,
+  };
+  const mathCaps = orchestrator55.inferTaskCapabilities(mathTask);
+  assert(mathCaps.includes('reasoning') && mathCaps.includes('math'), 'inferTaskCapabilities suy luận chính xác reasoning/math');
+
+  const fimTask: PlanTask = {
+    id: 31,
+    title: 'Surgical patch infill function body',
+    acceptanceCriteria: 'Fill-in-the-middle patch',
+    status: 'PENDING',
+    evidence: [],
+    dependsOn: [],
+    readSet: [],
+    writeSet: ['src/utils.ts'],
+    symbols: [],
+    parallelizable: true,
+    priority: 1,
+    estimatedCost: 1,
+    risk: 'LOW',
+    lastMutationSeq: 0,
+  };
+  const fimCaps = orchestrator55.inferTaskCapabilities(fimTask);
+  assert(fimCaps.includes('fim') && fimCaps.includes('surgical-patch'), 'inferTaskCapabilities suy luận chính xác fim/surgical-patch');
+
+  // 5. Kiểm thử scheduleNextDagBatch & EventBus Dispatched Notification
+  const dispatchPlanMgr = new PlanManager();
+  dispatchPlanMgr.createPlan([
+    {
+      id: 40,
+      title: 'Implement Clean Code Synthesis',
+      acceptanceCriteria: 'Synthesize module',
+      dependsOn: [],
+      writeSet: ['src/clean.ts'],
+      parallelizable: true,
+    },
+    {
+      id: 41,
+      title: 'Verify Instruction Following Schema',
+      acceptanceCriteria: 'Check compliance',
+      dependsOn: [],
+      writeSet: ['src/compliance.ts'],
+      parallelizable: true,
+    },
+  ]);
+  orchestrator55.bindPlanManager(dispatchPlanMgr);
+
+  const receivedEvents: string[] = [];
+  orchEventBus.subscribe('dag:task_dispatched', (event) => {
+    receivedEvents.push(`${event.topic}:${event.payload.taskId}:${event.payload.agentId}`);
+  });
+
+  const batchResult = await orchestrator55.scheduleNextDagBatch({ maxConcurrency: 2 });
+  assert(batchResult.dispatchedTasks.length === 2, 'scheduleNextDagBatch dispatch thành công 2 tasks song song');
+  assert(receivedEvents.length === 2, 'AgentEventBus nhận đủ 2 sự kiện dag:task_dispatched');
+  assert(
+    orchestrator55.fileLockManager.isLockedByOther('src/clean.ts', 'other-agent'),
+    'File src/clean.ts đã được cấp khóa an toàn trong FileConcurrencyLockManager',
+  );
+
+  // 6. Kiểm thử executeFullDag với Automated Pipeline & Quality Gate
+  const fullDagPlanMgr = new PlanManager();
+  fullDagPlanMgr.createPlan([
+    {
+      id: 50,
+      title: 'Module Alpha',
+      acceptanceCriteria: 'Alpha generated',
+      dependsOn: [],
+      writeSet: ['src/alpha.ts'],
+      parallelizable: true,
+    },
+    {
+      id: 51,
+      title: 'Module Beta',
+      acceptanceCriteria: 'Beta generated',
+      dependsOn: [],
+      writeSet: ['src/beta.ts'],
+      parallelizable: true,
+    },
+    {
+      id: 52,
+      title: 'Merge Alpha & Beta',
+      acceptanceCriteria: 'Combined successfully',
+      dependsOn: [50, 51],
+      writeSet: ['src/gamma.ts'],
+      parallelizable: false,
+    },
+  ]);
+
+  orchestrator55.bindPlanManager(fullDagPlanMgr);
+
+  const completedEvents: number[] = [];
+  orchEventBus.subscribe('dag:task_completed', (event) => {
+    completedEvents.push(event.payload.taskId);
+  });
+
+  const dagSummary = await orchestrator55.executeFullDag({
+    maxConcurrency: 2,
+    taskWorker: async (task) => ({
+      success: true,
+      output: `Task #${task.id} executed successfully.`,
+      modifiedFiles: task.writeSet,
+    }),
+    qualityGate: {
+      requireFilesModified: true,
+    },
+  });
+
+  assert(dagSummary.isSuccess === true, 'executeFullDag thực thi hoàn tất toàn bộ DAG');
+  assert(dagSummary.totalTasks === 3, 'Tổng số 3 tasks');
+  assert(dagSummary.completedTasks === 3, 'Cả 3 tasks đều COMPLETED');
+  assert(dagSummary.batchesExecuted >= 2, 'Thực thi qua ít nhất 2 đợt batches (Fork -> Join)');
+  assert(completedEvents.includes(50) && completedEvents.includes(51) && completedEvents.includes(52), 'Nhận đủ sự kiện dag:task_completed cho tất cả các nodes');
+  assert(
+    Object.keys(orchestrator55.fileLockManager.getLocks()).length === 0,
+    'Toàn bộ file locks được giải phóng hoàn toàn sau khi DAG kết thúc',
+  );
+
+  // 7. Kiểm thử Tool schedule_dag_parallel (Integration via ToolRunner)
+  const dagTool = createScheduleDagParallelTool(orchestrator55);
+  assert(dagTool.name === 'schedule_dag_parallel', 'Tên công cụ đúng schedule_dag_parallel');
+
+  const toolStatusRes = await dagTool.execute({ action: 'status' }, workspace);
+  assert(toolStatusRes.success === true, 'schedule_dag_parallel(status) thực thi thành công');
+  assert(toolStatusRes.status.allCompleted === true, 'Báo cáo trạng thái allCompleted = true');
+
+  // Tạo plan mới qua tool để test action next_batch
+  const toolPlanMgr = new PlanManager();
+  toolPlanMgr.createPlan([
+    { id: 60, title: 'Step 1', acceptanceCriteria: 'Criteria 1', dependsOn: [] },
+  ]);
+  orchestrator55.bindPlanManager(toolPlanMgr);
+
+  const toolNextRes = await dagTool.execute({ action: 'next_batch' }, workspace);
+  assert(toolNextRes.success === true, 'schedule_dag_parallel(next_batch) thực thi thành công');
+  assert(toolNextRes.batch.dispatchedTasks.length === 1, 'Dispatch được đúng 1 task qua tool');
+  assert(toolPlanMgr.getActiveTasks().length === 1, 'Task #60 chuyển sang IN_PROGRESS');
+
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

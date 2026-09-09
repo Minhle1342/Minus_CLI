@@ -299,3 +299,125 @@ export function createVerifySubagentQualityTool(orchestrator: AgentOrchestrator)
     },
   };
 }
+
+export function createScheduleDagParallelTool(orchestrator: AgentOrchestrator): ToolDefinition {
+  return {
+    name: 'schedule_dag_parallel',
+    description: 'Lập lịch và kích hoạt thực thi song song theo Đồ thị DAG (DAG Parallel Scheduler) cho PlanManager & AgentOrchestrator. Hỗ trợ chạy đợt kế tiếp ("next_batch"), toàn bộ đồ thị ("full_dag"), hoặc kiểm tra hiện trạng ("status").',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action: {
+          type: Type.STRING,
+          description: 'Hành động cần thực hiện: "next_batch" (mặc định: kích hoạt đợt kế tiếp), "full_dag" (chạy toàn bộ đồ thị tự động), hoặc "status" (kiểm tra các đợt runnable và hiện trạng DAG).',
+        },
+        maxConcurrency: {
+          type: Type.INTEGER,
+          description: 'Giới hạn số tác vụ thực thi song song tối đa trong một đợt (mặc định: 4).',
+        },
+        allowImplicitParallel: {
+          type: Type.BOOLEAN,
+          description: 'Nếu true, cho phép các task độc lập không khai báo explicit parallelizable vẫn được song song hóa nếu không có xung đột Read/Write set (mặc định: true).',
+        },
+        autoStartBatch: {
+          type: Type.BOOLEAN,
+          description: 'Nếu true, tự động chuyển đổi các task được chọn sang trạng thái IN_PROGRESS trong PlanManager (mặc định: true).',
+        },
+        acquireFileLocks: {
+          type: Type.BOOLEAN,
+          description: 'Nếu true, tự động cấp khóa file cho các file trong writeSet của từng task (mặc định: true).',
+        },
+      },
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const action = String(args.action || 'next_batch').trim().toLowerCase();
+      const planManager = orchestrator.getPlanManager();
+      if (!planManager) {
+        return {
+          success: false,
+          error: 'NO_PLAN_MANAGER_BOUND: AgentOrchestrator chưa được liên kết với PlanManager.',
+        };
+      }
+
+      if (!planManager.hasPlan()) {
+        return {
+          success: false,
+          error: 'NO_PLAN_EXISTS: PlanManager hiện không có kế hoạch thực thi nào.',
+        };
+      }
+
+      try {
+        if (action === 'status') {
+          const graph = planManager.getTaskGraph();
+          const runnable = planManager.getRunnableParallelBatch({
+            maxConcurrency: typeof args.maxConcurrency === 'number' ? args.maxConcurrency : 8,
+            allowImplicitParallel: args.allowImplicitParallel !== false,
+          });
+          return {
+            success: true,
+            status: {
+              allCompleted: planManager.isAllTasksCompleted(),
+              progress: planManager.getProgress(),
+              readyTaskIds: graph.readyTaskIds,
+              runnableBatchTaskIds: runnable.map((t) => t.id),
+              criticalPath: graph.criticalPath,
+              parallelBatches: graph.parallelBatches,
+              currentLocks: orchestrator.fileLockManager.getLocks(),
+            },
+          };
+        }
+
+        if (action === 'full_dag') {
+          const summary = await orchestrator.executeFullDag({
+            maxConcurrency: typeof args.maxConcurrency === 'number' ? args.maxConcurrency : 4,
+            allowImplicitParallel: args.allowImplicitParallel !== false,
+          });
+          return {
+            success: summary.isSuccess,
+            summary: {
+              totalTasks: summary.totalTasks,
+              completedTasks: summary.completedTasks,
+              failedTasks: summary.failedTasks,
+              batchesExecuted: summary.batchesExecuted,
+              executionTimeMs: summary.executionTimeMs,
+              isSuccess: summary.isSuccess,
+              results: Array.from(summary.taskResults.entries()).map(([id, res]) => ({
+                taskId: id,
+                ...res,
+              })),
+            },
+          };
+        }
+
+        // Default: next_batch
+        const batchResult = await orchestrator.scheduleNextDagBatch({
+          maxConcurrency: typeof args.maxConcurrency === 'number' ? args.maxConcurrency : 4,
+          allowImplicitParallel: args.allowImplicitParallel !== false,
+          autoStartBatch: args.autoStartBatch !== false,
+          acquireFileLocks: args.acquireFileLocks !== false,
+          dispatchToSubagents: true,
+        });
+
+        return {
+          success: true,
+          batch: {
+            batchNumber: batchResult.batchNumber,
+            dispatchedTasks: batchResult.dispatchedTasks.map((d) => ({
+              taskId: d.task.id,
+              title: d.task.title,
+              agentId: d.agentId,
+              lockedFiles: d.lockedFiles,
+              capabilities: d.capabilities,
+            })),
+            skippedOrDeferred: batchResult.skippedOrDeferred,
+            remainingPendingCount: batchResult.remainingPendingCount,
+            hasMoreRunnable: batchResult.hasMoreRunnable,
+          },
+        };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    },
+  };
+}
+

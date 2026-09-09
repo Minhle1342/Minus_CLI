@@ -202,6 +202,8 @@ export class AgentKernel {
     const sharedContext = new SharedContextService();
     const agentEvents = new AgentEventBus();
     const orchestrator = new AgentOrchestrator(agents);
+    orchestrator.bindPlanManager(plan);
+    orchestrator.bindEventBus(agentEvents);
     const tools = new ToolRegistry(plan, memory);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);

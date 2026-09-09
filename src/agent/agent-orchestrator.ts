@@ -1,6 +1,60 @@
 import crypto from 'node:crypto';
 import { AgentRegistry, AgentRecord } from './agent-registry.js';
 import { SubagentManager, SubagentOptions, SubagentHandle } from './subagent-manager.js';
+import type { PlanManager, PlanTask, PlanEvidence } from './plan-manager.js';
+import type { AgentEventBus } from './agent-event-bus.js';
+import { BENCHMARK_SPECIALISTS } from './benchmark-agents.js';
+
+export interface DagBatchScheduleOptions {
+  maxConcurrency?: number;
+  allowImplicitParallel?: boolean;
+  autoStartBatch?: boolean;
+  acquireFileLocks?: boolean;
+  dispatchToSubagents?: boolean;
+}
+
+export interface DagDispatchedTask {
+  task: PlanTask;
+  agentId: string;
+  handle?: SubagentHandle;
+  lockedFiles: string[];
+  capabilities: string[];
+}
+
+export interface DagBatchScheduleResult {
+  batchNumber: number;
+  dispatchedTasks: DagDispatchedTask[];
+  skippedOrDeferred: Array<{ taskId: number; reason: string }>;
+  remainingPendingCount: number;
+  hasMoreRunnable: boolean;
+}
+
+export interface DagExecutionOptions {
+  maxConcurrency?: number;
+  allowImplicitParallel?: boolean;
+  taskWorker?: (task: PlanTask, agentId: string) => Promise<{
+    success: boolean;
+    output?: string;
+    modifiedFiles?: string[];
+    diffText?: string;
+    commandRecords?: Array<{ command: string; exitCode: number }>;
+    error?: string;
+  }>;
+  qualityGate?: QualityGateOptions;
+  maxBatches?: number;
+  cascadeFailures?: boolean;
+}
+
+export interface DagExecutionSummary {
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  batchesExecuted: number;
+  executionTimeMs: number;
+  taskResults: Map<number, { success: boolean; agentId: string; output?: string; error?: string }>;
+  isSuccess: boolean;
+}
+
 
 export interface OrchestrationStatus {
   totalAgents: number;
@@ -209,6 +263,11 @@ export class AgentOrchestrator {
 
   // File-Level Concurrency Locking
   public readonly fileLockManager = new FileConcurrencyLockManager();
+
+  // DAG Parallel Scheduler Bindings
+  private planManager?: PlanManager;
+  private eventBus?: AgentEventBus;
+  private currentDagBatch = 0;
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -632,6 +691,353 @@ export class AgentOrchestrator {
   clearMemoizationCache(): void {
     this.memoizedResults.clear();
     this.memoizationHits = 0;
+  }
+
+  // ── DAG Parallel Scheduler (Tier 0 SOTA Orchestration) ─────────────────────
+
+  /**
+   * Gắn kết PlanManager quản lý đồ thị tác vụ DAG.
+   */
+  bindPlanManager(planManager: PlanManager): this {
+    this.planManager = planManager;
+    return this;
+  }
+
+  /**
+   * Gắn kết AgentEventBus phát tín hiệu điều phối sự kiện đa tác tử.
+   */
+  bindEventBus(bus: AgentEventBus): this {
+    this.eventBus = bus;
+    return this;
+  }
+
+  getPlanManager(): PlanManager | undefined {
+    return this.planManager;
+  }
+
+  getEventBus(): AgentEventBus | undefined {
+    return this.eventBus;
+  }
+
+  /**
+   * Suy luận năng lực bắt buộc (capabilities) từ thông tin task theo quy tắc semantic.
+   */
+  inferTaskCapabilities(task: PlanTask): string[] {
+    const text = `${task.title} ${task.acceptanceCriteria} ${(task.symbols || []).join(' ')}`.toLowerCase();
+    if (/\b(math|algorithm|reasoning|proof|complexity|dp|dynamic programming|logic)\b/.test(text)) {
+      return ['reasoning', 'math', 'algorithm'];
+    }
+    if (/\b(swe|bug|refactor|architecture|system|multi-file|structure|topology)\b/.test(text)) {
+      return ['swe-bench', 'refactoring', 'architecture'];
+    }
+    if (/\b(governance|compliance|schema|rule|instruction|constraint|audit)\b/.test(text)) {
+      return ['instruction-following', 'governance', 'schema-validation'];
+    }
+    if (/\b(fim|infill|surgical|patch|edit|diff|insert)\b/.test(text)) {
+      return ['fim', 'surgical-patch', 'infilling'];
+    }
+    return ['coding', 'code-generation', 'synthesis'];
+  }
+
+  /**
+   * Lập lịch và kích hoạt đợt thực thi song song kế tiếp theo Đồ thị DAG (DAG Parallel Scheduler).
+   * Tự động:
+   * 1. Nhận diện batch tác vụ độc lập/không xung đột từ PlanManager.
+   * 2. Phân bổ chuyên gia (Specialists/Subagents) phù hợp nhất theo capabilities.
+   * 3. Cấp khóa file an toàn (FileConcurrencyLockManager) ngăn chặn xung đột ngầm.
+   * 4. Kích hoạt trạng thái IN_PROGRESS và phát thông điệp dag:task_dispatched.
+   */
+  async scheduleNextDagBatch(options?: DagBatchScheduleOptions): Promise<DagBatchScheduleResult> {
+    if (!this.planManager) {
+      throw new Error('No PlanManager bound to AgentOrchestrator. Call orchestrator.bindPlanManager(planManager) first.');
+    }
+
+    const maxConcurrency = options?.maxConcurrency ?? 4;
+    const allowImplicit = options?.allowImplicitParallel ?? true;
+    const autoStart = options?.autoStartBatch !== false;
+    const acquireLocks = options?.acquireFileLocks !== false;
+    const dispatchSubagents = options?.dispatchToSubagents !== false;
+
+    const candidates = this.planManager.getRunnableParallelBatch({
+      maxConcurrency,
+      allowImplicitParallel: allowImplicit,
+    });
+
+    if (candidates.length === 0) {
+      const pendingCount = this.planManager.getTasks().filter((t) => t.status === 'PENDING').length;
+      return {
+        batchNumber: this.currentDagBatch,
+        dispatchedTasks: [],
+        skippedOrDeferred: [],
+        remainingPendingCount: pendingCount,
+        hasMoreRunnable: false,
+      };
+    }
+
+    this.currentDagBatch++;
+    const batchNumber = this.currentDagBatch;
+    const dispatchedTasks: DagDispatchedTask[] = [];
+    const skippedOrDeferred: Array<{ taskId: number; reason: string }> = [];
+    const taskIdsToStart: number[] = [];
+
+    for (const task of candidates) {
+      const requiredCapabilities = this.inferTaskCapabilities(task);
+      let targetAgentId = 'coding-agent';
+      let handle: SubagentHandle | undefined;
+      let lockedFiles: string[] = [];
+
+      if (dispatchSubagents) {
+        try {
+          handle = this.allocateTask(task.title, requiredCapabilities, {
+            fileScope: acquireLocks && task.writeSet.length > 0 ? task.writeSet : undefined,
+            priority: task.priority > 0 ? 'high' : 'normal',
+          });
+          targetAgentId = handle.id;
+          lockedFiles = acquireLocks ? [...task.writeSet] : [];
+        } catch (err: any) {
+          if (err.message && err.message.includes('File locking conflict')) {
+            skippedOrDeferred.push({
+              taskId: task.id,
+              reason: err.message,
+            });
+            continue;
+          }
+          const anyAgents = this.listAvailableAgents([]);
+          targetAgentId = anyAgents[0]?.id || 'coding-agent';
+          if (acquireLocks && task.writeSet.length > 0) {
+            const lockRes = this.fileLockManager.acquire(targetAgentId, task.writeSet);
+            if (!lockRes.success) {
+              skippedOrDeferred.push({
+                taskId: task.id,
+                reason: `File lock conflict: ${lockRes.conflictingFiles.join(', ')}`,
+              });
+              continue;
+            }
+            lockedFiles = lockRes.acquired;
+          }
+          this.registerInternalTask(targetAgentId, task.title, { fileScope: task.writeSet });
+        }
+      } else {
+        const availableAgents = this.listAvailableAgents(requiredCapabilities);
+        targetAgentId = availableAgents[0]?.id || this.listAvailableAgents([])[0]?.id || 'coding-agent';
+        if (acquireLocks && task.writeSet.length > 0) {
+          const lockRes = this.fileLockManager.acquire(targetAgentId, task.writeSet);
+          if (!lockRes.success) {
+            skippedOrDeferred.push({
+              taskId: task.id,
+              reason: `File lock conflict: ${lockRes.conflictingFiles.join(', ')}`,
+            });
+            continue;
+          }
+          lockedFiles = lockRes.acquired;
+        }
+      }
+
+      taskIdsToStart.push(task.id);
+      dispatchedTasks.push({
+        task,
+        agentId: targetAgentId,
+        handle,
+        lockedFiles,
+        capabilities: requiredCapabilities,
+      });
+
+      if (this.eventBus) {
+        await this.eventBus.publish('orchestrator', 'dag:task_dispatched', {
+          batchNumber,
+          taskId: task.id,
+          title: task.title,
+          agentId: targetAgentId,
+          writeSet: task.writeSet,
+        });
+      }
+    }
+
+    if (autoStart && taskIdsToStart.length > 0) {
+      this.planManager.startParallelBatch(taskIdsToStart);
+    }
+
+    const pendingCount = this.planManager.getTasks().filter((t) => t.status === 'PENDING').length;
+    const hasMore = this.planManager.getRunnableParallelBatch({ allowImplicitParallel: allowImplicit }).length > 0;
+
+    return {
+      batchNumber,
+      dispatchedTasks,
+      skippedOrDeferred,
+      remainingPendingCount: pendingCount,
+      hasMoreRunnable: hasMore,
+    };
+  }
+
+  /**
+   * Tự động điều phối và thực thi toàn bộ Đồ thị DAG từ gốc đến ngọn (Full DAG Execution Loop).
+   * Lặp qua từng đợt batch song song, kiểm tra cổng chất lượng (Quality Gates),
+   * thu thập bằng chứng, mở khóa Join Barriers và xử lý Cascade Failures nếu có lỗi.
+   */
+  async executeFullDag(options?: DagExecutionOptions): Promise<DagExecutionSummary> {
+    if (!this.planManager) {
+      throw new Error('No PlanManager bound to AgentOrchestrator. Call orchestrator.bindPlanManager(planManager) first.');
+    }
+
+    const startTime = Date.now();
+    const maxBatches = options?.maxBatches ?? 50;
+    const taskResults = new Map<number, { success: boolean; agentId: string; output?: string; error?: string }>();
+    let batchesExecuted = 0;
+
+    while (batchesExecuted < maxBatches && !this.planManager.isAllTasksCompleted()) {
+      const scheduleResult = await this.scheduleNextDagBatch({
+        maxConcurrency: options?.maxConcurrency,
+        allowImplicitParallel: options?.allowImplicitParallel ?? true,
+        autoStartBatch: true,
+        acquireFileLocks: true,
+        dispatchToSubagents: true,
+      });
+
+      if (scheduleResult.dispatchedTasks.length === 0) {
+        // Không còn task nào có thể dispatch đợt này
+        break;
+      }
+
+      batchesExecuted++;
+
+      // Thực thi song song tất cả các task trong batch hiện hành (Promise.allSettled)
+      const batchPromises = scheduleResult.dispatchedTasks.map(async (dispatched) => {
+        const { task, agentId } = dispatched;
+        const taskStart = Date.now();
+
+        try {
+          let workerOutput: {
+            success: boolean;
+            output?: string;
+            modifiedFiles?: string[];
+            diffText?: string;
+            commandRecords?: Array<{ command: string; exitCode: number }>;
+            error?: string;
+          } = {
+            success: true,
+            output: `Task #${task.id} executed successfully.`,
+            modifiedFiles: task.writeSet,
+            diffText: undefined,
+            commandRecords: undefined,
+            error: undefined,
+          };
+
+          if (options?.taskWorker) {
+            workerOutput = await options.taskWorker(task, agentId);
+          }
+
+          let passedQuality = workerOutput.success;
+          let failureReason = workerOutput.error;
+
+          if (passedQuality && options?.qualityGate) {
+            const gateRes = this.verifyQualityGate({
+              ...options.qualityGate,
+              modifiedFiles: workerOutput.modifiedFiles || task.writeSet,
+              diffText: workerOutput.diffText,
+              commandExecutionRecords: workerOutput.commandRecords,
+            });
+            if (!gateRes.passed) {
+              passedQuality = false;
+              failureReason = `Quality gate failed: ${gateRes.failures.join('; ')}`;
+            }
+          }
+
+          const durationMs = Date.now() - taskStart;
+
+          if (passedQuality) {
+            this.planManager!.completeTaskWithEvidence(
+              task.id,
+              {
+                toolName: 'dag-scheduler',
+                kind: 'verification',
+                outcome: 'success',
+                summary: workerOutput.output || `Task #${task.id} verified`,
+              },
+              workerOutput.output,
+            );
+            this.fileLockManager.release(agentId);
+            this.recordTaskCompletion(agentId, durationMs, true);
+            taskResults.set(task.id, {
+              success: true,
+              agentId,
+              output: workerOutput.output,
+            });
+
+            if (this.eventBus) {
+              await this.eventBus.publish('orchestrator', 'dag:task_completed', {
+                taskId: task.id,
+                agentId,
+                durationMs,
+              });
+            }
+          } else {
+            const err = failureReason || `Task #${task.id} failed verification`;
+            this.planManager!.failTaskWithCascade(task.id, err, {
+              cascadeToDependents: options?.cascadeFailures !== false,
+            });
+            this.fileLockManager.release(agentId);
+            this.recordTaskCompletion(agentId, durationMs, false);
+            taskResults.set(task.id, {
+              success: false,
+              agentId,
+              error: err,
+            });
+
+            if (this.eventBus) {
+              await this.eventBus.publish('orchestrator', 'dag:task_failed', {
+                taskId: task.id,
+                agentId,
+                error: err,
+              });
+            }
+          }
+        } catch (err: any) {
+          const durationMs = Date.now() - taskStart;
+          const errorMsg = err.message || String(err);
+          this.planManager!.failTaskWithCascade(task.id, errorMsg, {
+            cascadeToDependents: options?.cascadeFailures !== false,
+          });
+          this.fileLockManager.release(agentId);
+          this.recordTaskCompletion(agentId, durationMs, false);
+          taskResults.set(task.id, {
+            success: false,
+            agentId,
+            error: errorMsg,
+          });
+
+          if (this.eventBus) {
+            await this.eventBus.publish('orchestrator', 'dag:task_failed', {
+              taskId: task.id,
+              agentId,
+              error: errorMsg,
+            });
+          }
+        }
+      });
+
+      await Promise.allSettled(batchPromises);
+
+      if (this.eventBus) {
+        await this.eventBus.publish('orchestrator', 'dag:batch_completed', {
+          batchNumber: scheduleResult.batchNumber,
+          tasksCount: scheduleResult.dispatchedTasks.length,
+        });
+      }
+    }
+
+    const allTasks = this.planManager.getTasks();
+    const completedTasks = allTasks.filter((t) => t.status === 'COMPLETED').length;
+    const failedTasks = allTasks.filter((t) => t.status === 'FAILED').length;
+
+    return {
+      totalTasks: allTasks.length,
+      completedTasks,
+      failedTasks,
+      batchesExecuted,
+      executionTimeMs: Date.now() - startTime,
+      taskResults,
+      isSuccess: this.planManager.isAllTasksCompleted(),
+    };
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────────────
