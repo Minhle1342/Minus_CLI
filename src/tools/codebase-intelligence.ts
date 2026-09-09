@@ -10,6 +10,9 @@ export interface CallNode {
   line: number;
   kind?: string;
   children?: CallNode[];
+  depth?: number;
+  relevance?: 'high' | 'utility';
+  isPruned?: boolean;
 }
 
 export interface CallGraphResult {
@@ -19,6 +22,23 @@ export interface CallGraphResult {
   direction: 'callers' | 'callees' | 'both';
   callees: CallNode[];
   callers: CallNode[];
+  prunedCount?: number;
+}
+
+export const UTILITY_NOISE_SYMBOLS = new Set([
+  'log', 'info', 'warn', 'error', 'debug', 'trace',
+  'toString', 'valueOf', 'toJSON', 'format',
+  'trim', 'split', 'join', 'map', 'filter', 'forEach', 'reduce',
+  'push', 'pop', 'shift', 'unshift', 'slice', 'splice', 'concat',
+  'get', 'set', 'hasOwnProperty', 'includes', 'indexOf',
+  'resolve', 'reject', 'then', 'catch', 'finally',
+  'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+]);
+
+export function isUtilityNoiseSymbol(name: string): boolean {
+  if (!name) return false;
+  const clean = name.replace(/^[#_]+/, '');
+  return UTILITY_NOISE_SYMBOLS.has(clean) || UTILITY_NOISE_SYMBOLS.has(name);
 }
 
 export interface RouteEntry {
@@ -91,16 +111,20 @@ export class CodebaseIntelligenceService {
 
   /**
    * 1. Xây dựng Call Graph 2 chiều (Callers & Callees) với độ sâu tùy chỉnh
+   * Tích hợp CoSIL Relevance Pruning (arXiv:2503.22424v3) & Bounded Subgraph (RepoGraph arXiv:2410.14684v2)
    */
   queryCallGraph(
     symbolName: string,
     filePath?: string,
     direction: 'callers' | 'callees' | 'both' = 'both',
     maxDepth: number = 2,
+    options?: { pruneNoise?: boolean },
   ): CallGraphResult {
     this.tsService.syncWorkspaceFiles();
     const cleanSymbol = symbolName.trim();
     const depth = Math.min(Math.max(1, maxDepth), 5);
+    const pruneNoise = options?.pruneNoise ?? true;
+    let prunedCount = 0;
 
     const callees: CallNode[] = [];
     const callers: CallNode[] = [];
@@ -117,16 +141,21 @@ export class CodebaseIntelligenceService {
       }
     }
 
+    const visitedCallees = new Set<string>([cleanSymbol]);
+    const visitedCallers = new Set<string>([cleanSymbol]);
+
     if (direction === 'callees' || direction === 'both') {
       if (targetFile) {
-        const foundCallees = this.extractCallees(cleanSymbol, targetFile, depth);
-        callees.push(...foundCallees);
+        const found = this.extractCallees(cleanSymbol, targetFile, depth, pruneNoise, visitedCallees);
+        callees.push(...found.nodes);
+        prunedCount += found.prunedCount;
       }
     }
 
     if (direction === 'callers' || direction === 'both') {
-      const foundCallers = this.extractCallers(cleanSymbol, depth);
-      callers.push(...foundCallers);
+      const found = this.extractCallers(cleanSymbol, depth, pruneNoise, visitedCallers);
+      callers.push(...found.nodes);
+      prunedCount += found.prunedCount;
     }
 
     return {
@@ -136,6 +165,7 @@ export class CodebaseIntelligenceService {
       direction,
       callees,
       callers,
+      prunedCount,
     };
   }
 
@@ -459,17 +489,26 @@ export class CodebaseIntelligenceService {
   // --- Helper Methods ---
 
   private findSymbolDefinitionAcrossWorkspace(symbolName: string): any {
+    if (!symbolName || isUtilityNoiseSymbol(symbolName)) return undefined;
     const files = this.getAllCodeFiles();
     for (const f of files) {
+      const content = this.safeReadFile(f);
+      if (!content || !content.includes(symbolName)) continue;
       const res = this.tsService.inspectSymbol(f, symbolName);
       if (res.found) return res;
     }
     return undefined;
   }
 
-  private extractCallees(symbolName: string, filePath: string, depth: number): CallNode[] {
+  private extractCallees(
+    symbolName: string,
+    filePath: string,
+    depth: number,
+    pruneNoise = true,
+    visited = new Set<string>(),
+  ): { nodes: CallNode[]; prunedCount: number } {
     const safePath = this.workspace.resolveSafePath(filePath);
-    if (!fs.existsSync(safePath)) return [];
+    if (!fs.existsSync(safePath)) return { nodes: [], prunedCount: 0 };
 
     const fileContent = fs.readFileSync(safePath, 'utf8');
     const sourceFile = ts.createSourceFile(safePath, fileContent, ts.ScriptTarget.Latest, true);
@@ -492,10 +531,12 @@ export class CodebaseIntelligenceService {
     }
     findSymbolNode(sourceFile);
 
+    let rawCalls: Array<{ name: string; file: string; line: number }> = [];
+
     if (!symbolBodyNode) {
       // Fallback cho C# / Unity / non-TS files
       const lines = fileContent.split('\n');
-      const calls = new Map<string, CallNode>();
+      const calls = new Map<string, { name: string; file: string; line: number }>();
       const declPattern = new RegExp(`(?:class|interface|struct|def|void|int|string|float|bool|async|public|private|protected)\\s+${symbolName}\\b`, 'i');
       let inScope = false;
       let braceCount = 0;
@@ -525,46 +566,86 @@ export class CodebaseIntelligenceService {
           }
         }
       }
-      return Array.from(calls.values());
+      rawCalls = Array.from(calls.values());
+    } else {
+      const calls = new Map<string, { name: string; file: string; line: number }>();
+      const visitCalls = (node: ts.Node) => {
+        if (ts.isCallExpression(node)) {
+          let calledName = '';
+          if (ts.isIdentifier(node.expression)) {
+            calledName = node.expression.text;
+          } else if (ts.isPropertyAccessExpression(node.expression)) {
+            calledName = node.expression.name.text;
+          }
+
+          if (calledName && calledName !== symbolName && !calls.has(calledName)) {
+            const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+            calls.set(calledName, {
+              name: calledName,
+              file: this.workspace.toRelativePath(filePath),
+              line: line + 1,
+            });
+          }
+        }
+        ts.forEachChild(node, visitCalls);
+      };
+      visitCalls(symbolBodyNode);
+      rawCalls = Array.from(calls.values());
     }
 
-    const calls = new Map<string, CallNode>();
+    let prunedCount = 0;
+    const nodes: CallNode[] = [];
+    let subDepthCount = 0;
 
-    const visitCalls = (node: ts.Node) => {
-      if (ts.isCallExpression(node)) {
-        let calledName = '';
-        if (ts.isIdentifier(node.expression)) {
-          calledName = node.expression.text;
-        } else if (ts.isPropertyAccessExpression(node.expression)) {
-          calledName = node.expression.name.text;
-        }
+    for (const raw of rawCalls) {
+      const isNoise = isUtilityNoiseSymbol(raw.name);
+      if (isNoise) {
+        prunedCount++;
+        if (pruneNoise) continue;
+      }
+      const callNode: CallNode = {
+        name: raw.name,
+        file: raw.file,
+        line: raw.line,
+        depth: 1,
+        relevance: isNoise ? 'utility' : 'high',
+        isPruned: isNoise && pruneNoise,
+      };
 
-        if (calledName && calledName !== symbolName && !calls.has(calledName)) {
-          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-          calls.set(calledName, {
-            name: calledName,
-            file: this.workspace.toRelativePath(filePath),
-            line: line + 1,
-          });
+      // 2-hop Bounded Subgraph traversal nếu depth >= 2 (giới hạn max 5 sub-nodes để tránh bùng nổ AST scan)
+      if (depth >= 2 && !isNoise && !visited.has(raw.name) && subDepthCount < 5) {
+        visited.add(raw.name);
+        subDepthCount++;
+        const def = this.findSymbolDefinitionAcrossWorkspace(raw.name);
+        if (def?.file) {
+          const sub = this.extractCallees(raw.name, def.file, depth - 1, pruneNoise, visited);
+          if (sub.nodes.length > 0) {
+            callNode.children = sub.nodes.map((c) => ({ ...c, depth: 2 }));
+            prunedCount += sub.prunedCount;
+          }
         }
       }
-      ts.forEachChild(node, visitCalls);
-    };
+      nodes.push(callNode);
+    }
 
-    visitCalls(symbolBodyNode);
-    return Array.from(calls.values());
+    return { nodes, prunedCount };
   }
 
-  private extractCallers(symbolName: string, depth: number): CallNode[] {
+  private extractCallers(
+    symbolName: string,
+    depth: number,
+    pruneNoise = true,
+    visited = new Set<string>(),
+  ): { nodes: CallNode[]; prunedCount: number } {
     const callers: CallNode[] = [];
     const scannedFiles = this.getAllCodeFiles();
+    let prunedCount = 0;
 
     for (const file of scannedFiles) {
       const content = this.safeReadFile(file);
       if (!content || !content.includes(symbolName)) continue;
 
       const sourceFile = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
-
       let currentEnclosingFunction: string | undefined;
 
       const visit = (node: ts.Node) => {
@@ -589,12 +670,20 @@ export class CodebaseIntelligenceService {
           if (called === symbolName) {
             const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
             const callerName = currentEnclosingFunction || 'TopLevelScript';
-            if (!callers.some((c) => c.name === callerName && c.file === this.workspace.toRelativePath(file) && c.line === line + 1)) {
-              callers.push({
-                name: callerName,
-                file: this.workspace.toRelativePath(file),
-                line: line + 1,
-              });
+            const isNoise = isUtilityNoiseSymbol(callerName);
+            if (isNoise) {
+              prunedCount++;
+            }
+            if (!isNoise || !pruneNoise) {
+              if (!callers.some((c) => c.name === callerName && c.file === this.workspace.toRelativePath(file) && c.line === line + 1)) {
+                callers.push({
+                  name: callerName,
+                  file: this.workspace.toRelativePath(file),
+                  line: line + 1,
+                  depth: 1,
+                  relevance: isNoise ? 'utility' : 'high',
+                });
+              }
             }
           }
         }
@@ -613,19 +702,49 @@ export class CodebaseIntelligenceService {
           if (l.includes(symbolName) && !l.includes(`class ${symbolName}`) && !l.includes(`interface ${symbolName}`)) {
             const callerName = path.basename(file, path.extname(file));
             const relFile = this.workspace.toRelativePath(file);
-            if (!callers.some((c) => c.name === callerName && c.file === relFile && c.line === i + 1)) {
-              callers.push({
-                name: callerName,
-                file: relFile,
-                line: i + 1,
-              });
+            const isNoise = isUtilityNoiseSymbol(callerName);
+            if (isNoise) prunedCount++;
+            if (!isNoise || !pruneNoise) {
+              if (!callers.some((c) => c.name === callerName && c.file === relFile && c.line === i + 1)) {
+                callers.push({
+                  name: callerName,
+                  file: relFile,
+                  line: i + 1,
+                  depth: 1,
+                  relevance: isNoise ? 'utility' : 'high',
+                });
+              }
             }
           }
         }
       }
     }
 
-    return callers;
+    // 2-hop Bounded Subgraph cho Callers nếu depth >= 2 (giới hạn max 3 callers có ý nghĩa, tránh scan bão hòa)
+    if (depth >= 2) {
+      const candidates = callers
+        .filter(
+          (c) =>
+            c.relevance === 'high' &&
+            !visited.has(c.name) &&
+            c.name !== 'TopLevelScript' &&
+            !c.name.startsWith('test') &&
+            !c.name.startsWith('describe') &&
+            !c.name.startsWith('it')
+        )
+        .slice(0, 3);
+
+      for (const caller of candidates) {
+        visited.add(caller.name);
+        const sub = this.extractCallers(caller.name, depth - 1, pruneNoise, visited);
+        if (sub.nodes.length > 0) {
+          caller.children = sub.nodes.map((c) => ({ ...c, depth: 2 }));
+          prunedCount += sub.prunedCount;
+        }
+      }
+    }
+
+    return { nodes: callers, prunedCount };
   }
 
   private findCircularCycles(graph: Record<string, string[]>): CircularDependencyCycle[] {

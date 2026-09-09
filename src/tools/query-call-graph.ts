@@ -44,6 +44,10 @@ export function createQueryCallGraphTool(service?: CodebaseIntelligenceService):
           type: Type.INTEGER,
           description: 'Độ sâu cây phân cấp gọi hàm cần mở rộng (mặc định 2, tối đa 5).',
         },
+        pruneNoise: {
+          type: Type.BOOLEAN,
+          description: 'Cắt tỉa các hàm tiện ích đại trà (log, toString, v.v.) theo chuẩn CoSIL để giảm nhiễu (mặc định true).',
+        },
       },
       required: [],
     },
@@ -69,9 +73,10 @@ export function createQueryCallGraphTool(service?: CodebaseIntelligenceService):
 
       const direction = (args.direction === 'callers' || args.direction === 'callees' ? args.direction : 'both') as 'callers' | 'callees' | 'both';
       const depth = typeof args.depth === 'number' ? args.depth : 2;
+      const pruneNoise = args.pruneNoise !== false;
 
       const engine = service || getIntelligenceService(workspace);
-      const result = engine.queryCallGraph(symbolName, filePath, direction, depth);
+      const result = engine.queryCallGraph(symbolName, filePath, direction, depth, { pruneNoise });
 
       return {
         success: true,

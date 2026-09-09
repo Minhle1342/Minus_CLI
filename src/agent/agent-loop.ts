@@ -67,6 +67,7 @@ import { CognitiveHarness } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { detectWorkspaceTestCommand } from '../testing/test-engineering-harness.js';
+import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -2326,11 +2327,29 @@ export class AgentLoop {
 
           const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
+          let lspPreExecutionWarning: string | undefined;
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
             consecutiveUnproductiveSteps = 0;
-            for (const targetStr of observedMutationFiles(toolName, toolArgs, executionResult.result)) {
+            const mutFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+            for (const targetStr of mutFiles) {
               this.targetFilesModifiedInTurn.add(targetStr);
               if (isScratchFilePath(targetStr)) this.ephemeralScratchFiles.add(targetStr);
+            }
+            // Pre-Execution LSP Diagnostics Hook (QLCoder arXiv:2511.08462v5)
+            const codeFiles = mutFiles.filter((f) => /\.(ts|tsx|js|jsx|py)$/i.test(f));
+            if (codeFiles.length > 0) {
+              try {
+                const syntaxDiags = await CodeSyntaxValidator.validateFiles(codeFiles, this._workspace);
+                const errors = syntaxDiags.filter((d: any) => d.category === 'error' || !d.category);
+                if (errors.length > 0) {
+                  lspPreExecutionWarning = `⚠️ [PRE-EXECUTION LSP HOOK]: Detected ${errors.length} syntax/compile error(s) in modified file(s):\n` +
+                    errors.slice(0, 3).map((e: any) => `  • ${e.file}:${e.line} - ${e.message}`).join('\n') +
+                    `\n👉 ACTION REQUIRED: Fix these syntax/type errors immediately before running verification or submitting.`;
+                  if (executionResult.result && typeof executionResult.result === 'object') {
+                    executionResult.result.lspPreExecutionWarning = lspPreExecutionWarning;
+                  }
+                }
+              } catch {}
             }
           } else if (!isMutatingOrVerification) {
             consecutiveUnproductiveSteps++;
@@ -2347,6 +2366,9 @@ export class AgentLoop {
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
           const payloadToRecord = {
             ...executionResult.result,
+            ...(lspPreExecutionWarning
+              ? { _system_pre_execution_lsp_warning: lspPreExecutionWarning }
+              : {}),
             ...(executionResult.guardianDiagnosis?.errorAs200Unmasked
               ? { _system_guardian_unmasked_error: `[GUARDIAN UNMASKED ERROR]: Tool returned HTTP 200 / success but contained embedded error: "${executionResult.guardianDiagnosis.message}".` }
               : {}),
@@ -3117,8 +3139,21 @@ export class AgentLoop {
           const curator = new PlaybookCurator(this.turnMemoryRetriever.getLivingPlaybook());
           await curator.commitDeltas(deltas);
         }
+
+        // In-Loop Experience Distillation (SWE-Bench-CL & ExpeRepair)
+        if (this.targetFilesModifiedInTurn.size > 0 && this.verificationPolicy.canComplete().allowed) {
+          const touchedFiles = Array.from(this.targetFilesModifiedInTurn);
+          const verifiedCmd = toolsExecuted.find((t: any) => t.toolName === 'run_command' && t.result && t.result.exitCode === 0)?.args?.command || 'npm test';
+          await this.turnMemoryRetriever.distillExperience({
+            taskIntent: turnUserRequest || 'Software modification task',
+            faultLocalizedEntities: touchedFiles,
+            patchSummary: `Modified ${touchedFiles.length} file(s): ${touchedFiles.slice(0, 5).join(', ')}`,
+            verificationCommand: String(verifiedCmd),
+            verificationExitCode: 0,
+          }).catch(() => {});
+        }
       } catch {
-        // Non-blocking playbook reflection
+        // Non-blocking memory & playbook reflection
       }
     }
     this.cleanupEphemeralScratchFiles();

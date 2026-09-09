@@ -89,9 +89,12 @@ export class LspManager {
         providers.push(client.server.id);
         results.push(...items.map((item) => {
           const normalized = normalizeUris(item, this.workspace);
-          return normalized && typeof normalized === 'object' && !Array.isArray(normalized)
-            ? { provider: client.server.id, ...normalized }
-            : { provider: client.server.id, value: normalized };
+          const enriched = isLocationOperation(input.operation)
+            ? enrichLocationWithSnippet(normalized, this.workspace)
+            : normalized;
+          return enriched && typeof enriched === 'object' && !Array.isArray(enriched)
+            ? { provider: client.server.id, ...enriched }
+            : { provider: client.server.id, value: enriched };
         }));
       } catch (error: any) {
         results.push({ provider: client.server.id, error: error.message });
@@ -333,4 +336,43 @@ function splitKey(key: string): [string, string] {
 
 function samePath(left: string, right: string): boolean {
   return normalizePathKey(left) === normalizePathKey(right);
+}
+
+export function isLocationOperation(op: LspOperation): boolean {
+  return op === 'definition' || op === 'references' || op === 'implementation';
+}
+
+export function enrichLocationWithSnippet(item: any, workspace: Workspace): any {
+  if (!item || typeof item !== 'object') return item;
+  if (Array.isArray(item)) {
+    return item.map((sub) => enrichLocationWithSnippet(sub, workspace));
+  }
+  const targetPath = typeof item.uri === 'string' ? item.uri : (typeof item.targetUri === 'string' ? item.targetUri : undefined);
+  const targetRange = item.range || item.targetSelectionRange || item.targetRange;
+  if (!targetPath || !targetRange || typeof targetRange.start?.line !== 'number') {
+    return item;
+  }
+  try {
+    const absPath = workspace.resolveSafePath(targetPath);
+    if (fs.existsSync(absPath)) {
+      const content = fs.readFileSync(absPath, 'utf8');
+      const lines = content.split(/\r?\n/);
+      const startLine = targetRange.start.line;
+      const endLine = targetRange.end?.line ?? startLine;
+      const snippet = lines.slice(startLine, endLine + 1).join('\n').trim();
+      const ctxStart = Math.max(0, startLine - 1);
+      const ctxEnd = Math.min(lines.length - 1, endLine + 1);
+      const contextLines = lines.slice(ctxStart, ctxEnd + 1);
+      return {
+        ...item,
+        startLine: startLine + 1,
+        endLine: endLine + 1,
+        snippet,
+        contextLines,
+      };
+    }
+  } catch {
+    // Ignore read errors
+  }
+  return item;
 }

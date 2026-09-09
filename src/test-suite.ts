@@ -25,7 +25,7 @@ import { analyzeImpactTool } from './tools/blast-radius.js';
 import { ToolUseGuardian, classifyToolFailure, DEFAULT_TOOL_ALTERNATIVES } from './tools/tool-use-guardian.js';
 import { validateSchemaValue } from './tools/schema-validator.js';
 import { generateFileToolDiff, isMutationTool } from './tools/diff-generator.js';
-import { ContextGuardian, ContextAgent } from './context/index.js';
+import { ContextGuardian, ContextAgent, TurnMemoryRetriever } from './context/index.js';
 import { createInspectImageTool, extractImageDimensions, detectMimeType } from './tools/inspect-image.js';
 import { TypeScriptService } from './tools/typescript-service.js';
 import { MutationTransaction } from './workspace/mutation-transaction.js';
@@ -148,7 +148,9 @@ import { createReadSharedContextTool, createWriteSharedContextTool } from './too
 import { createPublishAgentEventTool } from './tools/agent-event-tools.js';
 import { createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool } from './tools/subagent-tools.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
-import { CodebaseIntelligenceService } from './tools/codebase-intelligence.js';
+import { CodebaseIntelligenceService, isUtilityNoiseSymbol } from './tools/codebase-intelligence.js';
+import { enrichLocationWithSnippet } from './lsp/lsp-manager.js';
+import { CodeSyntaxValidator } from './workspace/syntax-diagnostics.js';
 import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
 import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
 import { getSymbolContext360Tool, createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
@@ -8367,6 +8369,285 @@ Always write tests first!`;
     loopInstance.domainIntentGuardian !== undefined && typeof loopInstance.domainIntentGuardian.extractAndFreezeContract === 'function',
     'AgentLoop tích hợp thành công DomainIntentGuardian trong micro-kernel',
   );
+
+  console.log('\n========================================');
+  console.log('🧪 53. KIỂM THỬ DEEP LSP & AST-AWARE CODE INDEXING (arXiv:2608.13568, QLCoder arXiv:2511.08462, CoSIL arXiv:2503.22424)');
+  console.log('========================================');
+
+  const deepLspDir = path.join(process.cwd(), 'temp', `deep-lsp-suite-${Date.now()}`);
+  await fs.mkdir(deepLspDir, { recursive: true });
+  const deepLspWorkspace = new Workspace(deepLspDir);
+
+  // 1. Kiểm thử Text-Enriched LSP Slicing Engine (arXiv:2608.13568v1)
+  const mathServicePath = path.join(deepLspDir, 'math-service.ts');
+  const mathServiceContent = [
+    'export function add(a: number, b: number): number {',
+    '  return a + b;',
+    '}',
+    '',
+    'export function computeTotal(items: number[]): number {',
+    '  return items.reduce((acc, curr) => add(acc, curr), 0);',
+    '}',
+  ].join('\n');
+  await fs.writeFile(mathServicePath, mathServiceContent, 'utf8');
+
+  // Mô phỏng kết quả LSP location (chỉ có uri và range dạng 0-indexed)
+  const rawLspLocation = {
+    uri: 'math-service.ts',
+    range: {
+      start: { line: 4, character: 16 },
+      end: { line: 4, character: 28 },
+    },
+  };
+
+  const enrichedLocation = enrichLocationWithSnippet(rawLspLocation, deepLspWorkspace);
+  assert(
+    enrichedLocation.startLine === 5 && enrichedLocation.endLine === 5,
+    'Enrichment chuyển đổi chính xác range 0-indexed sang 1-indexed (startLine: 5, endLine: 5)',
+  );
+  assert(
+    Boolean(enrichedLocation.snippet && enrichedLocation.snippet.includes('export function computeTotal')),
+    'Enriched location đính kèm chính xác dòng mã cắt lát (snippet) trực tiếp',
+  );
+  assert(
+    Array.isArray(enrichedLocation.contextLines) && enrichedLocation.contextLines.length >= 2,
+    'Enriched location đính kèm các dòng ngữ cảnh liền kề (contextLines) giúp LLM không cần gọi read_file',
+  );
+
+  // Kiểm tra graceful degradation khi tệp không tồn tại
+  const nonexistentLocation = enrichLocationWithSnippet({ uri: 'nonexistent.ts', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }, deepLspWorkspace);
+  assert(nonexistentLocation.snippet === undefined, 'Graceful degradation khi tệp không tồn tại trong workspace');
+
+  // 2. Kiểm thử Pre-Execution LSP Diagnostics Hook (QLCoder arXiv:2511.08462v5)
+  const brokenTsPath = path.join(deepLspDir, 'broken.ts');
+  await fs.writeFile(brokenTsPath, 'const unclosedString = "syntax error without closing quote;\nfunction broken( {', 'utf8');
+  const brokenDiags = await CodeSyntaxValidator.validateFiles(['broken.ts'], deepLspWorkspace);
+  assert(brokenDiags.length > 0, 'CodeSyntaxValidator phát hiện chính xác lỗi cú pháp biên dịch trong file');
+  const syntaxErrors = brokenDiags.filter((d: any) => d.category === 'error' || !d.category);
+  assert(syntaxErrors.length > 0, 'Lọc chính xác các chẩn đoán lỗi ở mức độ nghiêm trọng (error)');
+
+  // Kiểm tra file hợp lệ không có cảnh báo
+  const validDiags = await CodeSyntaxValidator.validateFiles(['math-service.ts'], deepLspWorkspace);
+  assert(validDiags.length === 0, 'Tệp TypeScript chuẩn cú pháp không tạo cảnh báo false positive');
+
+  // 3. Kiểm thử CoSIL Relevance Pruning (arXiv:2503.22424v3) & Bounded Subgraph (RepoGraph arXiv:2410.14684v2)
+  // 3a. Kiểm tra bộ phân loại Utility Noise Symbols
+  assert(isUtilityNoiseSymbol('log') === true, 'isUtilityNoiseSymbol nhận diện "log" là utility noise');
+  assert(isUtilityNoiseSymbol('toString') === true, 'isUtilityNoiseSymbol nhận diện "toString" là utility noise');
+  assert(isUtilityNoiseSymbol('push') === true, 'isUtilityNoiseSymbol nhận diện "push" là utility noise');
+  assert(isUtilityNoiseSymbol('processPayment') === false, 'isUtilityNoiseSymbol xác nhận "processPayment" là business logic');
+  assert(isUtilityNoiseSymbol('validateTransaction') === false, 'isUtilityNoiseSymbol xác nhận "validateTransaction" là business logic');
+
+  // 3b. Tạo cấu trúc file nghiệp vụ phức hợp để kiểm thử Call Graph
+  const paymentServicePath = path.join(deepLspDir, 'payment-service.ts');
+  const paymentServiceContent = [
+    'import { executeStripeCharge } from "./gateway-service";',
+    '',
+    'export function authorizePayment(amount: number, card: string) {',
+    '  console.log("Authorizing payment");',
+    '  const records: string[] = [];',
+    '  records.push(card);',
+    '  return executeStripeCharge(amount, card);',
+    '}',
+  ].join('\n');
+  await fs.writeFile(paymentServicePath, paymentServiceContent, 'utf8');
+
+  const gatewayServicePath = path.join(deepLspDir, 'gateway-service.ts');
+  const gatewayServiceContent = [
+    'export function executeStripeCharge(amount: number, card: string) {',
+    '  return { status: "success", amount };',
+    '}',
+  ].join('\n');
+  await fs.writeFile(gatewayServicePath, gatewayServiceContent, 'utf8');
+
+  const intelService = new CodebaseIntelligenceService(deepLspWorkspace);
+
+  // Truy vấn Call Graph với CoSIL Pruning bật
+  const prunedGraph = intelService.queryCallGraph('authorizePayment', 'payment-service.ts', 'callees', 1, { pruneNoise: true });
+  assert(
+    prunedGraph.symbol === 'authorizePayment',
+    'Call Graph trả về đúng symbol gốc',
+  );
+  assert(
+    prunedGraph.prunedCount !== undefined && prunedGraph.prunedCount >= 2,
+    'CoSIL Relevance Pruning cắt tỉa thành công ít nhất 2 utility symbols (console.log, records.push)',
+  );
+  assert(
+    prunedGraph.callees.some((c) => c.name === 'executeStripeCharge' && c.relevance === 'high'),
+    'Call Graph giữ lại hàm nghiệp vụ executeStripeCharge với mức độ ưu tiên high',
+  );
+  assert(
+    !prunedGraph.callees.some((c) => c.name === 'log' || c.name === 'push'),
+    'Call Graph đã loại bỏ hoàn toàn các utility noise nodes khỏi danh sách trả về',
+  );
+
+  // Truy vấn Call Graph qua Tool Definition (query_call_graph)
+  const callGraphToolDef = createQueryCallGraphTool(intelService);
+  const toolExecResult = await callGraphToolDef.execute({
+    symbol: 'authorizePayment',
+    path: 'payment-service.ts',
+    direction: 'callees',
+    pruneNoise: true,
+  }, deepLspWorkspace);
+  assert(
+    toolExecResult.success === true && toolExecResult.callGraph.callees.length > 0,
+    'Tool query_call_graph thực thi thành công với tham số CoSIL pruneNoise',
+  );
+
+  // 3c. Kiểm thử Bounded 2-hop Subgraph Traversal
+  const boundedGraph = intelService.queryCallGraph('authorizePayment', 'payment-service.ts', 'callees', 2, { pruneNoise: true });
+  assert(
+    boundedGraph.callees.length > 0,
+    'Bounded Call Graph mở rộng thành công đa cấp',
+  );
+  assert(
+    boundedGraph.callees[0].depth === 1,
+    'Node cấp 1 được đánh dấu depth: 1 chính xác',
+  );
+
+  await fs.rm(deepLspDir, { recursive: true, force: true }).catch(() => {});
+
+  console.log('\n========================================');
+  console.log('🧪 54. KIỂM THỬ PERSISTENT SEMANTIC & EPISODIC MEMORY (ExpeRepair, CTIM-Rover, DreamBench-SWE & SWE-Bench-CL)');
+  console.log('========================================');
+
+  const dualMemDir = path.join(process.cwd(), 'temp', `dual-memory-suite-${Date.now()}`);
+  await fs.mkdir(dualMemDir, { recursive: true });
+  const authDir = path.join(dualMemDir, 'src', 'auth');
+  await fs.mkdir(authDir, { recursive: true });
+  const interceptorPath = path.join(authDir, 'interceptor.ts');
+  await fs.writeFile(interceptorPath, 'export function handleAuth() { return "token_valid"; }', 'utf8');
+
+  const memoryRetriever = new TurnMemoryRetriever(dualMemDir);
+  await memoryRetriever.init();
+
+  // 1. Kiểm thử Dual-Memory Recording & Persistence (ExpeRepair arXiv:2506.10484)
+  const recordedEpisode = await memoryRetriever.recordEpisodicExperience({
+    id: 'ep-auth-001',
+    taskIntent: 'Fix OAuth2 bearer token expiration in AuthInterceptor',
+    rootCause: 'Expired tokens were not refreshed before API request dispatch',
+    faultLocalizedEntities: ['src/auth/interceptor.ts'],
+    patchSummary: '- if (token.isExpired) throw Error;\n+ await refreshToken();',
+    verificationCommand: 'npm test test/auth.test.ts',
+    verificationExitCode: 0,
+  });
+
+  assert(
+    recordedEpisode.id === 'ep-auth-001',
+    'Episodic Experience được ghi nhận thành công với id chính xác',
+  );
+  assert(
+    Boolean(recordedEpisode.fileHashes && recordedEpisode.fileHashes['src/auth/interceptor.ts']),
+    'Tự động tính toán SHA-256 file hashes của các faultLocalizedEntities tại thời điểm fix',
+  );
+
+  await memoryRetriever.recordSemanticInvariant({
+    id: 'sem-auth-001',
+    ruleStatement: 'Always trigger refreshToken before validating authorization header',
+    category: 'architecture_invariant',
+    applicablePatterns: ['auth', 'token', 'oauth'],
+    confidence: 0.95,
+  });
+
+  assert(
+    memoryRetriever.getEpisodicExperienceCount() === 1,
+    'Episodic Memory lưu đúng 1 bản ghi',
+  );
+  assert(
+    memoryRetriever.getSemanticInvariantCount() === 1,
+    'Semantic Memory lưu đúng 1 bản ghi bất biến kiến trúc',
+  );
+
+  // Kiểm tra lưu bền vững (Persistence Reload)
+  const reloadedRetriever = new TurnMemoryRetriever(dualMemDir);
+  await reloadedRetriever.init();
+  assert(
+    reloadedRetriever.getEpisodicExperienceCount() === 1,
+    'Episodic Memory tái nạp thành công từ tệp JSON sau khi khởi động lại',
+  );
+  assert(
+    reloadedRetriever.getSemanticInvariantCount() === 1,
+    'Semantic Memory tái nạp thành công từ tệp JSON sau khi khởi động lại',
+  );
+
+  // 2. Kiểm thử Contrastive Relevance Gating & Anti-Noise Pruning (CTIM-Rover arXiv:2505.23422)
+  // 2a. Query hoàn toàn lạc đề (Noise Query) -> Relevance Gate phải chặn 100%
+  const noiseResult = await memoryRetriever.retrieveDualMemory('Optimize CSS button hover glow animation effect');
+  assert(
+    noiseResult.episodicExemplars.length === 0,
+    'CTIM-Rover Relevance Gate chặn đứng truy vấn lạc đề, loại bỏ 100% rác bộ nhớ (score < 0.60)',
+  );
+  assert(
+    noiseResult.rendered === '',
+    'Không đưa bất kỳ token nhiễu nào vào context khi không vượt qua ngưỡng liên quan',
+  );
+
+  // 2b. Query có độ tương đồng cao -> Đưa ra full exemplar
+  const relevantResult = await memoryRetriever.retrieveDualMemory('Fix OAuth2 token refresh in AuthInterceptor', {
+    activeFiles: ['src/auth/interceptor.ts'],
+  });
+  assert(
+    relevantResult.episodicExemplars.length > 0,
+    'Relevance Gate chấp thuận truy vấn tương đồng cao',
+  );
+  assert(
+    relevantResult.episodicExemplars[0].gatingTier === 'full_exemplar',
+    'Phân loại đúng gatingTier là full_exemplar khi điểm số >= 0.78',
+  );
+  assert(
+    relevantResult.semanticInvariants.length > 0,
+    'Truy hồi chính xác Semantic Invariant phù hợp với pattern auth/token',
+  );
+  assert(
+    relevantResult.rendered.includes('[EPISODIC EXPERIENCE DEMONSTRATIONS]'),
+    'Kết quả định dạng chứa khối Episodic Experience Demonstrations',
+  );
+  assert(
+    relevantResult.rendered.includes('Always trigger refreshToken'),
+    'Kết quả định dạng chứa Semantic Invariant đã được kiểm chứng',
+  );
+
+  // 3. Kiểm thử Memory Hygiene & Staleness Audit (DreamBench-SWE arXiv:2608.20664)
+  const hygieneBefore = await memoryRetriever.auditMemoryHygiene();
+  assert(
+    hygieneBefore.staleCount === 0 && hygieneBefore.validCount >= 1,
+    'Memory Hygiene Audit xác nhận các file mã nguồn hoàn toàn khớp SHA-256 hash gốc',
+  );
+
+  // Sửa đổi file mã nguồn để mô phỏng sự biến đổi của repository qua thời gian
+  await fs.writeFile(interceptorPath, 'export function handleAuth() { return "MODIFIED_CODE_NEW_VERSION"; }', 'utf8');
+  const hygieneAfter = await memoryRetriever.auditMemoryHygiene();
+  assert(
+    hygieneAfter.staleCount >= 1,
+    'Memory Hygiene phát hiện chính xác file mã nguồn đã thay đổi và đánh dấu ký ức là isStale',
+  );
+
+  // 4. Kiểm thử In-Loop Experience Distillation (SWE-Bench-CL & SWE-ContextBench)
+  const distilledExp = await memoryRetriever.distillExperience({
+    taskIntent: 'Implement Connection Pool Timeout in DatabaseManager',
+    rootCause: 'Socket hung indefinitely when connection limit reached',
+    faultLocalizedEntities: ['src/db/pool.ts'],
+    patchSummary: '+ connectionTimeoutMs: 5000\n+ maxPoolSize: 20',
+    verificationCommand: 'npm test test/db.test.ts',
+    verificationExitCode: 0,
+  });
+  assert(
+    distilledExp.id.startsWith('exp-'),
+    'distillExperience tự động sinh mã định danh và lưu trữ ca thành công',
+  );
+  assert(
+    memoryRetriever.getEpisodicExperienceCount() === 2,
+    'Kho Episodic Experience tăng lên 2 bản ghi sau khi chưng cất thành công',
+  );
+
+  // 5. Kiểm thử Tích Hợp Dynamic Context Snippet (Selective Re-injection)
+  const contextSnippet = await memoryRetriever.retrieveContextSnippet('Fix OAuth2 bearer token expiration in AuthInterceptor');
+  assert(
+    contextSnippet.includes('DUAL-MEMORY GUIDANCE'),
+    'retrieveContextSnippet tự động lồng ghép khối Dual-Memory Guidance có cấu trúc',
+  );
+
+  await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => {});
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

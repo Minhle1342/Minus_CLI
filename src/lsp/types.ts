@@ -19,6 +19,21 @@ export interface LspRange {
   end: LspPosition;
 }
 
+export interface EnrichedLspLocation {
+  uri?: string;
+  targetUri?: string;
+  range?: LspRange;
+  targetRange?: LspRange;
+  targetSelectionRange?: LspRange;
+  file?: string;
+  startLine?: number;
+  endLine?: number;
+  snippet?: string;
+  contextLines?: string[];
+  provider?: string;
+  [key: string]: any;
+}
+
 export interface LspDiagnostic {
   range: LspRange;
   severity?: number;
