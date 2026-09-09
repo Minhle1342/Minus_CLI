@@ -68,6 +68,8 @@ import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/con
 import { isMutationTool } from '../tools/diff-generator.js';
 import { detectWorkspaceTestCommand } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
+import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
+import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -275,6 +277,8 @@ export class AgentLoop {
     repositoryContext: string;
   }>();
   readonly dynamicContextArbiter: DynamicContextArbiter;
+  readonly stepRetrievalQueryBuilder = new StepRetrievalQueryBuilder();
+  readonly contextQualityEvaluator = new ContextQualityEvaluator();
   private stepDynamicSuffixes = new Map<number, string>();
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
@@ -282,6 +286,7 @@ export class AgentLoop {
   private cachedTurnNumber?: number;
   private cachedTurnToolDeclarations?: any[];
   private cachedTurnToolProviderSize?: number;
+  private cachedTurnToolFingerprint?: string;
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
@@ -525,7 +530,7 @@ export class AgentLoop {
 
   private async runInternalWithCircuitBreakerRetry(
     session: Session,
-    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean },
+    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean },
   ): Promise<string> {
     while (true) {
       try {
@@ -604,7 +609,7 @@ export class AgentLoop {
     }
   }
 
-  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
+  async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean }): Promise<string> {
     const previous = this.runQueues.get(session.id) || Promise.resolve('');
     const current = previous.then(
       () => this.runInternalWithCircuitBreakerRetry(session, options),
@@ -707,7 +712,7 @@ export class AgentLoop {
     }
   }
 
-  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean }): Promise<string> {
+  private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean }): Promise<string> {
     this.activeSession = session;
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
@@ -715,7 +720,7 @@ export class AgentLoop {
     const turnUserRequest = turnUserEvent?.data.content?.parts
       ?.map((part: any) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
-      .join('\n') || '';
+      .join('\n') || (options?.isRecoveryResume ? '[RESUME INTERRUPTED SESSION]' : '');
     this.planManager.bindSession(session);
     this.goalManager.bindSession(session);
     this.memoryManager.bindSession(session);
@@ -745,7 +750,11 @@ export class AgentLoop {
       ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor))
       : baseMaxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
-    const isContinuationOrGoal = isGoal || Boolean(options?.isCircuitBreakerRetry) || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[GOAL CONTINUATION]');
+    const isContinuationOrGoal = isGoal
+      || Boolean(options?.isCircuitBreakerRetry)
+      || Boolean(options?.isRecoveryResume)
+      || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]')
+      || turnUserRequest.includes('[GOAL CONTINUATION]');
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
@@ -1028,12 +1037,6 @@ export class AgentLoop {
       // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
       // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
       const activeTask = this.planManager.getActiveTask();
-      const activeStepQuery = [
-        turnUserRequest,
-        activeTask?.title || '',
-        activeTask?.acceptanceCriteria || '',
-        activeTask?.notes || '',
-      ].filter(Boolean).join(' ');
       const hasValidatedHypothesis = this.hypothesisTracker.getValidatedHypotheses().length > 0;
       const classification = this.classificationEngine.classify({
         request: turnUserRequest,
@@ -1109,11 +1112,27 @@ export class AgentLoop {
       const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
         && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
       const providerSize = candidateProvider.getAll().length;
+      const currentHypothesis = this.hypothesisTracker.getActiveHypothesis()
+        || this.hypothesisTracker.getValidatedHypotheses().slice(-1)[0];
+      const retrievalState = this.stepRetrievalQueryBuilder.build({
+        userRequest: turnUserRequest,
+        activeTask,
+        phase: classification.phase,
+        taskClass: classification.taskClass,
+        hypothesis: currentHypothesis,
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        allowedToolNames: toolControlMode === 'enforce'
+          ? recommendedToolDecision.allowedToolNames
+          : candidateProvider.getAll().map((tool) => tool.name),
+      });
+      const activeStepQuery = retrievalState.query;
       let activeToolDeclarations: any[];
       if (
         this.cachedTurnNumber === turn
         && this.cachedTurnToolDeclarations
         && this.cachedTurnToolProviderSize === providerSize
+        && this.cachedTurnToolFingerprint === retrievalState.fingerprint
       ) {
         activeToolDeclarations = this.cachedTurnToolDeclarations;
       } else {
@@ -1123,6 +1142,7 @@ export class AgentLoop {
         this.cachedTurnNumber = turn;
         this.cachedTurnToolDeclarations = activeToolDeclarations;
         this.cachedTurnToolProviderSize = providerSize;
+        this.cachedTurnToolFingerprint = retrievalState.fingerprint;
       }
 
       // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
@@ -1153,6 +1173,13 @@ export class AgentLoop {
       }
 
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
+      const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
+        if (hasSubmittedSolution) return false;
+        if (isPureInvestigation && name === 'submit_solution') return false;
+        if (hasVerifiedTests && isMutationTool(name)) return false;
+        return true;
+      });
+      this.contextQualityEvaluator.recordToolRetrieval(visibleToolNames, expectedToolNames);
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
       const stepToolProvider = toolControlMode === 'enforce'
@@ -1295,10 +1322,15 @@ export class AgentLoop {
               seedFiles: [
                 ...(activeTask?.readSet || []),
                 ...(activeTask?.writeSet || []),
+                ...(currentHypothesis?.targetFiles || []),
+                ...retrievalState.discoveredFiles,
                 ...(composeState?.registeredFiles || []),
                 ...repositoryMemoryRecords.flatMap((item) => item.relatedFiles),
               ],
-              seedSymbols: activeTask?.symbols || [],
+              seedSymbols: [
+                ...(activeTask?.symbols || []),
+                ...retrievalState.discoveredSymbols,
+              ],
             });
           } catch (error: any) {
             repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
@@ -1324,6 +1356,12 @@ export class AgentLoop {
           recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
             topK: 2,
             minScore: 0.55,
+            activeFiles: [
+              ...(activeTask?.readSet || []),
+              ...(activeTask?.writeSet || []),
+              ...(currentHypothesis?.targetFiles || []),
+              ...retrievalState.discoveredFiles,
+            ],
           });
         } catch {
           // Fail-open
@@ -1380,7 +1418,7 @@ export class AgentLoop {
 
       // Phase 2/3/4: Hierarchical Dynamic Context Budgeting with Adaptive Failure Throttling
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
-      const arbitration = this.dynamicContextArbiter.arbitrate({
+      const arbitrationInputs = {
         advicePrompt,
         reflectionContext,
         cognitiveScaffold: cognitiveScaffoldText,
@@ -1391,10 +1429,18 @@ export class AgentLoop {
         composeContext,
         repositoryMemoryContext,
         repositoryContext,
-      }, {
+      };
+      const arbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, {
         maxBudgetTokens: dynamicBudgetTokens,
         modelName: activeModelName,
         consecutiveFailures: consecutiveFails,
+        retrievalQuery: activeStepQuery,
+      });
+      this.contextQualityEvaluator.recordContextArbitration({
+        sourceCount: Object.values(arbitrationInputs).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
+        retainedSourceCount: arbitration.sourcesIncluded.length,
+        beforeTokens: arbitration.stats.beforeTokens,
+        afterTokens: arbitration.stats.afterTokens,
       });
       let dynamicExecutionContext = arbitration.renderedContext;
 
@@ -2820,7 +2866,7 @@ export class AgentLoop {
     session: Session,
     text: string,
     source: AgentInputSource = 'human',
-    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal },
+    options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isRecoveryResume?: boolean },
   ): Promise<string> {
     if (this.drainingInbox && this.drainingSessionId !== session.id) {
       throw new Error('AgentLoop is currently draining another session inbox.');
@@ -3028,7 +3074,7 @@ export class AgentLoop {
     await this.sessionPersistence.save(session);
   }
 
-  private async drainInbox(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal }): Promise<void> {
+  private async drainInbox(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isRecoveryResume?: boolean }): Promise<void> {
     this.drainScheduled = false;
     this.drainingInbox = true;
     this.drainingSessionId = session.id;

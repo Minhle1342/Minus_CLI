@@ -32,6 +32,8 @@ export interface DynamicContextArbiterOptions {
   enableDeduplication?: boolean;
   /** Số lần thất bại liên tiếp của lượt chạy hiện tại để điều tiết ngân sách động */
   consecutiveFailures?: number;
+  /** Query của reasoning step hiện tại để ưu tiên evidence liên quan trong P3-P7 */
+  retrievalQuery?: string;
 }
 
 export interface DynamicContextArbiterResult {
@@ -178,6 +180,16 @@ export class DynamicContextArbiter {
 
     const rankedSources: RankedSource[] = rawSources.filter((s) => s.content.length > 0);
 
+    // Question-aware placement (P3-P7 only): move the most query-relevant evidence
+    // toward the front so later budget truncation retains useful evidence first.
+    if (optObj?.retrievalQuery?.trim()) {
+      for (const source of rankedSources) {
+        if (source.priority >= 3) {
+          source.content = this.reorderByQuery(source.content, optObj.retrievalQuery);
+        }
+      }
+    }
+
     // 2. Khử trùng lặp chéo giữa các tầng trí nhớ nếu bật
     if (enableDedup) {
       this.deduplicateSources(rankedSources);
@@ -310,6 +322,27 @@ export class DynamicContextArbiter {
       });
       repoMemSource.content = filteredLines.join('\n').trim();
     }
+  }
+
+  private reorderByQuery(content: string, query: string): string {
+    const blocks = content.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
+    if (blocks.length <= 2) return content;
+    const terms = new Set(
+      query.toLowerCase().split(/[^a-z0-9_./\\-]+/g).filter((term) => term.length >= 3),
+    );
+    if (terms.size === 0) return content;
+
+    const header = blocks[0];
+    const ranked = blocks.slice(1).map((block, index) => {
+      const lower = block.toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (lower.includes(term)) score += term.includes('/') || term.includes('\\') || term.includes('.') ? 3 : 1;
+      }
+      return { block, index, score };
+    }).sort((a, b) => b.score - a.score || a.index - b.index);
+
+    return [header, ...ranked.map((entry) => entry.block)].join('\n\n');
   }
 
   /**

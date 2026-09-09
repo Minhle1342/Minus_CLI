@@ -1,6 +1,7 @@
 import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
+import { getNativeCore } from '../native/index.js';
 
 export interface ToolDocument {
   id: string;
@@ -125,20 +126,58 @@ export class ToolRetriever {
       }
     }
 
-    // 2. Tìm kiếm các tool phù hợp theo BM25 / Fuzzy matching
+    // 2. Hybrid retrieval: lexical BM25/fuzzy + local semantic candidates.
+    // Reciprocal-rank fusion avoids assuming scores from the two retrievers share a scale.
     const cleanedQuery = (query || '').trim();
     if (cleanedQuery.length > 0) {
       try {
         const searchHits = this.miniSearch.search(cleanedQuery);
-        let dynamicAdded = 0;
-        for (const hit of searchHits) {
-          if (dynamicAdded >= this.config.topK) break;
-          if (hit.score >= this.config.minScore && poolMap.has(hit.id)) {
-            if (!selectedToolNames.has(hit.id)) {
-              selectedToolNames.add(hit.id);
-              dynamicAdded++;
-            }
+        const lexicalRank = new Map<string, number>();
+        searchHits
+          .filter((hit) => hit.score >= this.config.minScore && poolMap.has(hit.id))
+          .forEach((hit, index) => lexicalRank.set(hit.id, index + 1));
+
+        const queryTerms = this.semanticTerms(cleanedQuery);
+        const native = getNativeCore();
+        let queryVector: number[] | undefined;
+        if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
+          try { queryVector = native.rsGenerateSubwordEmbedding(cleanedQuery); } catch {}
+        }
+
+        const semanticCandidates = pool.map((tool) => {
+          const category = this.inferCategory(tool);
+          const tags = this.inferTags(tool);
+          const text = `${tool.name} ${category} ${tags} ${tool.description || ''} ${Object.keys(tool.parameters?.properties || {}).join(' ')}`;
+          const toolTerms = this.semanticTerms(text);
+          let semanticScore = this.termOverlap(queryTerms, toolTerms);
+          if (queryVector && native && typeof native.rsGenerateSubwordEmbedding === 'function' && typeof native.rsCosineSimilarity === 'function') {
+            try {
+              const toolVector = native.rsGenerateSubwordEmbedding(text);
+              semanticScore = Math.max(semanticScore, Math.max(0, native.rsCosineSimilarity(queryVector, toolVector)));
+            } catch {}
           }
+          semanticScore += this.hierarchyBoost(cleanedQuery, category, tool.name);
+          return { name: tool.name, score: semanticScore };
+        }).filter((candidate) => candidate.score > 0)
+          .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+        const semanticRank = new Map<string, number>();
+        semanticCandidates.forEach((candidate, index) => semanticRank.set(candidate.name, index + 1));
+        const fused = pool
+          .map((tool) => {
+            const lr = lexicalRank.get(tool.name);
+            const sr = semanticRank.get(tool.name);
+            const score = (lr ? 1 / (60 + lr) : 0) + (sr ? 1 / (60 + sr) : 0);
+            return { name: tool.name, score };
+          })
+          .filter((candidate) => candidate.score > 0 && !selectedToolNames.has(candidate.name))
+          .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+        const topScore = fused[0]?.score || 0;
+        const cutoffScore = fused[this.config.topK - 1]?.score || 0;
+        const adaptiveExtra = topScore > 0 && cutoffScore > 0 && (topScore - cutoffScore) / topScore < 0.12 ? 2 : 0;
+        for (const candidate of fused.slice(0, this.config.topK + adaptiveExtra)) {
+          selectedToolNames.add(candidate.name);
         }
       } catch {
         // Fallback an toàn nếu query chứa ký tự regex đặc biệt
@@ -160,6 +199,35 @@ export class ToolRetriever {
     return this.formatDeclarations(retrievedTools);
   }
 
+  private semanticTerms(text: string): Set<string> {
+    return new Set(
+      text.toLowerCase()
+        .split(/[^a-z0-9_]+/g)
+        .map((term) => term.trim())
+        .filter((term) => term.length >= 3),
+    );
+  }
+
+  private termOverlap(queryTerms: Set<string>, documentTerms: Set<string>): number {
+    if (queryTerms.size === 0 || documentTerms.size === 0) return 0;
+    let matched = 0;
+    for (const term of queryTerms) {
+      if (documentTerms.has(term)) matched++;
+    }
+    return matched / Math.sqrt(queryTerms.size * documentTerms.size);
+  }
+
+  private hierarchyBoost(query: string, category: string, toolName: string): number {
+    const q = query.toLowerCase();
+    let boost = 0;
+    if (/(error|exception|diagnostic|failed|failure)/.test(q) && /diagnostic|inspect|symbol|call_graph/.test(toolName)) boost += 0.18;
+    if (/(caller|callee|dependency|impact|symbol|architecture|graph)/.test(q) && category === 'code_intelligence') boost += 0.16;
+    if (/(test|verify|build|compile)/.test(q) && /run|diagnostic|test|command/.test(toolName)) boost += 0.14;
+    if (/(web|research|paper|documentation|internet)/.test(q) && category === 'network') boost += 0.16;
+    if (/(edit|patch|fix|modify|implement)/.test(q) && category === 'filesystem_mutation') boost += 0.10;
+    return boost;
+  }
+
   configure(config: Partial<ToolRetrieverConfig>): void {
     this.config = { ...this.config, ...config };
   }
@@ -170,7 +238,7 @@ export class ToolRetriever {
 
   private formatDeclarations(tools: ToolDefinition[]): FunctionDeclaration[] {
     // KV-Cache Prefix Alignment: Sắp xếp cố định theo tên 100%
-    return tools
+    return [...tools]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((tool) => ({
         name: tool.name,

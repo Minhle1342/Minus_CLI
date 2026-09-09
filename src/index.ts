@@ -1456,7 +1456,33 @@ Please focus on executing and verifying this task, and update its status to COMP
           continue;
         }
 
-        // 4. Nếu có Subagents bị dừng do restart
+        // 4. Session vừa được crash-recovery nhưng không có Goal/Plan.
+        // Trước đây banner yêu cầu /resume nhưng handler rơi thẳng xuống
+        // nhánh "không phát hiện tác vụ".
+        if ((activeSession as any)?.wasInterruptedAndRecovered) {
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING INTERRUPTED SESSION]${c.reset} ${c.dim}Tiếp tục từ lịch sử đã được crash-recovery; model sẽ kiểm tra các tool call có outcome chưa xác định trước khi hành động.${c.reset}\n`);
+          const recoveryPrompt = `[RESUME INTERRUPTED SESSION]:
+The previous process was interrupted and the session has been repaired by the harness.
+Review the recovered conversation and the crash-recovery tool results first.
+Some side effects may have an unknown outcome. Do not blindly repeat a side effect; inspect the current workspace/state and retry only when justified.
+Continue the user's original request and finish with fresh observable evidence when work remains.`;
+          sessionCount++;
+          try {
+            await runWithCancellation(async (signal) => {
+              await agentLoop.submit(activeSession, recoveryPrompt, 'system', {
+                signal,
+                isRecoveryResume: true,
+              });
+            });
+            // The repaired events are durable; consume this one-shot startup marker.
+            (activeSession as any).wasInterruptedAndRecovered = false;
+          } catch (err: any) {
+            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục phiên bị gián đoạn:${c.reset}`, err.message);
+          }
+          continue;
+        }
+
+        // 5. Nếu có Subagents bị dừng do restart
         const stoppedAgents = (kernel.ctx as any)?.subagents?.getHandles
           ? (kernel.ctx as any).subagents.getHandles().filter((h: any) => h.status === 'stopped')
           : [];

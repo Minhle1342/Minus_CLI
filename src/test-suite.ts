@@ -157,6 +157,9 @@ import { getSymbolContext360Tool, createGetSymbolContext360Tool } from './tools/
 import { getArchitectureTopologyTool, createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
 import { ToolSynergyAdvisor } from './agent/tool-synergy-advisor.js';
 import { ToolRetriever } from './tools/tool-retriever.js';
+import { StepRetrievalQueryBuilder } from './agent/step-retrieval-query-builder.js';
+import { ContextQualityEvaluator } from './agent/context-quality-evaluator.js';
+import { DynamicContextArbiter } from './agent/dynamic-context-arbiter.js';
 import { loadSession, saveSession, clearSession, getSessionFilePath } from './session/persistent-session.js';
 import { SkillLoader } from './skills/skill-loader.js';
 import { SkillRegistry } from './skills/skill-registry.js';
@@ -1868,6 +1871,47 @@ async function runUnitTests() {
   const pendingAnswers = await pendingLoop.resumePending(pendingInputSession);
   assert(pendingAnswers.length === 1 && pendingAnswers[0].includes('tiếp tục'), 'Durable pending input được replay bởi explicit resumePending');
   assert(pendingInputSession.getPendingInputs().length === 0, 'Replay pending input không để lại queue dangling');
+
+  // Regression: /resume phải tiếp tục được session chỉ bị crash-recovery dù
+  // session đó không có Goal hoặc Plan nào để phục hồi.
+  const recoveredOnlySession = new Session('recovered-only-session');
+  recoveredOnlySession.addUserMessage('Tiếp tục kiểm tra tác vụ sau khi CLI bị gián đoạn');
+  recoveredOnlySession.append('turn/start', { turn: 1 });
+  recoveredOnlySession.append('step/start', { turn: 1, step: 1 });
+  recoveredOnlySession.addModelMessage({
+    functionCalls: [{ name: 'run_command', args: { command: 'npm test' } }],
+  });
+  const recoveredAssistantSeq = recoveredOnlySession.lastEvent?.seq;
+  recoveredOnlySession.append('tool/call', {
+    turn: 1,
+    step: 1,
+    toolName: 'run_command',
+    toolCallId: 'recovered-only-call-1',
+    assistantSeq: recoveredAssistantSeq,
+    args: { command: 'npm test' },
+  });
+  assert(recoveredOnlySession.recoverInterrupted(), 'Crash recovery tạo trạng thái interrupted cho session không có plan/goal');
+  (recoveredOnlySession as any).wasInterruptedAndRecovered = true;
+  const recoveredOnlyLoop = new AgentLoop(new MockFinalLLM(), registry, { maxSteps: 2, workspace });
+  const recoveredOnlyAnswer = await recoveredOnlyLoop.submit(
+    recoveredOnlySession,
+    '[RESUME INTERRUPTED SESSION]: Review crash-recovery evidence and continue safely.',
+    'system',
+    { isRecoveryResume: true },
+  );
+  assert(recoveredOnlyAnswer.length > 0, 'Session chỉ có crash-recovery tiếp tục được qua đường resume');
+  assert(
+    recoveredOnlySession.getEvents().some((event) => event.type === 'user/message'
+      && event.data.source === 'system'
+      && event.data.content?.parts?.[0]?.text?.includes('[RESUME INTERRUPTED SESSION]')),
+    'Recovery resume ghi nhận continuation prompt bền vững trong session',
+  );
+  assert(
+    recoveredOnlySession.getDiagnostics().openTurns.length === 0
+      && recoveredOnlySession.getDiagnostics().openSteps.length === 0
+      && recoveredOnlySession.getPendingToolCalls().length === 0,
+    'Recovery resume đóng lifecycle và không để lại tool call dangling',
+  );
 
   const delegationParent = new AgentLoop(new MockFinalLLM(), registry, { maxSteps: 2, workspace, agentId: 'delegation-parent' });
   const delegationParentSession = new Session('delegation-parent-session');
@@ -6469,6 +6513,131 @@ Always write tests first!`;
   const queryBlackboardHits = ratsRetriever.retrieve('shared blackboard context state occ lock', fullToolList).map((t: any) => t.name);
   assert(queryBlackboardHits.includes('read_shared_context') || queryBlackboardHits.includes('write_shared_context'), 'RATS truy xuất chính xác shared context tools');
 
+  // 2c. Hybrid hierarchy signal phải tìm được tool dù query không trùng lexical với schema.
+  const semanticOnlyRetriever = new ToolRetriever({
+    enabled: true,
+    activationThreshold: 2,
+    topK: 1,
+    alwaysInclude: [],
+  });
+  const semanticOnlyTools: any[] = [
+    { name: 'inspect_symbol_edges', description: 'Shows structural relationships in source code.', parameters: { type: 'object', properties: {} }, execute: async () => ({ success: true }) },
+    { name: 'archive_bundle', description: 'Packages selected artifacts.', parameters: { type: 'object', properties: {} }, execute: async () => ({ success: true }) },
+    { name: 'plan_queue', description: 'Maintains work items.', parameters: { type: 'object', properties: {} }, execute: async () => ({ success: true }) },
+    { name: 'memory_digest', description: 'Stores compact notes.', parameters: { type: 'object', properties: {} }, execute: async () => ({ success: true }) },
+  ];
+  semanticOnlyRetriever.indexTools(semanticOnlyTools);
+  const semanticOnlyHits = semanticOnlyRetriever
+    .retrieve('architecture dependency impact', semanticOnlyTools)
+    .map((tool: any) => tool.name);
+  assert(
+    semanticOnlyHits.includes('inspect_symbol_edges'),
+    'Hybrid ToolRetriever dùng hierarchy/semantic signal để tìm code-intelligence tool khi BM25 không có lexical match trực tiếp',
+  );
+
+  // 2d. StepRetrievalQueryBuilder phải làm cache fingerprint nhạy với reasoning state nhưng ổn định khi state không đổi.
+  const retrievalQueryBuilder = new StepRetrievalQueryBuilder();
+  const baseRetrievalState = retrievalQueryBuilder.build({
+    userRequest: 'Fix authentication refresh flow',
+    activeTask: {
+      title: 'Repair auth interceptor',
+      acceptanceCriteria: 'Tests pass',
+      readSet: ['src/auth/interceptor.ts'],
+      symbols: ['AuthInterceptor'],
+    },
+    phase: 'explore',
+    taskClass: 'bugfix',
+    allowedToolNames: ['read_file', 'get_diagnostics'],
+  });
+  const stableRetrievalState = retrievalQueryBuilder.build({
+    userRequest: 'Fix authentication refresh flow',
+    activeTask: {
+      title: 'Repair auth interceptor',
+      acceptanceCriteria: 'Tests pass',
+      readSet: ['src/auth/interceptor.ts'],
+      symbols: ['AuthInterceptor'],
+    },
+    phase: 'explore',
+    taskClass: 'bugfix',
+    allowedToolNames: ['get_diagnostics', 'read_file'],
+  });
+  assert(
+    baseRetrievalState.fingerprint === stableRetrievalState.fingerprint,
+    'Step retrieval fingerprint ổn định khi reasoning state và allowed tool set không đổi',
+  );
+  const changedPhaseState = retrievalQueryBuilder.build({
+    userRequest: 'Fix authentication refresh flow',
+    phase: 'implement',
+    taskClass: 'bugfix',
+    allowedToolNames: ['read_file', 'get_diagnostics'],
+  });
+  assert(
+    changedPhaseState.fingerprint !== baseRetrievalState.fingerprint,
+    'Step retrieval fingerprint thay đổi khi phase thay đổi',
+  );
+  const failedToolState = retrievalQueryBuilder.build({
+    userRequest: 'Fix authentication refresh flow',
+    phase: 'explore',
+    taskClass: 'bugfix',
+    hypothesis: { statement: 'Refresh token is not awaited', targetFiles: ['src/auth/interceptor.ts'] },
+    lastToolName: 'run_command',
+    lastToolResult: { error: 'TypeError in src/auth/service.ts at AuthService.refreshToken' },
+    allowedToolNames: ['read_file', 'get_diagnostics'],
+  });
+  assert(
+    failedToolState.failureSignature.length > 0
+      && failedToolState.discoveredFiles.includes('src/auth/service.ts')
+      && failedToolState.discoveredSymbols.includes('AuthService.refreshToken'),
+    'Step retrieval query thu nhận failure signature cùng file/symbol mới phát hiện từ tool evidence',
+  );
+  assert(
+    failedToolState.fingerprint !== baseRetrievalState.fingerprint,
+    'Tool failure/hypothesis mới làm invalid cache fingerprint của tool declarations',
+  );
+
+  // 2e. Question-aware arbitration chỉ sắp lại P3-P7 và giữ nguyên các tầng P1/P2.
+  const queryAwareArbiter = new DynamicContextArbiter(2_000);
+  const queryAwareResult = queryAwareArbiter.arbitrate({
+    advicePrompt: 'P1_KEEP_EXACT',
+    rawPlanContext: 'P2_KEEP_EXACT',
+    recalledTurnContext: [
+      '[TURN MEMORY]',
+      'CSS animation unrelated evidence',
+      'Auth token interceptor refresh evidence',
+    ].join('\n\n'),
+  }, {
+    maxBudgetTokens: 2_000,
+    retrievalQuery: 'auth token interceptor refresh',
+  });
+  assert(
+    queryAwareResult.renderedContext.indexOf('P1_KEEP_EXACT') < queryAwareResult.renderedContext.indexOf('P2_KEEP_EXACT'),
+    'Question-aware arbitration bảo toàn thứ tự P1 trước P2',
+  );
+  assert(
+    queryAwareResult.renderedContext.indexOf('Auth token interceptor refresh evidence')
+      < queryAwareResult.renderedContext.indexOf('CSS animation unrelated evidence'),
+    'Question-aware arbitration đưa evidence liên quan lên trước trong P3-P7',
+  );
+
+  // 2f. ContextQualityEvaluator chạy shadow mode và tính được recall/precision/token-saving proxy.
+  const qualityEvaluator = new ContextQualityEvaluator();
+  qualityEvaluator.recordToolRetrieval(['read_file', 'query_call_graph'], ['query_call_graph', 'get_route_map']);
+  qualityEvaluator.recordContextArbitration({
+    sourceCount: 4,
+    retainedSourceCount: 2,
+    beforeTokens: 1_000,
+    afterTokens: 600,
+  });
+  const qualitySnapshot = qualityEvaluator.snapshot();
+  assert(
+    qualitySnapshot.toolRecallAtK === 0.5 && qualitySnapshot.unnecessaryToolRate === 0.5,
+    'ContextQualityEvaluator tính đúng toolRecall@K và unnecessary-tool proxy',
+  );
+  assert(
+    qualitySnapshot.averageContextPrecisionProxy === 0.5 && qualitySnapshot.tokensSaved === 400,
+    'ContextQualityEvaluator tính đúng context precision proxy và số token tiết kiệm',
+  );
+
   console.log('\n========================================');
   console.log('🧪 37. KIỂM THỬ CƠ CHẾ CANCEL DURING EXECUTION (ANTIGRAVITY CLI TASK CANCELLATION)');
   console.log('========================================');
@@ -8645,6 +8814,14 @@ Always write tests first!`;
     'Memory Hygiene phát hiện chính xác file mã nguồn đã thay đổi và đánh dấu ký ức là isStale',
   );
 
+  const staleRelevantResult = await memoryRetriever.retrieveDualMemory('Fix OAuth2 token refresh in AuthInterceptor', {
+    activeFiles: ['src/auth/interceptor.ts'],
+  });
+  assert(
+    staleRelevantResult.episodicExemplars.every((item) => item.gatingTier !== 'full_exemplar'),
+    'Episodic exemplar có file đã thay đổi không được tiếp tục inject ở mức full_exemplar',
+  );
+
   // 4. Kiểm thử In-Loop Experience Distillation (SWE-Bench-CL & SWE-ContextBench)
   const distilledExp = await memoryRetriever.distillExperience({
     taskIntent: 'Implement Connection Pool Timeout in DatabaseManager',
@@ -8933,6 +9110,9 @@ Always write tests first!`;
     orchestrator55.fileLockManager.isLockedByOther('src/clean.ts', 'other-agent'),
     'File src/clean.ts đã được cấp khóa an toàn trong FileConcurrencyLockManager',
   );
+  for (const dispatched of batchResult.dispatchedTasks) {
+    orchestrator55.fileLockManager.release(dispatched.agentId);
+  }
 
   // 6. Kiểm thử executeFullDag với Automated Pipeline & Quality Gate
   const fullDagPlanMgr = new PlanManager();

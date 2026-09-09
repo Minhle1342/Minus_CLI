@@ -28,6 +28,7 @@ export interface TurnMemoryOptions {
   topK?: number;
   minScore?: number;
   maxTokens?: number;
+  activeFiles?: string[];
 }
 
 export interface AntiPatternRecord {
@@ -668,7 +669,11 @@ export class TurnMemoryRetriever {
     const snippets: string[] = [];
 
     // 0. Dual-Memory Stream (ExpeRepair & CTIM-Rover)
-    const dualMem = await this.retrieveDualMemory(query, { topK: options?.topK ?? 2, minScore: options?.minScore ?? 0.60 });
+    const dualMem = await this.retrieveDualMemory(query, {
+      topK: options?.topK ?? 2,
+      minScore: options?.minScore ?? 0.60,
+      activeFiles: options?.activeFiles,
+    });
     if (dualMem.rendered) {
       snippets.push(dualMem.rendered);
     }
@@ -914,9 +919,19 @@ export class TurnMemoryRetriever {
         score = score * 0.5;
       }
 
-      // CTIM-Rover Relevance Gate Threshold:
+      // Revalidate high-value exemplars against the current repository before injection.
+      // Similarity alone is insufficient because a once-correct patch can become stale.
       if (score >= minScore) {
-        const gatingTier = score >= 0.78 ? 'full_exemplar' : 'advisory_hint';
+        const repositoryCurrent = await this.verifyEpisodicRecordCurrent(rec);
+        const hasEntityEvidence = sc.entityOverlap > 0 || sc.bm25 >= 0.55;
+        if (!repositoryCurrent) {
+          rec.isStale = true;
+          score *= 0.5;
+        }
+        if (score < minScore || (!hasEntityEvidence && score < 0.82)) continue;
+        const gatingTier = repositoryCurrent && hasEntityEvidence && score >= 0.78
+          ? 'full_exemplar'
+          : 'advisory_hint';
         candidateEpisodes.push({
           record: rec,
           score: Number(score.toFixed(3)),
@@ -978,6 +993,26 @@ export class TurnMemoryRetriever {
 
     result.rendered = this.formatDualMemoryForContext(result);
     return result;
+  }
+
+  private async verifyEpisodicRecordCurrent(record: EpisodicExperienceRecord): Promise<boolean> {
+    if (record.isStale) return false;
+    const hashes = record.fileHashes || {};
+    const entries = Object.entries(hashes);
+    if (entries.length === 0) return true;
+    for (const [relativeFile, expectedHash] of entries) {
+      try {
+        const absoluteFile = path.isAbsolute(relativeFile)
+          ? relativeFile
+          : path.join(this.workspaceDir, relativeFile);
+        const bytes = await fs.readFile(absoluteFile);
+        const actualHash = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, expectedHash.length);
+        if (actualHash !== expectedHash) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
