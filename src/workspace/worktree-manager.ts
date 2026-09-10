@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Workspace } from './workspace.js';
 import { MutationTransaction, type StagedMutationOp } from './mutation-transaction.js';
+import { VirtualWorkspace } from './virtual-workspace.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +62,14 @@ export class WorktreeManager {
       } catch {}
       throw new Error(`Failed to create Compose worktree: ${error.message}`);
     }
+  }
+
+  /**
+   * Tạo Virtual Workspace In-Memory CoW cho Subagent mà không cần đĩa cứng (Zero-cost branching)
+   */
+  createVirtualWorkspace(sessionId?: string): VirtualWorkspace {
+    const id = sessionId || `vfs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return new VirtualWorkspace(id, this.workspaceRoot);
   }
 
   /** Apply preflighted mutations atomically inside an isolated worktree. */

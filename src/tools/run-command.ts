@@ -85,14 +85,69 @@ const ALLOWED_COMMAND_PREFIXES = [
   'tsc',
   'curl ',
   'wget ',
-  // Read-only Git commands
+  // Git commands (Tiêu chuẩn Công nghiệp: Cho phép thao tác Git qua run_command, chặn unrequested push lên main)
   'git status',
+  'git status ',
   'git diff',
+  'git diff ',
   'git log',
+  'git log ',
   'git branch',
+  'git branch ',
   'git show',
+  'git show ',
   'git rev-parse',
+  'git rev-parse ',
   'git describe',
+  'git describe ',
+  'git tag',
+  'git tag ',
+  'git add',
+  'git add ',
+  'git commit',
+  'git commit ',
+  'git checkout',
+  'git checkout ',
+  'git switch',
+  'git switch ',
+  'git restore',
+  'git restore ',
+  'git stash',
+  'git stash ',
+  'git reset',
+  'git reset ',
+  'git merge',
+  'git merge ',
+  'git rebase',
+  'git rebase ',
+  'git cherry-pick',
+  'git cherry-pick ',
+  'git fetch',
+  'git fetch ',
+  'git pull',
+  'git pull ',
+  'git rm',
+  'git rm ',
+  'git mv',
+  'git mv ',
+  'git init',
+  'git init ',
+  'git clone',
+  'git clone ',
+  'git clean',
+  'git clean ',
+  'git remote',
+  'git remote ',
+  'git config',
+  'git config ',
+  'git check-ignore',
+  'git check-ignore ',
+  'git blame',
+  'git blame ',
+  'git shortlog',
+  'git shortlog ',
+  'git push',
+  'git push ',
 ];
 
 /**
@@ -107,14 +162,43 @@ function truncateOutput(text: string, maxLength: number = 50000): string {
 }
 
 /**
+ * Kiểm tra xem lệnh Git push có nhắm tới nhánh main/master hay không.
+ * Tuân thủ nghiêm ngặt User Rule 2: Chặn tự động push lên main để không kích hoạt CI/CD Railway.
+ */
+export function isBlockedGitPushToMain(command: string): boolean {
+  const trimmed = command.trim().toLowerCase();
+  if (!/\bgit(?:\.exe)?\b/i.test(trimmed)) return false;
+  const subcmd = findGitSubcommand(command);
+  if (subcmd !== 'push') return false;
+  // Match: git push origin main, git push -u origin main, git push origin HEAD:main, git push ... master
+  return /\b(?:origin\s+)?(?:HEAD:)?(?:main|master)\b/i.test(trimmed);
+}
+
+/**
  * Kiểm tra xem lệnh có nằm trong danh sách an toàn hay không (cho Host mode).
  */
 export function isAllowedCommand(command: string): boolean {
   const trimmed = command.trim();
-  return ALLOWED_COMMAND_PREFIXES.some((prefix) => {
+  if (ALLOWED_COMMAND_PREFIXES.some((prefix) => {
     const exact = prefix.trim();
     return trimmed === exact || (prefix.endsWith(' ') && trimmed.startsWith(prefix));
-  });
+  })) {
+    return true;
+  }
+  // Cho phép mọi lệnh Git thông thường nếu subcommand hợp lệ
+  const gitSub = findGitSubcommand(command);
+  if (gitSub) {
+    const safeGitSubcommands = new Set([
+      'status', 'diff', 'log', 'branch', 'show', 'rev-parse', 'describe', 'tag',
+      'add', 'commit', 'checkout', 'switch', 'restore', 'stash', 'reset', 'merge',
+      'rebase', 'cherry-pick', 'fetch', 'pull', 'rm', 'mv', 'init', 'clone',
+      'clean', 'remote', 'config', 'check-ignore', 'blame', 'shortlog', 'push',
+    ]);
+    if (safeGitSubcommands.has(gitSub)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function isAllowedShellCommand(command: string): boolean {
@@ -488,14 +572,13 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(rawCommand);
 
-      const gitSubcommandBeforeDispatch = findGitSubcommand(rawCommand);
-      const readOnlyGitSubcommands = new Set(['status', 'diff', 'log', 'branch', 'show', 'rev-parse', 'describe', 'tag']);
-      const isGitMutation = Boolean(gitSubcommandBeforeDispatch && !readOnlyGitSubcommands.has(gitSubcommandBeforeDispatch));
+      // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway
+      const blockedPushToMain = isBlockedGitPushToMain(rawCommand);
 
-      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, là git mutation, hoặc chứa phân đoạn ngoài allowlist
+      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
         || shellAnalysis.complex
-        || isGitMutation
+        || blockedPushToMain
         || !shellAnalysis.segments.every(isAllowedCommand);
 
       const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
@@ -522,12 +605,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           errorCode: 'COMMAND_PARSE_REJECTED',
         };
       }
-      if (isGitMutation && !hasExplicitPermission) {
+      if (blockedPushToMain && !hasExplicitPermission) {
         return {
           command: rawCommand,
-          error: `Git mutation (${gitSubcommandBeforeDispatch}) phải được thực thi bằng git_command hoặc cần được cấp quyền (PERMISSION APPROVAL).`,
-          errorCode: 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-          suggestion: `Use git_command with subcommand "${gitSubcommandBeforeDispatch}" and a separate args array so workspace scope and per-turn authorization can be verified, hoặc yêu cầu phê duyệt từ người dùng.`,
+          error: 'THAO TÁC BỊ CHẶN (User Rule 2): Tuyệt đối không tự động thực hiện git push lên nhánh main/master để tránh kích hoạt hệ thống CI/CD Railway tự động. Cần có yêu cầu trực tiếp từ người dùng.',
+          errorCode: 'PUSH_TO_MAIN_PROHIBITED',
+          suggestion: 'Yêu cầu người dùng phê duyệt quyền (Permission Approval) nếu thực sự có chủ đích push lên main.',
         };
       }
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {

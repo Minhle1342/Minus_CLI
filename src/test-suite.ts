@@ -784,18 +784,18 @@ async function runUnitTests() {
   assert(cmdBlocked.errorCode === 'COMMAND_NOT_ALLOWED', 'run_command chặn thành công lệnh nguy hiểm ngoài allowlist');
   const gitPushBypass = await runCommandTool.execute({ command: 'git push origin main' }, workspace);
   assert(
-    gitPushBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-    'run_command chặn git push để không bỏ qua quyền của tool Git chuyên dụng',
+    gitPushBypass.errorCode === 'PUSH_TO_MAIN_PROHIBITED',
+    'run_command chặn git push lên main theo User Rule 2 bảo vệ Railway CI/CD',
   );
   const gitPushGlobalOptionBypass = await runCommandTool.execute({ command: 'git -C . push origin main' }, workspace);
   assert(
-    gitPushGlobalOptionBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-    'run_command vẫn chặn git push khi Git có global option -C',
+    gitPushGlobalOptionBypass.errorCode === 'PUSH_TO_MAIN_PROHIBITED',
+    'run_command vẫn chặn git push lên main khi Git có global option -C',
   );
-  const gitCheckoutBypass = await runCommandTool.execute({ command: 'git checkout -b feature' }, workspace);
+  const gitStatusExecution = await runCommandTool.execute({ command: 'git status' }, workspace);
   assert(
-    gitCheckoutBypass.errorCode === 'GIT_COMMAND_REQUIRES_GIT_TOOL',
-    'run_command chuyển Git mutation sang git_command để áp dụng một policy thống nhất',
+    gitStatusExecution.exitCode === 0,
+    'run_command cho phép thực thi trực tiếp các câu lệnh git theo Chuẩn Công nghiệp (Best Practice)',
   );
 
   // Test 3.8: Kiểm tra Terminal-First Exploration trong run_command (Codex CLI standard)

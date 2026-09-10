@@ -4,6 +4,8 @@ import { SubagentManager, SubagentOptions, SubagentHandle } from './subagent-man
 import type { PlanManager, PlanTask, PlanEvidence } from './plan-manager.js';
 import type { AgentEventBus } from './agent-event-bus.js';
 import { BENCHMARK_SPECIALISTS } from './benchmark-agents.js';
+import { nativeComputeSemanticSimilarity } from '../native/index.js';
+import { VirtualWorkspace } from '../workspace/virtual-workspace.js';
 
 export interface DagBatchScheduleOptions {
   maxConcurrency?: number;
@@ -109,19 +111,55 @@ WHAT YOU ARE NOT:
 - NOT a tester — delegate test generation and execution to testing agents / verification gates
 `;
 
+export interface TaskSimilarityBreakdown {
+  combinedScore: number;
+  lexicalScore: number;
+  semanticScore: number;
+  wordOverlap: number;
+  charBigram: number;
+  matchType: 'exact' | 'lexical' | 'semantic' | 'low';
+}
+
 /**
- * Thuật toán tính độ tương đồng xâu chuỗi (chuẩn SequenceMatcher & Dice Tokenizer)
- * Ngưỡng khuyến nghị: >= 0.55 (55%) để phát hiện task trùng lặp
+ * Thuật toán tính độ tương đồng nhiệm vụ chi tiết:
+ * Kết hợp Lexical (Dice Tokenizer + Bigrams) và Semantic Vector (Rust Native SIMD Subword Embedding)
  */
-export function computeTaskSimilarity(textA: string, textB: string): number {
+export function computeTaskSimilarityDetailed(textA: string, textB: string): TaskSimilarityBreakdown {
   const normA = textA.toLowerCase().trim().replace(/[^\w\s]/g, ' ');
   const normB = textB.toLowerCase().trim().replace(/[^\w\s]/g, ' ');
-  if (normA === normB) return 1.0;
-  if (!normA || !normB) return 0.0;
+  if (normA === normB) {
+    return {
+      combinedScore: 1.0,
+      lexicalScore: 1.0,
+      semanticScore: 1.0,
+      wordOverlap: 1.0,
+      charBigram: 1.0,
+      matchType: 'exact',
+    };
+  }
+  if (!normA || !normB) {
+    return {
+      combinedScore: 0.0,
+      lexicalScore: 0.0,
+      semanticScore: 0.0,
+      wordOverlap: 0.0,
+      charBigram: 0.0,
+      matchType: 'low',
+    };
+  }
 
   const wordsA = normA.split(/\s+/).filter(Boolean);
   const wordsB = normB.split(/\s+/).filter(Boolean);
-  if (wordsA.length === 0 || wordsB.length === 0) return 0.0;
+  if (wordsA.length === 0 || wordsB.length === 0) {
+    return {
+      combinedScore: 0.0,
+      lexicalScore: 0.0,
+      semanticScore: 0.0,
+      wordOverlap: 0.0,
+      charBigram: 0.0,
+      matchType: 'low',
+    };
+  }
 
   // 1. Word token overlap (Dice Coefficient)
   const setA = new Set(wordsA);
@@ -147,9 +185,38 @@ export function computeTaskSimilarity(textA: string, textB: string): number {
     if (bgB.has(b)) bgMatches++;
   }
   const charScore = (bgA.size + bgB.size > 0) ? (2 * bgMatches) / (bgA.size + bgB.size) : 0;
+  const lexicalScore = Math.max(wordScore, charScore);
 
-  // Lấy giá trị lớn nhất giữa word-level và char-level để nhạy bén với cả từ đồng nghĩa/viết tắt
-  return Math.max(wordScore, charScore);
+  // 3. Semantic Vector Similarity via Native Subword Embeddings
+  let semanticScore = 0;
+  try {
+    semanticScore = nativeComputeSemanticSimilarity(textA, textB);
+  } catch {
+    semanticScore = 0;
+  }
+
+  const combinedScore = Math.max(lexicalScore, semanticScore);
+  let matchType: 'exact' | 'lexical' | 'semantic' | 'low' = 'low';
+  if (combinedScore >= 0.55) {
+    matchType = semanticScore > lexicalScore ? 'semantic' : 'lexical';
+  }
+
+  return {
+    combinedScore: Number(combinedScore.toFixed(3)),
+    lexicalScore: Number(lexicalScore.toFixed(3)),
+    semanticScore: Number(semanticScore.toFixed(3)),
+    wordOverlap: Number(wordScore.toFixed(3)),
+    charBigram: Number(charScore.toFixed(3)),
+    matchType,
+  };
+}
+
+/**
+ * Thuật toán tính độ tương đồng xâu chuỗi kết hợp Hybrid Lexical-Vector
+ * Ngưỡng khuyến nghị: >= 0.55 (55%) để phát hiện task trùng lặp
+ */
+export function computeTaskSimilarity(textA: string, textB: string): number {
+  return computeTaskSimilarityDetailed(textA, textB).combinedScore;
 }
 
 /**
@@ -276,12 +343,23 @@ export class AgentOrchestrator {
   ) {}
 
   /**
+   * Cấp phát một Virtual Workspace In-Memory CoW độc lập cho Subagent (Zero-cost branching)
+   * Cho phép subagent thử nghiệm sửa code hoàn toàn trong RAM không gây ô nhiễm đĩa vật lý.
+   */
+  createVirtualWorkspace(agentId: string, rootDir: string = process.cwd()): VirtualWorkspace {
+    const sessionId = `vfs_${agentId}_${Date.now()}`;
+    return new VirtualWorkspace(sessionId, rootDir);
+  }
+
+  /**
    * Kiểm tra xem tác vụ có bị trùng lặp với tác vụ đang chờ/đang thực thi không
+   * Hỗ trợ Hybrid Lexical + Semantic Vector Embedding
    * Ngưỡng similarity threshold mặc định là 0.55 (55%)
    */
   checkDuplicateTask(description: string, threshold = 0.55): {
     isDuplicate: boolean;
     similarity: number;
+    breakdown?: TaskSimilarityBreakdown;
     existingTask?: TaskRegistryEntry;
   } {
     const clean = description.trim();
@@ -289,11 +367,12 @@ export class AgentOrchestrator {
 
     for (const task of this.taskRegistry.values()) {
       if (task.status === 'pending' || task.status === 'in_progress') {
-        const sim = computeTaskSimilarity(clean, task.description);
-        if (sim >= threshold) {
+        const breakdown = computeTaskSimilarityDetailed(clean, task.description);
+        if (breakdown.combinedScore >= threshold) {
           return {
             isDuplicate: true,
-            similarity: Number(sim.toFixed(3)),
+            similarity: breakdown.combinedScore,
+            breakdown,
             existingTask: { ...task },
           };
         }
@@ -321,9 +400,12 @@ export class AgentOrchestrator {
     if (options.checkAntiDuplication) {
       const dupCheck = this.checkDuplicateTask(cleanObjective, options.antiDuplicationThreshold || 0.55);
       if (dupCheck.isDuplicate && dupCheck.existingTask) {
+        const matchTypeDesc = dupCheck.breakdown?.matchType === 'semantic'
+          ? `[Semantic Vector SIMD: ${Math.round((dupCheck.breakdown?.semanticScore || dupCheck.similarity) * 100)}%]`
+          : `[Lexical Token/Bigram: ${Math.round((dupCheck.breakdown?.lexicalScore || dupCheck.similarity) * 100)}%]`;
         throw new Error(
           `DUPLICATE_TASK_DETECTED: Task "${cleanObjective}" matches existing in-progress task #${dupCheck.existingTask.id} ` +
-          `assigned to "${dupCheck.existingTask.agentId}" (Similarity: ${Math.round(dupCheck.similarity * 100)}%).`
+          `assigned to "${dupCheck.existingTask.agentId}" (${matchTypeDesc} Combined: ${Math.round(dupCheck.similarity * 100)}%).`
         );
       }
     }

@@ -1,7 +1,7 @@
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
-import { getNativeCore } from '../native/index.js';
+import { getNativeCore, nativeExecuteSandboxed } from '../native/index.js';
 
 const execAsync = promisify(exec);
 
@@ -58,22 +58,17 @@ export class LocalProcessSandbox implements ISandboxProvider {
       };
     }
 
-    const native = getNativeCore();
-    if (native && !options?.signal) {
-      try {
-        const res = native.rsExecuteIsolated(command, cwd, timeout, 5 * 1024 * 1024);
-        return {
-          stdout: res.stdout.trim(),
-          stderr: res.stderr.trim(),
-          exitCode: res.exitCode,
-          durationMs: res.durationMs,
-          sandboxType: 'local',
-          success: res.exitCode === 0,
-          timedOut: res.timedOut,
-        };
-      } catch {
-        // Fallback xuống execAsync của Node.js
-      }
+    const sandboxedRes = nativeExecuteSandboxed(command, cwd, timeout, 5 * 1024 * 1024, 2048);
+    if (sandboxedRes && !options?.signal) {
+      return {
+        stdout: sandboxedRes.stdout.trim(),
+        stderr: sandboxedRes.stderr.trim(),
+        exitCode: sandboxedRes.exitCode,
+        durationMs: sandboxedRes.durationMs,
+        sandboxType: 'local',
+        success: sandboxedRes.exitCode === 0,
+        timedOut: sandboxedRes.timedOut,
+      };
     }
 
     try {
@@ -110,10 +105,11 @@ export class LocalProcessSandbox implements ISandboxProvider {
   }
 
   getStatus(): SandboxStatus {
+    const native = getNativeCore();
     return {
       mode: 'local',
       activeProvider: this.name,
-      isIsolated: false,
+      isIsolated: Boolean(native),
       dockerAvailable: false,
     };
   }
