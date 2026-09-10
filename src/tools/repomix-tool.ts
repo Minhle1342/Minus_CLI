@@ -3,6 +3,8 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { pack, loadFileConfig, mergeConfigs } from 'repomix';
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import { buildAdaptiveCodeBundle, type FocusRange } from '../search/adaptive-code-reader.js';
 
 /**
  * createReadCompressedCodeTool
@@ -32,6 +34,45 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           type: Type.BOOLEAN,
           description: 'Có bật chế độ nén Tree-sitter hay không (mặc định: true).',
         },
+        fidelity: {
+          type: Type.STRING,
+          enum: ['compressed', 'adaptive', 'full'],
+          description: 'Mức chi tiết: compressed, adaptive đa độ phân giải, hoặc full. Mặc định giữ hành vi compress cũ.',
+        },
+        focusSymbols: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Các symbol cần trả đầy đủ thân hàm/lớp trong chế độ adaptive.',
+        },
+        focusRanges: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              path: { type: Type.STRING },
+              start: { type: Type.INTEGER, minimum: 1 },
+              end: { type: Type.INTEGER, minimum: 1 },
+            },
+            required: ['path', 'start', 'end'],
+          },
+          description: 'Các khoảng dòng cần trả nguyên văn trong chế độ adaptive.',
+        },
+        previewLines: {
+          type: Type.INTEGER,
+          minimum: 4,
+          maximum: 200,
+          description: 'Số dòng preview quanh symbol lân cận (mặc định 24).',
+        },
+        maxTokens: {
+          type: Type.INTEGER,
+          minimum: 64,
+          maximum: 100000,
+          description: 'Ngân sách token cứng cho các segment adaptive (mặc định 8000).',
+        },
+        includeDirectoryStructure: {
+          type: Type.BOOLEAN,
+          description: 'Kèm cây đường dẫn của các file đã chọn (mặc định true).',
+        },
       },
       required: [],
     },
@@ -43,7 +84,14 @@ export function createReadCompressedCodeTool(): ToolDefinition {
         : rawPaths && String(rawPaths).trim() !== 'undefined'
           ? [String(rawPaths).trim()]
           : [];
-      const shouldCompress = args.compress !== false;
+      const fidelity = ['compressed', 'adaptive', 'full'].includes(String(args.fidelity))
+        ? String(args.fidelity) as 'compressed' | 'adaptive' | 'full'
+        : undefined;
+      const adaptiveEnabled = process.env.MINUS_ADAPTIVE_CODE_READ !== 'off';
+      if (fidelity === 'adaptive' && !adaptiveEnabled) {
+        return { error: 'Adaptive code reading is disabled by MINUS_ADAPTIVE_CODE_READ=off.', errorCode: 'FEATURE_DISABLED' };
+      }
+      const shouldCompress = fidelity === 'full' ? false : (fidelity === 'adaptive' ? true : args.compress !== false);
 
       if (!filePaths || filePaths.length === 0) {
         return { error: 'Tham số "paths" (hoặc "path") là bắt buộc và phải chứa ít nhất 1 đường dẫn file.' };
@@ -77,10 +125,42 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           tokens: result.fileTokenCounts?.[f.path] ?? null,
         }));
 
+        if (fidelity === 'adaptive') {
+          const compressedByPath = new Map(files.map((file) => [file.path.replace(/\\/g, '/'), file.content]));
+          const sourceFiles = await Promise.all(relativePaths.map(async (relativePath) => ({
+            path: relativePath,
+            content: await fs.readFile(workspace.resolveSafePath(relativePath), 'utf8'),
+            compressedContent: compressedByPath.get(relativePath),
+          })));
+          const focusRanges: FocusRange[] = Array.isArray(args.focusRanges)
+            ? args.focusRanges.map((range: any) => ({
+                path: String(range.path || ''),
+                start: Number(range.start),
+                end: Number(range.end),
+              }))
+            : [];
+          const bundle = buildAdaptiveCodeBundle(sourceFiles, {
+            focusSymbols: Array.isArray(args.focusSymbols) ? args.focusSymbols.map(String) : [],
+            focusRanges,
+            previewLines: args.previewLines === undefined ? undefined : Number(args.previewLines),
+            maxTokens: args.maxTokens === undefined ? undefined : Number(args.maxTokens),
+            includeDirectoryStructure: args.includeDirectoryStructure !== false,
+          });
+          return {
+            totalFiles: result.totalFiles,
+            totalTokens: bundle.estimatedTokens,
+            compressionEnabled: true,
+            fidelity: 'adaptive',
+            ...bundle,
+            message: `Đã đọc ${result.totalFiles} tệp trong một bundle đa độ phân giải với ~${bundle.estimatedTokens} tokens.`,
+          };
+        }
+
         return {
           totalFiles: result.totalFiles,
           totalTokens: result.totalTokens,
           compressionEnabled: shouldCompress,
+          fidelity: fidelity || (shouldCompress ? 'compressed' : 'full'),
           files,
           message: `Đã nén và đọc thành công ${result.totalFiles} tệp với tổng số ước tính ~${result.totalTokens} tokens (Tiết kiệm đáng kể dung lượng context).`,
         };

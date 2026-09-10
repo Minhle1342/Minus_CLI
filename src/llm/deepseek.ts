@@ -3,6 +3,8 @@ import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason, type LLMUsage } from './gemini.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { createPromptCacheKey } from './cache-envelope.js';
+import { openAIPromptCacheFields } from './provider-capabilities.js';
 
 export interface DeepseekLLMOptions {
   modelName?: string;
@@ -470,8 +472,15 @@ export class DeepseekLLM {
       effectiveModel.includes('r1');
 
     // Gửi session metadata và cache key qua HTTP Headers để hỗ trợ Sticky Affinity Routing trên Gateway/Proxy
-    const rawCacheKey = request?.promptCacheKey || request?.sessionId || session.id || 'coding-agent-session';
-    const promptCacheKey = rawCacheKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+    const promptCacheKey = createPromptCacheKey(request?.systemPrompt || this.systemPrompt, {
+      provider: this.baseURL,
+      model: effectiveModel,
+      toolSchemaVersion: createToolSchemaVersion(openAITools),
+      policyVersion: 'provider-cache-v2',
+    });
+    const affinityKey = (request?.sessionId || session.id || 'coding-agent-session')
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 64);
 
     const requestBody: any = {
       model: effectiveModel,
@@ -481,6 +490,7 @@ export class DeepseekLLM {
       stream_options: {
         include_usage: true,
       },
+      ...openAIPromptCacheFields(this.baseURL, promptCacheKey, request),
     };
 
     const effectiveTokenConfig = resolveTokenConfig(this.modelName, {
@@ -541,9 +551,8 @@ export class DeepseekLLM {
           'Authorization': `Bearer ${this.apiKey}`,
           'HTTP-Referer': 'https://github.com/mini-agent-loop',
           'X-Title': 'Autonomous Coding Agent',
-          'session-id': promptCacheKey,
-          'X-Session-ID': promptCacheKey,
-          'prompt-cache-key': promptCacheKey,
+          'session-id': affinityKey,
+          'X-Session-ID': affinityKey,
           ...this.extraHeaders,
         },
         body: JSON.stringify(requestBody),
@@ -722,6 +731,18 @@ export class DeepseekLLM {
   async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
     return this.generateStream(session, tools, undefined, request);
   }
+}
+
+function createToolSchemaVersion(tools: any[] | undefined): string {
+  if (!tools || tools.length === 0) return 'no-tools';
+  let hash = 2166136261;
+  const value = JSON.stringify([...tools].sort((left, right) =>
+    String(left?.function?.name || '').localeCompare(String(right?.function?.name || ''))));
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `tools-${(hash >>> 0).toString(16)}`;
 }
 
 function normalizeOpenAIFinishReason(raw: string): LLMFinishReason {

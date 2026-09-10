@@ -9,6 +9,7 @@ import {
   type LLMUsage,
 } from './gemini.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { anthropicCacheControl } from './provider-capabilities.js';
 
 export interface AnthropicLLMOptions {
   modelName?: string;
@@ -82,12 +83,13 @@ export class AnthropicLLM {
       ...request?.tokenConfig,
     }, this.baseURL);
     const systemPromptText = request?.systemPrompt || this.systemPrompt;
-    const systemPayload = request?.enablePromptCaching !== false
+    const cacheControl = anthropicCacheControl(request);
+    const systemPayload = cacheControl
       ? [
           {
             type: 'text',
             text: systemPromptText,
-            cache_control: { type: 'ephemeral' },
+            cache_control: cacheControl,
           },
         ]
       : systemPromptText;
@@ -98,7 +100,7 @@ export class AnthropicLLM {
       messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext, request?.stepSuffixes),
       max_tokens: effectiveTokenConfig.maxOutputTokens || 8192,
       stream: true,
-      tools: tools.length > 0 ? this.convertTools(tools, request?.enablePromptCaching !== false) : undefined,
+      tools: tools.length > 0 ? this.convertTools(tools, cacheControl) : undefined,
       temperature: 0.2,
     };
 
@@ -285,7 +287,10 @@ export class AnthropicLLM {
     return this.generateStream(session, tools, undefined, request);
   }
 
-  private convertTools(tools: FunctionDeclaration[], enablePromptCaching: boolean = false): any[] {
+  private convertTools(
+    tools: FunctionDeclaration[],
+    cacheControl?: { type: 'ephemeral'; ttl?: '1h' },
+  ): any[] {
     return [...tools]
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
       .map((tool, idx, arr) => {
@@ -294,8 +299,8 @@ export class AnthropicLLM {
           description: tool.description || '',
           input_schema: normalizeSchema(tool.parameters || { type: 'object', properties: {} }),
         };
-        if (enablePromptCaching && idx === arr.length - 1) {
-          item.cache_control = { type: 'ephemeral' };
+        if (cacheControl && idx === arr.length - 1) {
+          item.cache_control = cacheControl;
         }
         return item;
       });

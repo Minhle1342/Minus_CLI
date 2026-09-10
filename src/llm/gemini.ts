@@ -3,6 +3,8 @@ import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
 import { retryWithExponentialBackoff } from './error-handling.js';
+import { createPromptCacheKey } from './cache-envelope.js';
+import { promptCacheV2Mode } from './provider-capabilities.js';
 
 export interface StreamCallbacks {
   onThoughtToken?: (token: string) => void;
@@ -70,6 +72,7 @@ export class GeminiLLM {
   readonly modelName: string;
   readonly systemPrompt: string;
   private tokenConfig: TokenConfig;
+  private explicitCaches = new Map<string, { name: string; expiresAt: number }>();
 
   constructor(
     apiKey: string,
@@ -116,6 +119,30 @@ export class GeminiLLM {
       systemInstruction: request?.systemPrompt || this.systemPrompt,
       tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
     };
+
+    if (
+      request?.enablePromptCaching !== false
+      && promptCacheV2Mode() === 'on'
+      && process.env.MINUS_GEMINI_EXPLICIT_CACHE === 'on'
+    ) {
+      const stablePrompt = request?.systemPrompt || this.systemPrompt;
+      const cacheKey = createPromptCacheKey(stablePrompt, {
+        provider: 'gemini',
+        model: this.modelName,
+        toolSchemaVersion: hashToolDeclarations(tools),
+        policyVersion: 'provider-cache-v2',
+      });
+      try {
+        const cachedContentName = await this.resolveExplicitCache(cacheKey, stablePrompt, tools, request);
+        if (cachedContentName) {
+          generateConfig.cachedContent = cachedContentName;
+          delete generateConfig.systemInstruction;
+          delete generateConfig.tools;
+        }
+      } catch {
+        // Explicit caching is an optimization. Implicit prefix caching remains available.
+      }
+    }
 
     if (effectiveTokenConfig.maxOutputTokens) {
       generateConfig.maxOutputTokens = effectiveTokenConfig.maxOutputTokens;
@@ -387,6 +414,41 @@ export class GeminiLLM {
   async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {
     return this.generateStream(session, tools, undefined, request);
   }
+
+  private async resolveExplicitCache(
+    cacheKey: string,
+    systemInstruction: string,
+    tools: FunctionDeclaration[],
+    request?: LLMRequestOptions,
+  ): Promise<string | undefined> {
+    const now = Date.now();
+    const existing = this.explicitCaches.get(cacheKey);
+    if (existing && existing.expiresAt > now + 30_000) return existing.name;
+    const ttlSeconds = request?.promptCacheRetention === '24h' ? 86_400 : 300;
+    const created = await this.client.caches.create({
+      model: this.modelName,
+      config: {
+        displayName: cacheKey.slice(0, 128),
+        ttl: `${ttlSeconds}s`,
+        systemInstruction,
+        tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+      },
+    });
+    if (!created.name) return undefined;
+    this.explicitCaches.set(cacheKey, { name: created.name, expiresAt: now + ttlSeconds * 1_000 });
+    return created.name;
+  }
+}
+
+function hashToolDeclarations(tools: FunctionDeclaration[]): string {
+  const value = JSON.stringify([...tools].sort((left, right) =>
+    (left.name || '').localeCompare(right.name || '')));
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `tools-${(hash >>> 0).toString(16)}`;
 }
 
 function requiresThoughtSignatures(modelName: string): boolean {

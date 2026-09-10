@@ -1,4 +1,5 @@
 import type { PromptAssemblyContext } from './prompt-sections.js';
+import { createPromptCacheKey } from './cache-envelope.js';
 
 export interface PromptSection {
   id: string;
@@ -62,16 +63,16 @@ export class PromptAssembler {
   }
 
   /**
-   * Generates a deterministic signature (hash + length) of the assembled prompt for prompt-caching validation.
+   * Generates a collision-resistant, content-addressed signature for prompt-caching validation.
    */
   getCacheSignature(ctx: PromptAssemblyContext = {}): string {
     const text = this.assembleForContext(ctx);
-    let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-      hash = ((hash << 5) - hash) + text.charCodeAt(i);
-      hash |= 0;
-    }
-    return `h_${(hash >>> 0).toString(16)}_${text.length}`;
+    if (process.env.MINUS_CACHE_ENVELOPE_V2 === 'off') return legacyCacheSignature(text);
+    return createPromptCacheKey(text, {
+      provider: 'provider-neutral',
+      model: 'runtime-selected',
+      policyVersion: 'prompt-assembler-v2',
+    });
   }
 
   private sortedSections(): RegisteredPromptSection[] {
@@ -79,5 +80,14 @@ export class PromptAssembler {
       (a, b) => (a.priority || 0) - (b.priority || 0) || a.order - b.order,
     );
   }
+}
+
+function legacyCacheSignature(text: string): string {
+  let hash = 0;
+  for (let index = 0; index < text.length; index++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+  return `h_${(hash >>> 0).toString(16)}_${text.length}`;
 }
 
