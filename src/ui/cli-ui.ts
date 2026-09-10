@@ -921,6 +921,50 @@ export interface CompactStepOptions {
  * Tập trung 100% vào tín hiệu người dùng cần thấy (Zero Clutter, High Signal-to-Noise).
  */
 export class CLI {
+  private static thinkingSpinnerTimer?: ReturnType<typeof setInterval>;
+  private static thinkingSpinnerFrame = 0;
+  private static thinkingSpinnerStartedAt = 0;
+  private static thinkingSpinnerVisible = false;
+
+  static startThinkingSpinner(): void {
+    if (this.thinkingSpinnerTimer || this.thinkingSpinnerVisible) return;
+
+    this.thinkingSpinnerFrame = 0;
+    this.thinkingSpinnerStartedAt = Date.now();
+    this.thinkingSpinnerVisible = true;
+
+    const render = () => {
+      const elapsed = ((Date.now() - this.thinkingSpinnerStartedAt) / 1000).toFixed(1);
+      const frame = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][this.thinkingSpinnerFrame];
+      const line = `  ${c.purple}${frame}${c.reset} ${c.yellow}Đang suy nghĩ${c.reset} ${c.mutedText}(${elapsed}s)${c.reset}`;
+
+      if (process.stdout.isTTY) {
+        process.stdout.write(`\r\x1b[2K${line}`);
+      } else if (this.thinkingSpinnerFrame === 0) {
+        console.log(line);
+      }
+      this.thinkingSpinnerFrame = (this.thinkingSpinnerFrame + 1) % 10;
+    };
+
+    render();
+    if (process.stdout.isTTY) {
+      this.thinkingSpinnerTimer = setInterval(render, 80);
+    }
+  }
+
+  static stopThinkingSpinner(): void {
+    if (!this.thinkingSpinnerVisible) return;
+
+    if (this.thinkingSpinnerTimer) {
+      clearInterval(this.thinkingSpinnerTimer);
+      this.thinkingSpinnerTimer = undefined;
+    }
+    if (process.stdout.isTTY) {
+      process.stdout.write('\r\x1b[2K');
+    }
+    this.thinkingSpinnerVisible = false;
+  }
+
   /**
    * Header mở đầu tối giản, hiện đại (3 dòng, không chiếm diện tích terminal)
    */

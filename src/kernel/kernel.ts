@@ -47,6 +47,18 @@ export interface KernelEvents {
   ) => void;
   'tool:error': (toolName: string, error: any) => void;
   'model:thought': (thought: string) => void;
+  'model:thinking:start': (lifecycle: {
+    agentId: string;
+    turn: number;
+    step: number;
+    startedAt: number;
+  }) => void;
+  'model:thinking:end': (lifecycle: {
+    agentId: string;
+    turn: number;
+    step: number;
+    endedAt: number;
+  }) => void;
   'model:token': (token: string) => void;
   'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
   'model:request_telemetry': (telemetry: {

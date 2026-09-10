@@ -7,6 +7,7 @@ import type { SessionPersistence } from '../session/session-persistence.js';
 import type { ToolScope } from '../tools/registry.js';
 import type { AgentRegistry } from './agent-registry.js';
 import type { ToolControlMode } from '../control/classification-types.js';
+import type { StepPromptGatingMode } from './step-prompt-policy.js';
 
 export interface AgentLoopOptions {
   maxSteps?: number;
@@ -22,6 +23,8 @@ export interface AgentLoopOptions {
   enableSubagents?: boolean;
   enableDynamicToolRetrieval?: boolean;
   enablePromptCaching?: boolean;
+  /** Per-step prompt selection. off preserves legacy injection, shadow observes, enforce reduces context. */
+  stepPromptGatingMode?: StepPromptGatingMode;
   enableStepSummarization?: boolean;
   /** Enable provider-neutral prompt-based soft latency coordination. */
   enableLatencyOptimization?: boolean;

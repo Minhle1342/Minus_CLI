@@ -76,6 +76,11 @@ export interface PlanRequirements {
   verificationRequired: boolean;
 }
 
+export interface StepPlanPromptOptions {
+  phase?: string;
+  includeFull?: boolean;
+}
+
 const TERMINAL_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED', 'SKIPPED']);
 const VALID_STATUSES = new Set<TaskStatus>(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'SKIPPED']);
 const PLAN_TOOL_NAMES = new Set(['create_plan', 'update_plan_task']);
@@ -799,6 +804,60 @@ export class PlanManager {
       activeTasks.length > 0
         ? `ACTIVE TASKS: ${activeTasks.map((task) => `#${task.id}`).join(', ')}. Work only on graph-ready tasks and update status via update_plan_task.`
         : 'All tasks are completed.',
+    ].join('\n');
+  }
+
+  /**
+   * Compact model-facing view for one reasoning step. The full renderer remains
+   * unchanged for recovery, /resume, and continuation prompts.
+   */
+  renderStepPromptContext(options: StepPlanPromptOptions = {}): string {
+    const requirements = this.getRequirements();
+    if (!this.hasPlan()) {
+      return requirements.required
+        ? `[STEP PLAN REQUIRED]\nCreate ${requirements.minimumTasks}-${requirements.maximumTasks} atomic tasks before multi-step execution. Goal: ${requirements.goal || '(not captured)'}`
+        : '';
+    }
+
+    if (this.isAllTasksCompleted()) return '';
+
+    const graph = this.getTaskGraph();
+    const criticalBlocker = graph.blocked.some((blocker) => (
+      blocker.failedDependencyIds.length > 0 || Boolean(blocker.permissionBlocker)
+    ));
+    if (options.includeFull || options.phase === 'plan' || criticalBlocker || graph.readyTaskIds.length > 1) {
+      return this.renderExecutionContext();
+    }
+
+    const active = this.getActiveTasks();
+    const ready = this.getReadyTasks();
+    const blockedIds = new Set(graph.blocked.map((blocker) => blocker.taskId));
+    const selectedIds = new Set([
+      ...active.map((task) => task.id),
+      ...ready.slice(0, 2).map((task) => task.id),
+      ...Array.from(blockedIds).slice(0, 2),
+    ]);
+    const selected = this.tasks.filter((task) => selectedIds.has(task.id));
+
+    const lines = selected.map((task) => {
+      const blocker = graph.blocked.find((item) => item.taskId === task.id);
+      const state = blocker?.failedDependencyIds.length
+        ? `BLOCKED_BY_FAILED(${blocker.failedDependencyIds.join(',')})`
+        : blocker?.permissionBlocker
+          ? 'AWAITING_PERMISSION'
+          : blocker?.dependencyIds.length
+            ? `WAITING_FOR(${blocker.dependencyIds.join(',')})`
+            : task.status === 'PENDING' ? 'READY' : task.status;
+      const recentEvidence = task.evidence.slice(-3)
+        .map((item) => `${item.toolName}:${item.kind}:${item.outcome}`)
+        .join(', ') || 'none';
+      return `${task.id}. [${state}] ${task.title}\n   Acceptance: ${task.acceptanceCriteria}\n   Depends on: ${task.dependsOn.join(', ') || 'none'}; evidence: ${recentEvidence}`;
+    });
+
+    return [
+      '[STEP EXECUTION PLAN]',
+      `Goal: ${requirements.goal || '(not captured)'}`,
+      ...lines,
     ].join('\n');
   }
 

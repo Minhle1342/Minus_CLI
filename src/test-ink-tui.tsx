@@ -47,6 +47,12 @@ assert.strictEqual(state.currentStep, 1);
 assert.strictEqual(state.status, 'thinking');
 console.log('  ✅ PASS: STEP_START chuyển trạng thái sang thinking');
 
+state = tuiReducer(state, { type: 'THINKING_START', startedAt: Date.now() });
+assert.strictEqual(state.status, 'thinking');
+assert.strictEqual(state.isThinking, true);
+assert.strictEqual(state.liveReasoning, '');
+console.log('  ✅ PASS: THINKING_START bật lifecycle reasoning trước token đầu tiên');
+
 state = tuiReducer(state, {
   type: 'TOOL_START',
   toolName: 'read_file',
@@ -126,8 +132,25 @@ assert.strictEqual(store.getState().currentStep, 2);
 mockEvents.emit('tool:before', 'write_file', { targetFile: 'test.txt' });
 assert.strictEqual(store.getState().status, 'executing_tool');
 
+mockEvents.emit('model:thinking:start', {
+  agentId: 'coding-agent',
+  turn: 1,
+  step: 2,
+  startedAt: Date.now(),
+});
+assert.strictEqual(store.getState().isThinking, true);
+assert.strictEqual(store.getState().status, 'thinking');
+
 mockEvents.emit('model:thought', 'Suy nghĩ System 2...');
 assert.strictEqual(store.getState().liveReasoning.includes('Suy nghĩ System 2...'), true);
+
+mockEvents.emit('model:thinking:end', {
+  agentId: 'coding-agent',
+  turn: 1,
+  step: 2,
+  endedAt: Date.now(),
+});
+assert.strictEqual(store.getState().isThinking, false);
 
 mockEvents.emit('model:final_answer', 'Nhiệm vụ hoàn thành!');
 assert.strictEqual(store.getState().finalAnswer, 'Nhiệm vụ hoàn thành!');
@@ -180,9 +203,37 @@ console.log('  ✅ PASS: LoadingSpinner Component với 10 frames hoạt hình k
 const reasoningElement = React.createElement(LiveReasoningBox, {
   reasoning: 'Bước 1: Phân tích\nBước 2: Xử lý',
   isCollapsed: false,
+  status: 'thinking',
+  isThinking: true,
+  thinkingStartedAt: Date.now() - 1000,
 });
 assert.strictEqual(React.isValidElement(reasoningElement), true);
 console.log('  ✅ PASS: LiveReasoningBox Component khởi tạo hợp lệ');
+
+const emptyReasoningElement = React.createElement(LiveReasoningBox, {
+  reasoning: '',
+  isCollapsed: true,
+  status: 'thinking',
+  isThinking: true,
+  thinkingStartedAt: Date.now(),
+});
+assert.strictEqual(React.isValidElement(emptyReasoningElement), true);
+assert.strictEqual(emptyReasoningElement.props.status, 'thinking');
+assert.strictEqual(emptyReasoningElement.props.isThinking, true);
+const emptyReasoningRender = LiveReasoningBox(emptyReasoningElement.props);
+assert.strictEqual(React.isValidElement(emptyReasoningRender), true);
+const emptyReasoningChildren = React.Children.toArray((emptyReasoningRender as React.ReactElement<any>).props.children);
+assert.strictEqual((emptyReasoningChildren[1] as React.ReactElement).type, LoadingSpinner);
+assert.strictEqual(
+  LiveReasoningBox({
+    reasoning: '',
+    isCollapsed: true,
+    status: 'idle',
+    isThinking: false,
+  }),
+  null,
+);
+console.log('  ✅ PASS: LiveReasoningBox nhận trạng thái loading khi chưa có thought token');
 
 const diffElement = React.createElement(DiffPreviewBox, {
   diff: {

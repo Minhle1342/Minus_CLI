@@ -18,6 +18,7 @@ type VersionModules = {
   DynamicContextArbiter: any;
   TurnMemoryRetriever: any;
   StepRetrievalQueryBuilder?: any;
+  StepPromptPolicy?: any;
 };
 
 type ToolCase = { query: string; expected: string };
@@ -65,6 +66,13 @@ function round(value: number, digits = 4): number {
   return Math.round(value * factor) / factor;
 }
 
+function percentile(values: number[], percentileValue: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentileValue * sorted.length) - 1));
+  return sorted[index];
+}
+
 async function importAt(root: string, relativePath: string, label: string): Promise<any> {
   const absolute = path.resolve(root, relativePath);
   return import(`${pathToFileURL(absolute).href}?context-benchmark=${label}`);
@@ -77,10 +85,16 @@ async function loadVersion(label: string, root: string): Promise<VersionModules>
     importAt(root, 'src/context/turn-memory-retriever.ts', `${label}-memory`),
   ]);
   let stepModule: any;
+  let promptPolicyModule: any;
   try {
     stepModule = await importAt(root, 'src/agent/step-retrieval-query-builder.ts', `${label}-step`);
   } catch {
     // The step-aware query builder was introduced after the baseline commit.
+  }
+  try {
+    promptPolicyModule = await importAt(root, 'src/agent/step-prompt-policy.ts', `${label}-prompt-policy`);
+  } catch {
+    // Historical baselines use unconditional prompt injection.
   }
   return {
     label,
@@ -89,6 +103,7 @@ async function loadVersion(label: string, root: string): Promise<VersionModules>
     DynamicContextArbiter: arbiterModule.DynamicContextArbiter,
     TurnMemoryRetriever: memoryModule.TurnMemoryRetriever,
     StepRetrievalQueryBuilder: stepModule?.StepRetrievalQueryBuilder,
+    StepPromptPolicy: promptPolicyModule?.StepPromptPolicy,
   };
 }
 
@@ -216,6 +231,182 @@ async function runStepBenchmark(version: VersionModules): Promise<{
   };
 }
 
+const allPromptBlocks = [
+  'architecture', 'rootCause', 'mutation', 'longTask', 'subagent', 'dagPlan',
+  'plan', 'advice', 'harness', 'scaffold',
+];
+
+function promptClassification(overrides: Record<string, any> = {}): Record<string, any> {
+  return {
+    id: 'benchmark',
+    version: 1,
+    taskClass: 'question',
+    phase: 'explore',
+    complexity: 'small',
+    externality: 'local',
+    reversibility: 'read-only',
+    risk: 'R0',
+    requiredCapabilities: ['inspect'],
+    confidence: 0.95,
+    fastPath: false,
+    reasonCodes: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function promptPolicyContext(overrides: Record<string, any> = {}): Record<string, any> {
+  return {
+    activeStepQuery: 'Read the requested value and answer',
+    fingerprint: 'benchmark-fingerprint',
+    classification: promptClassification(),
+    hasPlan: false,
+    planRequired: false,
+    planIncomplete: false,
+    planBlocked: false,
+    readyTaskCount: 0,
+    visibleToolNames: ['read_file'],
+    consecutiveFailures: 0,
+    hasValidatedHypothesis: false,
+    hasSubmittedSolution: false,
+    hasVerifiedTests: false,
+    activeAgentCount: 0,
+    harnessProfileName: 'balanced-default',
+    candidates: {
+      legacyPlanContext: '[DYNAMIC EXECUTION PLAN]\nNo plan exists. A plan is optional.',
+      stepPlanContext: '[STEP EXECUTION PLAN]\n1. Active task\nAcceptance: verified output',
+      advicePrompt: '[NEXT ACTION ADVICE]\nUse the next appropriate tool and verify its result.',
+      advicePlaybook: 'GENERAL',
+      harnessGuidance: '[HARNESS PROFILE]\nFollow the active runtime verification profile.',
+      scaffoldPrompt: '[COGNITIVE SCAFFOLD]\nInspect, falsify, mutate surgically, and verify.',
+      legacyScaffoldPrompt: '[COGNITIVE SCAFFOLD]\nInspect, falsify, mutate surgically, and verify.',
+    },
+    ...overrides,
+  };
+}
+
+const promptCases = [
+  { input: promptPolicyContext(), required: [] },
+  { input: promptPolicyContext({ activeStepQuery: 'Summarize README docs', harnessProfileName: 'read-only-guard' }), required: [] },
+  { input: promptPolicyContext({ activeStepQuery: 'Map architecture topology and call graph dependencies' }), required: ['architecture'] },
+  {
+    input: promptPolicyContext({
+      activeStepQuery: 'Debug root cause of authentication failure',
+      classification: promptClassification({ taskClass: 'bugfix', phase: 'explore', requiredCapabilities: ['inspect', 'edit'] }),
+      harnessProfileName: 'strict-verification',
+    }),
+    required: ['rootCause', 'harness', 'scaffold'],
+  },
+  {
+    input: promptPolicyContext({
+      activeStepQuery: 'Implement the accepted feature patch',
+      classification: promptClassification({ taskClass: 'feature', phase: 'implement', requiredCapabilities: ['edit', 'verify'] }),
+      harnessProfileName: 'velocity-first',
+    }),
+    required: ['mutation', 'harness'],
+  },
+  {
+    input: promptPolicyContext({
+      activeStepQuery: 'Run decisive regression verification',
+      classification: promptClassification({ taskClass: 'bugfix', phase: 'verify', requiredCapabilities: ['verify'] }),
+      harnessProfileName: 'strict-verification',
+      hasValidatedHypothesis: true,
+    }),
+    required: ['rootCause', 'harness'],
+  },
+  {
+    input: promptPolicyContext({ activeStepQuery: 'Poll running background server task', lastToolName: 'manage_task', lastToolResult: { status: 'running' } }),
+    required: ['longTask'],
+  },
+  {
+    input: promptPolicyContext({ activeStepQuery: 'Delegate parallel review to a subagent', classification: promptClassification({ requiredCapabilities: ['inspect', 'delegate'] }) }),
+    required: ['subagent'],
+  },
+  {
+    input: promptPolicyContext({
+      activeStepQuery: 'Execute active planned task',
+      classification: promptClassification({ taskClass: 'feature', phase: 'implement', requiredCapabilities: ['edit', 'plan'] }),
+      hasPlan: true,
+      planIncomplete: true,
+      activeTask: { title: 'Implement parser', acceptanceCriteria: 'Tests pass' },
+      harnessProfileName: 'velocity-first',
+    }),
+    required: ['mutation', 'dagPlan', 'plan', 'harness'],
+  },
+  {
+    input: promptPolicyContext({ activeStepQuery: 'Try a different parser strategy', consecutiveFailures: 2, failureSignature: 'assertion failed', lastToolResult: { error: 'failed' } }),
+    required: ['rootCause', 'advice', 'scaffold'],
+  },
+  {
+    input: promptPolicyContext({ activeStepQuery: 'Ambiguous request', classification: promptClassification({ confidence: 0.6 }) }),
+    required: allPromptBlocks,
+  },
+  {
+    input: promptPolicyContext({ activeStepQuery: 'Return final answer', hasSubmittedSolution: true, visibleToolNames: [] }),
+    required: ['advice'],
+  },
+];
+
+async function runPromptGatingBenchmark(version: VersionModules): Promise<{
+  promptBlockPrecision: number;
+  requiredBlockRecall: number;
+  tokenSavingsRatio: number;
+  medianTokensBefore: number;
+  medianTokensAfter: number;
+  gateLatencyP50Ms: number;
+  gateLatencyP95Ms: number;
+  supported: boolean;
+}> {
+  let selectedCount = 0;
+  let relevantSelected = 0;
+  let requiredCount = 0;
+  let recalledCount = 0;
+  const beforeTokens: number[] = [];
+  const afterTokens: number[] = [];
+  const latencies: number[] = [];
+  const promptPolicy = version.StepPromptPolicy ? new version.StepPromptPolicy() : undefined;
+
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    for (const testCase of promptCases) {
+      const started = performance.now();
+      const decision = promptPolicy?.decide(testCase.input, 'enforce');
+      latencies.push(performance.now() - started);
+      const selected = decision
+        ? [
+          ...(decision.includeStaticToolPlaybooks
+            ? allPromptBlocks.slice(0, 6)
+            : decision.selectedPlaybooks),
+          ...(decision.planContext ? ['plan'] : []),
+          ...(decision.advicePrompt ? ['advice'] : []),
+          ...(decision.harnessGuidance ? ['harness'] : []),
+          ...(decision.scaffoldPrompt ? ['scaffold'] : []),
+        ]
+        : allPromptBlocks;
+      const required = new Set(testCase.required);
+      selectedCount += selected.length;
+      relevantSelected += selected.filter((block: string) => required.has(block)).length;
+      requiredCount += required.size;
+      recalledCount += Array.from(required).filter((block) => selected.includes(block)).length;
+
+      const legacyTokens = decision?.estimatedTokensBefore
+        ?? Math.ceil((274 * 4 + Object.values(testCase.input.candidates).join('\n\n').length) / 4);
+      beforeTokens.push(legacyTokens);
+      afterTokens.push(decision?.injectedEstimatedTokens ?? legacyTokens);
+    }
+  }
+
+  return {
+    promptBlockPrecision: ratio(relevantSelected, selectedCount),
+    requiredBlockRecall: ratio(recalledCount, requiredCount),
+    tokenSavingsRatio: 1 - ratio(average(afterTokens), average(beforeTokens)),
+    medianTokensBefore: percentile(beforeTokens, 0.5),
+    medianTokensAfter: percentile(afterTokens, 0.5),
+    gateLatencyP50Ms: percentile(latencies, 0.5),
+    gateLatencyP95Ms: percentile(latencies, 0.95),
+    supported: Boolean(promptPolicy),
+  };
+}
+
 const arbitrationCases = [
   { query: 'auth token interceptor refresh', marker: 'AUTH_RELEVANT_EVIDENCE' },
   { query: 'database connection pool timeout', marker: 'DB_RELEVANT_EVIDENCE' },
@@ -332,6 +523,7 @@ type VersionReport = {
   step: Awaited<ReturnType<typeof runStepBenchmark>>;
   arbitration: Awaited<ReturnType<typeof runArbitrationBenchmark>>;
   memory: Awaited<ReturnType<typeof runMemoryBenchmark>>;
+  promptGating: Awaited<ReturnType<typeof runPromptGatingBenchmark>>;
   compositeScore: number;
 };
 
@@ -365,12 +557,18 @@ function printReport(baseline: VersionReport, candidate: VersionReport, candidat
   console.log(`P1/P2 priority preservation               ${baseline.arbitration.priorityPreservation.toFixed(4)}       ${candidate.arbitration.priorityPreservation.toFixed(4)}       ${delta(candidate.arbitration.priorityPreservation, baseline.arbitration.priorityPreservation)}`);
   console.log(`Stale full-exemplar leakage               ${baseline.memory.staleFullExemplarLeak.toFixed(4)}       ${candidate.memory.staleFullExemplarLeak.toFixed(4)}       ${delta(candidate.memory.staleFullExemplarLeak, baseline.memory.staleFullExemplarLeak)}`);
   console.log(`Valid full-exemplar preservation          ${baseline.memory.validFullExemplarPreservation.toFixed(4)}       ${candidate.memory.validFullExemplarPreservation.toFixed(4)}       ${delta(candidate.memory.validFullExemplarPreservation, baseline.memory.validFullExemplarPreservation)}`);
+  console.log(`Prompt-block precision                    ${baseline.promptGating.promptBlockPrecision.toFixed(4)}       ${candidate.promptGating.promptBlockPrecision.toFixed(4)}       ${delta(candidate.promptGating.promptBlockPrecision, baseline.promptGating.promptBlockPrecision)}`);
+  console.log(`Required-block recall                     ${baseline.promptGating.requiredBlockRecall.toFixed(4)}       ${candidate.promptGating.requiredBlockRecall.toFixed(4)}       ${delta(candidate.promptGating.requiredBlockRecall, baseline.promptGating.requiredBlockRecall)}`);
+  console.log(`Prompt token savings ratio                ${baseline.promptGating.tokenSavingsRatio.toFixed(4)}       ${candidate.promptGating.tokenSavingsRatio.toFixed(4)}       ${delta(candidate.promptGating.tokenSavingsRatio, baseline.promptGating.tokenSavingsRatio)}`);
+  console.log(`Median gated prompt tokens                ${baseline.promptGating.medianTokensAfter.toFixed(1)}       ${candidate.promptGating.medianTokensAfter.toFixed(1)}`);
   console.log(`Synthetic composite score                 ${baseline.compositeScore.toFixed(4)}       ${candidate.compositeScore.toFixed(4)}       ${delta(candidate.compositeScore, baseline.compositeScore)}`);
   console.log('\nLatency (ms/case; lower is better)');
   console.log(`Tool retrieval                            ${baseline.tool.latencyMs.toFixed(3)}       ${candidate.tool.latencyMs.toFixed(3)}`);
   console.log(`Step query construction                  ${baseline.step.latencyMs.toFixed(3)}       ${candidate.step.latencyMs.toFixed(3)}`);
   console.log(`Context arbitration                       ${baseline.arbitration.latencyMs.toFixed(3)}       ${candidate.arbitration.latencyMs.toFixed(3)}`);
   console.log(`Memory retrieval                         ${baseline.memory.latencyMs.toFixed(3)}       ${candidate.memory.latencyMs.toFixed(3)}`);
+  console.log(`Prompt gate p50                          ${baseline.promptGating.gateLatencyP50Ms.toFixed(3)}       ${candidate.promptGating.gateLatencyP50Ms.toFixed(3)}`);
+  console.log(`Prompt gate p95                          ${baseline.promptGating.gateLatencyP95Ms.toFixed(3)}       ${candidate.promptGating.gateLatencyP95Ms.toFixed(3)}`);
 
   const improved = candidate.compositeScore > baseline.compositeScore;
   console.log(`\nVerdict: ${improved ? 'CANDIDATE IMPROVED' : 'NO COMPOSITE IMPROVEMENT'} on this deterministic benchmark.`);
@@ -383,7 +581,10 @@ async function git(...args: string[]): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const candidateCommit = await git('rev-parse', 'HEAD');
+  const candidateHead = await git('rev-parse', 'HEAD');
+  const candidateCommit = (await git('status', '--porcelain'))
+    ? `${candidateHead}+worktree`
+    : candidateHead;
   const worktreeRoot = path.join(projectRoot, 'temp', `context-benchmark-baseline-${Date.now()}-${process.pid}`);
   await fs.mkdir(path.dirname(worktreeRoot), { recursive: true });
 
@@ -391,17 +592,18 @@ async function main(): Promise<void> {
     await git('worktree', 'add', '--detach', worktreeRoot, baselineRef);
     const [baseline, candidate] = await Promise.all([
       loadVersion(`baseline-${baselineRef}`, worktreeRoot),
-      loadVersion(`candidate-${candidateCommit.slice(0, 8)}`, projectRoot),
+      loadVersion(`candidate-${candidateHead.slice(0, 8)}`, projectRoot),
     ]);
 
     const reports = await Promise.all([baseline, candidate].map(async (version) => {
-      const [tool, step, arbitration, memory] = await Promise.all([
+      const [tool, step, arbitration, memory, promptGating] = await Promise.all([
         runToolBenchmark(version),
         runStepBenchmark(version),
         runArbitrationBenchmark(version),
         runMemoryBenchmark(version),
+        runPromptGatingBenchmark(version),
       ]);
-      const partial = { label: version.label, tool, step, arbitration, memory };
+      const partial = { label: version.label, tool, step, arbitration, memory, promptGating };
       return { ...partial, compositeScore: score(partial) } as VersionReport;
     }));
 

@@ -70,6 +70,7 @@ import { detectWorkspaceTestCommand } from '../testing/test-engineering-harness.
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
+import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -279,6 +280,7 @@ export class AgentLoop {
   readonly dynamicContextArbiter: DynamicContextArbiter;
   readonly stepRetrievalQueryBuilder = new StepRetrievalQueryBuilder();
   readonly contextQualityEvaluator = new ContextQualityEvaluator();
+  readonly stepPromptPolicy = new StepPromptPolicy();
   private stepDynamicSuffixes = new Map<number, string>();
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
@@ -872,11 +874,13 @@ export class AgentLoop {
         } else if (!isFinite(effectiveMaxSteps)) {
           prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
         }
-        const initialScaffold = this.cognitiveHarness.createScaffold({
-          request: userText,
-          phase: 'explore',
-        });
-        prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
+        if (resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode) !== 'enforce') {
+          const initialScaffold = this.cognitiveHarness.createScaffold({
+            request: userText,
+            phase: 'explore',
+          });
+          prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
+        }
         const rewrittenHistory = history.map((message, index) =>
           index === 0
             ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
@@ -1038,6 +1042,7 @@ export class AgentLoop {
       // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
       const activeTask = this.planManager.getActiveTask();
       const hasValidatedHypothesis = this.hypothesisTracker.getValidatedHypotheses().length > 0;
+      const priorClassification = previousClassification;
       const classification = this.classificationEngine.classify({
         request: turnUserRequest,
         activeTask: activeTask?.title,
@@ -1085,22 +1090,6 @@ export class AgentLoop {
           isGoal,
         });
       }
-
-      let cognitiveScaffoldText: string | undefined;
-      if (step === 1 || this.reflectionEngine.getConsecutiveFailures() > 1) {
-        const activeScaffold = this.cognitiveHarness.createScaffold({
-          request: turnUserRequest,
-          phase: classification.phase,
-          activeTask: activeTask?.title,
-          consecutiveFailures: this.reflectionEngine.getConsecutiveFailures(),
-        });
-        if (!this._collapsePreferences.compactSteps) {
-          CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
-        }
-        cognitiveScaffoldText = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
-      }
-
-
 
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
       this.verificationPolicy.setRequiredRisk(classification.risk);
@@ -1205,16 +1194,28 @@ export class AgentLoop {
         });
       }
 
-      let response;
-      // Progressive System Prompt: Tiết kiệm >70% token/turn với Zero Cache Invalidation (Core Invariant Prefix tại -1000)
-      const promptAssemblyCtx = detectPromptContext(
-        this._workspace,
-        this.toolProvider,
-        turnUserRequest,
-      );
-      const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
-      const rawPlanContext = this.planManager.renderExecutionContext();
-      const advicePrompt = this.toolAdvisor.formatAdvicePrompt({
+      const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
+      const activeScaffold = this.cognitiveHarness.createScaffold({
+        request: turnUserRequest,
+        phase: classification.phase,
+        activeTask: activeTask?.title,
+        consecutiveFailures: consecutiveFails,
+      });
+      const compactScaffoldPrompt = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
+      const legacyScaffoldPrompt = step === 1 || consecutiveFails > 1
+        ? compactScaffoldPrompt
+        : '';
+      const legacyPlanContext = this.planManager.renderExecutionContext();
+      const planRequirements = this.planManager.getRequirements();
+      const stepPlanBlocker = this.planManager.getCompletionBlocker();
+      const planBlocked = Boolean(stepPlanBlocker?.includes('graph-blocked'));
+      const stepPlanContext = this.planManager.renderStepPromptContext({
+        phase: classification.phase,
+        includeFull: classification.phase === 'plan'
+          || planBlocked
+          || this.planManager.getReadyTasks().length > 1,
+      });
+      const candidateAdvicePrompt = this.toolAdvisor.formatAdvicePrompt({
         lastToolName: this.lastToolExecution?.toolName,
         lastToolResult: this.lastToolExecution?.result,
         hasErrors: this.lastToolExecution?.result?.error !== undefined,
@@ -1224,6 +1225,76 @@ export class AgentLoop {
         userRequest: turnUserRequest,
         hasSubmittedSolution,
       });
+      const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
+      const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
+      const promptDecision = this.stepPromptPolicy.decide({
+        activeStepQuery,
+        fingerprint: retrievalState.fingerprint,
+        failureSignature: this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})
+          ? `${this.lastToolExecution.toolName}:failed`
+          : undefined,
+        classification,
+        previousPhase: priorClassification?.phase,
+        activeTask,
+        hasPlan: this.planManager.hasPlan(),
+        planRequired: planRequirements.required,
+        planIncomplete: this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted(),
+        planBlocked,
+        readyTaskCount: this.planManager.getReadyTasks().length,
+        visibleToolNames,
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        consecutiveFailures: consecutiveFails,
+        hasValidatedHypothesis,
+        hasSubmittedSolution,
+        hasVerifiedTests,
+        activeAgentCount: this.agentRegistry.list().filter((agent) => (
+          agent.id !== this.agentId && ['running', 'waiting'].includes(agent.status)
+        )).length,
+        harnessProfileName: harnessProfile.profileName,
+        candidates: {
+          legacyPlanContext,
+          stepPlanContext,
+          advicePrompt: candidateAdvicePrompt,
+          advicePlaybook: adviceInfo.playbook,
+          harnessGuidance: harnessProfile.guidance,
+          scaffoldPrompt: compactScaffoldPrompt,
+          legacyScaffoldPrompt,
+        },
+      }, stepPromptMode);
+      session.append('control/decision', {
+        turn,
+        step,
+        controlDecision: {
+          stepPromptDecision: {
+            requestedMode: promptDecision.requestedMode,
+            effectiveMode: promptDecision.effectiveMode,
+            conservativeFallback: promptDecision.conservativeFallback,
+            reasonCodes: promptDecision.reasonCodes,
+            selectedPlaybooks: promptDecision.selectedPlaybooks,
+            fingerprint: retrievalState.fingerprint,
+            estimatedTokensBefore: promptDecision.estimatedTokensBefore,
+            estimatedTokensAfter: promptDecision.estimatedTokensAfter,
+            estimatedTokensSaved: promptDecision.estimatedTokensSaved,
+            injectedEstimatedTokens: promptDecision.injectedEstimatedTokens,
+          },
+        },
+      });
+      if (promptDecision.scaffoldPrompt && !this._collapsePreferences.compactSteps) {
+        CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+      }
+
+      let response;
+      // Keep the static prefix cacheable. Enforced step playbooks are selected below and
+      // placed in the budgeted dynamic suffix; off/shadow retain the legacy section.
+      const promptAssemblyCtx = {
+        ...detectPromptContext(this._workspace, this.toolProvider, turnUserRequest),
+        includeStaticToolPlaybooks: promptDecision.includeStaticToolPlaybooks,
+      };
+      const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
+      const rawPlanContext = promptDecision.planContext;
+      const advicePrompt = promptDecision.advicePrompt;
+      const cognitiveScaffoldText = promptDecision.scaffoldPrompt;
       // Intent-Gated Memory Retrieval:
       // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
       // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
@@ -1375,9 +1446,6 @@ export class AgentLoop {
         || this.llm?.constructor?.name
         || 'unknown';
 
-      // Solve-Time Dynamic Harness Routing (Adaptive Auto-Harness 2026)
-      const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
-
       // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
       const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
         taskClass: classification.taskClass,
@@ -1386,7 +1454,6 @@ export class AgentLoop {
 
       // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
       const rawReflection = this.reflectionEngine.getLastReflectionPrompt();
-      const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
       let strategicPivotGuidance: string | undefined;
       if (consecutiveFails >= 2) {
         strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining. 4. Filter out malformed or truncated elements and ensure array length matches expectations.`;
@@ -1416,34 +1483,6 @@ export class AgentLoop {
         paretoGateReminder = `💡 [PARETO 80/20 GATE]: Before modifying any product code, formulate and verify your technical hypothesis using "formulate_and_verify_hypothesis". Direct edits in Explore phase without hypothesis validation will be rejected by the Guardian.`;
       }
 
-      // Phase 2/3/4: Hierarchical Dynamic Context Budgeting with Adaptive Failure Throttling
-      const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
-      const arbitrationInputs = {
-        advicePrompt,
-        reflectionContext,
-        cognitiveScaffold: cognitiveScaffoldText,
-        phaseGuidance,
-        rawPlanContext,
-        recalledTurnContext,
-        memoryPrompt,
-        composeContext,
-        repositoryMemoryContext,
-        repositoryContext,
-      };
-      const arbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, {
-        maxBudgetTokens: dynamicBudgetTokens,
-        modelName: activeModelName,
-        consecutiveFailures: consecutiveFails,
-        retrievalQuery: activeStepQuery,
-      });
-      this.contextQualityEvaluator.recordContextArbitration({
-        sourceCount: Object.values(arbitrationInputs).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
-        retainedSourceCount: arbitration.sourcesIncluded.length,
-        beforeTokens: arbitration.stats.beforeTokens,
-        afterTokens: arbitration.stats.afterTokens,
-      });
-      let dynamicExecutionContext = arbitration.renderedContext;
-
       // Phase 4: Auto-Convergence Directive when all verification tests passed
       let completionDirective: string | undefined;
       if (hasVerifiedTests) {
@@ -1453,18 +1492,63 @@ export class AgentLoop {
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
       const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
-      const injectedAdditions = [
+
+      // Every model-visible dynamic block enters one arbiter. A preliminary pass
+      // provides the footprint used by latency guidance; the final pass includes it.
+      const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
+      const arbitrationInputs = {
+        completionDirective,
+        advicePrompt,
+        reflectionContext,
+        cognitiveScaffold: cognitiveScaffoldText,
+        toolPlaybooks: promptDecision.toolPlaybookPrompt,
+        harnessGuidance: promptDecision.harnessGuidance,
         hypothesisContext,
         hypothesisGuidance,
         domainContractContext,
-        harnessProfile.guidance,
         paretoGateReminder,
-        completionDirective,
-      ].filter(Boolean);
-      if (injectedAdditions.length > 0) {
-        dynamicExecutionContext = [dynamicExecutionContext, ...injectedAdditions].filter(Boolean).join('\n\n');
-      }
+        phaseGuidance,
+        rawPlanContext,
+        recalledTurnContext,
+        memoryPrompt,
+        composeContext,
+        repositoryMemoryContext,
+        repositoryContext,
+      };
+      const arbitrationOptions = {
+        maxBudgetTokens: dynamicBudgetTokens,
+        modelName: activeModelName,
+        consecutiveFailures: consecutiveFails,
+        retrievalQuery: activeStepQuery,
+      };
+      const preliminaryArbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, arbitrationOptions);
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
+      const preliminaryFootprint = this.latencyOrchestrator.estimateRequest({
+        systemPrompt: assembledSystemPrompt,
+        tools: activeToolDeclarations,
+        history: session.getHistory(),
+        dynamicContext: preliminaryArbitration.renderedContext,
+        maxInputTokens: activeTokenConfig.maxInputTokens,
+        maxOutputTokens: activeTokenConfig.maxOutputTokens,
+      });
+      const latencyGuidance = this.latencyOrchestrator.buildGuidance({
+        step,
+        footprint: preliminaryFootprint,
+        modelName: activeModelName,
+        tokenConfig: activeTokenConfig,
+        phase: classification.phase,
+        verificationReady: this.verificationPolicy.canComplete().allowed
+          && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
+      });
+      const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
+      const arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
+      this.contextQualityEvaluator.recordContextArbitration({
+        sourceCount: Object.values(finalArbitrationInputs).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
+        retainedSourceCount: arbitration.sourcesIncluded.length,
+        beforeTokens: arbitration.stats.beforeTokens,
+        afterTokens: arbitration.stats.afterTokens,
+      });
+      const dynamicExecutionContext = arbitration.renderedContext;
       let requestFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
@@ -1473,26 +1557,6 @@ export class AgentLoop {
         maxInputTokens: activeTokenConfig.maxInputTokens,
         maxOutputTokens: activeTokenConfig.maxOutputTokens,
       });
-      const latencyGuidance = this.latencyOrchestrator.buildGuidance({
-        step,
-        footprint: requestFootprint,
-        modelName: activeModelName,
-        tokenConfig: activeTokenConfig,
-        phase: classification.phase,
-        verificationReady: this.verificationPolicy.canComplete().allowed
-          && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
-      });
-      if (latencyGuidance) {
-        dynamicExecutionContext = [dynamicExecutionContext, latencyGuidance].filter(Boolean).join('\n\n');
-        requestFootprint = this.latencyOrchestrator.estimateRequest({
-          systemPrompt: assembledSystemPrompt,
-          tools: activeToolDeclarations,
-          history: session.getHistory(),
-          dynamicContext: dynamicExecutionContext,
-          maxInputTokens: activeTokenConfig.maxInputTokens,
-          maxOutputTokens: activeTokenConfig.maxOutputTokens,
-        });
-      }
 
       // Budget the complete model-visible request, not history alone. This is
       // proactive compaction at a safe provider-turn boundary, not a timeout.
@@ -1548,37 +1612,52 @@ export class AgentLoop {
       };
       const requestStartedAt = Date.now();
       let firstTokenAt: number | undefined;
-      if (typeof this.llm.generateStream === 'function') {
-        response = await this.llm.generateStream(session, activeToolDeclarations, {
-          onThoughtToken: (token: string) => {
-            firstTokenAt ??= Date.now();
-            this.kernel?.ctx.events.emit('model:thought', token);
-          },
-          onContentToken: (token: string) => {
-            firstTokenAt ??= Date.now();
-            this.kernel?.ctx.events.emit('model:token', token);
-          },
-          onToolCallEarly: (earlyCall: any) => {
-            if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
-              const runContext = {
-                sessionId: session.id,
-                agentId: this.agentId,
-                turn,
-                userRequest: turnUserRequest,
-                signal: options?.signal,
-              };
-              this.pipelinedDispatcher.dispatchEarly(
-                earlyCall.name,
-                earlyCall.args,
-                this.toolRunner,
-                runContext,
-                earlyCall.id,
-              );
-            }
-          },
-        }, requestOptions);
-      } else {
-        response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
+      this.kernel?.ctx.events.emit('model:thinking:start', {
+        agentId: this.agentId,
+        turn,
+        step,
+        startedAt: requestStartedAt,
+      });
+      try {
+        if (typeof this.llm.generateStream === 'function') {
+          response = await this.llm.generateStream(session, activeToolDeclarations, {
+            onThoughtToken: (token: string) => {
+              firstTokenAt ??= Date.now();
+              this.kernel?.ctx.events.emit('model:thought', token);
+            },
+            onContentToken: (token: string) => {
+              firstTokenAt ??= Date.now();
+              this.kernel?.ctx.events.emit('model:token', token);
+            },
+            onToolCallEarly: (earlyCall: any) => {
+              if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+                const runContext = {
+                  sessionId: session.id,
+                  agentId: this.agentId,
+                  turn,
+                  userRequest: turnUserRequest,
+                  signal: options?.signal,
+                };
+                this.pipelinedDispatcher.dispatchEarly(
+                  earlyCall.name,
+                  earlyCall.args,
+                  this.toolRunner,
+                  runContext,
+                  earlyCall.id,
+                );
+              }
+            },
+          }, requestOptions);
+        } else {
+          response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
+        }
+      } finally {
+        this.kernel?.ctx.events.emit('model:thinking:end', {
+          agentId: this.agentId,
+          turn,
+          step,
+          endedAt: Date.now(),
+        });
       }
       this.consecutiveCircuitBreakerRetries = 0;
       const requestDurationMs = Date.now() - requestStartedAt;
@@ -1702,7 +1781,12 @@ export class AgentLoop {
         if (!this._collapsePreferences.compactSteps) {
           CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
         }
-        this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
+        // Streaming providers already emitted each thought chunk. Emit the
+        // aggregate only for non-streaming providers to avoid duplicating the
+        // reasoning trace in reactive UIs.
+        if (typeof this.llm.generateStream !== 'function') {
+          this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
+        }
 
         // Wink-Style Specification Drift & Goal Substitution Nudge
         const thoughtDrift = this.domainIntentGuardian.observeModelThoughts(response.reasoningContent);

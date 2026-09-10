@@ -1,14 +1,36 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import type { AgentUIStatus } from '../types.js';
+import { LoadingSpinner } from './StepStream.js';
 
 interface LiveReasoningBoxProps {
   reasoning: string;
   isCollapsed: boolean;
+  status: AgentUIStatus;
+  isThinking: boolean;
+  thinkingStartedAt?: number | null;
 }
 
-export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({ reasoning, isCollapsed }) => {
-  if (!reasoning || reasoning.trim().length === 0) {
+export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
+  reasoning,
+  isCollapsed,
+  status,
+  isThinking,
+  thinkingStartedAt,
+}) => {
+  const hasReasoning = Boolean(reasoning && reasoning.trim().length > 0);
+
+  if (!hasReasoning && !(isThinking && status === 'thinking')) {
     return null;
+  }
+
+  if (!hasReasoning) {
+    return (
+      <Box paddingX={1} marginY={0} gap={1}>
+        <Text color="yellow" bold>🧠 Thinking:</Text>
+        <LoadingSpinner startTime={thinkingStartedAt ?? undefined} />
+      </Box>
+    );
   }
 
   const clean = reasoning.trim();

@@ -17,6 +17,8 @@ export interface PromptAssemblyContext {
   hasSubagentTools?: boolean;
   hasAntigravityTools?: boolean;
   hasCodebaseTools?: boolean;
+  /** Keep the legacy all-playbooks system section. Step-aware AgentLoop requests disable it. */
+  includeStaticToolPlaybooks?: boolean;
 }
 
 const projectContextCache = new Map<string, { isUnity: boolean; isFrontend: boolean }>();
@@ -182,6 +184,18 @@ export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
    - Playbook E (Subagents & Multi-Agent): brainstorm_design -> allocate_agent_task(checkAntiDuplication, fileScope) -> write_shared_context -> publish_agent_event -> wait_agent -> verify_subagent_quality.
    - Playbook F (DAG Plan): create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`;
 
+/** Small cache-safe tail modules selected by StepPromptPolicy. */
+export const TOOL_PLAYBOOK_PROMPTS = {
+  architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\nget_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.`,
+  rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nget_diagnostics / inspect_symbol -> query_call_graph(callers) -> read_file.`,
+  mutation: `[TOOL PLAYBOOK C - MUTATION]\nget_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> targeted test.`,
+  longTask: `[TOOL PLAYBOOK D - LONG TASK]\nrun_command(WaitMsBeforeAsync=5000) -> manage_task -> schedule; avoid polling.`,
+  subagent: `[TOOL PLAYBOOK E - SUBAGENT]\nbrainstorm_design -> allocate_agent_task -> shared context/event -> wait_agent -> verify_subagent_quality.`,
+  dagPlan: `[TOOL PLAYBOOK F - DAG PLAN]\ncreate_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`,
+} as const;
+
+export type ToolPlaybookPromptId = keyof typeof TOOL_PLAYBOOK_PROMPTS;
+
 export const SECTION_COMPUTER_USE = `13. COMPUTER USE AGENT PROTOCOL:
    - Loop: 1.[Perception]: computer(action: "screenshot") -> 2.[Reasoning]: Locate UI elements [x, y] -> 3.[Action]: left_click, right_click, double_click, drag, type, key, scroll -> 4.[Verification]: computer(action: "screenshot").`;
 
@@ -213,7 +227,12 @@ export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'frontend-ui', content: SECTION_FRONTEND_UI, priority: 200, condition: (ctx: PromptAssemblyContext) => ctx.isFrontend ?? false },
   { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300, condition: (ctx: PromptAssemblyContext) => ctx.hasAntigravityTools ?? true },
   { id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE, priority: 400, condition: (ctx: PromptAssemblyContext) => ctx.hasCodebaseTools ?? true },
-  { id: 'tool-playbooks', content: SECTION_TOOL_PLAYBOOKS, priority: 500 },
+  {
+    id: 'tool-playbooks',
+    content: SECTION_TOOL_PLAYBOOKS,
+    priority: 500,
+    condition: (ctx: PromptAssemblyContext) => ctx.includeStaticToolPlaybooks ?? true,
+  },
   { id: 'task-orchestrator-boundaries', content: SECTION_TASK_ORCHESTRATOR_BOUNDARIES, priority: 550, condition: (ctx: PromptAssemblyContext) => ctx.hasSubagentTools ?? false },
   { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },
   { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },

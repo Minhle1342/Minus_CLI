@@ -49,6 +49,8 @@ export interface TuiState {
   };
   steps: TuiStepItem[];
   liveReasoning: string;
+  isThinking: boolean;
+  thinkingStartedAt: number | null;
   isReasoningCollapsed: boolean;
   isCompactMode: boolean;
   finalAnswer: string | null;
@@ -66,6 +68,8 @@ export type TuiAction =
   | { type: 'STEP_END'; step: number }
   | { type: 'TOOL_START'; toolName: string; args: Record<string, any>; step: number; maxSteps: number; phase: UIWorkflowPhase }
   | { type: 'TOOL_END'; toolName: string; result: Record<string, any>; durationMs: number; tokens?: number }
+  | { type: 'THINKING_START'; startedAt: number }
+  | { type: 'THINKING_END' }
   | { type: 'REASONING_CHUNK'; chunk: string }
   | { type: 'CLEAR_REASONING' }
   | { type: 'TOGGLE_REASONING_COLLAPSE' }

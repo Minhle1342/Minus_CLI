@@ -47,6 +47,8 @@ export interface BenchmarkTask {
   maxSteps?: number;
   /** Thời gian timeout cho phép tính bằng ms (mặc định: 120,000ms = 2 phút) */
   timeoutMs?: number;
+  /** Skip the mutation-oriented plan bootstrap for analysis/status tasks. */
+  readOnly?: boolean;
 }
 
 export interface TaskTokenMetrics {
@@ -59,12 +61,24 @@ export interface TaskTokenMetrics {
 
 export interface TaskExecutionMetrics {
   durationMs: number;
+  /** Wall time from immediately before AgentLoop.run() until its final answer settles. */
+  timeToFinalAnswerMs: number;
+  /** Sum of provider request durations recorded by the agent loop. */
+  totalModelRequestTimeMs: number;
+  ttftP50Ms: number;
+  ttftP95Ms: number;
   stepsTaken: number;
   toolCallsCount: number;
   toolCallBreakdown: Record<string, number>;
   guardianInterventionsCount: number;
   tokens: TaskTokenMetrics;
   estimatedCostUsd?: number;
+  promptGating?: {
+    tokensBefore: number;
+    tokensAfter: number;
+    tokensSaved: number;
+    conservativeFallbacks: number;
+  };
 }
 
 export type EvaluationStatus = 'PASSED' | 'FAILED' | 'TIMED_OUT' | 'ERROR';
@@ -93,6 +107,10 @@ export interface BenchmarkSuiteReport {
   passRatePercent: number;
   averageSteps: number;
   averageDurationMs: number;
+  averageTimeToFinalAnswerMs: number;
+  totalModelRequestTimeMs: number;
+  ttftP50Ms: number;
+  ttftP95Ms: number;
   totalTokens: number;
   totalCostUsd?: number;
   guardianViolationRate: number;
@@ -106,6 +124,10 @@ export interface BenchmarkRunnerOptions {
   modelName?: string;
   /** Sử dụng Mock LLM thay vì live API (Zero API cost) */
   mockMode?: boolean;
+  /** Fail instead of silently substituting MockLLM when live credentials are unavailable. */
+  requireLiveModel?: boolean;
+  /** Per-step prompt rollout mode used by AgentLoop. */
+  stepPromptGatingMode?: 'off' | 'shadow' | 'enforce';
   /** Chế độ sandbox: 'local' | 'docker' */
   sandboxMode?: 'local' | 'docker';
   /** Giữ lại thư mục workspace sau khi chạy (để debug) */

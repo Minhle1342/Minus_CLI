@@ -627,6 +627,16 @@ async function main() {
     agentLoop.setTokenConfig(savedSession.tokenConfig);
   }
 
+  const interactiveAgentIds = new Set(['main', 'interactive-agent', 'coding-agent']);
+  const onModelThinkingStart = ({ agentId }: { agentId: string }) => {
+    if (interactiveAgentIds.has(agentId)) CLI.startThinkingSpinner();
+  };
+  const onModelThinkingEnd = ({ agentId }: { agentId: string }) => {
+    if (interactiveAgentIds.has(agentId)) CLI.stopThinkingSpinner();
+  };
+  kernel.ctx.events.on('model:thinking:start', onModelThinkingStart);
+  kernel.ctx.events.on('model:thinking:end', onModelThinkingEnd);
+
   let sessionCount = 0;
 
   // Dream runs outside the interactive agent and is triggered only after a
@@ -2644,6 +2654,9 @@ ${planPrompt}`;
       }
     }
   } finally {
+    kernel.ctx.events.off('model:thinking:start', onModelThinkingStart);
+    kernel.ctx.events.off('model:thinking:end', onModelThinkingEnd);
+    CLI.stopThinkingSpinner();
     input.removeListener('keypress', handleInputKeypress);
     slashHints.dispose();
     rl.close();

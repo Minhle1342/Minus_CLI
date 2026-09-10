@@ -64,6 +64,9 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt }) => {
       <LiveReasoningBox
         reasoning={state.liveReasoning}
         isCollapsed={state.isReasoningCollapsed}
+        status={state.status}
+        isThinking={state.isThinking}
+        thinkingStartedAt={state.thinkingStartedAt}
       />
 
       {/* 4. Reactive Step Stream (One-Liner Log) */}

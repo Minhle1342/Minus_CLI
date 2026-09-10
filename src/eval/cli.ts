@@ -12,6 +12,8 @@ function parseArgs() {
     tasks?: string;
     model?: string;
     mock?: boolean;
+    requireLive?: boolean;
+    promptGating?: 'off' | 'shadow' | 'enforce';
     sandbox?: 'local' | 'docker';
     keepWorkspace?: boolean;
     output?: string;
@@ -23,6 +25,8 @@ function parseArgs() {
     const arg = args[i];
     if (arg === '--mock') {
       options.mock = true;
+    } else if (arg === '--require-live') {
+      options.requireLive = true;
     } else if (arg === '--list') {
       options.list = true;
     } else if (arg === '--keep-workspace') {
@@ -31,6 +35,12 @@ function parseArgs() {
       options.tasks = args[++i];
     } else if (arg === '--model' && args[i + 1]) {
       options.model = args[++i];
+    } else if (arg === '--prompt-gating' && args[i + 1]) {
+      const mode = args[++i];
+      if (!['off', 'shadow', 'enforce'].includes(mode)) {
+        throw new Error(`Invalid --prompt-gating mode: ${mode}`);
+      }
+      options.promptGating = mode as 'off' | 'shadow' | 'enforce';
     } else if (arg === '--sandbox' && args[i + 1]) {
       options.sandbox = args[++i] as any;
     } else if (arg === '--output' && args[i + 1]) {
@@ -86,6 +96,8 @@ async function main() {
     taskFilter: options.tasks,
     modelName: options.model,
     mockMode: options.mock,
+    requireLiveModel: options.requireLive,
+    stepPromptGatingMode: options.promptGating,
     sandboxMode: options.sandbox || 'local',
     keepWorkspaces: options.keepWorkspace,
     outputPath: options.output,

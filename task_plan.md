@@ -1,28 +1,38 @@
-# Multi-Agent Integration & Optimization Implementation Plan
+# Task Plan: Khắc phục và Nâng cấp Công cụ Khảo sát Codebase (Code Intelligence Tools)
 
-## Overview
-Transform hierarchical `SubagentManager` delegation into a decoupled Peer-to-Peer Multi-Agent system with a central Orchestrator, Event Bus, Shared Context (OCC), and Coordinated Multi-Agent Performance Optimization (`agent-orchestration-multi-agent-optimize`).
+## Mục tiêu chiến lược
+Khắc phục các điểm yếu của hệ thống công cụ đọc/khảo sát codebase hiện tại (`search_codebase_fast`, `read_file`, `read_compressed_code`, `get_symbol_context_360`, `query_call_graph`) nhằm tăng cường độ chính xác ngữ nghĩa, giảm nhiễu token, hỗ trợ batch symbol và kiểm soát kích thước payload.
 
-## Atomic Tasks
+---
 
-### Phase 1: Foundation (Orchestration & Discovery)
-- [x] Task 1.1: Initialize `AgentOrchestrator` service with multi-factor workload balancing.
-- [x] Task 1.2: Extend `AgentRegistry` for capability advertisement, metadata, and task workload tracking.
+## Phân chia giai đoạn & Công việc nguyên tử (Atomic Task Breakdown)
 
-### Phase 2: Communication Infrastructure
-- [x] Task 2.1: Create `AgentEventBus` for agent-to-agent messaging with topic wildcards and ring buffer history.
+### Phase 1: Nâng cấp Tìm kiếm Codebase Hybrid (Lexical + AST Filtering)
+- [ ] **Task 1.1:** Khảo sát `src/tools/search-codebase.ts` hoặc module tìm kiếm hiện tại để đánh giá cơ chế BM25 hiện tại.
+  - *Target Files:* `src/tools/search-codebase.ts` (hoặc module tương ứng trong `src/tools/`)
+  - *Concrete Code Logic:* Thêm bộ lọc ngữ nghĩa (AST symbol type filter) để loại bỏ kết quả nhiễu từ khóa phổ biến.
+  - *Verification:* Chạy test suite `npm test` hoặc `npx tsc --noEmit`.
+- [ ] **Task 1.2:** Tối ưu hóa điểm số xếp hạng (relevance scoring) cho `search_codebase_fast`.
+  - *Target Files:* `src/tools/search-codebase.ts`
+  - *Concrete Code Logic:* Ưu tiên kết quả khớp chính xác tên symbol hoặc định nghĩa lớp/hàm.
+  - *Verification:* Chạy test suite.
 
-### Phase 3: Context & Synchronization
-- [x] Task 3.1: Implement `SharedContextService` multi-tiered key-value store.
-- [x] Task 3.2: Implement basic optimistic concurrency control based on existing file hashes (OCC) for shared data.
+### Phase 2: Mở rộng Hỗ trợ Batch Symbol Lookup (`get_symbol_context_360`)
+- [ ] **Task 2.1:** Cập nhật interface `GetSymbolContext360Options` để hỗ trợ mảng `symbols?: string[]` thay vì chỉ 1 symbol đơn lẻ.
+  - *Target Files:* `src/tools/codebase-intelligence.ts`
+  - *Concrete Code Logic:* Cho phép truy vấn danh sách symbol cùng lúc để gom nhóm ngữ nghĩa.
+  - *Verification:* Kiểm tra typecheck `npx tsc --noEmit`.
+- [ ] **Task 2.2:** Xử lý gộp payload trả về cho batch symbol lookup mà không làm tràn context window.
+  - *Target Files:* `src/tools/codebase-intelligence.ts`
+  - *Verification:* Chạy test suite.
 
-### Phase 4: Benchmark Subagents & Tooling Integration
-- [x] Task 4.1: Register 5 Top-Benchmark specialized subagents into `AgentRegistry` (`src/agent/benchmark-agents.ts`).
-- [x] Task 4.2: Add `allocate_agent_task` tool with priority, cost-efficiency, and memoization options.
-- [x] Task 4.3: Add CLI `/agents` and `/explore agents` monitoring commands.
+### Phase 3: Smart Chunking & Progressive Disclosure cho `read_file`
+- [ ] **Task 3.1:** Thêm cơ chế tự động gợi ý dải dòng tiếp theo (`nextStartLine`) khi file vượt quá giới hạn 800 dòng.
+  - *Target Files:* `src/tools/read-file.ts` (hoặc module xử lý đọc file tương đương)
+  - *Concrete Code Logic:* Thêm metadata phản hồi phân trang (`hasMore: boolean`, `nextStartLine: number`) khi file bị cắt cụt.
+  - *Verification:* Chạy unit test đọc file lớn.
 
-### Phase 5: Multi-Agent Performance Optimization
-- [x] Task 5.1: Performance Profiling & Bottleneck Tracking (`AgentPerformanceTracker`).
-- [x] Task 5.2: Workload Distribution & Dynamic Weighted Scoring in `AgentOrchestrator`.
-- [x] Task 5.3: Cost-Aware Routing (`preferCostEfficient`) & Result Memoization cache.
-- [x] Task 5.4: Comprehensive Integration & Optimization Testing (Section 42, 43, 44 in `src/test-suite.ts`).
+### Phase 4: Payload Bounding & Node Pruning cho Call Graph (`query_call_graph`)
+- [ ] **Task 4.1:** Thêm giới hạn số lượng node tối đa (`maxNodes: number` mặc định 50) và bộ lọc loại bỏ node lá trùng lặp trong `query_call_graph`.
+  - *Target Files:* `src/tools/codebase-intelligence.ts`
+  - *Verification:* Chạy kiểm tra biên độ payload và `npm run build`.

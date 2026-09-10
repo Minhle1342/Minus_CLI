@@ -25,6 +25,8 @@ export function createInitialState(options: {
     },
     steps: [],
     liveReasoning: '',
+    isThinking: false,
+    thinkingStartedAt: null,
     isReasoningCollapsed: true,
     isCompactMode: true,
     finalAnswer: null,
@@ -50,6 +52,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         currentStep: action.step,
         maxSteps: action.maxSteps,
         status: 'thinking',
+        isThinking: false,
+        thinkingStartedAt: null,
+        liveReasoning: '',
         finalAnswer: null,
         errorMessage: null,
       };
@@ -73,6 +78,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         status: 'executing_tool',
+        isThinking: false,
+        thinkingStartedAt: null,
         activePhase: action.phase,
         steps: [...state.steps.slice(-50), newStepItem],
       };
@@ -99,9 +106,27 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         status: 'thinking',
+        isThinking: false,
+        thinkingStartedAt: null,
         steps: updatedSteps,
       };
     }
+    case 'THINKING_START':
+      return {
+        ...state,
+        status: 'thinking',
+        isThinking: true,
+        thinkingStartedAt: action.startedAt,
+        liveReasoning: '',
+        finalAnswer: null,
+        errorMessage: null,
+      };
+    case 'THINKING_END':
+      return {
+        ...state,
+        isThinking: false,
+        thinkingStartedAt: null,
+      };
     case 'REASONING_CHUNK':
       return {
         ...state,
@@ -142,12 +167,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         status: 'completed',
+        isThinking: false,
+        thinkingStartedAt: null,
         finalAnswer: action.answer,
       };
     case 'ERROR':
       return {
         ...state,
         status: 'error',
+        isThinking: false,
+        thinkingStartedAt: null,
         errorMessage: action.error,
       };
     case 'SHOW_DIFF':
@@ -218,6 +247,14 @@ export class TuiStore extends EventEmitter {
       this.dispatch({ type: 'TOOL_END', toolName, result, durationMs });
     };
 
+    const onThinkingStart = (lifecycle: { startedAt: number }) => {
+      this.dispatch({ type: 'THINKING_START', startedAt: lifecycle.startedAt });
+    };
+
+    const onThinkingEnd = () => {
+      this.dispatch({ type: 'THINKING_END' });
+    };
+
     const onModelThought = (thought: string) => {
       this.dispatch({ type: 'REASONING_CHUNK', chunk: thought });
     };
@@ -242,6 +279,8 @@ export class TuiStore extends EventEmitter {
     events.on('step:after', onStepAfter);
     events.on('tool:before', onToolBefore);
     events.on('tool:after', onToolAfter);
+    events.on('model:thinking:start', onThinkingStart);
+    events.on('model:thinking:end', onThinkingEnd);
     events.on('model:thought', onModelThought);
     events.on('model:usage', onModelUsage);
     events.on('model:final_answer', onModelFinalAnswer);
@@ -253,6 +292,8 @@ export class TuiStore extends EventEmitter {
       events.off('step:after', onStepAfter);
       events.off('tool:before', onToolBefore);
       events.off('tool:after', onToolAfter);
+      events.off('model:thinking:start', onThinkingStart);
+      events.off('model:thinking:end', onThinkingEnd);
       events.off('model:thought', onModelThought);
       events.off('model:usage', onModelUsage);
       events.off('model:final_answer', onModelFinalAnswer);

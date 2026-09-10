@@ -641,21 +641,25 @@ export class BenchmarkRunner {
     const agentLoop = new AgentLoop(llm, toolRegistry, {
       maxSteps: task.maxSteps || 15,
       workspace,
+      stepPromptGatingMode: this.options.stepPromptGatingMode,
     });
 
     // Thiết lập kế hoạch mục tiêu cho bài toán benchmark để mở khóa quyền thực thi cho Agent
-    agentLoop.planManager.createPlan([
-      {
-        title: task.title,
-        acceptanceCriteria: `Thực thi kiểm thử và bảo đảm ${task.verifyCommand || 'kiểm chứng'} vượt qua với Exit Code 0`,
-      },
-    ]);
+    if (!task.readOnly) {
+      agentLoop.planManager.createPlan([
+        {
+          title: task.title,
+          acceptanceCriteria: `Thực thi kiểm thử và bảo đảm ${task.verifyCommand || 'kiểm chứng'} vượt qua với Exit Code 0`,
+        },
+      ]);
+    }
 
     const session = new Session(`eval-${task.id}-${Date.now()}`);
     session.addUserMessage(task.prompt);
 
     let finalAnswer = '';
     let runError: any = null;
+    const agentStartedAt = Date.now();
 
     try {
       finalAnswer = await Promise.race([
@@ -667,9 +671,10 @@ export class BenchmarkRunner {
     } catch (err: any) {
       runError = err;
     }
+    const timeToFinalAnswerMs = Date.now() - agentStartedAt;
 
     // 3. Đo lường chỉ số Telemetry từ Session
-    const metrics = this.extractMetricsFromSession(session, Date.now() - startTaskTime);
+    const metrics = this.extractMetricsFromSession(session, Date.now() - startTaskTime, timeToFinalAnswerMs);
 
     // 4. Chạy kiểm chứng khách quan độc lập (Ground-Truth Verification)
     let status: EvaluationStatus = 'PASSED';
@@ -740,11 +745,14 @@ export class BenchmarkRunner {
     if (geminiKey) {
       return new GeminiLLM(geminiKey, modelName);
     }
+    if (this.options.requireLiveModel) {
+      throw new Error(`LIVE_MODEL_REQUIRED: No API credential is available for ${modelName}; refusing MockLLM fallback.`);
+    }
     // Fallback sang Mock LLM nếu không có key
     return new BenchmarkMockLLM(BENCHMARK_TASKS[0]);
   }
 
-  private extractMetricsFromSession(session: Session, durationMs: number): TaskExecutionMetrics {
+  private extractMetricsFromSession(session: Session, durationMs: number, timeToFinalAnswerMs = durationMs): TaskExecutionMetrics {
     const events = session.getEvents();
     let promptTokens = 0;
     let completionTokens = 0;
@@ -753,6 +761,11 @@ export class BenchmarkRunner {
     let toolCallsCount = 0;
     const toolCallBreakdown: Record<string, number> = {};
     let guardianInterventions = 0;
+    let totalModelRequestTimeMs = 0;
+    const timeToFirstTokenSamples: number[] = [];
+    let gatingTokensBefore = 0;
+    let gatingTokensAfter = 0;
+    let gatingFallbacks = 0;
 
     for (const event of events) {
       if (event.type === 'step/start') {
@@ -774,6 +787,15 @@ export class BenchmarkRunner {
         promptTokens += cd.promptTokens || 0;
         completionTokens += cd.completionTokens || 0;
         cachedTokens += cd.cachedTokens || 0;
+        if (cd.mode === 'soft-latency') {
+          totalModelRequestTimeMs += Number(cd.requestDurationMs || 0);
+          if (Number.isFinite(cd.timeToFirstTokenMs)) timeToFirstTokenSamples.push(Number(cd.timeToFirstTokenMs));
+        }
+        if (cd.stepPromptDecision) {
+          gatingTokensBefore += Number(cd.stepPromptDecision.estimatedTokensBefore || 0);
+          gatingTokensAfter += Number(cd.stepPromptDecision.injectedEstimatedTokens || 0);
+          if (cd.stepPromptDecision.conservativeFallback) gatingFallbacks++;
+        }
       }
       if (event.type === 'assistant/message' && (event.data as any)?.usage) {
         const u = (event.data as any).usage;
@@ -785,9 +807,17 @@ export class BenchmarkRunner {
 
     const totalTokens = promptTokens + completionTokens;
     const cacheHitRate = promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0;
+    const sortedTtft = [...timeToFirstTokenSamples].sort((a, b) => a - b);
+    const ttftPercentile = (p: number): number => sortedTtft.length === 0
+      ? 0
+      : sortedTtft[Math.min(sortedTtft.length - 1, Math.max(0, Math.ceil(sortedTtft.length * p) - 1))];
 
     return {
       durationMs,
+      timeToFinalAnswerMs,
+      totalModelRequestTimeMs,
+      ttftP50Ms: ttftPercentile(0.5),
+      ttftP95Ms: ttftPercentile(0.95),
       stepsTaken: Math.max(1, stepsTaken),
       toolCallsCount,
       toolCallBreakdown,
@@ -799,17 +829,28 @@ export class BenchmarkRunner {
         cachedTokens,
         cacheHitRate,
       },
+      promptGating: {
+        tokensBefore: gatingTokensBefore,
+        tokensAfter: gatingTokensAfter,
+        tokensSaved: Math.max(0, gatingTokensBefore - gatingTokensAfter),
+        conservativeFallbacks: gatingFallbacks,
+      },
     };
   }
 
   private emptyMetrics(durationMs: number): TaskExecutionMetrics {
     return {
       durationMs,
+      timeToFinalAnswerMs: durationMs,
+      totalModelRequestTimeMs: 0,
+      ttftP50Ms: 0,
+      ttftP95Ms: 0,
       stepsTaken: 0,
       toolCallsCount: 0,
       toolCallBreakdown: {},
       guardianInterventionsCount: 0,
       tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, cacheHitRate: 0 },
+      promptGating: { tokensBefore: 0, tokensAfter: 0, tokensSaved: 0, conservativeFallbacks: 0 },
     };
   }
 
@@ -824,6 +865,14 @@ export class BenchmarkRunner {
     const totalSteps = results.reduce((acc, r) => acc + r.metrics.stepsTaken, 0);
     const averageSteps = totalTasks > 0 ? Number((totalSteps / totalTasks).toFixed(1)) : 0;
     const averageDurationMs = totalTasks > 0 ? Math.round(totalDurationMs / totalTasks) : 0;
+    const averageTimeToFinalAnswerMs = totalTasks > 0
+      ? Math.round(results.reduce((acc, result) => acc + result.metrics.timeToFinalAnswerMs, 0) / totalTasks)
+      : 0;
+    const totalModelRequestTimeMs = results.reduce((acc, result) => acc + result.metrics.totalModelRequestTimeMs, 0);
+    const allTtft = results.flatMap((result) => [result.metrics.ttftP50Ms, result.metrics.ttftP95Ms]).filter((value) => value > 0).sort((a, b) => a - b);
+    const aggregatePercentile = (p: number): number => allTtft.length === 0
+      ? 0
+      : allTtft[Math.min(allTtft.length - 1, Math.max(0, Math.ceil(allTtft.length * p) - 1))];
     const totalTokens = results.reduce((acc, r) => acc + r.metrics.tokens.totalTokens, 0);
     const totalGuardianInterventions = results.reduce((acc, r) => acc + r.metrics.guardianInterventionsCount, 0);
     const guardianViolationRate = totalTasks > 0 ? Number(((totalGuardianInterventions / totalTasks) * 100).toFixed(1)) : 0;
@@ -840,6 +889,10 @@ export class BenchmarkRunner {
       passRatePercent,
       averageSteps,
       averageDurationMs,
+      averageTimeToFinalAnswerMs,
+      totalModelRequestTimeMs,
+      ttftP50Ms: aggregatePercentile(0.5),
+      ttftP95Ms: aggregatePercentile(0.95),
       totalTokens,
       guardianViolationRate,
       taskResults: results,
@@ -854,6 +907,8 @@ export class BenchmarkRunner {
     const passRateColor = report.passRatePercent >= 80 ? c.green : report.passRatePercent >= 50 ? c.yellow : c.red;
     console.log(`• Tỷ lệ hoàn thành (Pass@1): ${passRateColor}${c.bold}${report.passRatePercent}%${c.reset} (${report.passedTasks}/${report.totalTasks} tasks)`);
     console.log(`• Số step trung bình: ${c.bold}${report.averageSteps}${c.reset} steps/task`);
+    console.log(`• Time-to-final trung bình: ${c.bold}${(report.averageTimeToFinalAnswerMs / 1000).toFixed(2)}s${c.reset}`);
+    console.log(`• Tổng thời gian model request: ${c.bold}${(report.totalModelRequestTimeMs / 1000).toFixed(2)}s${c.reset} | TTFT p50/p95: ${report.ttftP50Ms.toFixed(0)}/${report.ttftP95Ms.toFixed(0)}ms`);
     console.log(`• Tổng token tiêu thụ: ${c.bold}${report.totalTokens.toLocaleString()}${c.reset} tokens`);
     console.log(`• Tần suất vi phạm Guardian: ${c.bold}${report.guardianViolationRate}%${c.reset}`);
     console.log(`----------------------------------------------------------------`);
