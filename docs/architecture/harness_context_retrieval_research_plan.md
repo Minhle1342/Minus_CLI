@@ -10,7 +10,7 @@ Harness nên được nâng cấp theo ba đường song song nhưng tách biệ
 
 Ba cơ chế kiểm soát bắt buộc để tránh làm loãng context là selective retrieval, ngân sách token cứng và provenance đến từng symbol/range. Kết quả semantic chỉ được thêm khi vượt ngưỡng hữu ích; graph expansion phải bị giới hạn; nội dung cần sửa hoặc kiểm chứng phải là mã nguồn nguyên văn, không phải bản tóm tắt sinh bởi mô hình.
 
-Phân tích phụ thuộc của GitNexus xác nhận hai seam phù hợp để tích hợp ngay là `CodeSearchEngine`/`createSearchCodebaseFastTool` và `createReadCompressedCodeTool`, đều có mức rủi ro LOW. Các adapter/prompt class có blast radius HIGH. Phân tích chi tiết trước khi nối vào main loop phát hiện `AgentLoop.runInternal` có mức CRITICAL và ảnh hưởng năm execution flows; vì vậy implementation hiện tại dừng ở adapter/tool seam và không sửa symbol này.
+Phân tích phụ thuộc của GitNexus xác nhận hai seam phù hợp để tích hợp đầu tiên là `CodeSearchEngine`/`createSearchCodebaseFastTool` và `createReadCompressedCodeTool`, đều có mức rủi ro LOW. Các adapter/prompt class có blast radius HIGH. `AgentLoop.runInternal` có mức CRITICAL và ảnh hưởng năm execution flows, nên phần nối main loop chỉ được thêm sau khi policy độc lập đã qua test deterministic/fail-open; rollout mặc định là `shadow`, còn `enforce` phải được bật tường minh.
 
 ## Trạng thái triển khai
 
@@ -27,9 +27,12 @@ Các phase không chạm main-loop CRITICAL đã được triển khai:
 | Cache envelope SHA-256 + provider capability mapping | Hoàn tất | `observe`; provider body changes chỉ khi `on` |
 | Anthropic TTL, OpenAI body fields, Gemini explicit cached content | Hoàn tất và có contract test | Gemini explicit cache `off` |
 | Repository-local benchmark và regression suite | Hoàn tất | Chạy thủ công/CI script |
-| Nối cache/context tiers trực tiếp vào `AgentLoop.runInternal` | Hoãn | GitNexus đánh giá CRITICAL: 5 execution flows |
+| Reliable tool orchestration state machine | Hoàn tất | `shadow`; chuỗi broad-to-narrow, fail-open |
+| AST symbol extraction cho `read_file(symbol)` | Hoàn tất | TS/JS compiler AST; Python indentation; heuristic có confidence |
+| Qualified method support trong `get_symbol_context_360` | Hoàn tất | Method definition/reference chính xác theo vị trí |
+| Nối orchestration policy vào `AgentLoop.runInternal` | Hoàn tất có feature gate | `shadow`; `enforce` opt-in và chỉ scope khi confidence cao |
 
-Benchmark proxy sau triển khai: 12 task, 413 file, 2.547 symbol chunks; HNSW hoạt động không warning; hybrid Recall@10 bằng BM25 (`0.6667`, không hồi quy); adaptive reading giảm second-read mô phỏng từ 11 xuống 0. Vì local hash embedding chưa đạt mục tiêu tăng recall 15%, semantic rollout vẫn giữ `off` cho đến khi benchmark bằng learned code embedding trên corpus held-out.
+Benchmark proxy sau đợt triển khai orchestration: 12 task, 416 file, 2.985 symbol chunks; HNSW hoạt động không warning; hybrid Recall@10 bằng BM25 (`0.75`, không hồi quy); adaptive reading giảm second-read mô phỏng từ 11 xuống 0. Integration test ở `enforce` hoàn tất chuỗi `search_codebase_fast → get_symbol_context_360 → read_file(symbol) → analyze_impact` với `followed=4`, `invalidCycles=0`. Vì local hash embedding chưa đạt mục tiêu tăng recall 15%, semantic rollout vẫn giữ `off`; orchestration giữ `shadow` mặc định cho đến khi có corpus issue/commit held-out.
 
 ## 1. Phạm vi và tiêu chí thiết kế
 
@@ -380,23 +383,26 @@ Module đề xuất:
 
 Exit gate: cache-hit tokens ≥ 70% ở workload lặp steady-state; TTFT giảm ít nhất 20%; prompt bytes và output quality không đổi so với control; kiểm tra riêng retention, data residency và Zero Data Retention trước khi bật cache dài.[^20]
 
-### Phase 5 — Nối context policy vào main loop, rủi ro CRITICAL (2–3 tuần)
+### Phase 5 — Nối context policy vào main loop, rủi ro CRITICAL (đã triển khai shadow)
 
 - Đưa `ContextBundlePolicy` vào shadow cạnh `DynamicContextArbiter`.
 - So sánh selection/dropped evidence từng step.
 - Bật cho read-only/explanation task trước, mutation task sau.
 - Chỉ khi non-inferiority gate đạt mới cân nhắc hợp nhất logic hoặc thay đổi `PromptAssembler`.
 
+Trạng thái hiện tại: policy state machine đã được nối vào main loop sau khi test độc lập đạt. `shadow` chỉ ghi quyết định và telemetry; `enforce` chỉ giới hạn các tool retrieval cạnh tranh khi quyết định có confidence đủ cao, giữ nguyên tool ngoài nhóm context và fail-open nếu tool ưu tiên không khả dụng. Chưa bật `enforce` mặc định.
+
 Exit gate: required evidence preservation 100% cho target mutation; stale leak 0; tool-loop count và total tokens giảm mà task success không suy giảm.
 
 ## 8. Feature flags và rollback
 
-Đề xuất bốn flag độc lập:
+Các flag độc lập:
 
 - `MINUS_SEMANTIC_SEARCH=off|shadow|on`
 - `MINUS_ADAPTIVE_CODE_READ=off|on`
 - `MINUS_CACHE_ENVELOPE_V2=off|observe|on`
 - `MINUS_SELECTIVE_CONTEXT=off|shadow|on`
+- `MINUS_RELIABLE_TOOL_ORCHESTRATION=off|shadow|enforce`
 
 Rollback không được yêu cầu rebuild repository:
 
@@ -404,6 +410,7 @@ Rollback không được yêu cầu rebuild repository:
 - adaptive read vẫn chấp nhận input cũ;
 - cache manifest có thể bỏ mà prompt bytes không đổi;
 - context policy shadow không ảnh hưởng arbiter hiện tại;
+- orchestration shadow không lọc tool; enforce tự bỏ scope nếu preferred/fallback không hiện diện;
 - vector index đặt ngoài source tree và có versioned directory để xóa/rebuild an toàn.
 
 Circuit breaker tự động nên tắt semantic path nếu embedding timeout/error vượt ngưỡng, dimension mismatch, index revision cũ hơn workspace hoặc p95 latency vượt budget liên tục.

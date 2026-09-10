@@ -52,7 +52,7 @@ export function chunkCodeFile(
     const source = lines.slice(symbol.startLine - 1, symbol.endLine).join('\n');
     const text = source.length <= maxCharacters ? source : source.slice(0, maxCharacters);
     const sourceHash = sha256(source);
-    const qualifiedName = `${normalizedPath}::${symbol.name}`;
+    const qualifiedName = `${normalizedPath}::${symbol.qualifiedName || symbol.name}`;
     chunks.push({
       id: sha256(`${qualifiedName}\0${symbol.kind}\0${sourceHash}`),
       path: normalizedPath,

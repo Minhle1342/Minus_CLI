@@ -6376,6 +6376,29 @@ Always write tests first!`;
   assert(archRes.topology.layers.tools !== undefined, 'get_architecture_topology phân tầng đúng Tools layer');
   assert(Array.isArray(archRes.topology.circularCycles), 'get_architecture_topology phân tích chu trình phụ thuộc vòng');
 
+  // 4b. Kiểm thử các cải tiến tối ưu hóa cho get_architecture_topology (/tool-design)
+  assert(archRes.mode === 'summary', 'get_architecture_topology mặc định trả về mode="summary" để tiết kiệm token');
+  assert(archRes.summary !== undefined, 'get_architecture_topology trả về tóm tắt cấu trúc');
+  assert(typeof archRes.topology.metrics?.averageInstability === 'number', 'get_architecture_topology tính toán Martin Instability metric');
+  assert(Array.isArray(archRes.topology.metrics?.hubNodes), 'get_architecture_topology phát hiện các hub nodes trọng yếu');
+
+  // Test mode='detailed' & focusLayer
+  const detailedRes = await archTopologyTool.execute({
+    entryDir: 'src',
+    mode: 'detailed',
+    focusLayer: 'tools',
+  }, workspace);
+  assert(detailedRes.success === true && detailedRes.mode === 'detailed', 'get_architecture_topology hỗ trợ mode="detailed"');
+  assert(detailedRes.topology.layers.tools !== undefined && Object.keys(detailedRes.topology.layers).length === 1, 'get_architecture_topology lọc chính xác theo focusLayer="tools"');
+
+  // Test mode='full'
+  const fullRes = await archTopologyTool.execute({
+    entryDir: 'src',
+    mode: 'full',
+  }, workspace);
+  assert(fullRes.success === true && fullRes.mode === 'full', 'get_architecture_topology hỗ trợ mode="full"');
+  assert(typeof fullRes.topology.dependencyGraph === 'object', 'get_architecture_topology trả về toàn bộ dependencyGraph trong mode="full"');
+
   // 5. Kiểm thử Đăng ký Mặc định vào ToolRegistry
   const defaultRegistry = new ToolRegistry();
   const allToolNames = defaultRegistry.getAll().map((t) => t.name);

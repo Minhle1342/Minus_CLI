@@ -9,6 +9,16 @@ import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
 import { TaskManager } from '../tasks/task-manager.js';
 import { analyzeShellCommand } from '../security/shell-segmenter.js';
+import {
+  sanitizeTerminalOutput,
+  distillTestOutput,
+  truncateTerminalOutput,
+  offloadLargeLogToDisk,
+} from './terminal-sanitizer.js';
+import {
+  evaluateCommandPreflight,
+  normalizeWindowsCommand,
+} from './command-preflight-guard.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -151,14 +161,79 @@ const ALLOWED_COMMAND_PREFIXES = [
 ];
 
 /**
- * Cắt ngắn output nếu quá dài để bảo vệ context window của LLM.
+ * Làm sạch và cắt ngắn output nếu quá dài để bảo vệ context window của LLM (RTK & SWE-agent standard).
  */
-function truncateOutput(text: string, maxLength: number = 50000): string {
-  if (!text || text.length <= maxLength) {
-    return text || '';
+export function truncateOutput(
+  text: string,
+  maxLength?: number,
+  options?: { logFilePath?: string; exitCode?: number }
+): string {
+  if (!text) return '';
+  const sanitized = sanitizeTerminalOutput(text);
+  const distilled = distillTestOutput(sanitized, options?.exitCode);
+  const result = truncateTerminalOutput(distilled, {
+    maxLength,
+    logFilePath: options?.logFilePath,
+    exitCode: options?.exitCode,
+  });
+  return result.text;
+}
+
+/**
+ * Xử lý hoàn tất output lệnh:
+ * - Làm sạch ANSI và \r
+ * - Bóc tách lỗi kiểm thử nếu fail
+ * - Tự động offload full log ra đĩa nếu vượt ngưỡng (mặc định 8,000 ký tự)
+ * - Cắt ngắn và đính kèm đường dẫn log file cho LLM
+ */
+export async function finalizeCommandResult(
+  baseResult: {
+    command: string;
+    stdout?: string;
+    stderr?: string;
+    exitCode?: number;
+    durationMs?: number;
+    success?: boolean;
+    [key: string]: any;
+  },
+  workspace: Workspace
+): Promise<Record<string, any>> {
+  const exitCode = typeof baseResult.exitCode === 'number' ? baseResult.exitCode : 0;
+  const cleanStdout = sanitizeTerminalOutput(baseResult.stdout || '');
+  const cleanStderr = sanitizeTerminalOutput(baseResult.stderr || '');
+  const distilledStdout = distillTestOutput(cleanStdout, exitCode);
+
+  const configuredMax = Number(process.env.MINUS_TERMINAL_MAX_OUTPUT_CHARS);
+  const maxLength = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 8000;
+
+  let logFilePath: string | undefined;
+  const combinedLength = distilledStdout.length + cleanStderr.length;
+  if (combinedLength > maxLength) {
+    const fullLog = `=== COMMAND ===\n${baseResult.command}\n\n=== STDOUT ===\n${baseResult.stdout || ''}\n\n=== STDERR ===\n${baseResult.stderr || ''}`;
+    logFilePath = await offloadLargeLogToDisk(workspace.rootDir, fullLog, baseResult.command);
   }
-  const half = Math.floor(maxLength / 2);
-  return `${text.slice(0, half)}\n\n[... Đã cắt bớt ${text.length - maxLength} ký tự output ...]\n\n${text.slice(-half)}`;
+
+  const truncatedStdout = truncateTerminalOutput(distilledStdout, {
+    maxLength,
+    exitCode,
+    logFilePath,
+  });
+  const truncatedStderr = truncateTerminalOutput(cleanStderr, {
+    maxLength: Math.floor(maxLength / 2),
+    exitCode,
+    logFilePath,
+  });
+
+  return {
+    ...baseResult,
+    stdout: truncatedStdout.text,
+    stderr: truncatedStderr.text,
+    exitCode,
+    durationMs: typeof baseResult.durationMs === 'number' ? baseResult.durationMs : 0,
+    success: typeof baseResult.success === 'boolean' ? baseResult.success : (exitCode === 0),
+    ...(logFilePath ? { logFilePath } : {}),
+    ...(truncatedStdout.savedChars > 0 ? { savedTokensEstimate: truncatedStdout.savedTokensEstimate } : {}),
+  };
 }
 
 /**
@@ -335,6 +410,89 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
   }
 
   return undefined;
+}
+
+export interface CatParsedOptions {
+  filePath: string;
+  headLines?: number;
+  tailLines?: number;
+}
+
+/**
+ * Phân tích cú pháp lệnh đọc file nhanh qua shell (cat, type, head, tail)
+ */
+export function parseCatCommand(command: string): CatParsedOptions | null {
+  const trimmed = command.trim();
+  if (/[;&|]/.test(trimmed)) return null;
+
+  const headMatch = trimmed.match(/^head(?:\s+-n\s+(\d+))?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (headMatch) {
+    const lines = headMatch[1] ? parseInt(headMatch[1], 10) : 20;
+    return {
+      filePath: headMatch[2].replace(/^["']|["']$/g, ''),
+      headLines: lines,
+    };
+  }
+
+  const tailMatch = trimmed.match(/^tail(?:\s+-n\s+(\d+))?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (tailMatch) {
+    const lines = tailMatch[1] ? parseInt(tailMatch[1], 10) : 20;
+    return {
+      filePath: tailMatch[2].replace(/^["']|["']$/g, ''),
+      tailLines: lines,
+    };
+  }
+
+  const catMatch = trimmed.match(/^(?:cat|type)\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
+  if (catMatch) {
+    return {
+      filePath: catMatch[1].replace(/^["']|["']$/g, ''),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Giả lập thực thi cat/type/head/tail siêu tốc qua Node.js I/O (<2ms)
+ * Tránh lỗi 'cat is not recognized' trên Windows cmd.exe và tiết kiệm nguyên 1 turn lỗi cho LLM.
+ */
+export async function executeCatEmulation(
+  parsed: CatParsedOptions,
+  workspace: Workspace,
+): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; emulated: boolean; suggestion: string }> {
+  const startTime = Date.now();
+  try {
+    const safePath = workspace.resolveSafePath(parsed.filePath);
+    const content = await fs.readFile(safePath, 'utf-8');
+    const lines = content.split(/\r?\n/);
+    let selectedLines = lines;
+    if (parsed.headLines) {
+      selectedLines = lines.slice(0, parsed.headLines);
+    } else if (parsed.tailLines) {
+      selectedLines = lines.slice(-parsed.tailLines);
+    }
+    const stdout = truncateOutput(selectedLines.join('\n'));
+    return {
+      stdout,
+      stderr: '',
+      success: true,
+      durationMs: Date.now() - startTime,
+      exitCode: 0,
+      emulated: true,
+      suggestion: 'Mẹo: Để tối ưu tốc độ và token, hãy dùng trực tiếp tool read_file với path, startLine, endLine hoặc symbol.',
+    };
+  } catch (err: any) {
+    return {
+      stdout: '',
+      stderr: `cat: cannot read file '${parsed.filePath}': ${err.message}`,
+      success: false,
+      durationMs: Date.now() - startTime,
+      exitCode: 1,
+      emulated: true,
+      suggestion: 'Kiểm tra lại đường dẫn file hoặc sử dụng tool chuyên dụng "read_file".',
+    };
+  }
 }
 
 export interface SedSliceOptions {
@@ -569,11 +727,36 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
       }
 
+      // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
+      const waitMsBeforeAsync = typeof args.WaitMsBeforeAsync === 'number'
+        ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
+        : (typeof args.wait_ms_before_async === 'number' ? Math.min(10000, Math.max(0, args.wait_ms_before_async)) : undefined);
+
+      // Pre-flight Guardrail: Chặn lệnh interactive (REPL, vim), dev server thiếu wait, lặp test vô ích, và chuẩn hóa Windows
+      const preflight = evaluateCommandPreflight(rawCommand, {
+        waitMsBeforeAsync,
+        lastExecution: (context as any)?.lastCommandExecution,
+      });
+
+      if (!preflight.allowed) {
+        return {
+          command: rawCommand,
+          error: preflight.reason || 'Lệnh bị chặn bởi Pre-flight Guardrail.',
+          errorCode: preflight.errorCode || 'PREFLIGHT_GUARD_REJECTED',
+          suggestion: preflight.suggestion,
+          success: false,
+          exitCode: 1,
+          durationMs: 1,
+        };
+      }
+
+      const effectiveCommand = preflight.normalizedCommand || rawCommand;
+
       // Parse and authorize the entire command before any synchronous or background dispatch.
-      const shellAnalysis = analyzeShellCommand(rawCommand);
+      const shellAnalysis = analyzeShellCommand(effectiveCommand);
 
       // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway
-      const blockedPushToMain = isBlockedGitPushToMain(rawCommand);
+      const blockedPushToMain = isBlockedGitPushToMain(effectiveCommand);
 
       // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
@@ -628,10 +811,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
-      const waitMsBeforeAsync = typeof args.WaitMsBeforeAsync === 'number'
-        ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
-        : (typeof args.wait_ms_before_async === 'number' ? Math.min(10000, Math.max(0, args.wait_ms_before_async)) : undefined);
-
       if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
         const bgTask = taskManager.startTask(rawCommand, workspace.rootDir);
         const startTime = Date.now();
@@ -667,19 +846,31 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
       if (!['auto', 'host'].includes(executionTarget)) {
         return {
-          command: rawCommand,
+          command: effectiveCommand,
           error: 'execution_target chỉ chấp nhận "auto" hoặc "host".',
           errorCode: 'INVALID_EXECUTION_TARGET',
         };
       }
 
+      // Tự động tối ưu hoá lệnh cat/type/head/tail đọc file bằng Node.js I/O (<2ms)
+      const parsedCat = parseCatCommand(effectiveCommand);
+      if (parsedCat) {
+        const emulatedCat = await executeCatEmulation(parsedCat, workspace);
+        return {
+          command: effectiveCommand,
+          ...emulatedCat,
+          sandbox: 'local',
+          executionTarget,
+        };
+      }
+
       // Tự động tối ưu hoá sed cắt dòng (sed -n 'start,endp' file) bằng bộ giả lập siêu tốc Node.js (<5ms)
-      const parsedSed = parseSedSliceCommand(rawCommand);
+      const parsedSed = parseSedSliceCommand(effectiveCommand);
       if (parsedSed) {
         const emulatedSed = await executeSedSliceEmulation(parsedSed, workspace);
         if (emulatedSed.success) {
           return {
-            command: rawCommand,
+            command: effectiveCommand,
             stdout: truncateOutput(emulatedSed.stdout),
             stderr: '',
             exitCode: emulatedSed.exitCode,
@@ -694,7 +885,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Tự động tối ưu hoá / giả lập lệnh xóa file (rm / del) siêu tốc qua Node.js I/O (<5ms)
-      const parsedRm = parseRmCommand(rawCommand);
+      const parsedRm = parseRmCommand(effectiveCommand);
       if (parsedRm) {
         const emulatedRm = await executeRmEmulation(parsedRm, workspace);
         return {
@@ -789,16 +980,14 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           }
         }
 
-        const hostDiagnosis = diagnoseCommandFailure(rawCommand, hostResult, hostSandbox.getStatus());
-        return {
-          command: rawCommand,
+        const hostDiagnosis = diagnoseCommandFailure(effectiveCommand, hostResult, hostSandbox.getStatus());
+        return finalizeCommandResult({
+          command: effectiveCommand,
           ...hostResult,
           ...hostDiagnosis,
-          stdout: truncateOutput(hostResult.stdout),
-          stderr: truncateOutput(hostResult.stderr),
           sandbox: hostResult.sandboxType,
           executionTarget: 'host',
-        };
+        }, workspace);
       }
 
       // Nếu có SandboxManager đang chạy
@@ -862,7 +1051,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
         const diagnosis = res.errorCode
           ? undefined
-          : diagnoseCommandFailure(rawCommand, res, sandboxManager.getStatus());
+          : diagnoseCommandFailure(effectiveCommand, res, sandboxManager.getStatus());
         const hostRecoveryRecommended = process.platform === 'win32'
           && res.sandboxType === 'docker'
           && ['NATIVE_DEPENDENCY_MISSING', 'COMMAND_NOT_EXECUTABLE'].includes(diagnosis?.errorCode || '');
@@ -870,17 +1059,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           ? `${diagnosis!.suggestion} This host is Windows; if the project intentionally uses Windows-native packages, retry run_command with execution_target: "host".`
           : diagnosis?.suggestion;
 
-        return {
-          command: rawCommand,
+        return finalizeCommandResult({
+          command: effectiveCommand,
           ...res,
           ...diagnosis,
           ...(recoverySuggestion ? { suggestion: recoverySuggestion } : {}),
           ...(hostRecoveryRecommended ? { recommendedExecutionTarget: 'host' } : {}),
-          stdout: truncateOutput(res.stdout),
-          stderr: truncateOutput(res.stderr),
           sandbox: res.sandboxType,
           executionTarget: 'auto',
-        };
+        }, workspace);
       }
 
       // Fallback mặc định
@@ -915,7 +1102,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       return new Promise((resolve) => {
         exec(
-          rawCommand,
+          effectiveCommand,
           {
             cwd: workspace.rootDir,
             timeout: timeoutMs,
@@ -927,10 +1114,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             const exitCode = error ? (error.code ?? 1) : 0;
 
             const rawResult = {
-              command: rawCommand,
+              command: effectiveCommand,
               exitCode,
-              stdout: truncateOutput(stdout),
-              stderr: truncateOutput(stderr),
+              stdout,
+              stderr,
               timedOut: Boolean(timedOut),
               durationMs: 0,
               sandboxType: 'local' as const,
@@ -939,11 +1126,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
             // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu gặp lỗi 127
             if (exitCode === 127 || stderr.includes('not found') || stderr.includes('not recognized')) {
-              const isRg = parseRipgrepCommand(rawCommand);
+              const isRg = parseRipgrepCommand(effectiveCommand);
               if (isRg) {
                 executeRipgrepEmulation(isRg, workspace).then((emulated) => {
                   resolve({
-                    command: rawCommand,
+                    command: effectiveCommand,
                     stdout: truncateOutput(emulated.stdout),
                     stderr: '',
                     exitCode: emulated.exitCode,
@@ -957,11 +1144,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 return;
               }
 
-              const isRm = parseRmCommand(rawCommand);
+              const isRm = parseRmCommand(effectiveCommand);
               if (isRm) {
                 executeRmEmulation(isRm, workspace).then((emulatedRm) => {
                   resolve({
-                    command: rawCommand,
+                    command: effectiveCommand,
                     stdout: truncateOutput(emulatedRm.stdout),
                     stderr: truncateOutput(emulatedRm.stderr),
                     exitCode: emulatedRm.exitCode,
@@ -977,10 +1164,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               }
             }
 
-            resolve({
+            const diagnosed = {
               ...rawResult,
-              ...diagnoseCommandFailure(rawCommand, rawResult),
-            });
+              ...diagnoseCommandFailure(effectiveCommand, rawResult),
+            };
+            finalizeCommandResult(diagnosed, workspace).then(resolve).catch(() => resolve(diagnosed));
           }
         );
       });

@@ -55,6 +55,9 @@ function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceServi
  */
 export function invalidateTopologyCache(): void {
   cachedTopology = undefined;
+  if (sharedIntelligenceService) {
+    sharedIntelligenceService.invalidateTopologyCache();
+  }
 }
 
 /**

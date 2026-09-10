@@ -81,10 +81,13 @@ export function fuseSearchResults(
       hit.chunk.name,
       hit.chunk.signature,
     );
+    const graphQualifiedSymbol = hit.chunk.qualifiedName.includes('::')
+      ? hit.chunk.qualifiedName.slice(hit.chunk.qualifiedName.lastIndexOf('::') + 2)
+      : hit.chunk.name;
     const candidate: HybridSearchHit = {
       id,
       path: hit.chunk.path,
-      symbol: hit.chunk.name,
+      symbol: graphQualifiedSymbol,
       startLine: hit.chunk.startLine,
       endLine: hit.chunk.endLine,
       snippet: `${hit.chunk.signature}\n${hit.chunk.text.split('\n').slice(0, 6).join('\n')}`,
@@ -106,11 +109,18 @@ export function fuseSearchResults(
   const results = [...byId.values()].filter((hit) => hit.symbol || !symbolsByPath.has(hit.path));
   for (const hit of results) {
     const parts = hit.scoreComponents;
-    hit.score = round((parts.lexicalRrf + parts.semanticRrf) * 30 + parts.exactBoost + parts.graphBoost);
+    // Lexical evidence remains the anchor for repository identifiers and paths.
+    // A semantic-only candidate must not displace a strong lexical candidate
+    // unless graph or exact-match evidence also supports it.
+    hit.score = round((parts.lexicalRrf + parts.semanticRrf * 0.65) * 30 + parts.exactBoost + parts.graphBoost);
   }
-  return results
-    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-    .slice(0, Math.max(1, Math.min(100, Math.trunc(limit))));
+  const ranked = results
+    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path));
+  const bestPerPath = new Map<string, HybridSearchHit>();
+  for (const hit of ranked) {
+    if (!bestPerPath.has(hit.path)) bestPerPath.set(hit.path, hit);
+  }
+  return [...bestPerPath.values()].slice(0, Math.max(1, Math.min(100, Math.trunc(limit))));
 }
 
 function exactMatchBoost(query: string, filePath: string, symbol?: string, text?: string): number {

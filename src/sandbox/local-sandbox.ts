@@ -2,6 +2,7 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
 import { getNativeCore, nativeExecuteSandboxed } from '../native/index.js';
+import { sanitizeTerminalOutput } from '../tools/terminal-sanitizer.js';
 
 const execAsync = promisify(exec);
 
@@ -43,6 +44,7 @@ export class LocalProcessSandbox implements ISandboxProvider {
       GIT_TERMINAL_PROMPT: '0',
       FORCE_COLOR: '0',
       npm_config_yes: 'true',
+      PYTHONIOENCODING: 'utf-8',
       ...options?.env,
     };
 
@@ -61,8 +63,8 @@ export class LocalProcessSandbox implements ISandboxProvider {
     const sandboxedRes = nativeExecuteSandboxed(command, cwd, timeout, 5 * 1024 * 1024, 2048);
     if (sandboxedRes && !options?.signal) {
       return {
-        stdout: sandboxedRes.stdout.trim(),
-        stderr: sandboxedRes.stderr.trim(),
+        stdout: sanitizeTerminalOutput(sandboxedRes.stdout),
+        stderr: sanitizeTerminalOutput(sandboxedRes.stderr),
         exitCode: sandboxedRes.exitCode,
         durationMs: sandboxedRes.durationMs,
         sandboxType: 'local',
@@ -81,8 +83,8 @@ export class LocalProcessSandbox implements ISandboxProvider {
       });
 
       return {
-        stdout: (stdout || '').trim(),
-        stderr: (stderr || '').trim(),
+        stdout: sanitizeTerminalOutput(stdout || ''),
+        stderr: sanitizeTerminalOutput(stderr || ''),
         exitCode: 0,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
@@ -92,8 +94,8 @@ export class LocalProcessSandbox implements ISandboxProvider {
       const isCancelled = options?.signal?.aborted || err?.name === 'AbortError';
       const exitCode = isCancelled ? 130 : typeof err.code === 'number' ? err.code : 1;
       return {
-        stdout: (err.stdout || '').trim(),
-        stderr: isCancelled ? 'Command was cancelled by user.' : (err.stderr || err.message || '').trim(),
+        stdout: sanitizeTerminalOutput(err.stdout || ''),
+        stderr: isCancelled ? 'Command was cancelled by user.' : sanitizeTerminalOutput(err.stderr || err.message || ''),
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',

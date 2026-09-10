@@ -3,13 +3,14 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CodebaseIntelligenceService } from './codebase-intelligence.js';
 
-let sharedIntelligenceService: CodebaseIntelligenceService | undefined;
+const intelligenceServicesByWorkspace = new WeakMap<Workspace, CodebaseIntelligenceService>();
 
 function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceService {
-  if (!sharedIntelligenceService) {
-    sharedIntelligenceService = new CodebaseIntelligenceService(workspace);
-  }
-  return sharedIntelligenceService;
+  const existing = intelligenceServicesByWorkspace.get(workspace);
+  if (existing) return existing;
+  const service = new CodebaseIntelligenceService(workspace);
+  intelligenceServicesByWorkspace.set(workspace, service);
+  return service;
 }
 
 export function createGetSymbolContext360Tool(service?: CodebaseIntelligenceService): ToolDefinition {

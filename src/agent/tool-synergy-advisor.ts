@@ -1,6 +1,7 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
 import { SECTION_PATCH_FORMAT_SPEC } from '../llm/prompt-sections.js';
 import { isMutationTool } from '../tools/diff-generator.js';
+import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
 
 export interface ToolSynergyContext {
   lastToolName?: string;
@@ -13,6 +14,10 @@ export interface ToolSynergyContext {
   guardianDiagnosis?: ToolFailureDiagnosis;
   userRequest?: string;
   hasSubmittedSolution?: boolean;
+  trajectory?: TrajectoryStep[];
+  evidenceSufficient?: boolean;
+  reflexionMemo?: string;
+  repairCyclesExhausted?: boolean;
 }
 
 export interface ToolAdvice {
@@ -190,6 +195,16 @@ export class ToolSynergyAdvisor {
       };
     }
 
+    // 3.9. LATS Backtracking khi đã cạn kiệt chu kỳ sửa lỗi (3+ lần thất bại)
+    if (context.repairCyclesExhausted) {
+      const memoText = context.reflexionMemo ? ` Failure reflection: ${context.reflexionMemo}` : '';
+      return {
+        playbook: 'B_DEBUGGING',
+        guidance: `[LATS BACKTRACKING] 3+ repair attempts failed to satisfy verification tests. Cease monkey-patching. Rollback workspace to the last green checkpoint or re-evaluate the hypothesis from root coordinates.${memoText}`,
+        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
+      };
+    }
+
     // 4. Phát hiện lỗi Compiler / Test Failure / Lỗi Thực thi (Playbook B: Root Cause Debugging)
     if (
       hasErrors ||
@@ -202,25 +217,31 @@ export class ToolSynergyAdvisor {
       };
     }
 
-    // 5. Khám phá Module hoặc Bắt đầu Task Mới (Playbook A: Architecture & Exploration)
-    if (activeTaskTitle && (!lastToolName || ['create_plan', 'update_plan_task'].includes(lastToolName))) {
+    // 5. Deterministic broad-to-narrow retrieval routing. This is guidance-only
+    // here; AgentLoop enforcement remains separately feature-gated and fail-open.
+    if (
+      activeTaskTitle
+      || userRequest
+      || ['search_codebase_fast', 'read_compressed_code', 'get_symbol_context_360', 'read_file'].includes(lastToolName || '')
+    ) {
+      const route = decideReliableToolRoute({
+        userRequest: userRequest || activeTaskTitle,
+        lastToolName,
+        lastToolResult,
+        trajectory: context.trajectory,
+        evidenceSufficient: context.evidenceSufficient,
+      });
+      const argsHint = route.suggestedArgs ? ` Suggested args: ${JSON.stringify(route.suggestedArgs)}.` : '';
       return {
-        playbook: 'A_DISCOVERY',
-        guidance: `Starting task "${activeTaskTitle}". Use "get_symbol_context_360" or "get_route_map" / "get_architecture_topology" to inspect module boundaries before making changes.`,
-        suggestedTools: ['get_symbol_context_360', 'get_route_map', 'get_architecture_topology', 'query_call_graph'],
+        playbook: route.stage === 'ready_for_mutation' ? 'G_BLAST_RADIUS' : 'A_DISCOVERY',
+        guidance: `[Reliable retrieval: ${route.stage}] ${route.guidance}${argsHint}`,
+        suggestedTools: [route.selectedTool, ...route.fallbackTools]
+          .filter((tool): tool is string => Boolean(tool))
+          .filter((tool, index, tools) => tools.indexOf(tool) === index),
       };
     }
 
-    // 6. Vừa nén đọc nhiều file (read_compressed_code)
-    if (lastToolName === 'read_compressed_code' && lastToolResult && !lastToolResult.error) {
-      return {
-        playbook: 'A_DISCOVERY',
-        guidance: 'Compressed code structures analyzed. To inspect full 360-degree context for any specific symbol (definition, type signature, callers, callees, dependencies, and tests in 1 single payload), call "get_symbol_context_360".',
-        suggestedTools: ['get_symbol_context_360', 'read_file', 'replace_text', 'get_diagnostics'],
-      };
-    }
-
-    // 7. Vừa tra cứu symbol đơn lẻ (inspect_symbol)
+    // 6. Vừa tra cứu symbol đơn lẻ (inspect_symbol)
     if (lastToolName === 'inspect_symbol' && lastToolResult && !lastToolResult.error) {
       return {
         playbook: 'G_BLAST_RADIUS',
@@ -229,16 +250,7 @@ export class ToolSynergyAdvisor {
       };
     }
 
-    // 8. Vừa đọc file mã nguồn (Playbook G: Blast Radius & Impact Awareness)
-    if (lastToolName === 'read_file' && lastToolResult && !lastToolResult.error) {
-      return {
-        playbook: 'G_BLAST_RADIUS',
-        guidance: 'File inspected. Before modifying any function or class, verify upstream callers, dependencies, and contracts via "get_symbol_context_360" or "query_call_graph(direction=\'callers\')".',
-        suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'replace_text', 'get_diagnostics'],
-      };
-    }
-
-    // 9. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
+    // 7. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
       guidance: 'Choose the most precise high-level tool: "get_symbol_context_360" for complete 360-degree symbol analysis, "get_route_map" for APIs, or "get_architecture_topology" for system structure.',

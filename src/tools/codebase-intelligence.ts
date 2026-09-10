@@ -66,6 +66,17 @@ export interface SymbolContext360Result {
   relatedTests: Array<{ file: string; line: number; preview: string }>;
 }
 
+export type ArchitectureLayerKey =
+  | 'controller'
+  | 'service'
+  | 'repository'
+  | 'ui'
+  | 'tools'
+  | 'utils'
+  | 'config'
+  | 'test'
+  | 'other';
+
 export interface ArchitectureLayer {
   name: string;
   description: string;
@@ -77,13 +88,42 @@ export interface CircularDependencyCycle {
   length: number;
 }
 
+export interface LayerViolation {
+  from: string;
+  to: string;
+  fromLayer: string;
+  toLayer: string;
+  rule: string;
+}
+
+export interface NodeCouplingMetric {
+  file: string;
+  afferentCoupling: number;
+  efferentCoupling: number;
+  instability: number;
+}
+
+export interface ArchitectureMetricsSummary {
+  averageInstability: number;
+  hubNodes: NodeCouplingMetric[];
+  mostStableModules: NodeCouplingMetric[];
+  mostUnstableModules: NodeCouplingMetric[];
+}
+
+export interface ArchitectureTopologyOptions {
+  mode?: 'summary' | 'detailed' | 'full';
+  focusLayer?: string;
+  forceRefresh?: boolean;
+}
+
 export interface ArchitectureTopologyResult {
   totalFiles: number;
   totalDependencies: number;
   layers: Record<string, ArchitectureLayer>;
   dependencyGraph: Record<string, string[]>;
   circularCycles: CircularDependencyCycle[];
-  layerViolations: Array<{ from: string; to: string; fromLayer: string; toLayer: string; rule: string }>;
+  layerViolations: LayerViolation[];
+  metrics?: ArchitectureMetricsSummary;
 }
 
 /**
@@ -99,10 +139,19 @@ export interface ArchitectureTopologyResult {
 export class CodebaseIntelligenceService {
   private tsService: TypeScriptService;
   private workspace: Workspace;
+  private cachedTopology?: {
+    entryDir: string;
+    timestamp: number;
+    result: ArchitectureTopologyResult;
+  };
 
   constructor(workspace: Workspace, tsService?: TypeScriptService) {
     this.workspace = workspace;
     this.tsService = tsService || new TypeScriptService(workspace);
+  }
+
+  invalidateTopologyCache(): void {
+    this.cachedTopology = undefined;
   }
 
   getTypeScriptService(): TypeScriptService {
@@ -282,8 +331,10 @@ export class CodebaseIntelligenceService {
    */
   getSymbolContext360(symbolName: string, filePath?: string): SymbolContext360Result {
     const cleanSymbol = symbolName.trim();
+    const memberSymbol = cleanSymbol.split('.').filter(Boolean).pop() || cleanSymbol;
     let defFile = filePath;
     let defLine = 1;
+    let defCharacter = 1;
     let kind = 'unknown';
     let typeSignature = '';
     let docComment = '';
@@ -293,8 +344,10 @@ export class CodebaseIntelligenceService {
     if (defFile) {
       const inspect = this.tsService.inspectSymbol(defFile, cleanSymbol);
       if (inspect.found) {
+        defFile = inspect.file || defFile;
         kind = inspect.kind || 'symbol';
         defLine = inspect.line || 1;
+        defCharacter = inspect.character || 1;
         typeSignature = inspect.typeSignature || '';
         docComment = inspect.docComment || '';
         isExported = Boolean(inspect.isExported);
@@ -304,6 +357,7 @@ export class CodebaseIntelligenceService {
       if (inspect?.file) {
         defFile = inspect.file;
         defLine = inspect.line || 1;
+        defCharacter = inspect.character || 1;
         kind = inspect.kind || 'symbol';
         typeSignature = inspect.typeSignature || '';
         docComment = inspect.docComment || '';
@@ -312,7 +366,7 @@ export class CodebaseIntelligenceService {
     }
 
     // Callers & Callees
-    const callGraph = this.queryCallGraph(cleanSymbol, defFile, 'both', 1);
+    const callGraph = this.queryCallGraph(memberSymbol, defFile, 'both', 1);
     const callers = callGraph.callers.map((c) => ({ name: c.name, file: c.file, line: c.line }));
     const callees = callGraph.callees.map((c) => ({ name: c.name, file: c.file, line: c.line }));
 
@@ -331,7 +385,9 @@ export class CodebaseIntelligenceService {
     }
 
     // Referencing files
-    const refs = defFile ? this.tsService.findReferences(defFile, cleanSymbol, 50) : [];
+    const refs = defFile
+      ? this.tsService.findReferencesAt(defFile, defLine, defCharacter, 50)
+      : [];
     const referencingFiles = Array.from(new Set(refs.map((r) => r.file)));
 
     // Related Tests
@@ -355,7 +411,9 @@ export class CodebaseIntelligenceService {
     return {
       symbol: cleanSymbol,
       kind,
-      file: defFile ? this.workspace.toRelativePath(defFile) : undefined,
+      file: defFile
+        ? (path.isAbsolute(defFile) ? this.workspace.toRelativePath(defFile) : defFile.replace(/\\/g, '/'))
+        : undefined,
       line: defLine,
       typeSignature: typeSignature || undefined,
       docComment: docComment || undefined,
@@ -369,9 +427,23 @@ export class CodebaseIntelligenceService {
   }
 
   /**
-   * 4. Phân tích Topo Kiến trúc & Phát hiện Vòng lặp Phụ thuộc (Circular Dependencies)
+   * 4. Phân tích Topo Kiến trúc, Đồ thị Phụ thuộc & Phát hiện Vòng lặp (Circular Dependencies)
+   * Tích hợp TypeScript Module Resolution (AST), Fast O(1) Lookup, In-Memory Caching & Martin Architecture Metrics
    */
-  getArchitectureTopology(entryDir = 'src'): ArchitectureTopologyResult {
+  getArchitectureTopology(
+    entryDir = 'src',
+    options?: ArchitectureTopologyOptions,
+  ): ArchitectureTopologyResult {
+    const now = Date.now();
+    if (
+      !options?.forceRefresh &&
+      this.cachedTopology &&
+      this.cachedTopology.entryDir === entryDir &&
+      now - this.cachedTopology.timestamp < 30_000
+    ) {
+      return this.cachedTopology.result;
+    }
+
     const rootDir = this.workspace.resolveSafePath(entryDir);
     const scannedFiles = this.getAllCodeFiles(rootDir);
     const relFiles = scannedFiles.map((f) => this.workspace.toRelativePath(f).replace(/\\/g, '/'));
@@ -379,33 +451,138 @@ export class CodebaseIntelligenceService {
     const dependencyGraph: Record<string, string[]> = {};
     let totalDependencies = 0;
 
+    // Fast O(1) Lookup Maps
+    const fileSet = new Set(relFiles);
+    const fileLookup = new Map<string, string>();
+    for (const rel of relFiles) {
+      const lower = rel.toLowerCase();
+      fileLookup.set(lower, rel);
+      const noExt = lower.replace(/\.[^.]+$/, '');
+      if (!fileLookup.has(noExt)) {
+        fileLookup.set(noExt, rel);
+      }
+    }
+
+    const compilerOptions = this.tsService.getCompilerOptions ? this.tsService.getCompilerOptions() : {};
+    const moduleResolutionHost: ts.ModuleResolutionHost = {
+      fileExists: (fileName: string) => fs.existsSync(fileName),
+      readFile: (fileName: string) => this.safeReadFile(fileName),
+      directoryExists: (dir: string) => {
+        try {
+          return fs.statSync(dir).isDirectory();
+        } catch {
+          return false;
+        }
+      },
+      getCurrentDirectory: () => this.workspace.rootDir,
+      getDirectories: (dir: string) => {
+        try {
+          return fs
+            .readdirSync(dir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
+        } catch {
+          return [];
+        }
+      },
+    };
+
     // 4a. Xây dựng Dependency Graph
     for (const file of scannedFiles) {
       const relPath = this.workspace.toRelativePath(file).replace(/\\/g, '/');
       const content = this.safeReadFile(file);
       if (!content) continue;
 
-      const deps: string[] = [];
-      const importRegex = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]/g;
-      let match: RegExpExecArray | null;
+      const specifiers = new Set<string>();
+      const isTsOrJs = /\.[cm]?[jt]sx?$/i.test(file);
 
-      while ((match = importRegex.exec(content)) !== null) {
-        const importSpecifier = match[1];
-        if (importSpecifier.startsWith('.')) {
-          // Resolve relative path
-          const resolvedPath = path.resolve(path.dirname(file), importSpecifier);
-          const resolvedRel = this.workspace.toRelativePath(resolvedPath).replace(/\\/g, '/');
-          
-          // Thử tìm file tương ứng với các extension
-          const matchedTarget = relFiles.find((f) => {
-            const noExt = f.replace(/\.(ts|tsx|js|jsx)$/, '');
-            const targetNoExt = resolvedRel.replace(/\.(ts|tsx|js|jsx)$/, '');
-            return f === resolvedRel || noExt === targetNoExt || f === `${resolvedRel}/index.ts` || f === `${resolvedRel}/index.js`;
-          });
+      // A. TypeScript/JavaScript AST parsing (Trích xuất sạch, loại trừ comment và template strings)
+      if (isTsOrJs) {
+        try {
+          const sf = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+          const visit = (node: ts.Node) => {
+            if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+              specifiers.add(node.moduleSpecifier.text);
+            } else if (
+              ts.isExportDeclaration(node) &&
+              node.moduleSpecifier &&
+              ts.isStringLiteral(node.moduleSpecifier)
+            ) {
+              specifiers.add(node.moduleSpecifier.text);
+            } else if (
+              ts.isCallExpression(node) &&
+              (node.expression.getText(sf) === 'require' || node.expression.kind === ts.SyntaxKind.ImportKeyword) &&
+              node.arguments.length > 0 &&
+              ts.isStringLiteral(node.arguments[0])
+            ) {
+              specifiers.add((node.arguments[0] as ts.StringLiteral).text);
+            }
+            ts.forEachChild(node, visit);
+          };
+          visit(sf);
+        } catch {}
+      }
 
-          if (matchedTarget && matchedTarget !== relPath) {
-            deps.push(matchedTarget);
+      // B. Fallback Regex cho các ngôn ngữ khác hoặc khi AST gặp ngoại lệ
+      if (specifiers.size === 0) {
+        const importRegex = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]/g;
+        let match: RegExpExecArray | null;
+        while ((match = importRegex.exec(content)) !== null) {
+          specifiers.add(match[1]);
+        }
+
+        const requireRegex = /require\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+        while ((match = requireRegex.exec(content)) !== null) {
+          specifiers.add(match[1]);
+        }
+
+        if (/\.py$/i.test(file)) {
+          const pyFromRegex = /from\s+([.\w]+)\s+import/g;
+          while ((match = pyFromRegex.exec(content)) !== null) {
+            specifiers.add(match[1].replace(/\./g, '/'));
           }
+          const pyImportRegex = /import\s+([.\w]+)/g;
+          while ((match = pyImportRegex.exec(content)) !== null) {
+            specifiers.add(match[1].replace(/\./g, '/'));
+          }
+        }
+      }
+
+      const deps: string[] = [];
+      for (const specifier of specifiers) {
+        let matchedRel: string | undefined;
+
+        // 1. Phân giải qua TypeScript Compiler API (hỗ trợ tsconfig paths, baseUrl, extensions, index.ts)
+        if (isTsOrJs) {
+          try {
+            const resolved = ts.resolveModuleName(specifier, file, compilerOptions, moduleResolutionHost);
+            if (resolved.resolvedModule && !resolved.resolvedModule.isExternalLibraryImport) {
+              const absPath = resolved.resolvedModule.resolvedFileName;
+              const relCandidate = this.workspace.toRelativePath(absPath).replace(/\\/g, '/');
+              if (fileSet.has(relCandidate)) {
+                matchedRel = relCandidate;
+              }
+            }
+          } catch {}
+        }
+
+        // 2. Fallback relative path lookup qua Fast O(1) Hash Map
+        if (!matchedRel && (specifier.startsWith('.') || specifier.startsWith('/'))) {
+          const resolvedPath = path.resolve(path.dirname(file), specifier);
+          const resolvedRel = this.workspace.toRelativePath(resolvedPath).replace(/\\/g, '/').toLowerCase();
+
+          matchedRel =
+            fileLookup.get(resolvedRel) ||
+            fileLookup.get(`${resolvedRel}.ts`) ||
+            fileLookup.get(`${resolvedRel}.tsx`) ||
+            fileLookup.get(`${resolvedRel}.js`) ||
+            fileLookup.get(`${resolvedRel}.jsx`) ||
+            fileLookup.get(`${resolvedRel}/index.ts`) ||
+            fileLookup.get(`${resolvedRel}/index.js`);
+        }
+
+        if (matchedRel && matchedRel !== relPath) {
+          deps.push(matchedRel);
         }
       }
 
@@ -415,75 +592,146 @@ export class CodebaseIntelligenceService {
 
     // 4b. Phân tầng kiến trúc (Architectural Layer Categorization)
     const layers: Record<string, ArchitectureLayer> = {
-      controller: { name: 'Controller / API Layer', description: 'HTTP endpoints, routers, routes', files: [] },
+      controller: { name: 'Controller / API Layer', description: 'HTTP endpoints, routers, routes, CLI entrypoints', files: [] },
       service: { name: 'Service / Domain Layer', description: 'Core business logic, agents, workflows, engines', files: [] },
       repository: { name: 'Data / Repository Layer', description: 'Database access, models, entities, schemas', files: [] },
-      tools: { name: 'Tools / Integration Layer', description: 'Agent tool implementations, external APIs', files: [] },
+      ui: { name: 'UI / Presentation Layer', description: 'Components, views, pages, layouts, screens, hooks', files: [] },
+      tools: { name: 'Tools / Integration Layer', description: 'Agent tool implementations, external APIs, MCP', files: [] },
+      config: { name: 'Configuration Layer', description: 'Configuration, environment, constants', files: [] },
       utils: { name: 'Utility / Helper Layer', description: 'Shared utility functions, formats, types', files: [] },
       test: { name: 'Test Layer', description: 'Test suites, mocks, assertions', files: [] },
-      other: { name: 'Other Modules', description: 'Configuration, bootstrap, entry points', files: [] },
+      other: { name: 'Other Modules', description: 'Bootstrap and general modules', files: [] },
     };
 
     for (const file of relFiles) {
-      const lower = file.toLowerCase();
-      if (lower.includes('test') || lower.includes('spec') || lower.includes('mock')) {
-        layers.test.files.push(file);
-      } else if (lower.includes('route') || lower.includes('controller') || lower.includes('api/')) {
-        layers.controller.files.push(file);
-      } else if (lower.includes('model') || lower.includes('schema') || lower.includes('entity') || lower.includes('repo') || lower.includes('db/')) {
-        layers.repository.files.push(file);
-      } else if (lower.includes('tool') || lower.includes('plugin')) {
-        layers.tools.files.push(file);
-      } else if (lower.includes('util') || lower.includes('helper') || lower.includes('types')) {
-        layers.utils.files.push(file);
-      } else if (lower.includes('agent') || lower.includes('service') || lower.includes('kernel') || lower.includes('core')) {
-        layers.service.files.push(file);
-      } else {
-        layers.other.files.push(file);
-      }
+      const layerKey = this.detectFileLayer(file);
+      layers[layerKey].files.push(file);
     }
 
-    // 4c. Thuật toán phát hiện Vòng lặp Phụ thuộc (Circular Dependency Cycle Detection via Tarjan / DFS)
+    // 4c. Thuật toán phát hiện Vòng lặp Phụ thuộc (Circular Dependency Cycle Detection)
     const circularCycles = this.findCircularCycles(dependencyGraph);
 
     // 4d. Phát hiện vi phạm phân tầng (Layer Violations)
-    const layerViolations: ArchitectureTopologyResult['layerViolations'] = [];
+    const layerViolations: LayerViolation[] = [];
     for (const [fromFile, toFiles] of Object.entries(dependencyGraph)) {
       const fromLayer = this.detectFileLayer(fromFile);
       for (const toFile of toFiles) {
         const toLayer = this.detectFileLayer(toFile);
 
-        // Rule: Repository/Model không được phụ thuộc Controller/Route
-        if (fromLayer === 'repository' && (toLayer === 'controller' || toLayer === 'tools')) {
+        // Rule 1: Repository/Model không được phụ thuộc Controller, Tools, hoặc UI
+        if (fromLayer === 'repository' && (toLayer === 'controller' || toLayer === 'tools' || toLayer === 'ui')) {
           layerViolations.push({
             from: fromFile,
             to: toFile,
             fromLayer,
             toLayer,
-            rule: 'Repository layer should not depend on Controller or Tool layer.',
+            rule: 'Repository layer should not depend on Controller, Tool, or UI layer.',
           });
         }
-        // Rule: Util layer không được phụ thuộc Service/Controller layer
-        if (fromLayer === 'utils' && (toLayer === 'controller' || toLayer === 'service')) {
+        // Rule 2: Util layer không được phụ thuộc Service, Controller, hoặc UI layer
+        if (fromLayer === 'utils' && (toLayer === 'controller' || toLayer === 'service' || toLayer === 'ui')) {
           layerViolations.push({
             from: fromFile,
             to: toFile,
             fromLayer,
             toLayer,
-            rule: 'Utility layer should not depend on Service or Controller layer.',
+            rule: 'Utility layer should not depend on Service, Controller, or UI layer.',
+          });
+        }
+        // Rule 3: Config layer không được phụ thuộc Service hoặc Controller
+        if (fromLayer === 'config' && (toLayer === 'service' || toLayer === 'controller')) {
+          layerViolations.push({
+            from: fromFile,
+            to: toFile,
+            fromLayer,
+            toLayer,
+            rule: 'Configuration layer should not depend on Service or Controller layer.',
+          });
+        }
+        // Rule 4: UI layer không nên truy cập trực tiếp Repository layer
+        if (fromLayer === 'ui' && toLayer === 'repository') {
+          layerViolations.push({
+            from: fromFile,
+            to: toFile,
+            fromLayer,
+            toLayer,
+            rule: 'UI layer should access Data via Service/Domain layer, not directly from Repository.',
           });
         }
       }
     }
 
-    return {
+    // 4e. Tính toán Chỉ số Kiến trúc (Architectural Metrics: Ca, Ce, Instability)
+    const inDegrees: Record<string, number> = {};
+    for (const file of relFiles) {
+      inDegrees[file] = 0;
+    }
+    for (const targets of Object.values(dependencyGraph)) {
+      for (const t of targets) {
+        inDegrees[t] = (inDegrees[t] || 0) + 1;
+      }
+    }
+
+    const allMetrics: NodeCouplingMetric[] = [];
+    let totalInstability = 0;
+
+    for (const file of relFiles) {
+      const efferentCoupling = (dependencyGraph[file] || []).length;
+      const afferentCoupling = inDegrees[file] || 0;
+      const sum = afferentCoupling + efferentCoupling;
+      const instability = sum === 0 ? 0 : Number((efferentCoupling / sum).toFixed(2));
+      totalInstability += instability;
+
+      allMetrics.push({
+        file,
+        afferentCoupling,
+        efferentCoupling,
+        instability,
+      });
+    }
+
+    const avgInstability = relFiles.length === 0 ? 0 : Number((totalInstability / relFiles.length).toFixed(2));
+
+    const hubNodes = [...allMetrics]
+      .filter((m) => m.afferentCoupling > 0)
+      .sort((a, b) => b.afferentCoupling - a.afferentCoupling)
+      .slice(0, 5);
+
+    const mostStableModules = [...allMetrics]
+      .filter((m) => m.afferentCoupling > 0)
+      .sort((a, b) => a.instability - b.instability || b.afferentCoupling - a.afferentCoupling)
+      .slice(0, 5);
+
+    const mostUnstableModules = [...allMetrics]
+      .filter((m) => m.efferentCoupling > 0)
+      .sort((a, b) => b.instability - a.instability || b.efferentCoupling - a.efferentCoupling)
+      .slice(0, 5);
+
+    const metrics: ArchitectureMetricsSummary = {
+      averageInstability: avgInstability,
+      hubNodes,
+      mostStableModules,
+      mostUnstableModules,
+    };
+
+    const result: ArchitectureTopologyResult = {
       totalFiles: relFiles.length,
       totalDependencies,
       layers,
       dependencyGraph,
       circularCycles,
       layerViolations,
+      metrics,
     };
+
+    // Cache kết quả trong RAM 30 giây
+    this.cachedTopology = {
+      entryDir,
+      timestamp: now,
+      result,
+    };
+
+    return result;
   }
 
   // --- Helper Methods ---
@@ -748,29 +996,55 @@ export class CodebaseIntelligenceService {
   }
 
   private findCircularCycles(graph: Record<string, string[]>): CircularDependencyCycle[] {
-    const visited = new Set<string>();
-    const recursionStack: string[] = [];
     const cycles: CircularDependencyCycle[] = [];
+    const seenCycleSignatures = new Set<string>();
 
-    const dfs = (node: string) => {
-      visited.add(node);
-      recursionStack.push(node);
+    const canonicalizeCycle = (nodes: string[]): string[] => {
+      if (nodes.length <= 1) return nodes;
+      const pathNodes = nodes[0] === nodes[nodes.length - 1] ? nodes.slice(0, -1) : [...nodes];
+      let minIdx = 0;
+      for (let i = 1; i < pathNodes.length; i++) {
+        if (pathNodes[i] < pathNodes[minIdx]) {
+          minIdx = i;
+        }
+      }
+      const rotated = [...pathNodes.slice(minIdx), ...pathNodes.slice(0, minIdx)];
+      rotated.push(rotated[0]);
+      return rotated;
+    };
 
-      const neighbors = graph[node] || [];
-      for (const neighbor of neighbors) {
-        if (!visited.has(neighbor)) {
-          dfs(neighbor);
-        } else if (recursionStack.includes(neighbor)) {
-          const cycleStartIndex = recursionStack.indexOf(neighbor);
-          const cyclePath = recursionStack.slice(cycleStartIndex).concat(neighbor);
-          cycles.push({
-            cycle: cyclePath,
-            length: cyclePath.length - 1,
-          });
+    const visited = new Set<string>();
+    const recStack: string[] = [];
+    const recSet = new Set<string>();
+
+    const dfs = (curr: string) => {
+      visited.add(curr);
+      recStack.push(curr);
+      recSet.add(curr);
+
+      const neighbors = graph[curr] || [];
+      for (const next of neighbors) {
+        if (!visited.has(next)) {
+          dfs(next);
+        } else if (recSet.has(next)) {
+          const startIndex = recStack.indexOf(next);
+          if (startIndex !== -1) {
+            const rawCycle = recStack.slice(startIndex).concat(next);
+            const canonical = canonicalizeCycle(rawCycle);
+            const sig = canonical.join(' -> ');
+            if (!seenCycleSignatures.has(sig)) {
+              seenCycleSignatures.add(sig);
+              cycles.push({
+                cycle: canonical,
+                length: canonical.length - 1,
+              });
+            }
+          }
         }
       }
 
-      recursionStack.pop();
+      recStack.pop();
+      recSet.delete(curr);
     };
 
     for (const node of Object.keys(graph)) {
@@ -779,17 +1053,92 @@ export class CodebaseIntelligenceService {
       }
     }
 
+    cycles.sort((a, b) => a.length - b.length);
     return cycles;
   }
 
-  private detectFileLayer(file: string): string {
-    const lower = file.toLowerCase();
-    if (lower.includes('test') || lower.includes('spec')) return 'test';
-    if (lower.includes('route') || lower.includes('controller') || lower.includes('api/')) return 'controller';
-    if (lower.includes('model') || lower.includes('schema') || lower.includes('entity') || lower.includes('repo')) return 'repository';
-    if (lower.includes('tool') || lower.includes('plugin')) return 'tools';
-    if (lower.includes('util') || lower.includes('helper') || lower.includes('types')) return 'utils';
-    if (lower.includes('agent') || lower.includes('service') || lower.includes('kernel')) return 'service';
+  detectFileLayer(file: string): ArchitectureLayerKey {
+    const lower = file.toLowerCase().replace(/\\/g, '/');
+    if (
+      lower.includes('.test.') ||
+      lower.includes('.spec.') ||
+      lower.includes('__tests__') ||
+      lower.includes('/mock') ||
+      lower.includes('test-suite')
+    ) {
+      return 'test';
+    }
+    if (
+      lower.includes('route') ||
+      lower.includes('controller') ||
+      lower.includes('endpoint') ||
+      lower.includes('api/') ||
+      lower.includes('cli.') ||
+      lower.endsWith('/cli.ts') ||
+      lower.endsWith('/index.ts')
+    ) {
+      return 'controller';
+    }
+    if (
+      lower.includes('model') ||
+      lower.includes('schema') ||
+      lower.includes('entity') ||
+      lower.includes('repo') ||
+      lower.includes('db/') ||
+      lower.includes('database') ||
+      lower.includes('migration') ||
+      lower.includes('store')
+    ) {
+      return 'repository';
+    }
+    if (
+      lower.includes('component') ||
+      lower.includes('/view') ||
+      lower.includes('/page') ||
+      lower.includes('/ui/') ||
+      lower.includes('/hooks/') ||
+      lower.includes('layout') ||
+      lower.includes('screen') ||
+      lower.includes('widget')
+    ) {
+      return 'ui';
+    }
+    if (
+      lower.includes('tool') ||
+      lower.includes('plugin') ||
+      lower.includes('integration') ||
+      lower.includes('/mcp')
+    ) {
+      return 'tools';
+    }
+    if (
+      lower.includes('config') ||
+      lower.includes('constant') ||
+      lower.includes('env') ||
+      lower.includes('.config.')
+    ) {
+      return 'config';
+    }
+    if (
+      lower.includes('agent') ||
+      lower.includes('service') ||
+      lower.includes('kernel') ||
+      lower.includes('core') ||
+      lower.includes('engine') ||
+      lower.includes('workflow') ||
+      lower.includes('orchestrat')
+    ) {
+      return 'service';
+    }
+    if (
+      lower.includes('util') ||
+      lower.includes('helper') ||
+      lower.includes('types') ||
+      lower.includes('sanitizer') ||
+      lower.includes('format')
+    ) {
+      return 'utils';
+    }
     return 'other';
   }
 

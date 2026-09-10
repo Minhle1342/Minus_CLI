@@ -72,6 +72,14 @@ import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
+import {
+  ReliableToolOrchestrationTelemetry,
+  applyReliableToolRouteToDeclarations,
+  decideReliableToolRoute,
+  resolveReliableToolOrchestrationMode,
+  type TrajectoryStep,
+} from './reliable-tool-orchestration.js';
+import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -296,6 +304,20 @@ export class AgentLoop {
   readonly dynamicContextArbiter: DynamicContextArbiter;
   readonly stepRetrievalQueryBuilder = new StepRetrievalQueryBuilder();
   readonly contextQualityEvaluator = new ContextQualityEvaluator();
+  readonly reliableToolOrchestrationTelemetry = new ReliableToolOrchestrationTelemetry();
+  readonly aciGuardrails = new AciGuardrails();
+  readonly trajectorySteps: TrajectoryStep[] = [];
+  private lastCommandExecutionState?: {
+    command: string;
+    success: boolean;
+    exitCode?: number;
+    filesModifiedSince: number;
+  };
+
+  private isEvidenceSufficient(): boolean {
+    const last = this.lastToolExecution;
+    return Boolean(last?.toolName === 'read_file' && last?.result?.symbol && last?.result?.completeDeclaration);
+  }
   readonly stepPromptPolicy = new StepPromptPolicy();
   private stepDynamicSuffixes = new Map<number, string>();
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
@@ -1215,6 +1237,22 @@ export class AgentLoop {
         activeToolDeclarations = [];
       }
 
+      const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
+      const reliableRouteDecision = decideReliableToolRoute({
+        userRequest: turnUserRequest,
+        lastToolName: this.lastToolExecution?.toolName,
+        lastToolResult: this.lastToolExecution?.result,
+        visibleToolNames: activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean),
+        trajectory: this.trajectorySteps,
+        evidenceSufficient: this.isEvidenceSufficient(),
+      });
+      this.reliableToolOrchestrationTelemetry.recordDecision(reliableRouteDecision);
+      activeToolDeclarations = applyReliableToolRouteToDeclarations(
+        activeToolDeclarations,
+        reliableRouteDecision,
+        reliableToolOrchestrationMode,
+      );
+
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;
@@ -1225,10 +1263,12 @@ export class AgentLoop {
       this.contextQualityEvaluator.recordToolRetrieval(visibleToolNames, expectedToolNames);
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
-      const stepToolProvider = toolControlMode === 'enforce'
+      const hasRuntimeToolScope = toolControlMode === 'enforce'
+        || (reliableToolOrchestrationMode === 'enforce' && reliableRouteDecision.constrainSafe && !reliableRouteDecision.failOpen);
+      const stepToolProvider = hasRuntimeToolScope
         ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, visibleToolNames)
         : this.toolProvider;
-      const stepToolRunner = toolControlMode === 'enforce'
+      const stepToolRunner = hasRuntimeToolScope
         ? this.toolRunner.createScoped(stepToolProvider)
         : this.toolRunner;
       if (toolControlMode !== 'off') {
@@ -1245,6 +1285,19 @@ export class AgentLoop {
               visibleToolNames,
               allowedToolSetHash: activeToolSetHash,
             },
+          },
+        });
+      }
+      if (reliableToolOrchestrationMode !== 'off') {
+        session.append('control/decision', {
+          turn,
+          step,
+          controlDecision: {
+            kind: 'reliable-tool-orchestration',
+            mode: reliableToolOrchestrationMode,
+            route: reliableRouteDecision,
+            visibleToolNames,
+            metrics: this.reliableToolOrchestrationTelemetry.snapshot(),
           },
         });
       }
@@ -1279,6 +1332,9 @@ export class AgentLoop {
         guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
         userRequest: turnUserRequest,
         hasSubmittedSolution,
+        trajectory: this.trajectorySteps,
+        evidenceSufficient: this.isEvidenceSufficient(),
+        repairCyclesExhausted: this.verificationPolicy.isRepairExhausted(),
       });
       const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
       const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
@@ -2222,33 +2278,72 @@ export class AgentLoop {
                 }
               } catch {}
             }
-            const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+            // Phase 1 ACI Guardrails Pre-validation (SWE-agent)
+            const aciValidation = this.aciGuardrails.validate({
               toolName,
-              toolArgs,
-              stepToolRunner,
-              {
-                sessionId: session.id,
-                agentId: this.agentId,
-                turn,
-                userRequest: turnUserRequest,
-                signal: options?.signal,
-                ...(toolControlMode === 'enforce' ? {
-                  decisionId: activeDecisionId,
-                  allowedToolNames: visibleToolNames,
-                  allowedToolSetHash: activeToolSetHash,
-                  classificationPhase: classification.phase,
-                  classificationRisk: classification.risk,
-                  maxToolCalls: recommendedToolDecision.maxToolCalls,
-                } : {}),
-                ...(toolName === 'submit_solution' ? {
-                  completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
-                  completionEvidenceReason: policyCompletion?.reason || completionEvidence?.reasons?.filter(Boolean).join('; ') || undefined,
-                } : {}),
-              },
-              toolCallId,
-            );
-            executionResult = pipelinedOutcome.executionResult;
-            if (executionResult.result.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN') {
+              args: toolArgs,
+              workspaceRoot: this._workspace.rootDir,
+            }, resolveAciGuardrailMode());
+
+            // Phase 3 Reproduction Gate (Agentless & AutoCodeRover)
+            const reproductionMode = process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe';
+            const reproductionCheck = isMutationTool(toolName)
+              ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode)
+              : { allowed: true };
+
+            if (!aciValidation.allowed) {
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                result: {
+                  success: false,
+                  error: aciValidation.rejectionMessage,
+                  reasonCode: aciValidation.reasonCode,
+                  remediationHint: aciValidation.remediationHint,
+                },
+                durationMs: 1,
+              };
+            } else if (!reproductionCheck.allowed) {
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                result: {
+                  success: false,
+                  error: reproductionCheck.reason,
+                  reasonCode: 'REPRODUCTION_GATE_BLOCKED',
+                },
+                durationMs: 1,
+              };
+            } else {
+              const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+                toolName,
+                toolArgs,
+                stepToolRunner,
+                {
+                  sessionId: session.id,
+                  agentId: this.agentId,
+                  turn,
+                  userRequest: turnUserRequest,
+                  signal: options?.signal,
+                  lastCommandExecution: this.lastCommandExecutionState,
+                  ...(toolControlMode === 'enforce' ? {
+                    decisionId: activeDecisionId,
+                    allowedToolNames: visibleToolNames,
+                    allowedToolSetHash: activeToolSetHash,
+                    classificationPhase: classification.phase,
+                    classificationRisk: classification.risk,
+                    maxToolCalls: recommendedToolDecision.maxToolCalls,
+                  } : {}),
+                  ...(toolName === 'submit_solution' ? {
+                    completionEvidenceVerified: completionEvidence?.allow === true && policyCompletion?.allowed === true,
+                    completionEvidenceReason: policyCompletion?.reason || completionEvidence?.reasons?.filter(Boolean).join('; ') || undefined,
+                  } : {}),
+                },
+                toolCallId,
+              );
+              executionResult = pipelinedOutcome.executionResult;
+            }
+            if (executionResult.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN') {
               this.toolControlTelemetry.recordDeniedCall();
             }
           }
@@ -2299,6 +2394,9 @@ export class AgentLoop {
             this.dynamicContextCache.invalidate();
           }
           if (hasObservedMutation(toolName, executionResult.result)) {
+            if (this.lastCommandExecutionState) {
+              this.lastCommandExecutionState.filesModifiedSince++;
+            }
             const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
             for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
             const mutatedPath = mutatedFiles[0] || '';
@@ -2332,6 +2430,12 @@ export class AgentLoop {
               executionResult.result.exitCode,
               { hasNewFailures: differential?.hasNewFailures },
             );
+            this.lastCommandExecutionState = {
+              command: String(toolArgs?.command || toolArgs?.CommandLine || ''),
+              success: !isToolResultFailure(executionResult.result) && (executionResult.result?.exitCode === 0 || executionResult.result?.exitCode === undefined),
+              exitCode: executionResult.result?.exitCode,
+              filesModifiedSince: 0,
+            };
 
             // AUTO-CLEANUP: Tự động xóa các file scratch tạm ngay khi lệnh kiểm thử chạy thành công mà không tốn thêm step xóa
             if (!isToolResultFailure(executionResult.result) && (executionResult.result.exitCode === 0 || executionResult.result.exitCode === undefined)) {
@@ -2575,6 +2679,21 @@ export class AgentLoop {
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
           if (this.loopOptions?.enableRepositoryMemory !== false) {
             await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
+          }
+          this.reliableToolOrchestrationTelemetry.recordExecution(reliableRouteDecision, toolName, executionResult.result);
+          this.trajectorySteps.push({
+            toolName,
+            args: toolArgs,
+            success: !isToolResultFailure(executionResult.result),
+            signature: `${toolName}:${JSON.stringify(toolArgs || {}).slice(0, 80)}`,
+          });
+          if (this.trajectorySteps.length > 20) this.trajectorySteps.shift();
+
+          if (toolName === 'run_command' && isVerificationCommand(String(toolArgs?.command || ''))) {
+            const isFailure = isToolResultFailure(executionResult.result) || executionResult.result?.exitCode !== 0;
+            if (isFailure) {
+              this.verificationPolicy.recordReproductionAttempt(String(toolArgs.command), true);
+            }
           }
           this.lastToolExecution = {
             toolName,

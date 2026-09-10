@@ -14,7 +14,7 @@ import { GeminiLLM } from '../llm/gemini.js';
 import { Session } from '../session/session.js';
 import { buildAdaptiveCodeBundle } from './adaptive-code-reader.js';
 import { DeterministicCodeEmbeddingProvider } from './embedding-provider.js';
-import { decideRetrievalMode } from './hybrid-ranker.js';
+import { decideRetrievalMode, fuseSearchResults } from './hybrid-ranker.js';
 import { chunkCodeFile } from './semantic-chunker.js';
 import { PersistentVectorStore } from './vector-store.js';
 
@@ -56,6 +56,37 @@ test('adaptive reader returns a full focus body and lower-fidelity neighbors in 
 test('selective retrieval keeps exact identifiers lexical and natural-language intent hybrid', () => {
   assert.equal(decideRetrievalMode('TokenService').mode, 'lexical');
   assert.equal(decideRetrievalMode('where is an expired session token refreshed').mode, 'hybrid');
+});
+
+test('hybrid fusion keeps only the strongest symbol per path to prevent context crowding', () => {
+  const lexicalHits = [
+    { path: 'src/target.ts', score: 1, matchTerms: ['target'], snippet: 'target', lineMatches: [] },
+    { path: 'src/other.ts', score: 0.5, matchTerms: ['other'], snippet: 'other', lineMatches: [] },
+  ];
+  const semanticHits = ['first', 'second'].map((name, index) => ({
+    chunk: {
+      id: name,
+      path: 'src/target.ts',
+      language: 'typescript',
+      kind: 'method' as const,
+      name,
+      qualifiedName: `src/target.ts::Target.${name}`,
+      signature: `${name}()`,
+      startLine: index + 1,
+      endLine: index + 1,
+      sourceHash: name.padEnd(64, '0'),
+      text: `${name}() {}`,
+      embeddingText: name,
+      imports: [],
+      parserConfidence: 'high' as const,
+    },
+    semanticScore: 1 - index * 0.1,
+    graphScore: 0,
+  }));
+  const fused = fuseSearchResults('natural language target behavior', lexicalHits, semanticHits, 10);
+  assert.equal(fused.filter((hit) => hit.path === 'src/target.ts').length, 1);
+  assert.equal(fused.length, 2);
+  assert.equal(fused[0]?.symbol, 'Target.first');
 });
 
 test('cache envelope is deterministic and its key ignores the dynamic T3 tail', () => {

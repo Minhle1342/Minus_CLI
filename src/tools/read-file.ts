@@ -8,7 +8,7 @@ import { SemanticSlicer } from '../agent/semantic-slicer.js';
 import { nativeBatchReadFiles } from '../native/index.js';
 
 /**
- * Tool 1: read_file (Phase 3 - AST Semantic Slicing Ready)
+ * Tool 1: read_file (Phase 3 - parser-aware semantic slicing)
  * Đọc nội dung văn bản của một file trong workspace.
  * Hỗ trợ:
  * 1. Đọc toàn bộ hoặc theo khoảng dòng startLine/endLine.
@@ -17,7 +17,7 @@ import { nativeBatchReadFiles } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Công cụ đọc file & mã nguồn chính trong workspace (an toàn tuyệt đối, zero-latency, cung cấp contentHash để sửa code). Hỗ trợ: (1) Trích xuất trọn vẹn thân hàm/lớp qua "symbol" trong 1 bước duy nhất (1-shot); (2) Đọc theo khoảng dòng startLine/endLine (khuyến nghị 150-300 dòng/lần, tối đa 800 dòng/lần để bảo vệ context); (3) Đọc sơ đồ tổng quan với "outlineOnly: true". Hỗ trợ đọc các file mã nguồn lớn (> 200KB như test-suite, bundles) linh hoạt bằng cách truyền startLine/endLine, outlineOnly hoặc symbol mà không bị lỗi tràn token.',
+  description: 'Công cụ đọc file & mã nguồn chính trong workspace, kèm contentHash để sửa code an toàn. Ưu tiên "symbol" để lấy đúng declaration trong 1 lượt: TypeScript/JavaScript dùng compiler AST, Python dùng ranh giới indentation; định dạng khác trả parser/confidence để nhận diện fallback heuristic. Cũng hỗ trợ startLine/endLine (tối đa 800 dòng) và outlineOnly để bảo vệ context window.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -39,7 +39,7 @@ export const readFileTool: ToolDefinition = {
       },
       symbol: {
         type: Type.STRING,
-        description: 'ƯU TIÊN DÙNG: Tên hàm, lớp, hoặc interface cụ thể cần đọc phần thân (ví dụ: "runQueryPipeline", "AgentLoop", "runSuite1"). Tool sẽ tự động trích xuất 100% trọn vẹn thân symbol qua AST mà không cần đoán dải dòng (hoạt động tốt trên cả file lớn > 200KB).',
+        description: 'ƯU TIÊN DÙNG khi đã biết symbol: tên đơn ("runQueryPipeline") hoặc tên định danh ("AgentLoop.runInternal"). TS/JS dùng compiler AST; Python dùng indentation parser. Nếu tên đơn trùng nhau, tool trả danh sách qualifiedName để tự phục hồi.',
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,
@@ -119,6 +119,8 @@ export const readFileTool: ToolDefinition = {
           symbolsCount: outline.symbols.length,
           summary: outline.summary,
           symbols,
+          parser: outline.parser,
+          extractionConfidence: outline.confidence,
           notice: isCapped
             ? `[OUTLINE CAPPED]: File có ${outline.symbols.length} symbols. Đã giới hạn hiển thị ${MAX_OUTLINE_SYMBOLS} symbols đầu tiên để tối ưu context token.`
             : undefined,
@@ -130,7 +132,7 @@ export const readFileTool: ToolDefinition = {
       // 2. Chế độ Symbol Extraction (Trích xuất theo tên hàm/lớp)
       if (args.symbol) {
         const symbolName = String(args.symbol).trim();
-        const sliced = SemanticSlicer.sliceSymbol(fileContent, symbolName);
+        const sliced = SemanticSlicer.sliceSymbol(fileContent, symbolName, rawPath);
         if (sliced.found && sliced.code) {
           const lines = sliced.code.split('\n');
           const start = sliced.startLine || 1;
@@ -142,6 +144,11 @@ export const readFileTool: ToolDefinition = {
             symbol: symbolName,
             startLine: sliced.startLine,
             endLine: sliced.endLine,
+            qualifiedName: sliced.symbol?.qualifiedName,
+            symbolKind: sliced.symbol?.kind,
+            parser: sliced.parser,
+            extractionConfidence: sliced.confidence,
+            completeDeclaration: sliced.complete,
             content,
             contentHash,
             eol,
@@ -150,13 +157,20 @@ export const readFileTool: ToolDefinition = {
         } else {
           // Khi không tìm thấy symbol, trích xuất outline để gợi ý các symbol khả dụng cho LLM tự phục hồi (Tool Design Error Recovery)
           const outline = SemanticSlicer.extractOutline(rawPath, fileContent);
-          const availableSymbols = outline.symbols.slice(0, 25).map((s) => `${s.kind} ${s.name} (L${s.startLine})`);
+          const availableSymbols = outline.symbols.slice(0, 25).map((s) => `${s.kind} ${s.qualifiedName || s.name} (L${s.startLine})`);
           return {
             path: rawPath,
-            warning: `Không tìm thấy symbol "${symbolName}" trong file "${rawPath}".`,
+            warning: sliced.ambiguousMatches?.length
+              ? `Symbol "${symbolName}" không duy nhất trong file "${rawPath}". Hãy dùng qualifiedName.`
+              : `Không tìm thấy symbol "${symbolName}" trong file "${rawPath}".`,
+            parser: sliced.parser,
+            extractionConfidence: sliced.confidence,
+            ambiguousMatches: sliced.ambiguousMatches,
             totalSymbolsFound: outline.symbols.length,
             availableSymbolsSample: availableSymbols,
-            suggestion: 'Hãy sử dụng một trong các symbols khả dụng bên trên, hoặc sử dụng "outlineOnly: true" hoặc "startLine/endLine" để đọc.',
+            suggestion: sliced.ambiguousMatches?.length
+              ? 'Gọi lại bằng một qualifiedName trong ambiguousMatches.'
+              : 'Hãy sử dụng một trong các symbols khả dụng bên trên, hoặc sử dụng "outlineOnly: true" hoặc "startLine/endLine" để đọc.',
           };
         }
       }

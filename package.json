@@ -13,7 +13,7 @@
     "test:latency": "tsx src/test-latency-optimization.ts",
     "test:prompt-gating": "node --import tsx --test src/agent/step-prompt-policy.test.ts src/agent/step-prompt-policy.integration.test.ts",
     "test:pareto": "node --import tsx --test src/agent/pareto-evidence-policy.test.ts",
-    "test:context-retrieval": "node --import tsx --test src/search/context-retrieval.test.ts",
+    "test:context-retrieval": "node --import tsx --test src/search/context-retrieval.test.ts src/agent/reliable-tool-orchestration.test.ts src/agent/reliable-tool-orchestration.integration.test.ts",
     "test:blast-radius": "tsx src/test-blast-radius.ts",
     "benchmark:context": "tsx src/eval/context-retrieval-benchmark.ts",
     "benchmark:code-context": "tsx src/eval/code-context-retrieval-benchmark.ts",

@@ -72,7 +72,13 @@ export function buildAdaptiveCodeBundle(
     const outline = SemanticSlicer.extractOutline(normalizedPath, file.content);
 
     for (const requested of focusSymbols) {
-      const symbol = outline.symbols.find((entry) => entry.name === requested || `${normalizedPath}::${entry.name}` === requested);
+      const requestedName = requested.includes('::') ? requested.slice(requested.lastIndexOf('::') + 2) : requested;
+      const symbol = outline.symbols.find((entry) => (
+        entry.name === requestedName
+        || entry.qualifiedName === requestedName
+        || `${normalizedPath}::${entry.name}` === requested
+        || `${normalizedPath}::${entry.qualifiedName || entry.name}` === requested
+      ));
       if (!symbol) continue;
       resolvedSymbols.add(requested);
       addSegment({
@@ -104,9 +110,14 @@ export function buildAdaptiveCodeBundle(
     }
 
     const focusedNames = new Set(
-      [...resolvedSymbols].map((value) => value.includes('::') ? value.slice(value.lastIndexOf('::') + 2) : value),
+      [...resolvedSymbols].flatMap((value) => {
+        const name = value.includes('::') ? value.slice(value.lastIndexOf('::') + 2) : value;
+        return [name, name.split('.').pop() || name];
+      }),
     );
-    for (const symbol of outline.symbols.filter((entry) => !focusedNames.has(entry.name)).slice(0, 4)) {
+    for (const symbol of outline.symbols.filter((entry) => (
+      !focusedNames.has(entry.name) && !focusedNames.has(entry.qualifiedName || entry.name)
+    )).slice(0, 4)) {
       const half = Math.floor(previewLines / 2);
       const start = Math.max(1, symbol.startLine - half);
       const end = Math.min(lines.length, Math.max(symbol.startLine + half, Math.min(symbol.endLine, symbol.startLine + previewLines - 1)));

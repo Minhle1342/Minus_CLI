@@ -55,6 +55,38 @@ export class VerificationPolicy {
   }
 
   private pendingTargetedTests: Set<string> = new Set();
+  private hasReproductionProof: boolean = false;
+  private reproductionProofCommand?: string;
+
+  recordReproductionAttempt(command: string, hasFailedTest: boolean): void {
+    if (hasFailedTest) {
+      this.hasReproductionProof = true;
+      this.reproductionProofCommand = command;
+    }
+  }
+
+  hasReproduction(): boolean {
+    return this.hasReproductionProof;
+  }
+
+  getReproductionCommand(): string | undefined {
+    return this.reproductionProofCommand;
+  }
+
+  /**
+   * Agentless & AutoCodeRover protocol: Bugfix tasks require a confirmed failing reproduction test
+   * before applying mutations to product code.
+   */
+  canMutate(taskClass?: string, gateMode: 'off' | 'observe' | 'enforce' = 'observe'): { allowed: boolean; reason?: string } {
+    if (gateMode !== 'enforce') return { allowed: true };
+    if (taskClass === 'bugfix' && !this.hasReproductionProof) {
+      return {
+        allowed: false,
+        reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix task requires a failing test execution proof before modifying code (Agentless reproduction protocol).',
+      };
+    }
+    return { allowed: true };
+  }
 
   /**
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
@@ -209,6 +241,8 @@ export class VerificationPolicy {
     this.repairCycles = 0;
     this.baselineManager.reset();
     this.requiredRisk = 'R0';
+    this.hasReproductionProof = false;
+    this.reproductionProofCommand = undefined;
   }
 
   private inferTier(command: string): VerificationLadderTier {

@@ -104,6 +104,10 @@ export class TypeScriptService {
     this.syncWorkspaceFiles();
   }
 
+  getCompilerOptions(): ts.CompilerOptions {
+    return this.compilerOptions;
+  }
+
   private loadCompilerOptions(): ts.CompilerOptions {
     const configPath = path.join(this.workspace.rootDir, 'tsconfig.json');
     let loadedOptions: ts.CompilerOptions = {};
@@ -263,31 +267,58 @@ export class TypeScriptService {
       const normalized = this.normalizeAndResolve(filePath);
       this.updateFile(normalized);
 
-      const program = this.services.getProgram();
+      let program = this.services.getProgram();
       if (!program) return { found: false, name: symbolName };
 
       let sourceFile = program.getSourceFile(normalized);
       if (!sourceFile) {
         this.rootFileNames.add(normalized);
-        sourceFile = this.services.getProgram()?.getSourceFile(normalized);
+        program = this.services.getProgram();
+        sourceFile = program?.getSourceFile(normalized);
         if (!sourceFile) return { found: false, name: symbolName };
       }
 
+      if (!program) return { found: false, name: symbolName };
       const typeChecker = program.getTypeChecker();
       let foundResult: SymbolDefinitionResult = { found: false, name: symbolName };
+      const requestedParts = symbolName.split('.').map((part) => part.trim()).filter(Boolean);
+      const requestedLeaf = requestedParts[requestedParts.length - 1] || symbolName;
 
-      function visit(node: ts.Node) {
+      const declarationName = (node: ts.Node): string | undefined => {
+        const named = node as ts.Node & { name?: ts.PropertyName | ts.BindingName };
+        if (!named.name) return undefined;
+        if (ts.isIdentifier(named.name) || ts.isPrivateIdentifier(named.name)
+          || ts.isStringLiteral(named.name) || ts.isNumericLiteral(named.name)) {
+          return named.name.text;
+        }
+        return named.name.getText(sourceFile);
+      };
+
+      const visit = (node: ts.Node, owners: string[] = []): void => {
         if (foundResult.found) return;
 
-        if (
-          (ts.isFunctionDeclaration(node) && node.name?.text === symbolName) ||
-          (ts.isClassDeclaration(node) && node.name?.text === symbolName) ||
-          (ts.isInterfaceDeclaration(node) && node.name?.text === symbolName) ||
-          (ts.isTypeAliasDeclaration(node) && node.name?.text === symbolName) ||
-          (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === symbolName)
-        ) {
-          const { line, character } = sourceFile!.getLineAndCharacterOfPosition(node.getStart());
-          const symbol = typeChecker.getSymbolAtLocation(node.name || node);
+        const supportedDeclaration = ts.isFunctionDeclaration(node)
+          || ts.isClassDeclaration(node)
+          || ts.isInterfaceDeclaration(node)
+          || ts.isTypeAliasDeclaration(node)
+          || ts.isEnumDeclaration(node)
+          || ts.isVariableDeclaration(node)
+          || ts.isMethodDeclaration(node)
+          || ts.isMethodSignature(node)
+          || ts.isGetAccessorDeclaration(node)
+          || ts.isSetAccessorDeclaration(node)
+          || ts.isPropertyDeclaration(node);
+        const name = supportedDeclaration ? declarationName(node) : undefined;
+        const qualifiedName = name ? [...owners, name].join('.') : undefined;
+        const nameMatches = requestedParts.length > 1
+          ? qualifiedName === requestedParts.join('.')
+          : name === requestedLeaf;
+
+        if (supportedDeclaration && name && nameMatches) {
+          const named = node as ts.Node & { name?: ts.PropertyName | ts.BindingName };
+          const definitionPosition = named.name?.getStart(sourceFile) ?? node.getStart(sourceFile);
+          const { line, character } = sourceFile!.getLineAndCharacterOfPosition(definitionPosition);
+          const symbol = typeChecker.getSymbolAtLocation(named.name || node);
           let typeSignature = '';
           let docComment = '';
           let isExported = false;
@@ -303,21 +334,36 @@ export class TypeScriptService {
           if (modifiers) {
             isExported = modifiers.some((m: ts.Modifier) => m.kind === ts.SyntaxKind.ExportKeyword);
           }
+          if (!isExported && owners.length > 0) {
+            let parent: ts.Node | undefined = node.parent;
+            while (parent) {
+              const parentModifiers = ts.canHaveModifiers(parent) ? ts.getModifiers(parent) : undefined;
+              if (parentModifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+                isExported = true;
+                break;
+              }
+              parent = parent.parent;
+            }
+          }
 
           let kind = 'unknown';
           if (ts.isFunctionDeclaration(node)) kind = 'function';
           else if (ts.isClassDeclaration(node)) kind = 'class';
           else if (ts.isInterfaceDeclaration(node)) kind = 'interface';
           else if (ts.isTypeAliasDeclaration(node)) kind = 'type';
+          else if (ts.isEnumDeclaration(node)) kind = 'enum';
           else if (ts.isVariableDeclaration(node)) kind = 'variable';
+          else if (ts.isMethodDeclaration(node) || ts.isMethodSignature(node)) kind = 'method';
+          else if (ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) kind = 'accessor';
+          else if (ts.isPropertyDeclaration(node)) kind = 'property';
 
           foundResult = {
             found: true,
-            name: symbolName,
+            name: qualifiedName || name,
             kind,
             line: line + 1,
             character: character + 1,
-            file: path.relative(process.cwd(), sourceFile!.fileName).replace(/\\/g, '/'),
+            file: this.workspace.toRelativePath(sourceFile!.fileName),
             typeSignature,
             isExported,
             docComment: docComment || undefined,
@@ -325,13 +371,48 @@ export class TypeScriptService {
           return;
         }
 
-        ts.forEachChild(node, visit);
-      }
+        const childOwners = (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) && node.name
+          ? [...owners, node.name.text]
+          : owners;
+        ts.forEachChild(node, (child) => visit(child, childOwners));
+      };
 
       visit(sourceFile);
       return foundResult;
     } catch {
       return { found: false, name: symbolName };
+    }
+  }
+
+  findReferencesAt(filePath: string, line: number, character: number, limit: number = 50): SymbolReferenceResult[] {
+    try {
+      const normalized = this.normalizeAndResolve(filePath);
+      this.updateFile(normalized);
+      const program = this.services.getProgram();
+      const sourceFile = program?.getSourceFile(normalized);
+      if (!program || !sourceFile || line < 1 || character < 1) return [];
+      const targetPosition = sourceFile.getPositionOfLineAndCharacter(line - 1, character - 1);
+      const refEntries = this.services.findReferences(normalized, targetPosition);
+      if (!refEntries) return [];
+      const results: SymbolReferenceResult[] = [];
+      for (const entry of refEntries) {
+        for (const ref of entry.references) {
+          if (results.length >= limit) return results;
+          const refSource = program.getSourceFile(ref.fileName);
+          if (!refSource) continue;
+          const location = refSource.getLineAndCharacterOfPosition(ref.textSpan.start);
+          results.push({
+            file: this.workspace.toRelativePath(ref.fileName),
+            line: location.line + 1,
+            character: location.character + 1,
+            preview: refSource.text.split('\n')[location.line]?.trim().slice(0, 160) || '',
+            isDefinition: Boolean(ref.isDefinition),
+          });
+        }
+      }
+      return results;
+    } catch {
+      return [];
     }
   }
 
