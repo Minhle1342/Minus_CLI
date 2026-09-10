@@ -115,12 +115,20 @@ export const applyPatchTool: ToolDefinition = {
         return {
           success: false,
           error: result.error || 'Failed to apply patch.',
-          errorCode: result.error?.includes('FUZZY_CANDIDATE_FOUND') ? 'FUZZY_CANDIDATE_FOUND' : 'PATCH_APPLY_FAILED',
+          errorCode: result.error?.includes('PRE_COMMIT_SYNTAX_ERROR')
+            ? 'PRE_COMMIT_SYNTAX_ERROR'
+            : result.error?.includes('TRANSACTION_ROLLBACK')
+            ? 'TRANSACTION_ROLLBACK'
+            : result.error?.includes('FUZZY_CANDIDATE_FOUND')
+            ? 'FUZZY_CANDIDATE_FOUND'
+            : 'PATCH_APPLY_FAILED',
           failedFile: failedFile?.path,
           failedHunkNumber,
           suggestedRead,
           recommendedFallback: 'replace_text',
-          suggestion: suggestedRead
+          suggestion: result.error?.includes('PRE_COMMIT_SYNTAX_ERROR')
+            ? 'Kiểm tra và sửa lại lỗi cú pháp trong bản vá trước khi thử lại.'
+            : suggestedRead
             ? `Use read_file with path: "${suggestedRead.path}", startLine: ${suggestedRead.startLine}, endLine: ${suggestedRead.endLine} to inspect exact line context, or switch to replace_text.`
             : 'Use read_file to inspect latest content or switch to replace_text with exact strings.',
           fileResults: result.fileResults,

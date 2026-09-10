@@ -156,9 +156,10 @@ export const SECTION_PATCH_FORMAT_SPEC = `UNIFIED DIFF & PATCH FORMAT SPECIFICAT
  * TIER 1: DOMAIN MODULES (Progressive Disclosure)
  */
 
-export const SECTION_GIT_OPERATIONS = `8. USER-AUTHORIZED GIT OPERATIONS:
-   - When explicitly requested, use dedicated Git tools: git_status, git_diff, git_add, git_commit, git_push.
-   - Never use run_command for Git operations. Push only to authorized target branches.`;
+export const SECTION_GIT_OPERATIONS = `8. GIT & TESTING RUNTIME OPERATIONS (INDUSTRY STANDARD):
+   - Execute all Git operations (git status, git diff, git add, git commit, git checkout, git branch, etc.) directly via run_command.
+   - Execute test suites (npm test, npx jest, pytest, cargo test, etc.) directly via run_command.
+   - NEVER push to main/master unless explicitly requested by the user.`;
 
 export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Inspect existing design tokens, CSS variables, and spacing before adding components.

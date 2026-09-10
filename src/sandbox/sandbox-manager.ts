@@ -60,8 +60,8 @@ export class SandboxManager {
 
       let dockerAvailable = await dockerProvider.isAvailable();
 
-      // Nếu Docker chưa chạy và chưa vừa bị timeout ở bước trước, tự động kích hoạt Docker Desktop
-      if (!dockerAvailable && !isDockerRecentlyFailed()) {
+      // Chỉ tự động kích hoạt Docker Desktop khi người dùng chỉ định tường minh mode === 'docker'
+      if (!dockerAvailable && this.mode === 'docker' && !isDockerRecentlyFailed()) {
         const timeoutSeconds = parseInt(process.env.DOCKER_START_TIMEOUT_SECONDS || '20', 10);
         dockerAvailable = await dockerProvider.startDockerDaemon(timeoutSeconds);
       }

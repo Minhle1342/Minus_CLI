@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import ts from 'typescript';
 import type { Workspace } from './workspace.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
@@ -176,6 +177,74 @@ export class CodeSyntaxValidator {
     }
 
     return allDiagnostics;
+  }
+
+  /**
+   * Thẩm định cú pháp trực tiếp trên nội dung trong bộ nhớ (In-Memory AST Syntax Validation - SWE-agent ACI Standard).
+   * Kiểm tra lỗi cú pháp biên dịch/parse trước khi file được commit xuống đĩa.
+   */
+  static validateContentSyntax(filePath: string, content: string): DiagnosticItem[] {
+    const diagnostics: DiagnosticItem[] = [];
+    const lower = (filePath || '').toLowerCase();
+
+    // 1. TypeScript / JavaScript AST Parse Check
+    if (
+      lower.endsWith('.ts') ||
+      lower.endsWith('.tsx') ||
+      lower.endsWith('.js') ||
+      lower.endsWith('.jsx') ||
+      lower.endsWith('.mjs') ||
+      lower.endsWith('.cjs')
+    ) {
+      try {
+        const isTsx = lower.endsWith('.tsx') || lower.endsWith('.jsx');
+        const sf = ts.createSourceFile(
+          filePath,
+          content,
+          ts.ScriptTarget.Latest,
+          true,
+          isTsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+        );
+        const parseErrors = (sf as any).parseDiagnostics || [];
+        for (const diag of parseErrors) {
+          if (diag.category === ts.DiagnosticCategory.Error) {
+            const { line, character } = sf.getLineAndCharacterOfPosition(diag.start || 0);
+            const msg =
+              typeof diag.messageText === 'string'
+                ? diag.messageText
+                : diag.messageText?.messageText || 'Syntax error';
+            diagnostics.push({
+              file: filePath,
+              line: line + 1,
+              character: character + 1,
+              code: diag.code,
+              category: 'error',
+              message: `[SyntaxError TS${diag.code}]: ${msg}`,
+            });
+          }
+        }
+      } catch {
+        // Bỏ qua lỗi parse không mong muốn
+      }
+    }
+
+    // 2. JSON Parse Check
+    if (lower.endsWith('.json')) {
+      try {
+        JSON.parse(content);
+      } catch (err: any) {
+        diagnostics.push({
+          file: filePath,
+          line: 1,
+          character: 1,
+          code: 9002,
+          category: 'error',
+          message: `[JSON SyntaxError]: ${err.message || 'Invalid JSON format'}`,
+        });
+      }
+    }
+
+    return diagnostics;
   }
 
   /**

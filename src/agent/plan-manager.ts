@@ -444,7 +444,15 @@ export class PlanManager {
       throw new Error('An active task cannot be moved backwards to PENDING.');
     }
 
-    if (task.status !== 'IN_PROGRESS') {
+    if (task.status === 'PENDING' && (status === 'COMPLETED' || status === 'FAILED' || status === 'SKIPPED')) {
+      const blocker = this.blockerFor(task);
+      if (blocker.dependencyIds.length > 0 || blocker.failedDependencyIds.length > 0) {
+        throw new Error(
+          `Task #${id} is blocked by dependencies: ${[...blocker.dependencyIds, ...blocker.failedDependencyIds].join(', ')}.`,
+        );
+      }
+      task.status = 'IN_PROGRESS';
+    } else if (task.status !== 'IN_PROGRESS') {
       throw new Error(`Task #${id} must be IN_PROGRESS before it can move to ${status}.`);
     }
 
@@ -904,11 +912,24 @@ export class PlanManager {
 
   private hasRequiredEvidence(task: PlanTask): boolean {
     const required = this.requiredEvidenceKind(task);
-    return task.evidence.some((item) => {
-      if (item.outcome !== 'success' || (required !== 'any' && item.kind !== required)) return false;
+    if (required === 'any') return true;
+
+    // 1. Kiểm tra trực tiếp trên task
+    const hasDirect = task.evidence.some((item) => {
+      if (item.outcome !== 'success' || item.kind !== required) return false;
       if (required === 'verification') return (item.seq || 0) > Math.max(task.lastMutationSeq, this.lastMutationSeq);
       return true;
     });
+    if (hasDirect) return true;
+
+    // 2. Fallback: Kiểm tra xem bằng chứng đã được ghi nhận trong bất kỳ task nào của session chưa
+    return this.tasks.some((t) =>
+      t.evidence.some((item) => {
+        if (item.outcome !== 'success' || item.kind !== required) return false;
+        if (required === 'verification') return (item.seq || 0) > Math.max(task.lastMutationSeq, this.lastMutationSeq);
+        return true;
+      }),
+    );
   }
 
   private validateGraph(tasks: PlanTask[]): void {
@@ -1010,7 +1031,10 @@ export class PlanManager {
   /** Attribute tool evidence to the most relevant running DAG node. */
   private selectEvidenceTask(toolName: string, args: Record<string, any>): PlanTask | undefined {
     const active = this.tasks.filter((task) => task.status === 'IN_PROGRESS');
-    if (active.length <= 1) return active[0];
+    if (active.length === 1) return active[0];
+    if (active.length === 0) {
+      return this.getReadyTasks()[0] || this.tasks.find((task) => task.status === 'PENDING');
+    }
     const candidatePaths = normalizeStringList([
       args.path,
       args.fromPath,

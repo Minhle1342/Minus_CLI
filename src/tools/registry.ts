@@ -20,7 +20,6 @@ import { lspQueryTool } from './lsp-query.js';
 import { analyzeImpactTool } from './blast-radius.js';
 import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
-import { runTestSuiteTool } from './run-test-suite.js';
 import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
 import { createWebSearchTool, searchWebTool, webSearchTool } from './web-search.js';
@@ -107,7 +106,6 @@ export class ToolRegistry implements ToolProvider {
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
     this.register(runCommandTool);
-    this.register(runTestSuiteTool);
     this.register(webSearchTool);
     this.register(searchWebTool);
     this.register(webFetchTool);
@@ -194,8 +192,12 @@ export class ToolRegistry implements ToolProvider {
 
   /**
    * Đăng ký bộ công cụ Git context & audit an toàn (git_status, git_diff, git_log, git_command...)
+   * @deprecated Chuẩn công nghiệp: Toàn bộ thao tác Git & Testing đã được dồn trọn vẹn vào `run_command`.
+   * Mặc định không nạp các tool git_* dư thừa vào schema LLM để tiết kiệm token và chống phân mảnh tool.
+   * Để nạp riêng cho mục đích test tương thích ngược, truyền `forceEnable = true`.
    */
-  attachGitTools(workspace: Workspace): void {
+  attachGitTools(workspace: Workspace, forceEnable = false): void {
+    if (!forceEnable) return;
     const gitTools = createGitTools(workspace);
     for (const tool of gitTools) {
       this.register(tool);

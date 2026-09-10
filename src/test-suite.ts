@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Workspace } from './workspace/workspace.js';
@@ -62,7 +63,7 @@ import { PlanManager, type PlanTask } from './agent/plan-manager.js';
 import { createPlanTool } from './tools/plan-tools.js';
 import { GraphRankedRepositoryMap } from './agent/graph-ranked-repository-map.js';
 import { GoalManager } from './agent/goal-manager.js';
-import { ReflectionEngine, isExploratoryCommand } from './agent/reflection-engine.js';
+import { ReflectionEngine, isExploratoryCommand, sliceErrorOutput } from './agent/reflection-engine.js';
 import { LoopProgressGuard } from './agent/loop-progress-guard.js';
 import { ProcessFailureDetector } from './agent/process-failure-detector.js';
 import { LivingPlaybookManager, PlaybookReflector, PlaybookCurator } from './context/living-playbook.js';
@@ -9214,6 +9215,108 @@ Always write tests first!`;
   assert(toolNextRes.batch.dispatchedTasks.length === 1, 'Dispatch được đúng 1 task qua tool');
   assert(toolPlanMgr.getActiveTasks().length === 1, 'Task #60 chuyển sang IN_PROGRESS');
 
+  console.log('\n========================================');
+  console.log('🧪 56. KIỂM THỬ CƠ CHẾ PHÒNG CHỐNG LỖI CẢI TIẾN (RESILIENCE & RECOVERY GUARANTEES)');
+  console.log('========================================');
+
+  // 1. ReflectionEngine: consecutiveFailures preservation
+  const engine56 = new ReflectionEngine();
+  engine56.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 1, stderr: 'FAIL' },
+    durationMs: 50,
+  });
+  assert(engine56.getConsecutiveFailures() === 1, 'ReflectionEngine: Lần đầu thất bại có consecutiveFailures = 1');
+
+  engine56.analyze({
+    toolName: 'read_file',
+    args: { path: 'src/app.ts' },
+    result: { content: 'code' },
+    durationMs: 20,
+  });
+  assert(engine56.getConsecutiveFailures() === 1, 'ReflectionEngine: Passive inspection tool (read_file) không làm mất bộ đếm consecutiveFailures');
+
+  const refEnginePause = engine56.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 1, stderr: 'FAIL second time' },
+    durationMs: 50,
+  });
+  assert(engine56.getConsecutiveFailures() === 2, 'ReflectionEngine: Lỗi lặp lại tăng consecutiveFailures lên 2');
+  assert(Boolean(refEnginePause.reflectionPrompt?.includes('consecutive times')), 'ReflectionEngine: Kích hoạt cảnh báo chu kỳ thất bại liên tiếp >= 2');
+
+  engine56.analyze({
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: { exitCode: 0, stdout: 'PASS' },
+    durationMs: 50,
+  });
+  assert(engine56.getConsecutiveFailures() === 0, 'ReflectionEngine: Lệnh thành công exitCode = 0 reset bộ đếm về 0');
+
+  // 2. ReflectionEngine: Environment failure diagnostic code mapping
+  const envAnalysis = engine56.analyze({
+    toolName: 'run_command',
+    args: { command: 'ls' },
+    result: {
+      errorCode: 'POSIX_COMMAND_ON_WINDOWS',
+      stderr: 'not recognized',
+      suggestion: 'Use Get-ChildItem',
+    },
+    durationMs: 30,
+  });
+  assert(envAnalysis.isFailure === true, 'ReflectionEngine: Nhận diện lỗi môi trường POSIX_COMMAND_ON_WINDOWS');
+  assert(Boolean(envAnalysis.reflectionPrompt?.includes('POSIX_COMMAND_ON_WINDOWS')), 'ReflectionEngine: Gợi ý chuyển đổi lệnh môi trường rõ ràng');
+
+  // 3. Smart Assertion Slicing
+  const bigLog = 'Log line\n'.repeat(300) + '\nFAIL test\n  Expected: 10\n  Received: 20\n' + 'More logs\n'.repeat(300);
+  const slicedLog = sliceErrorOutput(bigLog, 1200);
+  assert(slicedLog.includes('Expected: 10') && slicedLog.includes('Received: 20'), 'sliceErrorOutput: Bảo toàn khối assertion diff giữa output dung lượng lớn');
+
+  // 4. In-Memory AST Syntax Validator
+  const validAstErrors = CodeSyntaxValidator.validateContentSyntax('math.ts', 'const x: number = 42;');
+  const invalidAstErrors = CodeSyntaxValidator.validateContentSyntax('math.ts', 'const x: number = ;');
+  assert(validAstErrors.length === 0, 'CodeSyntaxValidator: Code TypeScript chuẩn không có lỗi AST');
+  assert(invalidAstErrors.length > 0 && invalidAstErrors[0].line === 1, 'CodeSyntaxValidator: Phát hiện lỗi cú pháp AST ngay trong RAM');
+
+  // 5. replace_text In-Memory Syntax Guardrail & Diff Hint
+  const resilienceTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-resilience-'));
+  const resilienceWs = new Workspace(resilienceTempDir);
+  const resSamplePath = path.join(resilienceTempDir, 'calc.ts');
+  await fs.writeFile(resSamplePath, 'export function add(a: number, b: number) { return a + b; }\n', 'utf-8');
+
+  const replaceSyntaxRes = await replaceTextTool.execute({
+    path: 'calc.ts',
+    oldText: 'return a + b;',
+    newText: 'return a + ;',
+  }, resilienceWs);
+  assert(replaceSyntaxRes.success === false && replaceSyntaxRes.errorCode === 'SYNTAX_ERROR_PREVENTED', 'replace_text: Chặn ghi đĩa file khi phát hiện lỗi cú pháp mới (SYNTAX_ERROR_PREVENTED)');
+  const resContentAfterGuard = await fs.readFile(resSamplePath, 'utf-8');
+  assert(resContentAfterGuard.includes('return a + b;'), 'replace_text: File trên đĩa được bảo toàn nguyên vẹn khi bị chặn cú pháp');
+
+  const replaceDiffRes = await replaceTextTool.execute({
+    path: 'calc.ts',
+    oldText: 'export function add(a: number, b: number) { "return a + b;" }',
+    newText: 'export function add() {}',
+  }, resilienceWs);
+  assert(replaceDiffRes.errorCode === 'TEXT_NOT_FOUND', 'replace_text: Trả về TEXT_NOT_FOUND khi chuỗi không khớp');
+
+  // 6. apply_patch Pre-commit Syntax Gate
+  const patchCodePath = path.join(resilienceTempDir, 'auth.ts');
+  await fs.writeFile(patchCodePath, 'export function checkAuth(): boolean {\n  return true;\n}\n', 'utf-8');
+  const brokenAuthPatch = `--- auth.ts\n+++ auth.ts\n@@ -1,3 +1,3 @@\n export function checkAuth(): boolean {\n-  return true;\n+  return true + ;\n }\n`;
+  const patchSyntaxRes = await applyPatchTool.execute({ patch: brokenAuthPatch }, resilienceWs);
+  assert(patchSyntaxRes.success === false && patchSyntaxRes.errorCode === 'PRE_COMMIT_SYNTAX_ERROR', 'apply_patch: Pre-commit AST Syntax Gate chặn hunk tạo mã lỗi cú pháp (PRE_COMMIT_SYNTAX_ERROR)');
+
+  // 7. PlanManager Auto-Advance
+  const autoPlanMgr = new PlanManager();
+  autoPlanMgr.createPlan([{ title: 'Run and verify' }]);
+  const pTasks = autoPlanMgr.getTasks();
+  autoPlanMgr.recordToolEvidence('run_command', { command: 'npm test' }, { exitCode: 0, stdout: 'OK' });
+  const completedPTask = autoPlanMgr.updateTask(pTasks[0].id, 'COMPLETED', 'Success');
+  assert(completedPTask?.status === 'COMPLETED', 'PlanManager: Auto-advance PENDING -> COMPLETED trơn tru khi có bằng chứng');
+
+  await fs.rm(resilienceTempDir, { recursive: true, force: true });
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

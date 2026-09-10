@@ -52,8 +52,6 @@ export class ToolRetriever {
         'replace_text',
         'write_file',
         'run_command',
-        'git_status',
-        'git_diff',
         'get_symbol_context_360',
         'get_diagnostics',
         'search_codebase_fast',

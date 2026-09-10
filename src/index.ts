@@ -55,9 +55,9 @@ import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming
 // Load biến môi trường từ file .env
 dotenv.config();
 
-// Tự động bật Docker Sandbox mặc định để chạy lệnh không giới hạn (Zero-Restriction) khi chạy npm run dev
+// Mặc định chạy ở chế độ auto: Dùng Docker nếu Docker daemon đã running, ngược lại dùng Local Sandbox an toàn, nhẹ nhàng và chống cạn kiệt RAM
 if (!process.env.SANDBOX_MODE) {
-  process.env.SANDBOX_MODE = 'docker';
+  process.env.SANDBOX_MODE = 'auto';
 }
 
 const apiKey = process.env.GEMINI_API_KEY || '';

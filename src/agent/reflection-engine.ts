@@ -18,6 +18,7 @@ export interface ReflectionAnalysis {
   diagnostics?: DiagnosticItem[];
   hypothesisFalsified?: boolean;
   detectiveReport?: ErrorDetectiveReport;
+  isStagnant?: boolean;
 }
 
 export function isExploratoryCommand(
@@ -45,6 +46,53 @@ export function isExploratoryCommand(
   return false;
 }
 
+const PASSIVE_INSPECTION_TOOLS = new Set([
+  'read_file',
+  'read_compressed_code',
+  'list_files',
+  'list_dir',
+  'grep_search',
+  'search_codebase_fast',
+  'search_text',
+  'view_outline',
+  'inspect_symbol',
+  'get_diagnostics',
+  'git_status',
+  'git_diff',
+  'git_log',
+  'read_url_content',
+  'search_web',
+]);
+
+/**
+ * Trích xuất output lỗi kiểm thử thông minh (SWE-agent & Aider standard).
+ * Thay vì cắt thô 1000 ký tự đầu (dễ mất assertion failure ở giữa hoặc summary ở cuối),
+ * hàm này ưu tiên giữ lại header, khối assertion failure/diff và summary.
+ */
+export function sliceErrorOutput(output: string, maxLength: number = 2000): string {
+  const trimmed = (output || '').trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  const failureRegex = /(?:FAIL\s|FAILED\s|AssertionError|Assertion failed|Expected:[\s\S]*?Received:|expected:[\s\S]*?actual:|diff:[\s\S]*?\+|Error:[\s\S]*?\bat\b|Stack trace:|TypeError:|ReferenceError:|SyntaxError:|panicked at)/i;
+  const match = failureRegex.exec(trimmed);
+
+  if (match) {
+    const matchIndex = match.index;
+    const windowStart = Math.max(0, matchIndex - 150);
+    const windowEnd = Math.min(trimmed.length, matchIndex + Math.max(800, maxLength - 700));
+    const header = trimmed.slice(0, 300);
+    const middle = trimmed.slice(windowStart, windowEnd);
+    const footer = trimmed.slice(-300);
+
+    return `${header}\n\n[... output omitted ...]\n\n${middle}\n\n[... output omitted ...]\n\n${footer}`;
+  }
+
+  const half = Math.floor((maxLength - 100) / 2);
+  return `${trimmed.slice(0, half)}\n\n[... output omitted ...]\n\n${trimmed.slice(-half)}`;
+}
+
 /**
  * ReflectionEngine - Động cơ Tự vấn & Quy trình Gỡ lỗi Thông minh (Codex CLI Standard + Error Detective)
  * 
@@ -61,23 +109,52 @@ export class ReflectionEngine {
   readonly detective = new ErrorDetective();
   private lastDetectiveReport?: ErrorDetectiveReport;
   private lastReflectionPrompt?: string;
+  private lastErrorFingerprint?: string;
 
   /**
    * Trích xuất các lỗi TypeScript (TSxxxx) từ output hoặc Language Service trong RAM
    */
-  private extractLspDiagnostics(feedback: ToolExecutionFeedback, workspace?: Workspace): DiagnosticItem[] {
+  private extractLspDiagnostics(
+    feedback: ToolExecutionFeedback,
+    workspace?: Workspace,
+    context?: { hasCodeMutations?: boolean; modifiedFiles?: string[] },
+    detectiveReport?: ErrorDetectiveReport,
+  ): DiagnosticItem[] {
     const diagnostics: DiagnosticItem[] = [];
 
     // 1. Kiểm tra qua in-memory TypeScript Language Service nếu có workspace
     if (workspace) {
       try {
-        const targetPath = feedback.args?.path ? String(feedback.args.path) : undefined;
-        if (targetPath && (targetPath.endsWith('.ts') || targetPath.endsWith('.tsx') || targetPath.endsWith('.js') || targetPath.endsWith('.jsx'))) {
-          const tsService = getOrCreateTypeScriptService(workspace);
-          const inMemoryDiags = tsService.getDiagnostics(targetPath);
-          const errors = inMemoryDiags.filter((d) => d.category === 'error');
-          if (errors.length > 0) {
-            diagnostics.push(...errors.slice(0, 5));
+        const candidateFiles = new Set<string>();
+        if (feedback.args?.path) candidateFiles.add(String(feedback.args.path));
+        if (context?.modifiedFiles) {
+          for (const f of context.modifiedFiles) {
+            if (f) candidateFiles.add(f);
+          }
+        }
+        if (detectiveReport?.location) {
+          const locFile = detectiveReport.location.split(':')[0].trim();
+          if (locFile) candidateFiles.add(locFile);
+        }
+
+        for (const targetPath of candidateFiles) {
+          if (
+            targetPath &&
+            (targetPath.endsWith('.ts') ||
+              targetPath.endsWith('.tsx') ||
+              targetPath.endsWith('.js') ||
+              targetPath.endsWith('.jsx'))
+          ) {
+            const tsService = getOrCreateTypeScriptService(workspace);
+            const inMemoryDiags = tsService.getDiagnostics(targetPath);
+            const errors = inMemoryDiags.filter((d) => d.category === 'error');
+            if (errors.length > 0) {
+              for (const err of errors) {
+                if (!diagnostics.some((d) => d.file === err.file && d.line === err.line && d.code === err.code)) {
+                  diagnostics.push(err);
+                }
+              }
+            }
           }
         }
       } catch {
@@ -113,7 +190,7 @@ export class ReflectionEngine {
   analyze(
     feedback: ToolExecutionFeedback,
     workspace?: Workspace,
-    context?: { hasCodeMutations?: boolean },
+    context?: { hasCodeMutations?: boolean; modifiedFiles?: string[] },
   ): ReflectionAnalysis {
     const { toolName, result } = feedback;
     let isFailure = false;
@@ -121,6 +198,7 @@ export class ReflectionEngine {
     let advice: string | undefined;
     let diagnostics: DiagnosticItem[] = [];
     let detectiveReport: ErrorDetectiveReport | undefined;
+    let isStagnant = false;
 
     const environmentFailureCodes = new Set([
       'COMMAND_NOT_FOUND',
@@ -131,6 +209,10 @@ export class ReflectionEngine {
       'PACKAGE_DEPENDENCY_MISSING',
       'MULTIPLE_RUNTIMES_REQUIRED',
       'RUNTIME_SANDBOX_INIT_FAILED',
+      'POSIX_COMMAND_ON_WINDOWS',
+      'PACKAGE_JSON_NOT_FOUND',
+      'PACKAGE_SCRIPT_MISSING',
+      'HOST_MEMORY_COMMIT_EXHAUSTED',
     ]);
 
     // 1. Lỗi môi trường/runtime cần hướng dẫn khắc phục, không phải phân tích stack trace mã nguồn.
@@ -171,7 +253,7 @@ export class ReflectionEngine {
       detectiveReport = this.detective.investigate(rawCombined, workspace);
       this.lastDetectiveReport = detectiveReport;
 
-      const errorSnippet = (result.stderr || result.stdout || '').trim().slice(0, 1000);
+      const errorSnippet = sliceErrorOutput(rawCombined, 2000);
 
       const promptParts = [
         `\n⚠️ [DEBUGGING PROTOCOL TRIGGERED - COMMAND EXECUTION FAILED (Exit Code: ${result.exitCode})]`,
@@ -186,6 +268,16 @@ export class ReflectionEngine {
           `Defect: ${detectiveReport.primaryDefect}${detectiveReport.location ? ` at ${detectiveReport.location}` : ''}${detectiveReport.immediateFix ? ` | Suggested Fix: ${detectiveReport.immediateFix}` : ''}`,
         );
       }
+
+      // Check for Stagnant Error Loop (sửa code nhưng chữ ký lỗi không đổi)
+      const currentFingerprint = `${result.exitCode}:${detectiveReport?.primaryDefect || ''}:${detectiveReport?.location || ''}`;
+      if (this.lastErrorFingerprint && this.lastErrorFingerprint === currentFingerprint && context?.hasCodeMutations) {
+        isStagnant = true;
+        promptParts.push(
+          `🚨 [STAGNANT DEFECT DETECTED]: Your previous code edit did not alter the error outcome at ${detectiveReport?.location || 'the target location'}. The exact same failure persisted. Re-examine your hypothesis instead of making superficial edits!`,
+        );
+      }
+      this.lastErrorFingerprint = currentFingerprint;
 
       // Level 1: Lần lỗi đầu tiên - giữ context gọn gàng, không nhồi nhét quy tắc phương pháp luận
       if (this.consecutiveFailures <= 1) {
@@ -247,9 +339,10 @@ export class ReflectionEngine {
         `\n⚠️ [SELF-REFLECTION - TEXT REPLACEMENT FAILED]`,
         `Error code: ${result.errorCode || 'REPLACE_TEXT_FAILED'}`,
         `Reason: ${result.error}`,
+        result.candidateDiffHint ? `💡 Candidate Diff Hint: ${result.candidateDiffHint}` : '',
         `💡 ${suggestedRead}`,
         `Use raw content without line numbers as oldText, pass contentHash as expectedFileHash, and do not repeat identical failing parameters.`,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
       advice = `replace_text failed (${result.errorCode || 'unknown'}). Read exact file region before retrying.`;
     }
@@ -285,14 +378,37 @@ export class ReflectionEngine {
 
       advice = `Tool execution error: ${result.error || result.errorCode}`;
     } 
-    // 6. Nếu thành công -> Reset bộ đếm thất bại liên tiếp
+    // 7. Xử lý khi Tool thực thi THÀNH CÔNG (Success handling)
     else {
-      this.consecutiveFailures = 0;
+      if (
+        toolName === 'run_command' &&
+        (result.exitCode === 0 || (result.exitCode === undefined && result.success !== false))
+      ) {
+        // Chỉ reset consecutiveFailures khi lệnh verification hoặc command đã chạy thành công
+        this.consecutiveFailures = 0;
+        this.lastErrorFingerprint = undefined;
+      } else if (
+        toolName === 'update_plan_task' &&
+        feedback.args?.status === 'COMPLETED' &&
+        result.success !== false
+      ) {
+        // Reset khi task được đánh dấu hoàn thành
+        this.consecutiveFailures = 0;
+        this.lastErrorFingerprint = undefined;
+      } else if (
+        !PASSIVE_INSPECTION_TOOLS.has(toolName) &&
+        !['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file'].includes(toolName)
+      ) {
+        // Các tool tiện ích khác (không phải công cụ đọc/sửa mã nguồn) thành công thì reset
+        this.consecutiveFailures = 0;
+      }
+      // GHI CHÚ QUAN TRỌNG: Nếu tool là passive read-only (read_file, list_files...) hoặc mutation (replace_text, apply_patch)
+      // thì GIỮ NGUYÊN consecutiveFailures để bảo toàn ngữ cảnh lỗi cho tới khi có lệnh verification exitCode 0!
     }
 
-    // 7. Bổ sung LSP / TypeScript Diagnostics & ErrorDetective vào Reflection Prompt nếu phát hiện lỗi compiler
+    // 8. Bổ sung LSP / TypeScript Diagnostics & ErrorDetective vào Reflection Prompt nếu phát hiện lỗi compiler
     if (isFailure) {
-      diagnostics = this.extractLspDiagnostics(feedback, workspace);
+      diagnostics = this.extractLspDiagnostics(feedback, workspace, context, detectiveReport);
       if (detectiveReport?.extractedErrors && detectiveReport.extractedErrors.length > 0) {
         const detectiveDiags = this.detective.toDiagnosticItems(detectiveReport.extractedErrors);
         for (const d of detectiveDiags) {
@@ -333,6 +449,7 @@ export class ReflectionEngine {
       diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
       hypothesisFalsified: isFailure,
       detectiveReport,
+      isStagnant,
     };
   }
 
@@ -352,5 +469,6 @@ export class ReflectionEngine {
     this.consecutiveFailures = 0;
     this.lastDetectiveReport = undefined;
     this.lastReflectionPrompt = undefined;
+    this.lastErrorFingerprint = undefined;
   }
 }

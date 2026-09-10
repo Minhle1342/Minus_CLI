@@ -2285,7 +2285,10 @@ export class AgentLoop {
             args: toolArgs,
             result: executionResult.result,
             durationMs: executionResult.durationMs,
-          }, this._workspace, { hasCodeMutations: hasMutationsSoFar });
+          }, this._workspace, {
+            hasCodeMutations: hasMutationsSoFar,
+            modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
+          });
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
             granted: executionResult.permission?.status === 'granted',

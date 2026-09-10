@@ -124,17 +124,21 @@ export const replaceTextTool: ToolDefinition = {
         if (oldText.length > 1000) {
           diagnostic += ` Cảnh báo: oldText quá dài (${oldText.length} ký tự). Hãy thu hẹp oldText xuống 3-15 dòng mỏ neo duy nhất để tránh trượt ký tự.`;
         }
+        const candidateDiffHint = candidates[0] ? analyzeCandidateDiff(oldText, candidates[0].preview) : undefined;
         return {
           success: false,
           path: rawPath,
           error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF, Unicode và indentation an toàn.`,
           errorCode: 'TEXT_NOT_FOUND',
           diagnostic,
+          candidateDiffHint,
           observedFileHash,
           oldTextLength: oldText.length,
           candidates,
           suggestedRead,
-          suggestion: `Gọi read_file với ${JSON.stringify(suggestedRead)}, lấy content nguyên bản (không có số dòng), rồi gọi lại replace_text với contentHash mới.`,
+          suggestion: candidateDiffHint
+            ? `Phát hiện: ${candidateDiffHint} Hãy điều chỉnh oldText hoặc đọc lại qua read_file.`
+            : `Gọi read_file với ${JSON.stringify(suggestedRead)}, lấy content nguyên bản (không có số dòng), rồi gọi lại replace_text với contentHash mới.`,
         };
       }
 
@@ -156,6 +160,27 @@ export const replaceTextTool: ToolDefinition = {
       const match = matches[0];
       const replacement = prepareReplacement(newText, content, match);
       const updatedContent = content.slice(0, match.start) + replacement + content.slice(match.end);
+
+      // In-Memory AST Syntax Validation Guardrail (SWE-agent ACI Standard)
+      // Chặn ghi đĩa nếu phát hiện lỗi cú pháp mới xuất hiện trong updatedContent
+      const preCheckSyntaxErrors = CodeSyntaxValidator.validateContentSyntax(rawPath, updatedContent);
+      if (preCheckSyntaxErrors.length > 0) {
+        const originalSyntaxErrors = CodeSyntaxValidator.validateContentSyntax(rawPath, content);
+        const newSyntaxErrors = preCheckSyntaxErrors.filter(
+          (se) => !originalSyntaxErrors.some((oe) => oe.code === se.code && Math.abs(oe.line - se.line) <= 2),
+        );
+        if (newSyntaxErrors.length > 0) {
+          return {
+            success: false,
+            path: rawPath,
+            error: `Sửa đổi bị chặn bởi In-Memory Syntax Guardrail: Phát hiện ${newSyntaxErrors.length} lỗi cú pháp mới trong nội dung trước khi ghi đĩa.`,
+            errorCode: 'SYNTAX_ERROR_PREVENTED',
+            syntaxErrors: newSyntaxErrors,
+            diagnostic: `Cú pháp mới bị gãy tại dòng ${newSyntaxErrors[0].line}: ${newSyntaxErrors[0].message}`,
+            suggestion: `Sửa lại cú pháp trong newText trước khi gọi lại replace_text: ${newSyntaxErrors[0].message}. File trên đĩa không bị thay đổi.`,
+          };
+        }
+      }
 
       // Detect a concurrent/stale edit between the initial read and the write.
       const latestContent = await fs.readFile(safePath, 'utf-8');
@@ -381,6 +406,24 @@ function findNearbyCandidates(content: string, oldText: string): Array<{ line: n
     .filter((candidate) => candidate.score >= 0.3)
     .sort((a, b) => b.score - a.score || a.line - b.line)
     .slice(0, 3);
+}
+
+function analyzeCandidateDiff(targetText: string, candidatePreview: string): string | undefined {
+  const t = targetText.trim();
+  const c = candidatePreview.trim();
+  if (!t || !c) return undefined;
+
+  const hints: string[] = [];
+  if (t.replace(/['"`]/g, "'") === c.replace(/['"`]/g, "'")) {
+    hints.push('Sai khác do kiểu dấu nháy (quotes \' vs " vs `).');
+  }
+  if (t.replace(/\s+/g, ' ') === c.replace(/\s+/g, ' ')) {
+    hints.push('Sai khác do khoảng trắng hoặc thụt đầu dòng (indentation/spaces).');
+  }
+  if (t.replace(/[;,.\s]/g, '') === c.replace(/[;,.\s]/g, '')) {
+    hints.push('Sai khác do dấu chấm phẩy (;) hoặc dấu câu cuối dòng.');
+  }
+  return hints.length > 0 ? hints.join(' ') : undefined;
 }
 
 function diceSimilarity(left: string, right: string): number {

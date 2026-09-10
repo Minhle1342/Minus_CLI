@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import { getNativeCore } from '../native/index.js';
+import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 
 export interface PatchHunk {
   oldStart: number;
@@ -280,27 +281,105 @@ export class PatchEngine {
       };
     }
 
-    // 3. Transaction Phase 2: Ghi dữ liệu thực tế xuống đĩa
+    // 3. Transaction Phase 2: In-Memory AST Syntax Gate & Ghi dữ liệu thực tế xuống đĩa
+    // 3a. Kiểm tra cú pháp AST trong bộ nhớ trước khi chạm vào bất kỳ file nào trên đĩa
+    for (const res of fileResults) {
+      if (res.newContent !== undefined && (res.type === 'modify' || res.type === 'create')) {
+        const syntaxErrors = CodeSyntaxValidator.validateContentSyntax(res.path, res.newContent);
+        if (syntaxErrors.length > 0) {
+          let isNewSyntaxError = true;
+          try {
+            const safePath = workspace.resolveSafePath(res.path);
+            const origContent = await fs.readFile(safePath, 'utf-8');
+            const origSyntaxErrors = CodeSyntaxValidator.validateContentSyntax(res.path, origContent);
+            isNewSyntaxError = syntaxErrors.some(
+              (se) => !origSyntaxErrors.some((oe) => oe.code === se.code && Math.abs(oe.line - se.line) <= 2),
+            );
+          } catch {
+            isNewSyntaxError = true;
+          }
+
+          if (isNewSyntaxError) {
+            return {
+              success: false,
+              filesModified: [],
+              filesCreated: [],
+              filesDeleted: [],
+              totalHunks,
+              hunksApplied,
+              fileResults,
+              error: `PRE_COMMIT_SYNTAX_ERROR: Patch tạo ra lỗi cú pháp trong "${res.path}" (Dòng ${syntaxErrors[0].line}: ${syntaxErrors[0].message}). Toàn bộ patch bị hủy bỏ để bảo vệ đĩa.`,
+            };
+          }
+        }
+      }
+    }
+
+    // 3b. Ghi dữ liệu thực tế xuống đĩa kèm Transactional Backup & Rollback
     const filesModified: string[] = [];
     const filesCreated: string[] = [];
     const filesDeleted: string[] = [];
 
     if (!options.dryRun) {
+      const fileBackups: Array<{
+        safePath: string;
+        relPath: string;
+        type: 'modify' | 'create' | 'delete';
+        originalContent?: string;
+        existed: boolean;
+      }> = [];
+
       for (const res of fileResults) {
         const safePath = workspace.resolveSafePath(res.path);
-        if (res.type === 'create') {
-          await fs.mkdir(path.dirname(safePath), { recursive: true });
-          await fs.writeFile(safePath, res.newContent || '', 'utf-8');
-          filesCreated.push(res.path);
-        } else if (res.type === 'delete') {
-          try {
-            await fs.unlink(safePath);
-            filesDeleted.push(res.path);
-          } catch {}
-        } else if (res.type === 'modify') {
-          await fs.writeFile(safePath, res.newContent || '', 'utf-8');
-          filesModified.push(res.path);
+        let existed = false;
+        let originalContent: string | undefined;
+        try {
+          originalContent = await fs.readFile(safePath, 'utf-8');
+          existed = true;
+        } catch {
+          existed = false;
         }
+        fileBackups.push({ safePath, relPath: res.path, type: res.type, originalContent, existed });
+      }
+
+      try {
+        for (const res of fileResults) {
+          const safePath = workspace.resolveSafePath(res.path);
+          if (res.type === 'create') {
+            await fs.mkdir(path.dirname(safePath), { recursive: true });
+            await fs.writeFile(safePath, res.newContent || '', 'utf-8');
+            filesCreated.push(res.path);
+          } else if (res.type === 'delete') {
+            try {
+              await fs.unlink(safePath);
+              filesDeleted.push(res.path);
+            } catch {}
+          } else if (res.type === 'modify') {
+            await fs.writeFile(safePath, res.newContent || '', 'utf-8');
+            filesModified.push(res.path);
+          }
+        }
+      } catch (writeErr: any) {
+        // Rollback toàn bộ các file về trạng thái ban đầu nếu có lỗi I/O
+        for (const backup of fileBackups) {
+          try {
+            if (backup.existed && backup.originalContent !== undefined) {
+              await fs.writeFile(backup.safePath, backup.originalContent, 'utf-8');
+            } else if (!backup.existed) {
+              await fs.unlink(backup.safePath).catch(() => {});
+            }
+          } catch {}
+        }
+        return {
+          success: false,
+          filesModified: [],
+          filesCreated: [],
+          filesDeleted: [],
+          totalHunks,
+          hunksApplied,
+          fileResults,
+          error: `TRANSACTION_ROLLBACK: Lỗi ghi đĩa trong quá trình áp dụng patch: ${writeErr.message}. Toàn bộ file đã được hoàn nguyên an toàn.`,
+        };
       }
     }
 

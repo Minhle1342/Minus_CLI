@@ -9,7 +9,7 @@ function runDockerCompose(timeoutMs: number = DOCKER_COMPOSE_TIMEOUT_MS): Promis
   return new Promise((resolve, reject) => {
     const child = spawn(
       'docker',
-      ['compose', '-f', COMPOSE_FILE, 'up', '-d'],
+      ['compose', '--file', COMPOSE_FILE, 'up', '-d'],
       {
         cwd: process.cwd(),
         stdio: 'inherit',
@@ -45,14 +45,25 @@ async function main(): Promise<void> {
   const docker = new DockerSandbox({ workspacePath: process.cwd() });
   let dockerReady = await docker.isAvailable();
 
-  if (!dockerReady) {
+  const isPredev = Boolean(process.env.npm_lifecycle_event === 'predev');
+  const forceStart = process.argv.includes('--force');
+
+  // Nếu chạy tự động qua predev, chỉ kích hoạt SearXNG khi Docker Desktop ĐÃ ĐANG CHẠY.
+  // Tránh tự ý mở Docker Desktop + WSL2 làm ngốn 1.5GB RAM và gây OOM crash Node.js.
+  if (!dockerReady && (!isPredev || forceStart)) {
     dockerReady = await docker.startDockerDaemon(DOCKER_START_TIMEOUT_SECONDS);
   }
 
   if (!dockerReady) {
-    console.warn(
-      `\n\x1b[33m⚠️  [search:up] Docker daemon không khởi động sau ${DOCKER_START_TIMEOUT_SECONDS}s. Tự động bỏ qua và tiếp tục chạy ứng dụng.\x1b[0m\n`,
-    );
+    if (isPredev) {
+      console.log(
+        `\x1b[90mℹ  [search:up] Docker daemon chưa bật. Tự động bỏ qua SearXNG cục bộ để bảo vệ RAM cho ứng dụng.\x1b[0m`,
+      );
+    } else {
+      console.warn(
+        `\n\x1b[33m⚠️  [search:up] Docker daemon không khả dụng. Tự động bỏ qua SearXNG container.\x1b[0m\n`,
+      );
+    }
     return;
   }
 
