@@ -59,7 +59,15 @@ export interface PreMutationGateContext {
   hasValidatedHypothesis: boolean;
   hypothesisCount?: number;
   targetFiles?: string[];
+  validatedTargetFiles?: string[];
   isTrivialEdit?: boolean;
+  risk?: string;
+  evidenceScore?: number;
+  evidenceThreshold?: number;
+  evidenceReasons?: string[];
+  inspectedFiles?: string[];
+  supportedHypothesisCount?: number;
+  hasEmpiricalEvidence?: boolean;
   hasSubmittedSolution?: boolean;
   reproductionStatus?: {
     isVerified?: boolean;
@@ -142,8 +150,8 @@ export function classifyToolFailure(
         isRetryable: false,
         maxRetries: 0,
         backoffMs: 0,
-        recoveryAction: 'Hãy khảo sát bằng get_symbol_context_360/inspect_symbol và gọi "formulate_and_verify_hypothesis", hoặc viết test tái hiện lỗi trong test/ / scratch/.',
-        suggestedAlternative: 'formulate_and_verify_hypothesis',
+        recoveryAction: 'Thu thập bằng chứng còn thiếu được nêu trong thông báo gate: đọc đúng target, truy vết cấu trúc, hoặc chạy test tái hiện khi rủi ro cao.',
+        suggestedAlternative: 'read_file',
       };
     }
 
@@ -522,10 +530,12 @@ export class ToolUseGuardian {
       'move_file',
     ].includes(toolName);
 
-    const isBugfix = Boolean(
+    const isEvidenceControlledTask = Boolean(
       gateContext?.isBugfixTask ||
       gateContext?.taskIntent === 'bugfix' ||
-      gateContext?.taskClass === 'bugfix'
+      gateContext?.taskClass === 'bugfix' ||
+      gateContext?.taskClass === 'refactor' ||
+      gateContext?.taskClass === 'security'
     );
 
     // Trích xuất đường dẫn file mục tiêu từ các tham số phổ biến
@@ -555,22 +565,57 @@ export class ToolUseGuardian {
       )
     );
 
-    // 2. Plan & Phase Fast-Pass: Cho phép can thiệp nếu đã có Kế hoạch được kích hoạt hoặc đã chuyển sang Phase Implement/Verify/Release
-    const isAuthorizedPhaseOrPlan = Boolean(
-      gateContext?.hasPlan ||
-      gateContext?.phase === 'implement' ||
-      gateContext?.phase === 'verify' ||
-      gateContext?.phase === 'release'
-    );
-
-    // 3. Đã có giả thuyết được kiểm chứng
+    // A plan describes intended work; it is supporting evidence, not proof that
+    // the causal mechanism is understood.
     const hasValidated = Boolean(gateContext?.hasValidatedHypothesis);
 
-    // 4. Trivial fix / Explicit patch bypass
-    const isTrivialBypass = Boolean(gateContext?.isTrivialEdit);
+    const normalizeTarget = (value: string): string => {
+      if (!value) return '';
+      const absolute = path.isAbsolute(value) ? value : path.resolve(this.workspaceDir, value);
+      return path.relative(this.workspaceDir, absolute).replace(/\\/g, '/').toLowerCase();
+    };
+    const normalizedTarget = normalizeTarget(targetPath);
+    const targetInspected = Boolean(
+      normalizedTarget
+      && gateContext?.inspectedFiles?.some((file) => normalizeTarget(file) === normalizedTarget)
+    );
+    const targetEmpiricallyValidated = Boolean(
+      normalizedTarget
+      && hasValidated
+      && gateContext?.validatedTargetFiles?.some((file) => normalizeTarget(file) === normalizedTarget)
+    );
+    const risk = gateContext?.risk || 'R2';
+    const isHighRisk = gateContext?.taskClass === 'security' || ['R3', 'R4', 'R5'].includes(risk);
+    const evidenceThreshold = Math.max(1, gateContext?.evidenceThreshold || (isHighRisk ? 5 : risk === 'R2' ? 3 : 2));
+    const evidenceScore = (gateContext?.evidenceScore || 0) + (targetInspected ? 2 : 0);
+    const hasEmpiricalEvidence = Boolean(
+      hasValidated
+      || gateContext?.hasEmpiricalEvidence
+      || gateContext?.reproductionStatus?.hasPreFixRepro
+    );
+    const oldText = String(args?.oldText || args?.old_text || '');
+    const newText = String(args?.newText || args?.new_text || '');
+    const changedLineCount = Math.max(oldText.split(/\r?\n/).length, newText.split(/\r?\n/).length);
+    const isSmallInspectedEdit = toolName === 'replace_text'
+      && targetInspected
+      && Math.max(oldText.length, newText.length) <= 800
+      && changedLineCount <= 8
+      && !isHighRisk;
+    const isTrivialFastPath = !isHighRisk && Boolean(gateContext?.isTrivialEdit || isSmallInspectedEdit);
+    const evidenceSufficient = targetEmpiricallyValidated
+      || isTrivialFastPath
+      || (targetInspected && evidenceScore >= evidenceThreshold && (!isHighRisk || hasEmpiricalEvidence));
 
-    if (isMutationTool && isBugfix && !isTestOrReproFile && !isAuthorizedPhaseOrPlan && !hasValidated && !isTrivialBypass) {
-      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Thao tác can thiệp mã nguồn "${toolName}" bị Cổng Pareto 80/20 từ chối: Bạn đang ở Phase Explore của một tác vụ sửa lỗi nhưng chưa có giả thuyết nào được xác minh. Theo nguyên tắc 80/20, hãy hoàn tất 80% khảo sát bằng cách dùng get_symbol_context_360 / inspect_symbol / query_call_graph, HOẶC tạo bài kiểm thử tạm thời trong "scratch/" để tái hiện/cô lập lỗi trước (hệ thống sẽ tự động dọn dẹp file scratch sau khi kiểm thử thành công mà không tốn thêm bước xóa). Sau đó gọi "formulate_and_verify_hypothesis" để chứng minh nguyên nhân lỗi trước khi được phép sửa code sản phẩm.`;
+    if (isMutationTool && isEvidenceControlledTask && !isTestOrReproFile && !evidenceSufficient) {
+      const missing = !targetInspected && !targetEmpiricallyValidated
+        ? `đọc chính target "${targetPath || '(unknown)'}" trước khi sửa`
+        : isHighRisk && !hasEmpiricalEvidence
+          ? 'chạy một reproduction/test có kết quả quan sát được cho thay đổi rủi ro cao'
+          : `bổ sung bằng chứng đến ngưỡng ${evidenceThreshold}`;
+      const reasons = gateContext?.evidenceReasons?.length
+        ? ` Bằng chứng hiện có: ${gateContext.evidenceReasons.join(', ')}.`
+        : '';
+      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto thích ứng chặn "${toolName}" vì uncertainty vẫn cao so với chi phí sai (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần ${missing}.${reasons}`;
       return {
         valid: false,
         allowed: false,
@@ -580,7 +625,7 @@ export class ToolUseGuardian {
         error: errorMsg,
         errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
         reason: errorMsg,
-        suggestedAlternative: 'formulate_and_verify_hypothesis',
+        suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
       };
     }
 

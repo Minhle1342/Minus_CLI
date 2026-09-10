@@ -141,10 +141,9 @@ export class CognitiveHarness {
 
     if (isDataParser && (isCodingTask || lowerReq.includes('hàm') || lowerReq.includes('test'))) {
       const negativeGate = [
-        'NEVER rely on a single naive regex that fails on parentheses "(+84)", hyphens, dots, or surrounding spaces.',
-        'ALWAYS strip delimiters/formatting or normalize prefix (+84) and verify exact length (e.g. exactly 10 digits total; discard too short numbers like 9 digits or invalid prefixes).',
-        'ALWAYS deduplicate parsed results (using Set or case-insensitive map) and lowercase emails before returning.',
-        'NEVER include invalid or truncated items in the returned array that violate test count/length assertions.',
+        'Do not assume one regex or one normalization rule covers every format in the active specification.',
+        'Derive normalization, validity, casing, and deduplication rules from current tests, schemas, or documented contracts.',
+        'Do not admit malformed or truncated values that violate the observed contract.',
       ];
 
       if (consecutiveFailures > 1) {
@@ -154,12 +153,12 @@ export class CognitiveHarness {
       return {
         category: 'data_parser',
         negativeGate,
-        premiseCheck: 'Inspect test sample text for formatting variations (e.g. parentheses "(+84)", dots, dashes) and explicitly check all negative/invalid edge cases.',
-        falsificationCriteria: 'If returned elements contain duplicates, invalid lengths, or miss valid phone/email variations, the parsing implementation is FALSIFIED.',
+        premiseCheck: 'Inspect representative inputs, expected outputs, and negative cases before choosing parsing or normalization rules.',
+        falsificationCriteria: 'If the implementation misses a valid observed format or accepts a value rejected by the contract, revise the parsing hypothesis.',
         executionTopology: [
           'Ground Truth Spec: Read test file to inspect sample strings, expected outputs, and negative test cases.',
-          'Format Normalization: Standardize delimiters, strip non-digit characters where appropriate, and handle country prefixes (+84).',
-          'Strict Validation & Deduplication: Filter candidates strictly by valid prefix & exact length (10 digits), deduplicate with Set.',
+          'Format Normalization: Derive transformations from the active data contract instead of assuming locale-specific rules.',
+          'Validation & Deduplication: Apply only constraints supported by tests, schemas, or documentation.',
           'Empirical Falsification: Run test suite to verify both element inclusion and exact array length assertions.',
         ],
         actionBoundary: 'Scope changes strictly to parser/validator functions matching 100% of test specifications.',
@@ -225,7 +224,7 @@ export class CognitiveHarness {
   }): CognitiveBrakeDecision {
     const { consecutiveFailures, hypothesisFailedCount, currentHypothesis } = params;
 
-    if (hypothesisFailedCount >= 2) {
+    if (hypothesisFailedCount >= 2 && consecutiveFailures >= 2) {
       this.falsifiedHypothesesCount++;
       const reason = `Hypothesis "${currentHypothesis || 'Active Hypothesis'}" failed validation ${hypothesisFailedCount} times.`;
       this.lastBrakeReason = reason;

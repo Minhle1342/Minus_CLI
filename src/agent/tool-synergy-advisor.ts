@@ -64,7 +64,7 @@ export class ToolSynergyAdvisor {
     if (!lastToolName && detectBugReportIntent(userRequest)) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] User reported a bug or error. Do not guess or monkey-patch! Protocol: 1.[Extract Coordinates / Locate defect] -> 2.[Backward Causal Trace via search/read_file/query_call_graph] -> 3.[Formulate Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verify via get_diagnostics/test]. Max 3 repair cycles.',
+        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] User reported a bug or error. Do not guess or monkey-patch. Protocol: 1.[Extract Coordinates / Locate defect] -> 2.[Backward Causal Trace via search/read_file/query_call_graph] -> 3.[Formulate Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verify via get_diagnostics/test]. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.',
         suggestedTools: ['search_codebase_fast', 'read_file', 'get_diagnostics', 'query_call_graph'],
       };
     }
@@ -197,7 +197,7 @@ export class ToolSynergyAdvisor {
     ) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without modifying hypothesis! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Max 3 repair cycles.',
+        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verification]. Use the newest feedback to pivot after repeated equivalent failure.',
         suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'inspect_symbol', 'replace_text'],
       };
     }

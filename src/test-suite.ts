@@ -1140,8 +1140,16 @@ async function runUnitTests() {
   const exploreDecision = classifier.classify({ request: 'Inspect and explain the current architecture' });
   assert(exploreDecision.phase === 'explore' && exploreDecision.risk === 'R0', 'ClassificationEngine recognizes read-only exploration fast path');
   const implementationDecision = classifier.classify({ request: 'Implement a refactor across the whole architecture', hasPlan: true });
-  assert(implementationDecision.phase === 'implement' && implementationDecision.risk === 'R3', 'ClassificationEngine raises risk for a large architectural refactor');
+  assert(implementationDecision.phase === 'explore' && implementationDecision.risk === 'R3', 'ClassificationEngine raises risk and keeps a large refactor in explore until evidence is sufficient');
   assert(implementationDecision.requiredCapabilities.includes('delegate'), 'Large tasks retain the existing parallel delegation strength');
+  const evidenceBackedRefactor = classifier.classify({
+    request: 'Implement a refactor across the whole architecture',
+    hasPlan: true,
+    hasDirectEvidence: true,
+    evidenceScore: 5,
+    evidenceThreshold: 5,
+  });
+  assert(evidenceBackedRefactor.phase === 'implement', 'Large refactor enters implement after reaching its risk-adjusted evidence threshold');
 
   const turnGate = new ThisTurnToolGate();
   const gatedDecision = turnGate.decide(exploreDecision, registry.getAll());
@@ -7206,7 +7214,7 @@ Always write tests first!`;
   const allowScratchFile = await adaptiveRunner.run('write_file', { path: 'scratch/repro.ts', content: 'script repro' });
   assert(allowScratchFile.result.success === true, 'TDD Fast-Pass cho phép tạo file trong scratch/');
 
-  // Kịch bản 4: Plan & Phase Fast-Pass - Cho phép can thiệp khi hasPlan = true hoặc phase = implement
+  // Kịch bản 4: Plan/phase không thay thế bằng chứng; evidence đạt ngưỡng mới mở cổng
   adaptiveGuardian.setPreMutationGateContext({
     isBugfixTask: true,
     taskClass: 'bugfix',
@@ -7214,10 +7222,24 @@ Always write tests first!`;
     hasPlan: true,
     hasValidatedHypothesis: false,
   });
-  const allowImplementPhase = await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'planned fix' });
-  assert(allowImplementPhase.result.success === true, 'Mở cổng khi Agent đã có Plan hoặc chuyển sang Phase Implement');
+  const blockedPlanOnly = await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'planned fix' });
+  assert(blockedPlanOnly.result.errorCode === 'UNVERIFIED_MUTATION_BLOCKED', 'Plan/phase không tự mở cổng khi uncertainty còn cao');
 
-  // Kịch bản 5: Refactor không bị chặn bởi cổng kiểm chứng giả thuyết lỗi
+  adaptiveGuardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    taskClass: 'bugfix',
+    phase: 'implement',
+    hasPlan: true,
+    hasValidatedHypothesis: false,
+    risk: 'R2',
+    evidenceScore: 3,
+    evidenceThreshold: 3,
+    inspectedFiles: ['src/core.ts'],
+  });
+  const allowEvidenceBackedImplement = await adaptiveRunner.run('write_file', { path: 'src/core.ts', content: 'evidence-backed fix' });
+  assert(allowEvidenceBackedImplement.result.success === true, 'Mở cổng khi bằng chứng đạt ngưỡng rủi ro');
+
+  // Kịch bản 5: Refactor cũng dùng evidence gate thay vì bypass mặc định
   adaptiveGuardian.setPreMutationGateContext({
     isBugfixTask: false,
     taskClass: 'refactor',
@@ -7225,8 +7247,8 @@ Always write tests first!`;
     hasPlan: false,
     hasValidatedHypothesis: false,
   });
-  const allowRefactor = await adaptiveRunner.run('write_file', { path: 'src/utils.ts', content: 'refactored code' });
-  assert(allowRefactor.result.success === true, 'Tác vụ refactor không bị chặn bởi cổng kiểm chứng lỗi');
+  const blockedUnexaminedRefactor = await adaptiveRunner.run('write_file', { path: 'src/utils.ts', content: 'refactored code' });
+  assert(blockedUnexaminedRefactor.result.errorCode === 'UNVERIFIED_MUTATION_BLOCKED', 'Refactor chưa có bằng chứng bị chặn');
 
   // 40.8. Kiểm thử Post-Submission Tool Locking & Playbook (Khắc phục triệt để lỗ hổng sau submit_solution)
   console.log('\n--- 40.8. Post-Submission Tool Locking & Playbook Guidance ---');

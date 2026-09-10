@@ -14,6 +14,10 @@ export interface ClassificationInput {
   lastToolFailed?: boolean;
   previous?: ClassificationDecision;
   hasValidatedHypothesis?: boolean;
+  hasDirectEvidence?: boolean;
+  evidenceScore?: number;
+  evidenceThreshold?: number;
+  minimumRisk?: ControlRisk;
 }
 
 const mutationIntent = /\b(?:implement|fix|change|modify|update|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sửa|triển khai|thực hiện|cập nhật|tạo|xóa|đổi tên|tích hợp)\b/i;
@@ -55,16 +59,23 @@ export class ClassificationEngine {
       complexity = /\b(?:architecture|system|migration|multiple|all|kiến trúc|hệ thống|lộ trình|toàn bộ)\b/i.test(text) ? 'large' : 'medium';
       risk = complexity === 'large' ? 'R3' : 'R2';
 
-      // Pareto 80/20 Rule: Nếu là bugfix hoặc refactor nhưng chưa có validated hypothesis và chưa có plan hoàn thiện,
-      // bắt buộc khởi đầu ở Phase 'explore' (80% nỗ lực khảo sát) và không cấp quyền 'edit' sớm!
-      const requiresHypothesisFirst = (taskClass === 'bugfix' || taskClass === 'refactor') && !input.hasValidatedHypothesis && !input.hasPlan;
-      if (requiresHypothesisFirst) {
+      const evidenceThreshold = Math.max(1, input.evidenceThreshold || 1);
+      const hasEnoughEvidence = Boolean(
+        input.hasValidatedHypothesis
+        || input.hasDirectEvidence
+        || (input.evidenceScore || 0) >= evidenceThreshold
+      );
+      const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor') && !hasEnoughEvidence;
+      if (requiresEvidenceFirst) {
         phase = 'explore';
         capabilities = ['inspect', 'search', 'plan', 'memory', 'verify'];
-        reasons.push('PARETO_80_20_EXPLORE_FIRST_BEFORE_MUTATION');
+        reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
         phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
         capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
+          reasons.push('PARETO_EVIDENCE_FAST_PATH');
+        }
         reasons.push(refactorIntent.test(text) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
       }
     } else if (bugIntent.test(text)) {
@@ -99,6 +110,14 @@ export class ClassificationEngine {
       reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
     }
 
+    if (input.minimumRisk) {
+      const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
+      if (riskRank[input.minimumRisk] > riskRank[risk]) {
+        risk = input.minimumRisk;
+        reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');
+      }
+    }
+
     const confidence = text.length < 8 ? 0.55 : reasons.includes('CONSERVATIVE_READ_ONLY_DEFAULT') ? 0.65 : 0.9;
     const stable = JSON.stringify({ taskClass, phase, complexity, risk, capabilities, text: text.toLowerCase() });
     return {
@@ -112,7 +131,9 @@ export class ClassificationEngine {
       risk,
       requiredCapabilities: capabilities,
       confidence,
-      fastPath: complexity === 'trivial' || (risk === 'R0' && !input.hasPlan),
+      fastPath: complexity === 'trivial'
+        || (risk === 'R0' && !input.hasPlan)
+        || Boolean(input.hasDirectEvidence && (risk === 'R1' || risk === 'R2')),
       reasonCodes: reasons,
       createdAt: new Date().toISOString(),
     };

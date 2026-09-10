@@ -99,7 +99,7 @@ export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `4. SEMANTIC INTELLIGENCE & BL
      * Use \`analyze_impact\` to calculate the Blast Radius and risk level (LOW/MEDIUM/HIGH/CRITICAL) before modifying exported APIs.`;
 
 export const SECTION_SURGICAL_MUTATION_FULL = `5. SURGICAL & ATOMIC MUTATION DISCIPLINE (CODEX CLI STANDARD):
-    - ADAPTIVE PRE-MUTATION HYPOTHESIS GATE & SCRATCH TESTING: For bugfix tasks on production code, you MUST activate formulate_and_verify_hypothesis with explicit falsification test and concrete source evidence before editing code (or freely create an isolated reproduction test in tests/ or scratch/ first; scratch tests are automatically cleaned up upon passing without extra delete steps). Creating tests or having an active plan automatically grants implementation access. Unverified edits to production code in Phase Explore trigger UNVERIFIED_MUTATION_BLOCKED.
+    - ADAPTIVE PRE-MUTATION EVIDENCE GATE: For bugfix/refactor tasks, gather evidence until uncertainty is low enough for the change risk. Small reversible edits may proceed after the exact target is inspected and direct evidence is sufficient. High-risk changes require an empirical reproduction or equivalent observed check. Tests and plans contribute evidence but do not automatically grant implementation access.
    - Always inspect relevant source lines with \`read_file\` before modifying code to obtain the \`contentHash\` and exact context.
    - DEDICATED CRUD SEPARATION:
      * Creating new files: Use \`create_file\` (refuses silent overwrite of existing files).
@@ -224,18 +224,18 @@ export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT C
 - TWO-TIER ERROR TRIAGING:
   * Tier 1 - Environment/Sandbox Failure (\`COMMAND_NOT_FOUND\`, \`NATIVE_DEPENDENCY_MISSING\`, \`PACKAGE_DEPENDENCY_MISSING\`, timeout): Resolve environment dependencies or select matching runtime profile; DO NOT modify application source code.
   * Tier 2 - Application/Logic Failure (test assertion failure, typecheck error, runtime exception): Enter the 5-Stage Error Detective Protocol.
-- 5-STAGE ERROR DETECTIVE PROTOCOL (PARETO 80/20):
+- 5-STAGE ERROR DETECTIVE PROTOCOL (EVIDENCE-ADAPTIVE PARETO):
   1. [Extract Coordinates]: Parse exact file, line number, column, and diagnostic code from error output or \`get_diagnostics\`.
   2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`git_diff\` to find the origin of invalid state.
   3. [Falsifiable Hypothesis & Empirical Proof (System 2 Thinking)]:
-     * YOU MUST call \`formulate_and_verify_hypothesis\` with your hypothesized statement, falsification test criteria, target files, and code evidence.
-     * If a reproduction test command is available, run it via the tool to prove the bug exists prior to fixing.
-     * The Pre-Mutation Gate will block any file modifications until at least one hypothesis is verified.
-  4. [Surgical Root Invariant Fix]: Apply the minimal surgical change (1-2 steps max) at the root source to restore the intended invariant without side effects.
+     * State a falsifiable causal hypothesis and record the evidence that supports it. Use \`formulate_and_verify_hypothesis\` when a durable hypothesis record or empirical reproduction is useful.
+     * Run a reproduction before high-risk changes. For a low-risk reversible edit, direct source evidence and inspection of the exact target may be sufficient.
+     * The Pre-Mutation Gate compares evidence with risk; it does not require a fixed percentage of investigation.
+  4. [Surgical Root Invariant Fix]: Apply the smallest coherent change at the root source that fully restores the intended invariant.
   5. [Empirical Verification & Anti-Regression]: Run the Verification Ladder to prove the fix and ensure no new regressions.
 - ANTI-LOOP & REPAIR BUDGET:
   * Never repeat the exact same failing command or tool arguments unchanged.
-  * You have a strict budget of maximum 3 repair cycles. If an approach fails repeatedly, reflect, pivot to an alternative strategy, or revert to the last clean task checkpoint.`;
+  * After repeated equivalent failures or materially lower confidence, reflect on the newest feedback and pivot to a distinct hypothesis. Continue productive, evidence-gaining steps when they are still reducing uncertainty.`;
 
 /**
  * Legacy Monolithic System Prompt (Codex CLI + Surgical Architecture standard, ~5,000 tokens).

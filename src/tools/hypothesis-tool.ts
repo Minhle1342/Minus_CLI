@@ -14,6 +14,7 @@ export interface FormulateAndVerifyHypothesisArgs {
   targetFiles: string[];
   evidence: string;
   reproductionCommand?: string;
+  expectedOutcome?: 'pass' | 'fail';
   blastRadius?: BlastRadiusRisk;
   proposedFix?: string;
 }
@@ -21,7 +22,7 @@ export interface FormulateAndVerifyHypothesisArgs {
 export interface FormulateAndVerifyHypothesisResult {
   success: boolean;
   hypothesisId?: string;
-  status: 'formulated' | 'testing' | 'validated' | 'falsified';
+  status: 'formulated' | 'testing' | 'supported' | 'validated' | 'falsified';
   statement: string;
   falsificationTest: string;
   targetFiles: string[];
@@ -57,17 +58,17 @@ export function createHypothesisTool(
 
   return {
     name: 'formulate_and_verify_hypothesis',
-    description: 'Thiết lập và kiểm chứng giả thuyết kỹ thuật ở Phase Explore trước khi can thiệp sửa mã. Bắt buộc phải có phát biểu giả định nguyên nhân, tiêu chí phản nghiệm, file mục tiêu và bằng chứng mã nguồn cụ thể để đạt chuẩn Pareto 80/20 (giảm tối đa số step thử-sai ở Phase Implement).',
+    description: 'Ghi nhận giả thuyết kỹ thuật có thể phản nghiệm. Evidence tĩnh chỉ tạo trạng thái supported; chỉ kết quả thực thi khớp expectedOutcome mới tạo trạng thái validated.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         statement: {
           type: Type.STRING,
-          description: 'Phát biểu giả định nguyên nhân gốc rễ hoặc cơ chế kỹ thuật gây lỗi (yêu cầu tối thiểu 30 ký tự).',
+          description: 'Phát biểu cụ thể về nguyên nhân gốc rễ hoặc cơ chế kỹ thuật gây lỗi.',
         },
         falsificationTest: {
           type: Type.STRING,
-          description: 'Tiêu chí phản nghiệm: Điều kiện cụ thể nào nếu xảy ra sẽ chứng minh giả thuyết này là SAI (yêu cầu tối thiểu 20 ký tự).',
+          description: 'Điều kiện quan sát được có thể chứng minh giả thuyết này sai.',
         },
         targetFiles: {
           type: Type.ARRAY,
@@ -76,11 +77,16 @@ export function createHypothesisTool(
         },
         evidence: {
           type: Type.STRING,
-          description: 'Dẫn chứng cụ thể: số dòng, tên biến, AST node, selector hoặc chuỗi gọi hàm chứng minh giả thuyết (yêu cầu tối thiểu 30 ký tự).',
+          description: 'Dẫn chứng cụ thể: số dòng, tên biến, AST node, selector, failing test hoặc chuỗi gọi hàm.',
         },
         reproductionCommand: {
           type: Type.STRING,
           description: 'Câu lệnh kiểm thử hoặc script cô lập để tái hiện lỗi (chạy ở chế độ read-only kiểm chứng, không sửa file).',
+        },
+        expectedOutcome: {
+          type: Type.STRING,
+          enum: ['pass', 'fail'],
+          description: 'Kết quả mong đợi của reproductionCommand. Mặc định là fail cho bài test tái hiện lỗi trước khi sửa.',
         },
         blastRadius: {
           type: Type.STRING,
@@ -107,13 +113,15 @@ export function createHypothesisTool(
         : [];
       const evidence = String(args.evidence || '').trim();
       const reproductionCommand = typeof args.reproductionCommand === 'string' ? args.reproductionCommand.trim() : undefined;
+      const expectedOutcome: 'pass' | 'fail' = args.expectedOutcome === 'pass' ? 'pass' : 'fail';
       const blastRadius: BlastRadiusRisk = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(args.blastRadius)
         ? args.blastRadius
         : 'MEDIUM';
       const proposedFix = String(args.proposedFix || '').trim();
 
-      // 1. Kiểm định tính đầy đủ của statement
-      if (statement.length < 30) {
+      // Validate semantic presence. Length quotas encouraged filler without
+      // improving evidence quality, so they are intentionally not used.
+      if (!statement) {
         return {
           success: false,
           status: 'formulated',
@@ -123,7 +131,7 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: `formulate_and_verify_hypothesis bị từ chối: trường "statement" quá ngắn (${statement.length} ký tự, yêu cầu tối thiểu 30 ký tự). Hãy nêu rõ cơ chế kỹ thuật gây ra sự cố.`,
+          error: 'formulate_and_verify_hypothesis bị từ chối: trường "statement" không được để trống.',
           errorCode: 'INSUFFICIENT_HYPOTHESIS_STATEMENT',
           suggestion: 'Ví dụ: "Hàm parseHeaders trong src/http.ts bỏ sót trường hợp Authorization header chứa ký tự tab."',
           guidance: 'Hãy bổ sung mô tả giả định nguyên nhân chi tiết.',
@@ -131,7 +139,7 @@ export function createHypothesisTool(
       }
 
       // 2. Kiểm định falsificationTest
-      if (falsificationTest.length < 20) {
+      if (!falsificationTest) {
         return {
           success: false,
           status: 'formulated',
@@ -141,7 +149,7 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: `formulate_and_verify_hypothesis bị từ chối: trường "falsificationTest" quá ngắn (${falsificationTest.length} ký tự, yêu cầu tối thiểu 20 ký tự). Bạn phải nêu rõ điều kiện nào chứng minh giả thuyết là sai.`,
+          error: 'formulate_and_verify_hypothesis bị từ chối: trường "falsificationTest" không được để trống.',
           errorCode: 'INSUFFICIENT_FALSIFICATION_CRITERIA',
           suggestion: 'Ví dụ: "Nếu giá trị header.trim() không làm thay đổi chuỗi ban đầu thì giả thuyết không đúng."',
           guidance: 'Hãy bổ sung tiêu chuẩn phản nghiệm rõ ràng.',
@@ -167,7 +175,7 @@ export function createHypothesisTool(
       }
 
       // 4. Kiểm định evidence
-      if (evidence.length < 30) {
+      if (!evidence) {
         return {
           success: false,
           status: 'formulated',
@@ -177,7 +185,7 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: `formulate_and_verify_hypothesis bị từ chối: trường "evidence" quá ngắn (${evidence.length} ký tự, yêu cầu tối thiểu 30 ký tự). Hãy cung cấp trích dẫn mã nguồn, số dòng hoặc luồng dữ liệu cụ thể đã tra cứu từ Phase Explore.`,
+          error: 'formulate_and_verify_hypothesis bị từ chối: trường "evidence" không được để trống.',
           errorCode: 'INSUFFICIENT_EVIDENCE',
           suggestion: 'Ví dụ: "Dòng 45 trong src/http.ts dùng regex /^Bearer / nhưng không xử lý whitespace."',
           guidance: 'Thu thập bằng chứng thực tế từ get_symbol_context_360 hoặc view_file trước.',
@@ -195,46 +203,84 @@ export function createHypothesisTool(
 
       hypothesisTracker.markTesting(hypothesis.id);
 
-      // 6. Tùy chọn kiểm chứng qua reproductionCommand
+      // 6. Tùy chọn kiểm chứng qua reproductionCommand. Static evidence can
+      // support a causal explanation, but only an observed command outcome can
+      // empirically validate it.
       let reproductionResult: FormulateAndVerifyHypothesisResult['reproductionResult'];
-      let isValidated = false;
-      let learningNotes = '';
 
       if (reproductionCommand) {
         const cwd = activeWorkspace?.rootDir || workspace?.rootDir || process.cwd();
+        let exitCode = 0;
+        let stdout = '';
+        let stderr = '';
+        let executionFailure: string | undefined;
         try {
-          const { stdout, stderr } = await execAsync(reproductionCommand, {
+          const completed = await execAsync(reproductionCommand, {
             cwd,
             timeout: 15000,
           });
-          reproductionResult = {
-            executed: true,
-            exitCode: 0,
-            stdout: stdout.slice(0, 1000),
-            stderr: stderr.slice(0, 1000),
-          };
-          // Nếu lệnh chạy không có lỗi (exitCode 0) khi đang muốn tái hiện lỗi,
-          // thì có thể lỗi không tồn tại hoặc test chưa trúng điểm yếu
-          isValidated = true; // Chấp nhận nếu có output xác nhận
-          learningNotes = `Reproduction command completed (Exit 0): ${stdout.slice(0, 200)}`;
+          stdout = completed.stdout;
+          stderr = completed.stderr;
         } catch (cmdErr: any) {
-          reproductionResult = {
-            executed: true,
-            exitCode: cmdErr.code ?? 1,
-            stdout: (cmdErr.stdout || '').slice(0, 1000),
-            stderr: (cmdErr.stderr || cmdErr.message || '').slice(0, 1000),
-          };
-          // Non-zero exit code thường chứng minh test tái hiện lỗi thất bại đúng như kỳ vọng (Red Phase)
-          isValidated = true;
-          learningNotes = `Defect successfully reproduced via "${reproductionCommand}" (Exit code ${cmdErr.code || 1}).`;
+          exitCode = typeof cmdErr.code === 'number' ? cmdErr.code : 1;
+          stdout = cmdErr.stdout || '';
+          stderr = cmdErr.stderr || cmdErr.message || '';
+          if (
+            cmdErr.killed
+            || cmdErr.signal
+            || typeof cmdErr.code !== 'number'
+            || /(?:not recognized as an internal|command not found|cannot find the (?:file|path)|enoent)/i.test(stderr)
+          ) {
+            executionFailure = stderr || 'The reproduction process could not be executed reliably.';
+          }
         }
-      } else {
-        // Kiểm chứng tĩnh dựa trên Evidence
-        isValidated = true;
-        learningNotes = `Static causal verification approved based on evidence in ${targetFiles.join(', ')}.`;
-      }
 
-      if (isValidated) {
+        reproductionResult = {
+          executed: true,
+          exitCode,
+          stdout: stdout.slice(0, 1000),
+          stderr: stderr.slice(0, 1000),
+        };
+        if (executionFailure) {
+          return {
+            success: false,
+            hypothesisId: hypothesis.id,
+            status: 'testing',
+            statement,
+            falsificationTest,
+            targetFiles,
+            evidence,
+            blastRadius,
+            canProceedToImplement: false,
+            reproductionResult,
+            error: `Không thể dùng reproductionCommand làm bằng chứng: ${executionFailure.slice(0, 500)}`,
+            errorCode: 'REPRODUCTION_EXECUTION_FAILED',
+            suggestion: 'Sửa môi trường hoặc câu lệnh để quá trình kiểm chứng thực sự khởi chạy, rồi thử lại.',
+            guidance: `Giả thuyết [${hypothesis.id}] chưa được kiểm chứng vì lệnh không chạy đáng tin cậy.`,
+          };
+        }
+        const outcomeMatched = expectedOutcome === 'pass' ? exitCode === 0 : exitCode !== 0;
+        if (!outcomeMatched) {
+          const observed = exitCode === 0 ? 'pass' : 'fail';
+          return {
+            success: false,
+            hypothesisId: hypothesis.id,
+            status: 'testing',
+            statement,
+            falsificationTest,
+            targetFiles,
+            evidence,
+            blastRadius,
+            canProceedToImplement: false,
+            reproductionResult,
+            error: `Kết quả reproductionCommand không khớp kỳ vọng: expected=${expectedOutcome}, observed=${observed} (exit ${exitCode}).`,
+            errorCode: 'REPRODUCTION_OUTCOME_MISMATCH',
+            suggestion: 'Kiểm tra lại test tái hiện, expectedOutcome và dữ liệu đầu vào trước khi kết luận về cơ chế nguyên nhân.',
+            guidance: `Giả thuyết [${hypothesis.id}] vẫn đang được kiểm tra. Kết quả lệnh chưa cung cấp bằng chứng thực nghiệm theo tiêu chí đã khai báo.`,
+          };
+        }
+
+        const learningNotes = `Observed expected ${expectedOutcome} outcome from "${reproductionCommand}" (exit ${exitCode}).`;
         hypothesisTracker.markValidated(hypothesis.id, learningNotes);
         return {
           success: true,
@@ -248,28 +294,25 @@ export function createHypothesisTool(
           canProceedToImplement: true,
           reproductionResult,
           learning: learningNotes,
-          guidance: `[HYPOTHESIS VALIDATED - PRE-MUTATION GATE UNLOCKED]: Giả thuyết [${hypothesis.id}] đã được chứng minh thành công! Bạn đã hoàn tất chuẩn 80% khảo sát ở Phase Explore. Cổng can thiệp sửa mã (PRE-MUTATION GATE) đã được MỞ KHÓA. Hãy thực hiện đúng 1 nhát sửa phẫu thuật (Surgical 1-shot fix) vào các file mục tiêu: ${targetFiles.join(', ')}.`,
-        };
-      } else {
-        const rejectReason = 'Reproduction command failed to substantiate the stated causal mechanism.';
-        hypothesisTracker.markFalsified(hypothesis.id, rejectReason);
-        return {
-          success: false,
-          hypothesisId: hypothesis.id,
-          status: 'falsified',
-          statement,
-          falsificationTest,
-          targetFiles,
-          evidence,
-          blastRadius,
-          canProceedToImplement: false,
-          reproductionResult,
-          error: `Giả thuyết [${hypothesis.id}] bị BÁC BỎ (Falsified). Không được phép chuyển sang Phase Implement với giả thuyết này.`,
-          errorCode: 'HYPOTHESIS_FALSIFIED',
-          suggestion: 'Hãy sử dụng get_symbol_context_360 hoặc query_call_graph để tìm hướng đi thay thế và thiết lập giả thuyết mới.',
-          guidance: `Giả thuyết [${hypothesis.id}] đã bị bác bỏ. Hãy quay lại Phase Explore để điều tra luồng dữ liệu chính xác trước khi sửa mã.`,
+          guidance: `[HYPOTHESIS VALIDATED]: Kết quả thực thi khớp tiêu chí đã khai báo cho giả thuyết [${hypothesis.id}]. Có thể chuyển sang thay đổi tối thiểu cần thiết trong: ${targetFiles.join(', ')}.`,
         };
       }
+
+      const learningNotes = `Static evidence supports the causal hypothesis in ${targetFiles.join(', ')}; empirical reproduction has not been run.`;
+      hypothesisTracker.markSupported(hypothesis.id, learningNotes);
+      return {
+        success: true,
+        hypothesisId: hypothesis.id,
+        status: 'supported',
+        statement,
+        falsificationTest,
+        targetFiles,
+        evidence,
+        blastRadius,
+        canProceedToImplement: blastRadius === 'LOW' || blastRadius === 'MEDIUM',
+        learning: learningNotes,
+        guidance: `[HYPOTHESIS SUPPORTED]: Bằng chứng tĩnh ủng hộ giả thuyết [${hypothesis.id}]. Thay đổi rủi ro thấp có thể dùng fast path nếu target đã được kiểm tra và evidence gate đạt ngưỡng; thay đổi rủi ro cao cần reproductionCommand cho bằng chứng thực nghiệm.`,
+      };
     },
   };
 }

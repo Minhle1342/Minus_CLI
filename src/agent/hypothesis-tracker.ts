@@ -1,4 +1,4 @@
-export type HypothesisStatus = 'formulated' | 'testing' | 'validated' | 'falsified';
+export type HypothesisStatus = 'formulated' | 'testing' | 'supported' | 'validated' | 'falsified';
 export type BlastRadiusRisk = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 export interface Hypothesis {
@@ -86,6 +86,16 @@ export class HypothesisTracker {
     }
   }
 
+  /** Static evidence supports a hypothesis but does not empirically validate it. */
+  markSupported(id?: string, notes?: string): void {
+    const target = id ? this.hypotheses.find((h) => h.id === id) : this.getActiveHypothesis();
+    if (target) {
+      target.status = 'supported';
+      target.testedAt = new Date().toISOString();
+      if (notes) target.learning = notes;
+    }
+  }
+
   /**
    * Đánh dấu giả thuyết bị BÁC BỎ (Falsified) kèm lý do cụ thể và bài học rút ra
    */
@@ -111,12 +121,18 @@ export class HypothesisTracker {
     return this.hypotheses.filter((h) => h.status === 'validated');
   }
 
-  getStats(): { total: number; validatedCount: number; falsifiedCount: number; activeCount: number } {
+  getSupportedHypotheses(): Hypothesis[] {
+    return this.hypotheses.filter((h) => h.status === 'supported');
+  }
+
+  getStats(): { total: number; supportedCount: number; validatedCount: number; falsifiedCount: number; activeCount: number } {
+    const supportedCount = this.hypotheses.filter((h) => h.status === 'supported').length;
     const validatedCount = this.hypotheses.filter((h) => h.status === 'validated').length;
     const falsifiedCount = this.hypotheses.filter((h) => h.status === 'falsified').length;
     const activeCount = this.hypotheses.filter((h) => h.status === 'formulated' || h.status === 'testing').length;
     return {
       total: this.hypotheses.length,
+      supportedCount,
       validatedCount,
       falsifiedCount,
       activeCount,
@@ -134,6 +150,8 @@ export class HypothesisTracker {
       const statusIcon =
         h.status === 'validated'
           ? '✅'
+          : h.status === 'supported'
+          ? '🔎'
           : h.status === 'falsified'
           ? '❌'
           : h.status === 'testing'

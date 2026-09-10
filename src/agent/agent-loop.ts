@@ -71,6 +71,7 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
+import { assessParetoEvidence } from './pareto-evidence-policy.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -93,6 +94,20 @@ function envFiniteNumber(name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+function hypothesisBlastRadiusRisk(
+  hypotheses: Array<{ blastRadius?: string }>,
+): 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | undefined {
+  const mapped = hypotheses.map((hypothesis) => (
+    hypothesis.blastRadius === 'CRITICAL' ? 'R5'
+      : hypothesis.blastRadius === 'HIGH' ? 'R3'
+        : hypothesis.blastRadius === 'MEDIUM' ? 'R2'
+          : hypothesis.blastRadius === 'LOW' ? 'R1'
+            : 'R0'
+  ));
+  const rank = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 } as const;
+  return mapped.sort((a, b) => rank[b] - rank[a])[0];
+}
+
 function isComprehensiveSubmissionSummary(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length < 200 || trimmed.split(/\s+/).length < 25) {
@@ -104,6 +119,7 @@ function isComprehensiveSubmissionSummary(value: string): boolean {
 
 export interface RuntimeHarnessProfile {
   profileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
+  /** @deprecated Kept for profile API compatibility; evidence policy decides whether reproduction is required. */
   enforceScratchTest: boolean;
   criticStrictness: 'strict' | 'standard' | 'lenient';
   compactionRatioBias: number;
@@ -118,10 +134,10 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
   if (isBugfixOrSecurity) {
     return {
       profileName: 'strict-verification',
-      enforceScratchTest: true,
+      enforceScratchTest: false,
       criticStrictness: 'strict',
       compactionRatioBias: -0.05,
-      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Tác vụ nhạy cảm về sửa lỗi/bảo mật. Quy tắc Popperian Falsification và kiểm thử cô lập (scratch test) được kích hoạt tối đa. Không sửa mã sản phẩm trước khi có bằng chứng tái hiện lỗi rõ ràng.',
+      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Tác vụ sửa lỗi/bảo mật cần bằng chứng tỷ lệ thuận với rủi ro. Dùng kiểm chứng thực nghiệm cho thay đổi rủi ro cao; thay đổi nhỏ, dễ đảo ngược có thể tiến hành khi target đã được đọc và cơ chế nguyên nhân có bằng chứng trực tiếp.',
     };
   }
 
@@ -1041,9 +1057,16 @@ export class AgentLoop {
       // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
       // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
       const activeTask = this.planManager.getActiveTask();
-      const hasValidatedHypothesis = this.hypothesisTracker.getValidatedHypotheses().length > 0;
+      const validatedHypotheses = this.hypothesisTracker.getValidatedHypotheses();
+      const supportedHypotheses = this.hypothesisTracker.getSupportedHypotheses();
+      const hasValidatedHypothesis = validatedHypotheses.length > 0;
+      const supportedHypothesisCount = supportedHypotheses.length;
+      const minimumHypothesisRisk = hypothesisBlastRadiusRisk([
+        ...validatedHypotheses,
+        ...supportedHypotheses,
+      ]);
       const priorClassification = previousClassification;
-      const classification = this.classificationEngine.classify({
+      const classificationInput = {
         request: turnUserRequest,
         activeTask: activeTask?.title,
         activeAcceptance: activeTask?.acceptanceCriteria,
@@ -1053,6 +1076,25 @@ export class AgentLoop {
         lastToolFailed: Boolean(this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})),
         previous: previousClassification,
         hasValidatedHypothesis,
+        minimumRisk: minimumHypothesisRisk,
+      };
+      const provisionalClassification = this.classificationEngine.classify(classificationInput);
+      const paretoEvidence = assessParetoEvidence({
+        session,
+        turn,
+        taskClass: provisionalClassification.taskClass,
+        risk: provisionalClassification.risk,
+        hasPlan: this.planManager.hasPlan(),
+        validatedHypothesisCount: validatedHypotheses.length,
+        supportedHypothesisCount,
+      });
+      const inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
+        && paretoEvidence.inspectedFiles.length > 0;
+      const classification = this.classificationEngine.classify({
+        ...classificationInput,
+        hasDirectEvidence: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+        evidenceScore: paretoEvidence.score,
+        evidenceThreshold: paretoEvidence.threshold,
       });
       previousClassification = classification;
 
@@ -1064,11 +1106,22 @@ export class AgentLoop {
         phase: classification.phase,
         hasPlan: this.planManager.hasPlan(),
         hasValidatedHypothesis,
-        targetFiles: this.hypothesisTracker.getValidatedHypotheses().flatMap((h) => h.targetFiles || []),
+        supportedHypothesisCount,
+        targetFiles: [
+          ...validatedHypotheses,
+          ...supportedHypotheses,
+        ].flatMap((h) => h.targetFiles || []),
+        validatedTargetFiles: validatedHypotheses.flatMap((h) => h.targetFiles || []),
+        risk: classification.risk,
+        evidenceScore: paretoEvidence.score,
+        evidenceThreshold: paretoEvidence.threshold,
+        evidenceReasons: paretoEvidence.reasons,
+        inspectedFiles: paretoEvidence.inspectedFiles,
+        hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
         hasSubmittedSolution,
         reproductionStatus: {
           hasPostFixPass: this.completionEvidenceGate.hasVerifiedPassingTest(session, turn),
-          hasPreFixRepro: false,
+          hasPreFixRepro: paretoEvidence.hasFailureEvidence || hasValidatedHypothesis,
         },
       });
 
@@ -1102,6 +1155,7 @@ export class AgentLoop {
         && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
       const providerSize = candidateProvider.getAll().length;
       const currentHypothesis = this.hypothesisTracker.getActiveHypothesis()
+        || this.hypothesisTracker.getSupportedHypotheses().slice(-1)[0]
         || this.hypothesisTracker.getValidatedHypotheses().slice(-1)[0];
       const retrievalState = this.stepRetrievalQueryBuilder.build({
         userRequest: turnUserRequest,
@@ -1184,6 +1238,7 @@ export class AgentLoop {
           controlDecision: {
             mode: toolControlMode,
             classification,
+            paretoEvidence,
             toolDecision: {
               ...recommendedToolDecision,
               id: activeDecisionId,
@@ -1246,6 +1301,8 @@ export class AgentLoop {
         lastToolResult: this.lastToolExecution?.result,
         consecutiveFailures: consecutiveFails,
         hasValidatedHypothesis,
+        paretoEvidenceSufficient: paretoEvidence.hasSufficientEvidence,
+        paretoUncertainty: paretoEvidence.uncertainty,
         hasSubmittedSolution,
         hasVerifiedTests,
         activeAgentCount: this.agentRegistry.list().filter((agent) => (
@@ -1449,14 +1506,18 @@ export class AgentLoop {
       // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
       const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
         taskClass: classification.taskClass,
-        hasValidatedHypothesis: (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) > 0,
+        hasValidatedHypothesis,
+        hasSupportedHypothesis: supportedHypothesisCount > 0,
+        evidenceSufficient: paretoEvidence.hasSufficientEvidence,
+        evidenceScore: paretoEvidence.score,
+        evidenceThreshold: paretoEvidence.threshold,
       });
 
       // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
       const rawReflection = this.reflectionEngine.getLastReflectionPrompt();
       let strategicPivotGuidance: string | undefined;
       if (consecutiveFails >= 2) {
-        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: You have encountered ${consecutiveFails} consecutive failures. DO NOT repeat similar mutations or regex adjustments. Decompose your approach: 1. Inspect exact test expectations and sample data. 2. Preprocess/clean strings or strip non-digit characters. 3. Validate components individually before combining. 4. Filter out malformed or truncated elements and ensure array length matches expectations.`;
+        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: ${consecutiveFails} consecutive failures provide feedback that the current approach is weak. Do not repeat the same action. Inspect the newest failure, compare it with the current hypothesis, run the smallest discriminating check, then revise or replace the hypothesis before another mutation.`;
       }
       if (consecutiveFails >= 3) {
         // Tự động đúc kết lỗi lặp lại thành Anti-Pattern lưu vào bộ nhớ dài hạn
@@ -1470,18 +1531,6 @@ export class AgentLoop {
         }).catch(() => {});
       }
       const reflectionContext = [rawReflection, strategicPivotGuidance].filter(Boolean).join('\n\n');
-
-      // Phase 4: Pareto 80/20 Pre-Mutation Reminder in Explore Phase (Layer 4 Safety)
-      const isBugfixOrSecurity = classification.taskClass === 'bugfix'
-        || (classification as any).category === 'bugfix'
-        || (classification as any).category === 'security'
-        || turnUserRequest.toLowerCase().includes('bug')
-        || turnUserRequest.toLowerCase().includes('sửa')
-        || turnUserRequest.toLowerCase().includes('lỗ hổng');
-      let paretoGateReminder: string | undefined;
-      if (classification.phase === 'explore' && isBugfixOrSecurity && (this.hypothesisTracker?.getValidatedHypotheses?.()?.length ?? 0) === 0) {
-        paretoGateReminder = `💡 [PARETO 80/20 GATE]: Before modifying any product code, formulate and verify your technical hypothesis using "formulate_and_verify_hypothesis". Direct edits in Explore phase without hypothesis validation will be rejected by the Guardian.`;
-      }
 
       // Phase 4: Auto-Convergence Directive when all verification tests passed
       let completionDirective: string | undefined;
@@ -1506,7 +1555,6 @@ export class AgentLoop {
         hypothesisContext,
         hypothesisGuidance,
         domainContractContext,
-        paretoGateReminder,
         phaseGuidance,
         rawPlanContext,
         recalledTurnContext,
@@ -2368,12 +2416,14 @@ export class AgentLoop {
           if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
             const hId = executionResult.result?.hypothesisId || 'H';
             const hStatus = executionResult.result?.status;
-            this.verificationPolicy.recordVerification(
-              `hypothesis_${hId}`,
-              hStatus === 'validated',
-              String(toolArgs.statement || 'Hypothesis verified').slice(0, 240),
-              hStatus === 'validated' ? 0 : 1,
-            );
+            if (hStatus === 'validated') {
+              this.verificationPolicy.recordVerification(
+                `hypothesis_${hId}`,
+                true,
+                String(toolArgs.statement || 'Hypothesis verified').slice(0, 240),
+                0,
+              );
+            }
           }
 
           if (reflectionAnalysis.isFailure) {
@@ -2770,7 +2820,7 @@ export class AgentLoop {
       const completionState = getTurnCompletionState(session, turn);
       const hasCodeMutations = completionState.hasMutations;
       const codeChangeRequired = initialTurnClassification.requiredCapabilities.includes('edit')
-        || initialTurnClassification.reasonCodes.includes('PARETO_80_20_EXPLORE_FIRST_BEFORE_MUTATION');
+        || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {

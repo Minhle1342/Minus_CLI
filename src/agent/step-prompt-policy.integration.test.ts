@@ -8,6 +8,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { Workspace } from '../workspace/workspace.js';
 import { AgentLoop } from './agent-loop.js';
 import type { StepPromptGatingMode } from './step-prompt-policy.js';
+import type { ToolControlMode } from '../control/classification-types.js';
 
 const finalSummary = [
   'Implemented the requested configuration update after reading the original value.',
@@ -55,7 +56,11 @@ class PromptCapturingScriptedLLM {
   }
 }
 
-async function runMode(mode: StepPromptGatingMode): Promise<{
+async function runMode(
+  mode: StepPromptGatingMode,
+  userRequest = 'Update sample.txt from before to after and verify the change.',
+  toolControlMode: ToolControlMode = 'off',
+): Promise<{
   finalAnswer: string;
   toolSequence: string[];
   fileContent: string;
@@ -115,7 +120,7 @@ async function runMode(mode: StepPromptGatingMode): Promise<{
     const loop = new AgentLoop(llm, registry, {
       workspace,
       maxSteps: 6,
-      toolControlMode: 'off',
+      toolControlMode,
       stepPromptGatingMode: mode,
       enableStepSummarization: false,
       enableGraphRepositoryMap: false,
@@ -124,7 +129,7 @@ async function runMode(mode: StepPromptGatingMode): Promise<{
       enableSubmitAutoFinalization: true,
     });
     const session = new Session(`step-prompt-${mode}`);
-    session.addUserMessage('Update sample.txt from before to after and verify the change.');
+    session.addUserMessage(userRequest);
     const finalAnswer = await loop.run(session);
     const toolSequence = session.getEvents()
       .filter((event) => event.type === 'tool/call')
@@ -165,4 +170,18 @@ test('off and enforce preserve scripted mutation lifecycle while enforce reduces
   assert.ok(enforce.promptTokensAfter < off.promptTokensAfter, 'enforce must inject fewer gated tokens');
   assert.ok(off.requests.every((request) => request.systemPrompt.includes('12. TOOL SYNERGY PLAYBOOKS:')));
   assert.ok(enforce.requests.every((request) => !request.systemPrompt.includes('12. TOOL SYNERGY PLAYBOOKS:')));
+});
+
+test('low-risk bugfix unlocks a small target-inspected edit without a mandatory hypothesis round-trip', async () => {
+  const result = await runMode(
+    'enforce',
+    'Fix the bug in sample.txt by changing before to after, then verify the change.',
+    'enforce',
+  );
+
+  assert.deepEqual(result.toolSequence, ['read_file', 'replace_text', 'run_command', 'submit_solution']);
+  assert.equal(result.fileContent, 'after');
+  assert.equal(result.failedToolResults, 0);
+  assert.equal(result.requests[0].tools.includes('replace_text'), false, 'first uncertain step stays read-only');
+  assert.equal(result.requests[1].tools.includes('replace_text'), true, 'reading the exact target exposes the bounded edit fast path');
 });

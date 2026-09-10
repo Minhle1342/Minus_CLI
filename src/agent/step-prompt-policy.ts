@@ -34,6 +34,8 @@ export interface StepPromptPolicyContext {
   lastToolResult?: unknown;
   consecutiveFailures: number;
   hasValidatedHypothesis: boolean;
+  paretoEvidenceSufficient?: boolean;
+  paretoUncertainty?: 'low' | 'medium' | 'high';
   hasSubmittedSolution: boolean;
   hasVerifiedTests: boolean;
   activeAgentCount: number;
@@ -161,9 +163,14 @@ export class StepPromptPolicy {
     const includeAdvice = !context.hasVerifiedTests && actionableAdvice;
     if (includeAdvice) reasonCodes.push('ACTIONABLE_TOOL_ADVICE');
 
+    const highRisk = ['R3', 'R4', 'R5'].includes(context.classification.risk)
+      || String(context.classification.taskClass) === 'security';
+    const evidenceSufficient = context.hasValidatedHypothesis || context.paretoEvidenceSufficient === true;
     const includeHarnessGuidance = (
       context.harnessProfileName === 'strict-verification'
-        ? (!context.hasValidatedHypothesis || !context.hasVerifiedTests)
+        ? (highRisk
+          ? (!context.hasValidatedHypothesis || !context.hasVerifiedTests)
+          : (!evidenceSufficient || (context.classification.phase === 'verify' && !context.hasVerifiedTests)))
         : context.harnessProfileName === 'velocity-first'
           ? ['plan', 'implement'].includes(context.classification.phase)
           : context.harnessProfileName === 'read-only-guard'
@@ -176,7 +183,11 @@ export class StepPromptPolicy {
     const parserTask = /\b(parser|extract|normalize|validator|phone|email|trích xuất|chuẩn hóa)\b/i.test(lower);
     const riskyMutation = ['bugfix', 'security', 'refactor'].includes(context.classification.taskClass)
       && (capabilities.has('edit') || ['explore', 'implement'].includes(context.classification.phase));
-    const includeScaffold = antiDeception || parserTask || riskyMutation || context.consecutiveFailures >= 2;
+    const includeScaffold = antiDeception
+      || context.consecutiveFailures >= 2
+      || confidence < 0.8
+      || (riskyMutation && (!evidenceSufficient || highRisk))
+      || (parserTask && context.paretoUncertainty === 'high');
     if (includeScaffold) reasonCodes.push('COGNITIVE_SCAFFOLD_REQUIRED');
 
     const includePlanContext = context.planRequired || (context.hasPlan && context.planIncomplete);

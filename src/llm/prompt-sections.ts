@@ -117,7 +117,7 @@ Core Architectural Invariants:
    - Complex/multi-file tasks: Call create_plan with 2-5 atomic milestones [Inspect -> Fix -> Verify]. Update milestones with update_plan_task.
 
 4. SURGICAL MUTATION DISCIPLINE & PRE-MUTATION HYPOTHESIS GATE:
-   - Before production bugfix edits, verify the cause with \`formulate_and_verify_hypothesis\`. Reproduction tests in \`scratch/\` are allowed and cleaned after passing. Unverified Explore-phase edits trigger UNVERIFIED_MUTATION_BLOCKED.
+   - Before production bugfix/refactor edits, reduce uncertainty in proportion to blast radius. A small reversible edit may proceed after inspecting its exact target and collecting direct evidence. High-risk changes require empirical reproduction through \`formulate_and_verify_hypothesis\` or an equivalent observed check. A plan alone does not prove causality.
    - Inspect target lines with read_file for contentHash and offsets; use symbol extraction or useful context windows.
    - create_file (new files, no overwrite), delete_file (requires expectedFileHash; NEVER use shell rm/del), move_file (safe rename; NEVER use shell mv).
    - replace_text (single hunk with expectedFileHash), apply_patch (unified diff for multi-hunk edits). See tool spec for patch hunk format.
@@ -244,21 +244,21 @@ export const DEFAULT_PROMPT_SECTIONS = [
  * Tuyệt đối không nhét vào System Prompt để bảo toàn 100% KV-Cache (Prefix Invariance).
  * Được tiêm động ở đuôi tin nhắn User (Dynamic Suffix) qua DynamicContextArbiter.
  */
-export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (80% REASONING BUDGET)]:
-- Goal: Deeply inspect code, navigate symbols, and isolate causal mechanisms.
+export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-ADAPTIVE INVESTIGATION)]:
+- Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
 - Primary Tools: get_symbol_context_360, inspect_symbol, query_call_graph, read_file, get_diagnostics.
-- Pareto Rule: Spend 80% of reasoning effort here. For bugfix/refactor tasks, formulate and verify your hypothesis with \`formulate_and_verify_hypothesis\` before attempting edits.
-- Constraint: Pre-Mutation Gate is active. Do NOT attempt to modify code until root cause is proven.`;
+- Pareto Rule: Investigate more when uncertainty or blast radius is high. Act early on a small reversible edit when the target has been inspected and direct evidence is sufficient.
+- Evidence Rule: Static evidence may support a low-risk change; high-risk changes require empirical reproduction or an equivalent observed check.`;
 
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
 - Goal: Break down complex, multi-file changes into 2-5 atomic milestones using \`create_plan\`.
 - Sequence: Inspect -> Surgical Fix -> Verification Ladder.
 - Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.`;
 
-export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (SURGICAL 1-2 SHOT MUTATION)]:
+export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
 - Primary Tools: \`apply_patch\` (Unified Diff) or \`replace_file_content\` / \`replace_text\` (with expectedFileHash).
-- Pareto Rule: Limit mutations to 1-2 precise edits. Never perform wide speculative rewrites.`;
+- Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.`;
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
 - Goal: Empirically prove that changes resolve the issue without regressions.
@@ -274,6 +274,10 @@ export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHOR
 export interface PhaseGuidanceOptions {
   taskClass?: string;
   hasValidatedHypothesis?: boolean;
+  hasSupportedHypothesis?: boolean;
+  evidenceSufficient?: boolean;
+  evidenceScore?: number;
+  evidenceThreshold?: number;
   hasUnverifiedChanges?: boolean;
   includePatchSpec?: boolean;
 }
@@ -287,8 +291,12 @@ export function resolvePhaseDynamicGuidance(
       let extra = '';
       if (options?.taskClass === 'bugfix' || options?.taskClass === 'refactor') {
         extra = options.hasValidatedHypothesis
-          ? '\n✔ Causal hypothesis is VALIDATED. You may proceed to plan or implement.'
-          : '\n⚠️ Pre-Mutation Gate ACTIVE: Formulate and verify your causal hypothesis with `formulate_and_verify_hypothesis` before editing files.';
+          ? '\n✔ Causal hypothesis is empirically validated. You may proceed to plan or implement.'
+          : options?.evidenceSufficient
+            ? `\n✔ Evidence threshold reached (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). A bounded, reversible implementation may proceed.`
+            : options?.hasSupportedHypothesis
+              ? `\n⚠️ Static evidence supports the hypothesis, but uncertainty remains above the current threshold (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). Inspect the target or run a discriminating check.`
+              : `\n⚠️ Evidence gate active (${options?.evidenceScore ?? 0}/${options?.evidenceThreshold ?? '?'}). Gather the smallest discriminating evidence before editing product files.`;
       }
       return `${SECTION_PHASE_EXPLORE_GUIDANCE}${extra}`;
     }
