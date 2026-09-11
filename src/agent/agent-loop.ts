@@ -9,7 +9,6 @@ import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
-import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ContextGuardian, ContextAgent, TurnMemoryRetriever, PlaybookReflector, PlaybookCurator } from '../context/index.js';
 import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
@@ -80,6 +79,7 @@ import {
   type TrajectoryStep,
 } from './reliable-tool-orchestration.js';
 import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
+import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1 } from './context-budget-manager.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
@@ -296,6 +296,7 @@ export class AgentLoop {
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
   readonly latencyOrchestrator: LatencyOrchestrator;
+  readonly contextBudgetManager: ContextBudgetManager;
   readonly dynamicContextCache = new DynamicContextCache<{
     repositoryMemoryContext: string;
     repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'];
@@ -439,6 +440,11 @@ export class AgentLoop {
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
     this.contextCompactor.setConfig({ preservePrefixCache: true });
+    this.contextBudgetManager = new ContextBudgetManager(this.contextCompactor, {
+      mode: resolveContextManagementMode(options?.contextManagementMode || process.env.MINUS_CONTEXT_MANAGEMENT_MODE),
+      triggerRatio: options?.requestCompactionRatio
+        ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO'),
+    });
     const dynamicBudget = options?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : 2000);
     this.dynamicContextArbiter = new DynamicContextArbiter(dynamicBudget);
     this.latencyOrchestrator = new LatencyOrchestrator({
@@ -810,7 +816,6 @@ export class AgentLoop {
     let hasReportedFindings = false;
     let reportedFindingsMarkdown: string | undefined;
     let previousClassification: ClassificationDecision | undefined;
-    let previousStepTokens = 0;
     const configuredControlMode = this.loopOptions?.toolControlMode || process.env.MINUS_TOOL_CONTROL_MODE || 'shadow';
     const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
       ? configuredControlMode as ToolControlMode
@@ -994,71 +999,10 @@ export class AgentLoop {
         this.goalManager.disarm();
         return rejectionMessage;
       }
-      // 2. Tối ưu hoá ngữ cảnh và nén Token tự động (Active Auto-Compaction Gate - Adaptive Threshold Elasticity)
-      const currentHistory = session.getHistory();
-      const totalHistoryChars = getHistoryTotalChars(currentHistory);
-      const estimatedHistoryTokens = ContextCompactor.estimateTokens(totalHistoryChars);
-      const tokenVelocity = previousStepTokens > 0
-        ? Math.max(0, estimatedHistoryTokens - previousStepTokens)
-        : 0;
-      previousStepTokens = estimatedHistoryTokens;
-
-      const currentPhase = this.targetFilesModifiedInTurn.size === 0
-        ? 'explore'
-        : hasSubmittedSolution
-          ? 'verify'
-          : 'implement';
-
+      // A single whole-request budget gate runs immediately before the provider
+      // call, after tools and dynamic context are known.
       const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
-      // Phase 2: Hierarchical Working-Memory Budget - giới hạn working history tối đa 24K tokens
       const workingHistoryBudget = Math.min(maxBudget, 24000);
-
-      // Tính toán ngưỡng kích hoạt nén co giãn thích ứng theo vận tốc token và pha nhận thức
-      const elasticRatio = ContextCompactor.computeElasticThresholdRatio({
-        tokenVelocity,
-        cognitivePhase: currentPhase,
-        baseRatio: 0.70,
-      });
-      const compactionThreshold = workingHistoryBudget * elasticRatio;
-
-      if (estimatedHistoryTokens > compactionThreshold && currentHistory.length > 4) {
-        // Context Guardian: Bảo vệ toàn vẹn ngữ cảnh trước khi nén (Pre-Compaction Zero Loss)
-        try {
-          const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
-            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-            projectPhase: `Turn ${turn} Execution`,
-          });
-          session.append('context/snapshot', {
-            reason: 'Context Guardian captured pre-compaction snapshot and generated transition briefing.',
-            snapshotId: guardianResult.snapshotId,
-          });
-        } catch {}
-
-        const activeModelName = this.llm?.getActiveProvider?.()?.name
-          || this.llm?.modelName
-          || this.llm?.constructor?.name
-          || 'unknown';
-
-        const compactRes = this.contextCompactor.compact(currentHistory, {
-          triggerRatio: elasticRatio,
-          force: true,
-          modelName: activeModelName,
-          mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-          cognitivePhase: currentPhase,
-          enableObservationMasking: true,
-        });
-        if (compactRes.stats.tokensSaved > 0) {
-          if (compactRes.stats.archivedTurns && compactRes.stats.archivedTurns.length > 0) {
-            await this.turnMemoryRetriever.archiveTurns(compactRes.stats.archivedTurns).catch(() => {});
-          }
-          if (compactRes.stats.maskedObservations && compactRes.stats.maskedObservations.length > 0) {
-            await this.turnMemoryRetriever.archiveMaskedObservations(compactRes.stats.maskedObservations).catch(() => {});
-          }
-          session.replaceHistory(compactRes.messages, 'auto-compaction');
-          CLI.renderAutoCompactionNotice(compactRes.stats.tokensSaved, compactRes.stats.compactedTokens);
-          await this.persistSession(session);
-        }
-      }
 
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
@@ -1460,14 +1404,14 @@ export class AgentLoop {
         ?? envFeatureEnabled('MINUS_DYNAMIC_CONTEXT_CACHE');
       const dynamicCacheKey = JSON.stringify({
         workspace: this._workspace.rootDir,
-        activeStepQuery,
+        // Source acquisition is stable across read-only steps. Query-specific
+        // ranking remains in the lightweight arbitration/retrieval layer.
+        taskIntent: turnUserRequest,
         activeTask: activeTask ? {
           id: activeTask.id,
-          readSet: activeTask.readSet,
           writeSet: activeTask.writeSet,
           symbols: activeTask.symbols,
         } : undefined,
-        relevantMemory: relevantMemory.map((item) => [item.key, item.confidence, item.insight]),
         registeredFiles: composeState?.registeredFiles || [],
         repositoryMemoryEnabled: shouldRecallRepoMem,
         repositoryMemoryTokens: effectiveRepoMemTokens,
@@ -1662,26 +1606,52 @@ export class AgentLoop {
         maxOutputTokens: activeTokenConfig.maxOutputTokens,
       });
 
-      // Budget the complete model-visible request, not history alone. This is
-      // proactive compaction at a safe provider-turn boundary, not a timeout.
-      const isHistoryExceeded = ContextCompactor.estimateTokens(getHistoryTotalChars(session.getHistory())) > workingHistoryBudget * 0.75;
-      const compactionResult = this.contextCompactor.compact(session.getHistory(), {
-        requestOverheadTokens: requestFootprint.nonHistoryTokens,
-        outputReserveTokens: requestFootprint.outputReserveTokens,
-        force: isHistoryExceeded,
-        triggerRatio: this.loopOptions?.requestCompactionRatio
-          ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO')
-          ?? (maxBudget > 32_000 ? (18_000 / maxBudget) : 0.82),
-        modelName: activeModelName,
+      // Budget the complete serialized request once all dynamic inputs are known.
+      const previousCompactionState = [...session.getEvents()]
+        .reverse()
+        .find((event) => event.type === 'session/compaction' && event.data.compactionState)
+        ?.data.compactionState as CompactionStateV1 | undefined;
+      const contextPreparation = await this.contextBudgetManager.prepareRequest({
+        provider: this.llm?.constructor?.name || 'unknown',
+        model: activeModelName,
+        systemPrompt: assembledSystemPrompt,
+        tools: activeToolDeclarations,
+        history: session.getHistory(),
+        dynamicContext: dynamicExecutionContext,
+        maxInputTokens: Math.max(1, activeTokenConfig.maxInputTokens || maxBudget),
+        targetInputTokens: workingHistoryBudget,
+        outputReserveTokens: Math.max(0, activeTokenConfig.maxOutputTokens || 0),
+      }, {
+        mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+        cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
+        enableObservationMasking: true,
+        previousState: previousCompactionState,
       });
-      if (compactionResult.stats.charsSaved > 0) {
-        if (compactionResult.stats.archivedTurns && compactionResult.stats.archivedTurns.length > 0) {
-          await this.turnMemoryRetriever.archiveTurns(compactionResult.stats.archivedTurns).catch(() => {});
+      const compactionStats = contextPreparation.compactionStats;
+      if (contextPreparation.changed && compactionStats) {
+        try {
+          const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
+            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+            projectPhase: `Turn ${turn} ${classification.phase}`,
+          });
+          session.append('context/snapshot', {
+            reason: 'Context Guardian captured evidence before whole-request compaction.',
+            snapshotId: guardianResult.snapshotId,
+            contextFingerprint: contextPreparation.state?.sourceFingerprint,
+          });
+        } catch {}
+        if (compactionStats.archivedTurns?.length) {
+          await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns).catch(() => {});
         }
-        if (compactionResult.stats.maskedObservations && compactionResult.stats.maskedObservations.length > 0) {
-          await this.turnMemoryRetriever.archiveMaskedObservations(compactionResult.stats.maskedObservations).catch(() => {});
+        if (compactionStats.maskedObservations?.length) {
+          await this.turnMemoryRetriever.archiveMaskedObservations(compactionStats.maskedObservations).catch(() => {});
         }
-        session.setHistory(compactionResult.messages);
+        session.setHistory(
+          contextPreparation.history,
+          `context-budget-${contextPreparation.mode}`,
+          contextPreparation.state as unknown as Record<string, unknown> | undefined,
+        );
+        CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
         await this.persistSession(session);
         requestFootprint = this.latencyOrchestrator.estimateRequest({
           systemPrompt: assembledSystemPrompt,
@@ -1691,6 +1661,13 @@ export class AgentLoop {
           maxInputTokens: activeTokenConfig.maxInputTokens,
           maxOutputTokens: activeTokenConfig.maxOutputTokens,
         });
+      }
+      if (contextPreparation.failureReason) {
+        const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${workingHistoryBudget} estimated input tokens).`;
+        session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
+        await this.persistSession(session);
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
+        return message;
       }
 
       session.recordRequestHeader({
@@ -1771,6 +1748,11 @@ export class AgentLoop {
         requestDurationMs,
         ...(timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs }),
       };
+      this.contextBudgetManager.observeActualUsage(
+        activeModelName,
+        contextPreparation.after.inputTokens,
+        response.usage.promptTokens,
+      );
       this.latencyOrchestrator.record({
         durationMs: requestDurationMs,
         timeToFirstTokenMs,
@@ -1811,6 +1793,11 @@ export class AgentLoop {
           cacheReadInputTokens: response.usage?.cacheReadInputTokens,
           cacheHitRate: response.usage?.cacheHitRate,
           hardTimeoutApplied: false,
+          contextManagementMode: contextPreparation.mode,
+          contextInputUpperBound: contextPreparation.after.upperBoundTokens,
+          contextWithinBudget: contextPreparation.withinBudget,
+          shadowCandidateInputUpperBound: contextPreparation.candidateAfter?.upperBoundTokens,
+          compactionStrategies: contextPreparation.compactionStats?.strategiesApplied,
         },
       });
       this.kernel?.ctx.events.emit('model:request_telemetry', {
@@ -1826,6 +1813,9 @@ export class AgentLoop {
         promptTokens: response.usage?.promptTokens,
         cachedTokens: response.usage?.cachedTokens,
         cacheHitRate: response.usage?.cacheHitRate,
+        contextManagementMode: contextPreparation.mode,
+        contextWithinBudget: contextPreparation.withinBudget,
+        contextInputUpperBound: contextPreparation.after.upperBoundTokens,
       });
 
       // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest

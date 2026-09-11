@@ -148,6 +148,7 @@ export interface SessionEventData {
   controlDecision?: Record<string, any>;
   snapshotId?: string;
   contextFingerprint?: string;
+  compactionState?: Record<string, unknown>;
 }
 
 export interface SessionEvent {
@@ -722,11 +723,16 @@ export class Session {
    * Replace the model-facing projection without deleting the raw history.
    * This is the first compaction seam; later phases can add typed policies.
    */
-  setHistory(newHistory: Content[], reason = 'context-compaction'): void {
+  setHistory(
+    newHistory: Content[],
+    reason = 'context-compaction',
+    compactionState?: Record<string, unknown>,
+  ): void {
     assertHistoryToolPairing(newHistory);
     this.append('session/compaction', {
       messages: newHistory,
       reason,
+      ...(compactionState ? { compactionState } : {}),
     });
   }
 

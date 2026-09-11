@@ -8,6 +8,7 @@ import type { ToolScope } from '../tools/registry.js';
 import type { AgentRegistry } from './agent-registry.js';
 import type { ToolControlMode } from '../control/classification-types.js';
 import type { StepPromptGatingMode } from './step-prompt-policy.js';
+import type { ContextManagementMode } from './context-budget-manager.js';
 
 export interface AgentLoopOptions {
   maxSteps?: number;
@@ -32,6 +33,8 @@ export interface AgentLoopOptions {
   softStepTargetMs?: number;
   /** Fraction of usable model input budget that triggers proactive request compaction. */
   requestCompactionRatio?: number;
+  /** Whole-request compaction rollout: legacy, shadow comparison, or hard-budget enforcement. */
+  contextManagementMode?: ContextManagementMode;
   /** Finalize directly from a verified submit_solution summary instead of adding another model round trip. */
   enableSubmitAutoFinalization?: boolean;
   /** Run consecutive allow-listed read-only tools concurrently. */

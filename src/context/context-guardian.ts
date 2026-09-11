@@ -138,6 +138,22 @@ export class ContextGuardian {
     const openQuestions: string[] = [];
     const attemptHistory: string[] = [];
 
+    // Derive verified commands from paired session events. A command name alone
+    // is never evidence that it succeeded.
+    const commandCalls = new Map<string, string>();
+    for (const event of session.getEvents()) {
+      if (event.type === 'tool/call' && event.data.toolCallId && event.data.toolName === 'run_command') {
+        const command = String(event.data.args?.command || '').trim();
+        if (command) commandCalls.set(event.data.toolCallId, command);
+      }
+      if (event.type === 'tool/result' && event.data.toolCallId) {
+        const command = commandCalls.get(event.data.toolCallId);
+        const result = event.data.result as Record<string, any> | undefined;
+        const succeeded = result?.exitCode === 0 || result?.success === true;
+        if (command && succeeded) workingCommandsSet.add(command);
+      }
+    }
+
     // 1. Quét tin nhắn trong history để thu thập tool calls, tool responses, và assistant outputs
     for (const msg of history) {
       for (const part of (msg.parts || [])) {
@@ -158,12 +174,8 @@ export class ContextGuardian {
             }
           }
 
-          if (fn === 'run_command' && args.command) {
-            const cmd = String(args.command).trim();
-            if (cmd.includes('test') || cmd.includes('tsc') || cmd.includes('build') || cmd.includes('status')) {
-              workingCommandsSet.add(cmd);
-            }
-          }
+          // Verification commands are recorded only after a paired successful
+          // tool/result event, handled above.
         }
 
         // Thu thập error resolutions từ tool results
@@ -226,71 +238,32 @@ export class ContextGuardian {
       }
     }
 
-    // Bổ sung các lệnh làm việc mặc định đã được xác minh
-    if (workingCommandsSet.size === 0) {
-      workingCommandsSet.add('npx tsc --noEmit');
-      workingCommandsSet.add('node node_modules/tsx/dist/cli.mjs src/test-suite.ts');
-    }
-
     return {
       projectId: path.basename(this.workspaceDir),
       timestamp: new Date().toISOString(),
       phase: additionalContext?.projectPhase || 'Implementation & Verification',
       p0: {
-        technicalDecisions: technicalDecisions.length > 0 ? technicalDecisions : [
-          {
-            topic: 'Module Architecture',
-            decision: 'Sử dụng cấu trúc module tách biệt với hợp đồng bảo vệ 4 giai đoạn',
-            rationale: 'Đảm bảo tính độc lập và khả năng khôi phục sau lỗi',
-            affectedFiles: Array.from(mutatedFilesSet),
-          },
-        ],
-        taskState: taskState.length > 0 ? taskState : [
-          {
-            description: 'Bảo toàn toàn vẹn ngữ cảnh trước compact tự động',
-            status: 'completed',
-            priority: 'P0',
-          },
-        ],
-        appliedFixes: appliedFixes.length > 0 ? appliedFixes : [
-          {
-            symptom: 'Lỗi suy giảm chú ý (Attention Decay) và mất ngữ cảnh khi nén',
-            rootCause: 'Compactor cắt tỉa lược bỏ thông tin quan trọng',
-            exactSolution: 'Tạo Context Guardian Pre-Compaction snapshot và Briefing',
-            affectedFiles: Array.from(mutatedFilesSet),
-          },
-        ],
+        technicalDecisions,
+        taskState,
+        appliedFixes,
         codeMutations: Array.from(mutatedFilesSet).map((f) => ({
           path: f,
-          nature: 'VERIFIED_MUTATION',
-          rationale: 'Implemented according to specification',
+          nature: 'OBSERVED_MUTATION',
+          rationale: 'Observed in the active turn; verification status is recorded separately',
         })),
-        resolvedErrors: resolvedErrors.length > 0 ? resolvedErrors : [
-          {
-            errorMessage: 'None (System stabilized)',
-            resolution: 'All tests green',
-          },
-        ],
+        resolvedErrors,
         workingCommands: Array.from(workingCommandsSet),
       },
       p1: {
-        discoveredPatterns: discoveredPatterns.length > 0 ? discoveredPatterns : [
-          'Tất cả các thay đổi cốt lõi đều được kiểm chứng bằng regression tests tự động',
-          'Khóa cứng invariant trước khi thực hiện nén lịch sử',
-        ],
+        discoveredPatterns,
         componentDependencies: [
           'src/context/context-guardian.ts phụ thuộc vào Session và Workspace',
           'src/agent/agent-loop.ts tích hợp ContextGuardian tại bước kích hoạt compactor',
         ],
-        userPreferences: [
-          'Giao tiếp tiếng Việt, mạch lạc, xúc tích, chuyên nghiệp',
-          'Bảo toàn 100% tỷ lệ vượt qua bài kiểm tra',
-        ],
+        userPreferences,
         projectContext: {
           keyFiles: Array.from(mutatedFilesSet),
-          architectureNotes: [
-            'CodingAgent sở hữu kiến trúc Multi-layer Defense với ToolRunner, Compactor, và Guardian',
-          ],
+          architectureNotes: [],
         },
         openQuestions,
       },
@@ -356,6 +329,7 @@ export class ContextGuardian {
       passed: data.p1.discoveredPatterns.length > 0,
       details: `${data.p1.discoveredPatterns.length} pattern(s)`,
     });
+    if (data.p1.discoveredPatterns.length === 0) missingItems.push('Quy ước và pattern thiết kế đã quan sát');
 
     // 6. Có danh sách lệnh đã xác minh hoạt động chính xác
     checks.push({
@@ -363,6 +337,7 @@ export class ContextGuardian {
       passed: data.p0.workingCommands.length > 0,
       details: `${data.p0.workingCommands.length} command(s)`,
     });
+    if (data.p0.workingCommands.length === 0) missingItems.push('Bằng chứng lệnh kiểm chứng thành công');
 
     // 7. Tính nhất quán giữa các phần (Cross-reference Consistency)
     const consistent = Boolean(data.projectId && data.timestamp);
@@ -373,17 +348,19 @@ export class ContextGuardian {
     });
 
     // 8. Đầy đủ các liên kết đường dẫn tệp cốt lõi
+    const pathsValid = data.p1.projectContext.keyFiles.every((f) => !f.startsWith('..'));
     checks.push({
       name: 'Đường dẫn tệp đầy đủ và hợp lệ trong phạm vi workspace',
-      passed: data.p1.projectContext.keyFiles.every((f) => !f.startsWith('..')),
+      passed: pathsValid,
       details: `${data.p1.projectContext.keyFiles.length} key file(s)`,
     });
+    if (!pathsValid) missingItems.push('Đường dẫn tệp hợp lệ trong workspace');
 
     const passedCount = checks.filter((c) => c.passed).length;
     const score = Math.round((passedCount / checks.length) * 100);
 
     return {
-      passed: missingItems.length === 0,
+      passed: checks.every((check) => check.passed),
       score,
       checks,
       missingItems,
@@ -465,7 +442,8 @@ export class ContextGuardian {
    */
   async saveSnapshot(
     data: ExtractedCriticalContext,
-    briefing: string
+    briefing: string,
+    integrity: IntegrityCheckResult,
   ): Promise<{ snapshotId: string; snapshotPath: string; jsonPath: string }> {
     await this.init();
 
@@ -483,7 +461,7 @@ export class ContextGuardian {
       `project: ${data.projectId}`,
       `timestamp: ${data.timestamp}`,
       `phase: ${data.phase}`,
-      `verification_score: 100`,
+      `verification_score: ${integrity.score}`,
       `---`,
       ``,
     ].join('\n');
@@ -493,13 +471,17 @@ export class ContextGuardian {
 
     // Tầng 2: Cập nhật ACTIVE_CONTEXT.md tại .codingagent/ACTIVE_CONTEXT.md (giới hạn <= 150 dòng)
     const activeContextPath = path.join(this.workspaceDir, '.codingagent', 'ACTIVE_CONTEXT.md');
+    const verificationStatus = data.p0.workingCommands.length > 0
+      ? `${data.p0.workingCommands.length} successful verification command(s) recorded`
+      : 'Unknown — no successful verification evidence recorded';
     const activeContextLines = [
       `# ACTIVE CONTEXT (CONSOLIDATED)`,
       `> Last updated: ${data.timestamp} | Snapshot: ${snapshotId}`,
       ``,
       `## Project Summary`,
       `- **Project**: ${data.projectId}`,
-      `- **Status**: All tests passing (100% green)`,
+      `- **Verification status**: ${verificationStatus}`,
+      `- **Snapshot integrity**: ${integrity.score}/100`,
       ``,
       `## Active Files`,
       ...data.p0.codeMutations.slice(0, 15).map((m) => `- \`${m.path}\` (${m.nature})`),
@@ -546,7 +528,7 @@ export class ContextGuardian {
     const briefing = this.generateTransitionBriefing(extracted);
 
     // 4. Lưu snapshot bền vững 3 tầng
-    const saved = await this.saveSnapshot(extracted, briefing);
+    const saved = await this.saveSnapshot(extracted, briefing, integrity);
 
     // 5. Tạo briefing hoàn chỉnh kèm đường dẫn snapshot
     const finalBriefing = this.generateTransitionBriefing(extracted, saved.snapshotPath);

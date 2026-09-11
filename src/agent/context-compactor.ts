@@ -1,4 +1,5 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing } from '../session/session-invariants.js';
@@ -42,6 +43,11 @@ export interface CompactionStats {
   effectiveHistoryBudgetTokens: number;
   archivedTurns?: ArchivedTurnDocument[];
   maskedObservations?: MaskedObservationRecord[];
+  /** True only when the model-visible history fits the calculated history budget. */
+  withinBudget: boolean;
+  budgetOverflowTokens: number;
+  /** Ordered list of compaction layers applied to this projection. */
+  strategiesApplied: string[];
 }
 
 export interface CompactionOptions {
@@ -56,6 +62,25 @@ export interface CompactionOptions {
   mutatedFiles?: string[];
   cognitivePhase?: 'explore' | 'plan' | 'implement' | 'verify';
   enableObservationMasking?: boolean;
+  /** Apply deterministic emergency reductions until the hard budget is met. */
+  enforceBudget?: boolean;
+  /** Per-request context ceiling; overrides the long-lived compactor default. */
+  maxInputTokens?: number;
+}
+
+const ROLLING_SYNOPSIS_MARKER = '[ROLLING DIALOGUE SYNOPSIS';
+
+function isRollingSynopsisMessage(message: SessionMessage): boolean {
+  return message.role === 'user'
+    && Boolean(message.parts?.some((part) => typeof part.text === 'string' && part.text.includes(ROLLING_SYNOPSIS_MARKER)));
+}
+
+function serializeHistory(messages: SessionMessage[]): string {
+  try {
+    return JSON.stringify(messages);
+  } catch {
+    return messages.map((message) => `${message.role}:${String(message.parts || '')}`).join('\n');
+  }
 }
 
 /**
@@ -132,6 +157,111 @@ export class ContextCompactor {
     return Math.ceil(Math.max(0, typeof textOrLength === 'number' ? textOrLength : 0) / 3.8);
   }
 
+  /** Count the serialized history instead of applying a character ratio to an aggregate length. */
+  static countHistoryTokens(messages: SessionMessage[], modelOrFamily?: string): number {
+    return ExactTokenizer.countTokens(serializeHistory(messages), modelOrFamily);
+  }
+
+  private enforceHardBudget(
+    input: SessionMessage[],
+    budgetTokens: number,
+    modelName?: string,
+  ): { messages: SessionMessage[]; strategies: string[]; prunedPartsCount: number } {
+    let messages = input.map((message) => ({
+      ...message,
+      parts: (message.parts || []).map((part) => ({ ...part })),
+    }));
+    const strategies: string[] = [];
+    let prunedPartsCount = 0;
+    const count = () => ContextCompactor.countHistoryTokens(messages, modelName);
+
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+
+    // Layer 1: reduce every large tool observation, including a recent one. A hard
+    // provider limit takes precedence over the soft recent-observation window.
+    messages = messages.map((message) => ({
+      ...message,
+      parts: (message.parts || []).map((part) => {
+        if (!part.functionResponse) return part;
+        const response = part.functionResponse.response as Record<string, any> | undefined;
+        const serialized = JSON.stringify(response ?? {});
+        if (serialized.length <= 320) return part;
+        prunedPartsCount++;
+        const rawLog = String(response?.stderr || response?.stdout || response?.error || '').trim();
+        return {
+          ...part,
+          functionResponse: {
+            name: part.functionResponse.name,
+            id: part.functionResponse.id,
+            response: {
+              status: response?.status || (response?.exitCode === 0 ? 'success' : 'compacted'),
+              ...(response?.path || response?.filePath ? { path: response.path || response.filePath } : {}),
+              ...(response?.command ? { command: String(response.command).slice(0, 240) } : {}),
+              ...(response?.exitCode !== undefined ? { exitCode: response.exitCode } : {}),
+              summary: `[HARD-BUDGET OBSERVATION STUB: ${serialized.length} chars archived in the session event log]`,
+              ...(rawLog ? { evidenceTail: rawLog.split('\n').slice(-4).join('\n').slice(-600) } : {}),
+            },
+          },
+        };
+      }),
+    }));
+    strategies.push('hard-budget-observation-stubs');
+
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+
+    // Layer 2: trim verbose assistant narration outside the most recent exchange.
+    let lastUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (
+        message.role === 'user'
+        && !message.parts?.some((part: any) => part.functionResponse)
+        && !isRollingSynopsisMessage(message)
+      ) {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    messages = messages.map((message, messageIndex) => ({
+      ...message,
+      parts: (message.parts || []).map((part) => {
+        if (
+          message.role !== 'model'
+          || messageIndex >= lastUserIndex
+          || typeof part.text !== 'string'
+          || part.text.length <= 600
+        ) return part;
+        prunedPartsCount++;
+        return {
+          ...part,
+          text: `${part.text.slice(0, 260)}\n… [${part.text.length - 520} chars archived] …\n${part.text.slice(-260)}`,
+        };
+      }),
+    }));
+    strategies.push('hard-budget-assistant-trim');
+
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+
+    // Layer 3: the detailed turn documents remain recoverable from the immutable
+    // event log and memory archive, so keep only the newest synopsis references.
+    messages = messages.map((message) => {
+      if (!isRollingSynopsisMessage(message)) return message;
+      const text = String(message.parts?.find((part) => part.text)?.text || '');
+      const turnLines = text.split('\n').filter((line) => line.trimStart().startsWith('• Turn #'));
+      const retained = turnLines.slice(-12);
+      prunedPartsCount++;
+      return {
+        role: 'user',
+        parts: [{
+          text: `${ROLLING_SYNOPSIS_MARKER} - ${turnLines.length} ARCHIVED]:\n${retained.join('\n')}\n> Older details remain retrievable from archived turn memory.`,
+        }],
+      };
+    });
+    strategies.push('hard-budget-synopsis-window');
+
+    return { messages, strategies, prunedPartsCount };
+  }
+
   /**
    * Trích xuất thông tin tóm tắt một turn đối thoại cũ
    */
@@ -173,17 +303,34 @@ export class ContextCompactor {
 
     const uniqueFiles = Array.from(new Set(filesTouched));
     const uniqueTools = Array.from(new Set(toolsUsed));
+    for (const text of assistantThoughts) {
+      for (const line of text.split('\n')) {
+        const normalized = line.replace(/^[-*•#\d.)\s]+/, '').trim();
+        if (
+          normalized.length >= 20
+          && /\b(decid(?:e|ed|ing)|decision|chọn|quyết định|thay thế|sử dụng|giữ|bỏ)\b/i.test(normalized)
+        ) {
+          keyDecisions.push(normalized.slice(0, 240));
+        }
+      }
+    }
+    const uniqueDecisions = Array.from(new Set(keyDecisions)).slice(0, 8);
     const summaryText = assistantThoughts.slice(-1)[0]
       || (uniqueTools.length > 0 ? `Đã thực thi công cụ: ${uniqueTools.join(', ')}` : 'Đã hoàn tất bước trao đổi.');
 
+    const stableTurnHash = crypto.createHash('sha256')
+      .update(serializeHistory(turnMessages))
+      .digest('hex')
+      .slice(0, 16);
+
     const doc: ArchivedTurnDocument = {
-      id: `archived-turn-${turnNum}-${Date.now().toString(36)}`,
+      id: `archived-turn-${turnNum}-${stableTurnHash}`,
       turnNumber: turnNum,
       userPrompt: userPrompt.trim() || `Yêu cầu turn #${turnNum}`,
       assistantSummary: summaryText.trim(),
       toolsUsed: uniqueTools,
       filesTouched: uniqueFiles,
-      keyDecisions,
+      keyDecisions: uniqueDecisions,
       timestamp: new Date().toISOString(),
     };
 
@@ -201,8 +348,15 @@ export class ContextCompactor {
     messages: SessionMessage[],
     preserveLastNTurns: number
   ): { messages: SessionMessage[]; archivedTurns: ArchivedTurnDocument[]; prunedTurnsCount: number } {
+    const priorSynopsisLines = messages
+      .filter(isRollingSynopsisMessage)
+      .flatMap((message) => message.parts || [])
+      .flatMap((part) => typeof part.text === 'string' ? part.text.split('\n') : [])
+      .filter((line) => line.trimStart().startsWith('• Turn #'));
+    const sourceMessages = messages.filter((message) => !isRollingSynopsisMessage(message));
+
     const userTurnIndices: number[] = [];
-    messages.forEach((msg, idx) => {
+    sourceMessages.forEach((msg, idx) => {
       if (msg.role === 'user' && !msg.parts?.some((p) => p.functionResponse)) {
         userTurnIndices.push(idx);
       }
@@ -215,11 +369,11 @@ export class ContextCompactor {
 
     // Turn 0 luôn được giữ nguyên (từ đầu đến trước turn 1 của user)
     const turn0EndIndex = userTurnIndices[1];
-    const turn0Messages = messages.slice(0, turn0EndIndex);
+    const turn0Messages = sourceMessages.slice(0, turn0EndIndex);
 
     // Điểm bắt đầu của cửa sổ trượt (các turn được bảo toàn ở đuôi)
     const cutoffTurnIdx = userTurnIndices[userTurnIndices.length - preserveLastNTurns];
-    const preservedTailMessages = messages.slice(cutoffTurnIdx);
+    const preservedTailMessages = sourceMessages.slice(cutoffTurnIdx);
 
     // Các turn cũ cần được thu gọn thành tóm tắt
     const archivedTurns: ArchivedTurnDocument[] = [];
@@ -231,8 +385,8 @@ export class ContextCompactor {
       const endIdx = (i + 1 < oldUserTurnIndices.length)
         ? oldUserTurnIndices[i + 1]
         : cutoffTurnIdx;
-      const singleTurnMessages = messages.slice(startIdx, endIdx);
-      const turnNum = i + 1;
+      const singleTurnMessages = sourceMessages.slice(startIdx, endIdx);
+      const turnNum = priorSynopsisLines.length + i + 1;
       const { synopsis, doc } = this.extractTurnSynopsis(singleTurnMessages, turnNum);
       archivedTurns.push(doc);
       synopsisLines.push(synopsis);
@@ -243,7 +397,7 @@ export class ContextCompactor {
       parts: [{
         text: `[ROLLING DIALOGUE SYNOPSIS - TURNS 1 to ${oldUserTurnIndices.length} ARCHIVED]:\n` +
           `> Ngữ cảnh các lượt trao đổi cũ đã được nén vào kho lưu trữ tập (Archived Turns Memory):\n` +
-          synopsisLines.join('\n') +
+          [...priorSynopsisLines, ...synopsisLines].join('\n') +
           `\n> (Hệ thống sẽ tự động re-inject thông tin chi tiết nếu người dùng đề cập đến các bước trên)`
       }]
     };
@@ -279,13 +433,14 @@ export class ContextCompactor {
 
     // 1. Tính tổng dung lượng ban đầu qua O(1) WeakMap cache
     const originalLength = getHistoryTotalChars(messages);
-    const originalTokens = ContextCompactor.estimateTokens(originalLength, options?.modelName);
+    const originalTokens = ContextCompactor.countHistoryTokens(messages, options?.modelName);
     const requestOverheadTokens = Math.max(0, options?.requestOverheadTokens || 0);
     const outputReserveTokens = Math.max(0, options?.outputReserveTokens || 0);
     const triggerRatio = Math.min(1, Math.max(0.5, options?.triggerRatio ?? 1));
+    const requestTokenCeiling = Math.max(1, options?.maxInputTokens || this.config.maxTotalHistoryTokens);
     const effectiveHistoryBudgetTokens = Math.max(
       0,
-      Math.floor(this.config.maxTotalHistoryTokens * triggerRatio) - requestOverheadTokens - outputReserveTokens,
+      Math.floor(requestTokenCeiling * triggerRatio) - requestOverheadTokens - outputReserveTokens,
     );
 
     // Nếu cấu hình bảo vệ Prefix Cache và dung lượng token chưa vượt ngưỡng ngân sách (maxTotalHistoryTokens)
@@ -305,6 +460,9 @@ export class ContextCompactor {
           outputReserveTokens,
           effectiveHistoryBudgetTokens,
           archivedTurns: [],
+          withinBudget: true,
+          budgetOverflowTokens: 0,
+          strategiesApplied: [],
         },
       };
     }
@@ -331,6 +489,9 @@ export class ContextCompactor {
       : this.config.preserveLastNToolResults;
 
     const isObservationMaskingActive = options?.enableObservationMasking ?? this.config.enableObservationMasking;
+    if (isObservationMaskingActive) {
+      effectivePreserveLastN = Math.min(effectivePreserveLastN, this.config.maskOldObservationsBeyondN);
+    }
 
     // Tìm các index của tool responses gần nhất
     const toolResultIndices: number[] = [];
@@ -553,7 +714,7 @@ export class ContextCompactor {
     // 4. Tính toán kết quả sau khi nén qua WeakMap cache
     compactedLength = getHistoryTotalChars(compactedMessages);
 
-    const charsSaved = Math.max(0, originalLength - compactedLength);
+    let charsSaved = Math.max(0, originalLength - compactedLength);
 
     if (options?.reinjectInvariants && charsSaved > 0) {
       compactedMessages.push({
@@ -565,7 +726,14 @@ export class ContextCompactor {
       compactedLength += options.reinjectInvariants.length + 65;
     }
 
-    const finalTokens = ContextCompactor.estimateTokens(compactedLength);
+    const hardBudgetResult = options?.enforceBudget
+      ? this.enforceHardBudget(compactedMessages, effectiveHistoryBudgetTokens, options.modelName)
+      : { messages: compactedMessages, strategies: [] as string[], prunedPartsCount: 0 };
+    compactedMessages.splice(0, compactedMessages.length, ...hardBudgetResult.messages);
+    prunedPartsCount += hardBudgetResult.prunedPartsCount;
+    compactedLength = getHistoryTotalChars(compactedMessages);
+    charsSaved = Math.max(0, originalLength - compactedLength);
+    const finalTokens = ContextCompactor.countHistoryTokens(compactedMessages, options?.modelName);
     const finalTokensSaved = Math.max(0, originalTokens - finalTokens);
 
     const stats: CompactionStats = {
@@ -582,6 +750,13 @@ export class ContextCompactor {
       effectiveHistoryBudgetTokens,
       archivedTurns,
       maskedObservations,
+      withinBudget: finalTokens <= effectiveHistoryBudgetTokens,
+      budgetOverflowTokens: Math.max(0, finalTokens - effectiveHistoryBudgetTokens),
+      strategiesApplied: [
+        ...(prunedTurnsCount > 0 ? ['rolling-turn-compaction'] : []),
+        ...(prunedPartsCount > 0 ? ['observation-masking-or-slicing'] : []),
+        ...hardBudgetResult.strategies,
+      ],
     };
 
     assertHistoryToolPairing(compactedMessages);

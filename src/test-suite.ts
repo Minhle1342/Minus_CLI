@@ -553,7 +553,7 @@ async function runUnitTests() {
     packageConfig.scripts?.predev === 'npm run search:up'
     && packageConfig.scripts?.['search:up'] === 'tsx src/scripts/start-searxng.ts'
     && searchStartupScript.includes('startDockerDaemon')
-    && searchStartupScript.includes("['compose', '-f', COMPOSE_FILE, 'up', '-d']"),
+    && searchStartupScript.includes("['compose', '--file', COMPOSE_FILE, 'up', '-d']"),
     'npm run dev tự bật Docker daemon rồi khởi động SearXNG ở chế độ nền qua predev lifecycle',
   );
 
@@ -7322,18 +7322,30 @@ Always write tests first!`;
   const guardianSession = new Session('sess-guardian-test');
   guardianSession.addUserMessage('Triển khai Context Guardian và kiểm tra toàn vẹn ngữ cảnh');
   guardianSession.append('tool/call', {
+    toolCallId: 'guardian-write-1',
     toolName: 'write_file',
     args: { path: 'src/context/context-guardian.ts', content: 'export class ContextGuardian {}' },
   });
+  guardianSession.append('tool/result', {
+    toolCallId: 'guardian-write-1',
+    toolName: 'write_file',
+    result: { success: true },
+  });
   guardianSession.append('tool/call', {
+    toolCallId: 'guardian-verify-1',
     toolName: 'run_command',
     args: { command: 'npx tsc --noEmit' },
+  });
+  guardianSession.append('tool/result', {
+    toolCallId: 'guardian-verify-1',
+    toolName: 'run_command',
+    result: { exitCode: 0, success: true },
   });
   guardianSession.append('assistant/message', {
     content: {
       role: 'model',
       parts: [{
-        text: 'Đã hoàn thành module. Quyết định kiến trúc: chuyển sang mô hình 4 Fases kết hợp Pre-Compaction Safeguard.',
+        text: 'Đã hoàn thành module. Quyết định kiến trúc: chuyển sang mô hình 4 Fases kết hợp Pre-Compaction Safeguard. Quy ước: chỉ ghi nhận bằng chứng kiểm chứng từ tool result thành công.',
       }],
     },
   });

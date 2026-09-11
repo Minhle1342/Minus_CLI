@@ -74,6 +74,9 @@ export interface KernelEvents {
     promptTokens?: number;
     cachedTokens?: number;
     cacheHitRate?: number;
+    contextManagementMode?: import('../agent/context-budget-manager.js').ContextManagementMode;
+    contextWithinBudget?: boolean;
+    contextInputUpperBound?: number;
   }) => void;
   'tools:batch': (telemetry: {
     mode: string;

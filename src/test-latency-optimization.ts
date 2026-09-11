@@ -6,6 +6,7 @@ import { LatencyOrchestrator, resolveModelLatencyProfile } from './agent/latency
 import { ContextCompactor } from './agent/context-compactor.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { DynamicContextCache } from './agent/dynamic-context-cache.js';
+import { PipelinedToolDispatcher } from './agent/pipelined-tool-dispatcher.js';
 import { partitionToolCalls, type ScheduledToolCall } from './agent/tool-execution-scheduler.js';
 import { AnthropicLLM } from './llm/anthropic.js';
 import { Session } from './session/session.js';
@@ -412,7 +413,7 @@ async function main(): Promise<void> {
   finalSession.addUserMessage('Hoàn tất tác vụ');
   const finalAnswer = await loop.run(finalSession);
   // 6. Test PipelinedToolDispatcher (Streaming Incremental Tool Dispatch)
-  const pipelinedDispatcher = loop.pipelinedDispatcher;
+  const pipelinedDispatcher = new PipelinedToolDispatcher();
   assert(pipelinedDispatcher.isSafeReadOnlyTool('read_file'), 'read_file must be marked as safe read-only tool');
   assert(pipelinedDispatcher.isSafeReadOnlyTool('grep_search'), 'grep_search must be marked as safe read-only tool');
   assert(!pipelinedDispatcher.isSafeReadOnlyTool('replace_text'), 'replace_text must NOT be dispatched early');
@@ -428,7 +429,13 @@ async function main(): Promise<void> {
     },
   });
 
-  const stepToolRunner = (loop as any).toolRunner;
+  const stepToolRunner = {
+    run: async (toolName: string, args: Record<string, any>) => {
+      const startedAt = Date.now();
+      const result = await registry.execute(toolName, args, workspace);
+      return { toolName, args, result, durationMs: Date.now() - startedAt };
+    },
+  } as any;
   const earlyDispatched = pipelinedDispatcher.dispatchEarly(
     'read_file',
     { path: 'src/main.ts' },
