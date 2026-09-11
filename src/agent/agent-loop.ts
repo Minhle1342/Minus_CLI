@@ -1566,12 +1566,21 @@ export class AgentLoop {
         workspaceRoot: this._workspace.rootDir,
       });
 
-      if (epistemicResult.activated && epistemicResult.dialecticalVerdict) {
-        this.hypothesisTracker.attachEpistemicVerdict(
-          activeHypothesis?.id,
-          epistemicResult.dialecticalVerdict,
-          epistemicResult.speculativeRollout,
-        );
+      if (epistemicResult.activated) {
+        if (epistemicResult.dialecticalVerdict) {
+          this.hypothesisTracker.attachEpistemicVerdict(
+            activeHypothesis?.id,
+            epistemicResult.dialecticalVerdict,
+            epistemicResult.speculativeRollout,
+          );
+        }
+        CLI.renderEpistemicProgress({
+          hypothesisId: activeHypothesis?.id,
+          targetFiles: activeHypothesis?.targetFiles,
+          dialecticalVerdict: epistemicResult.dialecticalVerdict,
+          speculativeRollout: epistemicResult.speculativeRollout,
+          distilledTokens: epistemicResult.dialecticalVerdict?.distilledTokens,
+        });
       }
       const epistemicVerdictContext = epistemicResult.activated ? epistemicResult.distilledContext : undefined;
 

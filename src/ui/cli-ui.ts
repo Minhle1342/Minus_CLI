@@ -1173,6 +1173,84 @@ export class CLI {
     console.log(`  ${c.purple}💾 [Snapshot Saved]${c.reset} ${c.brightCyan}${snapshot.snapshotId}${c.reset}${decisionsStr}`);
   }
 
+  /**
+   * Biểu diễn tiến trình thực thi của Cơ chế Epistemic Dual Investigation & Monte Carlo Rollout.
+   * (Chỉ biểu diễn các pha tiến trình sự kiện đang diễn ra, tuyệt đối không bao gồm cảnh báo)
+   */
+  static renderEpistemicProgress(event: {
+    hypothesisId?: string;
+    targetFiles?: string[];
+    dialecticalVerdict?: {
+      outcome: string;
+      confidence: number;
+      thesisClaim: string;
+      antithesisRebuttal: string;
+      epistemicArbiterReasoning?: string;
+      recommendedAction: string;
+      distilledTokens?: number;
+    };
+    speculativeRollout?: {
+      steps: Array<{
+        stepIndex: number;
+        action: string;
+        predictedOutcome: string;
+        syntaxValid: boolean;
+        regressionRisk: string;
+        score: number;
+      }>;
+      meanScore: number;
+      passedSyntaxCheck: boolean;
+      recommendation: string;
+    };
+    distilledTokens?: number;
+  }): void {
+    if (!event.dialecticalVerdict && !event.speculativeRollout) return;
+
+    const hypLabel = event.hypothesisId ? ` [${event.hypothesisId}]` : '';
+    const filesLabel = event.targetFiles && event.targetFiles.length > 0
+      ? ` ── ${event.targetFiles.map(f => path.basename(f)).join(', ')}`
+      : '';
+
+    console.log(`\n  ${c.brightCyan}${c.bold}⚖️ [EPISTEMIC DUAL INVESTIGATION]${c.reset}${c.brightYellow}${hypLabel}${c.reset}${c.slate}${filesLabel}${c.reset}`);
+
+    if (event.dialecticalVerdict) {
+      const v = event.dialecticalVerdict;
+      const confPct = Math.round(v.confidence * 100);
+      const outcomeColor = v.outcome === 'CONFIRMED_THESIS'
+        ? c.emerald
+        : v.outcome === 'REFINED_HYPOTHESIS'
+        ? c.brightYellow
+        : c.brightCyan;
+
+      console.log(`     ${c.slate}├─ ${c.brightYellow}Thesis:${c.reset}     ${v.thesisClaim}`);
+      console.log(`     ${c.slate}├─ ${c.brightCyan}Antithesis:${c.reset} ${v.antithesisRebuttal}`);
+      console.log(`     ${c.slate}├─ ${c.purple}Arbiter:${c.reset}    ${outcomeColor}${c.bold}${v.outcome}${c.reset} ${c.slate}(Độ tin cậy: ${confPct}%) · Hành động: ${c.white}${v.recommendedAction}${c.reset}`);
+    }
+
+    if (event.speculativeRollout) {
+      const r = event.speculativeRollout;
+      const scorePct = Math.round(r.meanScore * 100);
+      const recColor = r.recommendation === 'PROCEED'
+        ? c.emerald
+        : r.recommendation === 'TRY_ALTERNATIVE'
+        ? c.brightYellow
+        : c.crimson;
+
+      console.log(`     ${c.slate}├─ ${c.brightBlue}MCTS Rollout:${c.reset} ${r.steps.length} bước suy đoán lookahead · Khả thi: ${c.bold}${scorePct}%${c.reset} ➔ ${recColor}${c.bold}${r.recommendation}${c.reset}`);
+      for (const s of r.steps) {
+        const syntaxBadge = s.syntaxValid ? `${c.emerald}✔ syntax${c.reset}` : `${c.crimson}✘ syntax${c.reset}`;
+        console.log(`     ${c.slate}│  • Bước ${s.stepIndex}:${c.reset} ${s.action} ${c.slate}(${syntaxBadge}, rủi ro: ${s.regressionRisk}, điểm: ${s.score.toFixed(2)})${c.reset}`);
+      }
+    }
+
+    const tokens = event.distilledTokens || event.dialecticalVerdict?.distilledTokens || 0;
+    if (tokens > 0) {
+      console.log(`     ${c.slate}╰─ ${c.emerald}Distill:${c.reset}    Đã nén ${c.bold}${tokens} tokens${c.reset} ${c.slate}(ngưỡng ≤ 180 tk) ➔ Nạp vào Dynamic Context P1.44${c.reset}\n`);
+    } else {
+      console.log(`     ${c.slate}╰─ ${c.emerald}Distill:${c.reset}    ${c.slate}Đã nén ngữ cảnh ➔ Nạp vào Dynamic Context P1.44${c.reset}\n`);
+    }
+  }
+
   static renderContextDriftWarning(drift: {
     divergedFiles: string[];
     details: string[];
