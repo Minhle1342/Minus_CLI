@@ -48,6 +48,7 @@ import {
   resolveOutputTokensPreset,
   resolveInputTokensPreset,
   resolveThinkingTokensPreset,
+  resolveDynamicBudgetPreset,
   normalizePresetTier,
 } from './llm/token-config.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
@@ -2021,6 +2022,9 @@ ${planPrompt}`;
           const tierDef = TOKEN_TIER_DEFINITIONS[targetTier];
 
           agentLoop.setTokenConfig(presetConfig);
+          if (presetConfig.dynamicContextBudget) {
+            process.env.MINUS_DYNAMIC_CONTEXT_BUDGET = String(presetConfig.dynamicContextBudget);
+          }
           saveSession({ tokenConfig: presetConfig });
 
           console.log(`\n${c.green}✔ Đã áp dụng Gói Cấu hình Token:${c.reset} ${c.bold}${tierDef.badge} - ${tierDef.label}${c.reset}`);
@@ -2103,7 +2107,26 @@ ${planPrompt}`;
           continue;
         }
 
-        // 6. Khôi phục mặc định (Reset)
+        // 6. Cấu hình Dynamic Context Budget (chấp nhận: low | med | high | max | số nguyên)
+        if (subCmd === 'dynamic' || subCmd === 'dynamic_budget' || subCmd === 'dynamic_context') {
+          if (!val) {
+            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens dynamic <low|medium|high|max|số_token>${c.reset}\n`);
+            continue;
+          }
+          const resolvedDynamic = resolveDynamicBudgetPreset(val);
+          if (resolvedDynamic === null || resolvedDynamic <= 0) {
+            console.log(`\n${c.red}✖ Mức dynamic context không hợp lệ. Khả dụng: low (1,000), medium (2,000), high (4,000), max (8,000) hoặc nhập số nguyên.${c.reset}\n`);
+            continue;
+          }
+          agentLoop.setTokenConfig({ dynamicContextBudget: resolvedDynamic });
+          process.env.MINUS_DYNAMIC_CONTEXT_BUDGET = String(resolvedDynamic);
+          const updated = agentLoop.getTokenConfig();
+          saveSession({ tokenConfig: updated });
+          console.log(`\n${c.green}✔ Đã cập nhật Dynamic Context Budget:${c.reset} ${c.bold}${resolvedDynamic.toLocaleString()} tokens${c.reset} ${c.gray}(Đã đồng bộ DynamicContextArbiter & env)${c.reset}\n`);
+          continue;
+        }
+
+        // 7. Khôi phục mặc định (Reset)
         if (subCmd === 'reset') {
           const defaultConfig = resolveTokenConfig(modelName);
           agentLoop.setTokenConfig(defaultConfig);

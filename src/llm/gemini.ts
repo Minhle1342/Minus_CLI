@@ -329,11 +329,18 @@ export class GeminiLLM {
             });
           }
 
-          // Gắn suffix cho các step tiếp theo (Step 2, 3...) vào các tool responses tương ứng
+          // Gắn suffix cho các step tiếp theo (Step 2, 3...) vào tool response cuối cùng của mỗi step
+          // Khi có nhiều tool calls chạy song song trong cùng 1 step, chỉ gắn suffix vào tool response cuối cùng của step đó
           let currentStep = 2;
           for (let i = turnStartIdx + 1; i < cloned.length; i++) {
             const item = cloned[i];
-            if (item.role === 'user' && item.parts?.some((p: any) => p.functionResponse)) {
+            const isToolResponse = item.role === 'user' && item.parts?.some((p: any) => p.functionResponse);
+            const nextIsToolResponse = i + 1 < cloned.length
+              && cloned[i + 1].role === 'user'
+              && cloned[i + 1].parts?.some((p: any) => p.functionResponse);
+            const isLastToolResponseOfStep = isToolResponse && !nextIsToolResponse;
+
+            if (isLastToolResponseOfStep) {
               const sK = getSuffix(currentStep);
               if (sK && sK.trim()) {
                 item.parts = item.parts || [];

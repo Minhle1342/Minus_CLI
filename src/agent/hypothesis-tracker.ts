@@ -1,3 +1,5 @@
+import type { DialecticalVerdict, SpeculativeRolloutResult } from './epistemic-investigation-engine.js';
+
 export type HypothesisStatus = 'formulated' | 'testing' | 'supported' | 'validated' | 'falsified';
 export type BlastRadiusRisk = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -13,6 +15,8 @@ export interface Hypothesis {
   learning?: string;
   createdAt: string;
   testedAt?: string;
+  dialecticalVerdict?: DialecticalVerdict;
+  speculativeRollout?: SpeculativeRolloutResult;
 }
 
 /**
@@ -109,6 +113,19 @@ export class HypothesisTracker {
     }
   }
 
+  /**
+   * Gắn kết quả biện chứng (Dual Investigation) và Speculative Rollout vào giả thuyết
+   */
+  attachEpistemicVerdict(id: string | undefined, verdict: DialecticalVerdict, rollout?: SpeculativeRolloutResult): void {
+    const target = id ? this.hypotheses.find((h) => h.id === id) : this.getActiveHypothesis();
+    if (target) {
+      target.dialecticalVerdict = verdict;
+      if (rollout) {
+        target.speculativeRollout = rollout;
+      }
+    }
+  }
+
   getHypotheses(): Hypothesis[] {
     return [...this.hypotheses];
   }
@@ -166,6 +183,9 @@ export class HypothesisTracker {
       }
       if (h.learning) {
         lines.push(`     • Distilled Learning: ${h.learning}`);
+      }
+      if (h.dialecticalVerdict) {
+        lines.push(`     • Epistemic Verdict: [${h.dialecticalVerdict.outcome}] (${Math.round(h.dialecticalVerdict.confidence * 100)}% conf) - Action: ${h.dialecticalVerdict.recommendedAction}`);
       }
     }
     return lines.join('\n');

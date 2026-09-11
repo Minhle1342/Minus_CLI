@@ -9,6 +9,8 @@ import { DynamicContextCache } from './agent/dynamic-context-cache.js';
 import { PipelinedToolDispatcher } from './agent/pipelined-tool-dispatcher.js';
 import { partitionToolCalls, type ScheduledToolCall } from './agent/tool-execution-scheduler.js';
 import { AnthropicLLM } from './llm/anthropic.js';
+import { GeminiLLM } from './llm/gemini.js';
+import { DeepseekLLM } from './llm/deepseek.js';
 import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { ToolRegistry } from './tools/registry.js';
@@ -475,6 +477,94 @@ async function main(): Promise<void> {
   assert(t1 - t0 < 10, 'speculative diagnostic cache hit must return in < 10ms');
 
   await fs.rm(tempSpecDir, { recursive: true, force: true });
+
+  // 8. Test Parallel Tools + Step Suffixes KV-Cache Prefix Invariance
+  // When Step 1 runs parallel tool calls (e.g. read_file A & read_file B),
+  // Step 2 receives dynamic suffix S2, and Step 3 receives dynamic suffix S3.
+  // The prefix corresponding to Step 1 + S2 must remain 100% BYTE-FOR-BYTE IDENTICAL
+  // between the Step 2 request and the Step 3 request across all providers.
+  const parallelSession = new Session('parallel-tools-kv-cache-test');
+  parallelSession.addUserMessage('Inspect repo in parallel');
+  // Step 1: Model calls 2 tools in parallel
+  parallelSession.addModelMessage({
+    functionCalls: [
+      { name: 'read_file', args: { path: 'a.ts' }, id: 'call-a' },
+      { name: 'read_file', args: { path: 'b.ts' }, id: 'call-b' },
+    ],
+  });
+  parallelSession.addToolResultWithId('read_file', { content: 'content-a' }, 'call-a');
+  parallelSession.addToolResultWithId('read_file', { content: 'content-b' }, 'call-b');
+
+  const suffixesStep2 = new Map([[1, 'Suffix-Step-1'], [2, 'Suffix-Step-2']]);
+
+  // Check GeminiLLM
+  const geminiLLM = new GeminiLLM('dummy-key', 'gemini-1.5-pro');
+  const geminiContentsStep2 = (geminiLLM as any).prepareContents(parallelSession, 'Suffix-Step-2', suffixesStep2);
+
+  // Now Step 2 executes: Model calls tool C
+  parallelSession.addModelMessage({
+    functionCalls: [
+      { name: 'read_file', args: { path: 'c.ts' }, id: 'call-c' },
+    ],
+  });
+  parallelSession.addToolResultWithId('read_file', { content: 'content-c' }, 'call-c');
+
+  const suffixesStep3 = new Map([[1, 'Suffix-Step-1'], [2, 'Suffix-Step-2'], [3, 'Suffix-Step-3']]);
+  const geminiContentsStep3 = (geminiLLM as any).prepareContents(parallelSession, 'Suffix-Step-3', suffixesStep3);
+
+  assert.equal(geminiContentsStep2.length, 4);
+  assert.equal(geminiContentsStep3.length, 6);
+  assert.deepEqual(
+    geminiContentsStep3.slice(0, 4),
+    geminiContentsStep2,
+    'Gemini KV-Cache prefix invariance: Step 1 parallel tool results with suffix S2 are byte-for-byte identical in Step 3',
+  );
+
+  // Check AnthropicLLM
+  const anthropicLLM = new AnthropicLLM({ apiKey: 'test-key', modelName: 'claude-3-7-sonnet' });
+  const anthropicSessionStep2 = new Session('anthropic-step2');
+  anthropicSessionStep2.addUserMessage('Inspect repo in parallel');
+  anthropicSessionStep2.addModelMessage({
+    functionCalls: [
+      { name: 'read_file', args: { path: 'a.ts' }, id: 'call-a' },
+      { name: 'read_file', args: { path: 'b.ts' }, id: 'call-b' },
+    ],
+  });
+  anthropicSessionStep2.addToolResultWithId('read_file', { content: 'content-a' }, 'call-a');
+  anthropicSessionStep2.addToolResultWithId('read_file', { content: 'content-b' }, 'call-b');
+  const anthropicMsgsStep2 = (anthropicLLM as any).convertHistoryToAnthropicMessages(anthropicSessionStep2, 'Suffix-Step-2', suffixesStep2);
+
+  const anthropicMsgsStep3 = (anthropicLLM as any).convertHistoryToAnthropicMessages(parallelSession, 'Suffix-Step-3', suffixesStep3);
+  assert.equal(anthropicMsgsStep2.length, 3);
+  assert.equal(anthropicMsgsStep3.length, 5);
+  assert.deepEqual(
+    anthropicMsgsStep3.slice(0, 3),
+    anthropicMsgsStep2,
+    'Anthropic KV-Cache prefix invariance: Step 1 parallel tool results with suffix S2 are byte-for-byte identical in Step 3',
+  );
+
+  // Check DeepseekLLM
+  const deepseekLLM = new DeepseekLLM({ apiKey: 'dummy-key' });
+  const deepseekSessionStep2 = new Session('deepseek-step2');
+  deepseekSessionStep2.addUserMessage('Inspect repo in parallel');
+  deepseekSessionStep2.addModelMessage({
+    functionCalls: [
+      { name: 'read_file', args: { path: 'a.ts' }, id: 'call-a' },
+      { name: 'read_file', args: { path: 'b.ts' }, id: 'call-b' },
+    ],
+  });
+  deepseekSessionStep2.addToolResultWithId('read_file', { content: 'content-a' }, 'call-a');
+  deepseekSessionStep2.addToolResultWithId('read_file', { content: 'content-b' }, 'call-b');
+  const deepseekMsgsStep2 = (deepseekLLM as any).convertHistoryToOpenAIMessages(deepseekSessionStep2, 'System prompt', 'Suffix-Step-2', false, suffixesStep2);
+
+  const deepseekMsgsStep3 = (deepseekLLM as any).convertHistoryToOpenAIMessages(parallelSession, 'System prompt', 'Suffix-Step-3', false, suffixesStep3);
+  assert.equal(deepseekMsgsStep2.length, 5);
+  assert.equal(deepseekMsgsStep3.length, 7);
+  assert.deepEqual(
+    deepseekMsgsStep3.slice(0, 5),
+    deepseekMsgsStep2,
+    'DeepSeek KV-Cache prefix invariance: Step 1 parallel tool results with suffix S2 are byte-for-byte identical in Step 3',
+  );
 
   console.log('Latency optimization regression suite passed.');
 }

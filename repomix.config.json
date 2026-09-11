@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/yamadashy/repomix/main/repomix.config.schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "parsableStyle": true,
+    "headerText": "Minus_Cli AI Coding Agent Codebase Pack",
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "topFilesLength": 15,
+    "showLineNumbers": false,
+    "copyToClipboard": false,
+    "compress": true
+  },
+  "include": [
+    "src/**",
+    "package.json",
+    "tsconfig.json",
+    "README.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "node_modules/**",
+      ".git/**",
+      ".gitnexus/**",
+      "dist/**",
+      ".codingagent/**",
+      "scratch/**",
+      "logs/**",
+      "*.log",
+      ".env*",
+      "package-lock.json",
+      "repomix-output.xml",
+      "repomix-output.md",
+      "repomix-output.txt"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  },
+  "tokenCount": {
+    "encoding": "o200k_base"
+  }
+}

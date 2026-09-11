@@ -286,14 +286,23 @@ export class DeepseekLLM {
             }
           }
 
-          // Đối với các Step tiếp theo (Step 2, 3, ...), gắn suffix vào tool response tương ứng
+          // Đối với các Step tiếp theo (Step 2, 3, ...), gắn suffix vào tool response cuối cùng của mỗi step
           let currentStep = 2;
           for (let i = turnStartIdx + 1; i < rawMessages.length; i++) {
-            if (rawMessages[i].role === 'tool' && (i === rawMessages.length - 1 || rawMessages[i + 1].role === 'assistant')) {
+            const isToolMessage = rawMessages[i].role === 'tool';
+            const nextIsToolMessage = i + 1 < rawMessages.length && rawMessages[i + 1].role === 'tool';
+            const isLastToolOfStep = isToolMessage && !nextIsToolMessage;
+
+            if (isLastToolOfStep) {
               const sK = getSuffix(currentStep);
               if (sK && sK.trim()) {
                 if (typeof rawMessages[i].content === 'string') {
                   rawMessages[i].content = `${rawMessages[i].content}\n\n[Execution Context & Plan Status]\n${sK.trim()}`;
+                } else if (Array.isArray(rawMessages[i].content)) {
+                  rawMessages[i].content.push({
+                    type: 'text',
+                    text: `\n\n[Execution Context & Plan Status]\n${sK.trim()}`,
+                  });
                 }
               }
               currentStep++;

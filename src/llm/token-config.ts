@@ -19,6 +19,8 @@ export interface TokenConfig {
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max';
   /** Có kích hoạt stream/thu thập thought tokens hay không */
   includeThoughts?: boolean;
+  /** Ngân sách Dynamic Context Trimming (tokens) */
+  dynamicContextBudget?: number;
 }
 
 export interface ModelTokenProfile {
@@ -509,6 +511,7 @@ export function resolveTokenConfig(modelName: string, userConfig?: Partial<Token
 
   const reasoningEffort = userConfig?.reasoningEffort ?? (profile.supportsReasoningEffort ? 'medium' : undefined);
   const includeThoughts = userConfig?.includeThoughts ?? true;
+  const dynamicContextBudget = userConfig?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : undefined);
 
   return {
     maxOutputTokens,
@@ -516,6 +519,7 @@ export function resolveTokenConfig(modelName: string, userConfig?: Partial<Token
     thinkingBudget,
     reasoningEffort,
     includeThoughts,
+    dynamicContextBudget,
   };
 }
 
@@ -533,6 +537,7 @@ export interface TokenTierDefinition {
   inputTokens: number | 'max';
   thinkingTokens: number | 'max';
   reasoningEffort: 'low' | 'medium' | 'high' | 'max';
+  dynamicContextBudget: number;
 }
 
 /**
@@ -543,41 +548,45 @@ export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition
     tier: 'low',
     label: 'Tiết kiệm / Phản hồi nhanh (Low / Eco)',
     badge: '🟢 LOW',
-    description: 'Output 2K, Context 16K, Thinking 2K (effort: low) - Tối ưu token & phản hồi tức thì',
+    description: 'Output 2K, Context 16K, Thinking 2K, Dynamic 1K (effort: low) - Tối ưu token & phản hồi tức thì',
     outputTokens: 2048,
     inputTokens: 16000,
     thinkingTokens: 2048,
     reasoningEffort: 'low',
+    dynamicContextBudget: 1000,
   },
   medium: {
     tier: 'medium',
     label: 'Tiêu chuẩn / Cân bằng (Medium / Balanced)',
     badge: '🟡 MEDIUM',
-    description: 'Output 8K, Context 64K, Thinking 8K (effort: medium) - Cân bằng cho công việc thường ngày',
+    description: 'Output 8K, Context 64K, Thinking 8K, Dynamic 2K (effort: medium) - Cân bằng cho công việc thường ngày',
     outputTokens: 8192,
     inputTokens: 64000,
     thinkingTokens: 8192,
     reasoningEffort: 'medium',
+    dynamicContextBudget: 2000,
   },
   high: {
     tier: 'high',
     label: 'Nâng cao / Chuyên sâu (High / Deep Thinking)',
     badge: '🟠 HIGH',
-    description: 'Output 16K, Context 128K, Thinking 24K (effort: high) - Dành cho refactor lớn và suy luận sâu',
+    description: 'Output 16K, Context 128K, Thinking 24K, Dynamic 4K (effort: high) - Dành cho refactor lớn và suy luận sâu',
     outputTokens: 16384,
     inputTokens: 128000,
     thinkingTokens: 24576,
     reasoningEffort: 'high',
+    dynamicContextBudget: 4000,
   },
   max: {
     tier: 'max',
     label: 'Cực đại / Tối đa (Max / Unlimited)',
     badge: '🔴 MAX',
-    description: 'Output Max, Context Max, Thinking 64K (effort: max) - Khai thác 100% giới hạn phần cứng model',
+    description: 'Output Max, Context Max, Thinking 64K, Dynamic 8K (effort: max) - Khai thác 100% giới hạn phần cứng model',
     outputTokens: 'max',
     inputTokens: 'max',
     thinkingTokens: 'max',
     reasoningEffort: 'max',
+    dynamicContextBudget: 8000,
   },
 };
 
@@ -672,6 +681,26 @@ export function resolveThinkingTokensPreset(
 }
 
 /**
+ * Giải mã tham số Dynamic Context Budget từ preset tier hoặc số nguyên
+ */
+export function resolveDynamicBudgetPreset(val: string | number): number | null {
+  if (typeof val === 'number') {
+    return val > 0 ? val : null;
+  }
+  const tier = normalizePresetTier(val);
+  if (tier === 'low') return 1000;
+  if (tier === 'medium') return 2000;
+  if (tier === 'high') return 4000;
+  if (tier === 'max') return 8000;
+
+  const num = parseInt(val, 10);
+  if (!isNaN(num) && num > 0) {
+    return num;
+  }
+  return null;
+}
+
+/**
  * Tạo gói cấu hình TokenConfig hoàn chỉnh từ một Preset Tier
  */
 export function getPresetTokenConfig(tier: TokenPresetTier, profile: ModelTokenProfile): TokenConfig {
@@ -702,5 +731,6 @@ export function getPresetTokenConfig(tier: TokenPresetTier, profile: ModelTokenP
     thinkingBudget,
     reasoningEffort,
     includeThoughts: true,
+    dynamicContextBudget: def.dynamicContextBudget,
   };
 }

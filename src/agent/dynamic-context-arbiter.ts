@@ -13,6 +13,8 @@ export interface DynamicContextInputs {
   toolPlaybooks?: string;
   /** P1.4: Step-relevant textual guidance from the active runtime harness profile. */
   harnessGuidance?: string;
+  /** P1.44: Distilled Epistemic Verdict từ EpistemicInvestigationEngine (Thesis vs Antithesis + Monte Carlo Rollout) */
+  epistemicVerdictContext?: string;
   /** P1.45: Hypothesis state and action constraints. */
   hypothesisContext?: string;
   hypothesisGuidance?: string;
@@ -95,6 +97,16 @@ export class DynamicContextArbiter {
       : (defaultBudgetTokens ?? DynamicContextArbiter.DEFAULT_MAX_BUDGET_TOKENS);
   }
 
+  getBudget(): number {
+    return this.defaultBudget;
+  }
+
+  setBudget(budget: number): void {
+    if (Number.isFinite(budget) && budget > 0) {
+      this.defaultBudget = budget;
+    }
+  }
+
   arbitrate(
     inputs: DynamicContextInputs,
     options?: DynamicContextArbiterOptions | string,
@@ -146,6 +158,13 @@ export class DynamicContextArbiter {
         name: 'Harness Guidance (P1.4)',
         content: (inputs.harnessGuidance || '').trim(),
         priority: 1.4,
+        allowTruncation: false,
+      },
+      {
+        key: 'epistemicVerdictContext',
+        name: 'Epistemic Arbiter Verdict (P1.44)',
+        content: (inputs.epistemicVerdictContext || '').trim(),
+        priority: 1.44,
         allowTruncation: false,
       },
       {

@@ -56,6 +56,7 @@ import {
   resolveOutputTokensPreset,
   resolveInputTokensPreset,
   resolveThinkingTokensPreset,
+  resolveDynamicBudgetPreset,
   normalizePresetTier,
 } from './llm/token-config.js';
 import { ContextCompactor } from './agent/context-compactor.js';
@@ -5322,9 +5323,11 @@ Always write tests first!`;
   // 24.6. AgentLoop Token Config Integration
   const testLoop = new AgentLoop(testGeminiLLM, undefined, { workspace });
   assert(testLoop.getTokenConfig()?.maxOutputTokens === 24000, 'AgentLoop getTokenConfig lấy đúng config từ LLM');
-  testLoop.setTokenConfig({ maxOutputTokens: 48000, maxInputTokens: 128000 });
+  testLoop.setTokenConfig({ maxOutputTokens: 48000, maxInputTokens: 128000, dynamicContextBudget: 3500 });
   assert(testLoop.getTokenConfig()?.maxOutputTokens === 48000, 'AgentLoop setTokenConfig cập nhật LLM token config');
   assert(testLoop.contextCompactor.getConfig().maxTotalHistoryTokens === 128000, 'AgentLoop setTokenConfig tự động đồng bộ sang ContextCompactor maxInputTokens');
+  assert(testLoop.dynamicContextArbiter.getBudget() === 3500, 'AgentLoop setTokenConfig tự động đồng bộ sang DynamicContextArbiter setBudget');
+  assert(testLoop.getTokenConfig()?.dynamicContextBudget === 3500, 'AgentLoop getTokenConfig trả về dynamicContextBudget');
 
   // 24.7. Token Preset Tiers (Low, Medium, High, Max)
   assert(normalizePresetTier('low') === 'low' && normalizePresetTier('eco') === 'low' && normalizePresetTier('1') === 'low', 'normalizePresetTier nhận diện đúng tier low');
@@ -5335,22 +5338,35 @@ Always write tests first!`;
 
   const testPresetProfile = getModelTokenProfile('gemini-3.5-pro');
   const lowPreset = getPresetTokenConfig('low', testPresetProfile);
-  assert(lowPreset.maxOutputTokens === 2048 && lowPreset.maxInputTokens === 16000 && lowPreset.thinkingBudget === 2048 && lowPreset.reasoningEffort === 'low', 'getPresetTokenConfig tạo đúng gói LOW');
+  assert(lowPreset.maxOutputTokens === 2048 && lowPreset.maxInputTokens === 16000 && lowPreset.thinkingBudget === 2048 && lowPreset.reasoningEffort === 'low' && lowPreset.dynamicContextBudget === 1000, 'getPresetTokenConfig tạo đúng gói LOW bao gồm dynamicContextBudget: 1000');
 
   const medPreset = getPresetTokenConfig('medium', testPresetProfile);
-  assert(medPreset.maxOutputTokens === 8192 && medPreset.maxInputTokens === 64000 && medPreset.thinkingBudget === 8192 && medPreset.reasoningEffort === 'medium', 'getPresetTokenConfig tạo đúng gói MEDIUM');
+  assert(medPreset.maxOutputTokens === 8192 && medPreset.maxInputTokens === 64000 && medPreset.thinkingBudget === 8192 && medPreset.reasoningEffort === 'medium' && medPreset.dynamicContextBudget === 2000, 'getPresetTokenConfig tạo đúng gói MEDIUM bao gồm dynamicContextBudget: 2000');
 
   const highPreset = getPresetTokenConfig('high', testPresetProfile);
-  assert(highPreset.maxOutputTokens === 16384 && highPreset.maxInputTokens === 128000 && highPreset.thinkingBudget === 24576 && highPreset.reasoningEffort === 'high', 'getPresetTokenConfig tạo đúng gói HIGH');
+  assert(highPreset.maxOutputTokens === 16384 && highPreset.maxInputTokens === 128000 && highPreset.thinkingBudget === 24576 && highPreset.reasoningEffort === 'high' && highPreset.dynamicContextBudget === 4000, 'getPresetTokenConfig tạo đúng gói HIGH bao gồm dynamicContextBudget: 4000');
 
   const maxPreset = getPresetTokenConfig('max', testPresetProfile);
-  assert(maxPreset.maxOutputTokens === testPresetProfile.maxSupportedOutputTokens && maxPreset.maxInputTokens === testPresetProfile.maxSupportedInputTokens && maxPreset.thinkingBudget === 64000 && maxPreset.reasoningEffort === 'max', 'getPresetTokenConfig tạo đúng gói MAX');
+  assert(maxPreset.maxOutputTokens === testPresetProfile.maxSupportedOutputTokens && maxPreset.maxInputTokens === testPresetProfile.maxSupportedInputTokens && maxPreset.thinkingBudget === 64000 && maxPreset.reasoningEffort === 'max' && maxPreset.dynamicContextBudget === 8000, 'getPresetTokenConfig tạo đúng gói MAX bao gồm dynamicContextBudget: 8000');
 
   assert(resolveOutputTokensPreset('high', testPresetProfile) === 16384, 'resolveOutputTokensPreset giải mã đúng tier high');
   assert(resolveOutputTokensPreset('max', testPresetProfile) === testPresetProfile.maxSupportedOutputTokens, 'resolveOutputTokensPreset giải mã đúng tier max');
   assert(resolveInputTokensPreset('medium', testPresetProfile) === 64000, 'resolveInputTokensPreset giải mã đúng tier medium');
   assert(resolveThinkingTokensPreset('off', testPresetProfile)?.thinkingBudget === 0, 'resolveThinkingTokensPreset hỗ trợ tắt thinking với off');
   assert(resolveThinkingTokensPreset('high', testPresetProfile)?.thinkingBudget === 24576, 'resolveThinkingTokensPreset giải mã đúng thinking tier high');
+
+  // Dynamic Context Budget Resolver & DynamicContextArbiter dynamic updates
+  assert(resolveDynamicBudgetPreset('low') === 1000, 'resolveDynamicBudgetPreset giải mã đúng tier low');
+  assert(resolveDynamicBudgetPreset('high') === 4000, 'resolveDynamicBudgetPreset giải mã đúng tier high');
+  assert(resolveDynamicBudgetPreset('5000') === 5000, 'resolveDynamicBudgetPreset giải mã đúng số nguyên 5000');
+
+  const testArbiter = new DynamicContextArbiter(2000);
+  assert(testArbiter.getBudget() === 2000, 'DynamicContextArbiter getBudget trả về default 2000');
+  testArbiter.setBudget(4500);
+  assert(testArbiter.getBudget() === 4500, 'DynamicContextArbiter setBudget cập nhật thành công');
+
+  testLoop.setTokenConfig(lowPreset);
+  assert(testLoop.dynamicContextArbiter.getBudget() === 1000, 'AgentLoop setTokenConfig với preset LOW tự động cập nhật dynamicContextArbiter về 1000');
 
   console.log('\n========================================');
   console.log('🧪 25. KIỂM THỬ SEMANTIC VECTOR MEMORY (RAG) & VISION MULTIMODAL PERCEPTION');

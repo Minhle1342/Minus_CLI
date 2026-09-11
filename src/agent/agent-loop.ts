@@ -38,6 +38,7 @@ import { VerificationPolicy } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
+import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.js';
 import { CriticGate } from './critic-gate.js';
 import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
 import { registerReportFindingsTool } from '../tools/report-findings.js';
@@ -268,6 +269,7 @@ export class AgentLoop {
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
   readonly hypothesisTracker = new HypothesisTracker();
+  readonly epistemicEngine = new EpistemicInvestigationEngine();
   readonly criticGate: CriticGate;
   readonly speculativeManager: SpeculativeBranchManager;
   readonly adaptiveReasoning = new AdaptiveReasoningController();
@@ -545,10 +547,18 @@ export class AgentLoop {
   }
 
   getTokenConfig(): import('../llm/token-config.js').TokenConfig | undefined {
+    let baseConfig: import('../llm/token-config.js').TokenConfig | undefined = undefined;
     if (this.llm && typeof this.llm.getTokenConfig === 'function') {
-      return this.llm.getTokenConfig();
+      baseConfig = { ...this.llm.getTokenConfig() };
     }
-    return undefined;
+    const currentDynamicBudget = this.dynamicContextArbiter?.getBudget();
+    if (currentDynamicBudget !== undefined) {
+      baseConfig = {
+        ...(baseConfig || {}),
+        dynamicContextBudget: currentDynamicBudget,
+      };
+    }
+    return baseConfig;
   }
 
   setTokenConfig(config: Partial<import('../llm/token-config.js').TokenConfig>): void {
@@ -557,6 +567,10 @@ export class AgentLoop {
     }
     if (config.maxInputTokens) {
       this.contextCompactor.setMaxInputTokens(config.maxInputTokens);
+    }
+    if (config.dynamicContextBudget && this.dynamicContextArbiter) {
+      this.dynamicContextArbiter.setBudget(config.dynamicContextBudget);
+      process.env.MINUS_DYNAMIC_CONTEXT_BUDGET = String(config.dynamicContextBudget);
     }
   }
 
@@ -1538,6 +1552,29 @@ export class AgentLoop {
         completionDirective = `🎯 [VERIFICATION SUCCESSFUL]: All unit test checks passed with Exit Code 0. Code modifications are empirically verified. Do NOT make any more code changes. Call "submit_solution" immediately to conclude the task.`;
       }
 
+      // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
+      // Gated to prevent context dilution and latency/accuracy degradation
+      const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+      const epistemicResult = this.epistemicEngine.investigate({
+        hypothesis: activeHypothesis,
+        phase: classification.phase === 'release' ? 'verify' : classification.phase,
+        risk: activeHypothesis?.blastRadius || (consecutiveFails >= 2 ? 'HIGH' : 'LOW'),
+        consecutiveFailures: consecutiveFails,
+        recentError: rawReflection || undefined,
+        targetFiles: activeHypothesis?.targetFiles,
+        proposedFixSummary: activeHypothesis?.proposedFix,
+        workspaceRoot: this._workspace.rootDir,
+      });
+
+      if (epistemicResult.activated && epistemicResult.dialecticalVerdict) {
+        this.hypothesisTracker.attachEpistemicVerdict(
+          activeHypothesis?.id,
+          epistemicResult.dialecticalVerdict,
+          epistemicResult.speculativeRollout,
+        );
+      }
+      const epistemicVerdictContext = epistemicResult.activated ? epistemicResult.distilledContext : undefined;
+
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
       const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
@@ -1552,6 +1589,7 @@ export class AgentLoop {
         cognitiveScaffold: cognitiveScaffoldText,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
         harnessGuidance: promptDecision.harnessGuidance,
+        epistemicVerdictContext,
         hypothesisContext,
         hypothesisGuidance,
         domainContractContext,

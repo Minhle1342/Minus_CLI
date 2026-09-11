@@ -386,10 +386,19 @@ export class AnthropicLLM {
             });
           }
 
+          // Gắn suffix cho các step tiếp theo (Step 2, 3...) vào tool result cuối cùng của mỗi step
+          // Khi có nhiều tool calls chạy song song trong cùng 1 step, chỉ gắn suffix vào tool result cuối cùng của step đó
           let currentStep = 2;
           for (let i = turnStartIdx + 1; i < messages.length; i++) {
             const m = messages[i];
-            if (m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result')) {
+            const isToolResult = m.role === 'user' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_result');
+            const nextIsToolResult = i + 1 < messages.length
+              && messages[i + 1].role === 'user'
+              && Array.isArray(messages[i + 1].content)
+              && messages[i + 1].content.some((b: any) => b.type === 'tool_result');
+            const isLastToolResultOfStep = isToolResult && !nextIsToolResult;
+
+            if (isLastToolResultOfStep) {
               const sK = getSuffix(currentStep);
               if (sK && sK.trim()) {
                 m.content.push({
