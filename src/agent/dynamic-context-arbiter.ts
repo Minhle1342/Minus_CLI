@@ -51,6 +51,8 @@ export interface DynamicContextArbiterOptions {
   consecutiveFailures?: number;
   /** Query của reasoning step hiện tại để ưu tiên evidence liên quan trong P3-P7 */
   retrievalQuery?: string;
+  /** Văn bản ngữ cảnh lịch sử đã có (như Warm-Start ở history[0]) để khử trùng lặp chéo */
+  existingHistoryContext?: string;
 }
 
 export interface DynamicContextArbiterResult {
@@ -282,7 +284,7 @@ export class DynamicContextArbiter {
 
     // 2. Khử trùng lặp chéo giữa các tầng trí nhớ nếu bật
     if (enableDedup) {
-      this.deduplicateSources(rankedSources);
+      this.deduplicateSources(rankedSources, optObj?.existingHistoryContext);
     }
 
     // 3. Tính toán tổng token ban đầu
@@ -296,12 +298,13 @@ export class DynamicContextArbiter {
 
     // Nếu tổng token ban đầu đã nằm trong ngân sách cho phép
     if (beforeTokens <= budgetTokens) {
-      const rendered = rankedSources.map((s) => s.content).join('\n\n');
+      const activeSources = rankedSources.filter((s) => s.content.trim().length > 0);
+      const rendered = activeSources.map((s) => s.content).join('\n\n');
       return {
         renderedContext: rendered,
         totalTokens: beforeTokens,
         budgetTokens,
-        sourcesIncluded: rankedSources.map((s) => s.name),
+        sourcesIncluded: activeSources.map((s) => s.name),
         sourcesPruned: [],
         sourcesTruncated: [],
         stats: {
@@ -387,12 +390,15 @@ export class DynamicContextArbiter {
   }
 
   /**
-   * Khử trùng lặp chéo giữa các tầng trí nhớ:
-   * Nếu các insight trong Project Memory (P4) hoặc Re-injected Turns (P3) đã đề cập đến các statement
-   * của Repository Memory (P6), ta lọc bớt các dòng trùng lặp trong P6 để tránh lãng phí context.
+   * Khử trùng lặp chéo giữa các tầng trí nhớ và lịch sử:
+   * 1. Nếu các insight trong Project Memory (P4) đã được nạp ở Warm-Start (History[0]), lọc bỏ để tránh trùng lặp.
+   * 2. Nếu các statement của Repository Memory (P6) đã có trong History hoặc P1-P5, lọc bớt các dòng trùng lặp.
    */
-  private deduplicateSources(sources: RankedSource[]): void {
+  private deduplicateSources(sources: RankedSource[], existingHistoryText?: string): void {
     const higherPriorityTexts: string[] = [];
+    if (existingHistoryText && existingHistoryText.trim().length > 0) {
+      higherPriorityTexts.push(existingHistoryText.toLowerCase());
+    }
     for (const source of sources) {
       if (source.priority < 6) {
         higherPriorityTexts.push(source.content.toLowerCase());
@@ -401,6 +407,32 @@ export class DynamicContextArbiter {
 
     if (higherPriorityTexts.length === 0) return;
 
+    // 1. Khử trùng lặp trong P4 (Project Memory) nếu nội dung đã có trong History (Warm-Start)
+    const memSource = sources.find((s) => s.key === 'memoryPrompt');
+    if (memSource && memSource.content && existingHistoryText) {
+      const histLower = existingHistoryText.toLowerCase();
+      const lines = memSource.content.split('\n');
+      const filteredLines = lines.filter((line) => {
+        const trimmed = line.trim();
+        if (trimmed.length < 20 || trimmed.startsWith('[VERIFIED RELEVANT')) return true;
+        // Bóc tách phần insight cốt lõi sau dấu "]" cuối cùng nếu có định dạng - [key; confidence=...] insight
+        const match = trimmed.match(/^-\s*\[[^\]]+\]\s*(.*)$/);
+        const insight = (match ? match[1] : trimmed).toLowerCase().trim();
+        if (insight.length >= 15 && histLower.includes(insight)) {
+          return false; // Đã có trong lịch sử (Warm-Start)
+        }
+        return true;
+      });
+      // Nếu không còn dòng insight nào (chỉ còn tiêu đề [VERIFIED RELEVANT...])
+      const remainingInsights = filteredLines.filter((l) => l.trim().startsWith('-'));
+      if (remainingInsights.length === 0) {
+        memSource.content = '';
+      } else {
+        memSource.content = filteredLines.join('\n').trim();
+      }
+    }
+
+    // 2. Khử trùng lặp trong P6 (Repository Memory)
     const repoMemSource = sources.find((s) => s.key === 'repositoryMemoryContext');
     if (repoMemSource && repoMemSource.content) {
       const lines = repoMemSource.content.split('\n');

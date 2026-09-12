@@ -68,6 +68,21 @@ export interface EpistemicInvestigationResult {
  */
 export class EpistemicInvestigationGating {
   static shouldActivate(inputs: EpistemicInvestigationInputs): { activate: boolean; reason: string } {
+    const operationalFailure = inputs.recentError?.match(
+      /\b(?:PACKAGE_JSON_NOT_FOUND|TOOL_NOT_ALLOWED_THIS_TURN|APPROVAL_REQUIRED|CONTEXT_BUDGET_UNSATISFIABLE|COMMAND_NOT_FOUND|WORKSPACE_PATH_NOT_FOUND)\b/i,
+    )?.[0];
+    const hasHighRiskHypothesis = inputs.hypothesis
+      && (inputs.hypothesis.blastRadius === 'HIGH' || inputs.hypothesis.blastRadius === 'CRITICAL');
+
+    // Environment and authorization failures need deterministic recovery, not another
+    // thesis/antithesis cycle. Bypass only when no independently high-risk hypothesis exists.
+    if (operationalFailure && !hasHighRiskHypothesis) {
+      return {
+        activate: false,
+        reason: `Bypassed: operational failure ${operationalFailure.toUpperCase()} requires deterministic recovery.`,
+      };
+    }
+
     // 1. Nếu consecutive failures >= 2 -> Bắt buộc kích hoạt để tránh loop/confirmation bias
     if (inputs.consecutiveFailures >= 2) {
       return {

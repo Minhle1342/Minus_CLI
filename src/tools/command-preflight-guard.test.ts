@@ -117,9 +117,10 @@ test('Preflight Guard: Prevents redundant idempotent test execution without code
   assert.equal(rerunAfterFix.allowed, true);
 });
 
-test('Preflight Guard: Normalizes POSIX environment exports and which on Windows', () => {
+test('Preflight Guard: Normalizes POSIX environment exports, which, and ls on Windows', () => {
   const originalPlatform = process.platform;
   try {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     const resExport = normalizeWindowsCommand('export NODE_ENV=production && npm start');
     assert.equal(resExport.normalizedCommand, 'npm start');
     assert.deepEqual(resExport.extractedEnv, { NODE_ENV: 'production' });
@@ -127,9 +128,42 @@ test('Preflight Guard: Normalizes POSIX environment exports and which on Windows
     const resInline = normalizeWindowsCommand('CI=true npm test');
     assert.equal(resInline.normalizedCommand, 'npm test');
     assert.deepEqual(resInline.extractedEnv, { CI: 'true' });
+
+    // Windows ls normalization
+    const resLs = normalizeWindowsCommand('ls');
+    assert.equal(resLs.normalizedCommand, 'dir');
+    assert.equal(resLs.modified, true);
+
+    const resLsLa = normalizeWindowsCommand('ls -la');
+    assert.equal(resLsLa.normalizedCommand, 'dir /a');
+    assert.equal(resLsLa.modified, true);
+
+    const resLsDir = normalizeWindowsCommand('ls -la src');
+    assert.equal(resLsDir.normalizedCommand, 'dir /a src');
+    assert.equal(resLsDir.modified, true);
   } finally {
     Object.defineProperty(process, 'platform', { value: originalPlatform });
   }
+});
+
+test('Preflight Guard: Blocks dangerous git clone into current workspace directory', () => {
+  const cloneCmds = [
+    'git clone https://github.com/HKUDS/DeepCode .',
+    'git clone https://github.com/HKUDS/DeepCode ./',
+    'git.exe clone https://github.com/HKUDS/DeepCode .',
+  ];
+
+  for (const cmd of cloneCmds) {
+    const result = evaluateCommandPreflight(cmd, { mode: 'enforce' });
+    assert.equal(result.allowed, false, `Expected "${cmd}" to be blocked.`);
+    assert.equal(result.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
+    assert.match(result.reason || '', /thư mục hiện tại/);
+    assert.match(result.suggestion || '', /DeepCode/);
+  }
+
+  // Allowed when cloning into a subfolder
+  const safeClone = evaluateCommandPreflight('git clone https://github.com/HKUDS/DeepCode deepcode-repo', { mode: 'enforce' });
+  assert.equal(safeClone.allowed, true);
 });
 
 test('Preflight Guard Benchmark: Latency and token preservation verification', () => {

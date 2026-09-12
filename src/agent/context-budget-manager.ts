@@ -111,8 +111,17 @@ export class CalibratedRequestTokenCounter implements RequestTokenCounter {
     const nonHistoryTokens = ExactTokenizer.countTokens(staticText, envelope.model);
     const inputTokens = historyTokens + nonHistoryTokens;
     const ratios = this.observedRatios.get(envelope.model.toLowerCase()) || [];
-    const observedMax = ratios.length > 0 ? Math.max(...ratios) : 1;
-    const errorMarginRatio = Math.max(0.05, observedMax * 1.05 - 1);
+    let calibratedRatio = 1.0;
+    if (ratios.length > 0) {
+      const validRatios = ratios.filter((r) => Number.isFinite(r) && r >= 0.5 && r <= 2.5);
+      if (validRatios.length > 0) {
+        const sorted = [...validRatios].sort((a, b) => a - b);
+        const p90Index = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.90));
+        calibratedRatio = sorted[p90Index];
+      }
+    }
+    // Giới hạn sai số biên an toàn trong khoảng [0.05, 0.20] (tối đa 20% margin, không bùng nổ do outlier)
+    const errorMarginRatio = Math.min(0.20, Math.max(0.05, calibratedRatio * 1.05 - 1));
     return {
       inputTokens,
       upperBoundTokens: Math.ceil(inputTokens * (1 + errorMarginRatio)),
@@ -126,10 +135,13 @@ export class CalibratedRequestTokenCounter implements RequestTokenCounter {
 
   observe(model: string, estimatedInputTokens: number, actualInputTokens: number): void {
     if (estimatedInputTokens <= 0 || actualInputTokens <= 0) return;
+    const ratio = actualInputTokens / estimatedInputTokens;
+    // Bỏ qua các outlier bất thường do turn rỗng, lệch cache hoặc chênh lệch snapshot
+    if (!Number.isFinite(ratio) || ratio < 0.5 || ratio > 2.5) return;
     const key = model.toLowerCase();
     const ratios = this.observedRatios.get(key) || [];
-    ratios.push(actualInputTokens / estimatedInputTokens);
-    if (ratios.length > 200) ratios.splice(0, ratios.length - 200);
+    ratios.push(ratio);
+    if (ratios.length > 100) ratios.splice(0, ratios.length - 100);
     this.observedRatios.set(key, ratios);
   }
 }
@@ -274,17 +286,42 @@ export class ContextBudgetManager {
     const candidateAfter = this.mode === 'shadow'
       ? await this.counter.count({ ...envelope, history: candidate.messages })
       : undefined;
-    const withinBudget = after.upperBoundTokens <= usableInputTokens;
+    let finalSelected = selected;
+    let finalAfter = after;
+    let withinBudget = after.upperBoundTokens <= usableInputTokens;
+
+    // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
+    // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
+    if (!withinBudget && envelope.history.length > 2) {
+      const emergencyBudgetTokens = Math.max(1, usableInputTokens - before.nonHistoryTokens);
+      const emergencyCandidate = this.compactor.compact(selected.messages, {
+        ...baseOptions,
+        enforceBudget: true,
+        maxInputTokens: Math.max(1, emergencyBudgetTokens + envelope.outputReserveTokens),
+        enableRollingTurns: true,
+        preserveLastNTurns: 2,
+        enableObservationMasking: true,
+      });
+      if (emergencyCandidate.stats.charsSaved > 0) {
+        const emergencyEnvelope = { ...envelope, history: emergencyCandidate.messages };
+        const emergencyAfter = await this.counter.count(emergencyEnvelope);
+        if (emergencyAfter.upperBoundTokens <= usableInputTokens || emergencyAfter.upperBoundTokens < finalAfter.upperBoundTokens) {
+          finalSelected = emergencyCandidate;
+          finalAfter = emergencyAfter;
+          withinBudget = emergencyAfter.upperBoundTokens <= usableInputTokens;
+        }
+      }
+    }
 
     return {
       mode: this.mode,
-      history: selected.messages,
-      changed: selected.stats.charsSaved > 0,
+      history: finalSelected.messages,
+      changed: finalSelected.stats.charsSaved > 0,
       before,
-      after,
+      after: finalAfter,
       candidateAfter,
-      compactionStats: selected.stats,
-      state: buildState(selected.messages, selected.stats, previousState),
+      compactionStats: finalSelected.stats,
+      state: buildState(finalSelected.messages, finalSelected.stats, previousState),
       withinBudget,
       ...(this.mode === 'enforce' && !withinBudget
         ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const }

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
-import { createReadCompressedCodeTool } from '../tools/repomix-tool.js';
+import { createPackCodebaseTool, createReadCompressedCodeTool } from '../tools/repomix-tool.js';
 import { createSearchCodebaseFastTool } from '../tools/search-code-tool.js';
 import { createPromptCacheEnvelope } from '../llm/cache-envelope.js';
 import { openAIPromptCacheFields, resolvePromptCacheCapabilities } from '../llm/provider-capabilities.js';
@@ -255,4 +255,29 @@ test('read_compressed_code adaptive mode remains a single tool call', async (t) 
   }, new Workspace(temporary));
   assert.equal(result.fidelity, 'adaptive');
   assert.ok(result.segments?.some((segment: any) => segment.fidelity === 'full' && /reduce/.test(segment.content)));
+});
+
+test('read_compressed_code does not treat the workspace as its output file', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-repomix-output-test-'));
+  t.after(async () => fs.rm(temporary, { recursive: true, force: true }));
+  await fs.mkdir(path.join(temporary, 'src'), { recursive: true });
+  await fs.writeFile(path.join(temporary, 'src', 'sample.ts'), 'export const sample = 1;\n');
+  await fs.writeFile(path.join(temporary, 'src', 'unrelated.ts'), 'export const unrelated = 2;\n');
+  await fs.writeFile(path.join(temporary, 'repomix.config.json'), JSON.stringify({
+    output: { filePath: 'configured-output.xml' },
+    include: ['src/**'],
+  }));
+
+  const result = await createReadCompressedCodeTool().execute({
+    path: 'src/sample.ts',
+  }, new Workspace(temporary));
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.totalFiles, 1);
+
+  const packResult = await createPackCodebaseTool().execute({
+    include: ['src/sample.ts'],
+  }, new Workspace(temporary));
+  assert.equal(packResult.error, undefined);
+  await assert.rejects(fs.access(path.join(temporary, 'configured-output.xml')));
 });

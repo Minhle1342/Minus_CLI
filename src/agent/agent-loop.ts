@@ -36,6 +36,7 @@ import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
+import { getModelTokenProfile } from '../llm/token-config.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
 import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.js';
@@ -49,7 +50,7 @@ import {
   generateFallbackStepSummary,
 } from './step-summarizer.js';
 import { classifyLLMError } from '../llm/error-handling.js';
-import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
+import { ToolSynergyAdvisor, detectBugReportIntent } from './tool-synergy-advisor.js';
 import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
 import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
 import { ClassificationEngine } from '../control/classification-engine.js';
@@ -1015,8 +1016,14 @@ export class AgentLoop {
       }
       // A single whole-request budget gate runs immediately before the provider
       // call, after tools and dynamic context are known.
-      const maxBudget = this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
-      const workingHistoryBudget = Math.min(maxBudget, 24000);
+      const userConfiguredInput = typeof this.llm?.getTokenConfig === 'function'
+        ? this.llm.getTokenConfig()?.maxInputTokens
+        : undefined;
+      const maxBudget = userConfiguredInput || this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
+      // Tự động căn chỉnh workingHistoryBudget theo tỷ lệ 75% cấu hình người dùng (từ /token low/medium/high/max)
+      const workingHistoryBudget = userConfiguredInput
+        ? Math.floor(userConfiguredInput * 0.75)
+        : Math.min(maxBudget, 24000);
 
       const requestDecision = await this.agentHooks.run('agent/request', hookContext);
       if (!requestDecision.allow) {
@@ -1386,12 +1393,23 @@ export class AgentLoop {
       const explicitRepoMap = this.loopOptions?.enableGraphRepositoryMap === true;
       const explicitRepoMem = this.loopOptions?.enableRepositoryMemory === true;
 
+      // Step 1 Adaptive Footprint:
+      // Tại step 1 của turn, agent chưa khoanh vùng được file/symbol mục tiêu.
+      // Dù tác vụ non-localized, việc bung toàn bộ 1.600 tokens Graph Map hoặc 1.000 tokens Repo Mem là quá sớm và gây nghẽn ngân sách.
+      // Cấp soft footprint: Graph Map tối đa 400 tokens, Repo Mem tối đa 300 tokens ở Step 1.
+      // Khi step >= 2 hoặc khi chuyển sang phase 'plan' (cần DAG đa file), bung đầy đủ ngân sách cấu hình.
+      const isStepOneExploration = step === 1 && classification.phase === 'explore';
+
       const effectiveRepoMemTokens = (isLocalizedExecution && !explicitRepoMem)
         ? Math.min(300, configuredRepoMemTokens)
-        : configuredRepoMemTokens;
+        : (isStepOneExploration && !explicitRepoMem)
+          ? Math.min(300, configuredRepoMemTokens)
+          : configuredRepoMemTokens;
       const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
         ? 0
-        : configuredRepoMapTokens;
+        : (isStepOneExploration && !explicitRepoMap)
+          ? Math.min(400, configuredRepoMapTokens)
+          : configuredRepoMapTokens;
 
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
       const shouldRecallRepoMem = explicitRepoMem
@@ -1588,14 +1606,38 @@ export class AgentLoop {
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
       const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
 
+      // Khử trùng lặp chéo giữa history[0] (Warm-Start) và Dynamic Tail ở Step 1:
+      const historyZeroText = session.getHistory()[0]?.parts?.[0]?.text || '';
+      const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE TASK SCAFFOLD');
+      const historyHasWarmMemory = historyZeroText.includes('[SESSION / GOAL MEMORY');
+
+      // 1. Khử trùng lặp Cognitive Scaffold: Nếu history[0] đã chứa khung System 2 từ Warm-Start
+      // và không có lỗi liên tiếp (consecutiveFails < 2), thì tại Step 1 không nạp lại ở đuôi dynamic context.
+      const effectiveScaffoldText = (step === 1 && historyHasWarmScaffold && consecutiveFails < 2)
+        ? undefined
+        : cognitiveScaffoldText;
+
+      // 2. Khử trùng lặp Project Memory: Nếu history[0] đã chứa [SESSION / GOAL MEMORY],
+      // thì tại Step 1 các mục memory insight đã được nạp ở đầu tin nhắn.
+      const effectiveMemoryPrompt = (step === 1 && historyHasWarmMemory)
+        ? ''
+        : memoryPrompt;
+
+      // 3. Step 1 Tool Advice Gating: Khi chưa có tool nào chạy và người dùng không báo lỗi,
+      // lời khuyên discovery chỉ lặp lại Core System Prompt và Phase Explore Guidance. Bỏ qua ở Step 1.
+      const hasInitialBugIntent = !this.lastToolExecution?.toolName && detectBugReportIntent(turnUserRequest);
+      const effectiveAdvicePrompt = (step === 1 && !this.lastToolExecution?.toolName && !hasInitialBugIntent)
+        ? undefined
+        : advicePrompt;
+
       // Every model-visible dynamic block enters one arbiter. A preliminary pass
       // provides the footprint used by latency guidance; the final pass includes it.
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
       const arbitrationInputs = {
         completionDirective,
-        advicePrompt,
+        advicePrompt: effectiveAdvicePrompt,
         reflectionContext,
-        cognitiveScaffold: cognitiveScaffoldText,
+        cognitiveScaffold: effectiveScaffoldText,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
         harnessGuidance: promptDecision.harnessGuidance,
         epistemicVerdictContext,
@@ -1605,7 +1647,7 @@ export class AgentLoop {
         phaseGuidance,
         rawPlanContext,
         recalledTurnContext,
-        memoryPrompt,
+        memoryPrompt: effectiveMemoryPrompt,
         composeContext,
         repositoryMemoryContext,
         repositoryContext,
@@ -1615,6 +1657,7 @@ export class AgentLoop {
         modelName: activeModelName,
         consecutiveFailures: consecutiveFails,
         retrievalQuery: activeStepQuery,
+        existingHistoryContext: historyZeroText,
       };
       const preliminaryArbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, arbitrationOptions);
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
@@ -1626,15 +1669,19 @@ export class AgentLoop {
         maxInputTokens: activeTokenConfig.maxInputTokens,
         maxOutputTokens: activeTokenConfig.maxOutputTokens,
       });
-      const latencyGuidance = this.latencyOrchestrator.buildGuidance({
-        step,
-        footprint: preliminaryFootprint,
-        modelName: activeModelName,
-        tokenConfig: activeTokenConfig,
-        phase: classification.phase,
-        verificationReady: this.verificationPolicy.canComplete().allowed
-          && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
-      });
+      const shouldIncludeLatencyGuidance = step > 1
+        || preliminaryFootprint.estimatedInputTokens > (activeTokenConfig.maxInputTokens || 128000) * 0.7;
+      const latencyGuidance = shouldIncludeLatencyGuidance
+        ? this.latencyOrchestrator.buildGuidance({
+            step,
+            footprint: preliminaryFootprint,
+            modelName: activeModelName,
+            tokenConfig: activeTokenConfig,
+            phase: classification.phase,
+            verificationReady: this.verificationPolicy.canComplete().allowed
+              && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
+          })
+        : undefined;
       const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
       const arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
       this.contextQualityEvaluator.recordContextArbitration({
@@ -1710,11 +1757,29 @@ export class AgentLoop {
         });
       }
       if (contextPreparation.failureReason) {
-        const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${workingHistoryBudget} estimated input tokens).`;
-        session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
-        await this.persistSession(session);
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
-        return message;
+        // Kiểm tra giới hạn phần cứng thực tế của Model Provider (Gemini 1M, Claude 200k, GPT 128k)
+        const modelProfile = getModelTokenProfile(activeModelName);
+        const hardwareLimit = modelProfile?.maxSupportedInputTokens || 128000;
+        const actualEstimatedInput = contextPreparation.after.inputTokens;
+
+        if (actualEstimatedInput < hardwareLimit) {
+          // Context chỉ vượt qua mức budget cấu hình mềm của người dùng (ví dụ: gói /token low 16K)
+          // nhưng vẫn hoàn toàn nằm trong giới hạn chịu tải thực tế của Provider.
+          // Tự động duy trì thực thi, cảnh báo nhẹ để không làm gián đoạn turn của người dùng.
+          CLI.renderContextBudgetExceededNotice({
+            currentTokens: actualEstimatedInput,
+            configuredBudget: workingHistoryBudget,
+            hardwareLimit,
+            tier: activeTokenConfig.maxInputTokens ? `${activeTokenConfig.maxInputTokens} tokens` : 'Custom',
+          });
+        } else {
+          // Chỉ dừng khi thực sự tràn giới hạn phần cứng của Model Provider
+          const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${hardwareLimit} provider hardware limit exceeded).`;
+          session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
+          await this.persistSession(session);
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
+          return message;
+        }
       }
 
       session.recordRequestHeader({

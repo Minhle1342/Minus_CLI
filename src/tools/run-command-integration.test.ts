@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createRunCommandTool, executeCatEmulation, parseCatCommand } from './run-command.js';
+import {
+  createRunCommandTool,
+  executeCatEmulation,
+  parseCatCommand,
+  executeLsEmulation,
+  parseLsCommand,
+} from './run-command.js';
 import { Workspace } from '../workspace/workspace.js';
 
 test('Integration Phase 1 & 2: Interactive command is rejected in 0ms without spawning process', async () => {
@@ -129,4 +135,52 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
 
   // Allowed to proceed (not blocked by preflight)
   assert.notEqual(allowedRes.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
+});
+
+test('Integration Phase 3: Git clone into current directory is blocked by preflight guard', async () => {
+  const tool = createRunCommandTool();
+  const workspace = new Workspace();
+
+  const res = await tool.execute(
+    { command: 'git clone https://github.com/HKUDS/DeepCode .' },
+    workspace
+  );
+
+  assert.equal(res.success, false);
+  assert.equal(res.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
+  assert.match(res.error, /thư mục hiện tại/);
+  assert.match(res.suggestion, /DeepCode/);
+});
+
+test('Integration Phase 3: Ls emulation executes in <5ms on Windows without missing executable error', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-ls-test-'));
+  try {
+    await fs.writeFile(path.join(tempDir, 'file1.txt'), 'hello');
+    await fs.writeFile(path.join(tempDir, 'file2.js'), 'console.log()');
+    await fs.mkdir(path.join(tempDir, 'subfolder'));
+
+    const workspace = new Workspace(tempDir);
+    const tool = createRunCommandTool();
+
+    // 1. Direct emulation function test
+    const parsed = parseLsCommand('ls -la');
+    assert.ok(parsed);
+    assert.equal(parsed.all, true);
+    assert.equal(parsed.long, true);
+
+    const emulated = await executeLsEmulation(parsed, workspace);
+    assert.equal(emulated.success, true);
+    assert.equal(emulated.exitCode, 0);
+    assert.match(emulated.stdout, /file1\.txt/);
+    assert.match(emulated.stdout, /file2\.js/);
+    assert.match(emulated.stdout, /subfolder\//);
+
+    // 2. Full run_command tool execution test (transparently emulated)
+    const toolRes = await tool.execute({ command: 'ls -la' }, workspace);
+    assert.equal(toolRes.success, true);
+    assert.match(toolRes.stdout, /file1\.txt/);
+    assert.ok(!toolRes.stderr || toolRes.stderr.length === 0);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });

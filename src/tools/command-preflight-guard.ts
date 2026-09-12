@@ -96,12 +96,39 @@ export function normalizeWindowsCommand(command: string): {
   let modified = false;
   const extractedEnv: Record<string, string> = {};
 
-  // 1. Chuyển 'which <tool>' thành 'where <tool>' trên Windows
+  // 1. Chuyển 'which <tool>' thành 'where <tool>' trên Windows và chuẩn hóa 'ls' thành 'dir'
   if (process.platform === 'win32') {
     const whichMatch = normalized.match(/^which\s+([a-zA-Z0-9_-]+)$/i);
     if (whichMatch) {
       normalized = `where ${whichMatch[1]}`;
       modified = true;
+    }
+
+    const lsMatch = normalized.match(/^ls\b(.*)$/i);
+    if (lsMatch && !/[;&|]/.test(normalized)) {
+      const rest = lsMatch[1].trim();
+      if (!rest) {
+        normalized = 'dir';
+        modified = true;
+      } else {
+        const tokens = (rest.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((t) => t.trim());
+        let hasA = false;
+        let hasS = false;
+        const paths: string[] = [];
+        for (const token of tokens) {
+          if (token.startsWith('-') || token.startsWith('/')) {
+            const lower = token.toLowerCase();
+            if (lower.includes('a')) hasA = true;
+            if (lower.includes('r') || lower === '/s') hasS = true;
+          } else {
+            paths.push(token);
+          }
+        }
+        const flags = [hasA ? '/a' : '', hasS ? '/s' : ''].filter(Boolean).join(' ');
+        const pathPart = paths.join(' ');
+        normalized = `dir${flags ? ' ' + flags : ''}${pathPart ? ' ' + pathPart : ''}`;
+        modified = true;
+      }
     }
   }
 
@@ -214,6 +241,28 @@ export function evaluateCommandPreflight(
         suggestion: 'Hãy phân tích nguyên nhân lỗi, đọc mã nguồn bằng "read_file" và thực hiện sửa lỗi bằng "replace_text" trước khi chạy lại test.',
       };
     }
+  }
+
+  // 4. Chặn 'git clone <url> .' vào thư mục hiện tại vì chắc chắn thất bại khi workspace đã có mã nguồn
+  // và tránh rủi ro ghi đè / xung đột với kho lưu trữ git hiện tại của dự án.
+  const gitCloneDotMatch = normalizedCommand.match(/^git(?:\.exe)?\s+clone(?:\s+[^\s]+)*\s+([^\s]+)\s+(?:\.|\.\/|\\|\.\\)\s*$/i);
+  if (gitCloneDotMatch) {
+    const repoUrl = gitCloneDotMatch[1];
+    const repoName = repoUrl.replace(/\.git$/i, '').split(/[/:\\]/).pop() || 'external-repo';
+    if (mode === 'observe') {
+      return {
+        allowed: true,
+        normalizedCommand,
+        extractedEnv,
+        reason: '[OBSERVE] Phát hiện lệnh git clone trực tiếp vào thư mục gốc workspace.',
+      };
+    }
+    return {
+      allowed: false,
+      errorCode: 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN',
+      reason: `Lệnh "git clone" trực tiếp vào thư mục hiện tại (".") bị chặn vì workspace hiện tại chứa mã nguồn dự án và Git sẽ báo lỗi "fatal: destination path '.' already exists and is not an empty directory".`,
+      suggestion: `Hãy chỉ định một thư mục con riêng biệt để clone, ví dụ: "git clone ${repoUrl} ${repoName}" hoặc tạo thư mục tạm trong "scratch/${repoName}".`,
+    };
   }
 
   return {

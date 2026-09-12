@@ -362,7 +362,7 @@ export class PermissionManager {
         };
       }
 
-      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|env|printenv|sed\s+-n|awk|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
+      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|git\s+(?:status|diff|log)|env|printenv|sed\s+-n|awk|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
       if (shellAnalysis.error || shellAnalysis.complex || shellAnalysis.segments.some((segment) => !safeSegment.test(segment.trim()))) {
         return {
           id,

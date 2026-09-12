@@ -720,7 +720,10 @@ export class ProjectMemoryManager {
 
     const scriptKeys = Object.keys(this.memoryData.scripts).sort();
     if (scriptKeys.length > 0) {
-      lines.push(`- Lệnh khả dụng: ${scriptKeys.map((k) => `"${k}": npm run ${k}`).slice(0, 5).join(', ')}`);
+      const commands = scriptKeys
+        .slice(0, 5)
+        .map((key) => `"${key}": ${this.memoryData.scripts[key]}`);
+      lines.push(`- Lệnh khả dụng: ${commands.join(', ')}`);
     }
 
     if (this.memoryData.isMonorepo && this.memoryData.monorepoWorkspaces && this.memoryData.monorepoWorkspaces.length > 0) {

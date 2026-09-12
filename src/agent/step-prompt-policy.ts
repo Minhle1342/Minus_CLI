@@ -155,10 +155,12 @@ export class StepPromptPolicy {
     else reasonCodes.push('NO_STEP_PLAYBOOK_REQUIRED');
 
     const phaseChanged = Boolean(context.previousPhase && context.previousPhase !== context.classification.phase);
+    const isInitialBugReport = !context.lastToolName && context.candidates.advicePlaybook === 'B_DEBUGGING';
     const actionableAdvice = context.hasSubmittedSolution
       || lastToolFailed
       || isMutationTool(context.lastToolName)
       || phaseChanged
+      || isInitialBugReport
       || (Boolean(context.activeTask) && context.candidates.advicePlaybook !== 'GENERAL');
     const includeAdvice = !context.hasVerifiedTests && actionableAdvice;
     if (includeAdvice) reasonCodes.push('ACTIONABLE_TOOL_ADVICE');

@@ -1161,6 +1161,15 @@ export class CLI {
     console.log(`  ${c.cyan}🧹 [Auto-Compacted]${c.reset} ${c.emerald}Saved ~${savedTokens.toLocaleString()} tokens${c.reset} ${c.slate}(History: ~${remainingTokens.toLocaleString()} tok)${c.reset}`);
   }
 
+  static renderContextBudgetExceededNotice(info: {
+    currentTokens: number;
+    configuredBudget: number;
+    hardwareLimit: number;
+    tier?: string;
+  }): void {
+    console.log(`  ${c.brightYellow}⚠️ [Context Budget Notice]${c.reset} ${c.slate}Context (~${info.currentTokens.toLocaleString()} tk) vượt ngưỡng cấu hình (${info.configuredBudget.toLocaleString()} tk). Tự động duy trì thực thi trong giới hạn Model (${Math.round(info.hardwareLimit / 1000)}k tk).${c.reset}`);
+  }
+
   static renderContextSnapshotSaved(snapshot: {
     snapshotId: string;
     turn: number;

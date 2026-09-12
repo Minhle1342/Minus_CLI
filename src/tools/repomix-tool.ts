@@ -1,10 +1,40 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
-import { pack, loadFileConfig, mergeConfigs } from 'repomix';
+import { pack, loadFileConfig, mergeConfigs, setLogLevel } from 'repomix';
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs/promises';
 import { buildAdaptiveCodeBundle, type FocusRange } from '../search/adaptive-code-reader.js';
+
+// Tắt hoàn toàn banner/warning của Repomix ra stdout để đảm bảo UI CLI tinh gọn
+try {
+  setLogLevel(-1);
+  process.env.REPOMIX_LOG_LEVEL = '-1';
+} catch {}
+
+async function packWithTemporaryOutput(
+  rootDir: string,
+  config: Parameters<typeof pack>[1],
+): Promise<Awaited<ReturnType<typeof pack>>> {
+  const temporaryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-repomix-'));
+  try {
+    return await pack([rootDir], {
+      ...config,
+      output: {
+        ...config.output,
+        filePath: path.join(temporaryDir, 'repomix-output.xml'),
+      },
+    });
+  } finally {
+    await fs.rm(temporaryDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    }).catch(() => undefined);
+  }
+}
 
 /**
  * createReadCompressedCodeTool
@@ -104,10 +134,10 @@ export function createReadCompressedCodeTool(): ToolDefinition {
       });
 
       try {
+        try { setLogLevel(-1); } catch {}
         const baseConfig = await loadFileConfig(workspace.rootDir, null);
-        const config = mergeConfigs(workspace.rootDir, baseConfig, {
+        const config = mergeConfigs(workspace.rootDir, { ...baseConfig, include: [] }, {
           output: {
-            filePath: '',
             compress: shouldCompress,
           },
           include: relativePaths,
@@ -117,7 +147,7 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           },
         });
 
-        const result = await pack([workspace.rootDir], config);
+        const result = await packWithTemporaryOutput(workspace.rootDir, config);
 
         const files = (result.processedFiles || []).map((f) => ({
           path: f.path,
@@ -202,10 +232,10 @@ export function createPackCodebaseTool(): ToolDefinition {
       const shouldCompress = args.compress !== false;
 
       try {
+        try { setLogLevel(-1); } catch {}
         const baseConfig = await loadFileConfig(workspace.rootDir, null);
         const config = mergeConfigs(workspace.rootDir, baseConfig, {
           output: {
-            filePath: '',
             compress: shouldCompress,
           },
           include,
@@ -215,7 +245,7 @@ export function createPackCodebaseTool(): ToolDefinition {
           },
         });
 
-        const result = await pack([workspace.rootDir], config);
+        const result = await packWithTemporaryOutput(workspace.rootDir, config);
 
         return {
           totalFiles: result.totalFiles,

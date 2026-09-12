@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { exec } from 'node:child_process';
 import { Type } from '@google/genai';
 import { ToolDefinition, type ToolExecutionContext } from './types.js';
@@ -354,9 +355,10 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
   }
 
   // 2. Duyệt file/thư mục qua shell (ls, dir, tree, Get-ChildItem, gci)
-  const listMatch = trimmed.match(/^(?:ls|dir|tree|Get-ChildItem|gci)(?:\s+([^\s;&|]+))?$/i);
+  const listMatch = trimmed.match(/^(?:ls|dir|tree|Get-ChildItem|gci)(?:\s+(?:-[a-zA-Z0-9/]+\s*)*)?(?:\s+([^\s;&|]+))?$/i);
   if (listMatch) {
-    const dirPath = (listMatch[1] || '').replace(/^["']|["']$/g, '') || undefined;
+    const rawTarget = (listMatch[1] || '').replace(/^["']|["']$/g, '');
+    const dirPath = rawTarget && !rawTarget.startsWith('-') && !rawTarget.startsWith('/') ? rawTarget : undefined;
     return {
       tool: 'list_files',
       reason: 'Liệt kê cấu trúc thư mục với bộ lọc tự động bỏ qua node_modules/.git',
@@ -491,6 +493,138 @@ export async function executeCatEmulation(
       exitCode: 1,
       emulated: true,
       suggestion: 'Kiểm tra lại đường dẫn file hoặc sử dụng tool chuyên dụng "read_file".',
+    };
+  }
+}
+
+export interface LsParsedOptions {
+  targetPath: string;
+  all: boolean;
+  long: boolean;
+}
+
+/**
+ * Phân tích cú pháp lệnh duyệt thư mục (ls, dir)
+ */
+export function parseLsCommand(command: string): LsParsedOptions | null {
+  const trimmed = command.trim();
+  if (/[;&|]/.test(trimmed)) return null;
+
+  const prefixMatch = trimmed.match(/^(?:ls|dir)\b/i);
+  if (!prefixMatch) return null;
+
+  const rawArgs = trimmed.slice(prefixMatch[0].length).trim();
+  const tokens = (rawArgs.match(/"[^"]*"|'[^']*'|\S+/g) || []).map((t) => t.trim());
+
+  let all = false;
+  let long = false;
+  let targetPath = '.';
+
+  if (prefixMatch[0].toLowerCase() === 'dir') {
+    long = true;
+  }
+
+  for (const token of tokens) {
+    if (token.startsWith('-') || token.startsWith('/')) {
+      const lower = token.toLowerCase();
+      if (lower.includes('a')) all = true;
+      if (lower.includes('l')) long = true;
+    } else {
+      targetPath = token.replace(/^["']|["']$/g, '');
+    }
+  }
+
+  if (tokens.length === 0 || tokens.some((t) => t.startsWith('-') && t.includes('l'))) {
+    long = true;
+  }
+
+  return {
+    targetPath,
+    all,
+    long,
+  };
+}
+
+/**
+ * Giả lập thực thi ls/dir siêu tốc qua Node.js I/O (<2ms)
+ * Tránh lỗi 'ls is not recognized' trên Windows cmd.exe và hoạt động nhất quán đa nền tảng.
+ */
+export async function executeLsEmulation(
+  parsed: LsParsedOptions,
+  workspace: Workspace,
+): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; emulated: boolean; suggestion?: string }> {
+  const startTime = Date.now();
+  try {
+    const safePath = workspace.resolveSafePath(parsed.targetPath);
+    const stat = await fs.stat(safePath);
+    if (!stat.isDirectory()) {
+      return {
+        stdout: '',
+        stderr: `ls: cannot access '${parsed.targetPath}': Not a directory`,
+        success: false,
+        durationMs: Date.now() - startTime,
+        exitCode: 1,
+        emulated: true,
+        suggestion: 'Đường dẫn chỉ định là tệp tin, không phải thư mục.',
+      };
+    }
+
+    const dirents = await fs.readdir(safePath, { withFileTypes: true });
+
+    // Sắp xếp thư mục trước, sau đó theo alphabet A-Z
+    dirents.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const lines: string[] = [];
+    for (const d of dirents) {
+      if (!parsed.all && d.name.startsWith('.')) continue;
+
+      const isDir = d.isDirectory();
+      const typeChar = isDir ? 'd' : '-';
+      const perms = isDir ? 'rwxr-xr-x' : 'rw-r--r--';
+
+      let sizeStr = '       0';
+      let dateStr = '                ';
+      try {
+        const itemStat = await fs.stat(path.join(safePath, d.name));
+        sizeStr = String(itemStat.size).padStart(8, ' ');
+        dateStr = itemStat.mtime.toISOString().slice(0, 16).replace('T', ' ');
+      } catch {
+        // Bỏ qua lỗi permission denied cho file con
+      }
+
+      if (parsed.long) {
+        lines.push(`${typeChar}${perms}  ${sizeStr}  ${dateStr}  ${d.name}${isDir ? '/' : ''}`);
+      } else {
+        lines.push(`${d.name}${isDir ? '/' : ''}`);
+      }
+    }
+
+    const totalCount = lines.length;
+    const header = `total ${totalCount} items in ${parsed.targetPath}`;
+    const output = [header, ...lines].join('\n');
+
+    return {
+      stdout: truncateOutput(output),
+      stderr: '',
+      success: true,
+      durationMs: Date.now() - startTime,
+      exitCode: 0,
+      emulated: true,
+      suggestion: 'Mẹo: Để tối ưu token và quản lý cấu trúc cây thư mục chuẩn, hãy dùng tool chuyên dụng "list_files".',
+    };
+  } catch (err: any) {
+    return {
+      stdout: '',
+      stderr: `ls: cannot access '${parsed.targetPath}': ${err.message}`,
+      success: false,
+      durationMs: Date.now() - startTime,
+      exitCode: 1,
+      emulated: true,
+      suggestion: 'Kiểm tra lại đường dẫn thư mục hoặc sử dụng tool "list_files".',
     };
   }
 }
@@ -902,6 +1036,18 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
 
+      // Tự động tối ưu hoá / giả lập lệnh duyệt thư mục (ls / dir) siêu tốc qua Node.js I/O (<2ms)
+      const parsedLs = parseLsCommand(effectiveCommand);
+      if (parsedLs) {
+        const emulatedLs = await executeLsEmulation(parsedLs, workspace);
+        return {
+          command: effectiveCommand,
+          ...emulatedLs,
+          sandbox: 'local',
+          executionTarget,
+        };
+      }
+
       if (executionTarget === 'host') {
         if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
@@ -932,7 +1078,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
-        const hostResult = await hostSandbox.exec(rawCommand, { cwd: workspace.rootDir, timeoutMs, signal: context?.signal });
+        const hostResult = await hostSandbox.exec(effectiveCommand, { cwd: workspace.rootDir, timeoutMs, signal: context?.signal });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
         const parsedSearch = parseRipgrepCommand(rawCommand);
@@ -1024,7 +1170,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           };
         }
 
-        const res = await sandboxManager.exec(rawCommand, {
+        const res = await sandboxManager.exec(effectiveCommand, {
           cwd: workspace.rootDir,
           timeoutMs,
           signal: context?.signal,

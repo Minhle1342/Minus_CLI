@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest } from './request-intent.js';
+import { isReadOnlyRequest, normalizeRequestIntentText } from './request-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
@@ -20,17 +20,18 @@ export interface ClassificationInput {
   minimumRisk?: ControlRisk;
 }
 
-const mutationIntent = /\b(?:implement|fix|change|modify|update|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sửa|triển khai|thực hiện|cập nhật|tạo|xóa|đổi tên|tích hợp)\b/i;
-const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|lỗi|hỏng|không hoạt động|nguyên nhân)\b/i;
-const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tái cấu trúc)\b/i;
-const releaseIntent = /\b(?:deploy|publish|release|push|production|phát hành|triển khai production)\b/i;
-const verifyIntent = /\b(?:test|verify|verification|build|lint|typecheck|kiểm thử|xác minh|đối chiếu)\b/i;
-const exploreIntent = /\b(?:explain|inspect|investigate|review|analy[sz]e|how|why|what|kiểm tra|phân tích|đánh giá|giải thích|tìm hiểu)\b/i;
+const mutationIntent = /\b(?:implement|fix|change|modify|update|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sua|trien khai|thuc hien|thuc thi|cap nhat|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung)\b/i;
+const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
+const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
+const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
+const verifyIntent = /\b(?:test|verify|verification|build|lint|typecheck|kiem thu|xac minh|doi chieu)\b/i;
+const exploreIntent = /\b(?:explain|inspect|investigate|review|analy[sz]e|how|why|what|kiem tra|phan tich|danh gia|giai thich|tim hieu)\b/i;
 
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
     const rawPrompt = input.request || input.userPrompt || input.prompt || '';
     const text = [rawPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
+    const normalizedText = normalizeRequestIntentText(text);
     const reasons: string[] = [];
     let taskClass: TaskClass = 'question';
     let phase: TaskPhase = 'explore';
@@ -41,22 +42,22 @@ export class ClassificationEngine {
     if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
-    } else if (releaseIntent.test(text)) {
+    } else if (releaseIntent.test(normalizedText)) {
       taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
     } else if (
       input.hasUnverifiedChanges
-      || (input.previous?.phase === 'implement' && verifyIntent.test(text))
+      || (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
       || (input.previous?.phase === 'verify' && input.lastToolName === 'run_command' && !input.lastToolFailed)
     ) {
       taskClass = input.previous?.taskClass || 'feature'; phase = 'verify'; risk = input.previous?.risk || 'R2';
       complexity = input.previous?.complexity || 'medium';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
       reasons.push(input.hasUnverifiedChanges ? 'UNVERIFIED_MUTATION_EXISTS' : 'VERIFICATION_PHASE_STICKY_UNTIL_COMPLETION');
-    } else if (mutationIntent.test(text)) {
-      taskClass = refactorIntent.test(text) ? 'refactor' : bugIntent.test(text) ? 'bugfix' : 'feature';
-      complexity = /\b(?:architecture|system|migration|multiple|all|kiến trúc|hệ thống|lộ trình|toàn bộ)\b/i.test(text) ? 'large' : 'medium';
+    } else if (mutationIntent.test(normalizedText)) {
+      taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
+      complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
       risk = complexity === 'large' ? 'R3' : 'R2';
 
       const evidenceThreshold = Math.max(1, input.evidenceThreshold || 1);
@@ -76,24 +77,24 @@ export class ClassificationEngine {
         if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
           reasons.push('PARETO_EVIDENCE_FAST_PATH');
         }
-        reasons.push(refactorIntent.test(text) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
+        reasons.push(refactorIntent.test(normalizedText) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
       }
-    } else if (bugIntent.test(text)) {
+    } else if (bugIntent.test(normalizedText)) {
       taskClass = 'bugfix'; phase = 'explore'; complexity = 'medium'; risk = 'R1';
       capabilities = ['inspect', 'search', 'execute', 'verify', 'memory'];
       reasons.push('BUG_REQUIRES_DIAGNOSIS');
-    } else if (verifyIntent.test(text)) {
+    } else if (verifyIntent.test(normalizedText)) {
       taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
       capabilities = ['inspect', 'execute', 'verify', 'git-read'];
       reasons.push('VERIFICATION_INTENT');
-    } else if (exploreIntent.test(text)) {
+    } else if (exploreIntent.test(normalizedText)) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLORATION');
     } else {
       reasons.push('CONSERVATIVE_READ_ONLY_DEFAULT');
     }
 
-    const needsNetwork = /\b(?:web|internet|online|latest|documentation|docs|website|trực tuyến|mới nhất)\b/i.test(text);
+    const needsNetwork = /\b(?:web|internet|online|latest|documentation|docs|website|truc tuyen|moi nhat)\b/i.test(normalizedText);
     if (needsNetwork && !capabilities.includes('network')) {
       capabilities.push('network');
       if (risk === 'R0') risk = 'R1';
@@ -105,9 +106,25 @@ export class ClassificationEngine {
     }
 
     if (input.lastToolFailed && input.previous && input.previous.phase !== 'release') {
-      phase = 'explore';
-      capabilities = Array.from(new Set<Capability>(['inspect', 'search', 'memory', ...(risk === 'R0' ? [] : ['execute' as Capability])]));
-      reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
+      const preserveMutationCapability = mutationIntent.test(normalizedText)
+        && input.previous.requiredCapabilities.includes('edit')
+        && (input.previous.phase === 'implement' || input.previous.phase === 'verify');
+      if (preserveMutationCapability) {
+        phase = 'implement';
+        capabilities = Array.from(new Set<Capability>([
+          ...input.previous.requiredCapabilities,
+          'inspect',
+          'search',
+          'edit',
+          'execute',
+          'verify',
+        ]));
+        reasons.push('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY');
+      } else {
+        phase = 'explore';
+        capabilities = Array.from(new Set<Capability>(['inspect', 'search', 'memory', ...(risk === 'R0' ? [] : ['execute' as Capability])]));
+        reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
+      }
     }
 
     if (input.minimumRisk) {
@@ -119,7 +136,7 @@ export class ClassificationEngine {
     }
 
     const confidence = text.length < 8 ? 0.55 : reasons.includes('CONSERVATIVE_READ_ONLY_DEFAULT') ? 0.65 : 0.9;
-    const stable = JSON.stringify({ taskClass, phase, complexity, risk, capabilities, text: text.toLowerCase() });
+    const stable = JSON.stringify({ taskClass, phase, complexity, risk, capabilities, text: normalizedText });
     return {
       id: `class-${createHash('sha256').update(stable).digest('hex').slice(0, 16)}`,
       version: 1,

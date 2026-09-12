@@ -35,7 +35,8 @@ export class ToolDescriptorRegistry {
     } else if (EDIT.has(name)) {
       descriptor = { name, capabilities: ['edit'], phases: ['implement'], minimumRisk: 'R1', mutates: true, reversible: true, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'run_command') {
-      descriptor = { name, capabilities: ['execute', 'verify'], phases: ['explore', 'implement', 'verify', 'release'], minimumRisk: 'R1', mutates: true, reversible: false, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
+      // Invocation risk is enforced by PermissionManager; safe inspection commands must remain available at R0.
+      descriptor = { name, capabilities: ['inspect', 'search', 'execute', 'verify', 'git-read'], phases: ['explore', 'implement', 'verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: false, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'submit_solution') {
       descriptor = { name, capabilities: ['complete'], phases: ['verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
     } else if (name === 'report_investigation_findings') {
