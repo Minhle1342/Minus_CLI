@@ -17,21 +17,29 @@ import { nativeBatchReadFiles } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Công cụ đọc file & mã nguồn chính trong workspace, kèm contentHash để sửa code an toàn. Ưu tiên "symbol" để lấy đúng declaration trong 1 lượt: TypeScript/JavaScript dùng compiler AST, Python dùng ranh giới indentation; định dạng khác trả parser/confidence để nhận diện fallback heuristic. Cũng hỗ trợ startLine/endLine (tối đa 800 dòng) và outlineOnly để bảo vệ context window.',
+  description: 'Công cụ đọc file & mã nguồn chính trong workspace, kèm contentHash để sửa code an toàn. Nếu đường dẫn là thư mục, tự động liệt kê danh sách tệp/thư mục con. Ưu tiên "symbol" để lấy đúng declaration trong 1 lượt: TypeScript/JavaScript dùng compiler AST, Python dùng ranh giới indentation. Cũng hỗ trợ startLine/endLine (hoặc offset/limit, tối đa 800 dòng), outlineOnly, và tự động cắt dòng siêu dài (>2000 ký tự) để bảo vệ context window.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới file cần đọc (ví dụ: "package.json", "src/index.ts", "src/test-suite.ts")',
+        description: 'Đường dẫn tương đối tới file hoặc thư mục cần đọc (ví dụ: "package.json", "src/index.ts", "src")',
       },
       startLine: {
         type: Type.INTEGER,
-        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần. Tối đa 800 dòng/lần gọi để bảo vệ context token.',
+        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần. Tối đa 800 dòng/lần gọi.',
       },
       endLine: {
         type: Type.INTEGER,
         description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn). Nếu bỏ trống trên file lớn (>350 dòng), mặc định đọc 250 dòng tiếp theo.',
+      },
+      offset: {
+        type: Type.INTEGER,
+        description: 'Alias tương thích cho startLine (1-indexed, mặc định 1).',
+      },
+      limit: {
+        type: Type.INTEGER,
+        description: 'Alias tương thích: số dòng tối đa cần đọc (mặc định 250 dòng trên file lớn, tối đa 800 dòng).',
       },
       outlineOnly: {
         type: Type.BOOLEAN,
@@ -58,13 +66,20 @@ export const readFileTool: ToolDefinition = {
       const safePath = workspace.resolveSafePath(rawPath);
       const stat = await fs.stat(safePath);
 
+      // 1. Nếu là thư mục, tự động chuyển sang hành vi liệt kê danh sách tệp/thư mục con (Directory Listing Fallback)
+      if (stat.isDirectory()) {
+        return await listDirectoryFallback(safePath, rawPath);
+      }
+
       if (!stat.isFile()) {
-        return { path: rawPath, error: `Đường dẫn "${rawPath}" là thư mục, không phải file.` };
+        return { path: rawPath, error: `Đường dẫn "${rawPath}" không phải là tệp tin hợp lệ.` };
       }
 
       // Kiểm tra xem LLM có truyền phạm vi cụ thể (scoped read) hay không
       const hasExplicitScope = args.startLine !== undefined
         || args.endLine !== undefined
+        || args.offset !== undefined
+        || args.limit !== undefined
         || Boolean(args.symbol)
         || Boolean(args.outlineOnly);
 
@@ -87,7 +102,7 @@ export const readFileTool: ToolDefinition = {
           error: `File quá lớn (${Math.round(stat.size / 1024)}KB). Giới hạn tối đa mỗi lần đọc toàn bộ là 200KB để chống tràn context token.`,
           errorCode: 'FILE_TOO_LARGE',
           fileSizeBytes: stat.size,
-          suggestion: `Hãy đọc từng phần bằng tham số "startLine" và "endLine" (ví dụ: startLine: 1, endLine: 200), hoặc sử dụng "outlineOnly: true" để xem cấu trúc hàm/lớp, hoặc dùng "symbol: <tên_symbol>" để chỉ trích xuất phần thân hàm/lớp bạn cần.`,
+          suggestion: `Hãy đọc từng phần bằng tham số "startLine" và "endLine" (hoặc "offset" và "limit"), hoặc sử dụng "outlineOnly: true" để xem cấu trúc hàm/lớp, hoặc dùng "symbol: <tên_symbol>" để chỉ trích xuất phần thân hàm/lớp bạn cần.`,
         };
       }
 
@@ -101,8 +116,11 @@ export const readFileTool: ToolDefinition = {
         fileContent = nativeBatch[0].content;
         contentHash = nativeBatch[0].hash || `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
       } else {
-        fileContent = await fs.readFile(safePath, 'utf-8');
-        contentHash = `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;
+        const fileBuffer = await fs.readFile(safePath);
+        // Giải mã UTF-8 an toàn: tự động thay thế byte hỏng bằng \uFFFD thay vì văng lỗi crash
+        const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+        fileContent = utf8Decoder.decode(fileBuffer);
+        contentHash = `sha256:${createHash('sha256').update(fileBuffer).digest('hex')}`;
       }
       const eol = detectEol(fileContent);
       const includeLineNumbers = args.includeLineNumbers !== false;
@@ -134,16 +152,25 @@ export const readFileTool: ToolDefinition = {
         const symbolName = String(args.symbol).trim();
         const sliced = SemanticSlicer.sliceSymbol(fileContent, symbolName, rawPath);
         if (sliced.found && sliced.code) {
-          const lines = sliced.code.split('\n');
+          const rawSymbolLines = sliced.code.split('\n');
           const start = sliced.startLine || 1;
+          let symbolTruncatedCount = 0;
+          const processedLines = rawSymbolLines.map((line) => {
+            const truncated = truncateLine(line);
+            if (truncated.truncated) symbolTruncatedCount++;
+            return truncated.text;
+          });
+
           const content = includeLineNumbers
-            ? lines.map((l, i) => `${start + i}: ${l}`).join('\n')
-            : sliced.code;
+            ? processedLines.map((l, i) => `${start + i}: ${l}`).join('\n')
+            : processedLines.join('\n');
+
           return {
             path: rawPath,
             symbol: symbolName,
             startLine: sliced.startLine,
             endLine: sliced.endLine,
+            linesCount: rawSymbolLines.length,
             qualifiedName: sliced.symbol?.qualifiedName,
             symbolKind: sliced.symbol?.kind,
             parser: sliced.parser,
@@ -153,6 +180,8 @@ export const readFileTool: ToolDefinition = {
             contentHash,
             eol,
             lineNumbersIncluded: includeLineNumbers,
+            hasTruncatedLines: symbolTruncatedCount > 0,
+            truncatedLinesCount: symbolTruncatedCount > 0 ? symbolTruncatedCount : undefined,
           };
         } else {
           // Khi không tìm thấy symbol, trích xuất outline để gợi ý các symbol khả dụng cho LLM tự phục hồi (Tool Design Error Recovery)
@@ -175,31 +204,46 @@ export const readFileTool: ToolDefinition = {
         }
       }
 
-      // 3. Chế độ đọc thông thường theo khoảng dòng
+      // 3. Chế độ đọc thông thường theo khoảng dòng (hoặc offset/limit)
       const lines = fileContent.split('\n');
       const totalLines = lines.length;
 
-      // Nếu file lớn (> 350 dòng) và không chỉ định khoảng dòng/symbol, tự động kích hoạt Windowing + AST Outline (SWE-agent & Cursor standard)
-      const isUnscopedLargeFile = args.startLine === undefined && args.endLine === undefined && !args.symbol && !args.outlineOnly && totalLines > 350;
-      const startLine = Math.max(1, Number(args.startLine) || 1);
+      // Hỗ trợ startLine và offset alias (1-indexed)
+      const rawOffset = args.offset !== undefined ? Number(args.offset) : undefined;
+      const rawStart = args.startLine !== undefined ? Number(args.startLine) : rawOffset;
+      const startLine = Math.max(1, rawStart || 1);
 
       if (startLine > totalLines) {
         return {
           path: rawPath,
-          error: `startLine (${startLine}) vượt quá tổng số dòng của file (${totalLines}).`,
+          error: `Dòng bắt đầu startLine/offset (${startLine}) vượt quá tổng số dòng của file (${totalLines}).`,
+          totalLines,
         };
       }
 
-      // Xác định endLine với các Guardrail bảo vệ context:
-      // - Nếu unscoped large file: lấy 120 dòng đầu
-      // - Nếu có startLine nhưng không có endLine trên file lớn (>350 dòng): tự động gán cửa sổ 250 dòng
-      // - Nếu dải dòng > 800: giới hạn tối đa 800 dòng/lần gọi
+      // Hỗ trợ limit alias và endLine
+      const rawLimit = args.limit !== undefined ? Math.max(1, Number(args.limit)) : undefined;
+
+      // Nếu file lớn (> 350 dòng) và không chỉ định bất kỳ khoảng dòng/symbol/limit nào:
+      // Tự động kích hoạt Windowing 120 dòng đầu + AST Outline (SWE-agent & Cursor standard)
+      const isUnscopedLargeFile = rawStart === undefined && args.endLine === undefined && rawLimit === undefined && !args.symbol && !args.outlineOnly && totalLines > 350;
+
       const MAX_LINE_RANGE = 800;
       let endLine: number;
       let autoWindowNotice: string | undefined;
 
       if (isUnscopedLargeFile) {
         endLine = Math.min(120, totalLines);
+      } else if (rawLimit !== undefined) {
+        const requestedLimit = Math.min(MAX_LINE_RANGE, rawLimit);
+        if (args.endLine !== undefined) {
+          endLine = Math.min(Number(args.endLine), startLine + requestedLimit - 1);
+        } else {
+          endLine = Math.min(totalLines, startLine + requestedLimit - 1);
+        }
+        if (rawLimit > MAX_LINE_RANGE) {
+          autoWindowNotice = `[MAX_RANGE_CAPPED]: Tham số limit (${rawLimit}) vượt quá giới hạn an toàn (${MAX_LINE_RANGE} dòng). Đã tự động giới hạn xuống ${MAX_LINE_RANGE} dòng.`;
+        }
       } else if (args.endLine !== undefined) {
         const requestedEndLine = Math.min(totalLines, Number(args.endLine) || totalLines);
         if (requestedEndLine - startLine + 1 > MAX_LINE_RANGE) {
@@ -209,21 +253,45 @@ export const readFileTool: ToolDefinition = {
           endLine = requestedEndLine;
         }
       } else if (totalLines > 350) {
-        // Có startLine nhưng không truyền endLine trên file lớn
+        // Có startLine/offset nhưng không truyền endLine/limit trên file lớn
         endLine = Math.min(totalLines, startLine + 249);
-        autoWindowNotice = `[AUTO_WINDOW_APPLIED]: Do không chỉ định endLine trên file lớn (${totalLines} dòng), hệ thống tự động đọc 250 dòng (L${startLine}-L${endLine}) để bảo vệ context window.`;
+        autoWindowNotice = `[AUTO_WINDOW_APPLIED]: Do không chỉ định endLine hoặc limit trên file lớn (${totalLines} dòng), hệ thống tự động đọc 250 dòng (L${startLine}-L${endLine}) để bảo vệ context window.`;
       } else {
         endLine = totalLines;
       }
 
       const selectedLines = lines.slice(startLine - 1, endLine);
+      let rangeTruncatedCount = 0;
+      const processedLines = selectedLines.map((line) => {
+        const truncated = truncateLine(line);
+        if (truncated.truncated) rangeTruncatedCount++;
+        return truncated.text;
+      });
+
       const content = includeLineNumbers
-        ? selectedLines.map((line, idx) => `${startLine + idx}: ${line}`).join('\n')
-        : selectedLines.join('\n');
+        ? processedLines.map((line, idx) => `${startLine + idx}: ${line}`).join('\n')
+        : processedLines.join('\n');
 
       const outline = isUnscopedLargeFile
         ? SemanticSlicer.extractOutline(rawPath, fileContent)
         : undefined;
+
+      const hasMore = endLine < totalLines;
+      let nextPage: { startLine: number; endLine: number; offset: number; limit: number } | undefined;
+      let paginationSuggestion: string | undefined;
+
+      if (hasMore) {
+        const nextStart = endLine + 1;
+        const pageSize = Math.min(MAX_LINE_RANGE, endLine - startLine + 1);
+        const nextEnd = Math.min(totalLines, nextStart + pageSize - 1);
+        nextPage = {
+          startLine: nextStart,
+          endLine: nextEnd,
+          offset: nextStart,
+          limit: nextEnd - nextStart + 1,
+        };
+        paginationSuggestion = `Để đọc tiếp phần kế tiếp (từ dòng ${nextStart} đến ${nextEnd}), hãy gọi: read_file(path="${rawPath}", startLine=${nextStart}, endLine=${nextEnd})`;
+      }
 
       return {
         path: rawPath,
@@ -231,14 +299,20 @@ export const readFileTool: ToolDefinition = {
         totalLines,
         startLine,
         endLine,
+        linesCount: selectedLines.length,
+        hasMore,
+        nextPage,
+        paginationSuggestion,
+        hasTruncatedLines: rangeTruncatedCount > 0,
+        truncatedLinesCount: rangeTruncatedCount > 0 ? rangeTruncatedCount : undefined,
         contentHash,
         eol,
         lineNumbersIncluded: includeLineNumbers,
-        isTruncated: isUnscopedLargeFile,
+        isTruncated: isUnscopedLargeFile || hasMore,
         symbolsCount: outline?.symbols?.length,
         outline: outline?.symbols?.slice(0, 30),
         notice: isUnscopedLargeFile
-          ? `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). Lines 1-120 and AST Symbol Outline are shown above to protect context window. To read other sections, pass startLine/endLine or symbol parameter.`
+          ? `[WINDOWED FILE VIEW]: File "${rawPath}" có ${totalLines} dòng (> 350). 120 dòng đầu tiên và AST Symbol Outline được hiển thị để bảo vệ context window. Để đọc các đoạn khác, hãy truyền startLine/endLine hoặc symbol.`
           : autoWindowNotice,
       };
     } catch (err: any) {
@@ -264,29 +338,102 @@ export const readFileTool: ToolDefinition = {
   },
 };
 
+/**
+ * Ngưỡng độ dài tối đa cho mỗi dòng đơn lẻ (2000 ký tự).
+ * Ngăn chặn tình trạng 1 dòng nén (minified code, base64, SVG) làm nổ context window của LLM.
+ */
+const MAX_LINE_CHARS = 2000;
+
+function truncateLine(line: string, maxChars = MAX_LINE_CHARS): { text: string; truncated: boolean; originalLength: number } {
+  if (line.length <= maxChars) {
+    return { text: line, truncated: false, originalLength: line.length };
+  }
+  const truncatedChars = line.length - maxChars;
+  return {
+    text: `${line.slice(0, maxChars)}... [truncated ${truncatedChars} chars]`,
+    truncated: true,
+    originalLength: line.length,
+  };
+}
+
+/**
+ * Directory Listing Fallback:
+ * Khi người dùng hoặc LLM gọi nhầm read_file vào một thư mục thay vì tệp tin,
+ * tool tự động hiển thị danh sách các tệp và thư mục con thay vì báo lỗi cứng.
+ */
+async function listDirectoryFallback(safePath: string, rawPath: string): Promise<Record<string, any>> {
+  try {
+    const entries = await fs.readdir(safePath, { withFileTypes: true });
+    // Sắp xếp: Thư mục lên trước, theo thứ tự bảng chữ cái
+    const sorted = entries.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const MAX_DIR_ENTRIES = 100;
+    const isCapped = sorted.length > MAX_DIR_ENTRIES;
+    const displayEntries = isCapped ? sorted.slice(0, MAX_DIR_ENTRIES) : sorted;
+
+    const formattedList = displayEntries
+      .map((e) => {
+        const prefix = e.isDirectory() ? '[DIR] ' : '[FILE]';
+        return `${prefix} ${e.name}`;
+      })
+      .join('\n');
+
+    const cleanPath = rawPath.replace(/\\/g, '/');
+    return {
+      path: cleanPath,
+      isDirectory: true,
+      totalEntries: sorted.length,
+      displayedEntries: displayEntries.length,
+      entries: displayEntries.map((e) => ({
+        name: e.name,
+        type: e.isDirectory() ? 'directory' : 'file',
+      })),
+      content: `Directory listing for "${cleanPath}":\n${formattedList}${isCapped ? `\n\n... và ${sorted.length - MAX_DIR_ENTRIES} mục khác. Hãy chỉ định đường dẫn thư mục con cụ thể.` : ''}`,
+      notice: `[DIRECTORY_FALLBACK]: "${cleanPath}" là thư mục, không phải tệp tin. Tool đã tự động chuyển sang liệt kê danh sách tệp con để bạn dễ dàng định hướng tệp cần đọc.`,
+      suggestion: `Hãy chọn một tệp từ danh sách trên và gọi lại read_file với path="${cleanPath.replace(/\/$/, '')}/<tên_tệp>".`,
+    };
+  } catch (err: any) {
+    return {
+      path: rawPath,
+      isDirectory: true,
+      error: `Không thể đọc nội dung thư mục "${rawPath}": ${err.message}`,
+      errorCode: 'DIR_READ_ERROR',
+    };
+  }
+}
+
 async function findSimilarFiles(rawPath: string, workspace: Workspace): Promise<string[]> {
   try {
     const parentDir = path.dirname(rawPath);
     const baseName = path.basename(rawPath).toLowerCase().replace(/\.[^.]+$/, '');
+    const ext = path.extname(rawPath).toLowerCase();
     const safeParent = workspace.resolveSafePath(parentDir || '.');
 
     const entries = await fs.readdir(safeParent, { withFileTypes: true });
-    const candidates: string[] = [];
+    const nameMatches: string[] = [];
+    const extMatches: string[] = [];
 
     for (const entry of entries) {
       if (entry.isFile()) {
         const entryClean = entry.name.toLowerCase().replace(/\.[^.]+$/, '');
-        if (
-          entryClean.includes(baseName)
-          || baseName.includes(entryClean)
-          || entry.name.endsWith('.ts')
-          || entry.name.endsWith('.js')
-        ) {
-          candidates.push(path.join(parentDir, entry.name).replace(/\\/g, '/'));
+        const entryExt = path.extname(entry.name).toLowerCase();
+        const formattedCandidate = path.join(parentDir, entry.name).replace(/\\/g, '/');
+
+        if (entryClean.includes(baseName) || baseName.includes(entryClean)) {
+          nameMatches.push(formattedCandidate);
+        } else if (ext && entryExt === ext) {
+          extMatches.push(formattedCandidate);
         }
       }
     }
-    return candidates.slice(0, 5);
+
+    // Ưu tiên ứng viên khớp mờ tên file lên đầu, sau đó mới bổ sung file cùng extension
+    const combined = [...nameMatches, ...extMatches];
+    return combined.slice(0, 5);
   } catch {
     return [];
   }

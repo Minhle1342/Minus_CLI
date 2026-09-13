@@ -132,24 +132,60 @@ export function normalizeWindowsCommand(command: string): {
     }
   }
 
-  // 2. Bóc tách 'export FOO=bar && cmd' dạng POSIX
-  const exportMatch = normalized.match(/^export\s+([a-zA-Z_][a-zA-Z0-9_]*)=['"]?([^'";\n&]+)['"]?\s*&&\s*(.+)$/i);
-  if (exportMatch) {
-    const varName = exportMatch[1];
-    const varVal = exportMatch[2].trim();
-    extractedEnv[varName] = varVal;
-    normalized = exportMatch[3].trim();
-    modified = true;
-  }
+  // 2. Bóc tách lặp các tiền tố gán biến môi trường (PowerShell, CMD, POSIX export, inline)
+  // Xử lý hoàn hảo các chuỗi biến môi trường phức tạp:
+  // Ví dụ: $env:NODE_OPTIONS='--max-old-space-size=512'; $env:UV_THREADPOOL_SIZE='1'; npm run build
+  let matchedEnvInLoop = true;
+  while (matchedEnvInLoop && normalized.length > 0) {
+    matchedEnvInLoop = false;
 
-  // 3. Bóc tách 'FOO=bar <cmd>' dạng inline POSIX (ví dụ: NODE_ENV=test npm test)
-  const inlineEnvMatch = normalized.match(/^([a-zA-Z_][a-zA-Z0-9_]*)=([^\s;&|]+)\s+(.+)$/i);
-  if (inlineEnvMatch && !inlineEnvMatch[1].toLowerCase().startsWith('git')) {
-    const varName = inlineEnvMatch[1];
-    const varVal = inlineEnvMatch[2].trim();
-    extractedEnv[varName] = varVal;
-    normalized = inlineEnvMatch[3].trim();
-    modified = true;
+    // 2.1. PowerShell: $env:VAR_NAME = 'value'; hoặc "value"; hoặc value; (dấu ; là tuỳ chọn)
+    const psMatch = normalized.match(/^\$env:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s;]+))\s*;?\s*([\s\S]*)$/i);
+    if (psMatch) {
+      const varName = psMatch[1];
+      const varVal = psMatch[2] ?? psMatch[3] ?? psMatch[4] ?? '';
+      extractedEnv[varName] = varVal;
+      normalized = (psMatch[5] || '').trim();
+      modified = true;
+      matchedEnvInLoop = true;
+      continue;
+    }
+
+    // 2.2. CMD: set "VAR_NAME=value" && hoặc set VAR_NAME=value && (hoặc &)
+    const cmdMatch = normalized.match(/^set\s+(?:"([a-zA-Z_][a-zA-Z0-9_]*)=([^"]*)"|([a-zA-Z_][a-zA-Z0-9_]*)=([^\s&]+))\s*(?:&&|&)\s*([\s\S]*)$/i);
+    if (cmdMatch) {
+      const varName = cmdMatch[1] || cmdMatch[3];
+      const varVal = cmdMatch[2] ?? cmdMatch[4] ?? '';
+      extractedEnv[varName] = varVal;
+      normalized = (cmdMatch[5] || '').trim();
+      modified = true;
+      matchedEnvInLoop = true;
+      continue;
+    }
+
+    // 2.3. POSIX Export: export VAR_NAME='value' && hoặc ;
+    const exportMatch = normalized.match(/^export\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s;&|]+))\s*(?:&&|;)\s*([\s\S]*)$/i);
+    if (exportMatch) {
+      const varName = exportMatch[1];
+      const varVal = exportMatch[2] ?? exportMatch[3] ?? exportMatch[4] ?? '';
+      extractedEnv[varName] = varVal;
+      normalized = (exportMatch[5] || '').trim();
+      modified = true;
+      matchedEnvInLoop = true;
+      continue;
+    }
+
+    // 2.4. POSIX Inline: VAR_NAME=value <cmd> (không match nếu là lệnh git hoặc từ khóa shell)
+    const inlineMatch = normalized.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s;&|]+))\s+([\s\S]+)$/i);
+    if (inlineMatch && !inlineMatch[1].toLowerCase().startsWith('git') && !/^(?:if|then|else|for|while|do|case)\b/i.test(inlineMatch[1])) {
+      const varName = inlineMatch[1];
+      const varVal = inlineMatch[2] ?? inlineMatch[3] ?? inlineMatch[4] ?? '';
+      extractedEnv[varName] = varVal;
+      normalized = (inlineMatch[5] || '').trim();
+      modified = true;
+      matchedEnvInLoop = true;
+      continue;
+    }
   }
 
   return {

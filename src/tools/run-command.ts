@@ -61,6 +61,8 @@ const ALLOWED_COMMAND_PREFIXES = [
   'printf ',
   'env',
   'printenv',
+  'set ',
+  '$env:',
   'jq ',
   'sed ',
   'awk ',
@@ -259,6 +261,14 @@ export function isAllowedCommand(command: string): boolean {
     const exact = prefix.trim();
     return trimmed === exact || (prefix.endsWith(' ') && trimmed.startsWith(prefix));
   })) {
+    return true;
+  }
+  // Cho phép các lệnh gán biến môi trường an toàn ($env:VAR=..., set VAR=..., export VAR=...)
+  if (
+    /^\$env:[a-zA-Z_][a-zA-Z0-9_]*\s*=/i.test(trimmed)
+    || /^set\s+(?:"?[a-zA-Z_][a-zA-Z0-9_]*=)/i.test(trimmed)
+    || /^export\s+[a-zA-Z_][a-zA-Z0-9_]*\s*=/i.test(trimmed)
+  ) {
     return true;
   }
   // Cho phép mọi lệnh Git thông thường nếu subcommand hợp lệ
@@ -946,7 +956,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
       if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
-        const bgTask = taskManager.startTask(rawCommand, workspace.rootDir);
+        const bgTask = taskManager.startTask(effectiveCommand, workspace.rootDir, preflight.extractedEnv);
         const startTime = Date.now();
         const deadline = startTime + waitMsBeforeAsync;
 
@@ -1049,7 +1059,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       if (executionTarget === 'host') {
-        if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        const isAllowedOnHost = isAllowedShellCommand(effectiveCommand) || isAllowedShellCommand(rawCommand);
+        if (!isAllowedOnHost && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
             const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
             if (permCheck.allowed) {
@@ -1065,7 +1076,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             }
           }
         }
-        if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        if (!isAllowedOnHost && !hasExplicitPermission) {
           const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
@@ -1078,7 +1089,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
-        const hostResult = await hostSandbox.exec(effectiveCommand, { cwd: workspace.rootDir, timeoutMs, signal: context?.signal });
+        const hostResult = await hostSandbox.exec(effectiveCommand, {
+          cwd: workspace.rootDir,
+          timeoutMs,
+          signal: context?.signal,
+          env: preflight.extractedEnv,
+        });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
         const parsedSearch = parseRipgrepCommand(rawCommand);
@@ -1141,7 +1157,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const status = sandboxManager.getStatus();
         
         // Nếu không ở trong môi trường Docker Container cô lập, kiểm tra cấp quyền
-        if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        const isAllowedOnSandbox = isAllowedShellCommand(effectiveCommand) || isAllowedShellCommand(rawCommand);
+        if (!status.isIsolated && !isAllowedOnSandbox && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
             const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
             if (permCheck.allowed) {
@@ -1158,7 +1175,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           }
         }
 
-        if (!status.isIsolated && !isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+        if (!status.isIsolated && !isAllowedOnSandbox && !hasExplicitPermission) {
           const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
@@ -1174,6 +1191,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           cwd: workspace.rootDir,
           timeoutMs,
           signal: context?.signal,
+          env: preflight.extractedEnv,
         });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
@@ -1217,7 +1235,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Fallback mặc định
-      if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+      const isAllowedFallback = isAllowedShellCommand(effectiveCommand) || isAllowedShellCommand(rawCommand);
+      if (!isAllowedFallback && !hasExplicitPermission) {
         if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
           const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
           if (permCheck.allowed) {
@@ -1234,7 +1253,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
       }
 
-      if (!isAllowedShellCommand(rawCommand) && !hasExplicitPermission) {
+      if (!isAllowedFallback && !hasExplicitPermission) {
         const misuse = detectFileCommandMisuse(rawCommand);
         return {
           command: rawCommand,
@@ -1254,6 +1273,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             timeout: timeoutMs,
             signal: context?.signal,
             maxBuffer: 1024 * 1024,
+            env: preflight.extractedEnv ? { ...process.env, ...preflight.extractedEnv } : process.env,
           },
           (error, stdout, stderr) => {
             const timedOut = error?.killed && error.signal === 'SIGTERM';

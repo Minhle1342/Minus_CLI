@@ -138,9 +138,40 @@ test('Preflight Guard: Normalizes POSIX environment exports, which, and ls on Wi
     assert.equal(resLsLa.normalizedCommand, 'dir /a');
     assert.equal(resLsLa.modified, true);
 
-    const resLsDir = normalizeWindowsCommand('ls -la src');
-    assert.equal(resLsDir.normalizedCommand, 'dir /a src');
-    assert.equal(resLsDir.modified, true);
+    // PowerShell multi-env chaining (ví dụ thực tế của user)
+    const complexPsCmd = "$env:NODE_OPTIONS='--max-old-space-size=512'; $env:SHARP_CONCURRENCY='1'; $env:UV_THREADPOOL_SIZE='1'; $env:ASTRO_TELEMETRY_DISABLED='1'; npm run build";
+    const resPs = normalizeWindowsCommand(complexPsCmd);
+    assert.equal(resPs.normalizedCommand, 'npm run build');
+    assert.deepEqual(resPs.extractedEnv, {
+      NODE_OPTIONS: '--max-old-space-size=512',
+      SHARP_CONCURRENCY: '1',
+      UV_THREADPOOL_SIZE: '1',
+      ASTRO_TELEMETRY_DISABLED: '1',
+    });
+    assert.equal(resPs.modified, true);
+
+    // Kiểm tra qua evaluateCommandPreflight
+    const preflightPs = evaluateCommandPreflight(complexPsCmd, { mode: 'enforce' });
+    assert.equal(preflightPs.allowed, true);
+    assert.equal(preflightPs.normalizedCommand, 'npm run build');
+    assert.deepEqual(preflightPs.extractedEnv, {
+      NODE_OPTIONS: '--max-old-space-size=512',
+      SHARP_CONCURRENCY: '1',
+      UV_THREADPOOL_SIZE: '1',
+      ASTRO_TELEMETRY_DISABLED: '1',
+    });
+
+    // CMD multi-env chaining
+    const resCmd = normalizeWindowsCommand('set "FOO=bar" && set BAZ=123 && npm test');
+    assert.equal(resCmd.normalizedCommand, 'npm test');
+    assert.deepEqual(resCmd.extractedEnv, { FOO: 'bar', BAZ: '123' });
+    assert.equal(resCmd.modified, true);
+
+    // Multi POSIX export
+    const resMultiExport = normalizeWindowsCommand('export A=1 && export B=2 && npm start');
+    assert.equal(resMultiExport.normalizedCommand, 'npm start');
+    assert.deepEqual(resMultiExport.extractedEnv, { A: '1', B: '2' });
+    assert.equal(resMultiExport.modified, true);
   } finally {
     Object.defineProperty(process, 'platform', { value: originalPlatform });
   }

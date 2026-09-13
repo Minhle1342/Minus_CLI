@@ -1,8 +1,12 @@
-import fs from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
+import { executeRipgrepEmulation, type RgParsedOptions } from './rg-emulator.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface MatchItem {
   file: string;
@@ -15,203 +19,249 @@ export interface FileMatchSummary {
   matchCount: number;
 }
 
+// Cache kiểm tra sự tồn tại của tiện ích Ripgrep (rg) trên môi trường
+let isRgAvailableCache: boolean | null = null;
+
+async function checkRipgrepAvailable(): Promise<boolean> {
+  if (isRgAvailableCache !== null) {
+    return isRgAvailableCache;
+  }
+  try {
+    await execFileAsync('rg', ['--version'], { timeout: 2000 });
+    isRgAvailableCache = true;
+  } catch {
+    isRgAvailableCache = false;
+  }
+  return isRgAvailableCache;
+}
+
 /**
- * Tool 3: search_text (Two-Stage Output Capping & Context Protection Ready)
- * Tìm kiếm chuỗi văn bản trong các file text của workspace.
- * Hỗ trợ các outputMode: 'content' (mặc định), 'files_with_matches', 'count'
- * Tự động kích hoạt Two-Stage Capping khi có quá nhiều kết quả để bảo vệ Context Window.
+ * Tool: search_text (Grep & Regex Hybrid Search Tool)
+ * 
+ * Tìm kiếm nội dung bên trong các tệp tin bằng Biểu thức chính quy (Regex) hoặc chuỗi văn bản.
+ * Hoạt động theo cơ chế Hybrid 3 tầng:
+ * 1. Ưu tiên Ripgrep (rg) nếu có sẵn trên hệ điều hành (siêu nhanh, tôn trọng .gitignore).
+ * 2. Rust Native Ripgrep Core (nếu có native addon).
+ * 3. Pure-TypeScript Fallback (chạy đệ quy thuần Node.js, bỏ qua thư mục rác, không sợ thiếu binary).
+ * 
+ * Hỗ trợ:
+ * - Regex pattern hoặc plain string
+ * - Glob filter (ví dụ: *.ts, *.py)
+ * - Output mode: 'content' (dòng chi tiết path:line:text), 'files_with_matches', 'count'
+ * - Giới hạn an toàn maxMatches (mặc định 50, trần 200) chống ngộ độc context window.
  */
 export const searchTextTool: ToolDefinition = {
   name: 'search_text',
-  description: 'Tìm kiếm chuỗi văn bản trong một thư mục hoặc một tệp tin cụ thể trong workspace. Hỗ trợ outputMode ("content", "files_with_matches", "count") và cơ chế Two-Stage Capping chống ngộ độc context.',
+  description: 'Tìm kiếm nội dung tệp tin bằng Biểu thức chính quy (Regex) hoặc chuỗi văn bản theo cơ chế Hybrid (Ripgrep native + TypeScript fallback). Tự động bỏ qua thư mục rác (node_modules, .git, dist) và giới hạn kết quả để bảo vệ context token.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       query: {
         type: Type.STRING,
-        description: 'Chuỗi văn bản cần tìm kiếm',
+        description: 'Biểu thức chính quy (Regex) hoặc chuỗi văn bản cần tìm kiếm. Ví dụ: "function\\s+\\w+", "TODO:", "export\\s+class".',
       },
       path: {
         type: Type.STRING,
-        description: 'Thư mục hoặc tệp tin cụ thể để tìm kiếm (mặc định là ".")',
+        description: 'Thư mục hoặc tệp tin cụ thể để tìm kiếm (mặc định: "." quét toàn bộ workspace).',
+      },
+      isRegex: {
+        type: Type.BOOLEAN,
+        description: 'Nếu true (mặc định), xử lý query như Regular Expression. Nếu false, tìm kiếm chuỗi ký tự chính xác (literal string).',
+      },
+      include: {
+        type: Type.STRING,
+        description: 'Bộ lọc định dạng tệp tin theo mẫu glob (ví dụ: "*.ts", "*.py", "*.json").',
+      },
+      caseSensitive: {
+        type: Type.BOOLEAN,
+        description: 'Nếu true, tìm kiếm phân biệt chữ hoa/thường. Mặc định false (không phân biệt).',
+      },
+      wordMatch: {
+        type: Type.BOOLEAN,
+        description: 'Nếu true, chỉ khớp các từ hoàn chỉnh (tương đương \\b...\\b hoặc cờ -w trong ripgrep). Mặc định false.',
       },
       outputMode: {
         type: Type.STRING,
         enum: ['content', 'files_with_matches', 'count'],
-        description: 'Chế độ hiển thị: "content" (dòng khớp chi tiết), "files_with_matches" (chỉ danh sách file + số lượng khớp để tiết kiệm token), hoặc "count" (chỉ đếm số lượng). Mặc định là "content".',
-      },
-      caseSensitive: {
-        type: Type.BOOLEAN,
-        description: 'Nếu true, tìm kiếm phân biệt chữ hoa/thường. Mặc định false.',
+        description: 'Chế độ trả về: "content" (dòng khớp chi tiết path:line:text), "files_with_matches" (chỉ danh sách file), hoặc "count" (đếm số lượng). Mặc định: "content".',
       },
       maxMatches: {
         type: Type.INTEGER,
-        description: 'Giới hạn số lượng kết quả chi tiết trả về (mặc định: 30, tối đa: 100).',
+        description: 'Giới hạn số lượng kết quả trả về tối đa (mặc định: 50, tối đa: 200).',
       },
     },
     required: ['query'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawQuery = String(args.query || '');
-    const rawPath = String(args.path || '.');
-    const outputMode = args.outputMode || 'content';
+    const rawQuery = String(args.query || '').trim();
+    const rawPath = String(args.path || '.').trim();
+    const isRegex = args.isRegex !== false;
+    const includeGlob = args.include ? String(args.include).trim() : undefined;
     const caseSensitive = args.caseSensitive === true;
-    const maxMatches = Math.min(100, Math.max(1, Number(args.maxMatches) || 30));
+    const wordMatch = args.wordMatch === true;
+    const outputMode = args.outputMode || 'content';
+    const HARD_LIMIT = 200;
+    const maxMatches = Math.min(HARD_LIMIT, Math.max(1, Number(args.maxMatches) || 50));
 
-    if (!rawQuery.trim()) {
+    if (!rawQuery) {
       return { error: 'Tham số "query" không được để trống.', errorCode: 'INVALID_ARGS' };
     }
 
-    const searchQuery = caseSensitive ? rawQuery : rawQuery.toLowerCase();
-
+    // Kiểm tra đường dẫn tồn tại trước khi tìm
     try {
-      const safeRoot = workspace.resolveSafePath(rawPath);
-      let stat;
+      workspace.resolveSafePath(rawPath);
+    } catch (err: any) {
+      return {
+        error: `Đường dẫn "${rawPath}" nằm ngoài phạm vi workspace hợp lệ.`,
+        errorCode: 'PATH_OUT_OF_BOUNDS',
+      };
+    }
+
+    const options: RgParsedOptions = {
+      query: rawQuery,
+      isRegex,
+      ignoreCase: !caseSensitive,
+      invertMatch: false,
+      wordRegexp: wordMatch,
+      filesWithMatchesOnly: outputMode === 'files_with_matches',
+      countOnly: outputMode === 'count',
+      showLineNumbers: true,
+      maxTotalMatches: maxMatches,
+      globFilter: includeGlob ? [includeGlob] : undefined,
+      targetPaths: [rawPath],
+    };
+
+    let engineUsed: 'ripgrep-binary' | 'typescript-emulator' = 'typescript-emulator';
+    let rawStdout = '';
+    let totalMatchCount = 0;
+
+    // 1. Thử nghiệm chạy với Ripgrep CLI native trên hệ thống nếu khả dụng
+    const rgAvailable = await checkRipgrepAvailable();
+    if (rgAvailable) {
       try {
-        stat = await fs.stat(safeRoot);
-      } catch (statErr: any) {
-        if (statErr.code === 'ENOENT' || String(statErr.message).includes('ENOENT')) {
-          return {
-            error: `Đường dẫn "${rawPath}" không tồn tại (ENOENT: no such file or directory).`,
-            errorCode: 'PATH_NOT_FOUND',
-            suggestion: 'Hãy kiểm tra lại đường dẫn tệp hoặc thư mục bằng list_files hoặc search_codebase_fast.',
-          };
-        }
-        throw statErr;
-      }
+        const rgArgs: string[] = ['--line-number', '--no-heading', '--color', 'never'];
+        if (!caseSensitive) rgArgs.push('--ignore-case');
+        if (wordMatch) rgArgs.push('--word-regexp');
+        if (!isRegex) rgArgs.push('--fixed-strings');
+        if (includeGlob) rgArgs.push('--glob', includeGlob);
+        if (outputMode === 'files_with_matches') rgArgs.push('--files-with-matches');
+        if (outputMode === 'count') rgArgs.push('--count');
+        rgArgs.push('--max-count', String(maxMatches));
+        rgArgs.push(rawQuery);
+        rgArgs.push(rawPath);
 
-      const allMatches: MatchItem[] = [];
-      const fileSummaryMap = new Map<string, number>();
-      const hardMaxMatches = 200; // Cắt cứng quét để tránh treo I/O
-      let isScanCapped = false;
+        const { stdout } = await execFileAsync('rg', rgArgs, {
+          cwd: workspace.rootDir,
+          timeout: 8000,
+          maxBuffer: 5 * 1024 * 1024,
+        });
 
-      async function searchInFile(fullPath: string) {
-        if (workspace.isBinaryFile(path.basename(fullPath))) {
-          return;
-        }
-
-        try {
-          const fileContent = await fs.readFile(fullPath, 'utf-8');
-          const lines = fileContent.split(/\r?\n/);
-
-          for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            const matched = caseSensitive
-              ? line.includes(searchQuery)
-              : line.toLowerCase().includes(searchQuery);
-
-            if (matched) {
-              const relativeFilePath = workspace.toRelativePath(fullPath).replace(/\\/g, '/');
-              fileSummaryMap.set(relativeFilePath, (fileSummaryMap.get(relativeFilePath) || 0) + 1);
-
-              allMatches.push({
-                file: relativeFilePath,
-                line: i + 1,
-                text: line.trim(),
-              });
-
-              if (allMatches.length >= hardMaxMatches) {
-                isScanCapped = true;
-                break;
-              }
-            }
-          }
-        } catch {
-          // Bỏ qua nếu file không đọc được dạng utf-8
+        rawStdout = stdout.trim();
+        engineUsed = 'ripgrep-binary';
+      } catch (err: any) {
+        // Exit code 1 của ripgrep đơn giản là không tìm thấy kết quả (No matches found)
+        if (err.code === 1) {
+          rawStdout = '';
+          engineUsed = 'ripgrep-binary';
+        } else {
+          // Lỗi cú pháp regex hoặc lỗi khác -> Tự động fallback sang TypeScript Emulator
+          rawStdout = '';
         }
       }
+    }
 
-      async function walk(currentDir: string) {
-        if (allMatches.length >= hardMaxMatches) {
-          isScanCapped = true;
-          return;
-        }
+    // 2. Fallback sang Pure-TypeScript Emulator nếu Ripgrep CLI không có hoặc gặp lỗi
+    if (engineUsed === 'typescript-emulator') {
+      const emulated = await executeRipgrepEmulation(options, workspace);
+      rawStdout = emulated.stdout.trim();
+      totalMatchCount = emulated.matchCount;
+    }
 
-        const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    // 3. Xử lý kết quả theo từng outputMode
+    const lines = rawStdout ? rawStdout.split(/\r?\n/).filter(Boolean) : [];
 
-        for (const entry of entries) {
-          if (allMatches.length >= hardMaxMatches) {
-            isScanCapped = true;
-            break;
-          }
-
-          const fullPath = path.join(currentDir, entry.name);
-
-          if (entry.isDirectory()) {
-            if (workspace.isIgnoredDirectory(entry.name)) {
-              continue;
-            }
-            await walk(fullPath);
-          } else if (entry.isFile()) {
-            await searchInFile(fullPath);
-          }
-        }
+    // Chế độ 1: 'count'
+    if (outputMode === 'count') {
+      let count = totalMatchCount;
+      if (engineUsed === 'ripgrep-binary') {
+        count = lines.reduce((acc, l) => {
+          const parts = l.split(':');
+          const last = parseInt(parts[parts.length - 1], 10);
+          return acc + (isNaN(last) ? 0 : last);
+        }, 0);
       }
-
-      if (stat.isFile()) {
-        await searchInFile(safeRoot);
-      } else if (stat.isDirectory()) {
-        await walk(safeRoot);
-      } else {
-        return {
-          error: `Đường dẫn "${rawPath}" không phải là tệp tin hoặc thư mục hợp lệ.`,
-          errorCode: 'INVALID_PATH',
-        };
-      }
-
-      const fileSummaries: FileMatchSummary[] = Array.from(fileSummaryMap.entries()).map(
-        ([file, matchCount]) => ({ file, matchCount }),
-      );
-
-      // 1. Chế độ 'count': Chỉ trả về thống kê
-      if (outputMode === 'count') {
-        return {
-          query: rawQuery,
-          path: rawPath,
-          totalMatches: allMatches.length,
-          totalFiles: fileSummaries.length,
-          isScanCapped,
-        };
-      }
-
-      // 2. Chế độ 'files_with_matches' (SWE-agent Stage 1 Overview Standard)
-      if (outputMode === 'files_with_matches') {
-        return {
-          query: rawQuery,
-          path: rawPath,
-          totalMatches: allMatches.length,
-          totalFiles: fileSummaries.length,
-          files: fileSummaries,
-          isScanCapped,
-          guidance: 'Danh sách các file chứa từ khóa. Để xem chi tiết từng file, gọi read_file hoặc search_text với path cụ thể.',
-        };
-      }
-
-      // 3. Chế độ 'content' mặc định kèm Two-Stage Capping khi nhiều kết quả
-      const isTwoStageCapped = allMatches.length > 20 || fileSummaries.length > 3;
-      const returnedMatches = isTwoStageCapped
-        ? allMatches.slice(0, Math.min(15, maxMatches))
-        : allMatches.slice(0, maxMatches);
-
       return {
         query: rawQuery,
         path: rawPath,
-        outputMode: 'content',
-        totalMatches: allMatches.length,
-        totalFiles: fileSummaries.length,
-        fileSummary: fileSummaries,
-        matches: returnedMatches,
-        isCapped: isTwoStageCapped || allMatches.length > returnedMatches.length,
-        isScanCapped,
-        notice: isTwoStageCapped
-          ? `[TWO-STAGE SEARCH CAPPED]: Tìm thấy ${allMatches.length} vị trí khớp trong ${fileSummaries.length} files. Hiển thị tổng hợp file và ${returnedMatches.length} dòng mẫu để chống loãng context. Hãy dùng outputMode="files_with_matches" hoặc chỉ định path="<file>" để lọc chính xác.`
-          : undefined,
-      };
-    } catch (err: any) {
-      return {
-        error: `Tìm kiếm thất bại: ${err.message}`,
-        errorCode: 'SEARCH_ERROR',
+        engine: engineUsed,
+        outputMode: 'count',
+        totalMatches: count,
       };
     }
+
+    // Chế độ 2: 'files_with_matches'
+    if (outputMode === 'files_with_matches') {
+      const files = lines.map((f) => f.replace(/\\/g, '/'));
+      return {
+        query: rawQuery,
+        path: rawPath,
+        engine: engineUsed,
+        outputMode: 'files_with_matches',
+        totalFiles: files.length,
+        files,
+        guidance: 'Danh sách các file chứa kết quả. Hãy dùng read_file hoặc search_text với path cụ thể để xem chi tiết.',
+      };
+    }
+
+    // Chế độ 3: 'content' (Mặc định)
+    const matches: MatchItem[] = [];
+    const fileSummaryMap = new Map<string, number>();
+
+    for (const line of lines) {
+      // Định dạng chuẩn của ripgrep / emulator: path:line:text
+      const firstColon = line.indexOf(':');
+      const secondColon = line.indexOf(':', firstColon + 1);
+
+      if (firstColon !== -1 && secondColon !== -1) {
+        const file = line.slice(0, firstColon).replace(/\\/g, '/');
+        const lineNum = parseInt(line.slice(firstColon + 1, secondColon), 10);
+        const text = line.slice(secondColon + 1);
+
+        matches.push({ file, line: lineNum, text });
+        fileSummaryMap.set(file, (fileSummaryMap.get(file) || 0) + 1);
+      } else {
+        // Fallback nếu định dạng chỉ có file:text hoặc đơn dòng
+        matches.push({ file: rawPath, line: 1, text: line });
+      }
+    }
+
+    const fileSummary: FileMatchSummary[] = Array.from(fileSummaryMap.entries()).map(
+      ([file, matchCount]) => ({ file, matchCount })
+    );
+
+    const isCapped = matches.length >= maxMatches;
+    const formattedContent = matches
+      .map((m) => `${m.file}:${m.line}: ${m.text}`)
+      .join('\n');
+
+    return {
+      query: rawQuery,
+      path: rawPath,
+      engine: engineUsed,
+      isRegex,
+      include: includeGlob,
+      totalMatches: matches.length,
+      totalFiles: fileSummary.length,
+      content: formattedContent || 'Không tìm thấy kết quả nào khớp với yêu cầu.',
+      matches,
+      fileSummary,
+      isCapped,
+      warning: isCapped
+        ? `[SEARCH_CAPPED]: Đã đạt giới hạn tối đa ${maxMatches} kết quả. Còn nhiều kết quả khác chưa được hiển thị.`
+        : undefined,
+      suggestion: isCapped
+        ? 'Hãy thu hẹp biểu thức chính quy (regex), hoặc chỉ định tham số "include" (ví dụ: "*.ts") hoặc "path" cụ thể hơn.'
+        : undefined,
+    };
   },
 };

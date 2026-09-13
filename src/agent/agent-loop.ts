@@ -835,6 +835,8 @@ export class AgentLoop {
     const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
       ? configuredControlMode as ToolControlMode
       : 'shadow';
+    const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
+      ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
     if (toolControlMode === 'enforce') {
       const baselineDiagnostics = this.collectVerificationDiagnostics();
       if (baselineDiagnostics) {
@@ -882,7 +884,9 @@ export class AgentLoop {
     this.latencyOrchestrator.resetTurn();
 
     session.append('turn/start', { turn });
-    await this.persistSession(session);
+    if (!batchPersistenceEnabled) {
+      await this.persistSession(session);
+    }
     const turnStartDecision = await this.agentHooks.run('agent/turn-start', {
       session,
       turn,
@@ -945,7 +949,9 @@ export class AgentLoop {
             : message
         );
         session.replaceHistory(rewrittenHistory, 'warm-start');
-        await this.persistSession(session);
+        if (!batchPersistenceEnabled) {
+          await this.persistSession(session);
+        }
       }
     }
 
@@ -990,7 +996,9 @@ export class AgentLoop {
       }
 
       session.append('step/start', { turn, step });
-      await this.persistSession(session);
+      if (!batchPersistenceEnabled) {
+        await this.persistSession(session);
+      }
       this.setAgentStatus('running', session, turn, step);
       const hookContext: AgentHookContext = {
         session,
@@ -1350,6 +1358,7 @@ export class AgentLoop {
             conservativeFallback: promptDecision.conservativeFallback,
             reasonCodes: promptDecision.reasonCodes,
             selectedPlaybooks: promptDecision.selectedPlaybooks,
+            selectedGitPlaybook: promptDecision.selectedGitPlaybook,
             fingerprint: retrievalState.fingerprint,
             estimatedTokensBefore: promptDecision.estimatedTokensBefore,
             estimatedTokensAfter: promptDecision.estimatedTokensAfter,
@@ -1458,44 +1467,46 @@ export class AgentLoop {
         repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
         repositoryContext = cachedDynamicContext.repositoryContext;
       } else {
-        if (shouldRecallRepoMem) {
-          try {
-            const recalled = await this.repositoryMemory.recall(activeStepQuery, {
+        // Tối ưu hóa Latency: Thực thi song song Repository Memory Recall và Repository Map Render
+        const repoMemPromise = shouldRecallRepoMem
+          ? this.repositoryMemory.recall(activeStepQuery, {
               limit: isLocalizedExecution && !explicitRepoMem ? 4 : 12,
               maxTokens: effectiveRepoMemTokens,
-            });
-            repositoryMemoryContext = recalled.rendered;
-            repositoryMemoryRecords = recalled.records;
-          } catch {
-            // Repository memory is an independent, fail-open context source.
-          }
-        }
-        if (shouldRenderRepoMap) {
-          try {
-            const repositoryQuery = [
-              activeStepQuery,
-              ...relevantMemory.map((item) => item.insight),
-              ...repositoryMemoryRecords.map((item) => item.statement),
-            ].filter(Boolean).join('\n');
-            repositoryContext = await this.repositoryMap.renderContext(repositoryQuery, {
+            }).catch(() => ({ rendered: '', records: [] }))
+          : Promise.resolve({ rendered: '', records: [] });
+
+        const baseRepoQuery = [
+          activeStepQuery,
+          ...relevantMemory.map((item) => item.insight),
+        ].filter(Boolean).join('\n');
+
+        const baseSeedFiles = [
+          ...(activeTask?.readSet || []),
+          ...(activeTask?.writeSet || []),
+          ...(currentHypothesis?.targetFiles || []),
+          ...retrievalState.discoveredFiles,
+          ...(composeState?.registeredFiles || []),
+        ];
+
+        const baseSeedSymbols = [
+          ...(activeTask?.symbols || []),
+          ...retrievalState.discoveredSymbols,
+        ];
+
+        const repoMapPromise = shouldRenderRepoMap
+          ? this.repositoryMap.renderContext(baseRepoQuery, {
               maxTokens: effectiveRepoMapTokens,
-              seedFiles: [
-                ...(activeTask?.readSet || []),
-                ...(activeTask?.writeSet || []),
-                ...(currentHypothesis?.targetFiles || []),
-                ...retrievalState.discoveredFiles,
-                ...(composeState?.registeredFiles || []),
-                ...repositoryMemoryRecords.flatMap((item) => item.relatedFiles),
-              ],
-              seedSymbols: [
-                ...(activeTask?.symbols || []),
-                ...retrievalState.discoveredSymbols,
-              ],
-            });
-          } catch (error: any) {
-            repositoryContext = `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`;
-          }
-        }
+              seedFiles: baseSeedFiles,
+              seedSymbols: baseSeedSymbols,
+            }).catch((error: any) => `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`)
+          : Promise.resolve('');
+
+        const [recalled, renderedMap] = await Promise.all([repoMemPromise, repoMapPromise]);
+
+        repositoryMemoryContext = recalled.rendered;
+        repositoryMemoryRecords = recalled.records;
+        repositoryContext = renderedMap;
+
         if (dynamicCacheEnabled) {
           this.dynamicContextCache.set(dynamicCacheKey, {
             repositoryMemoryContext,
@@ -1639,6 +1650,7 @@ export class AgentLoop {
         reflectionContext,
         cognitiveScaffold: effectiveScaffoldText,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
+        gitPlaybook: promptDecision.gitPlaybookPrompt,
         harnessGuidance: promptDecision.harnessGuidance,
         epistemicVerdictContext,
         hypothesisContext,

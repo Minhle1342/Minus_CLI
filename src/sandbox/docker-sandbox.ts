@@ -309,7 +309,13 @@ export class DockerSandbox implements ISandboxProvider {
     const startTime = Date.now();
     const timeout = options?.timeoutMs ?? 30000;
     
-    const dockerExecArgs = ['exec', this.containerId, 'sh', '-c', command];
+    const envFlags: string[] = [];
+    if (options?.env) {
+      for (const [key, val] of Object.entries(options.env)) {
+        envFlags.push('-e', `${key}=${val}`);
+      }
+    }
+    const dockerExecArgs = ['exec', ...envFlags, this.containerId, 'sh', '-c', command];
 
     try {
       const { stdout, stderr } = await execFileAsync('docker', dockerExecArgs, {

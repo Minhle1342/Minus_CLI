@@ -3,6 +3,8 @@ import {
   SECTION_TOOL_PLAYBOOKS,
   TOOL_PLAYBOOK_PROMPTS,
   type ToolPlaybookPromptId,
+  GIT_WORKFLOW_PROMPTS,
+  type GitWorkflowPromptId,
 } from '../llm/prompt-sections.js';
 
 export type StepPromptGatingMode = 'off' | 'shadow' | 'enforce';
@@ -49,8 +51,10 @@ export interface StepPromptDecision {
   conservativeFallback: boolean;
   reasonCodes: string[];
   selectedPlaybooks: ToolPlaybookPromptId[];
+  selectedGitPlaybook?: GitWorkflowPromptId;
   includeStaticToolPlaybooks: boolean;
   toolPlaybookPrompt: string;
+  gitPlaybookPrompt: string;
   planContext: string;
   advicePrompt: string;
   harnessGuidance: string;
@@ -154,6 +158,54 @@ export class StepPromptPolicy {
     if (selectedPlaybooks.length > 0) reasonCodes.push(`PLAYBOOKS_${selectedPlaybooks.join('_').toUpperCase()}`);
     else reasonCodes.push('NO_STEP_PLAYBOOK_REQUIRED');
 
+    let selectedGitPlaybook: GitWorkflowPromptId | undefined;
+
+    // Gating conditions for Git Workflows:
+    // Only inject at most 1 relevant playbook when specific intent/phase matches.
+    // Default is 0 tokens (undefined / empty).
+    if (!context.hasSubmittedSolution) {
+      // 1. Rollback & Stash (Highest priority when handling failure/revert)
+      if (
+        context.consecutiveFailures >= 2
+        || /\b(rollback|revert|restore|stash|hoàn tác|hủy thay đổi)\b/i.test(lower)
+      ) {
+        selectedGitPlaybook = 'gitRollback';
+      }
+      // 2. PR Enhancement (When explicitly dealing with PR review, PR preparation or release phase with PR intent)
+      else if (
+        /\b(pull request|\bpr\b|create pr|enhance pr|review pr|mô tả pr|pr-enhance)\b/i.test(lower)
+        || (context.classification.phase === 'release' && /\b(pr|pull request|review)\b/i.test(lower))
+      ) {
+        selectedGitPlaybook = 'gitPrEnhance';
+      }
+      // 3. Atomic Staging & Commit (When tests are verified or query explicitly requests commit/stage)
+      else if (
+        (/\b(git commit|commit changes|stage files|đóng gói commit|tạo commit|git add)\b/i.test(lower)
+          || (context.hasVerifiedTests && context.classification.phase === 'verify'))
+        && context.consecutiveFailures === 0
+      ) {
+        selectedGitPlaybook = 'gitCommit';
+      }
+      // 4. Branch Isolation (When planning new work and branch is mentioned or plan required with branch intent)
+      else if (
+        (context.classification.phase === 'plan' || context.classification.phase === 'explore')
+        && /\b(branch|nhánh|checkout -b|isolate branch|feature branch|tạo nhánh)\b/i.test(lower)
+      ) {
+        selectedGitPlaybook = 'gitBranch';
+      }
+      // 5. Baseline Inspection (When exploring repo state or query asks for git status/diff)
+      else if (
+        (context.classification.phase === 'explore' || !context.lastToolName)
+        && /\b(git status|git diff|working tree|uncommitted|baseline|trạng thái git|kiểm tra git)\b/i.test(lower)
+      ) {
+        selectedGitPlaybook = 'gitInspect';
+      }
+    }
+
+    if (selectedGitPlaybook) {
+      reasonCodes.push(`GIT_PLAYBOOK_${selectedGitPlaybook.toUpperCase()}`);
+    }
+
     const phaseChanged = Boolean(context.previousPhase && context.previousPhase !== context.classification.phase);
     const isInitialBugReport = !context.lastToolName && context.candidates.advicePlaybook === 'B_DEBUGGING';
     const actionableAdvice = context.hasSubmittedSolution
@@ -196,6 +248,7 @@ export class StepPromptPolicy {
     if (includePlanContext) reasonCodes.push(context.planBlocked ? 'PLAN_BLOCKED_CONTEXT' : 'ACTIVE_PLAN_CONTEXT');
 
     const targetPlaybookPrompt = selectedPlaybooks.map((id) => TOOL_PLAYBOOK_PROMPTS[id]).join('\n\n');
+    const targetGitPlaybookPrompt = selectedGitPlaybook ? GIT_WORKFLOW_PROMPTS[selectedGitPlaybook] : '';
     const beforeTokens = estimateTokens([
       SECTION_TOOL_PLAYBOOKS,
       context.candidates.legacyPlanContext,
@@ -205,6 +258,7 @@ export class StepPromptPolicy {
     ]);
     const targetAfterTokens = estimateTokens([
       targetPlaybookPrompt,
+      targetGitPlaybookPrompt,
       includePlanContext ? context.candidates.stepPlanContext : '',
       includeAdvice ? context.candidates.advicePrompt : '',
       includeHarnessGuidance ? context.candidates.harnessGuidance : '',
@@ -214,6 +268,7 @@ export class StepPromptPolicy {
     const reportedAfterTokens = mode === 'off' || conservativeFallback
       ? beforeTokens
       : targetAfterTokens;
+    const gitPlaybookPrompt = mode === 'off' || conservativeFallback ? '' : targetGitPlaybookPrompt;
 
     return {
       requestedMode: mode,
@@ -221,8 +276,10 @@ export class StepPromptPolicy {
       conservativeFallback,
       reasonCodes,
       selectedPlaybooks,
+      selectedGitPlaybook,
       includeStaticToolPlaybooks: useLegacyInjection,
       toolPlaybookPrompt: useLegacyInjection ? '' : targetPlaybookPrompt,
+      gitPlaybookPrompt,
       planContext: useLegacyInjection
         ? context.candidates.legacyPlanContext
         : includePlanContext ? context.candidates.stepPlanContext : '',

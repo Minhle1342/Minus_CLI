@@ -11,6 +11,8 @@ export interface DynamicContextInputs {
   cognitiveScaffold?: string;
   /** P1.3: One or more step-selected tool playbooks. */
   toolPlaybooks?: string;
+  /** P1.35: On-demand Git workflow playbook (Inspect, Branch, Commit, PR Enhance, Rollback). */
+  gitPlaybook?: string;
   /** P1.4: Step-relevant textual guidance from the active runtime harness profile. */
   harnessGuidance?: string;
   /** P1.44: Distilled Epistemic Verdict từ EpistemicInvestigationEngine (Thesis vs Antithesis + Monte Carlo Rollout) */
@@ -153,6 +155,13 @@ export class DynamicContextArbiter {
         name: 'Step Tool Playbooks (P1.3)',
         content: (inputs.toolPlaybooks || '').trim(),
         priority: 1.3,
+        allowTruncation: false,
+      },
+      {
+        key: 'gitPlaybook',
+        name: 'Git Workflow Playbook (P1.35)',
+        content: (inputs.gitPlaybook || '').trim(),
+        priority: 1.35,
         allowTruncation: false,
       },
       {

@@ -38,7 +38,7 @@ export class TaskManager {
   /**
    * Khởi chạy một tiến trình nền mới
    */
-  startTask(command: string, cwd?: string): BackgroundTask {
+  startTask(command: string, cwd?: string, env?: Record<string, string>): BackgroundTask {
     this.taskCounter++;
     const id = `task_${this.taskCounter}`;
     const effectiveCwd = cwd ? path.resolve(cwd) : this.defaultCwd;
@@ -53,9 +53,10 @@ export class TaskManager {
       logs: [],
     };
 
-    // Khởi chạy child process với shell
+    // Khởi chạy child process với shell và env kết hợp
     const child = spawn(command, [], {
       cwd: effectiveCwd,
+      env: env ? { ...process.env, ...env } : process.env,
       shell: true,
       // POSIX process groups make whole-tree termination possible. Windows
       // uses taskkill /T against the exact shell PID instead.

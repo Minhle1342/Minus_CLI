@@ -197,6 +197,41 @@ export const TOOL_PLAYBOOK_PROMPTS = {
 
 export type ToolPlaybookPromptId = keyof typeof TOOL_PLAYBOOK_PROMPTS;
 
+/**
+ * On-demand Git workflow modules selected strictly by StepPromptPolicy based on phase & intent.
+ * Kept concise (~30-75 tokens) to prevent context window pollution and preserve KV-cache.
+ */
+export const GIT_WORKFLOW_PROMPTS = {
+  gitInspect: `[GIT WORKFLOW - BASELINE INSPECTION]
+- Check working tree status: \`run_command "git status -s"\`.
+- Inspect uncommitted changes or recent commit context: \`run_command "git diff"\` or \`git log -n 3 --oneline\`. Never overwrite active user work.`,
+
+  gitBranch: `[GIT WORKFLOW - BRANCH ISOLATION]
+- Check current branch: \`run_command "git branch --show-current"\`.
+- For non-trivial features/refactors, isolate work on a dedicated branch: \`run_command "git checkout -b <branch-name>"\`. Avoid working directly on main.`,
+
+  gitCommit: `[GIT WORKFLOW - ATOMIC STAGING & COMMIT]
+- 1. Review exact changes: \`run_command "git diff"\`.
+- 2. Stage specific modified files ONLY: \`run_command "git add <file1> <file2>"\` (NEVER use \`git add .\` to avoid staging secrets or ephemeral artifacts).
+- 3. Conventional Commit: \`run_command "git commit -m \\"<type>(<scope>): <concise summary>\\""\` (always include -m to prevent interactive vim/nano hang).`,
+
+  gitPrEnhance: `[GIT WORKFLOW - PULL REQUEST ENHANCEMENT]
+- 1. Summarize diff: \`run_command "git diff --stat origin/main...HEAD"\`.
+- 2. Structured PR Description:
+   * Summary: 1-3 bullet points of what changed and why.
+   * Review Checklist: Specific files and critical functions reviewers should scrutinize.
+   * Verification Evidence: Exact commands executed (e.g. tests, build) and exit codes.
+   * Risk Assessment: Potential regression blast radius and mitigations.
+- 3. Safety Gate: NEVER run git push --force. Always obtain user approval before pushing.`,
+
+  gitRollback: `[GIT WORKFLOW - SAFE ROLLBACK & STASH]
+- Revert single-file edits safely: \`run_command "git restore <path>"\` or \`git checkout -- <path>\`.
+- Stash experimental work safely: \`run_command "git stash push -m \\"<note>\\""\` and recover via \`git stash pop\`.
+- Safety Gate: NEVER execute destructive \`git reset --hard\` without explicit user authorization.`,
+} as const;
+
+export type GitWorkflowPromptId = keyof typeof GIT_WORKFLOW_PROMPTS;
+
 export const SECTION_COMPUTER_USE = `13. COMPUTER USE AGENT PROTOCOL:
    - Loop: 1.[Perception]: computer(action: "screenshot") -> 2.[Reasoning]: Locate UI elements [x, y] -> 3.[Action]: left_click, right_click, double_click, drag, type, key, scroll -> 4.[Verification]: computer(action: "screenshot").`;
 

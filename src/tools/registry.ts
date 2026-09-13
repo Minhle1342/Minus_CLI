@@ -62,6 +62,26 @@ export interface ToolProvider {
 }
 
 /**
+ * Compatibility/workflow tools remain executable through `get`/`execute`, but
+ * are omitted from model-facing declarations because a canonical tool or an
+ * AgentLoop harness gate already provides the same capability.
+ */
+export const MODEL_HIDDEN_TOOL_NAMES = new Set([
+  'search_web',
+  'read_url_content',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'discover_tools',
+  'report_investigation_findings',
+  'pack_codebase',
+]);
+
+function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
+  return tools.filter((tool) => !MODEL_HIDDEN_TOOL_NAMES.has(tool.name));
+}
+
+/**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
  * 
  * Giúp tách biệt hoàn toàn giữa:
@@ -90,6 +110,7 @@ export class ToolRegistry implements ToolProvider {
     // Đăng ký mặc định các tool cốt lõi của Coding Agent
     this.register(readFileTool);
     this.register(listFilesTool);
+    this.register(searchTextTool);
     this.register(applyPatchTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
@@ -291,7 +312,7 @@ export class ToolRegistry implements ToolProvider {
    * Áp dụng KV-Cache Prefix Alignment: Sắp xếp cố định theo tên để chuỗi token schema luôn đồng nhất 100%.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
-    return this.getAll()
+    return modelVisibleTools(this.getAll())
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((tool) => ({
         name: tool.name,
@@ -304,7 +325,7 @@ export class ToolRegistry implements ToolProvider {
    * Dynamic Tool Retrieval (RATS): Lấy tập hợp FunctionDeclaration phù hợp nhất với ngữ cảnh hiện tại
    */
   getRelevantTools(query: string): FunctionDeclaration[] {
-    return this.retriever.retrieve(query, this.getAll());
+    return this.retriever.retrieve(query, modelVisibleTools(this.getAll()));
   }
 
   getRetriever(): ToolRetriever {
@@ -411,7 +432,7 @@ export class ToolScope implements ToolProvider {
   }
 
   getFunctionDeclarations(): FunctionDeclaration[] {
-    return this.getAll()
+    return modelVisibleTools(this.getAll())
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((tool) => ({
         name: tool.name,
@@ -421,7 +442,7 @@ export class ToolScope implements ToolProvider {
   }
 
   getRelevantTools(query: string): FunctionDeclaration[] {
-    return this.retriever.retrieve(query, this.getAll());
+    return this.retriever.retrieve(query, modelVisibleTools(this.getAll()));
   }
 
   getRetriever(): ToolRetriever {

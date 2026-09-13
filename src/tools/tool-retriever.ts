@@ -19,7 +19,7 @@ export interface ToolRetrieverConfig {
   activationThreshold?: number;
   /** Số lượng dynamic tools tối đa được chọn thêm theo query (mặc định: 5) */
   topK?: number;
-  /** Tập hợp các Core Anchor Tools luôn luôn có mặt trong mọi lượt gọi (mặc định: 4 tools cốt lõi) */
+  /** Tập hợp nhỏ các Core Anchor Tools luôn có mặt trong mọi lượt gọi. */
   alwaysInclude?: string[];
   /** Điểm số tương đồng tối thiểu để đưa tool vào danh sách (mặc định: 0.05) */
   minScore?: number;
@@ -30,7 +30,7 @@ export interface ToolRetrieverConfig {
  * 
  * Giải quyết triệt để vấn đề "Tool Dilution" và "Lost in the middle" khi số lượng tool tăng cao:
  * 1. Đánh chỉ mục BM25 / Fuzzy Search in-memory cho toàn bộ tool schemas.
- * 2. Bảo toàn bộ Core Anchor Tools cốt lõi (read_file, replace_text, write_file, run_command).
+ * 2. Bảo toàn một tập Core Anchor nhỏ; capability chuyên biệt được retrieve theo ngữ cảnh.
  * 3. Truy xuất động Top-K tool phù hợp nhất với task/ngữ cảnh hiện tại của từng bước lặp.
  * 4. Áp dụng KV-Cache Prefix Alignment: Luôn sắp xếp cố định theo tên để tối đa hóa Cache Hit Rate.
  */
@@ -46,15 +46,11 @@ export class ToolRetriever {
       topK: config?.topK ?? 5,
       alwaysInclude: config?.alwaysInclude ?? [
         'read_file',
-        'read_compressed_code',
         'list_files',
+        'search_codebase_fast',
         'apply_patch',
         'replace_text',
-        'write_file',
         'run_command',
-        'get_symbol_context_360',
-        'get_diagnostics',
-        'search_codebase_fast',
         'submit_solution',
       ],
       minScore: config?.minScore ?? 0.05,
@@ -115,24 +111,44 @@ export class ToolRetriever {
       return this.formatDeclarations(pool);
     }
 
+    const cleanedQuery = (query || '').trim();
+    const lowerQ = cleanedQuery.toLowerCase();
+    const isGameQuery = /\b(game|pixel|sprite|tilemap|physics|unity|engine|scaffold|asset)\b/i.test(lowerQ);
+    const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
+    const isMultiAgentQuery = /\b(subagent|delegate|swarm|dag|shared_context|event_bus|orchestrat)\b/i.test(lowerQ);
+    const isNetworkQuery = /\b(web|internet|online|browse|research|latest|current|news|url|website|citation|external|documentation)\b/i.test(lowerQ);
+    const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
+    const isVisionQuery = /\b(image|screenshot|photo|picture|vision|diagram|pixel)\b/i.test(lowerQ);
+
+    // Adaptive Schema Pruning: Loại trừ các tool chuyên biệt nặng nếu query không chứa tín hiệu liên quan
+    const activePool = pool.filter((tool) => {
+      const cat = this.inferCategory(tool);
+      if (cat === 'game_development' && !isGameQuery) return false;
+      if (tool.name === 'schedule' && !isScheduleQuery) return false;
+      if (cat === 'multi_agent' && !isMultiAgentQuery) return false;
+      if (cat === 'network' && !isNetworkQuery) return false;
+      if (cat === 'memory' && !isMemoryQuery) return false;
+      if (tool.name === 'inspect_image' && !isVisionQuery) return false;
+      return true;
+    });
+    const activePoolMap = new Map(activePool.map((tool) => [tool.name, tool]));
+
     const selectedToolNames = new Set<string>();
 
-    // 1. Luôn bảo lưu các Core Anchor Tools
+    // 1. Luôn bảo lưu các Core Anchor Tools (nếu có trong activePool)
     for (const anchor of this.config.alwaysInclude) {
-      if (poolMap.has(anchor)) {
+      if (activePoolMap.has(anchor)) {
         selectedToolNames.add(anchor);
       }
     }
 
-    // 2. Hybrid retrieval: lexical BM25/fuzzy + local semantic candidates.
-    // Reciprocal-rank fusion avoids assuming scores from the two retrievers share a scale.
-    const cleanedQuery = (query || '').trim();
+    // 2. Hybrid retrieval: lexical BM25/fuzzy + local semantic candidates trên activePool.
     if (cleanedQuery.length > 0) {
       try {
         const searchHits = this.miniSearch.search(cleanedQuery);
         const lexicalRank = new Map<string, number>();
         searchHits
-          .filter((hit) => hit.score >= this.config.minScore && poolMap.has(hit.id))
+          .filter((hit) => hit.score >= this.config.minScore && activePoolMap.has(hit.id))
           .forEach((hit, index) => lexicalRank.set(hit.id, index + 1));
 
         const queryTerms = this.semanticTerms(cleanedQuery);
@@ -142,7 +158,7 @@ export class ToolRetriever {
           try { queryVector = native.rsGenerateSubwordEmbedding(cleanedQuery); } catch {}
         }
 
-        const semanticCandidates = pool.map((tool) => {
+        const semanticCandidates = activePool.map((tool) => {
           const category = this.inferCategory(tool);
           const tags = this.inferTags(tool);
           const text = `${tool.name} ${category} ${tags} ${tool.description || ''} ${Object.keys(tool.parameters?.properties || {}).join(' ')}`;
@@ -161,7 +177,7 @@ export class ToolRetriever {
 
         const semanticRank = new Map<string, number>();
         semanticCandidates.forEach((candidate, index) => semanticRank.set(candidate.name, index + 1));
-        const fused = pool
+        const fused = activePool
           .map((tool) => {
             const lr = lexicalRank.get(tool.name);
             const sr = semanticRank.get(tool.name);
@@ -182,9 +198,9 @@ export class ToolRetriever {
       }
     }
 
-    // 3. Fallback an toàn: Nếu số lượng tool được chọn quá ít, bổ sung các tool phổ biến
+    // 3. Fallback an toàn: Nếu số lượng tool được chọn quá ít, bổ sung các tool phù hợp từ activePool
     if (selectedToolNames.size <= this.config.alwaysInclude.length) {
-      for (const tool of pool) {
+      for (const tool of activePool) {
         if (selectedToolNames.size >= this.config.alwaysInclude.length + this.config.topK) break;
         selectedToolNames.add(tool.name);
       }
