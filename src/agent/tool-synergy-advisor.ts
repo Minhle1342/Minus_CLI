@@ -62,8 +62,8 @@ export class ToolSynergyAdvisor {
       hasSubmittedSolution,
     } = context;
 
-    // 0a. Vừa gọi submit_solution hoặc đã submit giải pháp thành công (Playbook POST_SUBMISSION)
-    if (lastToolName === 'submit_solution' || hasSubmittedSolution) {
+    // 0a. Vừa gọi submit_solution (thành công) hoặc đã submit giải pháp thành công (Playbook POST_SUBMISSION)
+    if ((lastToolName === 'submit_solution' && lastToolResult?.success !== false) || hasSubmittedSolution) {
       return {
         playbook: 'POST_SUBMISSION',
         guidance: 'Solution has been submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Conclude your turn immediately with your final comprehensive response to the user.',
