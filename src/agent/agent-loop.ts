@@ -917,7 +917,7 @@ export class AgentLoop {
     if (history.length === 1 && history[0].role === 'user') {
       const userText = history[0].parts?.[0]?.text || '';
       if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
-        const digest = this.memoryManager.getProjectDigest();
+        const digest = this.memoryManager.getProjectDigest({ query: userText });
         const relevantMemory = this.memoryManager
           .getRelevantMemory(userText, session, 4)
           .filter((item) => item.scope !== 'project');
@@ -1120,12 +1120,44 @@ export class AgentLoop {
         },
       });
 
+      const activeTargetFile = activeTask?.writeSet?.[0]
+        || validatedHypotheses[0]?.targetFiles?.[0]
+        || supportedHypotheses[0]?.targetFiles?.[0]
+        || paretoEvidence.inspectedFiles?.[0]
+        || (typeof this.lastToolExecution?.result?.path === 'string' ? this.lastToolExecution.result.path : undefined)
+        || (typeof this.lastToolExecution?.result?.filePath === 'string' ? this.lastToolExecution.result.filePath : undefined);
+
+      let activeCallGraphContext: { symbol?: string; callers?: string[]; callees?: string[] } | undefined;
+      const lastRes = this.lastToolExecution?.result;
+      if (lastRes) {
+        if (lastRes.symbol) {
+          activeCallGraphContext = {
+            symbol: lastRes.symbol,
+            callers: Array.isArray(lastRes.callers) ? lastRes.callers.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
+            callees: Array.isArray(lastRes.callees) ? lastRes.callees.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
+          };
+        } else if (lastRes.blastRadius?.modifiedSymbols?.length > 0) {
+          activeCallGraphContext = {
+            symbol: lastRes.blastRadius.modifiedSymbols[0],
+            callers: Array.isArray(lastRes.blastRadius.directConsumers) ? lastRes.blastRadius.directConsumers : undefined,
+          };
+        }
+      }
+      if (!activeCallGraphContext) {
+        const hypSymbol = (validatedHypotheses[0] as any)?.symbol || (supportedHypotheses[0] as any)?.symbol;
+        if (hypSymbol) {
+          activeCallGraphContext = { symbol: hypSymbol };
+        }
+      }
+
       const adviceInfo = this.toolAdvisor.advise({
         lastToolName: this.lastToolExecution?.toolName,
         lastToolResult: this.lastToolExecution?.result,
         hasErrors: this.lastToolExecution?.result?.error !== undefined,
         activeTaskTitle: activeTask?.title,
         hasSubmittedSolution,
+        lastTargetFile: activeTargetFile,
+        callGraphContext: activeCallGraphContext,
       });
 
       // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
@@ -1308,6 +1340,8 @@ export class AgentLoop {
         trajectory: this.trajectorySteps,
         evidenceSufficient: this.isEvidenceSufficient(),
         repairCyclesExhausted: this.verificationPolicy.isRepairExhausted(),
+        lastTargetFile: activeTargetFile,
+        callGraphContext: activeCallGraphContext,
       });
       const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
       const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
@@ -1554,6 +1588,7 @@ export class AgentLoop {
         evidenceSufficient: paretoEvidence.hasSufficientEvidence,
         evidenceScore: paretoEvidence.score,
         evidenceThreshold: paretoEvidence.threshold,
+        targetFile: activeTargetFile,
       });
 
       // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)

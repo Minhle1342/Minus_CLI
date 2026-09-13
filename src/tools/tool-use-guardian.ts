@@ -113,6 +113,7 @@ export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
   web_search: ['search_web', 'read_url_content'],
   search_web: ['read_url_content', 'run_command (curl)'],
   read_url_content: ['search_web', 'run_command (curl)'],
+  run_node_script: ['apply_patch', 'replace_text', 'run_command'],
 };
 
 /**
@@ -528,6 +529,7 @@ export class ToolUseGuardian {
       'create_file',
       'delete_file',
       'move_file',
+      'run_node_script',
     ].includes(toolName);
 
     const isEvidenceControlledTask = Boolean(

@@ -16,7 +16,7 @@ test('ToolRetriever - Adaptive Tool Schema Pruning removes heavy game tools on r
 
   // 1. Khi truy vấn code thông thường: KHÔNG được chứa tool game chuyên biệt
   const regularDeclarations = retriever.retrieve('fix authentication bug and inspect src/auth.ts', allTools);
-  const regularToolNames = regularDeclarations.map((d) => d.name);
+  const regularToolNames = regularDeclarations.map((d) => d.name || '');
 
   // Core Anchor Tools phải luôn hiện diện (bảo toàn 100% accuracy)
   assert.ok(regularToolNames.includes('read_file'), 'Must include read_file');
@@ -30,7 +30,7 @@ test('ToolRetriever - Adaptive Tool Schema Pruning removes heavy game tools on r
 
   // 2. Khi truy vấn thực sự liên quan tới Game / Unity: Tự động bung tool Game
   const gameDeclarations = retriever.retrieve('create 2d pixel character sprite for unity game', allTools);
-  const gameToolNames = gameDeclarations.map((d) => d.name);
+  const gameToolNames = gameDeclarations.map((d) => d.name || '');
 
   const hasGameToolInGameQuery = gameToolNames.some((name) => name.startsWith('game_') || name.startsWith('unity_'));
   assert.equal(hasGameToolInGameQuery, true, 'Game tools must be dynamically included when query explicitly asks for game/unity');

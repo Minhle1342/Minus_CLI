@@ -20,6 +20,7 @@ import { lspQueryTool } from './lsp-query.js';
 import { analyzeImpactTool } from './blast-radius.js';
 import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
+import { runNodeScriptTool } from './run-node-script.js';
 import { createManageTaskTool } from './manage-task.js';
 import { createScheduleTool } from './schedule-tool.js';
 import { createWebSearchTool, searchWebTool, webSearchTool } from './web-search.js';
@@ -127,6 +128,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
     this.register(runCommandTool);
+    this.register(runNodeScriptTool);
     this.register(webSearchTool);
     this.register(searchWebTool);
     this.register(webFetchTool);

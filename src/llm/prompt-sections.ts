@@ -113,7 +113,7 @@ Core Architectural Invariants:
    - Match the requested detail. Explain findings for questions; report outcomes and verification for changes.
 
 3. ADAPTIVE PLANNING & EXECUTION:
-   - Simple tasks (reading, quick fixes): Execute immediately with tools without creating a plan.
+   - Simple tasks (reading, quick fixes, command execution): Execute immediately with tools without creating a plan. When asked to run, start, or test a server/app, proactively dispatch run_command with WaitMsBeforeAsync=5000 instead of passively printing instructions.
    - Complex/multi-file tasks: Call create_plan with 2-5 atomic milestones [Inspect -> Fix -> Verify]. Update milestones with update_plan_task.
 
 4. SURGICAL MUTATION DISCIPLINE & PRE-MUTATION HYPOTHESIS GATE:
@@ -135,22 +135,71 @@ Core Architectural Invariants:
 /**
  * ON-DEMAND MODULE: ĐỊNH DẠNG VÀ CƠ CHẾ KHỚP PATCH (apply_patch 1-Shot Unified Diff)
  * Được tách ra khỏi Core Invariant để tránh phình prompt khởi đầu (~60 tokens).
- * Có thể nạp theo nhu cầu (on-demand reference) khi agent thao tác sửa đổi file hoặc gặp FUZZY_CANDIDATE_FOUND.
+ * Hỗ trợ Dynamic Few-Shot Example Selection theo ngôn ngữ của targetFile (Python, Go, Rust, JSON, YAML, TypeScript).
  */
-export const SECTION_PATCH_FORMAT_SPEC = `UNIFIED DIFF & PATCH FORMAT SPECIFICATION (apply_patch):
-- Header: --- a/<path> followed by +++ b/<path>
-- Hunk format: @@ -start,count +start,count @@
-- Context lines prefix with ' ', deletions prefix with '-', additions prefix with '+'
-- 1-Shot Example:
-  --- a/src/example.ts
+export function resolvePatchFormatSpec(targetFile?: string): string {
+  const ext = targetFile ? path.extname(targetFile).toLowerCase() : '';
+
+  let oneShotExample = `  --- a/src/example.ts
   +++ b/src/example.ts
   @@ -10,3 +10,3 @@
    const a = 1;
   -const b = 2;
   +const b = 3;
-   return a + b;
+   return a + b;`;
+
+  if (ext === '.py' || ext === '.pyi') {
+    oneShotExample = `  --- a/app/calculator.py
+  +++ b/app/calculator.py
+  @@ -10,3 +10,3 @@
+   def compute(a: int, b: int) -> int:
+  -    return a - b
+  +    return a + b`;
+  } else if (ext === '.go') {
+    oneShotExample = `  --- a/pkg/calc.go
+  +++ b/pkg/calc.go
+  @@ -12,3 +12,3 @@
+   func Compute(a, b int) int {
+  -	return a - b
+  +	return a + b
+   }`;
+  } else if (ext === '.rs') {
+    oneShotExample = `  --- a/src/calc.rs
+  +++ b/src/calc.rs
+  @@ -15,3 +15,3 @@
+   pub fn compute(a: i32, b: i32) -> i32 {
+  -    a - b
+  +    a + b
+   }`;
+  } else if (ext === '.json') {
+    oneShotExample = `  --- a/package.json
+  +++ b/package.json
+  @@ -5,3 +5,3 @@
+     "version": "1.0.0",
+  -  "debug": false,
+  +  "debug": true,
+     "main": "index.js"`;
+  } else if (ext === '.yaml' || ext === '.yml') {
+    oneShotExample = `  --- a/config.yaml
+  +++ b/config.yaml
+  @@ -8,3 +8,3 @@
+   service:
+  -  enabled: false
+  +  enabled: true
+     timeout: 30`;
+  }
+
+  return `UNIFIED DIFF & PATCH FORMAT SPECIFICATION (apply_patch):
+- Header: --- a/<path> followed by +++ b/<path>
+- Hunk format: @@ -start,count +start,count @@
+- Context lines prefix with ' ', deletions prefix with '-', additions prefix with '+'
+- 1-Shot Example:
+${oneShotExample}
 - Fuzz Matching: Fuzz 0-2 auto-resolved (line shifts, indentation tolerance, context reduction).
 - Fuzz 3 (FUZZY_CANDIDATE_FOUND): Returns advisory signal and does NOT mutate disk; call read_file for exact line matching.`;
+}
+
+export const SECTION_PATCH_FORMAT_SPEC = resolvePatchFormatSpec();
 
 /**
  * TIER 1: DOMAIN MODULES (Progressive Disclosure)
@@ -166,7 +215,7 @@ export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Always verify with tsc --noEmit.`;
 
 export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
-   - run_command: Run fast commands (<5s) synchronously; set WaitMsBeforeAsync=5000 for servers/watchers. Do NOT use run_command to slice files with sed/cat (always use read_file) or delete files with rm/del (always use delete_file).
+   - run_command: Run fast commands (<5s) synchronously; for servers/watchers/background daemons, MUST set WaitMsBeforeAsync=5000 to launch automatically in background. When asked to run, start, or test a server, NEVER just output passive shell snippets; proactively call run_command with WaitMsBeforeAsync=5000.
    - manage_task: Manage background tasks (list, status, kill, send_input).
    - schedule: Event-driven delays via schedule(DurationSeconds=N, Prompt="...", TimerCondition="..."). Avoid polling.
    - Web retrieval: Use search_web and read_url_content for third-party docs and APIs.`;
@@ -190,7 +239,7 @@ export const TOOL_PLAYBOOK_PROMPTS = {
   architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\nget_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.`,
   rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nget_diagnostics / inspect_symbol -> query_call_graph(callers) -> read_file.`,
   mutation: `[TOOL PLAYBOOK C - MUTATION]\nget_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> targeted test.`,
-  longTask: `[TOOL PLAYBOOK D - LONG TASK]\nrun_command(WaitMsBeforeAsync=5000) -> manage_task -> schedule; avoid polling.`,
+  longTask: `[TOOL PLAYBOOK D - LONG TASK / SERVER]\nrun_command(WaitMsBeforeAsync=5000) -> inspect startup logs -> manage_task if needed -> schedule; proactively launch servers in background instead of printing passive instructions.`,
   subagent: `[TOOL PLAYBOOK E - SUBAGENT]\nbrainstorm_design -> allocate_agent_task -> shared context/event -> wait_agent -> verify_subagent_quality.`,
   dagPlan: `[TOOL PLAYBOOK F - DAG PLAN]\ncreate_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`,
 } as const;
@@ -316,6 +365,7 @@ export interface PhaseGuidanceOptions {
   evidenceThreshold?: number;
   hasUnverifiedChanges?: boolean;
   includePatchSpec?: boolean;
+  targetFile?: string;
 }
 
 export function resolvePhaseDynamicGuidance(
@@ -340,8 +390,9 @@ export function resolvePhaseDynamicGuidance(
       return SECTION_PHASE_PLAN_GUIDANCE;
     case 'implement': {
       const withPatchSpec = options?.includePatchSpec ?? true;
+      const patchSpec = resolvePatchFormatSpec(options?.targetFile);
       return withPatchSpec
-        ? `${SECTION_PHASE_IMPLEMENT_GUIDANCE}\n\n${SECTION_PATCH_FORMAT_SPEC}`
+        ? `${SECTION_PHASE_IMPLEMENT_GUIDANCE}\n\n${patchSpec}`
         : SECTION_PHASE_IMPLEMENT_GUIDANCE;
     }
     case 'verify':

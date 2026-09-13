@@ -48,6 +48,7 @@ export class ToolRetriever {
         'read_file',
         'list_files',
         'search_codebase_fast',
+        'search_text',
         'apply_patch',
         'replace_text',
         'run_command',
@@ -251,14 +252,19 @@ export class ToolRetriever {
   }
 
   private formatDeclarations(tools: ToolDefinition[]): FunctionDeclaration[] {
-    // KV-Cache Prefix Alignment: Sắp xếp cố định theo tên 100%
-    return [...tools]
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      }));
+    // KV-Cache Prefix Alignment:
+    // 1. Nhóm Anchor Tools cốt lõi luôn nằm ở vị trí tiền tố (Prefix) cố định 100%
+    // 2. Nhóm Dynamic Tools mở rộng được sắp xếp cố định theo tên và nối tiếp phía sau
+    // Giúp giữ nguyên vẹn KV-Cache của Anchor Tools ngay cả khi tập dynamic tools thay đổi giữa các turn
+    const anchorSet = new Set(this.config.alwaysInclude);
+    const anchorTools = tools.filter((t) => anchorSet.has(t.name)).sort((a, b) => a.name.localeCompare(b.name));
+    const dynamicTools = tools.filter((t) => !anchorSet.has(t.name)).sort((a, b) => a.name.localeCompare(b.name));
+
+    return [...anchorTools, ...dynamicTools].map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    }));
   }
 
   private inferCategory(tool: ToolDefinition): string {

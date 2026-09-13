@@ -11,6 +11,7 @@
 import {
   CORE_SYSTEM_PROMPT,
   SECTION_PATCH_FORMAT_SPEC,
+  resolvePatchFormatSpec,
   SECTION_GIT_OPERATIONS,
   SECTION_FRONTEND_UI,
   SECTION_ANTIGRAVITY_TOOLS,
@@ -38,6 +39,7 @@ import { PromptAssembler } from './prompt-assembler.js';
 export {
   CORE_SYSTEM_PROMPT,
   SECTION_PATCH_FORMAT_SPEC,
+  resolvePatchFormatSpec,
   SECTION_GIT_OPERATIONS,
   SECTION_FRONTEND_UI,
   SECTION_ANTIGRAVITY_TOOLS,
@@ -126,7 +128,9 @@ export const SECTION_TERMINAL_SANDBOX_FULL = `6. TERMINAL-FIRST EXPLORATION & SA
     - CODEBASE EXPLORATION: Use terminal search tools (\`rg\`, \`grep\`, \`find\`, \`fd\`, \`git log\`) or fast search (\`search_codebase_fast\`).
     - FILE INSPECTION & ZERO-BLOAT POLICY: Always prefer \`read_file\` over terminal commands (\`cat\`, \`sed\`, \`head\`, \`tail\`). Use \`read_file(symbol='...')\` for 1-shot full function/class extraction, or read 150-300 lines per window. DO NOT use \`run_command\` with sequential \`sed -n\` 50-line slices, which bloats conversation steps, triggers interactive permission prompts, and wastes context budget.
     - FILE DELETION & SAFE MUTATION: Always use \`delete_file\` (with reason and expectedFileHash) or \`move_file\`. NEVER execute \`rm\`, \`del\`, \`rmdir\`, \`Remove-Item\` via \`run_command\` on the terminal; \`rm\` is unavailable on Windows cmd.exe, takes 5+ seconds searching PATH before failing, and triggers CRITICAL permission gates.
-    - BUILD, TEST & RUN: Use \`run_command\` for testing (\`npm test\`, \`pytest\`), building (\`npm run build\`, \`tsc\`), and managing dependencies.`;
+    - BUILD, TEST & PROACTIVE SERVER RUNTIME:
+      * Use \`run_command\` for testing (\`npm test\`, \`pytest\`), building (\`npm run build\`, \`tsc\`), and managing dependencies.
+      * PROACTIVE LOCAL SERVER LAUNCH INVARIANT: When the user asks to run, start, test, or verify a dev server, web service, or daemon (e.g. \`npm run dev\`, \`npm start\`, \`vite\`, \`next dev\`, \`python app.py\`, \`uvicorn\`), NEVER just output conversational text instructions or shell snippets telling the user how to run it. PROACTIVELY call \`run_command\` with \`WaitMsBeforeAsync=5000\` to launch the server as an autonomous background task. Check initial startup logs, confirm that the listening port/URL is active, and report the running status (TaskId, PID, Port) directly to the user.`;
 
 export const SECTION_VERIFICATION_LADDER_FULL = `7. VERIFICATION LADDER & DIFFERENTIAL EVIDENCE GATE (CODEX CLI STANDARD):
    - Before executing test/build commands, verify defined scripts from [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect package.json (or sub-package workspaces if Monorepo, e.g. "npm test --workspace=<app>"). Do not guess non-existent scripts.
@@ -171,6 +175,7 @@ export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. GOOGLE ANTIGRAVITY AUTONO
     - UNIFIED COMMAND EXECUTION (\`run_command\` with \`WaitMsBeforeAsync\`):
       * For fast commands (<5s), run normally to receive immediate synchronous stdout/stderr.
       * For long-running commands (dev servers like "npm run dev", test watchers, continuous build, large db migrations), set \`WaitMsBeforeAsync=5000\`. The tool will automatically transition running processes into background tasks and return a \`TaskId\` without blocking your turn.
+      * PROACTIVE SERVER LAUNCH (NO PASSIVE INSTRUCTIONS): If the user request implies running, launching, or testing a dev server or web app, DO NOT merely print passive command snippets. Proactively dispatch \`run_command(command="...", WaitMsBeforeAsync=5000)\` to execute it in the background and verify that it started successfully.
     - BACKGROUND TASK MANAGEMENT & INTERACTIVE REPL (\`manage_task\`):
       * Actions: \`list\` (inspect all tasks), \`status\` (inspect logs and state of a task), \`kill\` (terminate process tree), \`send_input\` (interactive stdin stream).
       * Use \`send_input\` whenever a CLI tool requires interactive user confirmation (e.g. [y/N] prompts, package manager init wizards, database migration confirmations, password/token prompts, or Python/Node REPLs).

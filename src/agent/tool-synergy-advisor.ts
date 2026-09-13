@@ -1,5 +1,5 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
-import { SECTION_PATCH_FORMAT_SPEC } from '../llm/prompt-sections.js';
+import { SECTION_PATCH_FORMAT_SPEC, resolvePatchFormatSpec } from '../llm/prompt-sections.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
 
@@ -18,6 +18,12 @@ export interface ToolSynergyContext {
   evidenceSufficient?: boolean;
   reflexionMemo?: string;
   repairCyclesExhausted?: boolean;
+  lastTargetFile?: string;
+  callGraphContext?: {
+    symbol?: string;
+    callers?: string[];
+    callees?: string[];
+  };
 }
 
 export interface ToolAdvice {
@@ -106,9 +112,10 @@ export class ToolSynergyAdvisor {
       const reason = isFuzzy
         ? 'FUZZY_CANDIDATE_FOUND (Fuzz Level 3 match). Disk was NOT mutated to avoid accidental corruption.'
         : `Patch application failed: ${lastToolResult.error || 'Invalid patch structure'}`;
+      const patchSpec = resolvePatchFormatSpec(context.lastTargetFile);
       return {
         playbook: 'C_MUTATION',
-        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${SECTION_PATCH_FORMAT_SPEC}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide an exact patch hunk with matching context lines.`,
+        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${patchSpec}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide an exact patch hunk with matching context lines.`,
         suggestedTools: ['read_file', 'apply_patch', 'replace_text'],
       };
     }
@@ -133,6 +140,10 @@ export class ToolSynergyAdvisor {
     if (lastToolName && isMutationTool(lastToolName)) {
       if (lastToolResult && !lastToolResult.error) {
         const blast = lastToolResult.blastRadius;
+        const graphAdvice = (context.callGraphContext?.symbol && context.callGraphContext?.callers && context.callGraphContext.callers.length > 0)
+          ? ` [Graph Intelligence]: Symbol "${context.callGraphContext.symbol}" is invoked by: [${context.callGraphContext.callers.slice(0, 3).join(', ')}]. Verify caller expectations before finishing mutation.`
+          : '';
+
         if (blast) {
           const testAdvice = blast.impactedTestSuites?.length > 0
             ? ` Impacted test suite(s): ${blast.impactedTestSuites.slice(0, 2).join(', ')}. Run targeted test via "run_command".`
@@ -147,7 +158,7 @@ export class ToolSynergyAdvisor {
 
           return {
             playbook: 'C_MUTATION',
-            guidance: `${riskPrefix}Code mutation applied.${symbolAdvice}${consumerAdvice}${testAdvice}`,
+            guidance: `${riskPrefix}Code mutation applied.${symbolAdvice}${consumerAdvice}${graphAdvice}${testAdvice}`,
             suggestedTools: blast.impactedTestSuites?.length > 0
               ? ['run_command', 'get_diagnostics', 'get_symbol_context_360']
               : ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
@@ -156,7 +167,7 @@ export class ToolSynergyAdvisor {
 
         return {
           playbook: 'C_MUTATION',
-          guidance: 'Code was modified. Next, call "get_diagnostics" to check for compiler/type errors, then run relevant test suites via "run_command".',
+          guidance: `Code was modified.${graphAdvice} Next, call "get_diagnostics" to check for compiler/type errors, then run relevant test suites via "run_command".`,
           suggestedTools: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
         };
       }
@@ -210,9 +221,12 @@ export class ToolSynergyAdvisor {
       hasErrors ||
       (lastToolResult && (lastToolResult.error || (Array.isArray(lastToolResult.diagnostics) && lastToolResult.diagnostics.length > 0)))
     ) {
+      const graphTrace = context.callGraphContext?.symbol
+        ? ` [Graph Trace]: Defect locus "${context.callGraphContext.symbol}"${context.callGraphContext.callers?.length ? ` invoked by [${context.callGraphContext.callers.slice(0, 3).join(', ')}]` : ''}${context.callGraphContext.callees?.length ? ` calls [${context.callGraphContext.callees.slice(0, 3).join(', ')}]` : ''}.`
+        : '';
       return {
         playbook: 'B_DEBUGGING',
-        guidance: '[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction=\'callers\')] -> 3.[Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verification]. Use the newest feedback to pivot after repeated equivalent failure.',
+        guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction='callers')] -> 3.[Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verification].${graphTrace} Use the newest feedback to pivot after repeated equivalent failure.`,
         suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'inspect_symbol', 'replace_text'],
       };
     }
@@ -243,9 +257,12 @@ export class ToolSynergyAdvisor {
 
     // 6. Vừa tra cứu symbol đơn lẻ (inspect_symbol)
     if (lastToolName === 'inspect_symbol' && lastToolResult && !lastToolResult.error) {
+      const callerHint = context.callGraphContext?.callers?.length
+        ? ` Direct callers: [${context.callGraphContext.callers.slice(0, 3).join(', ')}].`
+        : '';
       return {
         playbook: 'G_BLAST_RADIUS',
-        guidance: 'Symbol definition inspected. For full cross-codebase 360-degree context (all callers, outgoing callees, dependencies, and test coverage in 1 payload), use "get_symbol_context_360".',
+        guidance: `Symbol definition inspected.${callerHint} For full cross-codebase 360-degree context (all callers, outgoing callees, dependencies, and test coverage in 1 payload), use "get_symbol_context_360".`,
         suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact', 'replace_text'],
       };
     }

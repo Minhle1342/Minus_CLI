@@ -40,6 +40,11 @@ export interface MemoryConsolidationPlan {
   pruneIds: string[];
 }
 
+export interface ProjectDigestOptions {
+  query?: string;
+  activeFiles?: string[];
+}
+
 export interface MemoryConsolidationResult {
   upserted: number;
   superseded: number;
@@ -710,29 +715,123 @@ export class ProjectMemoryManager {
 
   /**
    * Tạo bản tóm tắt "Project Knowledge Digest" ngắn gọn (~150 tokens) để nạp sẵn cho LLM.
-   * Áp dụng KV-Cache Prefix Alignment: Đảm bảo thứ tự xuất dữ liệu luôn cố định để tăng tỷ lệ Cache Hit.
+   * Áp dụng Task-Conditioned Relevance Scoring: Sắp xếp các script, monorepo workspaces và chỉ dẫn
+   * phù hợp nhất với task/query hiện tại lên đầu thay vì cắt ngọn 5 phần tử cố định.
+   * Bảo toàn 100% KV-Cache Prefix Alignment và cấu trúc dòng khi không có query.
    */
-  getProjectDigest(): string {
+  getProjectDigest(queryOrOptions?: string | ProjectDigestOptions): string {
+    const options: ProjectDigestOptions = typeof queryOrOptions === 'string'
+      ? { query: queryOrOptions }
+      : (queryOrOptions || {});
+
+    const query = options.query?.toLowerCase() || '';
+    const activeFiles = (options.activeFiles || []).map((f) => f.toLowerCase());
+    const hasRelevanceContext = Boolean(query || activeFiles.length > 0);
+
+    const queryTokens = query
+      .split(/[\s,.;:!?_/\-\\]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 1);
+
     const lines: string[] = [
       `[PROJECT KNOWLEDGE BASE - WARM START MEMORY]`,
       `- Dự án: ${this.memoryData.projectName} (${this.memoryData.projectType})`,
     ];
 
-    const scriptKeys = Object.keys(this.memoryData.scripts).sort();
+    const scoreScript = (key: string, cmd: string): number => {
+      if (!hasRelevanceContext) return 0;
+      let score = 0;
+      const keyLower = key.toLowerCase();
+      const cmdLower = cmd.toLowerCase();
+
+      if (query && query.includes(keyLower)) score += 20;
+      for (const token of queryTokens) {
+        if (keyLower.includes(token)) score += 10;
+        if (cmdLower.includes(token)) score += 5;
+      }
+
+      const hasTestIntent = queryTokens.some((t) => ['test', 'spec', 'check', 'verify', 'jest', 'vitest', 'coverage'].includes(t))
+        || activeFiles.some((f) => f.includes('.test.') || f.includes('.spec.') || f.includes('/test/') || f.includes('\\test\\'));
+      if (hasTestIntent && (keyLower.includes('test') || keyLower.includes('spec') || keyLower.includes('check'))) {
+        score += 25;
+      }
+
+      const hasBuildIntent = queryTokens.some((t) => ['build', 'compile', 'bundle', 'tsc', 'dist', 'pack'].includes(t));
+      if (hasBuildIntent && (keyLower.includes('build') || keyLower.includes('compile') || keyLower.includes('bundle'))) {
+        score += 20;
+      }
+
+      const hasLintIntent = queryTokens.some((t) => ['lint', 'format', 'prettier', 'eslint', 'style', 'clean'].includes(t));
+      if (hasLintIntent && (keyLower.includes('lint') || keyLower.includes('format') || keyLower.includes('prettier'))) {
+        score += 20;
+      }
+
+      const hasDevIntent = queryTokens.some((t) => ['dev', 'start', 'serve', 'watch', 'server'].includes(t));
+      if (hasDevIntent && (keyLower.includes('dev') || keyLower.includes('start') || keyLower.includes('serve'))) {
+        score += 20;
+      }
+
+      return score;
+    };
+
+    const scriptKeys = Object.keys(this.memoryData.scripts);
     if (scriptKeys.length > 0) {
-      const commands = scriptKeys
+      const sortedScriptKeys = hasRelevanceContext
+        ? [...scriptKeys].sort((a, b) => {
+            const scoreA = scoreScript(a, this.memoryData.scripts[a] || '');
+            const scoreB = scoreScript(b, this.memoryData.scripts[b] || '');
+            return (scoreB - scoreA) || a.localeCompare(b);
+          })
+        : [...scriptKeys].sort();
+
+      const commands = sortedScriptKeys
         .slice(0, 5)
         .map((key) => `"${key}": ${this.memoryData.scripts[key]}`);
       lines.push(`- Lệnh khả dụng: ${commands.join(', ')}`);
     }
 
     if (this.memoryData.isMonorepo && this.memoryData.monorepoWorkspaces && this.memoryData.monorepoWorkspaces.length > 0) {
-      lines.push(`- Kiến trúc Monorepo: [${this.memoryData.monorepoWorkspaces.map((w) => w.relativePath).join(', ')}]`);
+      const scoreWorkspace = (w: any): number => {
+        if (!hasRelevanceContext) return 0;
+        let score = 0;
+        const relLower = w.relativePath.toLowerCase();
+        const nameLower = w.name.toLowerCase();
+
+        if (activeFiles.some((f) => f.includes(relLower) || f.includes(nameLower))) {
+          score += 30;
+        }
+        if (query && (query.includes(relLower) || query.includes(nameLower))) {
+          score += 20;
+        }
+        for (const token of queryTokens) {
+          if (relLower.includes(token) || nameLower.includes(token)) score += 10;
+        }
+        return score;
+      };
+
+      const sortedWorkspaces = hasRelevanceContext
+        ? [...this.memoryData.monorepoWorkspaces].sort((a, b) => {
+            const scoreA = scoreWorkspace(a);
+            const scoreB = scoreWorkspace(b);
+            return (scoreB - scoreA) || a.relativePath.localeCompare(b.relativePath);
+          })
+        : [...this.memoryData.monorepoWorkspaces].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+      lines.push(`- Kiến trúc Monorepo: [${sortedWorkspaces.map((w) => w.relativePath).join(', ')}]`);
       lines.push(`- Lệnh khả dụng theo workspace:`);
-      for (const w of this.memoryData.monorepoWorkspaces.slice(0, 4)) {
-        const subScriptKeys = Object.keys(w.scripts).sort();
-        const scriptsFormatted = subScriptKeys.length > 0
-          ? subScriptKeys.slice(0, 4).map((k) => `"${k}": npm run ${k} --workspace=${w.relativePath}`).join(', ')
+
+      for (const w of sortedWorkspaces.slice(0, 4)) {
+        const subScriptKeys = Object.keys(w.scripts);
+        const sortedSubKeys = hasRelevanceContext
+          ? [...subScriptKeys].sort((a, b) => {
+              const scoreA = scoreScript(a, w.scripts[a] || '');
+              const scoreB = scoreScript(b, w.scripts[b] || '');
+              return (scoreB - scoreA) || a.localeCompare(b);
+            })
+          : [...subScriptKeys].sort();
+
+        const scriptsFormatted = sortedSubKeys.length > 0
+          ? sortedSubKeys.slice(0, 4).map((k) => `"${k}": npm run ${k} --workspace=${w.relativePath}`).join(', ')
           : 'Không có script định nghĩa';
         lines.push(`  * ${w.relativePath} (${w.projectType || 'Package'}): ${scriptsFormatted}`);
       }
@@ -763,7 +862,21 @@ export class ProjectMemoryManager {
     }
 
     if (this.memoryData.codingConventions && this.memoryData.codingConventions.length > 0) {
-      lines.push(`- Chỉ dẫn dự án (AGENTS.md): ${this.memoryData.codingConventions.slice(0, 3).join('; ')}`);
+      const scoreConvention = (conv: string): number => {
+        if (!hasRelevanceContext) return 0;
+        let score = 0;
+        const convLower = conv.toLowerCase();
+        for (const token of queryTokens) {
+          if (convLower.includes(token)) score += 5;
+        }
+        return score;
+      };
+
+      const sortedConventions = hasRelevanceContext
+        ? [...this.memoryData.codingConventions].sort((a, b) => scoreConvention(b) - scoreConvention(a))
+        : this.memoryData.codingConventions;
+
+      lines.push(`- Chỉ dẫn dự án (AGENTS.md): ${sortedConventions.slice(0, 3).join('; ')}`);
     }
 
     return lines.join('\n');

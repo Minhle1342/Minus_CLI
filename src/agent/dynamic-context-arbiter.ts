@@ -174,7 +174,7 @@ export class DynamicContextArbiter {
       {
         key: 'epistemicVerdictContext',
         name: 'Epistemic Arbiter Verdict (P1.44)',
-        content: (inputs.epistemicVerdictContext || '').trim(),
+        content: this.capEpistemicVerdict(inputs.epistemicVerdictContext),
         priority: 1.44,
         allowTruncation: false,
       },
@@ -396,6 +396,14 @@ export class DynamicContextArbiter {
         tokensSaved: Math.max(0, beforeTokens - afterTokens),
       },
     };
+  }
+
+  private capEpistemicVerdict(text?: string): string {
+    if (!text) return '';
+    const trimmed = text.trim();
+    const MAX_VERDICT_CHARS = 3200; // ~800 tokens max
+    if (trimmed.length <= MAX_VERDICT_CHARS) return trimmed;
+    return `${trimmed.slice(0, MAX_VERDICT_CHARS)}\n... [Epistemic Verdict truncated to ~800 tokens to preserve context budget]`;
   }
 
   /**

@@ -186,6 +186,45 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           };
         }
 
+        const MAX_UNMASKED_REPOMIX_TOKENS = 4000;
+        const totalEstimatedTokens = result.totalTokens || 0;
+        if (totalEstimatedTokens > MAX_UNMASKED_REPOMIX_TOKENS && files.length > 0) {
+          const scratchDir = path.join(workspace.rootDir, '.codingagent', 'scratch');
+          await fs.mkdir(scratchDir, { recursive: true }).catch(() => undefined);
+          const timestamp = Date.now();
+          const offloadFilename = `repomix-packed-${timestamp}.txt`;
+          const offloadRelativePath = `.codingagent/scratch/${offloadFilename}`;
+          const offloadAbsolutePath = path.join(scratchDir, offloadFilename);
+
+          const fullTextPayload = files
+            .map((f) => `=== FILE: ${f.path} (~${f.tokens ?? 'n/a'} tokens) ===\n${f.content || ''}`)
+            .join('\n\n');
+
+          await fs.writeFile(offloadAbsolutePath, fullTextPayload, 'utf8').catch(() => undefined);
+
+          const maskedFiles = files.map((f) => {
+            const rawContent = f.content || '';
+            const previewLines = rawContent.split(/\r?\n/).slice(0, 15).join('\n');
+            return {
+              path: f.path,
+              tokens: f.tokens,
+              preview: previewLines,
+              status: 'MASKED_TO_SCRATCH',
+            };
+          });
+
+          return {
+            totalFiles: result.totalFiles,
+            totalTokens: result.totalTokens,
+            compressionEnabled: shouldCompress,
+            fidelity: fidelity || (shouldCompress ? 'compressed' : 'full'),
+            observationMasked: true,
+            offloadFilePath: offloadRelativePath,
+            files: maskedFiles,
+            message: `[OBSERVATION MASKED]: Nội dung chi tiết ${result.totalFiles} tệp (~${result.totalTokens} tokens) đã được offload ra tệp "${offloadRelativePath}" để chống tràn ngữ cảnh. Trả về preview 15 dòng đầu mỗi tệp. Dùng tool "read_file" với startLine/maxLines để đọc chi tiết vị trí cần sửa.`,
+          };
+        }
+
         return {
           totalFiles: result.totalFiles,
           totalTokens: result.totalTokens,

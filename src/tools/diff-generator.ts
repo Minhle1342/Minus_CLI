@@ -14,6 +14,7 @@ export const FILE_MUTATION_TOOLS = new Set([
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
+  'run_node_script',
 ]);
 
 /**

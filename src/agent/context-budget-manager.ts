@@ -278,12 +278,16 @@ export class ContextBudgetManager {
         Math.floor(targetUsableInputTokens / (1 + before.errorMarginRatio)) + envelope.outputReserveTokens,
       ),
     };
-    const legacy = this.compactor.compact(envelope.history, baseOptions);
-    const candidate = this.compactor.compact(envelope.history, { ...baseOptions, enforceBudget: true });
-    const selected = this.mode === 'enforce' ? candidate : legacy;
+    const legacy = this.mode !== 'enforce'
+      ? this.compactor.compact(envelope.history, baseOptions)
+      : undefined;
+    const candidate = this.mode !== 'legacy'
+      ? this.compactor.compact(envelope.history, { ...baseOptions, enforceBudget: true })
+      : undefined;
+    const selected = (this.mode === 'enforce' ? candidate! : legacy!) || candidate || legacy;
     const selectedEnvelope = { ...envelope, history: selected.messages };
     const after = await this.counter.count(selectedEnvelope);
-    const candidateAfter = this.mode === 'shadow'
+    const candidateAfter = this.mode === 'shadow' && candidate
       ? await this.counter.count({ ...envelope, history: candidate.messages })
       : undefined;
     let finalSelected = selected;

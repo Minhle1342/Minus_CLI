@@ -613,9 +613,18 @@ export async function executeLsEmulation(
       }
     }
 
+    const MAX_LS_ITEMS = 50;
     const totalCount = lines.length;
+    const isCapped = totalCount > MAX_LS_ITEMS;
+    const displayLines = isCapped ? lines.slice(0, MAX_LS_ITEMS) : lines;
+    if (isCapped) {
+      displayLines.push(
+        `... [Đã lược bớt ${totalCount - MAX_LS_ITEMS} mục để bảo vệ context window. Dùng tool "list_files" để duyệt cây thư mục có bộ lọc và tiết kiệm token]`,
+      );
+    }
+
     const header = `total ${totalCount} items in ${parsed.targetPath}`;
-    const output = [header, ...lines].join('\n');
+    const output = [header, ...displayLines].join('\n');
 
     return {
       stdout: truncateOutput(output),
@@ -624,7 +633,9 @@ export async function executeLsEmulation(
       durationMs: Date.now() - startTime,
       exitCode: 0,
       emulated: true,
-      suggestion: 'Mẹo: Để tối ưu token và quản lý cấu trúc cây thư mục chuẩn, hãy dùng tool chuyên dụng "list_files".',
+      suggestion: isCapped
+        ? 'Thư mục có nhiều mục. Để tối ưu token và quản lý cấu trúc chuẩn, hãy dùng tool "list_files".'
+        : 'Mẹo: Để tối ưu token và quản lý cấu trúc cây thư mục chuẩn, hãy dùng tool chuyên dụng "list_files".',
     };
   } catch (err: any) {
     return {
@@ -833,7 +844,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "rg \'my_function\' src/", "ls -la", "node -v"). Không dùng để đọc file (dùng read_file) hoặc xóa file (dùng delete_file).',
+          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "npm run dev", "rg \'my_function\' src/", "ls -la", "node -v"). Khi chạy dev server / web app hoặc tiến trình dài hạn, BẮT BUỘC đặt WaitMsBeforeAsync=5000 để chạy nền tự động thay vì in hướng dẫn text suông.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -841,7 +852,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Số milliseconds chờ đợi sau khi bắt đầu lệnh trước khi gửi xuống chạy nền (background task). Tối đa 10000ms. Nếu lệnh kết thúc trong khoảng này, trả về kết quả đồng bộ; nếu chưa, chuyển thành Background Task.',
+          description: 'Số milliseconds chờ đợi sau khi bắt đầu lệnh trước khi gửi xuống chạy nền (background task). Tối đa 10000ms. Đối với lệnh chạy dev server/web app dài hạn (npm run dev, npm start, vite, uvicorn, python web server...), BẮT BUỘC đặt WaitMsBeforeAsync=5000 để chạy nền tự động.',
         },
         timeout_ms: {
           type: Type.NUMBER,

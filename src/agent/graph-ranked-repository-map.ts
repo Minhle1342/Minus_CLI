@@ -81,12 +81,19 @@ function estimateTokens(value: string): number {
  * (what the active code uses) and dependents (what a change may affect), then
  * emits only signatures that fit the active token budget.
  */
+interface CachedFileNode {
+  mtimeMs: number;
+  size: number;
+  node: RepositoryFileNode;
+}
+
 export class GraphRankedRepositoryMap {
   private workspace: Workspace;
   private snapshot?: RepositorySnapshot;
   private dirty = true;
   private changedFiles = new Set<string>();
   private diagnosticFiles = new Set<string>();
+  private fileCache = new Map<string, CachedFileNode>();
 
   constructor(workspace: Workspace) {
     this.workspace = workspace;
@@ -99,11 +106,16 @@ export class GraphRankedRepositoryMap {
     this.dirty = true;
     this.changedFiles.clear();
     this.diagnosticFiles.clear();
+    this.fileCache.clear();
   }
 
   invalidate(filePath?: string): void {
     this.dirty = true;
-    if (filePath) this.changedFiles.add(normalizePath(filePath));
+    if (filePath) {
+      const normalized = normalizePath(filePath);
+      this.changedFiles.add(normalized);
+      this.fileCache.delete(normalized);
+    }
   }
 
   observeToolResult(toolName: string, args: Record<string, any>, result: Record<string, any>): void {
@@ -115,7 +127,9 @@ export class GraphRankedRepositoryMap {
     ];
     for (const candidate of candidates) {
       if (typeof candidate === 'string' && candidate.trim()) {
-        this.changedFiles.add(normalizePath(candidate.trim()));
+        const normalized = normalizePath(candidate.trim());
+        this.changedFiles.add(normalized);
+        this.fileCache.delete(normalized);
       }
     }
     if (MUTATION_TOOLS.has(toolName) && !result.error && !result.errorCode) this.dirty = true;
@@ -290,14 +304,25 @@ export class GraphRankedRepositoryMap {
         try {
           const stat = await fs.stat(absolutePath);
           if (stat.size > 400 * 1024 || indexedBytes + stat.size > MAX_INDEXED_SOURCE_BYTES) continue;
-          const content = await fs.readFile(absolutePath, 'utf8');
           const relativePath = normalizePath(this.workspace.toRelativePath(absolutePath));
+
+          const cached = this.fileCache.get(relativePath);
+          if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+            files.push(cached.node);
+            indexedBytes += stat.size;
+            fingerprints.push(`${relativePath}:${stat.size}:${stat.mtimeMs}`);
+            continue;
+          }
+
+          const content = await fs.readFile(absolutePath, 'utf8');
           const symbols = SemanticSlicer.extractOutline(relativePath, content).symbols;
           const identifierCounts = new Map<string, number>();
           for (const identifier of content.match(IDENTIFIER_PATTERN) || []) {
             identifierCounts.set(identifier, (identifierCounts.get(identifier) || 0) + 1);
           }
-          files.push({ path: relativePath, absolutePath, content, symbols, identifierCounts });
+          const node: RepositoryFileNode = { path: relativePath, absolutePath, content, symbols, identifierCounts };
+          this.fileCache.set(relativePath, { mtimeMs: stat.mtimeMs, size: stat.size, node });
+          files.push(node);
           indexedBytes += stat.size;
           fingerprints.push(`${relativePath}:${stat.size}:${stat.mtimeMs}`);
         } catch {
