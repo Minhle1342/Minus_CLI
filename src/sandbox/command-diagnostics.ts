@@ -153,6 +153,15 @@ export function diagnoseCommandFailure(
     };
   }
 
+  if (/& was unexpected at this time/i.test(combinedOutput)) {
+    return {
+      success: false,
+      errorCode: 'POWERSHELL_SYNTAX_ON_CMD',
+      diagnostic: 'Cú pháp toán tử gọi PowerShell ("& <lệnh>") không tương thích với shell Windows cmd.exe.',
+      suggestion: 'Bỏ ký tự "&" ở đầu lệnh (ví dụ: "path\\to\\app.exe" thay vì "& .\\path\\to\\app.exe") hoặc chạy qua PowerShell: powershell -NoProfile -Command "...".',
+    };
+  }
+
   return {
     success: false,
     errorCode: 'COMMAND_FAILED',

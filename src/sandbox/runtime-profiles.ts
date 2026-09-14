@@ -105,7 +105,13 @@ export function detectWorkspaceRuntimeProfile(workspacePath: string): SandboxRun
   const files = projectFiles(workspacePath);
   const has = (pattern: RegExp) => files.some((file) => pattern.test(file));
 
-  if (has(/(?:\.sln|\.slnx|\.csproj|global\.json)$/i)) return getRuntimeProfile('dotnet', workspacePath);
+  if (has(/(?:\.csproj|\.fsproj|global\.json)$/i)) return getRuntimeProfile('dotnet', workspacePath);
+  if (has(/(?:\.sln|\.slnx)$/i)) {
+    if (has(/\.vcxproj$/i) && !has(/(?:\.csproj|\.fsproj)$/i)) {
+      return getRuntimeProfile('generic', workspacePath);
+    }
+    return getRuntimeProfile('dotnet', workspacePath);
+  }
   if (has(/(?:^|\/)package\.json$/i)) return getRuntimeProfile('node', workspacePath);
   if (has(/(?:^|\/)(?:pyproject\.toml|requirements[^/]*\.txt|Pipfile|setup\.py)$/i)) return getRuntimeProfile('python', workspacePath);
   if (has(/(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|gradlew)$/i)) return getRuntimeProfile('java', workspacePath);

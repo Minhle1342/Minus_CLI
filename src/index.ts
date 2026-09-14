@@ -70,6 +70,7 @@ const githubToken = process.env.GITHUB_TOKEN || process.env.GITHUB_API_KEY || ''
 const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || '';
 const mistralApiKey = process.env.MISTRAL_API_KEY || '';
 const openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
+const omniRouteApiKey = process.env.OMNIROUTE_API_KEY || '';
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
 const anthropicApiKeys = Array.from(new Set([
   process.env.ANTHROPIC_API_KEY,
@@ -289,6 +290,14 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     return new DeepseekLLM(key, rawModel === 'auto' ? 'auto' : rawModel, undefined, baseUrl, undefined, tokenConfig);
   }
 
+  // 0.2. OmniRoute / Cheaper Inference gateway (OpenAI-compatible)
+  if (model.startsWith('omniroute/')) {
+    const rawModel = model.replace(/^omniroute\//, '');
+    const baseUrl = process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1';
+    const key = process.env.OMNIROUTE_API_KEY || 'sk_omniroute';
+    return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
+  }
+
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)
   if (
     model.startsWith('gemini') ||
@@ -499,6 +508,8 @@ async function main() {
     siliconflowApiKey ||
     mistralApiKey ||
     openrouterApiKey ||
+    omniRouteApiKey ||
+    process.env.OMNIROUTE_BASE_URL ||
     openaiApiKey ||
     anthropicApiKey ||
     hasCodexAuth;

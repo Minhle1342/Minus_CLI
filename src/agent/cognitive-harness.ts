@@ -10,7 +10,7 @@
  */
 
 export interface CognitiveScaffold {
-  category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective' | 'data_parser';
+  category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective' | 'data_parser' | 'context_compression';
   negativeGate: string[];
   premiseCheck?: string;
   falsificationCriteria: string;
@@ -127,6 +127,45 @@ export class CognitiveHarness {
       };
     }
 
+    // Specialized Scaffold for Context Compression & Memory Persistence (/context-compression)
+    const isContextCompression = (
+      lowerReq.includes('context-compression')
+      || lowerReq.includes('context_compression')
+      || lowerReq.includes('nén ngữ cảnh')
+      || lowerReq.includes('tóm tắt lịch sử')
+      || lowerReq.includes('history persistence')
+      || lowerReq.includes('conversation memory')
+      || lowerReq.includes('lưu trữ lịch sử')
+      || lowerReq.includes('compact context')
+      || lowerReq.includes('context compaction')
+      || lowerReq.includes('rolling synopsis')
+      || lowerReq.includes('anchored summary')
+      || lowerReq.includes('artifact trail')
+    );
+
+    if (isContextCompression) {
+      return {
+        category: 'context_compression',
+        negativeGate: [
+          'NEVER dump raw uncompressed conversation history or multi-thousand-line tool output logs into the context window.',
+          'NEVER omit the explicit Artifact Trail (segregating [MODIFIED], [CREATED], and [READ-ONLY] files) when summarizing session context.',
+          'NEVER discard past architectural decisions, technical constraints, or unfulfilled user intents across compression cycles.',
+          'NEVER fabricate mock test passes or hide failing verification evidence in the Current State summary.',
+        ],
+        premiseCheck: 'Verify that long-term history is securely persisted to disk (SessionPersistence / JSONL) before applying lossy context window projection.',
+        falsificationCriteria: 'If the agent cannot identify modified files, forgets root-cause decisions, or re-fetches unchanged code due to missing details, the compression representation is FALSIFIED.',
+        executionTopology: [
+          'Audit Disk Event Store: Confirm raw session events are flushed to immutable append-only JSONL storage.',
+          'Artifact Trail Classification: Segregate modified files from read-only inspections with change summaries.',
+          'Extract Decisions & Invariants: Retain key design choices, constraints, and non-negotiable architectural rules.',
+          'State & Verification Extraction: Record exact passing/failing test commands, exit codes, and error traces.',
+          'Anchored 5-Section Synthesis: Format into standard Markdown sections (Intent, Artifact Trail, Decisions, State, Next Steps).',
+          'Sliding Window Assembly: Keep the last K turns intact for immediate reactive reasoning.',
+        ],
+        actionBoundary: 'Structured distillation strictly preserving technical identifiers, file paths, and empirical verification states.',
+      };
+    }
+
     // Specialized Scaffold for Data Extraction, Parsing, and Normalization Tasks (SWE-bench Rig)
     const isDataParser = (
       lowerReq.includes('trích xuất')
@@ -142,7 +181,7 @@ export class CognitiveHarness {
     if (isDataParser && (isCodingTask || lowerReq.includes('hàm') || lowerReq.includes('test'))) {
       const negativeGate = [
         'Do not assume one regex or one normalization rule covers every format in the active specification.',
-        'Derive normalization, validity, casing, and deduplication rules from current tests, schemas, or documented contracts.',
+        'Derive normalization, validity, casing, and deduplication rules from current tests, schemas, or documented contracts (deduplicate entries).',
         'Do not admit malformed or truncated values that violate the observed contract.',
       ];
 
@@ -170,6 +209,7 @@ export class CognitiveHarness {
         'NEVER fabricate mock test data inside production code to force a green test.',
         'NEVER comment out or silence compiler/LSP diagnostics.',
         'NEVER modify code blindly without inspecting actual lines with read_file first.',
+        'NEVER guess or hallucinate test commands or binary output paths (e.g. bin/Release/..., build/...) without inspecting project manifests or confirming file existence with list_files.',
         'NEVER declare victory without running empirical verification (e.g. npm run build / test).',
       ];
 
@@ -224,7 +264,7 @@ export class CognitiveHarness {
   }): CognitiveBrakeDecision {
     const { consecutiveFailures, hypothesisFailedCount, currentHypothesis } = params;
 
-    if (hypothesisFailedCount >= 2 && consecutiveFailures >= 2) {
+    if (hypothesisFailedCount >= 2 && consecutiveFailures >= 1) {
       this.falsifiedHypothesesCount++;
       const reason = `Hypothesis "${currentHypothesis || 'Active Hypothesis'}" failed validation ${hypothesisFailedCount} times.`;
       this.lastBrakeReason = reason;

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   evaluateCommandPreflight,
   normalizeWindowsCommand,
@@ -171,7 +173,14 @@ test('Preflight Guard: Normalizes POSIX environment exports, which, and ls on Wi
     const resMultiExport = normalizeWindowsCommand('export A=1 && export B=2 && npm start');
     assert.equal(resMultiExport.normalizedCommand, 'npm start');
     assert.deepEqual(resMultiExport.extractedEnv, { A: '1', B: '2' });
-    assert.equal(resMultiExport.modified, true);
+    // PowerShell call operator normalization (& .\bin\Release\GitKeyTests.exe)
+    const resPsCall = normalizeWindowsCommand('& .\\bin\\Release\\GitKeyTests.exe');
+    assert.equal(resPsCall.normalizedCommand, '.\\bin\\Release\\GitKeyTests.exe');
+    assert.equal(resPsCall.modified, true);
+
+    const resPsCallQuoted = normalizeWindowsCommand('& "bin\\Release\\GitKeyTests.exe" --verbose');
+    assert.equal(resPsCallQuoted.normalizedCommand, '"bin\\Release\\GitKeyTests.exe" --verbose');
+    assert.equal(resPsCallQuoted.modified, true);
   } finally {
     Object.defineProperty(process, 'platform', { value: originalPlatform });
   }
@@ -221,4 +230,38 @@ test('Preflight Guard Benchmark: Latency and token preservation verification', (
   const simulatedSavedTimeMs = 30000;
   const preflightLatencyMs = durationMs / 3000;
   assert.ok(preflightLatencyMs < 1);
+});
+
+test('Preflight Guard: Blocks non-existent local binary and discovers sibling executable', async () => {
+  const os = await import('node:os');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-binary-preflight-'));
+  try {
+    const debugDir = path.join(tempDir, 'bin', 'Debug');
+    const releaseDir = path.join(tempDir, 'bin', 'Release');
+    await fs.mkdir(debugDir, { recursive: true });
+    await fs.mkdir(releaseDir, { recursive: true });
+
+    // Tạo file test binary thực tế trong Debug
+    await fs.writeFile(path.join(debugDir, 'GitKeyTests.exe'), 'mock binary');
+
+    // LLM đoán mò chạy file trong Release (không tồn tại)
+    const res = evaluateCommandPreflight('.\\bin\\Release\\GitKeyTests.exe', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+
+    assert.equal(res.allowed, false);
+    assert.equal(res.errorCode, 'LOCAL_EXECUTABLE_NOT_FOUND');
+    assert.match(res.reason || '', /không tồn tại trên đĩa/);
+    assert.match(res.reason || '', /bin[\\/]Debug[\\/]GitKeyTests\.exe/);
+
+    // Khi chạy file thực sự tồn tại trong Debug -> ALLOWED
+    const resExisting = evaluateCommandPreflight('.\\bin\\Debug\\GitKeyTests.exe', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+    assert.equal(resExisting.allowed, true);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });

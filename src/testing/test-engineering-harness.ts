@@ -461,12 +461,36 @@ export async function detectWorkspaceTestCommand(workspaceRoot: string): Promise
     }
   } catch {}
 
-  // 2. Kiểm tra .NET (C# / F#)
+  // 2. Kiểm tra .NET (C# / F#) vs C++ (MSBuild / Visual C++)
   try {
     const rootFiles = await fs.readdir(root).catch(() => []);
-    const hasDotnet = rootFiles.some((f) => f.endsWith('.sln') || f.endsWith('.csproj') || f.endsWith('.fsproj'));
-    if (hasDotnet) {
+    const hasVcxproj = rootFiles.some((f) => f.endsWith('.vcxproj'));
+    const hasCsproj = rootFiles.some((f) => f.endsWith('.csproj') || f.endsWith('.fsproj'));
+    const hasSln = rootFiles.some((f) => f.endsWith('.sln'));
+
+    if (hasCsproj || (hasSln && !hasVcxproj)) {
       return 'dotnet test';
+    }
+
+    if (hasVcxproj) {
+      // Dự án C++ Visual Studio: Kiểm tra xem có test binary đã build trong bin/Debug hoặc bin/Release không
+      const possibleTestDirs = [
+        path.join(root, 'bin', 'Debug'),
+        path.join(root, 'bin', 'Release'),
+        path.join(root, 'x64', 'Debug'),
+        path.join(root, 'x64', 'Release'),
+      ];
+      for (const tDir of possibleTestDirs) {
+        try {
+          const binFiles = await fs.readdir(tDir);
+          const testExe = binFiles.find((f) => /tests?\.exe$/i.test(f));
+          if (testExe) {
+            const relDir = path.relative(root, tDir);
+            return path.join(relDir, testExe);
+          }
+        } catch {}
+      }
+      return 'ctest';
     }
   } catch {}
 

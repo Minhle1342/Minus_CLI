@@ -362,7 +362,7 @@ export class PermissionManager {
         };
       }
 
-      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|git\s+(?:status|diff|log)|env|printenv|sed\s+-n|awk|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test)\b/i;
+      const safeSegment = /^(?:cat|type|get-content|gc|head|tail|more|less|ls|dir|tree|get-childitem|gci|grep|rg|ripgrep|findstr|select-string|sls|find|fd|wc|which|where|pwd|echo|printf|node\s+-v|npm\s+-v|git\s+(?:status|diff|log)|env|printenv|sed\s+-n|awk|npm\s+test|npm\s+run\s+(?:build|test|lint|typecheck)|npx\s+tsc|dotnet\s+test|pytest|cargo\s+test|ctest|(?:\.?[\/\\])?(?:bin|target|build|x64|x86)[\/\\](?:debug|release)[\/\\][a-zA-Z0-9_.-]*test[a-zA-Z0-9_.-]*(?:\.exe)?)\b/i;
       if (shellAnalysis.error || shellAnalysis.complex || shellAnalysis.segments.some((segment) => !safeSegment.test(segment.trim()))) {
         return {
           id,
@@ -391,7 +391,10 @@ export class PermissionManager {
       }
 
       // 4. Lệnh build / test an toàn -> LOW
-      if (/\b(npm\s+test|npm\s+run\s+build|npx\s+tsc|node\s+-v|dotnet\s+test|pytest|cargo\s+test)\b/i.test(lower)) {
+      if (
+        /\b(npm\s+test|npm\s+run\s+build|npx\s+tsc|node\s+-v|dotnet\s+test|pytest|cargo\s+test|ctest)\b/i.test(lower)
+        || /^(?:\.?[\/\\])?(?:bin|target|build|x64|x86)[\/\\](?:debug|release)[\/\\][a-zA-Z0-9_.-]*test[a-zA-Z0-9_.-]*(?:\.exe)?(?:\s+.*)?$/i.test(lower)
+      ) {
         return {
           id,
           toolName,

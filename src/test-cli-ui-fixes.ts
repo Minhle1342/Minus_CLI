@@ -485,6 +485,44 @@ go 1.22
       }
     });
   });
+
+  describe('12. Windows Shell Execution & PowerShell Call Operator Handling', () => {
+    it('should diagnose "& was unexpected at this time" as POWERSHELL_SYNTAX_ON_CMD', async () => {
+      const { diagnoseCommandFailure } = await import('./sandbox/command-diagnostics.js');
+      const diag = diagnoseCommandFailure('& .\\bin\\Release\\GitKeyTests.exe', {
+        stdout: '',
+        stderr: '& was unexpected at this time.',
+        exitCode: 1,
+        durationMs: 10,
+        sandboxType: 'local',
+        success: false,
+      });
+
+      assert.ok(diag);
+      assert.strictEqual(diag.errorCode, 'POWERSHELL_SYNTAX_ON_CMD');
+      assert.ok(diag.suggestion.includes('powershell'));
+    });
+
+    it('should normalize PowerShell call operator "&" on Windows in normalizeWindowsCommand', async () => {
+      const { normalizeWindowsCommand } = await import('./tools/command-preflight-guard.js');
+      const originalPlatform = process.platform;
+      try {
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        const res = normalizeWindowsCommand('& .\\bin\\Release\\GitKeyTests.exe');
+        assert.strictEqual(res.normalizedCommand, '.\\bin\\Release\\GitKeyTests.exe');
+        assert.strictEqual(res.modified, true);
+      } finally {
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+      }
+    });
+
+    it('should allow local test binaries under bin/target/build in isAllowedCommand', async () => {
+      const { isAllowedCommand } = await import('./tools/run-command.js');
+      assert.strictEqual(isAllowedCommand('.\\bin\\Debug\\GitKeyTests.exe'), true);
+      assert.strictEqual(isAllowedCommand('bin\\Release\\GitKeyTests.exe --run_test'), true);
+      assert.strictEqual(isAllowedCommand('ctest'), true);
+    });
+  });
 });
 
 

@@ -392,13 +392,47 @@ export class ContextCompactor {
       synopsisLines.push(synopsis);
     }
 
+    // Trích xuất dữ liệu tổng hợp cho 5 phần Anchored Structured Summary (/context-compression)
+    const sessionIntent = (turn0Messages.flatMap((m) => m.parts || []).find((p) => p.text && !p.functionResponse)?.text || 'Perform requested task')
+      .trim().slice(0, 320);
+
+    const allTouched = Array.from(new Set(archivedTurns.flatMap((t) => t.filesTouched)));
+    const allDecisions = Array.from(new Set(archivedTurns.flatMap((t) => t.keyDecisions))).slice(0, 10);
+    const allTools = Array.from(new Set(archivedTurns.flatMap((t) => t.toolsUsed)));
+
+    const artifactLines = allTouched.length > 0
+      ? allTouched.map((f) => `- [TOUCHED] ${f}`)
+      : ['- No workspace files modified in archived turns.'];
+
+    const structuredSummary = [
+      `${ROLLING_SYNOPSIS_MARKER} - TURNS 1 to ${oldUserTurnIndices.length} ARCHIVED]:`,
+      `> Ngữ cảnh các lượt trao đổi cũ đã được nén theo chuẩn Anchored Structured Compression (/context-compression):`,
+      ``,
+      `## 1. Session Intent`,
+      sessionIntent,
+      ``,
+      `## 2. Artifact Trail (Files Modified / Inspected)`,
+      ...artifactLines,
+      ``,
+      `## 3. Decisions Made`,
+      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Tuân thủ quy chuẩn kỹ thuật của codebase.']),
+      ``,
+      `## 4. Current State & Tools Executed`,
+      `- Đã thực thi các công cụ: ${allTools.slice(0, 8).join(', ') || 'none'}`,
+      `- Trạng thái: Các lượt trao đổi cũ đã được đóng gói an toàn và lưu vết bất biến.`,
+      ``,
+      `## 5. Next Steps`,
+      `- Tiếp tục thực thi nhiệm vụ trên các tệp tin trong active sliding window.`,
+      ``,
+      `### Chronological Turn Index`,
+      ...[...priorSynopsisLines, ...synopsisLines],
+      `\n> (Hệ thống sẽ tự động re-inject thông tin chi tiết nếu người dùng đề cập đến các bước trên)`
+    ].join('\n');
+
     const rollingSynopsisMessage: SessionMessage = {
       role: 'user',
       parts: [{
-        text: `[ROLLING DIALOGUE SYNOPSIS - TURNS 1 to ${oldUserTurnIndices.length} ARCHIVED]:\n` +
-          `> Ngữ cảnh các lượt trao đổi cũ đã được nén vào kho lưu trữ tập (Archived Turns Memory):\n` +
-          [...priorSynopsisLines, ...synopsisLines].join('\n') +
-          `\n> (Hệ thống sẽ tự động re-inject thông tin chi tiết nếu người dùng đề cập đến các bước trên)`
+        text: structuredSummary
       }]
     };
 

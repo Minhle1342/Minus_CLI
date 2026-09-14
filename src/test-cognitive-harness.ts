@@ -53,6 +53,17 @@ async function runCognitiveHarnessTests(): Promise<void> {
   assert(parserScaffold.negativeGate.some(g => g.includes('parentheses') || g.includes('deduplicate')), 'Negative gate chặn lỗi regex và yêu cầu deduplicate');
   console.log('  ✅ PASS: CognitiveHarness kích hoạt data_parser scaffold với tiêu chí validation nghiêm ngặt');
 
+  // 1.5 Scaffold cho Context Compression & Memory Persistence (/context-compression)
+  const compressionScaffold = harness.createScaffold({
+    request: 'Cơ chế Conversation Memory: lưu lại Text History và thực hiện context-compression',
+    phase: 'explore',
+  });
+  assert.strictEqual(compressionScaffold.category, 'context_compression', 'Nhận diện tác vụ context_compression');
+  assert(compressionScaffold.negativeGate.some(g => g.includes('NEVER dump raw uncompressed conversation history')), 'Negative gate chặn dump raw history');
+  assert(compressionScaffold.negativeGate.some(g => g.includes('Artifact Trail')), 'Negative gate bắt buộc Artifact Trail tường minh');
+  assert(compressionScaffold.executionTopology.some(s => s.includes('Anchored 5-Section Synthesis')), 'Yêu cầu cấu trúc Anchored 5 phần');
+  console.log('  ✅ PASS: CognitiveHarness kích hoạt context_compression scaffold theo chuẩn /context-compression');
+
   // 2. Kiểm thử Cognitive Brake (Tự ngắt nhánh suy luận sai / Branch Pruning)
   const normalBrake = harness.evaluateCognitiveBrake({
     consecutiveFailures: 1,

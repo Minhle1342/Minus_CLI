@@ -263,6 +263,13 @@ export function isAllowedCommand(command: string): boolean {
   })) {
     return true;
   }
+  // Cho phép ctest và thực thi test binary cục bộ trong workspace (bin/Debug/..., target/debug/..., x64/Debug/...)
+  if (
+    /^(?:ctest\b)/i.test(trimmed)
+    || /^(?:\.?[\/\\])?(?:bin|target|build|x64|x86)[\/\\](?:debug|release)[\/\\][a-zA-Z0-9_.-]*test[a-zA-Z0-9_.-]*(?:\.exe)?(?:\s+.*)?$/i.test(trimmed)
+  ) {
+    return true;
+  }
   // Cho phép các lệnh gán biến môi trường an toàn ($env:VAR=..., set VAR=..., export VAR=...)
   if (
     /^\$env:[a-zA-Z_][a-zA-Z0-9_]*\s*=/i.test(trimmed)
@@ -887,10 +894,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
         : (typeof args.wait_ms_before_async === 'number' ? Math.min(10000, Math.max(0, args.wait_ms_before_async)) : undefined);
 
-      // Pre-flight Guardrail: Chặn lệnh interactive (REPL, vim), dev server thiếu wait, lặp test vô ích, và chuẩn hóa Windows
+      // Pre-flight Guardrail: Chặn lệnh interactive (REPL, vim), dev server thiếu wait, lặp test vô ích, chuẩn hóa Windows, và chặn binary không tồn tại
       const preflight = evaluateCommandPreflight(rawCommand, {
         waitMsBeforeAsync,
         lastExecution: (context as any)?.lastCommandExecution,
+        workspaceRoot: workspace.rootDir,
       });
 
       if (!preflight.allowed) {

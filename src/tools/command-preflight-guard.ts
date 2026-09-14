@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 
 export interface PreflightGuardResult {
   allowed: boolean;
@@ -96,8 +97,19 @@ export function normalizeWindowsCommand(command: string): {
   let modified = false;
   const extractedEnv: Record<string, string> = {};
 
-  // 1. Chuyển 'which <tool>' thành 'where <tool>' trên Windows và chuẩn hóa 'ls' thành 'dir'
+  // 1. Chuẩn hóa môi trường Windows cmd.exe:
+  // - Bóc tách toán tử gọi của PowerShell '& <cmd>' (ví dụ: & .\bin\Release\GitKeyTests.exe)
+  // - Chuyển 'which <tool>' thành 'where <tool>'
+  // - Chuẩn hóa 'ls' thành 'dir'
   if (process.platform === 'win32') {
+    // 1.0. Chuẩn hóa toán tử gọi của PowerShell "& <cmd>" trên Windows cmd.exe
+    // Ví dụ: & .\bin\Release\GitKeyTests.exe -> .\bin\Release\GitKeyTests.exe
+    const psCallMatch = normalized.match(/^&\s+((?:["'][^"']+["'])|(?:\S+.*))$/);
+    if (psCallMatch) {
+      normalized = psCallMatch[1].trim();
+      modified = true;
+    }
+
     const whichMatch = normalized.match(/^which\s+([a-zA-Z0-9_-]+)$/i);
     if (whichMatch) {
       normalized = `where ${whichMatch[1]}`;
@@ -301,9 +313,91 @@ export function evaluateCommandPreflight(
     };
   }
 
+  // 5. Chặn gọi file thực thi nội bộ ảo (hallucinated local binary/script) khi không tồn tại trên đĩa
+  if (options?.workspaceRoot) {
+    const candidatePath = extractLocalCandidatePath(normalizedCommand);
+    if (candidatePath) {
+      const fullCandidate = path.isAbsolute(candidatePath)
+        ? candidatePath
+        : path.resolve(options.workspaceRoot, candidatePath);
+
+      if (!fs.existsSync(fullCandidate)) {
+        // Tìm kiếm các file nhị phân tương tự trong thư mục lân cận (ví dụ: Debug thay vì Release)
+        let siblingSuggestion = '';
+        try {
+          const dirName = path.dirname(fullCandidate);
+          const parentDir = path.dirname(dirName);
+          if (fs.existsSync(parentDir)) {
+            const subEntries = fs.readdirSync(parentDir, { withFileTypes: true });
+            const found: string[] = [];
+            for (const sub of subEntries) {
+              if (sub.isDirectory()) {
+                const subPath = path.join(parentDir, sub.name);
+                const subFiles = fs.readdirSync(subPath);
+                const exes = subFiles.filter((f) => /tests?\.exe$/i.test(f) || f.endsWith('.exe'));
+                for (const exe of exes) {
+                  found.push(path.relative(options.workspaceRoot, path.join(subPath, exe)));
+                }
+              }
+            }
+            if (found.length > 0) {
+              siblingSuggestion = ` Tìm thấy các tệp thực thi tồn tại trong thư mục đầu ra: ${found.join(', ')}.`;
+            }
+          }
+        } catch {}
+
+        if (mode === 'observe') {
+          return {
+            allowed: true,
+            normalizedCommand,
+            extractedEnv,
+            reason: `[OBSERVE] Tệp thực thi "${candidatePath}" không tồn tại trên đĩa.`,
+          };
+        }
+
+        return {
+          allowed: false,
+          errorCode: 'LOCAL_EXECUTABLE_NOT_FOUND',
+          reason: `Tệp thực thi "${candidatePath}" không tồn tại trên đĩa trong thư mục workspace.${siblingSuggestion}`,
+          suggestion: siblingSuggestion
+            ? `Hãy kiểm tra lại tệp thực thi thực tế hoặc cấu hình build (ví dụ: chạy bản Debug thay vì Release hoặc build lại trước khi chạy). Dùng tool "list_files" để kiểm tra thư mục đầu ra.`
+            : `Tệp nhị phân hoặc script "${candidatePath}" chưa được biên dịch hoặc không tồn tại. Hãy build dự án trước hoặc dùng "list_files" để xác minh đường dẫn chính xác.`,
+        };
+      }
+    }
+  }
+
   return {
     allowed: true,
     normalizedCommand,
     extractedEnv,
   };
+}
+
+/**
+ * Trích xuất đường dẫn file thực thi nội bộ cục bộ từ chuỗi lệnh.
+ */
+export function extractLocalCandidatePath(command: string): string | undefined {
+  const trimmed = command.trim();
+  const quotedMatch = trimmed.match(/^["']([^"']+)["'](?:\s+.*)?$/);
+  if (quotedMatch) {
+    const p = quotedMatch[1];
+    if (/[\\/]/.test(p) || /\.(?:exe|bat|cmd|sh|ps1|com)$/i.test(p)) {
+      return p;
+    }
+  }
+
+  const tokenMatch = trimmed.match(/^(\S+)(?:\s+.*)?$/);
+  if (tokenMatch) {
+    const firstToken = tokenMatch[1].replace(/^["']|["']$/g, '');
+    if (
+      firstToken.startsWith('.\\')
+      || firstToken.startsWith('./')
+      || /^(?:\.?[\/\\])?(?:bin|target|build|dist|scripts|out|x64|x86)[\/\\]/i.test(firstToken)
+    ) {
+      return firstToken;
+    }
+  }
+
+  return undefined;
 }

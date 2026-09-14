@@ -494,6 +494,82 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Định tuyến qua 9Router Proxy (localhost:20128/v1) với RTK Token Saver & 40+ providers',
   },
 
+  // 0.2. Cheaper Inference hosted coding models (OmniRoute integration)
+  {
+    id: 'or',
+    name: 'omniroute/deepseek-v4.1-flash',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'DeepSeek V4.1 Flash: model coding nhanh từ live hosted catalog',
+    recommended: true,
+  },
+  {
+    id: 'or1',
+    name: 'omniroute/deepseek-v4-pro',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'DeepSeek V4 Pro: reasoning và coding chuyên sâu',
+    recommended: true,
+  },
+  {
+    id: 'or2',
+    name: 'omniroute/deepseek-v4-flash',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'DeepSeek V4 Flash: phản hồi nhanh cho coding hằng ngày',
+  },
+  {
+    id: 'or3',
+    name: 'omniroute/qwen-3-8-max',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'Qwen 3.8 Max: coding và agentic workflow',
+  },
+  {
+    id: 'or4',
+    name: 'omniroute/qwen-3-8-27b',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'Qwen 3.8 27B: lựa chọn coding nhẹ và nhanh',
+  },
+  {
+    id: 'or5',
+    name: 'omniroute/kimi-k3',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'Kimi K3: coding agent với context dài',
+  },
+  {
+    id: 'or6',
+    name: 'omniroute/glm-5.3',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'GLM 5.3: reasoning và coding',
+  },
+  {
+    id: 'or7',
+    name: 'omniroute/glm-5.3-flash',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'GLM 5.3 Flash: phản hồi nhanh cho tác vụ coding',
+  },
+  {
+    id: 'or8',
+    name: 'omniroute/gpt-5.4-mini',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'GPT-5.4 Mini: coding hằng ngày với độ trễ thấp',
+  },
+  {
+    id: 'or9',
+    name: 'omniroute/gpt-5.4',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'GPT-5.4: coding và xử lý tác vụ phức tạp',
+  },
+  {
+    id: 'ora',
+    name: 'omniroute/claude-sonnet-4.6',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'Claude Sonnet 4.6: coding agent chất lượng cao',
+  },
+  {
+    id: 'orb',
+    name: 'omniroute/minimax-m2.7',
+    provider: 'Cheaper Inference (OmniRoute Hosted)',
+    desc: 'MiniMax M2.7: model coding hosted cân bằng chi phí và năng lực',
+  },
+
   // 1. Google AI Studio
   {
     id: '1',

@@ -345,17 +345,46 @@ export class ProjectMemoryManager {
       }
     } catch {}
 
-    // 6. Quét .csproj / .sln (C# / .NET)
+    // 6. Quét .csproj / .vcxproj / .sln (C# / .NET vs C++ / MSBuild)
     try {
       const entries = await fs.readdir(rootDir);
-      const csProj = entries.find((e) => e.endsWith('.csproj') || e.endsWith('.sln'));
-      if (csProj) {
-        projectName = csProj.replace(/\.(csproj|sln)$/, '');
+      const vcxProj = entries.find((e) => e.endsWith('.vcxproj'));
+      const csProj = entries.find((e) => e.endsWith('.csproj') || e.endsWith('.fsproj'));
+      const sln = entries.find((e) => e.endsWith('.sln'));
+
+      if (csProj || (sln && !vcxProj)) {
+        const projFile = csProj || sln;
+        projectName = projFile!.replace(/\.(csproj|fsproj|sln)$/, '');
         projectType = 'C# / .NET Application';
         packageManager = 'dotnet';
         scripts['test'] = scripts['test'] || 'dotnet test';
         scripts['build'] = scripts['build'] || 'dotnet build';
         scripts['run'] = scripts['run'] || 'dotnet run';
+      } else if (vcxProj || sln) {
+        const projFile = vcxProj || sln;
+        projectName = projFile!.replace(/\.(vcxproj|sln)$/, '');
+        projectType = 'C++ / Visual Studio (MSBuild)';
+        packageManager = 'msbuild';
+
+        const possibleTestDirs = [
+          path.join(rootDir, 'bin', 'Debug'),
+          path.join(rootDir, 'bin', 'Release'),
+          path.join(rootDir, 'x64', 'Debug'),
+          path.join(rootDir, 'x64', 'Release'),
+        ];
+        let foundTestExe: string | undefined;
+        for (const tDir of possibleTestDirs) {
+          try {
+            const bFiles = await fs.readdir(tDir);
+            const tExe = bFiles.find((f) => /tests?\.exe$/i.test(f));
+            if (tExe) {
+              foundTestExe = path.join(path.relative(rootDir, tDir), tExe);
+              break;
+            }
+          } catch {}
+        }
+        scripts['test'] = scripts['test'] || (foundTestExe ? foundTestExe : 'ctest');
+        scripts['build'] = scripts['build'] || `msbuild ${sln || vcxProj}`;
       }
     } catch {}
 
