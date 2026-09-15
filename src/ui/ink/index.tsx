@@ -26,10 +26,11 @@ export function renderInkApp(
   store: TuiStore,
   options: {
     onSubmitPrompt?: (prompt: string) => void;
+    onAbort?: () => void;
   } = {}
 ): InkAppHandle {
   const instance = render(
-    <App store={store} onSubmitPrompt={options.onSubmitPrompt} />,
+    <App store={store} onSubmitPrompt={options.onSubmitPrompt} onAbort={options.onAbort} />,
     {
       patchConsole: false,
     }

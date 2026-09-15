@@ -8,7 +8,7 @@ export interface SubmitSolutionArgs {
   summary: string;
   rootCause?: string;
   filesModified?: string[];
-  verificationEvidence: string;
+  verificationEvidence?: string;
 }
 
 export interface SubmitSolutionResult {

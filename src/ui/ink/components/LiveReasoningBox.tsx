@@ -27,7 +27,7 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   if (!hasReasoning) {
     return (
       <Box paddingX={1} marginY={0} gap={1}>
-        <Text color="yellow" bold>🧠 Thinking:</Text>
+        <Text color="red" bold>🧠 Thinking:</Text>
         <LoadingSpinner startTime={thinkingStartedAt ?? undefined} />
       </Box>
     );
@@ -40,8 +40,8 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   if (isCollapsed) {
     return (
       <Box paddingX={1} marginY={0} gap={1}>
-        <Text color="yellow" bold>🧠 Thinking:</Text>
-        <Text color="gray" italic>{truncatedSummary}</Text>
+        <Text color="red" bold>🧠 Thinking:</Text>
+        <Text color="white" italic>{truncatedSummary}</Text>
         <Text color="dim">(Ctrl+O để xem chi tiết)</Text>
       </Box>
     );
@@ -51,14 +51,14 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   const lines = clean.split('\n').slice(-6);
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="yellow" paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
-        <Text color="yellow" bold>🧠 REASONING TRACE (System 2 CoT)</Text>
+        <Text color="red" bold>🧠 REASONING TRACE (System 2 CoT)</Text>
         <Text color="gray">[Nhấn Ctrl+O để thu gọn]</Text>
       </Box>
       <Box flexDirection="column" marginTop={0}>
         {lines.map((line, idx) => (
-          <Text key={idx} color="gray" italic>
+          <Text key={idx} color="white" italic>
             {line.length > 90 ? `${line.slice(0, 87)}…` : line}
           </Text>
         ))}

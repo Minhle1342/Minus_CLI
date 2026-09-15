@@ -109,12 +109,45 @@ assert.notStrictEqual(state.activeDiff, null);
 assert.strictEqual(state.activeDiff?.isAutoApproved, true);
 console.log('  ✅ PASS: SHOW_DIFF nạp thông tin diff view chính xác');
 
+state = tuiReducer(state, {
+  type: 'RETRY_UPDATE',
+  retryInfo: {
+    attempt: 2,
+    maxRetries: 3,
+    delayMs: 1500,
+    message: 'Rate limit (429)',
+  },
+});
+assert.strictEqual(state.retryInfo?.attempt, 2);
+assert.strictEqual(state.retryInfo?.delayMs, 1500);
+console.log('  ✅ PASS: RETRY_UPDATE cập nhật thông tin retry backoff chính xác');
+
+state = tuiReducer(state, {
+  type: 'SET_ABORTING',
+  isAborting: true,
+});
+assert.strictEqual(state.isAborting, true);
+console.log('  ✅ PASS: SET_ABORTING cập nhật trạng thái hủy yêu cầu chính xác');
+
+// Kiểm thử Bounded Circular Ring Buffer cho liveReasoning (chống tràn RAM)
+const hugeChunk = 'x'.repeat(5000);
+state = tuiReducer(state, {
+  type: 'REASONING_CHUNK',
+  chunk: hugeChunk,
+});
+assert.strictEqual(state.liveReasoning.length <= 4000, true);
+console.log('  ✅ PASS: Circular Ring Buffer giới hạn độ dài liveReasoning <= 4000 ký tự');
+
 // 2. Kiểm thử TuiStore & AgentKernel Event Bus Binding
 console.log('\n▶ 2. Kiểm thử TuiStore & Event Bus Binding');
 const store = new TuiStore({ modelName: 'test-model' });
 let changeCount = 0;
+let abortTriggered = false;
 store.on('change', () => {
   changeCount++;
+});
+store.on('abort', () => {
+  abortTriggered = true;
 });
 
 const mockEvents = new EventEmitter();
@@ -142,7 +175,6 @@ assert.strictEqual(store.getState().isThinking, true);
 assert.strictEqual(store.getState().status, 'thinking');
 
 mockEvents.emit('model:thought', 'Suy nghĩ System 2...');
-assert.strictEqual(store.getState().liveReasoning.includes('Suy nghĩ System 2...'), true);
 
 mockEvents.emit('model:thinking:end', {
   agentId: 'coding-agent',
@@ -151,12 +183,26 @@ mockEvents.emit('model:thinking:end', {
   endedAt: Date.now(),
 });
 assert.strictEqual(store.getState().isThinking, false);
+assert.strictEqual(store.getState().liveReasoning.includes('Suy nghĩ System 2...'), true);
+
+mockEvents.emit('model:retry', {
+  attempt: 1,
+  maxRetries: 3,
+  delayMs: 1000,
+  message: '503 Service Unavailable',
+});
+assert.strictEqual(store.getState().retryInfo?.attempt, 1);
+assert.strictEqual(store.getState().retryInfo?.delayMs, 1000);
+
+store.abortCurrent();
+assert.strictEqual(store.getState().isAborting, true);
+assert.strictEqual(abortTriggered, true);
 
 mockEvents.emit('model:final_answer', 'Nhiệm vụ hoàn thành!');
 assert.strictEqual(store.getState().finalAnswer, 'Nhiệm vụ hoàn thành!');
 
 assert.strictEqual(changeCount >= 4, true);
-console.log(`  ✅ PASS: TuiStore phản ứng với 4 sự kiện từ AgentKernel (changeCount=${changeCount})`);
+console.log(`  ✅ PASS: TuiStore phản ứng với các sự kiện từ AgentKernel và hỗ trợ abort (changeCount=${changeCount})`);
 
 unbind();
 mockEvents.emit('step:before', 3, 10);

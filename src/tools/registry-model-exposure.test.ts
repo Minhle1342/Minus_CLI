@@ -30,6 +30,7 @@ test('ToolRetriever keeps a workflow-complete core and prunes unrelated network 
     'read_file',
     'list_files',
     'search_codebase_fast',
+    'search_text',
     'apply_patch',
     'replace_text',
     'run_command',

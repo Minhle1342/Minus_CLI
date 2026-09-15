@@ -110,6 +110,22 @@ export class ReflectionEngine {
   private lastDetectiveReport?: ErrorDetectiveReport;
   private lastReflectionPrompt?: string;
   private lastErrorFingerprint?: string;
+  private baselineErrorSignatures: Set<string> = new Set();
+
+  /**
+   * Thiết lập danh sách các chữ ký lỗi có sẵn (Baseline Errors) để phân lập lỗi vi sai
+   */
+  setBaselineErrors(signatures: string[] | Set<string>): void {
+    if (Array.isArray(signatures)) {
+      this.baselineErrorSignatures = new Set(signatures);
+    } else if (signatures instanceof Set) {
+      this.baselineErrorSignatures = new Set(signatures);
+    }
+  }
+
+  getBaselineErrors(): Set<string> {
+    return new Set(this.baselineErrorSignatures);
+  }
 
   /**
    * Trích xuất các lỗi TypeScript (TSxxxx) từ output hoặc Language Service trong RAM
@@ -250,10 +266,18 @@ export class ReflectionEngine {
       this.consecutiveFailures++;
 
       const rawCombined = `${result.stderr || ''}\n${result.stdout || ''}\n${result.error || ''}`;
-      detectiveReport = this.detective.investigate(rawCombined, workspace);
+      detectiveReport = this.detective.investigate(
+        rawCombined,
+        workspace,
+        context?.modifiedFiles || [],
+        { baselineSignatures: this.baselineErrorSignatures },
+      );
       this.lastDetectiveReport = detectiveReport;
 
-      const errorSnippet = sliceErrorOutput(rawCombined, 2000);
+      // Context Optimization: Observation Masking
+      // Khi ErrorDetective đã phân tích Root Cause & AST Slice, nén raw log từ 2000 chars xuống 400 chars để tiết kiệm context
+      const maxChars = detectiveReport.primaryDefect ? 400 : 1200;
+      const errorSnippet = sliceErrorOutput(rawCombined, maxChars);
 
       const promptParts = [
         `\n⚠️ [DEBUGGING PROTOCOL TRIGGERED - COMMAND EXECUTION FAILED (Exit Code: ${result.exitCode})]`,
@@ -279,22 +303,19 @@ export class ReflectionEngine {
       }
       this.lastErrorFingerprint = currentFingerprint;
 
-      // Level 1: Lần lỗi đầu tiên - giữ context gọn gàng, không nhồi nhét quy tắc phương pháp luận
-      if (this.consecutiveFailures <= 1) {
-        promptParts.push(`👉 Inspect the error output above and resolve the defect.`);
+      // Bổ sung Causal RCA Guidance từ ErrorDetective hoặc Debugging Protocol
+      if (detectiveReport.promptGuidance) {
+        promptParts.push(detectiveReport.promptGuidance);
+      } else if (this.consecutiveFailures > 1) {
+        promptParts.push(
+          `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
+          `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
+          `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
+          `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
+          `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
+        );
       } else {
-        // Level 2+: Khi lỗi lặp lại từ lần 2 trở đi - mới bổ sung hướng dẫn phương pháp luận sâu và chặn lặp
-        if (detectiveReport.promptGuidance) {
-          promptParts.push(detectiveReport.promptGuidance);
-        } else {
-          promptParts.push(
-            `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
-            `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
-            `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
-            `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
-            `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
-          );
-        }
+        promptParts.push(`👉 Inspect the error output above and resolve the defect.`);
       }
 
       reflectionPrompt = promptParts.join('\n');

@@ -22,10 +22,10 @@ export const LoadingSpinner: React.FC<{ startTime?: number }> = ({ startTime }) 
 
   return (
     <Box gap={1}>
-      <Text color="yellow" bold>
+      <Text color="red" bold>
         {SPINNER_FRAMES[frameIndex]}
       </Text>
-      <Text color="yellow">
+      <Text color="white">
         running ({sec}s)
       </Text>
     </Box>
@@ -52,14 +52,6 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
     <Box flexDirection="column" marginY={0} paddingX={1}>
       {visibleSteps.map((step) => {
         const p = step.phase;
-        let phaseColor = 'gray';
-        if (p === 'EXPLORE') phaseColor = 'cyan';
-        else if (p === 'IMPLEMENT') phaseColor = 'yellow';
-        else if (p === 'VERIFY') phaseColor = 'green';
-        else if (p === 'RELEASE') phaseColor = 'magenta';
-
-        const isUnlimited = !isFinite(step.maxSteps) || step.maxSteps >= 9999;
-        const stepTag = isUnlimited ? `${step.step}/∞` : `${step.step}/${step.maxSteps}`;
 
         const rawTarget =
           step.args.path ||
@@ -81,18 +73,18 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
           statusElement = <Text color="red">✖ failed</Text>;
         } else if (step.result && step.result.stdout !== undefined) {
           statusElement = (
-            <Text color="green">
+            <Text color="white">
               ✔ {step.result.exitCode === 0 ? 'exit 0' : `exit ${step.result.exitCode}`}
             </Text>
           );
         } else if (step.result && step.result.replacements !== undefined) {
-          statusElement = <Text color="green">✔ {step.result.replacements} replaced</Text>;
+          statusElement = <Text color="white">✔ {step.result.replacements} replaced</Text>;
         } else if (step.result && step.result.created) {
-          statusElement = <Text color="green">✔ created</Text>;
+          statusElement = <Text color="white">✔ created</Text>;
         } else if (step.result && step.result.hunksApplied !== undefined) {
-          statusElement = <Text color="green">✔ {step.result.hunksApplied} hunks</Text>;
+          statusElement = <Text color="white">✔ {step.result.hunksApplied} hunks</Text>;
         } else {
-          statusElement = <Text color="green">✔ OK</Text>;
+          statusElement = <Text color="white">✔ OK</Text>;
         }
 
         const durationStr = step.durationMs > 0 ? ` (${step.durationMs}ms)` : '';
@@ -108,8 +100,8 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
         return (
           <Box key={step.id} flexDirection="column">
             <Box gap={1}>
-              <Text color={phaseColor} bold>[{p}:{stepTag}]</Text>
-              <Text color="cyan">›</Text>
+              <Text color="red" bold>[{p}]</Text>
+              <Text color="red">›</Text>
               <Text bold color="white">{step.toolName}</Text>
               <Text color="gray">{targetStr}</Text>
               {statusElement}

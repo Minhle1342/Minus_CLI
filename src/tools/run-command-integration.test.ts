@@ -101,13 +101,13 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
   const tool = createRunCommandTool();
   const workspace = new Workspace();
 
-  // Calling npm test when previous failed with 0 files modified
+  // Calling test command when previous failed with 0 files modified
   const res = await tool.execute(
-    { command: 'npm test' },
+    { command: 'cargo test --help' },
     workspace,
     {
       lastCommandExecution: {
-        command: 'npm test',
+        command: 'cargo test --help',
         success: false,
         exitCode: 1,
         filesModifiedSince: 0,
@@ -119,13 +119,13 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
   assert.equal(res.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
   assert.match(res.error, /chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa/);
 
-  // Calling npm test after 1 file was modified (ALLOWED to proceed to shell)
+  // Calling test command after 1 file was modified (ALLOWED to proceed to shell)
   const allowedRes = await tool.execute(
-    { command: 'npm test' },
+    { command: 'cargo test --help' },
     workspace,
     {
       lastCommandExecution: {
-        command: 'npm test',
+        command: 'cargo test --help',
         success: false,
         exitCode: 1,
         filesModifiedSince: 1,

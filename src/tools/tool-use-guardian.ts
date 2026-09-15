@@ -9,6 +9,7 @@
  * 5. Learning & Tool Reliability Tracking (3+ failures marks tool degraded with alternative suggestions)
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeForMatching } from '../agent/final-answer-guard.js';
 
@@ -799,16 +800,30 @@ export class ToolUseGuardian {
           }
 
           // Safe Parameter Resolution (Life-Harness Action Realization):
-          // Nếu trường yêu cầu đường dẫn tuyệt đối hoặc là TargetFile/AbsolutePath/SearchPath/DirectoryPath/Cwd, tự động resolve
+          // Nếu trường yêu cầu đường dẫn tuyệt đối hoặc là TargetFile/AbsolutePath/SearchPath/DirectoryPath/Cwd, tự động resolve & auto-repair đuôi file
           const isAbsoluteField = ['targetfile', 'absolutepath', 'searchpath', 'directorypath', 'cwd'].includes(key.toLowerCase())
             || (typeof prop.description === 'string' && prop.description.toLowerCase().includes('must be an absolute path'));
-          if (isAbsoluteField && val.length > 0 && !path.isAbsolute(val) && !val.startsWith('http://') && !val.startsWith('https://')) {
-            const resolved = path.resolve(this.workspaceDir, val);
-            if (resolved !== val) {
-              coerced[key] = resolved;
+          if (isAbsoluteField && val.length > 0 && !val.startsWith('http://') && !val.startsWith('https://')) {
+            let candidatePath = val;
+            if (!path.isAbsolute(candidatePath)) {
+              candidatePath = path.resolve(this.workspaceDir, candidatePath);
+            }
+            // Auto-heal missing extension if target file does not exist directly
+            if (!fs.existsSync(candidatePath)) {
+              const extensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.mjs', '.cjs', '.py', '.go', '.rs'];
+              for (const ext of extensions) {
+                const withExt = candidatePath + ext;
+                if (fs.existsSync(withExt)) {
+                  candidatePath = withExt;
+                  break;
+                }
+              }
+            }
+            if (candidatePath !== val) {
+              coerced[key] = candidatePath;
               changed = true;
               coercedKeys.push(key);
-              val = resolved;
+              val = candidatePath;
             }
           }
         }
@@ -935,10 +950,105 @@ export class ToolUseGuardian {
       }
     }
 
+    // Tier 2 Self-Healing: Fuzzy whitespace and line offset auto-repair for text replacement tools
+    const targetFilePath = String(coerced.TargetFile || coerced.path || coerced.filePath || coerced.targetFile || '').trim();
+    const targetContentVal = coerced.TargetContent ?? coerced.oldText ?? coerced.old_text;
+    if (targetFilePath && typeof targetContentVal === 'string' && targetContentVal.length > 0) {
+      try {
+        const absFile = path.isAbsolute(targetFilePath) ? targetFilePath : path.resolve(this.workspaceDir, targetFilePath);
+        if (fs.existsSync(absFile)) {
+          const fileContent = fs.readFileSync(absFile, 'utf8');
+          // If not an exact match, attempt fuzzy whitespace and line normalization
+          if (!fileContent.includes(targetContentVal)) {
+            const healed = this.fuzzyAlignTargetContent(fileContent, targetContentVal);
+            if (healed) {
+              if ('TargetContent' in coerced || actualSchema?.properties?.TargetContent) {
+                coerced.TargetContent = healed.exactMatch;
+                changed = true;
+                coercedKeys.push('TargetContent:FuzzyWhitespaceHealed');
+              } else if ('oldText' in coerced || actualSchema?.properties?.oldText) {
+                coerced.oldText = healed.exactMatch;
+                changed = true;
+                coercedKeys.push('oldText:FuzzyWhitespaceHealed');
+              }
+              if (actualSchema?.properties?.StartLine && healed.startLine) {
+                coerced.StartLine = healed.startLine;
+                changed = true;
+                coercedKeys.push('StartLine:DriftHealed');
+              }
+              if (actualSchema?.properties?.EndLine && healed.endLine) {
+                coerced.EndLine = healed.endLine;
+                changed = true;
+                coercedKeys.push('EndLine:DriftHealed');
+              }
+            }
+          }
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
     if (isDirectArgsReturn) {
       return coerced;
     }
     return { coerced, changed, coercedKeys };
+  }
+
+  /**
+   * Tự động căn chỉnh và tìm vị trí tương đồng của TargetContent trong file
+   * (khắc phục sai khác về thụt đầu dòng, \r\n vs \n, khoảng trắng thừa cuối dòng)
+   */
+  fuzzyAlignTargetContent(
+    fileContent: string,
+    targetText: string,
+  ): { exactMatch: string; startLine: number; endLine: number } | undefined {
+    const normalizeLine = (l: string) => l.trim().replace(/\s+/g, ' ');
+    const targetLines = targetText.split(/\r?\n/).map(normalizeLine).filter((l) => l.length > 0);
+    if (targetLines.length === 0) return undefined;
+
+    const fileLines = fileContent.split(/\r?\n/);
+    let matchStart = -1;
+    let matchEnd = -1;
+    let matchCount = 0;
+
+    for (let i = 0; i <= fileLines.length - targetLines.length; i++) {
+      let isMatch = true;
+      let targetIdx = 0;
+      let j = i;
+
+      while (targetIdx < targetLines.length && j < fileLines.length) {
+        const fileNorm = normalizeLine(fileLines[j]);
+        if (!fileNorm) {
+          j++;
+          continue;
+        }
+        if (fileNorm !== targetLines[targetIdx]) {
+          isMatch = false;
+          break;
+        }
+        targetIdx++;
+        j++;
+      }
+
+      if (isMatch && targetIdx === targetLines.length) {
+        matchCount++;
+        matchStart = i;
+        matchEnd = j; // exclusive
+      }
+    }
+
+    // Chỉ tự động dàn xếp nếu tìm thấy ĐÚNG 1 vị trí tương đồng duy nhất (đảm bảo tính đơn định)
+    if (matchCount === 1 && matchStart >= 0 && matchEnd > matchStart) {
+      const exactMatch = fileLines.slice(matchStart, matchEnd).join('\n');
+      return {
+        exactMatch,
+        startLine: matchStart + 1,
+        endLine: matchEnd,
+      };
+    }
+
+    return undefined;
   }
 
   /**

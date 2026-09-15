@@ -25,6 +25,20 @@ export type ErrorPatternCategory =
   | 'RUNTIME_PANIC'
   | 'ENVIRONMENT_MISCONFIG';
 
+export interface UpstreamAstSlice {
+  file: string;
+  enclosingSymbol?: string;
+  startLine: number;
+  endLine: number;
+  snippet: string;
+}
+
+export interface CallGraphSliceContext {
+  caller?: string;
+  callee?: string;
+  chain?: string[];
+}
+
 export interface ErrorDetectiveReport {
   extractedErrors: ExtractedErrorItem[];
   primaryDefect?: string;
@@ -37,6 +51,17 @@ export interface ErrorDetectiveReport {
   prevention?: string;
   promptGuidance?: string;
   failingSourceLine?: string;
+  // Dynamic Call-Graph & AST Slice
+  upstreamSlice?: UpstreamAstSlice;
+  callGraphContext?: CallGraphSliceContext;
+  // Differential Regression Pinpointing
+  isDifferentialRegression?: boolean;
+  newRegressionsCount?: number;
+  preExistingCount?: number;
+}
+
+export interface ErrorDetectiveOptions {
+  baselineSignatures?: Set<string>;
 }
 
 /**
@@ -47,6 +72,8 @@ export interface ErrorDetectiveReport {
  * 2. Causal Backward Tracing: Separates surface symptoms from upstream root causes (cascading failure detection).
  * 3. Anti-Pattern Classification: Identifies null dereferences, missing imports, signature drift, etc.
  * 4. Actionable Remediation: Provides concrete file locations, line ranges, and prevention guidance.
+ * 5. Dynamic AST Call-Graph Slicing: Directly inspects enclosing caller/callee function implementations.
+ * 6. Differential Regression Pinpointing: Isolates newly introduced test failures from pre-existing legacy issues.
  */
 export class ErrorDetective {
   /**
@@ -56,6 +83,7 @@ export class ErrorDetective {
     rawText: string,
     workspace?: Workspace,
     recentlyMutatedFiles: string[] = [],
+    options?: ErrorDetectiveOptions,
   ): ErrorDetectiveReport {
     const text = rawText || '';
     const extractedErrors: ExtractedErrorItem[] = [];
@@ -86,11 +114,43 @@ export class ErrorDetective {
       if (generic) extractedErrors.push(generic);
     }
 
-    // Select primary defect (prefer compiler/runtime errors on recently mutated files)
-    const primary = this.selectPrimaryDefect(extractedErrors, recentlyMutatedFiles);
+    // 6. Differential Regression Pinpointing (Pre-existing vs New Regressions)
+    let isDifferentialRegression = false;
+    let newRegressionsCount = 0;
+    let preExistingCount = 0;
+    let errorsForPrimarySelection = extractedErrors;
+
+    if (options?.baselineSignatures && options.baselineSignatures.size > 0) {
+      const newErrors: ExtractedErrorItem[] = [];
+      const preExistingErrors: ExtractedErrorItem[] = [];
+
+      for (const err of extractedErrors) {
+        const sig = this.computeErrorSignature(err);
+        if (options.baselineSignatures.has(sig)) {
+          preExistingErrors.push(err);
+        } else {
+          newErrors.push(err);
+        }
+      }
+
+      newRegressionsCount = newErrors.length;
+      preExistingCount = preExistingErrors.length;
+
+      if (newRegressionsCount > 0) {
+        isDifferentialRegression = true;
+        // Prioritize newly introduced errors for primary defect selection
+        errorsForPrimarySelection = newErrors;
+      }
+    }
+
+    // Select primary defect (prefer compiler/runtime errors on recently mutated files or new regressions)
+    const primary = this.selectPrimaryDefect(errorsForPrimarySelection, recentlyMutatedFiles);
 
     // Inspect actual source line if location is identified (especially for test assertion failures)
     let failingSourceLine: string | undefined;
+    let upstreamSlice: UpstreamAstSlice | undefined;
+    let callGraphContext: CallGraphSliceContext | undefined;
+
     if (primary?.file && primary?.line) {
       try {
         let absPath = primary.file;
@@ -115,6 +175,13 @@ export class ErrorDetective {
               failingSourceLine = targetLine;
             }
           }
+
+          // Extract dynamic AST / Call-Graph Slice
+          const sliceResult = this.extractAstAndCallGraphSlice(absPath, primary.line, workspace?.rootDir);
+          if (sliceResult) {
+            upstreamSlice = sliceResult.slice;
+            callGraphContext = sliceResult.callGraph;
+          }
         }
       } catch {
         // Safe fallback
@@ -134,6 +201,11 @@ export class ErrorDetective {
       causalAnalysis,
       extractedErrors,
       failingSourceLine,
+      upstreamSlice,
+      callGraphContext,
+      isDifferentialRegression,
+      newRegressionsCount,
+      preExistingCount,
     });
 
     const locationStr = primary?.file
@@ -158,7 +230,27 @@ export class ErrorDetective {
       prevention: causalAnalysis.prevention,
       promptGuidance,
       failingSourceLine,
+      upstreamSlice,
+      callGraphContext,
+      isDifferentialRegression,
+      newRegressionsCount,
+      preExistingCount,
     };
+  }
+
+  /**
+   * Computes a deterministic error signature for differential regression tracking
+   */
+  public computeErrorSignature(err: ExtractedErrorItem): string {
+    const fileNorm = err.file ? normalizeFilePath(err.file) : 'unknown';
+    const code = err.errorCode || err.errorType || 'ERR';
+    const line = err.line || 0;
+    const msgSnippet = (err.message || '')
+      .slice(0, 80)
+      .replace(/\s+/g, ' ')
+      .replace(/[.:;,]+$/, '')
+      .trim();
+    return `${err.language}:${fileNorm}:${code}:${line}:${msgSnippet}`;
   }
 
   /**
@@ -569,6 +661,162 @@ export class ErrorDetective {
     }
   }
 
+  /**
+   * Trích xuất lát cắt AST và Ngữ cảnh Đồ thị Gọi hàm (Call Graph Context)
+   * Tự động nhận diện hàm bao quanh (enclosing function) hoặc truy vết hàm được import từ test file
+   */
+  private extractAstAndCallGraphSlice(
+    absPath: string,
+    lineNum: number,
+    workspaceRootDir?: string,
+  ): { slice: UpstreamAstSlice; callGraph?: CallGraphSliceContext } | undefined {
+    try {
+      if (!fs.existsSync(absPath)) return undefined;
+      const content = fs.readFileSync(absPath, 'utf8');
+      const lines = content.split(/\r?\n/);
+      const isTestFile = /[._-](?:test|spec)\.[a-zA-Z0-9]+$/i.test(absPath)
+        || /[\\/](?:tests?|__tests__|scratch)[\\/]/i.test(absPath);
+
+      const relPath = workspaceRootDir
+        ? path.relative(workspaceRootDir, absPath).replace(/\\/g, '/')
+        : normalizeFilePath(absPath);
+
+      // 1. Trường hợp là file test: Cố gắng truy vết ngược tới hàm implementation được gọi
+      if (isTestFile) {
+        const targetLineIdx = lineNum - 1;
+        const surroundingText = lines.slice(Math.max(0, targetLineIdx - 3), Math.min(lines.length, targetLineIdx + 4)).join('\n');
+
+        // Tìm các import từ test file
+        const importRegex = /import\s+(?:\{([^}]+)\}|([a-zA-Z0-9_$]+))\s+from\s+['"]([^'"]+)['"]/g;
+        let importMatch;
+        const importedSymbols: Array<{ name: string; modulePath: string }> = [];
+
+        while ((importMatch = importRegex.exec(content)) !== null) {
+          const namedImports = importMatch[1];
+          const defaultImport = importMatch[2];
+          const modPath = importMatch[3];
+
+          if (namedImports) {
+            const symbols = namedImports.split(',').map((s) => s.trim().split(/\s+as\s+/)[0].trim());
+            for (const sym of symbols) {
+              if (sym) importedSymbols.push({ name: sym, modulePath: modPath });
+            }
+          }
+          if (defaultImport) {
+            importedSymbols.push({ name: defaultImport.trim(), modulePath: modPath });
+          }
+        }
+
+        // Tìm xem symbol nào được gọi trong surroundingText
+        const testedSymbol = importedSymbols.find((s) => {
+          const callRegex = new RegExp(`\\b${s.name}\\b`);
+          return callRegex.test(surroundingText);
+        });
+
+        if (testedSymbol) {
+          // Resolve implementation file
+          const dir = path.dirname(absPath);
+          let targetModuleFile = path.resolve(dir, testedSymbol.modulePath);
+          const extensions = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs'];
+          let resolvedImplPath: string | undefined;
+
+          for (const ext of extensions) {
+            const candidate = targetModuleFile.endsWith(ext) ? targetModuleFile : `${targetModuleFile}${ext}`;
+            if (fs.existsSync(candidate) && !fs.statSync(candidate).isDirectory()) {
+              resolvedImplPath = candidate;
+              break;
+            }
+            // Cũng thử thay .js thành .ts
+            if (candidate.endsWith('.js')) {
+              const tsCandidate = candidate.slice(0, -3) + '.ts';
+              if (fs.existsSync(tsCandidate)) {
+                resolvedImplPath = tsCandidate;
+                break;
+              }
+            }
+          }
+
+          if (resolvedImplPath && fs.existsSync(resolvedImplPath)) {
+            const implContent = fs.readFileSync(resolvedImplPath, 'utf8');
+            const implLines = implContent.split(/\r?\n/);
+            const symRegex = new RegExp(`(?:export\\s+)?(?:async\\s+)?(?:function\\s+${testedSymbol.name}|class\\s+${testedSymbol.name}|const\\s+${testedSymbol.name}\\s*=)`, 'm');
+            const match = symRegex.exec(implContent);
+
+            if (match) {
+              const charIdx = match.index;
+              const lineStart = implContent.slice(0, charIdx).split(/\r?\n/).length;
+              // Context Optimization: giới hạn lát cắt AST tối đa 12 dòng / 500 ký tự để tiết kiệm context tokens
+              const lineEnd = Math.min(implLines.length, lineStart + 12);
+              let snippet = implLines.slice(lineStart - 1, lineEnd).join('\n');
+              if (snippet.length > 500) {
+                snippet = snippet.slice(0, 500) + '\n   // ... [truncated for context optimization]';
+              }
+              const relImplPath = workspaceRootDir
+                ? path.relative(workspaceRootDir, resolvedImplPath).replace(/\\/g, '/')
+                : normalizeFilePath(resolvedImplPath);
+
+              return {
+                slice: {
+                  file: relImplPath,
+                  enclosingSymbol: testedSymbol.name,
+                  startLine: lineStart,
+                  endLine: lineEnd,
+                  snippet,
+                },
+                callGraph: {
+                  caller: `${path.basename(absPath)}:${lineNum}`,
+                  callee: `${relImplPath}:${testedSymbol.name}`,
+                  chain: [
+                    `Test Assertion: ${path.basename(absPath)}:${lineNum}`,
+                    `Called Implementation: ${relImplPath}:${lineStart} (${testedSymbol.name})`,
+                  ],
+                },
+              };
+            }
+          }
+        }
+      }
+
+      // 2. Trường hợp là file implementation thông thường: Trích xuất hàm bao quanh
+      const targetLineIdx = lineNum - 1;
+      let funcStartLine = Math.max(1, lineNum - 4);
+      let foundSymbol: string | undefined;
+
+      for (let i = targetLineIdx; i >= 0 && i >= targetLineIdx - 30; i--) {
+        const line = lines[i];
+        const funcMatch = /(?:export\s+)?(?:async\s+)?(?:function\s+([a-zA-Z0-9_$]+)|class\s+([a-zA-Z0-9_$]+)|(?:const|let)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>|([a-zA-Z0-9_$]+)\s*\([^)]*\)\s*[:{])/.exec(line);
+        if (funcMatch) {
+          foundSymbol = funcMatch[1] || funcMatch[2] || funcMatch[3] || funcMatch[4];
+          funcStartLine = i + 1;
+          break;
+        }
+      }
+
+      // Context Optimization: Giới hạn slice 8 dòng quanh lỗi
+      const endLine = Math.min(lines.length, lineNum + 6);
+      let snippet = lines.slice(funcStartLine - 1, endLine).join('\n');
+      if (snippet.length > 500) {
+        snippet = snippet.slice(0, 500) + '\n   // ... [truncated for context optimization]';
+      }
+
+      return {
+        slice: {
+          file: relPath,
+          enclosingSymbol: foundSymbol,
+          startLine: funcStartLine,
+          endLine,
+          snippet,
+        },
+        callGraph: {
+          callee: foundSymbol ? `${relPath}:${foundSymbol}` : `${relPath}:${lineNum}`,
+          chain: [`Fault Frame: ${relPath}:${lineNum} ${foundSymbol ? `in ${foundSymbol}` : ''}`],
+        },
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   private buildPromptGuidance(params: {
     primary?: ExtractedErrorItem;
     pattern?: ErrorPatternCategory;
@@ -580,11 +828,37 @@ export class ErrorDetective {
     };
     extractedErrors: ExtractedErrorItem[];
     failingSourceLine?: string;
+    upstreamSlice?: UpstreamAstSlice;
+    callGraphContext?: CallGraphSliceContext;
+    isDifferentialRegression?: boolean;
+    newRegressionsCount?: number;
+    preExistingCount?: number;
   }): string {
-    const { primary, pattern, causalAnalysis, extractedErrors, failingSourceLine } = params;
-    const lines: string[] = [
-      `\n🕵️ [ERROR DETECTIVE - CAUSAL ROOT CAUSE ANALYSIS ACTIVATED]:`,
-    ];
+    const {
+      primary,
+      pattern,
+      causalAnalysis,
+      extractedErrors,
+      failingSourceLine,
+      upstreamSlice,
+      callGraphContext,
+      isDifferentialRegression,
+      newRegressionsCount,
+      preExistingCount,
+    } = params;
+
+    const lines: string[] = [];
+
+    // Differential Regression Alert
+    if (isDifferentialRegression && newRegressionsCount && newRegressionsCount > 0) {
+      lines.push(
+        `🚨 [DIFFERENTIAL REGRESSION PINPOINTED]:`,
+        `   • Phát hiện ${newRegressionsCount} lỗi MỚI xuất hiện do lần sửa đổi gần nhất (bỏ qua ${preExistingCount || 0} lỗi tồn đọng trước đó).`,
+        `   • Ưu tiên tuyệt đối 100%: Tập trung xử lý các lỗi mới này trước!`,
+      );
+    }
+
+    lines.push(`\n🕵️ [ERROR DETECTIVE - CAUSAL ROOT CAUSE ANALYSIS ACTIVATED]:`);
 
     if (primary) {
       lines.push(
@@ -601,6 +875,22 @@ export class ErrorDetective {
       );
     }
 
+    // Upstream AST & Call-Graph Slice Injection
+    if (upstreamSlice) {
+      lines.push(
+        `\n🎯 [DYNAMIC AST & CALL-GRAPH SLICE INJECTED]:`,
+        `   📁 File: ${upstreamSlice.file}${upstreamSlice.enclosingSymbol ? ` (Symbol: \`${upstreamSlice.enclosingSymbol}\`)` : ''} [Lines ${upstreamSlice.startLine}-${upstreamSlice.endLine}]`,
+      );
+      if (callGraphContext?.chain && callGraphContext.chain.length > 0) {
+        lines.push(`   🔗 Call Chain: ${callGraphContext.chain.join(' ➔ ')}`);
+      }
+      lines.push(
+        '   ```typescript',
+        ...upstreamSlice.snippet.split('\n').map((l) => `   ${l}`),
+        '   ```',
+      );
+    }
+
     if (extractedErrors.length > 1) {
       lines.push(`\n5. [ADDITIONAL CORRELATED DEFECTS (${extractedErrors.length - 1})]:`);
       for (const err of extractedErrors.slice(1, 5)) {
@@ -608,7 +898,7 @@ export class ErrorDetective {
       }
     }
 
-    lines.push(`\n👉 MANDATORY INVARIANT: Do not perform superficial monkey-patching! Address the root cause identified above.`);
+    lines.push(`\n👉 MANDATORY INVARIANT: Do not perform superficial monkey-patching! Address the root cause and AST slice identified above.`);
 
     return lines.filter(Boolean).join('\n');
   }

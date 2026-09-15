@@ -67,6 +67,7 @@ export class TypeScriptService {
         let file = this.files.get(normalized);
         if (!file && fs.existsSync(normalized)) {
           try {
+            this.pruneCacheIfNeeded();
             const content = fs.readFileSync(normalized, 'utf8');
             file = { version: 1, content };
             this.files.set(normalized, file);
@@ -102,6 +103,18 @@ export class TypeScriptService {
 
     this.services = ts.createLanguageService(host, ts.createDocumentRegistry());
     this.syncWorkspaceFiles();
+  }
+
+  private pruneCacheIfNeeded(): void {
+    if (this.files.size > 80) {
+      // Giữ lại 40 file gần nhất để tránh phình to RAM heap
+      const keys = Array.from(this.files.keys());
+      const toRemove = keys.slice(0, keys.length - 40);
+      for (const k of toRemove) {
+        this.files.delete(k);
+        this.rootFileNames.delete(k);
+      }
+    }
   }
 
   getCompilerOptions(): ts.CompilerOptions {

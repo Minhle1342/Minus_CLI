@@ -57,6 +57,13 @@ export interface TuiState {
   errorMessage: string | null;
   activeDiff: TuiDiffPayload | null;
   activePermission: TuiPermissionRequest | null;
+  isAborting: boolean;
+  retryInfo: {
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    message?: string;
+  } | null;
 }
 
 export type TuiAction =
@@ -80,4 +87,14 @@ export type TuiAction =
   | { type: 'SHOW_DIFF'; diff: TuiDiffPayload }
   | { type: 'CLEAR_DIFF' }
   | { type: 'REQUEST_PERMISSION'; permission: TuiPermissionRequest }
-  | { type: 'RESOLVE_PERMISSION' };
+  | { type: 'RESOLVE_PERMISSION' }
+  | { type: 'SET_ABORTING'; isAborting: boolean }
+  | {
+      type: 'RETRY_UPDATE';
+      retryInfo: {
+        attempt: number;
+        maxRetries: number;
+        delayMs: number;
+        message?: string;
+      } | null;
+    };

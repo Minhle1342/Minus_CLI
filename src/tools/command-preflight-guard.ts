@@ -207,16 +207,19 @@ export function normalizeWindowsCommand(command: string): {
   };
 }
 
+export interface EvaluateCommandPreflightOptions {
+  waitMsBeforeAsync?: number;
+  lastExecution?: LastCommandExecutionState;
+  mode?: 'enforce' | 'observe' | 'off';
+  workspaceRoot?: string;
+}
+
 /**
  * Đánh giá Pre-flight Guardrail trước khi spawn subprocess thực thi terminal.
  */
 export function evaluateCommandPreflight(
   command: string,
-  options?: {
-    waitMsBeforeAsync?: number;
-    lastExecution?: LastCommandExecutionState;
-    mode?: 'enforce' | 'observe' | 'off';
-  }
+  options?: EvaluateCommandPreflightOptions
 ): PreflightGuardResult {
   const mode = options?.mode || (process.env.MINUS_COMMAND_PREFLIGHT_GUARD?.toLowerCase() === 'off' ? 'off' : 'enforce');
   if (mode === 'off') {

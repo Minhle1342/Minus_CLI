@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { SLASH_COMMANDS } from '../../cli-ui.js';
 import { Workspace } from '../../../workspace/workspace.js';
@@ -7,6 +7,7 @@ import { FileMentionEngine } from '../../../workspace/file-attachment.js';
 export interface InputPromptBarProps {
   onSubmit: (value: string) => void;
   onToggleCompact?: () => void;
+  onAbort?: () => void;
   disabled?: boolean;
   workspacePath?: string;
   workspace?: Workspace;
@@ -21,9 +22,26 @@ interface SuggestionItem {
   mentionEnd?: number;
 }
 
+function useDebounce<T>(value: T, delay: number = 150): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
 export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   onSubmit,
   onToggleCompact,
+  onAbort,
   disabled = false,
   workspacePath,
   workspace: externalWorkspace,
@@ -32,6 +50,9 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isDismissed, setIsDismissed] = useState(false);
   const [hasNavigated, setHasNavigated] = useState(false);
+
+  // Debounce input value for heavy file-system scanning in @mentions
+  const debouncedValue = useDebounce(value, 150);
 
   // Khởi tạo hoặc tái sử dụng Workspace instance để quét gợi ý file
   const activeWorkspace = useMemo(() => {
@@ -50,14 +71,14 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   }>(() => {
     const trimmed = value.trimStart();
 
-    // 1. Gợi ý File Mentions (@...)
-    if (value.includes('@') && activeWorkspace) {
-      const activeMention = FileMentionEngine.extractActiveMention(value);
+    // 1. Gợi ý File Mentions (@...) sử dụng debouncedValue để tránh nghẽn I/O
+    if (debouncedValue.includes('@') && activeWorkspace) {
+      const activeMention = FileMentionEngine.extractActiveMention(debouncedValue);
       if (activeMention) {
         const fileSuggestions = FileMentionEngine.getFileSuggestions(
-          value,
+          debouncedValue,
           activeWorkspace,
-          value.length,
+          debouncedValue.length,
           5
         );
 
@@ -99,7 +120,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     }
 
     return { suggestions: [], suggestionType: 'none' };
-  }, [value, activeWorkspace]);
+  }, [value, debouncedValue, activeWorkspace]);
 
   // Áp dụng lựa chọn gợi ý vào thanh nhập liệu
   const applySelectedSuggestion = (item: SuggestionItem) => {
@@ -117,7 +138,13 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   };
 
   useInput((input, key) => {
-    if (disabled) return;
+    if (disabled) {
+      // Khi đang chạy tác vụ, hỗ trợ hủy qua Esc hoặc Ctrl+C
+      if (key.escape || (key.ctrl && input === 'c')) {
+        onAbort?.();
+      }
+      return;
+    }
 
     // Phím tắt Ctrl+O: Thu gọn/mở rộng reasoning
     if (key.ctrl && input === 'o') {
@@ -204,9 +231,9 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     <Box flexDirection="column" paddingX={1} marginY={0}>
       {/* Khung Gợi Ý Interactive với Phím Điều Hướng */}
       {showSuggestions && (
-        <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginY={0}>
+        <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
           <Box justifyContent="space-between">
-            <Text color="cyan" bold>
+            <Text color="red" bold>
               {suggestionType === 'command'
                 ? '⚡ GỢI Ý SLASH COMMANDS'
                 : '📁 GỢI Ý FILE / THƯ MỤC (@MENTION)'}
@@ -219,18 +246,17 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
             {suggestions.map((item, index) => {
               const isSelected = index === selectedIndex;
               const badge = item.type === 'directory' ? '[DIR]' : item.type === 'file' ? '[FILE]' : '[CMD]';
-              const badgeColor = item.type === 'directory' ? 'blue' : item.type === 'file' ? 'magenta' : 'yellow';
 
               return (
                 <Box key={`${item.label}-${index}`} gap={1}>
-                  <Text color={isSelected ? 'cyan' : 'gray'} bold>
+                  <Text color={isSelected ? 'red' : 'gray'} bold>
                     {isSelected ? '❯' : ' '}
                   </Text>
-                  <Text color={badgeColor} bold>
+                  <Text color={isSelected ? 'red' : 'white'} bold>
                     {badge}
                   </Text>
                   <Text
-                    color={isSelected ? 'cyan' : 'white'}
+                    color="white"
                     bold={isSelected}
                     underline={isSelected}
                   >
@@ -249,11 +275,18 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       )}
 
       {/* Dòng nhập lệnh chính */}
-      <Box gap={1} marginTop={0}>
-        <Text color="cyan" bold>❯</Text>
-        <Text color="white">{value}</Text>
-        <Text color="cyan">█</Text>
-      </Box>
+      {disabled ? (
+        <Box gap={1} marginTop={0}>
+          <Text color="red" bold>❯</Text>
+          <Text color="gray" dimColor>[Đang thực thi nhiệm vụ... Nhấn Esc hoặc Ctrl+C để hủy yêu cầu]</Text>
+        </Box>
+      ) : (
+        <Box gap={1} marginTop={0}>
+          <Text color="red" bold>❯</Text>
+          <Text color="white">{value}</Text>
+          <Text color="red">█</Text>
+        </Box>
+      )}
     </Box>
   );
 };

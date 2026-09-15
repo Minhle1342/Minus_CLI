@@ -12,9 +12,10 @@ import { InputPromptBar } from './InputPromptBar.js';
 interface AppProps {
   store: TuiStore;
   onSubmitPrompt?: (prompt: string) => void;
+  onAbort?: () => void;
 }
 
-export const App: React.FC<AppProps> = ({ store, onSubmitPrompt }) => {
+export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
   const [state, setState] = useState<TuiState>(store.getState());
 
   useEffect(() => {
@@ -35,6 +36,14 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt }) => {
   const handleSubmit = (value: string) => {
     if (onSubmitPrompt) {
       onSubmitPrompt(value);
+    }
+  };
+
+  const handleAbort = () => {
+    if (onAbort) {
+      onAbort();
+    } else {
+      store.abortCurrent();
     }
   };
 
@@ -75,7 +84,24 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt }) => {
       {/* 5. Active Diff View (if inspecting a patch or mutation) */}
       {state.activeDiff && <DiffPreviewBox diff={state.activeDiff} />}
 
-      {/* 6. Final Answer Display */}
+      {/* 6. Retry Information Banner (Exponential Backoff Feedback) */}
+      {state.retryInfo && (
+        <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
+          <Text color="red" bold>
+            🔄 [RETRYING] Đang thử lại (lần {state.retryInfo.attempt}/{state.retryInfo.maxRetries}) sau {(state.retryInfo.delayMs / 1000).toFixed(1)}s...
+            {state.retryInfo.message ? ` (${state.retryInfo.message})` : ''}
+          </Text>
+        </Box>
+      )}
+
+      {/* 7. Aborting Indicator Banner */}
+      {state.isAborting && (
+        <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
+          <Text color="red" bold>⏳ Đang dừng và hủy yêu cầu hiện tại...</Text>
+        </Box>
+      )}
+
+      {/* 8. Final Answer Display */}
       {state.finalAnswer && (
         <Box flexDirection="column" borderStyle="single" borderColor="green" paddingX={1} marginY={0}>
           <Text color="green" bold>✨ [HOÀN TẤT NHIỆM VỤ]</Text>
@@ -83,17 +109,18 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt }) => {
         </Box>
       )}
 
-      {/* 7. Error Banner */}
+      {/* 9. Error Banner */}
       {state.errorMessage && (
         <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
           <Text color="red" bold>✖ LỖI: {state.errorMessage}</Text>
         </Box>
       )}
 
-      {/* 8. Input Prompt Bar (when idle or ready) */}
+      {/* 10. Input Prompt Bar (when idle or ready, supports Esc/Ctrl+C abort) */}
       <InputPromptBar
         onSubmit={handleSubmit}
         onToggleCompact={handleToggleCompact}
+        onAbort={handleAbort}
         disabled={state.status === 'executing_tool' || state.status === 'thinking'}
         workspacePath={state.workspacePath}
       />

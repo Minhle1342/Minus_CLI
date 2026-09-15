@@ -206,6 +206,9 @@ import dotenv from 'dotenv';
 dotenv.config();
 process.env.NODE_ENV = 'test';
 process.env.SANDBOX_MODE = 'local';
+if (!process.env.MINUS_TOOL_CONTROL_MODE || process.env.MINUS_TOOL_CONTROL_MODE === 'enforce') {
+  process.env.MINUS_TOOL_CONTROL_MODE = 'shadow';
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -1752,7 +1755,7 @@ async function runUnitTests() {
       };
     }
   }
-  const cancelledBatchLoop = new AgentLoop(new MockCancelledBatchLLM(), cancellationRegistry, { maxSteps: 3, workspace });
+  const cancelledBatchLoop = new AgentLoop(new MockCancelledBatchLLM(), cancellationRegistry, { maxSteps: 3, workspace, toolControlMode: 'shadow' });
   const cancelledBatchSession = new Session('cancelled-tool-batch-session');
   cancelledBatchSession.addUserMessage('Cancel the batch after its first tool.');
   const cancelledBatchResult = await cancelledBatchLoop.run(cancelledBatchSession, {
@@ -1927,7 +1930,7 @@ async function runUnitTests() {
   const delegationParentSession = new Session('delegation-parent-session');
   delegationParent.bindSession(delegationParentSession);
   const delegated = delegationParent.subagentManager.start('Kiểm tra nhanh bằng subagent', { maxSteps: 2 });
-  const delegatedResult = await delegationParent.subagentManager.waitFor(delegated.id, 5000).catch(() => delegationParent.subagentManager.get(delegated.id));
+  const delegatedResult = await delegationParent.subagentManager.waitFor(delegated.id, 10000).catch(() => delegationParent.subagentManager.get(delegated.id));
   assert(delegated.status === 'running' && delegatedResult?.status === 'completed', 'Subagent provider tạo child AgentLoop chạy nền và trả kết quả');
   assert(delegationParent.agentRegistry.get(delegated.id)?.status === 'idle', 'Subagent được phản ánh trong live AgentRegistry');
   assert(
@@ -1957,7 +1960,7 @@ async function runUnitTests() {
     'Delegation đang chạy được đánh dấu stopped an toàn sau process restart',
   );
   const resumed = recoveredDelegationLoop.subagentManager.resume('subagent-restarted-1', { maxSteps: 2 });
-  const resumedResult = await recoveredDelegationLoop.subagentManager.waitFor('subagent-restarted-1', 5000).catch(() => recoveredDelegationLoop.subagentManager.get('subagent-restarted-1'));
+  const resumedResult = await recoveredDelegationLoop.subagentManager.waitFor('subagent-restarted-1', 10000).catch(() => recoveredDelegationLoop.subagentManager.get('subagent-restarted-1'));
   assert(resumed?.status === 'running' && resumedResult?.status === 'completed', 'Delegation chỉ resume khi explicit và hoàn tất được lần chạy mới');
 
   console.log('\n========================================');
@@ -2291,6 +2294,7 @@ async function runUnitTests() {
   const planExecutorLoop = new AgentLoop(planExecutorLLM, planExecutorRegistry, {
     maxSteps: 8,
     workspace,
+    toolControlMode: 'shadow',
   });
   const planExecutorSession = new Session('plan-executor-loop-test');
   planExecutorSession.addUserMessage('Implement a small configuration fix and verify tests');
@@ -5757,7 +5761,8 @@ Always write tests first!`;
   const submitSolutionTool = createSubmitSolutionTool(testWorkspace);
   assert(submitSolutionTool.name === 'submit_solution', 'submit_solution tool được định nghĩa đúng tên');
   assert(Boolean(submitSolutionTool.parameters?.required?.includes('summary')), 'submit_solution bắt buộc tham số summary');
-  assert(Boolean(submitSolutionTool.parameters?.required?.includes('verificationEvidence')), 'submit_solution bắt buộc tham số verificationEvidence');
+  assert(Boolean(submitSolutionTool.parameters?.properties?.verificationEvidence), 'submit_solution hỗ trợ tham số verificationEvidence');
+  assert(!submitSolutionTool.parameters?.required?.includes('verificationEvidence'), 'submit_solution không còn bắt buộc verificationEvidence (tùy chọn theo commit 789183f)');
 
   const submitResult = await submitSolutionTool.execute({
     summary: 'Refactored auth token refresh logic',

@@ -21,10 +21,6 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
   const filled = Math.min(barWidth, Math.round((percent / 100) * barWidth));
   const empty = Math.max(0, barWidth - filled);
 
-  let barColor = 'green';
-  if (percent >= 80) barColor = 'red';
-  else if (percent >= 50) barColor = 'yellow';
-
   const usedStr = usedTokens >= 1000 ? `${(usedTokens / 1000).toFixed(1)}k` : `${usedTokens}`;
   const maxStr = maxTokens >= 1000 ? `${(maxTokens / 1000).toFixed(0)}k` : `${maxTokens}`;
 
@@ -32,14 +28,14 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
     <Box flexDirection="row" justifyContent="space-between" marginY={0} paddingX={1}>
       <Box gap={1}>
         <Text color="gray">Context:</Text>
-        <Text color={barColor}>{'█'.repeat(filled)}</Text>
+        <Text color="red">{'█'.repeat(filled)}</Text>
         <Text color="gray">{'░'.repeat(empty)}</Text>
-        <Text color="cyan">{percent}%</Text>
+        <Text color="white" bold>{percent}%</Text>
         <Text color="gray">({usedStr} / {maxStr} tok)</Text>
       </Box>
       <Box gap={1}>
         <Text color="gray">Prompt Cache:</Text>
-        <Text color={cacheHitRate > 0 ? 'green' : 'gray'} bold>
+        <Text color="white" bold>
           {cacheHitRate}% {cacheHitRate > 0 ? '(warm)' : '(cold)'}
         </Text>
         {cachedTokens > 0 && (

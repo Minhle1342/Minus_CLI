@@ -33,7 +33,46 @@ export function createInitialState(options: {
     errorMessage: null,
     activeDiff: null,
     activePermission: null,
+    isAborting: false,
+    retryInfo: null,
   };
+}
+
+export class StreamBatcher {
+  private buffer: string = '';
+  private timer: NodeJS.Timeout | null = null;
+  private readonly flushIntervalMs: number = 33; // ~30 FPS frame coalescing
+
+  constructor(private onFlush: (batchedChunk: string) => void) {}
+
+  public push(token: string): void {
+    this.buffer += token;
+    if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.flush();
+      }, this.flushIntervalMs);
+    }
+  }
+
+  public flush(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    if (this.buffer.length > 0) {
+      const chunk = this.buffer;
+      this.buffer = '';
+      this.onFlush(chunk);
+    }
+  }
+
+  public clear(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.buffer = '';
+  }
 }
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -57,11 +96,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         liveReasoning: '',
         finalAnswer: null,
         errorMessage: null,
+        isAborting: false,
+        retryInfo: null,
       };
     case 'STEP_END':
       return {
         ...state,
         status: 'idle',
+        isAborting: false,
+        retryInfo: null,
       };
     case 'TOOL_START': {
       const newStepItem: TuiStepItem = {
@@ -81,7 +124,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         isThinking: false,
         thinkingStartedAt: null,
         activePhase: action.phase,
-        steps: [...state.steps.slice(-50), newStepItem],
+        steps: [...state.steps.slice(-25), newStepItem],
       };
     }
     case 'TOOL_END': {
@@ -127,11 +170,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         isThinking: false,
         thinkingStartedAt: null,
       };
-    case 'REASONING_CHUNK':
+    case 'REASONING_CHUNK': {
+      const combined = state.liveReasoning + action.chunk;
+      // Bounded Circular Ring Buffer: Giữ tối đa 4.000 ký tự gần nhất hiển thị trên TUI để tránh rò rỉ RAM Heap
+      const boundedReasoning = combined.length > 4000 ? combined.slice(-3500) : combined;
       return {
         ...state,
-        liveReasoning: state.liveReasoning + action.chunk,
+        liveReasoning: boundedReasoning,
       };
+    }
     case 'CLEAR_REASONING':
       return {
         ...state,
@@ -199,6 +246,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         activePermission: null,
       };
+    case 'SET_ABORTING':
+      return {
+        ...state,
+        isAborting: action.isAborting,
+      };
+    case 'RETRY_UPDATE':
+      return {
+        ...state,
+        retryInfo: action.retryInfo,
+      };
     default:
       return state;
   }
@@ -221,18 +278,31 @@ export class TuiStore extends EventEmitter {
     this.emit('change', this.state);
   }
 
+  abortCurrent(): void {
+    this.dispatch({ type: 'SET_ABORTING', isAborting: true });
+    this.emit('abort');
+  }
+
   bindKernel(kernel: AgentKernel): () => void {
     const events = kernel.ctx.events;
 
+    // Stream Batcher (Frame Coalescing ~30 FPS) giúp triệt tiêu bão re-render và chống tràn RAM Heap
+    const batcher = new StreamBatcher((batchedThought) => {
+      this.dispatch({ type: 'REASONING_CHUNK', chunk: batchedThought });
+    });
+
     const onStepBefore = (step: number, maxSteps: number) => {
+      batcher.flush();
       this.dispatch({ type: 'STEP_START', step, maxSteps });
     };
 
     const onStepAfter = (step: number) => {
+      batcher.flush();
       this.dispatch({ type: 'STEP_END', step });
     };
 
     const onToolBefore = (toolName: string, args: Record<string, any>) => {
+      batcher.flush();
       this.dispatch({
         type: 'TOOL_START',
         toolName,
@@ -244,19 +314,22 @@ export class TuiStore extends EventEmitter {
     };
 
     const onToolAfter = (toolName: string, result: Record<string, any>, durationMs: number) => {
+      batcher.flush();
       this.dispatch({ type: 'TOOL_END', toolName, result, durationMs });
     };
 
     const onThinkingStart = (lifecycle: { startedAt: number }) => {
+      batcher.clear();
       this.dispatch({ type: 'THINKING_START', startedAt: lifecycle.startedAt });
     };
 
     const onThinkingEnd = () => {
+      batcher.flush();
       this.dispatch({ type: 'THINKING_END' });
     };
 
     const onModelThought = (thought: string) => {
-      this.dispatch({ type: 'REASONING_CHUNK', chunk: thought });
+      batcher.push(thought);
     };
 
     const onModelUsage = (usage: any) => {
@@ -264,6 +337,7 @@ export class TuiStore extends EventEmitter {
     };
 
     const onModelFinalAnswer = (answer: string) => {
+      batcher.flush();
       this.dispatch({ type: 'FINAL_ANSWER', answer });
     };
 
@@ -274,6 +348,20 @@ export class TuiStore extends EventEmitter {
     const onModelChanged = (newModel: string) => {
       this.dispatch({ type: 'SET_MODEL', model: newModel });
     };
+
+    const onModelRetry = (retryPayload: { attempt: number; maxRetries: number; delayMs: number; message?: string } | null) => {
+      this.dispatch({ type: 'RETRY_UPDATE', retryInfo: retryPayload });
+    };
+
+    const onAbortRequested = () => {
+      batcher.clear();
+      // Forward abort signal to kernel if supported
+      if (typeof (kernel as any).cancelCurrentTask === 'function') {
+        (kernel as any).cancelCurrentTask();
+      }
+    };
+
+    this.on('abort', onAbortRequested);
 
     events.on('step:before', onStepBefore);
     events.on('step:after', onStepAfter);
@@ -286,8 +374,11 @@ export class TuiStore extends EventEmitter {
     events.on('model:final_answer', onModelFinalAnswer);
     events.on('workspace:changed', onWorkspaceChanged);
     events.on('model:changed', onModelChanged);
+    (events as any).on?.('model:retry', onModelRetry);
 
     return () => {
+      batcher.clear();
+      this.off('abort', onAbortRequested);
       events.off('step:before', onStepBefore);
       events.off('step:after', onStepAfter);
       events.off('tool:before', onToolBefore);
@@ -299,6 +390,7 @@ export class TuiStore extends EventEmitter {
       events.off('model:final_answer', onModelFinalAnswer);
       events.off('workspace:changed', onWorkspaceChanged);
       events.off('model:changed', onModelChanged);
+      (events as any).off?.('model:retry', onModelRetry);
     };
   }
 }

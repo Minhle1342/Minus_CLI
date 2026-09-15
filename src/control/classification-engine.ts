@@ -53,7 +53,7 @@ export class ClassificationEngine {
     ) {
       taskClass = input.previous?.taskClass || 'feature'; phase = 'verify'; risk = input.previous?.risk || 'R2';
       complexity = input.previous?.complexity || 'medium';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
+      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete', 'plan'];
       reasons.push(input.hasUnverifiedChanges ? 'UNVERIFIED_MUTATION_EXISTS' : 'VERIFICATION_PHASE_STICKY_UNTIL_COMPLETION');
     } else if (mutationIntent.test(normalizedText)) {
       taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';

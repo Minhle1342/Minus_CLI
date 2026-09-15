@@ -12,18 +12,18 @@ export const DiffPreviewBox: React.FC<DiffPreviewBoxProps> = ({ diff }) => {
   const remainingCount = diff.lines.length - maxLines;
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
-        <Text color="cyan" bold>
+        <Text color="red" bold>
           {diff.isAutoApproved ? '⚡ [AUTO-APPROVED DIFF]' : '📝 [DIFF PREVIEW]'}: {diff.file}
         </Text>
       </Box>
       <Box flexDirection="column" marginTop={0}>
         {renderLines.map((line, idx) => {
           let lineColor = 'gray';
-          if (line.startsWith('+')) lineColor = 'green';
+          if (line.startsWith('+')) lineColor = 'white';
           else if (line.startsWith('-')) lineColor = 'red';
-          else if (line.startsWith('@@')) lineColor = 'cyan';
+          else if (line.startsWith('@@')) lineColor = 'red';
           else if (line.startsWith('---') || line.startsWith('+++')) lineColor = 'white';
 
           return (

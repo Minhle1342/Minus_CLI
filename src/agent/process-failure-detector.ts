@@ -44,10 +44,18 @@ export interface PRMScoreResult {
 }
 
 export interface ProcessFailureIntervention {
-  type: 'RELEVANCE_DRIFT' | 'LOCALIZATION_FAILURE_BACKTRACK' | 'PREMATURE_MUTATION';
+  type: 'RELEVANCE_DRIFT' | 'LOCALIZATION_FAILURE_BACKTRACK' | 'PREMATURE_MUTATION' | 'SEMANTIC_LOOP';
   message: string;
   suggestedAction: string;
   phase: DevelopmentPhase;
+  similarity?: number;
+}
+
+export interface FailedMutationAttempt {
+  toolName: string;
+  targetFile?: string;
+  contentSnippet: string;
+  timestamp: number;
 }
 
 const MUTATION_TOOLS = new Set([
@@ -83,6 +91,7 @@ export class ProcessFailureDetector {
   private candidateHypotheses: FaultHypothesis[] = [];
   private activeHypothesisIndex = 0;
   private inspectedFiles: string[] = [];
+  private failedMutationHistory: FailedMutationAttempt[] = [];
 
   constructor(taskDescription?: string) {
     if (taskDescription) {
@@ -264,7 +273,83 @@ export class ProcessFailureDetector {
       }
     }
 
+    // 4. Kiểm tra Fuzzy Semantic Failure Loop (Kẹt vòng lặp sửa sai mù quáng)
+    if (MUTATION_TOOLS.has(toolName)) {
+      const isMutationFailure = result.error !== undefined || result.success === false || result.status === 'error';
+      const targetFile = (args.TargetFile || args.path || args.filePath || args.targetFile || '').toString();
+      const contentSnippet = (
+        args.TargetContent ||
+        args.ReplacementContent ||
+        args.newText ||
+        args.CodeContent ||
+        args.code ||
+        args.patch ||
+        ''
+      ).toString().trim();
+
+      if (isMutationFailure && contentSnippet.length > 0) {
+        // So khớp với các nỗ lực sửa đổi thất bại trước đó
+        for (const prev of this.failedMutationHistory.slice(-4)) {
+          const sim = this.calculateTokenSimilarity(contentSnippet, prev.contentSnippet);
+          const sameTarget = Boolean(targetFile && prev.targetFile && targetFile.toLowerCase() === prev.targetFile.toLowerCase());
+          const isHighSim = sim >= 0.70 || (sameTarget && sim >= 0.55);
+
+          if (isHighSim) {
+            return {
+              type: 'SEMANTIC_LOOP',
+              phase: this.currentPhase,
+              similarity: sim,
+              message: `[PROCESS-LEVEL FAILURE: SEMANTIC FAILURE LOOP DETECTED] Hệ thống phát hiện các lần can thiệp gần nhất có độ tương đồng ngữ nghĩa cao (${Math.round(sim * 100)}%) nhưng đều thất bại. Bạn đang bị kẹt trong vòng lặp sửa đổi vi mô (Micro-patching Loop).`,
+              suggestedAction: `Dừng việc thử nghiệm các biến thể cú pháp tương tự trên file '${targetFile || 'hiện tại'}'. Hãy Hoàn nguyên (Rollback) và Chuyển hướng Chiến lược (Strategy Pivot) sang phương án cấu trúc khác hoặc viết test tái hiện cô lập trong scratch/.`,
+            };
+          }
+        }
+
+        this.failedMutationHistory.push({
+          toolName,
+          targetFile,
+          contentSnippet,
+          timestamp: Date.now(),
+        });
+        if (this.failedMutationHistory.length > 10) {
+          this.failedMutationHistory.shift();
+        }
+      }
+    }
+
     return null;
+  }
+
+  /**
+   * Tính toán độ tương đồng ngữ nghĩa bằng Token Jaccard Similarity
+   */
+  public calculateTokenSimilarity(strA: string, strB: string): number {
+    if (!strA || !strB) return 0;
+    if (strA.trim() === strB.trim()) return 1.0;
+
+    const tokenize = (text: string): Set<string> => {
+      const tokens = text
+        .toLowerCase()
+        .replace(/[\r\n\t]/g, ' ')
+        .split(/[^a-zA-Z0-9_$]+/)
+        .filter((t) => t.length > 1);
+      return new Set(tokens);
+    };
+
+    const tokensA = tokenize(strA);
+    const tokensB = tokenize(strB);
+
+    if (tokensA.size === 0 || tokensB.size === 0) return 0;
+
+    let intersectionCount = 0;
+    for (const t of tokensA) {
+      if (tokensB.has(t)) {
+        intersectionCount++;
+      }
+    }
+
+    const unionCount = new Set([...tokensA, ...tokensB]).size;
+    return unionCount === 0 ? 0 : intersectionCount / unionCount;
   }
 
   public reset(): void {
@@ -275,5 +360,6 @@ export class ProcessFailureDetector {
     this.candidateHypotheses = [];
     this.activeHypothesisIndex = 0;
     this.inspectedFiles = [];
+    this.failedMutationHistory = [];
   }
 }
