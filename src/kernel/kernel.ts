@@ -35,7 +35,7 @@ export interface KernelEvents {
   'kernel:init': () => void;
   'kernel:disposed': () => void;
   'plugin:registered': (pluginName: string) => void;
-  'step:before': (step: number, maxSteps: number) => void;
+  'step:before': (step: number, maxSteps: number, phase?: import('../control/classification-types.js').TaskPhase) => void;
   'step:after': (step: number) => void;
   'tool:before': (toolName: string, args: Record<string, any>) => void;
   'tool:after': (

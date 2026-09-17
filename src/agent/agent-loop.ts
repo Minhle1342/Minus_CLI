@@ -1178,7 +1178,7 @@ export class AgentLoop {
         });
       }
 
-      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps);
+      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase);
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
@@ -1458,7 +1458,7 @@ export class AgentLoop {
       const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
         ? 0
         : (isStepOneExploration && !explicitRepoMap)
-          ? 0
+          ? Math.min(400, configuredRepoMapTokens)
           : configuredRepoMapTokens;
 
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
@@ -2882,12 +2882,11 @@ export class AgentLoop {
             session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
             this.kernel?.ctx.events.emit('tools:batch', batchTelemetry);
           }
-          if (!deferReadPersistence || partitionEndIndex === callIndex) {
-            await this.persistSession(session);
-          }
           if (effect) {
             const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
             this.effectLedger.commit(effect.id, outcome);
+          }
+          if (!deferReadPersistence || partitionEndIndex === callIndex) {
             await this.persistSession(session);
           }
 

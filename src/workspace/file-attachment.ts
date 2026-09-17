@@ -39,6 +39,7 @@ export interface AttachmentResult {
   expandedPrompt: string;
   attachments: AttachedItemSummary[];
   hasAttachments: boolean;
+  skippedAttachments?: Array<{ path: string; reason: 'attachment_limit' | 'source_byte_limit' | 'context_token_limit' }>;
 }
 
 /**
@@ -269,6 +270,10 @@ export class FileMentionEngine {
  * PromptAttachmentProcessor - Tự động bóc tách các file/thư mục được @mention và đính kèm vào context
  */
 export class PromptAttachmentProcessor {
+  private static readonly MAX_ATTACHMENTS = 8;
+  private static readonly MAX_SOURCE_BYTES = 64 * 1024;
+  private static readonly MAX_CONTEXT_TOKENS = 12_000;
+
   /**
    * Regex phát hiện các @mention file/thư mục hoặc lệnh /add, /attach
    */
@@ -313,98 +318,121 @@ export class PromptAttachmentProcessor {
 
     const attachments: AttachedItemSummary[] = [];
     const attachedContextBlocks: string[] = [];
+    const skippedAttachments: NonNullable<AttachmentResult['skippedAttachments']> = [];
+    let attachedSourceBytes = 0;
+    let attachedContextTokens = 0;
 
     for (const relPath of mentionedPaths) {
       try {
+        if (attachments.length >= this.MAX_ATTACHMENTS) {
+          skippedAttachments.push({ path: relPath, reason: 'attachment_limit' });
+          continue;
+        }
+
         const safePath = workspace.resolveSafePath(relPath);
         if (!fs.existsSync(safePath)) {
           continue;
         }
 
         const stat = await fsp.stat(safePath);
+        if (attachedSourceBytes + stat.size > this.MAX_SOURCE_BYTES) {
+          skippedAttachments.push({ path: relPath, reason: 'source_byte_limit' });
+          continue;
+        }
+
+        let attachment: AttachedItemSummary;
+        let contextBlock: string;
 
         if (stat.isFile()) {
           if (workspace.isBinaryFile(relPath)) {
-            attachments.push({
+            attachment = {
               path: relPath,
               type: 'file',
               sizeBytes: stat.size,
               preview: '[Binary File]',
-            });
-            attachedContextBlocks.push(
-              `\n---\n[Attached Binary File: ${relPath} (${(stat.size / 1024).toFixed(1)} KB)]\n---`
-            );
-            continue;
-          }
+            };
+            contextBlock = `\n---\n[Attached Binary File: ${relPath} (${(stat.size / 1024).toFixed(1)} KB)]\n---`;
+          } else {
+            const content = await fsp.readFile(safePath, 'utf8');
+            const lines = content.split(/\r?\n/);
+            const lineCount = lines.length;
+            const ext = path.extname(relPath).replace(/^\./, '') || 'text';
 
-          const content = await fsp.readFile(safePath, 'utf8');
-          const lines = content.split(/\r?\n/);
-          const lineCount = lines.length;
-          const ext = path.extname(relPath).replace(/^\./, '') || 'text';
+            let renderedContent = content;
+            let isSliced = false;
 
-          let renderedContent = content;
-          let isSliced = false;
+            // Nếu file quá dài (> 350 dòng hoặc > 14KB), tự động áp dụng Semantic AST Slicing (Cursor Standard)
+            if (lineCount > 350 || stat.size > 14000) {
+              const outline = SemanticSlicer.extractOutline(relPath, content);
+              if (outline.symbols.length > 0) {
+                isSliced = true;
+                const headLines = lines.slice(0, 45).join('\n');
+                const topSymbols = outline.symbols.slice(0, 25);
+                let symbolOutlineLines = topSymbols
+                  .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
+                  .join('\n');
+                if (outline.symbols.length > 25) {
+                  symbolOutlineLines += `\n  - ... (+${outline.symbols.length - 25} other symbols in this file)`;
+                }
 
-          // Nếu file quá dài (> 350 dòng hoặc > 14KB), tự động áp dụng Semantic AST Slicing (Cursor Standard)
-          if (lineCount > 350 || stat.size > 14000) {
-            const outline = SemanticSlicer.extractOutline(relPath, content);
-            if (outline.symbols.length > 0) {
-              isSliced = true;
-              const headLines = lines.slice(0, 45).join('\n');
-              const topSymbols = outline.symbols.slice(0, 25);
-              let symbolOutlineLines = topSymbols
-                .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
-                .join('\n');
-              if (outline.symbols.length > 25) {
-                symbolOutlineLines += `\n  - ... (+${outline.symbols.length - 25} other symbols in this file)`;
+                renderedContent = `${headLines}\n\n// ... [SEMANTIC AST SLICE: File is large (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB)] ...\n// Structural symbols index (showing ${topSymbols.length}/${outline.symbols.length}):\n${symbolOutlineLines}\n\n// [NOTE]: Use tool read_file with startLine/endLine if a specific function implementation is required.`;
               }
-
-              renderedContent = `${headLines}\n\n// ... [SEMANTIC AST SLICE: File is large (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB)] ...\n// Structural symbols index (showing ${topSymbols.length}/${outline.symbols.length}):\n${symbolOutlineLines}\n\n// [NOTE]: Use tool read_file with startLine/endLine if a specific function implementation is required.`;
             }
+
+            attachment = {
+              path: relPath,
+              type: 'file',
+              sizeBytes: stat.size,
+              lineCount,
+              preview: isSliced ? `[AST Sliced: ${lineCount} lines]` : undefined,
+            };
+            contextBlock = `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB${isSliced ? ' • Semantic AST Sliced' : ''})]\n\`\`\`${ext}\n${renderedContent}\n\`\`\`\n---`;
           }
-
-          attachments.push({
-            path: relPath,
-            type: 'file',
-            sizeBytes: stat.size,
-            lineCount,
-            preview: isSliced ? `[AST Sliced: ${lineCount} lines]` : undefined,
-          });
-
-          // Định dạng theo chuẩn Markdown Code Block rõ ràng cho LLM
-          attachedContextBlocks.push(
-            `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB${isSliced ? ' • Semantic AST Sliced' : ''})]\n\`\`\`${ext}\n${renderedContent}\n\`\`\`\n---`
-          );
         } else if (stat.isDirectory()) {
           // Nếu là thư mục, tạo sơ đồ cây thư mục (Directory Tree)
           const treeListing = await this.renderDirectoryTree(safePath, workspace, 3);
           const entries = await fsp.readdir(safePath);
           const fileCount = entries.length;
 
-          attachments.push({
+          attachment = {
             path: relPath,
             type: 'directory',
             sizeBytes: stat.size,
             fileCount,
-          });
-
-          attachedContextBlocks.push(
-            `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries)]\n\`\`\`\n${treeListing}\n\`\`\`\n---`
-          );
+          };
+          contextBlock = `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries)]\n\`\`\`\n${treeListing}\n\`\`\`\n---`;
+        } else {
+          continue;
         }
+
+        const estimatedTokens = Math.ceil(Buffer.byteLength(contextBlock, 'utf8') / 4);
+        if (attachedContextTokens + estimatedTokens > this.MAX_CONTEXT_TOKENS) {
+          skippedAttachments.push({ path: relPath, reason: 'context_token_limit' });
+          continue;
+        }
+
+        attachments.push(attachment);
+        attachedContextBlocks.push(contextBlock);
+        attachedSourceBytes += stat.size;
+        attachedContextTokens += estimatedTokens;
       } catch {
         // Bỏ qua nếu có lỗi bảo mật hoặc không truy cập được
         continue;
       }
     }
 
-    if (attachments.length === 0) {
+    if (attachments.length === 0 && skippedAttachments.length === 0) {
       return {
         originalPrompt: userPrompt,
         expandedPrompt: userPrompt,
         attachments: [],
         hasAttachments: false,
       };
+    }
+
+    if (skippedAttachments.length > 0) {
+      const skippedSummary = skippedAttachments.map(({ path: skippedPath, reason }) => `- ${skippedPath}: ${reason}`).join('\n');
+      attachedContextBlocks.push(`\n[Attachment limits] The following user-mentioned paths were not attached:\n${skippedSummary}`);
     }
 
     // Gắn phần attachments vào đuôi user prompt
@@ -414,7 +442,8 @@ export class PromptAttachmentProcessor {
       originalPrompt: userPrompt,
       expandedPrompt,
       attachments,
-      hasAttachments: true,
+      hasAttachments: attachments.length > 0,
+      skippedAttachments: skippedAttachments.length > 0 ? skippedAttachments : undefined,
     };
   }
 
