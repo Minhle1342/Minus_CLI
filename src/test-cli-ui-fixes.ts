@@ -10,6 +10,7 @@ import {
   formatMarkdownTerminal,
   RealtimeSlashCommandHints,
   CLI,
+  SLASH_COMMANDS,
   colors as c,
 } from './ui/cli-ui.js';
 import { validateSchemaValue } from './tools/schema-validator.js';
@@ -108,6 +109,43 @@ describe('Antigravity CLI UI & Input Bug Fixes', () => {
       assert.ok(clean.includes('• Item 1'));
       assert.ok(clean.includes('• Item 2'));
       assert.ok(clean.includes('Bold Text'));
+    });
+
+    it('should format multi-column markdown table with Vietnamese text and keep 100% border width equality', () => {
+      const mdTable = [
+        '| STT | Tên Tool (Name) | Mô tả / Chức năng chính | Trạng thái Model | Tệp nguồn (Source File) |',
+        '|---|---|---|---|---|',
+        '| 1 | read_file | Đọc nội dung tệp tin từ đĩa cục bộ với mã hóa UTF-8 | Sẵn sàng | src/tools/read-file.ts |',
+        '| 2 | write_to_file | Ghi nội dung hoặc tạo mới tệp tin trên hệ thống | Sẵn sàng | src/tools/write-file.ts |',
+      ].join('\n');
+
+      const formatted = formatMarkdownTerminal(mdTable);
+      const lines = formatted.split('\n').filter(l => l.includes('│') || l.includes('┌') || l.includes('├') || l.includes('└'));
+      assert.ok(lines.length >= 4, 'Table should have at least 4 rendered box lines');
+
+      // Tất cả các dòng của khung bảng phải có độ rộng hiển thị (Visible Width) tuyệt đối bằng nhau
+      const expectedWidth = getVisibleWidth(lines[0]);
+      for (let idx = 0; idx < lines.length; idx++) {
+        const line = lines[idx];
+        const w = getVisibleWidth(line);
+        assert.strictEqual(w, expectedWidth, `Line ${idx} width (${w}) must equal table width (${expectedWidth}): "${line}"`);
+      }
+    });
+
+    it('should wrap wide cells cleanly without exceeding terminal bounds', () => {
+      const mdTable = [
+        '| STT | Tool | Mô tả rất dài |',
+        '|---|---|---|',
+        '| 1 | test_tool | Đây là đoạn mô tả cực kỳ dài được viết bằng tiếng Việt có dấu nhằm kiểm tra khả năng tự động xuống dòng và phân bổ độ rộng của bảng TUI trong terminal mà không làm vỡ các góc cạnh |',
+      ].join('\n');
+
+      const formatted = formatMarkdownTerminal(mdTable);
+      const lines = formatted.split('\n').filter(l => l.includes('│') || l.includes('┌') || l.includes('├') || l.includes('└'));
+      const expectedWidth = getVisibleWidth(lines[0]);
+      for (const line of lines) {
+        assert.strictEqual(getVisibleWidth(line), expectedWidth);
+      }
+      assert.ok(lines.length > 4, 'Should wrap long text into multiple sublines');
     });
   });
 
@@ -521,6 +559,55 @@ go 1.22
       assert.strictEqual(isAllowedCommand('.\\bin\\Debug\\GitKeyTests.exe'), true);
       assert.strictEqual(isAllowedCommand('bin\\Release\\GitKeyTests.exe --run_test'), true);
       assert.strictEqual(isAllowedCommand('ctest'), true);
+    });
+  });
+
+  describe('13. Docker Desktop Toggle & Auto-Start Configuration', () => {
+    it('should include /docker in SLASH_COMMANDS with alias /docker-desktop', () => {
+      const dockerCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/docker');
+      assert.ok(dockerCmd, 'SLASH_COMMANDS should have /docker');
+      assert.strictEqual(dockerCmd.category, 'Execution');
+      assert.ok(dockerCmd.aliases?.includes('/docker-desktop'));
+    });
+
+    it('should render Docker status without errors', () => {
+      CLI.renderDockerStatus({ isAvailable: true, autoStartEnabled: true, mode: 'docker' });
+      CLI.renderDockerStatus({ isAvailable: false, autoStartEnabled: false, mode: 'local' });
+    });
+
+    it('should render Docker toggle notices without errors', () => {
+      CLI.renderDockerToggleNotice(true);
+      CLI.renderDockerToggleNotice(false);
+    });
+
+    it('should render Docker startup prompt without errors', () => {
+      CLI.renderDockerStartupPrompt({ isAvailable: false, autoStartEnabled: false });
+    });
+
+    it('should handle promptDockerStartupChoice user responses', async () => {
+      const mockRlAlways = {
+        question: async () => 'a',
+      };
+      const resAlways = await CLI.promptDockerStartupChoice(mockRlAlways);
+      assert.strictEqual(resAlways, 'always');
+
+      const mockRlNever = {
+        question: async () => 'd',
+      };
+      const resNever = await CLI.promptDockerStartupChoice(mockRlNever);
+      assert.strictEqual(resNever, 'never');
+
+      const mockRlYes = {
+        question: async () => 'y',
+      };
+      const resYes = await CLI.promptDockerStartupChoice(mockRlYes);
+      assert.strictEqual(resYes, 'on');
+
+      const mockRlNo = {
+        question: async () => 'n',
+      };
+      const resNo = await CLI.promptDockerStartupChoice(mockRlNo);
+      assert.strictEqual(resNo, 'off');
     });
   });
 });

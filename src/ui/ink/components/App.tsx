@@ -104,8 +104,13 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
       {/* 8. Final Answer Display */}
       {state.finalAnswer && (
         <Box flexDirection="column" borderStyle="single" borderColor="green" paddingX={1} marginY={0}>
-          <Text color="green" bold>✨ [HOÀN TẤT NHIỆM VỤ]</Text>
-          <Text color="white">{state.finalAnswer}</Text>
+          <Box justifyContent="space-between">
+            <Text color="green" bold>✨ [HOÀN TẤT NHIỆM VỤ - FINAL ANSWER]</Text>
+            <Text dimColor>RESULT</Text>
+          </Box>
+          <Box flexDirection="column" marginTop={1}>
+            <Text color="white" wrap="wrap">{state.finalAnswer}</Text>
+          </Box>
         </Box>
       )}
 

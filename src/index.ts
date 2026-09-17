@@ -1141,6 +1141,36 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     }
   };
 
+  // Kiểm tra & xử lý lựa chọn mở Docker Desktop sau khi chạy npm run dev
+  const savedAutoStart = savedSession.autoStartDocker ?? globalSavedSession.autoStartDocker;
+  const envAutoStart = process.env.AUTO_START_DOCKER !== undefined
+    ? process.env.AUTO_START_DOCKER === 'true' || process.env.AUTO_START_DOCKER === '1'
+    : undefined;
+  const effectiveAutoStart = envAutoStart ?? savedAutoStart;
+
+  if (effectiveAutoStart === true) {
+    if (!kernel.ctx.sandbox.getStatus().isIsolated) {
+      void kernel.ctx.sandbox.switchToDocker(true).catch(() => {});
+    }
+  } else if (effectiveAutoStart === undefined && input.isTTY && output.isTTY) {
+    const sbStatus = kernel.ctx.sandbox.getStatus();
+    if (!sbStatus.isIsolated && !sbStatus.dockerAvailable) {
+      const choice = await CLI.promptDockerStartupChoice(rl);
+      if (choice === 'always') {
+        saveSession({ autoStartDocker: true }, workspace.rootDir);
+        saveSession({ autoStartDocker: true });
+        CLI.renderDockerToggleNotice(true);
+        await kernel.ctx.sandbox.switchToDocker(true);
+      } else if (choice === 'never') {
+        saveSession({ autoStartDocker: false }, workspace.rootDir);
+        saveSession({ autoStartDocker: false });
+        CLI.renderDockerToggleNotice(false);
+      } else if (choice === 'on') {
+        await kernel.ctx.sandbox.switchToDocker(true);
+      }
+    }
+  }
+
   try {
     while (true) {
       const userPrompt = await readUserPrompt(rl, input, CLI.getPromptSymbol());
@@ -1196,6 +1226,81 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/sandbox') {
         CLI.renderSandbox(kernel.ctx.sandbox.getStatus());
+        continue;
+      }
+
+      if (
+        trimmed === '/docker' ||
+        trimmed.startsWith('/docker ') ||
+        trimmed === '/docker-desktop' ||
+        trimmed.startsWith('/docker-desktop ')
+      ) {
+        const sub = trimmed
+          .replace(/^\/(?:docker-desktop|docker)\s*/i, '')
+          .trim()
+          .toLowerCase();
+
+        const currentStatus = kernel.ctx.sandbox.getStatus();
+        const isAvailable = currentStatus.isIsolated || currentStatus.dockerAvailable;
+        const currentSavedSession = loadSession(workspace.rootDir);
+        const currentAutoStart = currentSavedSession.autoStartDocker ?? loadSession().autoStartDocker;
+
+        if (sub === 'on' || sub === 'enable' || sub === '1') {
+          saveSession({ autoStartDocker: true }, workspace.rootDir);
+          saveSession({ autoStartDocker: true });
+          CLI.renderDockerToggleNotice(true);
+          if (!currentStatus.isIsolated) {
+            console.log(`  ${c.brightCyan}🚀 Đang khởi động Docker Desktop...${c.reset}`);
+            const switched = await kernel.ctx.sandbox.switchToDocker(true);
+            if (switched) {
+              console.log(`  ${c.brightGreen}✔ Sandbox đã chuyển sang Docker Container thành công!${c.reset}\n`);
+            }
+          }
+          continue;
+        }
+
+        if (sub === 'off' || sub === 'disable' || sub === '0') {
+          saveSession({ autoStartDocker: false }, workspace.rootDir);
+          saveSession({ autoStartDocker: false });
+          CLI.renderDockerToggleNotice(false);
+          if (currentStatus.isIsolated) {
+            await kernel.ctx.sandbox.switchToLocal();
+            console.log(`  ${c.slate}✔ Đã chuyển về Local Sandbox.${c.reset}\n`);
+          }
+          continue;
+        }
+
+        if (sub === 'start') {
+          if (currentStatus.isIsolated) {
+            console.log(`\n  ${c.emerald}✔ Docker Desktop và Docker Sandbox đã đang hoạt động.${c.reset}\n`);
+          } else {
+            console.log(`  ${c.brightCyan}🚀 Đang khởi động Docker Desktop...${c.reset}`);
+            const switched = await kernel.ctx.sandbox.switchToDocker(true);
+            if (switched) {
+              console.log(`  ${c.brightGreen}✔ Sandbox đã chuyển sang Docker Container thành công!${c.reset}\n`);
+            }
+          }
+          continue;
+        }
+
+        if (sub === 'toggle') {
+          const next = !currentAutoStart;
+          saveSession({ autoStartDocker: next }, workspace.rootDir);
+          saveSession({ autoStartDocker: next });
+          CLI.renderDockerToggleNotice(next);
+          if (next && !currentStatus.isIsolated) {
+            await kernel.ctx.sandbox.switchToDocker(true);
+          } else if (!next && currentStatus.isIsolated) {
+            await kernel.ctx.sandbox.switchToLocal();
+          }
+          continue;
+        }
+
+        CLI.renderDockerStatus({
+          isAvailable,
+          autoStartEnabled: Boolean(currentAutoStart),
+          mode: kernel.ctx.sandbox.getStatus().mode,
+        });
         continue;
       }
 

@@ -5,6 +5,7 @@ import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
+import { nativeCompactHistory } from '../native/index.js';
 import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
 
 export interface CompactionConfig {
@@ -16,6 +17,10 @@ export interface CompactionConfig {
   preserveLastNTurns?: number;
   enableObservationMasking?: boolean;
   maskOldObservationsBeyondN?: number;
+  /** Archive old tool observations without rewriting the model-facing history. */
+  checkpointEveryNToolResults?: number;
+  /** Run the native output-masking prepass only after history grows beyond this size. */
+  nativePrecompactionThresholdChars?: number;
 }
 
 export interface MaskedObservationRecord {
@@ -83,6 +88,66 @@ function serializeHistory(messages: SessionMessage[]): string {
   }
 }
 
+function createMaskedObservationRecord(
+  response: any,
+  originalPayload: any,
+  fallbackId: string,
+  summary: string,
+): MaskedObservationRecord {
+  const payload = originalPayload && typeof originalPayload === 'object' ? originalPayload as Record<string, any> : {};
+  return {
+    id: response?.id || fallbackId,
+    toolName: response?.name || 'unknown',
+    targetPath: payload.path || payload.filePath || payload.targetFile,
+    command: payload.command,
+    exitCode: payload.exitCode,
+    timestamp: new Date().toISOString(),
+    originalPayload,
+    summary,
+  };
+}
+
+function collectNativeMaskedObservations(
+  originalMessages: SessionMessage[],
+  nativeMessages: SessionMessage[],
+): MaskedObservationRecord[] {
+  const nativeResponses = new Map<string, unknown>();
+  nativeMessages.forEach((message, messageIndex) => {
+    (message.parts || []).forEach((part: any, partIndex) => {
+      const response = part.functionResponse;
+      if (!response) return;
+      nativeResponses.set(response.id || `${messageIndex}:${partIndex}`, response.response);
+    });
+  });
+
+  const records: MaskedObservationRecord[] = [];
+  originalMessages.forEach((message, messageIndex) => {
+    (message.parts || []).forEach((part: any, partIndex) => {
+      const response = part.functionResponse;
+      if (!response) return;
+      const key = response.id || `${messageIndex}:${partIndex}`;
+      const nativePayload = nativeResponses.get(key);
+      if (JSON.stringify(response.response) === JSON.stringify(nativePayload)) return;
+      records.push(createMaskedObservationRecord(
+        response,
+        response.response,
+        `native-observation-${messageIndex}-${partIndex}`,
+        '[NATIVE PRECOMPACTION: Full tool result archived for on-demand recall.]',
+      ));
+    });
+  });
+  return records;
+}
+
+function isVerificationOrFailure(response: any): boolean {
+  const payload = response?.response as Record<string, any> | undefined;
+  if (response?.name === 'run_command') return true;
+  return payload?.success === false
+    || (typeof payload?.exitCode === 'number' && payload.exitCode !== 0)
+    || payload?.status === 'error'
+    || payload?.status === 'failed';
+}
+
 /**
  * ContextCompactor - Động cơ Nén Ngữ Cảnh & Quản Lý Ngân Sách Token (Phase 3 - Production)
  * 
@@ -107,6 +172,8 @@ export class ContextCompactor {
       preserveLastNTurns: config?.preserveLastNTurns ?? 8,
       enableObservationMasking: config?.enableObservationMasking ?? true,
       maskOldObservationsBeyondN: config?.maskOldObservationsBeyondN ?? 3,
+      checkpointEveryNToolResults: config?.checkpointEveryNToolResults ?? 12,
+      nativePrecompactionThresholdChars: config?.nativePrecompactionThresholdChars ?? 256 * 1024,
     };
   }
 
@@ -145,6 +212,40 @@ export class ContextCompactor {
     if (config.maskOldObservationsBeyondN !== undefined) {
       this.config.maskOldObservationsBeyondN = config.maskOldObservationsBeyondN;
     }
+    if (config.checkpointEveryNToolResults !== undefined) {
+      this.config.checkpointEveryNToolResults = config.checkpointEveryNToolResults;
+    }
+    if (config.nativePrecompactionThresholdChars !== undefined) {
+      this.config.nativePrecompactionThresholdChars = config.nativePrecompactionThresholdChars;
+    }
+  }
+
+  /**
+   * Creates durable recall records during a long tool-heavy turn without
+   * rewriting history, so a provider can keep reusing its existing KV prefix.
+   */
+  collectWithinTurnCheckpoint(messages: SessionMessage[]): MaskedObservationRecord[] {
+    const observations: Array<{ response: any; messageIndex: number; partIndex: number }> = [];
+    messages.forEach((message, messageIndex) => {
+      (message.parts || []).forEach((part: any, partIndex) => {
+        if (part.functionResponse) {
+          observations.push({ response: part.functionResponse, messageIndex, partIndex });
+        }
+      });
+    });
+
+    if (observations.length < this.config.checkpointEveryNToolResults) return [];
+    const cutoff = Math.max(0, observations.length - this.config.preserveLastNToolResults);
+    return observations.slice(0, cutoff).flatMap(({ response, messageIndex, partIndex }) => {
+      const payload = response.response as Record<string, any> | undefined;
+      if (payload?.status === 'masked' || payload?.status === 'superseded') return [];
+      return [createMaskedObservationRecord(
+        response,
+        response.response,
+        `turn-checkpoint-${messageIndex}-${partIndex}`,
+        '[WITHIN-TURN CHECKPOINT: Full tool result retained for on-demand recall.]',
+      )];
+    });
   }
 
   /**
@@ -166,7 +267,7 @@ export class ContextCompactor {
     input: SessionMessage[],
     budgetTokens: number,
     modelName?: string,
-  ): { messages: SessionMessage[]; strategies: string[]; prunedPartsCount: number } {
+  ): { messages: SessionMessage[]; strategies: string[]; prunedPartsCount: number; maskedObservations: MaskedObservationRecord[] } {
     let messages = input.map((message) => ({
       ...message,
       parts: (message.parts || []).map((part) => ({ ...part })),
@@ -175,7 +276,8 @@ export class ContextCompactor {
     let prunedPartsCount = 0;
     const count = () => ContextCompactor.countHistoryTokens(messages, modelName);
 
-    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+    const maskedObservations: MaskedObservationRecord[] = [];
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount, maskedObservations };
 
     // Layer 1: reduce every large tool observation, including a recent one. A hard
     // provider limit takes precedence over the soft recent-observation window.
@@ -187,6 +289,12 @@ export class ContextCompactor {
         const serialized = JSON.stringify(response ?? {});
         if (serialized.length <= 320) return part;
         prunedPartsCount++;
+        maskedObservations.push(createMaskedObservationRecord(
+          part.functionResponse,
+          response,
+          `hard-budget-observation-${prunedPartsCount}`,
+          '[HARD-BUDGET: Full tool result archived for on-demand recall.]',
+        ));
         const rawLog = String(response?.stderr || response?.stdout || response?.error || '').trim();
         return {
           ...part,
@@ -207,7 +315,7 @@ export class ContextCompactor {
     }));
     strategies.push('hard-budget-observation-stubs');
 
-    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount, maskedObservations };
 
     // Layer 2: trim verbose assistant narration outside the most recent exchange.
     let lastUserIndex = -1;
@@ -240,7 +348,7 @@ export class ContextCompactor {
     }));
     strategies.push('hard-budget-assistant-trim');
 
-    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount };
+    if (count() <= budgetTokens) return { messages, strategies, prunedPartsCount, maskedObservations };
 
     // Layer 3: the detailed turn documents remain recoverable from the immutable
     // event log and memory archive, so keep only the newest synopsis references.
@@ -259,7 +367,7 @@ export class ContextCompactor {
     });
     strategies.push('hard-budget-synopsis-window');
 
-    return { messages, strategies, prunedPartsCount };
+    return { messages, strategies, prunedPartsCount, maskedObservations };
   }
 
   /**
@@ -462,6 +570,7 @@ export class ContextCompactor {
     let compactedLength = 0;
     let prunedPartsCount = 0;
     let prunedTurnsCount = 0;
+    let nativePrecompactionApplied = false;
     let archivedTurns: ArchivedTurnDocument[] = [];
     const maskedObservations: MaskedObservationRecord[] = [];
 
@@ -503,11 +612,35 @@ export class ContextCompactor {
 
     // 1.5. Kỹ thuật Rolling Turn Compaction: Thu gọn các cặp Turn (User - Assistant) quá cũ theo cửa sổ trượt
     let workingMessages = messages;
+    const hasVerificationCommand = messages.some((message) => message.parts?.some(
+      (part) => part.functionResponse?.name === 'run_command',
+    ));
+    if (!hasVerificationCommand && originalLength >= this.config.nativePrecompactionThresholdChars) {
+      const serialized = serializeHistory(messages);
+      const nativeResult = nativeCompactHistory(
+        serialized,
+        Math.ceil(originalLength / 3.8) + 1,
+        this.config.preserveLastNToolResults,
+        this.config.maxCharactersPerToolResult,
+      );
+      if (nativeResult && nativeResult.compactedChars < nativeResult.originalChars) {
+        try {
+          const nativeMessages = JSON.parse(nativeResult.compactedMessagesJson) as SessionMessage[];
+          assertHistoryToolPairing(nativeMessages);
+          maskedObservations.push(...collectNativeMaskedObservations(messages, nativeMessages));
+          workingMessages = nativeMessages;
+          prunedPartsCount += nativeResult.maskedCount;
+          nativePrecompactionApplied = true;
+        } catch {
+          // Keep the contract-preserving TypeScript compactor as the safe fallback.
+        }
+      }
+    }
     const shouldRunRollingTurns = options?.enableRollingTurns ?? this.config.enableRollingTurnCompaction;
     const preserveTurns = options?.preserveLastNTurns ?? this.config.preserveLastNTurns;
 
     if (shouldRunRollingTurns && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
-      const rollingResult = this.applyRollingTurnCompaction(messages, preserveTurns);
+      const rollingResult = this.applyRollingTurnCompaction(workingMessages, preserveTurns);
       workingMessages = rollingResult.messages;
       archivedTurns = rollingResult.archivedTurns;
       prunedTurnsCount = rollingResult.prunedTurnsCount;
@@ -529,9 +662,13 @@ export class ContextCompactor {
 
     // Tìm các index của tool responses gần nhất
     const toolResultIndices: number[] = [];
+    const protectedToolResultIndices = new Set<number>();
     workingMessages.forEach((msg, idx) => {
       if (msg.parts?.some((p) => p.functionResponse)) {
         toolResultIndices.push(idx);
+        if (msg.parts?.some((part: any) => part.functionResponse && isVerificationOrFailure(part.functionResponse))) {
+          protectedToolResultIndices.add(idx);
+        }
       }
     });
 
@@ -541,7 +678,10 @@ export class ContextCompactor {
 
     // 3. Tiến hành Adaptive Context Pruning (Observation Masking & Superseded Deduplication)
     const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
-      const isOldToolResult = cutoffIndex >= 0 && msgIdx < cutoffIndex && msg.parts?.some((p) => p.functionResponse);
+      const isOldToolResult = cutoffIndex >= 0
+        && msgIdx < cutoffIndex
+        && !protectedToolResultIndices.has(msgIdx)
+        && msg.parts?.some((p) => p.functionResponse);
 
       if (!isOldToolResult) {
         return msg;
@@ -564,14 +704,7 @@ export class ContextCompactor {
           if (normalizedPath && mutatedFilesNormalized.has(normalizedPath)) {
             prunedPartsCount++;
             const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" đã được sửa đổi ở bước sau. Vui lòng đọc lại file nếu cần nội dung mới nhất]`;
-            maskedObservations.push({
-              id: resp.id || `obs-${msgIdx}`,
-              toolName: resp.name || 'unknown',
-              targetPath: rawFilePath,
-              timestamp: new Date().toISOString(),
-              originalPayload: resp.response,
-              summary: supersededMask,
-            });
+            maskedObservations.push(createMaskedObservationRecord(resp, resp.response, `obs-${msgIdx}`, supersededMask));
             return {
               functionResponse: {
                 name: resp.name,
@@ -635,16 +768,12 @@ export class ContextCompactor {
               };
             }
 
-            maskedObservations.push({
-              id: resp.id || `obs-${msgIdx}`,
-              toolName: resp.name || 'unknown',
-              targetPath: r.path || r.filePath || r.targetFile,
-              command: r.command,
-              exitCode: r.exitCode,
-              timestamp: new Date().toISOString(),
-              originalPayload: resp.response,
-              summary: compressedPayload.observationMask || `Masked observation of ${resp.name}`,
-            });
+            maskedObservations.push(createMaskedObservationRecord(
+              resp,
+              resp.response,
+              `obs-${msgIdx}`,
+              compressedPayload.observationMask || `Masked observation of ${resp.name}`,
+            ));
 
             return {
               functionResponse: {
@@ -762,9 +891,10 @@ export class ContextCompactor {
 
     const hardBudgetResult = options?.enforceBudget
       ? this.enforceHardBudget(compactedMessages, effectiveHistoryBudgetTokens, options.modelName)
-      : { messages: compactedMessages, strategies: [] as string[], prunedPartsCount: 0 };
+      : { messages: compactedMessages, strategies: [] as string[], prunedPartsCount: 0, maskedObservations: [] as MaskedObservationRecord[] };
     compactedMessages.splice(0, compactedMessages.length, ...hardBudgetResult.messages);
     prunedPartsCount += hardBudgetResult.prunedPartsCount;
+    maskedObservations.push(...hardBudgetResult.maskedObservations);
     compactedLength = getHistoryTotalChars(compactedMessages);
     charsSaved = Math.max(0, originalLength - compactedLength);
     const finalTokens = ContextCompactor.countHistoryTokens(compactedMessages, options?.modelName);
@@ -787,6 +917,7 @@ export class ContextCompactor {
       withinBudget: finalTokens <= effectiveHistoryBudgetTokens,
       budgetOverflowTokens: Math.max(0, finalTokens - effectiveHistoryBudgetTokens),
       strategiesApplied: [
+        ...(nativePrecompactionApplied ? ['native-large-history-prepass'] : []),
         ...(prunedTurnsCount > 0 ? ['rolling-turn-compaction'] : []),
         ...(prunedPartsCount > 0 ? ['observation-masking-or-slicing'] : []),
         ...hardBudgetResult.strategies,

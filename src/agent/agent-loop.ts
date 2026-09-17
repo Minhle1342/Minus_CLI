@@ -840,7 +840,12 @@ export class AgentLoop {
     const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
       ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
     if (toolControlMode === 'enforce') {
-      const baselineDiagnostics = this.collectVerificationDiagnostics();
+      const activeTask = this.planManager.getActiveTask();
+      const targetFiles = [
+        ...(activeTask?.writeSet || []),
+        ...(activeTask?.readSet || []),
+      ];
+      const baselineDiagnostics = this.collectVerificationDiagnostics(targetFiles);
       if (baselineDiagnostics) {
         try {
           await this.verificationPolicy.getBaselineManager().captureBaseline(this._workspace, baselineDiagnostics);
@@ -1453,7 +1458,7 @@ export class AgentLoop {
       const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
         ? 0
         : (isStepOneExploration && !explicitRepoMap)
-          ? Math.min(400, configuredRepoMapTokens)
+          ? 0
           : configuredRepoMapTokens;
 
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
@@ -1656,7 +1661,7 @@ export class AgentLoop {
 
       // Khử trùng lặp chéo giữa history[0] (Warm-Start) và Dynamic Tail ở Step 1:
       const historyZeroText = session.getHistory()[0]?.parts?.[0]?.text || '';
-      const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE TASK SCAFFOLD');
+      const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE SCAFFOLD ACTIVE');
       const historyHasWarmMemory = historyZeroText.includes('[SESSION / GOAL MEMORY');
 
       // 1. Khử trùng lặp Cognitive Scaffold: Nếu history[0] đã chứa khung System 2 từ Warm-Start
@@ -1781,6 +1786,13 @@ export class AgentLoop {
         previousState: previousCompactionState,
       });
       const compactionStats = contextPreparation.compactionStats;
+      const observationsToArchive = [
+        ...(contextPreparation.checkpointObservations || []),
+        ...(compactionStats?.maskedObservations || []),
+      ];
+      if (observationsToArchive.length > 0) {
+        await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive).catch(() => {});
+      }
       if (contextPreparation.changed && compactionStats) {
         try {
           const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
@@ -1795,9 +1807,6 @@ export class AgentLoop {
         } catch {}
         if (compactionStats.archivedTurns?.length) {
           await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns).catch(() => {});
-        }
-        if (compactionStats.maskedObservations?.length) {
-          await this.turnMemoryRetriever.archiveMaskedObservations(compactionStats.maskedObservations).catch(() => {});
         }
         session.setHistory(
           contextPreparation.history,
@@ -3500,17 +3509,27 @@ export class AgentLoop {
     }
   }
 
-  private collectVerificationDiagnostics(): VerificationFailureItem[] | undefined {
+  private collectVerificationDiagnostics(targetFiles?: string[]): VerificationFailureItem[] | undefined {
     try {
-      return getOrCreateTypeScriptService(this._workspace).getDiagnostics()
-        .filter((item) => item.category === 'error')
-        .map((item): VerificationFailureItem => ({
-          id: `ts-${item.code}-${item.file}-${item.line}`,
-          source: 'diagnostics',
-          file: item.file,
-          line: item.line,
-          message: item.message,
-        }));
+      if (!targetFiles || targetFiles.length === 0) {
+        return [];
+      }
+      const tsService = getOrCreateTypeScriptService(this._workspace);
+      const items: VerificationFailureItem[] = [];
+      for (const file of targetFiles) {
+        if (!/\.[cm]?[jt]sx?$/i.test(file)) continue;
+        const diags = tsService.getDiagnostics(file)
+          .filter((item) => item.category === 'error')
+          .map((item): VerificationFailureItem => ({
+            id: `ts-${item.code}-${item.file}-${item.line}`,
+            source: 'diagnostics',
+            file: item.file,
+            line: item.line,
+            message: item.message,
+          }));
+        items.push(...diags);
+      }
+      return items;
     } catch {
       return undefined;
     }

@@ -3,6 +3,7 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { TypeScriptService } from './typescript-service.js';
 import { toolError, toolSuccess } from './tool-result.js';
+import { nativeFindSymbolInFile } from '../native/index.js';
 
 let sharedTsService: TypeScriptService | undefined;
 
@@ -58,6 +59,29 @@ export const inspectSymbolTool: ToolDefinition = {
     }
 
     try {
+      // 1. Rust Native Fast Path: Tra cứu trực tiếp trên Native Rust (<1ms, 0 V8 AST Heap Overhead)
+      try {
+        const safePath = workspace.resolveSafePath(rawPath);
+        const nativeSym = nativeFindSymbolInFile(safePath, symbol);
+        if (nativeSym && nativeSym.found) {
+          return toolSuccess({
+            found: true,
+            name: nativeSym.name,
+            kind: nativeSym.kind,
+            line: nativeSym.line,
+            character: nativeSym.character,
+            file: rawPath,
+            typeSignature: nativeSym.typeSignature,
+            isExported: nativeSym.isExported,
+            docComment: nativeSym.docComment || undefined,
+            engine: 'rust_native_fast_path',
+          });
+        }
+      } catch {
+        // Fallback to TypeScript Language Service
+      }
+
+      // 2. TypeScript Language Service Semantic Fallback (nếu cần giải quyết type phức tạp)
       const tsService = getOrCreateTypeScriptService(workspace);
       const res = tsService.inspectSymbol(rawPath, symbol);
 

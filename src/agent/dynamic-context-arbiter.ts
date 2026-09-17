@@ -306,13 +306,15 @@ export class DynamicContextArbiter {
     }
 
     // 3. Tính toán tổng token ban đầu
-    let beforeTokens = 0;
-    const sourceTokenCosts = new Map<keyof DynamicContextInputs, number>();
+    const renderIncluded = (included: Map<keyof DynamicContextInputs, string>): string => rankedSources
+      .map((source) => included.get(source.key))
+      .filter((content): content is string => Boolean(content?.trim()))
+      .join('\n\n');
+    const included = new Map<keyof DynamicContextInputs, string>();
     for (const source of rankedSources) {
-      const cost = ExactTokenizer.countTokens(source.content, modelName);
-      sourceTokenCosts.set(source.key, cost);
-      beforeTokens += cost;
+      included.set(source.key, source.content);
     }
+    const beforeTokens = ExactTokenizer.countTokens(renderIncluded(included), modelName);
 
     // Nếu tổng token ban đầu đã nằm trong ngân sách cho phép
     if (beforeTokens <= budgetTokens) {
@@ -334,14 +336,8 @@ export class DynamicContextArbiter {
     }
 
     // 4. Cắt tỉa theo thứ tự ưu tiên ngược (từ P7 lên P1)
-    const included = new Map<keyof DynamicContextInputs, string>();
     const sourcesPruned: string[] = [];
     const sourcesTruncated: string[] = [];
-
-    // Khởi tạo tất cả nguồn vào danh sách dự kiến
-    for (const source of rankedSources) {
-      included.set(source.key, source.content);
-    }
 
     let currentTotalTokens = beforeTokens;
 
@@ -352,13 +348,13 @@ export class DynamicContextArbiter {
       const source = rankedSources[i];
       if (source.priority <= 1.5) break; // P1 và P1.5 là bất khả xâm phạm
 
-      const originalCost = sourceTokenCosts.get(source.key) || 0;
+      const content = included.get(source.key) || '';
+      const originalCost = ExactTokenizer.countTokens(content, modelName);
       const tokensNeededToSave = currentTotalTokens - budgetTokens;
 
       if (!source.allowTruncation || originalCost <= tokensNeededToSave) {
         // Loại bỏ hoàn toàn nguồn này
         included.delete(source.key);
-        currentTotalTokens -= originalCost;
         sourcesPruned.push(source.name);
       } else {
         // Cắt tỉa từng phần theo ranh giới dòng
@@ -370,12 +366,44 @@ export class DynamicContextArbiter {
           source.minPreserveLines ?? 2,
         );
 
-        const newCost = ExactTokenizer.countTokens(truncated, modelName);
-        included.set(source.key, truncated);
-        currentTotalTokens -= (originalCost - newCost);
-        sourcesTruncated.push(source.name);
-        break; // Đã đạt được mức ngân sách cần thiết
+        if (truncated) {
+          included.set(source.key, truncated);
+          sourcesTruncated.push(source.name);
+        } else {
+          included.delete(source.key);
+          sourcesPruned.push(source.name);
+        }
       }
+      currentTotalTokens = ExactTokenizer.countTokens(renderIncluded(included), modelName);
+    }
+
+    // A protected source or a source's minimum preserved lines may exceed the entire
+    // budget. Preserve priority, but degrade content as a last resort so it stays hard.
+    for (let i = rankedSources.length - 1; i >= 0 && currentTotalTokens > budgetTokens; i--) {
+      const source = rankedSources[i];
+      const content = included.get(source.key) || '';
+      if (!content) continue;
+      const originalCost = ExactTokenizer.countTokens(content, modelName);
+      const tokensNeededToSave = currentTotalTokens - budgetTokens;
+      if (originalCost <= tokensNeededToSave) {
+        included.delete(source.key);
+        sourcesPruned.push(source.name);
+      } else {
+        const truncated = this.truncateToTokenBudget(
+          content,
+          originalCost - tokensNeededToSave,
+          modelName,
+          0,
+        );
+        if (truncated) {
+          included.set(source.key, truncated);
+          sourcesTruncated.push(source.name);
+        } else {
+          included.delete(source.key);
+          sourcesPruned.push(source.name);
+        }
+      }
+      currentTotalTokens = ExactTokenizer.countTokens(renderIncluded(included), modelName);
     }
 
     // 5. Kết xuất chuỗi context hoàn chỉnh theo thứ tự ưu tiên ban đầu
@@ -502,16 +530,24 @@ export class DynamicContextArbiter {
     modelName: string,
     minPreserveLines: number,
   ): string {
+    if (targetTokens <= 0) return '';
     const lines = text.split('\n');
     if (lines.length <= minPreserveLines) return text;
 
-    let low = minPreserveLines;
+    const marker = '\n[... truncated by Dynamic Context Arbiter ...]';
+    if (ExactTokenizer.countTokens(marker, modelName) > targetTokens) return '';
+
+    let low = 0;
     let high = lines.length;
-    let bestCut = minPreserveLines;
+    let bestCut = -1;
 
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
-      const candidate = lines.slice(0, mid).join('\n') + '\n[... truncated by Dynamic Context Arbiter ...]';
+      if (mid < minPreserveLines) {
+        low = mid + 1;
+        continue;
+      }
+      const candidate = lines.slice(0, mid).join('\n') + marker;
       const tokens = ExactTokenizer.countTokens(candidate, modelName);
 
       if (tokens <= targetTokens) {
@@ -522,6 +558,6 @@ export class DynamicContextArbiter {
       }
     }
 
-    return lines.slice(0, bestCut).join('\n') + '\n[... truncated by Dynamic Context Arbiter ...]';
+    return bestCut >= 0 ? lines.slice(0, bestCut).join('\n') + marker : '';
   }
 }

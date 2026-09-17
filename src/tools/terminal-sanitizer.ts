@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { nativeTruncateToolOutput } from '../native/index.js';
 
 export interface TerminalTruncationOptions {
   maxLength?: number;
@@ -154,14 +155,10 @@ export function truncateTerminalOutput(
   const configuredMaxLength = Number(process.env.MINUS_TERMINAL_MAX_OUTPUT_CHARS);
   const maxLength = options?.maxLength ?? (Number.isFinite(configuredMaxLength) && configuredMaxLength > 0 ? configuredMaxLength : 8000);
   const maxLines = options?.maxLines ?? 120;
-  const headLinesCount = options?.preserveHeadLines ?? 30;
-  const tailLinesCount = options?.preserveTailLines ?? 60;
 
-  const lines = text.split(/\r?\n/);
-  const exceedsChars = originalLength > maxLength;
-  const exceedsLines = lines.length > maxLines;
-
-  if (!exceedsChars && !exceedsLines) {
+  // Sử dụng Rust Native Filter với Head/Tail Retention & Error Snippet Extraction siêu nhanh
+  const nativeRes = nativeTruncateToolOutput(text, maxLines, maxLength, true);
+  if (!nativeRes.wasTruncated) {
     return {
       text,
       truncated: false,
@@ -172,28 +169,17 @@ export function truncateTerminalOutput(
     };
   }
 
-  const effectiveHeadCount = Math.min(headLinesCount, Math.floor(lines.length / 2));
-  const effectiveTailCount = Math.min(tailLinesCount, Math.floor(lines.length / 2));
-
-  const headPart = lines.slice(0, effectiveHeadCount).join('\n');
-  const tailPart = lines.slice(-effectiveTailCount).join('\n');
-
-  const omittedLinesCount = lines.length - effectiveHeadCount - effectiveTailCount;
-  const omittedCharsCount = originalLength - headPart.length - tailPart.length;
-
-  let separator = `\n\n[... Đã cắt bớt ${omittedLinesCount} dòng (${omittedCharsCount} ký tự log thừa để bảo vệ token window) ...]`;
+  let finalOutput = nativeRes.text;
   if (options?.logFilePath) {
-    separator += `\n[💡 TOÀN BỘ LOG ĐẦY ĐỦ ĐÃ ĐƯỢC LƯU TẠI TỆP: ${options.logFilePath} — Có thể dùng tool "read_file" nếu cần xem đoạn giữa]`;
+    finalOutput += `\n[💡 TOÀN BỘ LOG ĐẦY ĐỦ ĐÃ ĐƯỢC LƯU TẠI TỆP: ${options.logFilePath} — Có thể dùng tool "read_file" nếu cần xem đoạn giữa]`;
   }
-  separator += '\n\n';
 
-  const truncatedText = `${headPart}${separator}${tailPart}`;
-  const truncatedLength = truncatedText.length;
+  const truncatedLength = finalOutput.length;
   const savedChars = Math.max(0, originalLength - truncatedLength);
   const savedTokensEstimate = Math.round(savedChars / 4);
 
   return {
-    text: truncatedText,
+    text: finalOutput,
     truncated: true,
     originalLength,
     truncatedLength,

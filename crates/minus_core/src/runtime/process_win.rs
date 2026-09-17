@@ -1,8 +1,13 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+use napi::{Env, Task};
+use napi::bindgen_prelude::AsyncTask;
 use napi_derive::napi;
 
 use super::ring_buffer::CircularStreamBuffer;
@@ -16,6 +21,86 @@ pub struct RsExecutionResult {
     pub duration_ms: i64,
     pub timed_out: bool,
     pub is_sandboxed: bool,
+    pub cancelled: bool,
+    pub output_incomplete: bool,
+}
+
+static EXECUTION_CANCELLATIONS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn execution_cancellations() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    EXECUTION_CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn cancel_execution(execution_id: &str) -> bool {
+    let Ok(registry) = execution_cancellations().lock() else { return false; };
+    let Some(control) = registry.get(execution_id) else { return false; };
+    control.store(true, Ordering::Release);
+    true
+}
+
+pub struct ExecuteCommandTask {
+    command: String,
+    cwd: String,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+    memory_limit_mb: u32,
+    execution_id: String,
+    environment: Vec<String>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Task for ExecuteCommandTask {
+    type Output = RsExecutionResult;
+    type JsValue = RsExecutionResult;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let result = execute_isolated_command_with_control(
+            &self.command,
+            &self.cwd,
+            self.timeout_ms,
+            self.max_output_bytes,
+            self.memory_limit_mb,
+            Some(&self.cancelled),
+            &self.environment,
+        );
+        if !self.execution_id.is_empty() {
+            if let Ok(mut registry) = execution_cancellations().lock() {
+                registry.remove(&self.execution_id);
+            }
+        }
+        Ok(result)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+pub fn execute_isolated_command_async(
+    command: String,
+    cwd: String,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+    memory_limit_mb: u32,
+    execution_id: String,
+    environment: Vec<String>,
+) -> AsyncTask<ExecuteCommandTask> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    if !execution_id.is_empty() {
+        if let Ok(mut registry) = execution_cancellations().lock() {
+            registry.insert(execution_id.clone(), Arc::clone(&cancelled));
+        }
+    }
+    AsyncTask::new(ExecuteCommandTask {
+        command,
+        cwd,
+        timeout_ms,
+        max_output_bytes,
+        memory_limit_mb,
+        execution_id,
+        environment,
+        cancelled,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -158,7 +243,32 @@ pub fn execute_isolated_command(
     max_output_bytes: usize,
     memory_limit_mb: u32,
 ) -> RsExecutionResult {
+    execute_isolated_command_with_control(command, cwd, timeout_ms, max_output_bytes, memory_limit_mb, None, &[])
+}
+
+fn execute_isolated_command_with_control(
+    command: &str,
+    cwd: &str,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+    memory_limit_mb: u32,
+    cancellation: Option<&Arc<AtomicBool>>,
+    environment: &[String],
+) -> RsExecutionResult {
     let start_time = Instant::now();
+
+    if cancellation.is_some_and(|control| control.load(Ordering::Acquire)) {
+        return RsExecutionResult {
+            exit_code: 130,
+            stdout: String::new(),
+            stderr: "Command was cancelled before execution.".to_string(),
+            duration_ms: 0,
+            timed_out: false,
+            is_sandboxed: false,
+            cancelled: true,
+            output_incomplete: false,
+        };
+    }
 
     #[cfg(target_os = "windows")]
     let mut cmd = {
@@ -177,6 +287,14 @@ pub fn execute_isolated_command(
     cmd.current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if !environment.is_empty() {
+        cmd.env_clear();
+        for entry in environment {
+            if let Some((key, value)) = entry.split_once('=') {
+                cmd.env(key, value);
+            }
+        }
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -188,6 +306,8 @@ pub fn execute_isolated_command(
                 duration_ms: start_time.elapsed().as_millis() as i64,
                 timed_out: false,
                 is_sandboxed: false,
+                cancelled: false,
+                output_incomplete: false,
             };
         }
     };
@@ -242,8 +362,11 @@ pub fn execute_isolated_command(
 
     // Vòng lặp chờ tiến trình kèm timeout
     let timeout_duration = Duration::from_millis(timeout_ms);
-    let check_interval = Duration::from_millis(20);
+    // The process runs on a libuv worker; a short wait keeps cancellation and
+    // completion detection responsive without blocking Node's event loop.
+    let check_interval = Duration::from_millis(5);
     let mut timed_out = false;
+    let mut cancelled = false;
 
     let exit_code = loop {
         match child.try_wait() {
@@ -251,6 +374,15 @@ pub fn execute_isolated_command(
                 break status.code().unwrap_or(0);
             }
             Ok(None) => {
+                if cancellation.is_some_and(|control| control.load(Ordering::Acquire)) {
+                    cancelled = true;
+                    #[cfg(target_os = "windows")]
+                    if let Some(ref job) = job_guard {
+                        job.terminate(130);
+                    }
+                    let _ = child.kill();
+                    break 130;
+                }
                 if start_time.elapsed() >= timeout_duration {
                     timed_out = true;
                     #[cfg(target_os = "windows")]
@@ -273,8 +405,11 @@ pub fn execute_isolated_command(
         }
     };
 
-    let stdout = stdout_rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
-    let stderr = stderr_rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
+    let stdout_result = stdout_rx.recv_timeout(Duration::from_millis(500));
+    let stderr_result = stderr_rx.recv_timeout(Duration::from_millis(500));
+    let output_incomplete = stdout_result.is_err() || stderr_result.is_err();
+    let stdout = stdout_result.unwrap_or_default();
+    let stderr = stderr_result.unwrap_or_default();
 
     RsExecutionResult {
         exit_code,
@@ -283,5 +418,7 @@ pub fn execute_isolated_command(
         duration_ms: start_time.elapsed().as_millis() as i64,
         timed_out,
         is_sandboxed,
+        cancelled,
+        output_incomplete,
     }
 }

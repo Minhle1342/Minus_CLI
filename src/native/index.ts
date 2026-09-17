@@ -24,6 +24,8 @@ export interface NativeExecutionResult {
   durationMs: number;
   timedOut: boolean;
   isSandboxed?: boolean;
+  cancelled?: boolean;
+  outputIncomplete?: boolean;
 }
 
 export interface NativeVfsFileStatus {
@@ -67,12 +69,43 @@ export interface NativeHistoryStats {
   estimatedTokens: number;
 }
 
+export interface NativeTruncateResult {
+  text: string;
+  originalBytes: number;
+  truncatedBytes: number;
+  wasTruncated: boolean;
+  linesRetained: number;
+}
+
+export interface NativeCompactionResult {
+  compactedMessagesJson: string;
+  originalChars: number;
+  compactedChars: number;
+  estimatedTokensSaved: number;
+  prunedCount: number;
+  maskedCount: number;
+}
+
+export interface NativeSymbolDefinition {
+  found: boolean;
+  name: string;
+  kind: string;
+  line: number;
+  character: number;
+  file: string;
+  typeSignature: string;
+  isExported: boolean;
+  docComment?: string | null;
+}
+
 interface NativeCoreModule {
   rsVersion(): string;
   rsAnalyzeShellCommand(command: string): NativeShellAnalysis;
   rsResolveSafePath(rootDir: string, targetPath: string): NativePathResult;
   rsExecuteIsolated(command: string, cwd: string, timeoutMs: number, maxBytes: number): NativeExecutionResult;
   rsExecuteSandboxed?(command: string, cwd: string, timeoutMs: number, maxBytes: number, memoryLimitMb: number): NativeExecutionResult;
+  rsExecuteSandboxedAsync?(command: string, cwd: string, timeoutMs: number, maxBytes: number, memoryLimitMb: number, executionId: string, environment: string[]): Promise<NativeExecutionResult>;
+  rsCancelSandboxed?(executionId: string): boolean;
   rsApplyHunk(original: string, hunkLines: string[], expectedStart: number): NativeHunkApplyResult;
   rsSearchCodebase(
     targetDir: string,
@@ -82,6 +115,14 @@ interface NativeCoreModule {
     maxMatches: number,
     ignoredDirs: string[]
   ): NativeSearchResult;
+  rsSearchCodebaseAsync?(
+    targetDir: string,
+    query: string,
+    isRegex: boolean,
+    ignoreCase: boolean,
+    maxMatches: number,
+    ignoredDirs: string[]
+  ): Promise<NativeSearchResult>;
   rsCosineSimilarity(a: number[], b: number[]): number;
   rsCosineSimilarityTyped?(a: Float64Array, b: Float64Array): number;
   rsBatchCosineSimilarity?(query: Float64Array, database: Float64Array, dims: number): number[];
@@ -90,6 +131,7 @@ interface NativeCoreModule {
   rsComputeStringHash(content: string): string;
   rsScanAndDigestWorkspace(rootDir: string, ignoredDirs: string[]): string;
   rsBatchReadFiles(rootDir: string, relPaths: string[], maxBytes: number): NativeBatchFileReadResult[];
+  rsBatchReadFilesAsync?(rootDir: string, relPaths: string[], maxBytes: number): Promise<NativeBatchFileReadResult[]>;
   rsFastHistoryStats(payloads: string[]): NativeHistoryStats;
   rsVfsCreateSession?(sessionId: string, rootDir: string): boolean;
   rsVfsReadFile?(sessionId: string, relPath: string): string | null;
@@ -99,6 +141,10 @@ interface NativeCoreModule {
   rsVfsGenerateDiff?(sessionId: string): string;
   rsVfsCommitToDisk?(sessionId: string): string[];
   rsVfsDestroySession?(sessionId: string): boolean;
+  rsTruncateToolOutput?(content: string, maxLines: number, maxBytes: number, preserveHeadTail: boolean): NativeTruncateResult;
+  rsCompactHistory?(messagesJson: string, maxTokens: number, preserveLastN: number, maxCharsPerTool: number): NativeCompactionResult;
+  rsExtractFileSymbols?(filePath: string, content?: string | null): NativeSymbolDefinition[];
+  rsFindSymbolInFile?(filePath: string, symbolName: string, content?: string | null): NativeSymbolDefinition;
 }
 
 let nativeCore: NativeCoreModule | null = null;
@@ -114,12 +160,14 @@ export function getNativeCore(): NativeCoreModule | null {
   nativeLoadAttempted = true;
 
   const candidatePaths = [
-    // Build artifacts từ cargo / napi-build
+    // The packaged .node artifact is the canonical addon. Cargo emits a .dll,
+    // while a stale target/release .node can otherwise shadow a fresh build.
     path.resolve(process.cwd(), 'crates/minus_core/minus_core.node'),
-    path.resolve(process.cwd(), 'crates/minus_core/target/release/minus_core.node'),
+    // Fallback artifacts for local development.
     path.resolve(process.cwd(), 'crates/minus_core/target/release/minus_core.dll'),
-    path.resolve(process.cwd(), 'crates/minus_core/target/debug/minus_core.node'),
+    path.resolve(process.cwd(), 'crates/minus_core/target/release/minus_core.node'),
     path.resolve(process.cwd(), 'crates/minus_core/target/debug/minus_core.dll'),
+    path.resolve(process.cwd(), 'crates/minus_core/target/debug/minus_core.node'),
     path.resolve(process.cwd(), 'dist/minus_core.node'),
     path.resolve(process.cwd(), 'minus_core.node'),
   ];
@@ -322,31 +370,68 @@ export function nativeComputeSemanticSimilarity(textA: string, textB: string): n
  * Thực thi lệnh trong Sandbox cứng cấp kernel (Windows Job Objects / Resource Quota)
  * Giới hạn bộ nhớ tối đa và đảm bảo diệt sạch 100% cây tiến trình con khi timeout.
  */
-export function nativeExecuteSandboxed(
+export async function nativeExecuteSandboxed(
   command: string,
   cwd: string,
   timeoutMs: number = 30000,
   maxBytes: number = 5 * 1024 * 1024,
   memoryLimitMb: number = 2048,
-): NativeExecutionResult | null {
+  signal?: AbortSignal,
+  env?: Record<string, string>,
+): Promise<NativeExecutionResult | null> {
   const core = getNativeCore();
-  if (core) {
-    if (typeof core.rsExecuteSandboxed === 'function') {
-      try {
-        return core.rsExecuteSandboxed(command, cwd, timeoutMs, maxBytes, memoryLimitMb);
-      } catch {
-        // fallback
-      }
-    }
-    if (typeof core.rsExecuteIsolated === 'function') {
-      try {
-        return core.rsExecuteIsolated(command, cwd, timeoutMs, maxBytes);
-      } catch {
-        // fallback
-      }
-    }
+  if (!core || typeof core.rsExecuteSandboxedAsync !== 'function') return null;
+  if (signal && typeof core.rsCancelSandboxed !== 'function') return null;
+
+  const executionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cancel = () => { core.rsCancelSandboxed?.(executionId); };
+  if (signal?.aborted) return null;
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    const environment = Object.entries(env || {}).map(([key, value]) => `${key}=${value}`);
+    return await core.rsExecuteSandboxedAsync(command, cwd, timeoutMs, maxBytes, memoryLimitMb, executionId, environment);
+  } catch {
+    // Keep the event loop responsive; LocalProcessSandbox will use its Node fallback.
+    return null;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
   }
-  return null;
+}
+
+/** Read files on a libuv worker so mmap, hashing, and decoding do not block Node. */
+export async function nativeBatchReadFilesAsync(
+  rootDir: string,
+  relPaths: string[],
+  maxBytes: number = 200 * 1024,
+  signal?: AbortSignal,
+): Promise<NativeBatchFileReadResult[] | null> {
+  const core = getNativeCore();
+  if (signal?.aborted) return null;
+  if (!core || typeof core.rsBatchReadFilesAsync !== 'function') return null;
+  try {
+    const results = await core.rsBatchReadFilesAsync(rootDir, relPaths, maxBytes);
+    return signal?.aborted ? null : results;
+  } catch {
+    return null;
+  }
+}
+
+/** Search on a libuv worker so a large workspace scan does not block Node. */
+export async function nativeSearchCodebaseAsync(
+  targetDir: string,
+  query: string,
+  isRegex: boolean,
+  ignoreCase: boolean,
+  maxMatches: number,
+  ignoredDirs: string[],
+): Promise<NativeSearchResult | null> {
+  const core = getNativeCore();
+  if (!core || typeof core.rsSearchCodebaseAsync !== 'function') return null;
+  try {
+    return await core.rsSearchCodebaseAsync(targetDir, query, isRegex, ignoreCase, maxMatches, ignoredDirs);
+  } catch {
+    return null;
+  }
 }
 
 // ── Virtual Copy-on-Write (CoW) Workspace Management ────────────────────────
@@ -522,3 +607,117 @@ export function nativeVfsDestroySession(sessionId: string): boolean {
   }
   return tsVfsSessions.delete(sessionId);
 }
+
+/**
+ * Cắt ngắn thông minh output của công cụ (Command/Search/Read) bằng Rust Native Output Filter
+ */
+export function nativeTruncateToolOutput(
+  content: string,
+  maxLines: number = 200,
+  maxBytes: number = 100 * 1024,
+  preserveHeadTail: boolean = true,
+): NativeTruncateResult {
+  const core = getNativeCore();
+  if (core && typeof core.rsTruncateToolOutput === 'function') {
+    try {
+      return core.rsTruncateToolOutput(content, maxLines, maxBytes, preserveHeadTail);
+    } catch {
+      // Fallback to TS
+    }
+  }
+
+  // TypeScript Fallback
+  const originalBytes = Buffer.byteLength(content, 'utf8');
+  if (originalBytes <= maxBytes) {
+    const lines = content.split('\n');
+    if (lines.length <= maxLines) {
+      return {
+        text: content,
+        originalBytes,
+        truncatedBytes: originalBytes,
+        wasTruncated: false,
+        linesRetained: lines.length,
+      };
+    }
+  }
+
+  const lines = content.split('\n');
+  const half = Math.max(5, Math.floor(maxLines / 2));
+  const head = lines.slice(0, half);
+  const tail = lines.slice(Math.max(half, lines.length - half));
+  const result = [
+    ...head,
+    `\n[... Đã cắt bớt ${lines.length - (head.length + tail.length)} dòng (${originalBytes} bytes) ...]\n`,
+    ...tail,
+  ].join('\n');
+
+  const truncatedBytes = Buffer.byteLength(result, 'utf8');
+  return {
+    text: result,
+    originalBytes,
+    truncatedBytes,
+    wasTruncated: true,
+    linesRetained: head.length + tail.length,
+  };
+}
+
+/**
+ * Nén ngữ cảnh hội thoại Session History trực tiếp trên Native Rust
+ */
+export function nativeCompactHistory(
+  messagesJson: string,
+  maxTokens: number = 32000,
+  preserveLastN: number = 4,
+  maxCharsPerTool: number = 1500,
+): NativeCompactionResult | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsCompactHistory === 'function') {
+    try {
+      return core.rsCompactHistory(messagesJson, maxTokens, preserveLastN, maxCharsPerTool);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Trích xuất toàn bộ Symbol mã nguồn bằng Rust Native Lexer/AST
+ */
+export function nativeExtractFileSymbols(
+  filePath: string,
+  content?: string | null,
+): NativeSymbolDefinition[] | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsExtractFileSymbols === 'function') {
+    try {
+      return core.rsExtractFileSymbols(filePath, content || null);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Tìm kiếm định nghĩa của 1 symbol cụ thể trong file bằng Rust Native
+ */
+export function nativeFindSymbolInFile(
+  filePath: string,
+  symbolName: string,
+  content?: string | null,
+): NativeSymbolDefinition | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsFindSymbolInFile === 'function') {
+    try {
+      const res = core.rsFindSymbolInFile(filePath, symbolName, content || null);
+      if (res && res.found) {
+        return res;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+

@@ -49,6 +49,28 @@ test('DynamicContextArbiter clears memoryPrompt completely when all items are du
   assert.equal(result.sourcesIncluded.includes('Project Memory (P4)'), false);
 });
 
+test('DynamicContextArbiter enforces its budget when protected guidance alone overflows it', () => {
+  const arbiter = new DynamicContextArbiter(40);
+  const result = arbiter.arbitrate({
+    advicePrompt: ['[ADVICE]', ...Array.from({ length: 80 }, (_, index) => `Keep instruction ${index}.`)].join('\n'),
+    cognitiveScaffold: ['[SCAFFOLD]', ...Array.from({ length: 40 }, (_, index) => `Check invariant ${index}.`)].join('\n'),
+  }, { maxBudgetTokens: 40 });
+
+  assert.ok(result.totalTokens <= 40, `hard cap exceeded: ${result.totalTokens}`);
+  assert.ok(result.renderedContext.includes('[ADVICE]'), 'highest-priority guidance is retained first');
+  assert.ok(result.sourcesPruned.length > 0 || result.sourcesTruncated.length > 0, 'overflow is reduced');
+});
+
+test('DynamicContextArbiter enforces its budget when minimum preserved lines overflow it', () => {
+  const arbiter = new DynamicContextArbiter(12);
+  const result = arbiter.arbitrate({
+    recalledTurnContext: Array.from({ length: 4 }, (_, index) => `Long recalled evidence line ${index} with diagnostic details.`).join('\n'),
+  }, { maxBudgetTokens: 12 });
+
+  assert.ok(result.totalTokens <= 12, `hard cap exceeded: ${result.totalTokens}`);
+  assert.ok(result.sourcesPruned.includes('Selective Re-injection (P3)') || result.sourcesTruncated.includes('Selective Re-injection (P3)'));
+});
+
 test('Step 1 Bug Report Intent detection triggers Playbook B guidance', () => {
   const bugReportPrompt = 'Fix bug where user cannot login due to undefined token exception';
   const normalPrompt = 'Show me the project architecture and file tree';

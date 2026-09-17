@@ -73,6 +73,8 @@ export interface ContextPreparationResult {
   after: RequestTokenCount;
   candidateAfter?: RequestTokenCount;
   compactionStats?: CompactionStats;
+  /** Archive-only checkpoint that intentionally leaves the model history untouched. */
+  checkpointObservations?: MaskedObservationRecord[];
   state?: CompactionStateV1;
   withinBudget: boolean;
   failureReason?: 'CONTEXT_BUDGET_UNSATISFIABLE';
@@ -253,6 +255,7 @@ export class ContextBudgetManager {
     );
     const targetUsableInputTokens = Math.max(0, targetInputTokens - envelope.outputReserveTokens);
     const shouldCompact = before.upperBoundTokens > Math.floor(targetUsableInputTokens * this.triggerRatio);
+    const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(envelope.history);
 
     if (!shouldCompact) {
       return {
@@ -261,6 +264,7 @@ export class ContextBudgetManager {
         changed: false,
         before,
         after: before,
+        checkpointObservations,
         withinBudget: before.upperBoundTokens <= usableInputTokens,
       };
     }
@@ -325,6 +329,7 @@ export class ContextBudgetManager {
       after: finalAfter,
       candidateAfter,
       compactionStats: finalSelected.stats,
+      checkpointObservations,
       state: buildState(finalSelected.messages, finalSelected.stats, previousState),
       withinBudget,
       ...(this.mode === 'enforce' && !withinBudget

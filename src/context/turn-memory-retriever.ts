@@ -31,6 +31,49 @@ export interface TurnMemoryOptions {
   activeFiles?: string[];
 }
 
+interface NativeVectorScorer {
+  rsCosineSimilarity?(query: number[], candidate: number[]): number;
+  rsBatchCosineSimilarity?(query: Float64Array, database: Float64Array, dims: number): number[];
+}
+
+/** Scores same-sized vectors in one N-API crossing when the native batch API is available. */
+export function scoreVectorBatch(
+  native: NativeVectorScorer,
+  query: number[],
+  candidates: Iterable<[string, number[] | undefined]>,
+): Map<string, number> {
+  const valid = Array.from(candidates).filter(([, vector]) => vector?.length === query.length) as Array<[string, number[]]>;
+  const scores = new Map<string, number>();
+  if (valid.length === 0 || query.length === 0) return scores;
+
+  if (typeof native.rsBatchCosineSimilarity === 'function') {
+    try {
+      const database = new Float64Array(valid.length * query.length);
+      for (let row = 0; row < valid.length; row++) {
+        database.set(valid[row][1], row * query.length);
+      }
+      const batchScores = native.rsBatchCosineSimilarity(new Float64Array(query), database, query.length);
+      for (let index = 0; index < valid.length; index++) {
+        scores.set(valid[index][0], Math.max(0, Number(batchScores[index]) || 0));
+      }
+      return scores;
+    } catch {
+      // Retain scalar compatibility with older native artifacts.
+    }
+  }
+
+  if (typeof native.rsCosineSimilarity === 'function') {
+    for (const [id, vector] of valid) {
+      try {
+        scores.set(id, Math.max(0, native.rsCosineSimilarity(query, vector)));
+      } catch {
+        // Skip individual malformed vectors without failing retrieval.
+      }
+    }
+  }
+  return scores;
+}
+
 export interface AntiPatternRecord {
   id: string;
   triggerPattern: string;
@@ -469,9 +512,10 @@ export class TurnMemoryRetriever {
     if (native && typeof native.rsGenerateSubwordEmbedding === 'function' && typeof native.rsCosineSimilarity === 'function') {
       try {
         const queryVector = native.rsGenerateSubwordEmbedding(query);
+        const vectorScores = scoreVectorBatch(native, queryVector, Array.from(this.turnsMap.entries(), ([id, doc]) => [id, doc.vector]));
         for (const [id, doc] of this.turnsMap.entries()) {
           if (doc.vector && doc.vector.length > 0) {
-            const cosSim = native.rsCosineSimilarity(queryVector, doc.vector);
+            const cosSim = vectorScores.get(id) || 0;
             const existing = scoreMap.get(id) || { bm25Score: 0, vectorScore: 0 };
             existing.vectorScore = Math.max(0, cosSim);
             scoreMap.set(id, existing);
@@ -878,13 +922,13 @@ export class TurnMemoryRetriever {
       episodicScores.set(h.id, { bm25: h.score / maxEpBm25, vector: 0, entityOverlap: 0 });
     }
 
+    const episodicVectorScores = queryVector && native
+      ? scoreVectorBatch(native, queryVector, Array.from(this.episodicMap.entries(), ([id, rec]) => [id, rec.vector]))
+      : new Map<string, number>();
     for (const [id, rec] of this.episodicMap.entries()) {
       const entry = episodicScores.get(id) || { bm25: 0, vector: 0, entityOverlap: 0 };
-      if (queryVector && rec.vector && native && typeof native.rsCosineSimilarity === 'function') {
-        try {
-          const sim = native.rsCosineSimilarity(queryVector, rec.vector);
-          entry.vector = Math.max(0, sim);
-        } catch {}
+      if (queryVector && rec.vector) {
+        entry.vector = episodicVectorScores.get(id) || 0;
       }
       // Check entity overlap
       const hasOverlap = (rec.faultLocalizedEntities || []).some((f) => {

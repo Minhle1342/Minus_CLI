@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import type { Workspace } from '../workspace/workspace.js';
 import { SemanticSlicer, type CodeSymbol } from './semantic-slicer.js';
 
@@ -13,13 +14,14 @@ const MUTATION_TOOLS = new Set([
 ]);
 const MAX_INDEXED_FILES = 5_000;
 const MAX_INDEXED_SOURCE_BYTES = 64 * 1024 * 1024;
+const WORKER_RANK_MIN_NODES = 64;
 
 interface RepositoryFileNode {
   path: string;
   absolutePath: string;
-  content: string;
   symbols: CodeSymbol[];
   identifierCounts: Map<string, number>;
+  relativeImports: string[];
 }
 
 export interface RankedRepositoryEntry {
@@ -192,8 +194,7 @@ export class GraphRankedRepositoryMap {
       if (lexical > 0) personalization.set(file.path, 1 + lexical);
     }
 
-    const dependencyRank = this.pageRank(snapshot.files, snapshot.edges, personalization, false);
-    const impactRank = this.pageRank(snapshot.files, snapshot.edges, personalization, true);
+    const { dependencyRank, impactRank } = await this.rankGraph(snapshot.files, snapshot.edges, personalization);
     const maxLexical = Math.max(1, ...lexicalScores.values());
     const ranked = snapshot.files.map((file): RankedRepositoryEntry => {
       const lexicalScore = (lexicalScores.get(file.path) || 0) / maxLexical;
@@ -320,7 +321,16 @@ export class GraphRankedRepositoryMap {
           for (const identifier of content.match(IDENTIFIER_PATTERN) || []) {
             identifierCounts.set(identifier, (identifierCounts.get(identifier) || 0) + 1);
           }
-          const node: RepositoryFileNode = { path: relativePath, absolutePath, content, symbols, identifierCounts };
+          const relativeImports: string[] = [];
+          const importPattern = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]|require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+          let match: RegExpExecArray | null;
+          while ((match = importPattern.exec(content)) !== null) {
+            const specifier = match[1] || match[2];
+            if (specifier?.startsWith('.')) {
+              relativeImports.push(specifier);
+            }
+          }
+          const node: RepositoryFileNode = { path: relativePath, absolutePath, symbols, identifierCounts, relativeImports };
           this.fileCache.set(relativePath, { mtimeMs: stat.mtimeMs, size: stat.size, node });
           files.push(node);
           indexedBytes += stat.size;
@@ -354,11 +364,7 @@ export class GraphRankedRepositoryMap {
     };
 
     for (const file of files) {
-      const importPattern = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]|require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
-      let match: RegExpExecArray | null;
-      while ((match = importPattern.exec(file.content)) !== null) {
-        const specifier = match[1] || match[2];
-        if (!specifier?.startsWith('.')) continue;
+      for (const specifier of file.relativeImports) {
         const target = this.resolveImport(file.path, specifier, filePaths);
         if (target) addEdge(file.path, target, 8);
       }
@@ -396,6 +402,54 @@ export class GraphRankedRepositoryMap {
       ...[...CODE_EXTENSIONS].map((extension) => `${extensionlessBase}/index${extension}`),
     ];
     return candidates.find((candidate) => files.has(candidate));
+  }
+
+  private async rankGraph(
+    files: RepositoryFileNode[],
+    edges: Map<string, Map<string, number>>,
+    personalization: Map<string, number>,
+  ): Promise<{ dependencyRank: Map<string, number>; impactRank: Map<string, number> }> {
+    // tsx test/dev execution cannot load a sibling compiled worker; production
+    // builds use the worker once graph ranking is large enough to matter.
+    if (files.length < WORKER_RANK_MIN_NODES || import.meta.url.endsWith('.ts')) {
+      return {
+        dependencyRank: this.pageRank(files, edges, personalization, false),
+        impactRank: this.pageRank(files, edges, personalization, true),
+      };
+    }
+
+    try {
+      const response = await new Promise<{ dependency: Array<[string, number]>; impact: Array<[string, number]> }>((resolve, reject) => {
+        const worker = new Worker(new URL('./graph-rank-worker.js', import.meta.url));
+        let settled = false;
+        worker.once('message', (result) => {
+          settled = true;
+          resolve(result);
+          void worker.terminate();
+        });
+        worker.once('error', (error) => {
+          settled = true;
+          reject(error);
+        });
+        worker.once('exit', (code) => {
+          if (!settled && code !== 0) reject(new Error(`Graph rank worker exited with code ${code}.`));
+        });
+        worker.postMessage({
+          nodes: files.map((file) => file.path),
+          edges: Array.from(edges.entries(), ([source, outgoing]) => [source, Array.from(outgoing.entries())]),
+          personalization: Array.from(personalization.entries()),
+        });
+      });
+      return {
+        dependencyRank: new Map(response.dependency),
+        impactRank: new Map(response.impact),
+      };
+    } catch {
+      return {
+        dependencyRank: this.pageRank(files, edges, personalization, false),
+        impactRank: this.pageRank(files, edges, personalization, true),
+      };
+    }
   }
 
   private pageRank(

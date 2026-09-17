@@ -2,10 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
+import { ToolDefinition, ToolExecutionContext } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { SemanticSlicer } from '../agent/semantic-slicer.js';
-import { nativeBatchReadFiles } from '../native/index.js';
+import { nativeBatchReadFilesAsync } from '../native/index.js';
 
 /**
  * Tool 1: read_file (Phase 3 - parser-aware semantic slicing)
@@ -56,7 +56,7 @@ export const readFileTool: ToolDefinition = {
     },
     required: ['path'],
   },
-  async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
+  async execute(args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
     const rawPath = String(args.path || args.filePath || '').trim();
     if (!rawPath) {
       return { error: 'Tham số "path" là bắt buộc.' };
@@ -65,6 +65,10 @@ export const readFileTool: ToolDefinition = {
     try {
       const safePath = workspace.resolveSafePath(rawPath);
       const stat = await fs.stat(safePath);
+
+      if (context?.signal?.aborted) {
+        return { path: rawPath, error: 'Đã huỷ thao tác đọc file.', errorCode: 'OPERATION_CANCELLED' };
+      }
 
       // 1. Nếu là thư mục, tự động chuyển sang hành vi liệt kê danh sách tệp/thư mục con (Directory Listing Fallback)
       if (stat.isDirectory()) {
@@ -111,7 +115,11 @@ export const readFileTool: ToolDefinition = {
 
       // Nếu file <= 200KB, ưu tiên đọc siêu tốc qua nativeBatchReadFiles
       const canUseNativeBatch = stat.size <= 200 * 1024;
-      const nativeBatch = canUseNativeBatch ? nativeBatchReadFiles(workspace.rootDir, [rawPath], 200 * 1024) : null;
+      const nativeBatch = canUseNativeBatch ? await nativeBatchReadFilesAsync(workspace.rootDir, [rawPath], 200 * 1024, context?.signal) : null;
+      if (context?.signal?.aborted) {
+        return { path: rawPath, error: 'Đã huỷ thao tác đọc file.', errorCode: 'OPERATION_CANCELLED' };
+      }
+
       if (nativeBatch && nativeBatch[0] && nativeBatch[0].content !== null && nativeBatch[0].content !== undefined) {
         fileContent = nativeBatch[0].content;
         contentHash = nativeBatch[0].hash || `sha256:${createHash('sha256').update(fileContent, 'utf8').digest('hex')}`;

@@ -175,6 +175,49 @@ export class SandboxManager {
     this.isInitialized = false;
   }
 
+  /**
+   * Chuyển đổi sang Docker Sandbox và khởi chạy Docker Desktop nếu được yêu cầu
+   */
+  async switchToDocker(startDaemon = true): Promise<boolean> {
+    const profile = this.explicitDockerImage
+      ? createCustomRuntimeProfile(this.explicitDockerImage)
+      : detectWorkspaceRuntimeProfile(this.workspacePath);
+    const dockerProvider = this.createDockerProvider(profile);
+    let available = await dockerProvider.isAvailable();
+    if (!available && startDaemon) {
+      const timeoutSeconds = parseInt(process.env.DOCKER_START_TIMEOUT_SECONDS || '20', 10);
+      available = await dockerProvider.startDockerDaemon(timeoutSeconds, true);
+    }
+    if (available) {
+      try {
+        await dockerProvider.init();
+        if (this.activeProvider && this.activeProvider.type !== 'docker') {
+          await this.activeProvider.dispose();
+        }
+        this.activeProvider = dockerProvider;
+        this.activeRuntimeProfile = profile;
+        this.dockerProviders.set(this.profileKey(profile), dockerProvider);
+        this.mode = 'docker';
+        return true;
+      } catch (err: any) {
+        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể chuyển sang Docker: ${err.message}\x1b[0m`);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Chuyển đổi sang Local Sandbox
+   */
+  async switchToLocal(): Promise<void> {
+    if (this.activeProvider && this.activeProvider.type === 'docker') {
+      await this.activeProvider.dispose();
+    }
+    this.activeProvider = new LocalProcessSandbox(this.workspacePath);
+    await this.activeProvider.init();
+    this.mode = 'local';
+  }
+
   private createDockerProvider(profile: SandboxRuntimeProfile): DockerSandbox {
     return new DockerSandbox({
       workspacePath: this.workspacePath,

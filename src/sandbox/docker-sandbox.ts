@@ -362,10 +362,11 @@ export class DockerSandbox implements ISandboxProvider {
           await execFileAsync(
             'docker',
             ['exec', this.containerId, 'sh', '-c', 'apk add --no-cache curl git bash ca-certificates ripgrep 2>/dev/null || (apt-get update && apt-get install -y curl git bash ca-certificates ripgrep) 2>/dev/null || true'],
-            { timeout: 25000 }
+            { timeout: 25000, signal: options?.signal }
           );
           const retried = await execFileAsync('docker', dockerExecArgs, {
             timeout,
+            signal: options?.signal,
             maxBuffer: 1024 * 1024 * 5,
           });
           return {
@@ -379,6 +380,17 @@ export class DockerSandbox implements ISandboxProvider {
             image: this.image,
           };
         } catch (retryErr: any) {
+          if (options?.signal?.aborted || retryErr?.name === 'AbortError') {
+            return {
+              stdout: (retryErr.stdout || '').trim(),
+              stderr: 'Command was cancelled by user.',
+              exitCode: 130,
+              durationMs: Date.now() - startTime,
+              sandboxType: 'docker',
+              success: false,
+              errorCode: 'COMMAND_CANCELLED',
+            };
+          }
           const exitCode = typeof retryErr.code === 'number' ? retryErr.code : 1;
           return {
             stdout: (retryErr.stdout || '').trim(),

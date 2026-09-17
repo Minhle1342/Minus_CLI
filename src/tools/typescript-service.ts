@@ -67,7 +67,6 @@ export class TypeScriptService {
         let file = this.files.get(normalized);
         if (!file && fs.existsSync(normalized)) {
           try {
-            this.pruneCacheIfNeeded();
             const content = fs.readFileSync(normalized, 'utf8');
             file = { version: 1, content };
             this.files.set(normalized, file);
@@ -103,18 +102,6 @@ export class TypeScriptService {
 
     this.services = ts.createLanguageService(host, ts.createDocumentRegistry());
     this.syncWorkspaceFiles();
-  }
-
-  private pruneCacheIfNeeded(): void {
-    if (this.files.size > 80) {
-      // Giữ lại 40 file gần nhất để tránh phình to RAM heap
-      const keys = Array.from(this.files.keys());
-      const toRemove = keys.slice(0, keys.length - 40);
-      for (const k of toRemove) {
-        this.files.delete(k);
-        this.rootFileNames.delete(k);
-      }
-    }
   }
 
   getCompilerOptions(): ts.CompilerOptions {
@@ -163,12 +150,15 @@ export class TypeScriptService {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
           if (this.workspace.isIgnoredDirectory(entry.name)) continue;
+          if (entry.name.startsWith('.') && entry.name !== '.github') continue;
+          if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build' || entry.name === 'coverage' || entry.name === 'deploy' || entry.name === 'scratch') continue;
           const fullPath = path.join(dir, entry.name);
           if (entry.isDirectory()) {
             scanDir(fullPath);
           } else if (
             entry.isFile() &&
-            /\.[cm]?[jt]sx?$/i.test(entry.name)
+            /\.[cm]?[jt]sx?$/i.test(entry.name) &&
+            !entry.name.endsWith('.d.ts')
           ) {
             const normalized = normalizePath(fullPath);
             this.rootFileNames.add(normalized);
@@ -209,67 +199,67 @@ export class TypeScriptService {
   }
 
   getDiagnostics(filePath?: string): DiagnosticItem[] {
-    const results: DiagnosticItem[] = [];
-    const targetFiles = filePath
-      ? [this.normalizeAndResolve(filePath)]
-      : Array.from(this.rootFileNames);
-
-    for (const file of targetFiles) {
-      if (!fs.existsSync(file)) continue;
-      this.updateFile(file);
-
-      try {
-        const program = this.services.getProgram();
-        if (!program) continue;
-
-        let sourceFile = program.getSourceFile(file);
-        if (!sourceFile) {
-          // Thử refresh file trong host registry
-          this.rootFileNames.add(file);
-          const refreshedProgram = this.services.getProgram();
-          sourceFile = refreshedProgram?.getSourceFile(file);
-          if (!sourceFile) {
-            // Không tìm thấy SourceFile trong TypeScript Program (file non-source hoặc bị ts bỏ qua)
-            continue;
-          }
-        }
-
-        const syntactic = this.services.getSyntacticDiagnostics(file);
-        const semantic = this.services.getSemanticDiagnostics(file);
-        const allDiag = [...syntactic, ...semantic];
-
-        for (const diag of allDiag) {
-          if (!diag.file || diag.start === undefined) continue;
-          const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start);
-          const categoryMap: Record<ts.DiagnosticCategory, DiagnosticItem['category']> = {
-            [ts.DiagnosticCategory.Error]: 'error',
-            [ts.DiagnosticCategory.Warning]: 'warning',
-            [ts.DiagnosticCategory.Suggestion]: 'suggestion',
-            [ts.DiagnosticCategory.Message]: 'message',
-          };
-
-          results.push({
-            file: this.workspace.toRelativePath(diag.file.fileName),
-            line: line + 1,
-            character: character + 1,
-            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-            code: diag.code,
-            category: categoryMap[diag.category] || 'error',
-          });
-        }
-      } catch (err: any) {
-        // Defensive Guardian: Không bao giờ để lỗi của 1 file (ví dụ Could not find source file) làm sập toàn bộ tool
-        if (filePath) {
-          results.push({
-            file: this.workspace.toRelativePath(file),
-            line: 1,
-            character: 1,
-            message: `TypeScript Language Service warning: ${err.message}`,
-            code: 0,
-            category: 'warning',
-          });
-        }
+    // Anti-OOM Safeguard:
+    // Nếu không truyền filePath cụ thể, KHÔNG BAO GIỜ duyệt toàn bộ tệp của dự án.
+    // Chỉ kiểm tra các tệp đã được mở/cập nhật gần đây trong RAM (this.files).
+    // Nếu chưa có tệp nào được nạp, trả về danh sách rỗng lập tức.
+    if (!filePath) {
+      const activeInMemoryFiles = Array.from(this.files.keys());
+      if (activeInMemoryFiles.length === 0) {
+        return [];
       }
+      return activeInMemoryFiles.flatMap((file) => this.getDiagnostics(file));
+    }
+
+    const results: DiagnosticItem[] = [];
+    const normalizedFile = this.normalizeAndResolve(filePath);
+    if (!fs.existsSync(normalizedFile)) return [];
+    this.updateFile(normalizedFile);
+
+    try {
+      const program = this.services.getProgram();
+      if (!program) return [];
+
+      let sourceFile = program.getSourceFile(normalizedFile);
+      if (!sourceFile) {
+        this.rootFileNames.add(normalizedFile);
+        const refreshedProgram = this.services.getProgram();
+        sourceFile = refreshedProgram?.getSourceFile(normalizedFile);
+        if (!sourceFile) return [];
+      }
+
+      const syntactic = this.services.getSyntacticDiagnostics(normalizedFile);
+      const semantic = this.services.getSemanticDiagnostics(normalizedFile);
+      const allDiag = [...syntactic, ...semantic];
+
+      for (const diag of allDiag) {
+        if (!diag.file || diag.start === undefined) continue;
+        const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start);
+        const categoryMap: Record<ts.DiagnosticCategory, DiagnosticItem['category']> = {
+          [ts.DiagnosticCategory.Error]: 'error',
+          [ts.DiagnosticCategory.Warning]: 'warning',
+          [ts.DiagnosticCategory.Suggestion]: 'suggestion',
+          [ts.DiagnosticCategory.Message]: 'message',
+        };
+
+        results.push({
+          file: this.workspace.toRelativePath(diag.file.fileName),
+          line: line + 1,
+          character: character + 1,
+          message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+          code: diag.code,
+          category: categoryMap[diag.category] || 'error',
+        });
+      }
+    } catch (err: any) {
+      results.push({
+        file: this.workspace.toRelativePath(normalizedFile),
+        line: 1,
+        character: 1,
+        message: `TypeScript Language Service warning: ${err.message}`,
+        code: 0,
+        category: 'warning',
+      });
     }
 
     return results;

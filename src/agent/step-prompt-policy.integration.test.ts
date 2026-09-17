@@ -172,6 +172,15 @@ test('off and enforce preserve scripted mutation lifecycle while enforce reduces
   assert.ok(enforce.requests.every((request) => !request.systemPrompt.includes('12. TOOL SYNERGY PLAYBOOKS:')));
 });
 
+test('shadow mode does not duplicate the warm-start cognitive scaffold in its first dynamic suffix', async () => {
+  const shadow = await runMode('shadow');
+  assert.equal(
+    shadow.requests[0]?.dynamicContext.includes('[COGNITIVE SCAFFOLD -'),
+    false,
+    'the warm-start full scaffold already supplies this first-step guidance',
+  );
+});
+
 test('low-risk bugfix unlocks a small target-inspected edit without a mandatory hypothesis round-trip', async () => {
   const result = await runMode(
     'enforce',

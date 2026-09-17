@@ -30,6 +30,7 @@ export interface SessionData {
   workspacePath?: string;
   activeSessionId?: string;
   tokenConfig?: import('../llm/token-config.js').TokenConfig;
+  autoStartDocker?: boolean;
   lastUpdated?: string;
 }
 

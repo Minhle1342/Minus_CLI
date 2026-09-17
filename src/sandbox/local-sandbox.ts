@@ -37,6 +37,14 @@ export class LocalProcessSandbox implements ISandboxProvider {
       PATH: process.env.PATH || '',
       HOME: process.env.HOME || process.env.USERPROFILE || '',
       USER: process.env.USER || process.env.USERNAME || '',
+      ...(process.platform === 'win32' ? {
+        SystemRoot: process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows',
+        WINDIR: process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows',
+        ComSpec: process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe',
+        PATHEXT: process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD',
+        TEMP: process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp',
+        TMP: process.env.TMP || process.env.TEMP || 'C:\\Windows\\Temp',
+      } : {}),
       NODE_ENV: 'development',
       CI: 'true',
       DEBIAN_FRONTEND: 'noninteractive',
@@ -60,16 +68,26 @@ export class LocalProcessSandbox implements ISandboxProvider {
       };
     }
 
-    const sandboxedRes = nativeExecuteSandboxed(command, cwd, timeout, 5 * 1024 * 1024, 2048);
-    if (sandboxedRes && !options?.signal) {
+    const sandboxedRes = await nativeExecuteSandboxed(
+      command,
+      cwd,
+      timeout,
+      5 * 1024 * 1024,
+      options?.memoryLimitMb ?? 2048,
+      options?.signal,
+      sanitizedEnv,
+    );
+    if (sandboxedRes) {
       return {
         stdout: sanitizeTerminalOutput(sandboxedRes.stdout),
         stderr: sanitizeTerminalOutput(sandboxedRes.stderr),
         exitCode: sandboxedRes.exitCode,
         durationMs: sandboxedRes.durationMs,
         sandboxType: 'local',
-        success: sandboxedRes.exitCode === 0,
+        success: sandboxedRes.exitCode === 0 && !sandboxedRes.cancelled,
         timedOut: sandboxedRes.timedOut,
+        ...(sandboxedRes.outputIncomplete ? { outputIncomplete: true } : {}),
+        ...(sandboxedRes.cancelled ? { errorCode: 'COMMAND_CANCELLED' } : {}),
       };
     }
 

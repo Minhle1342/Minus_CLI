@@ -107,6 +107,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/new-session', description: 'Tạo session hội thoại mới', category: 'Session' },
   { command: '/fork-session', usage: '/fork-session [seq]', description: 'Fork session tại event boundary', category: 'Session' },
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
+  { command: '/docker', usage: '/docker [on|off|toggle|start|status]', description: 'Cấu hình bật / tắt hoặc mở Docker Desktop khi chạy dev', category: 'Execution', aliases: ['/docker-desktop'] },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
   { command: '/queue', usage: '/queue [list|cancel <id>|clear|add <text>]', description: 'Quản lý hàng đợi tin nhắn Queued Messages (Antigravity-style)', category: 'Execution', aliases: ['/q'] },
   { command: '/steer', usage: '/steer <yêu cầu điều chỉnh>', description: 'Đưa tin nhắn vào hàng đợi để bẻ lái Agent ngay trong bước kế tiếp', category: 'Execution' },
@@ -940,18 +941,73 @@ export function getVisibleWidth(text: string): number {
       width += 1;
     }
   }
+
   return width;
 }
 
 export function padRightVisible(text: string, targetWidth: number): string {
-  const visibleLen = getVisibleWidth(text);
-  const pad = Math.max(0, targetWidth - visibleLen);
-  return text + ' '.repeat(pad);
+  const currentWidth = getVisibleWidth(text);
+  if (currentWidth >= targetWidth) return text;
+  return text + ' '.repeat(targetWidth - currentWidth);
 }
 
-export function getTerminalWidth(defaultWidth = 80, minWidth = 50, maxWidth = 110): number {
-  const cols = process.stdout.columns || defaultWidth;
-  return Math.max(minWidth, Math.min(maxWidth, cols));
+export function getTerminalWidth(fallback = 80, min = 40, max = 140): number {
+  const cols = process.stdout?.columns || fallback;
+  return Math.max(min, Math.min(max, cols));
+}
+
+export function wrapVisibleText(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [text];
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    if (!currentLine) {
+      if (getVisibleWidth(word) <= maxWidth) {
+        currentLine = word;
+      } else {
+        // Word is longer than maxWidth, hard wrap by character/grapheme
+        let chunk = '';
+        for (const { segment } of SHARED_SEGMENTER.segment(word)) {
+          if (getVisibleWidth(chunk + segment) > maxWidth) {
+            if (chunk) lines.push(chunk);
+            chunk = segment;
+          } else {
+            chunk += segment;
+          }
+        }
+        currentLine = chunk;
+      }
+    } else {
+      const candidate = currentLine + ' ' + word;
+      if (getVisibleWidth(candidate) <= maxWidth) {
+        currentLine = candidate;
+      } else {
+        lines.push(currentLine);
+        if (getVisibleWidth(word) <= maxWidth) {
+          currentLine = word;
+        } else {
+          let chunk = '';
+          for (const { segment } of SHARED_SEGMENTER.segment(word)) {
+            if (getVisibleWidth(chunk + segment) > maxWidth) {
+              if (chunk) lines.push(chunk);
+              chunk = segment;
+            } else {
+              chunk += segment;
+            }
+          }
+          currentLine = chunk;
+        }
+      }
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [''];
 }
 
 export function createBoxHeader(title: string, color = c.subtleBorder, width?: number): string {
@@ -1358,6 +1414,89 @@ export class CLI {
 
   static renderSandbox(status: any): void {
     console.log(`  ${c.slate}Sandbox:${c.reset} ${status.activeProvider} (${status.mode}) · Isolated: ${status.isIsolated ? '✔ Yes' : 'Host OS'}`);
+  }
+  /**
+   * Hiển thị bảng trạng thái & cấu hình bật / tắt Docker Desktop
+   */
+  static renderDockerStatus(options: {
+    isAvailable: boolean;
+    autoStartEnabled?: boolean;
+    mode?: string;
+  }): void {
+    const width = getTerminalWidth(80, 50, 95);
+    console.log(`\n${createBoxHeader('🐳 DOCKER DESKTOP CONFIGURATION', c.brightCyan, width)}`);
+
+    const daemonStatus = options.isAvailable
+      ? `${c.emerald}${c.bold}● ĐANG CHẠY (Running)${c.reset}`
+      : `${c.crimson}${c.bold}○ ĐÃ TẮT (Stopped)${c.reset}`;
+
+    const autoStatus = options.autoStartEnabled
+      ? `${c.emerald}${c.bold}✔ BẬT${c.reset} ${c.slate}(Tự động mở khi chạy npm run dev)${c.reset}`
+      : `${c.slate}✖ TẮT (Không tự động mở, tiết kiệm RAM)${c.reset}`;
+
+    const modeStr = `${c.brightCyan}${options.mode || 'auto'}${c.reset}`;
+
+    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Trạng thái Daemon:${c.reset}     ${daemonStatus}`);
+    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Tự động mở khi dev:${c.reset}    ${autoStatus}`);
+    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Sandbox Mode:${c.reset}           ${modeStr}`);
+    console.log(`${createBoxDivider(c.brightCyan, width)}`);
+    console.log(`${c.brightCyan}│${c.reset}  ${c.slate}💡 Lệnh nhanh:${c.reset}`);
+    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker on${c.reset}     ➔ Bật tự động mở Docker Desktop khi dev`);
+    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker off${c.reset}    ➔ Tắt tự động mở (chạy Local Sandbox nhẹ RAM)`);
+    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker start${c.reset}  ➔ Khởi chạy Docker Desktop ngay lập tức`);
+    console.log(`${createBoxFooter(c.brightCyan, width)}\n`);
+  }
+
+  /**
+   * Thông báo bật / tắt thành công tính năng tự động mở Docker Desktop
+   */
+  static renderDockerToggleNotice(enabled: boolean): void {
+    const badge = enabled
+      ? `${c.emerald}${c.bold}✔ [ĐÃ BẬT]${c.reset}`
+      : `${c.amber}${c.bold}✖ [ĐÃ TẮT]${c.reset}`;
+    const detail = enabled
+      ? 'Docker Desktop sẽ tự động được khởi chạy khi bạn chạy npm run dev.'
+      : 'Docker Desktop sẽ không tự mở khi chạy dev. Hệ thống dùng Local Sandbox để tiết kiệm RAM.';
+    console.log(`\n  ${badge} ${c.white}${c.bold}Cấu hình mở Docker Desktop:${c.reset} ${c.slate}${detail}${c.reset}`);
+    console.log(`  ${c.slate}💡 Bạn có thể đổi lại bất kỳ lúc nào bằng lệnh ${c.brightCyan}/docker on${c.slate} hoặc ${c.brightCyan}/docker off${c.reset}\n`);
+  }
+
+  /**
+   * Hộp thoại hiển thị lựa chọn mở Docker Desktop khi khởi động sau npm run dev
+   */
+  static renderDockerStartupPrompt(options: { isAvailable?: boolean; autoStartEnabled?: boolean } = {}): void {
+    const width = getTerminalWidth(80, 50, 95);
+    console.log(`\n${createBoxHeader('🐳 TÙY CHỌN MỞ DOCKER DESKTOP', c.geminiBlue, width)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.amber}Docker Desktop hiện chưa chạy trên máy của bạn.${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.mutedText}Bạn có thể chọn mở Docker Desktop để dùng Docker Sandbox & SearXNG,${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.mutedText}hoặc tắt mở để tiết kiệm ~1.5GB RAM (dùng Local Sandbox an toàn).${c.reset}`);
+    console.log(`${createBoxDivider(c.geminiBlue, width)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[y]${c.reset} ${c.white}Mở Docker Desktop ngay bây giờ${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[n]${c.reset} ${c.slate}Không mở (dùng Local Sandbox)${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[a]${c.reset} ${c.emerald}Luôn tự động mở sau khi chạy npm run dev${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[d]${c.reset} ${c.amber}Luôn tắt mở khi chạy npm run dev (Không hỏi lại)${c.reset}`);
+    console.log(`${createBoxFooter(c.geminiBlue, width)}`);
+  }
+
+  /**
+   * Hàm hỏi người dùng tương tác lựa chọn bật / tắt mở Docker Desktop
+   */
+  static async promptDockerStartupChoice(
+    readlineInterface: { question(prompt: string): Promise<string> },
+  ): Promise<'on' | 'off' | 'always' | 'never' | 'skip'> {
+    CLI.renderDockerStartupPrompt();
+    try {
+      const answer = (
+        await readlineInterface.question(`  ${c.brightCyan}${c.bold}👉 Lựa chọn của bạn [y/n/a/d] (mặc định n):${c.reset} `)
+      ).trim().toLowerCase();
+
+      if (answer === 'a' || answer === 'always') return 'always';
+      if (answer === 'd' || answer === 'never' || answer === 'disable') return 'never';
+      if (answer === 'y' || answer === 'yes' || answer === '1') return 'on';
+      return 'off';
+    } catch {
+      return 'skip';
+    }
   }
 
   static renderTasks(tasks: Array<{ id: string; command: string; status: string; startedAt: string; pid?: number }>): void {
@@ -1842,27 +1981,64 @@ export class CLI {
 
           if (header && header.length > 0) {
             const colCount = Math.max(...allRows.map(r => r.length));
-            const colWidths: number[] = new Array(colCount).fill(3);
-
+            
+            // 1. Tính toán độ rộng tự nhiên (Natural Visible Width) của từng cột dựa trên Unicode & Emojis
+            const naturalWidths: number[] = new Array(colCount).fill(3);
             for (const row of allRows) {
               for (let c = 0; c < colCount; c++) {
                 const cellVal = row[c] || '';
-                colWidths[c] = Math.max(colWidths[c], cellVal.length);
+                naturalWidths[c] = Math.max(naturalWidths[c], getVisibleWidth(cellVal));
               }
             }
 
+            // 2. Cân đối với độ rộng màn hình terminal (Responsive Budget Allocation)
+            const termWidth = getTerminalWidth(95, 60, 130);
+            const borderOverhead = colCount * 3 + 1; // '│ cell │'
+            const maxContentWidth = Math.max(colCount * 4, termWidth - borderOverhead);
+            const totalNatural = naturalWidths.reduce((sum, w) => sum + w, 0);
+
+            let colWidths: number[];
+            if (totalNatural <= maxContentWidth) {
+              colWidths = [...naturalWidths];
+            } else {
+              // Phân bổ co giãn thông minh: giữ nguyên cột hẹp (STT, Status), co nhỏ các cột dài (Mô tả, Tệp)
+              const minWidths = naturalWidths.map(w => Math.min(w, Math.max(3, Math.min(10, w))));
+              const minSum = minWidths.reduce((sum, w) => sum + w, 0);
+              const availableExtra = Math.max(0, maxContentWidth - minSum);
+              const extraDemands = naturalWidths.map((w, idx) => Math.max(0, w - minWidths[idx]));
+              const totalDemand = extraDemands.reduce((sum, d) => sum + d, 0);
+
+              colWidths = naturalWidths.map((w, idx) => {
+                if (totalDemand <= 0) return minWidths[idx];
+                const share = Math.floor(availableExtra * (extraDemands[idx] / totalDemand));
+                return Math.max(3, minWidths[idx] + share);
+              });
+            }
+
+            // 3. Xây dựng khung viền chuẩn Unicode Box-Drawing
             const topBorder = '┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
             const midBorder = '├' + colWidths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
             const botBorder = '└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘';
 
             const formattedLines: string[] = [topBorder];
-            const headerCells = header.map((cell, c) => ` ${cell.padEnd(colWidths[c])} `).join('│');
-            formattedLines.push(`│${headerCells}│`);
+
+            // 4. Render hàng tiêu đề (Header) với hỗ trợ Wrap nhiều dòng
+            const headerColLines = header.map((cell, c) => wrapVisibleText(cell || '', colWidths[c]));
+            const headerHeight = Math.max(...headerColLines.map(cl => cl.length), 1);
+            for (let h = 0; h < headerHeight; h++) {
+              const rowCells = colWidths.map((w, c) => ` ${padRightVisible(headerColLines[c]?.[h] || '', w)} `);
+              formattedLines.push(`│${rowCells.join('│')}│`);
+            }
             formattedLines.push(midBorder);
 
+            // 5. Render các hàng dữ liệu (Data Rows) với hỗ trợ Wrap từng ô không làm vỡ khung
             for (const row of dataRows) {
-              const dataCells = row.map((cell, c) => ` ${(cell || '').padEnd(colWidths[c])} `).join('│');
-              formattedLines.push(`│${dataCells}│`);
+              const rowColLines = colWidths.map((w, c) => wrapVisibleText(row[c] || '', w));
+              const rowHeight = Math.max(...rowColLines.map(cl => cl.length), 1);
+              for (let h = 0; h < rowHeight; h++) {
+                const rowCells = colWidths.map((w, c) => ` ${padRightVisible(rowColLines[c]?.[h] || '', w)} `);
+                formattedLines.push(`│${rowCells.join('│')}│`);
+              }
             }
 
             formattedLines.push(botBorder);
@@ -1913,29 +2089,17 @@ export class CLI {
       .join('');
   }
 
-  static cleanFinalAnswerContent(text: string): string {
-    let cleaned = text.trim();
-    cleaned = cleaned.replace(/^\s*Code changes must end with an explicit test\/build verification step\.?\s*/i, '');
-    cleaned = cleaned.replace(/^\s*\[Verification Ladder Result\][\s\S]*?\[Final Result\]\s*/i, '');
-    cleaned = cleaned.replace(/^\s*\[Verification Ladder Result\][\s\S]*?(?=\n\n|\n[A-Z#Đ-Ưa-z])/i, '');
-    cleaned = cleaned.replace(/^\s*\[Final Result\]\s*/i, '');
-    return cleaned.trim();
-  }
-
+  /**
+   * Hiển thị Final Answer chuẩn Codex / Antigravity CLI (in trực tiếp nội dung Markdown, không viền khung và không typewriter animation)
+   */
   static async renderFinalAnswer(answer: string, options: { animate?: boolean } = {}): Promise<void> {
-    const rawContent = CLI.cleanFinalAnswerContent(answer);
-    if (!rawContent) return;
+    const content = answer.trim();
+    if (!content) return;
 
-    const shouldAnimate = options.animate === true;
-    const formatted = CLI.formatMarkdownTerminal(rawContent);
+    const formatted = CLI.formatMarkdownTerminal(content);
 
     console.log('');
-    if (shouldAnimate) {
-      await writeTypewriterText(formatted);
-      process.stdout.write('\n');
-    } else {
-      console.log(formatted);
-    }
+    console.log(formatted);
     console.log('');
   }
 
@@ -2169,3 +2333,7 @@ export class CLI {
 export const formatMarkdownTerminal = CLI.formatMarkdownTerminal;
 export const renderTaskCancelledToast = CLI.renderTaskCancelledToast.bind(CLI);
 export const renderPromptInputNotice = CLI.renderPromptInputNotice.bind(CLI);
+export const renderDockerStatus = CLI.renderDockerStatus.bind(CLI);
+export const renderDockerToggleNotice = CLI.renderDockerToggleNotice.bind(CLI);
+export const renderDockerStartupPrompt = CLI.renderDockerStartupPrompt.bind(CLI);
+export const promptDockerStartupChoice = CLI.promptDockerStartupChoice.bind(CLI);

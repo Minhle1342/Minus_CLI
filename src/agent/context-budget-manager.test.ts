@@ -7,6 +7,7 @@ import { ContextCompactor } from './context-compactor.js';
 import { ContextBudgetManager } from './context-budget-manager.js';
 import { ContextGuardian } from '../context/context-guardian.js';
 import { Session } from '../session/session.js';
+import { isNativeAvailable } from '../native/index.js';
 
 test('enforce mode compacts a recent oversized observation to the whole-request budget', async () => {
   const compactor = new ContextCompactor({
@@ -66,6 +67,66 @@ test('rolling synopsis is not recursively summarized', () => {
   assert.match(firstText, /alpha and variable beta/);
   assert.match(secondText, /alpha and variable beta/);
   assert.equal((secondText.match(/ROLLING DIALOGUE SYNOPSIS/g) || []).length, 1);
+});
+
+test('native precompaction masks only large non-verification history', { skip: !isNativeAvailable() }, () => {
+  const compactor = new ContextCompactor({
+    nativePrecompactionThresholdChars: 1,
+    preserveLastNToolResults: 1,
+    enableObservationMasking: false,
+  });
+  const history: any[] = [
+    { role: 'user', parts: [{ text: 'Inspect the first large file.' }] },
+    { role: 'model', parts: [{ functionCall: { id: 'read-1', name: 'read_file', args: { path: 'first.ts' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id: 'read-1', name: 'read_file', response: { content: 'a'.repeat(20_000) } } }] },
+    { role: 'model', parts: [{ functionCall: { id: 'read-2', name: 'read_file', args: { path: 'second.ts' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id: 'read-2', name: 'read_file', response: { content: 'current result' } } }] },
+  ];
+
+  const result = compactor.compact(history, { force: true, enableRollingTurns: false });
+  assert.ok(result.stats.strategiesApplied.includes('native-large-history-prepass'));
+  assert.ok(JSON.stringify(result.messages).length < JSON.stringify(history).length);
+  assert.equal(result.stats.maskedObservations?.length, 1);
+  assert.equal(result.stats.maskedObservations?.[0].originalPayload.content.length, 20_000);
+});
+
+test('within-turn checkpoints archive old observations without rewriting the KV-cache prefix', async () => {
+  const compactor = new ContextCompactor({
+    checkpointEveryNToolResults: 4,
+    preserveLastNToolResults: 2,
+    preservePrefixCache: true,
+  });
+  const manager = new ContextBudgetManager(compactor, { mode: 'legacy', triggerRatio: 0.95 });
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Investigate the issue.' }] }];
+  for (let index = 0; index < 4; index++) {
+    history.push({ role: 'model', parts: [{ functionCall: { id: `read-${index}`, name: 'read_file', args: { path: `${index}.ts` } } }] });
+    history.push({ role: 'user', parts: [{ functionResponse: { id: `read-${index}`, name: 'read_file', response: { path: `${index}.ts`, content: `evidence-${index}` } } }] });
+  }
+
+  const result = await manager.prepareRequest({
+    provider: 'test', model: 'gemini-test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 20_000, outputReserveTokens: 100,
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.history, history);
+  assert.equal(result.checkpointObservations?.length, 2);
+  assert.deepEqual(result.checkpointObservations?.map((record) => record.id), ['read-0', 'read-1']);
+});
+
+test('hard-budget stubs retain a recoverable copy of recent verification output', () => {
+  const compactor = new ContextCompactor({ maxTotalHistoryTokens: 300 });
+  const history: any[] = [
+    { role: 'user', parts: [{ text: 'Verify the build.' }] },
+    { role: 'model', parts: [{ functionCall: { id: 'build', name: 'run_command', args: { command: 'npm run build' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id: 'build', name: 'run_command', response: { command: 'npm run build', exitCode: 0, stdout: 'verified-output-'.repeat(2_000) } } }] },
+  ];
+
+  const result = compactor.compact(history, { force: true, enforceBudget: true, maxInputTokens: 300 });
+
+  assert.ok(result.stats.strategiesApplied.includes('hard-budget-observation-stubs'));
+  assert.equal(result.stats.maskedObservations?.[0].id, 'build');
+  assert.match(result.stats.maskedObservations?.[0].originalPayload.stdout, /verified-output/);
 });
 
 test('enforce mode refuses an irreducible oversized pinned request', async () => {

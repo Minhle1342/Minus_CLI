@@ -13,6 +13,7 @@ export interface SandboxExecutionResult {
   missingExecutable?: string;
   missingDependency?: string;
   timedOut?: boolean;
+  outputIncomplete?: boolean;
   runtime?: string;
   image?: string;
 }

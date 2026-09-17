@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { DockerSandbox } from '../sandbox/docker-sandbox.js';
+import { loadSession } from '../session/persistent-session.js';
 
 const COMPOSE_FILE = 'deploy/searxng/compose.yaml';
 const DOCKER_START_TIMEOUT_SECONDS = parseInt(process.env.DOCKER_START_TIMEOUT_SECONDS || '20', 10);
@@ -47,10 +48,22 @@ async function main(): Promise<void> {
 
   const isPredev = Boolean(process.env.npm_lifecycle_event === 'predev');
   const forceStart = process.argv.includes('--force');
+  const session = loadSession();
+  const envAutoStart = process.env.AUTO_START_DOCKER !== undefined
+    ? process.env.AUTO_START_DOCKER === 'true' || process.env.AUTO_START_DOCKER === '1'
+    : undefined;
+  const autoStartDocker = envAutoStart ?? session.autoStartDocker;
 
-  // Nếu chạy tự động qua predev, chỉ kích hoạt SearXNG khi Docker Desktop ĐÃ ĐANG CHẠY.
-  // Tránh tự ý mở Docker Desktop + WSL2 làm ngốn 1.5GB RAM và gây OOM crash Node.js.
-  if (!dockerReady && (!isPredev || forceStart)) {
+  // Nếu người dùng cấu hình autoStartDocker: true hoặc forceStart -> tự mở Docker Desktop.
+  // Nếu autoStartDocker: false -> không tự mở Docker Desktop để tiết kiệm RAM.
+  // Nếu chưa cấu hình -> chỉ mở nếu forceStart hoặc không phải predev.
+  const shouldAttemptStart = !dockerReady && (
+    autoStartDocker === true ||
+    forceStart ||
+    (!isPredev && autoStartDocker !== false)
+  );
+
+  if (shouldAttemptStart) {
     dockerReady = await docker.startDockerDaemon(DOCKER_START_TIMEOUT_SECONDS);
   }
 
