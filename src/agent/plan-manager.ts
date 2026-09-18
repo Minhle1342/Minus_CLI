@@ -772,6 +772,21 @@ export class PlanManager {
     return `Execution plan is incomplete: ${unfinished.length} task(s) remain; active/next task is #${next.id} "${next.title}".`;
   }
 
+  /**
+   * Tự động điều hòa (reconcile) các task chưa hoàn thành còn lại sang trạng thái SKIPPED
+   * khi Agent đã hoàn tất và đưa ra câu trả lời giải quyết mục tiêu chính.
+   */
+  autoReconcileRemainingTasks(reason = 'Remaining tasks bypassed upon delivery of substantive final answer'): PlanTask[] {
+    const unfinished = this.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status));
+    for (const task of unfinished) {
+      task.status = 'SKIPPED';
+      task.notes = task.notes ? `${task.notes}; auto-reconciled: ${reason}` : `auto-reconciled: ${reason}`;
+    }
+    this.reconcileRunnableState();
+    this.persist('tasks-auto-reconciled');
+    return this.getTasks();
+  }
+
   renderExecutionContext(): string {
     const requirements = this.getRequirements();
     if (!this.hasPlan()) {

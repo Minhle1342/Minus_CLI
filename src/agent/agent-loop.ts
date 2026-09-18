@@ -30,7 +30,7 @@ import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, type FinalAnswerGuardDecision } from './final-answer-guard.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -3088,11 +3088,19 @@ export class AgentLoop {
         this.kernel?.ctx.events.emit('step:after', step);
         if (canRetryPlan) continue;
 
-        const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
-        await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
-        this.goalManager.disarm();
-        return incompletePlanMessage;
+        if (finalAnswer && finalAnswer.trim().length > 80 && !isCompletionStub(finalAnswer)) {
+          this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
+          CLI.renderReflectionAlert(
+            consecutivePlanCompletionRejects,
+            `[Auto-Reconciliation]: Tự động điều hòa hoàn tất các task tồn đọng trong Plan do Model đã cung cấp câu trả lời thực chất. Tiếp tục chuyển sang Completion Gate.`,
+          );
+        } else {
+          const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
+          await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
+          this.goalManager.disarm();
+          return incompletePlanMessage;
+        }
       }
       consecutivePlanCompletionRejects = 0;
 

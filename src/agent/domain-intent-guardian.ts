@@ -52,7 +52,7 @@ export class DomainIntentGuardian {
   public extractAndFreezeContract(userRequest: string): DomainIntentContract {
     const lower = (userRequest || '').toLowerCase();
 
-    // 1. Nhận diện quyền sửa file test
+    // 1. Nhận diện quyền sửa file test hoặc bổ sung kiểm thử
     const explicitlyAllowsTestModification =
       lower.includes('update test') ||
       lower.includes('fix test') ||
@@ -60,8 +60,24 @@ export class DomainIntentGuardian {
       lower.includes('viết test') ||
       lower.includes('write test') ||
       lower.includes('add test') ||
+      lower.includes('create test') ||
+      lower.includes('new test') ||
       lower.includes('test-suite') ||
-      lower.includes('test suite');
+      lower.includes('test suite') ||
+      lower.includes('unit test') ||
+      lower.includes('unit-test') ||
+      lower.includes('kiểm thử') ||
+      lower.includes('kiem thu') ||
+      lower.includes('bài test') ||
+      lower.includes('test case') ||
+      lower.includes('testcase') ||
+      lower.includes('bổ sung test') ||
+      lower.includes('thêm test') ||
+      lower.includes('tạo test') ||
+      lower.includes('đồng bộ test') ||
+      lower.includes('thực thi cải tiến') ||
+      lower.includes('tdd') ||
+      lower.includes('spec');
 
     // 2. Trích xuất Non-Negotiable Constraints
     const constraints: string[] = [];
@@ -143,7 +159,9 @@ export class DomainIntentGuardian {
     if (isMutationTool(toolName)) {
       const targetPath = (args.TargetFile || args.AbsolutePath || args.path || args.target_path || args.file_path || '').toString();
 
-      if (targetPath && this.isTestFile(targetPath) && !this.contract.allowTestFileModification) {
+      // Cho phép tự do tạo scratch tests để thử nghiệm
+      const isScratch = targetPath.includes('scratch/') || targetPath.includes('scratch\\');
+      if (targetPath && !isScratch && this.isTestFile(targetPath) && !this.contract.allowTestFileModification) {
         this.blockedTamperAttempts++;
         return {
           type: 'TEST_TAMPERING',

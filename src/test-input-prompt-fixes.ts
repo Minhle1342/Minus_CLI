@@ -15,6 +15,10 @@ import {
 import { InputPromptBar } from './ui/ink/components/InputPromptBar.js';
 import { PermissionPromptBox } from './ui/ink/components/PermissionPromptBox.js';
 import { formatToolTargetWithLines } from './ui/ink/components/StepStream.js';
+import { VerificationPolicy } from './skills/verification-policy.js';
+import { DomainIntentGuardian } from './agent/domain-intent-guardian.js';
+import { hasUnfulfilledDeferredPromise } from './agent/final-answer-guard.js';
+import { PlanManager } from './agent/plan-manager.js';
 import { FileMentionEngine } from './workspace/file-attachment.js';
 import { Workspace } from './workspace/workspace.js';
 
@@ -481,6 +485,90 @@ describe('Text Input & Prompt Bug Fixes (TUI)', () => {
         query: 'searchPattern',
       });
       assert.strictEqual(queryTarget, 'searchPattern');
+    });
+  });
+
+  describe('10. Flexible Policies & Guardians for Non-SWE Tasks', () => {
+    it('VerificationPolicy: should allow completion when only non-executable files are modified', () => {
+      const policy = new VerificationPolicy();
+      policy.recordModification('README.md');
+      policy.recordModification('.env.example');
+      policy.recordModification('.gitignore');
+
+      const decision = policy.canComplete([]);
+      assert.strictEqual(decision.allowed, true, 'Editing non-executable docs/configs must not require test verification');
+    });
+
+    it('VerificationPolicy: should mandate verification when code files are modified', () => {
+      const policy = new VerificationPolicy();
+      policy.recordModification('src/index.ts');
+
+      const decision = policy.canComplete([]);
+      assert.strictEqual(decision.allowed, false, 'Editing executable source code must require test verification');
+      assert.strictEqual(decision.errorCode, 'VERIFICATION_REQUIRED');
+    });
+
+    it('DomainIntentGuardian: should recognize Vietnamese natural keywords for test modification', () => {
+      const guardian = new DomainIntentGuardian();
+      guardian.extractAndFreezeContract('Thực thi cải tiến và bổ sung kiểm thử cho TUI');
+      assert.strictEqual(guardian.getContract()?.allowTestFileModification, true);
+
+      const guardian2 = new DomainIntentGuardian();
+      guardian2.extractAndFreezeContract('Áp dụng TDD để fix bug');
+      assert.strictEqual(guardian2.getContract()?.allowTestFileModification, true);
+
+      const guardian3 = new DomainIntentGuardian();
+      guardian3.extractAndFreezeContract('Cải tiến logic và đồng bộ test case');
+      assert.strictEqual(guardian3.getContract()?.allowTestFileModification, true);
+    });
+
+    it('DomainIntentGuardian: should allow scratch tests even without explicit test modification flag', () => {
+      const guardian = new DomainIntentGuardian();
+      guardian.extractAndFreezeContract('Tối ưu hóa hiệu năng hệ thống');
+      assert.strictEqual(guardian.getContract()?.allowTestFileModification, false);
+
+      const intervention = guardian.observeToolCall({
+        toolName: 'write_to_file',
+        args: { TargetFile: 'scratch/perf-test.ts' },
+      });
+      assert.strictEqual(intervention, null, 'Scratch test file creation should never be blocked as test tampering');
+    });
+
+    it('FinalAnswerGuard: should not reject courtesy closing or future roadmap in substantial answers', () => {
+      const substantialAnswer = `
+Dưới đây là kết quả phân tích chuyên sâu về kiến trúc hệ thống:
+1. Module A quản lý vòng lặp chính.
+2. Module B xử lý giao diện người dùng.
+Hệ thống hiện tại vận hành rất ổn định và đáp ứng đầy đủ yêu cầu.
+
+Trong các bước tiếp theo, tôi sẽ hỗ trợ bạn triển khai tính năng API nếu bạn cần.
+`.trim();
+
+      const hasDeferred = hasUnfulfilledDeferredPromise(substantialAnswer);
+      assert.strictEqual(hasDeferred, false, 'Courtesy future assistance offer in substantial answer should not be flagged as deferred work');
+    });
+
+    it('FinalAnswerGuard: should still reject lazy responses that merely promise future work', () => {
+      const lazyAnswer = 'Tôi sẽ tiến hành sửa lỗi này ngay bây giờ.';
+      const hasDeferred = hasUnfulfilledDeferredPromise(lazyAnswer);
+      assert.strictEqual(hasDeferred, true, 'Lazy response without actual execution must be rejected');
+    });
+
+    it('PlanManager: autoReconcileRemainingTasks should skip remaining tasks smoothly', () => {
+      const plan = new PlanManager();
+      plan.createPlan([
+        { id: 1, title: 'Inspect code' },
+        { id: 2, title: 'Implement logic' },
+        { id: 3, title: 'Write report' },
+      ]);
+
+      plan.completeTaskWithEvidence(1);
+      assert.strictEqual(plan.isAllTasksCompleted(), false);
+      assert.strictEqual(plan.getIncompleteTasks().length, 2);
+
+      plan.autoReconcileRemainingTasks('Delivery of substantive final answer');
+      assert.strictEqual(plan.isAllTasksCompleted(), true, 'All tasks should now be in terminal state (COMPLETED or SKIPPED)');
+      assert.strictEqual(plan.getCompletionBlocker(), undefined);
     });
   });
 });

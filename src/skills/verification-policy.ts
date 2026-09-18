@@ -1,4 +1,4 @@
-import { isVerificationCommand } from '../agent/completion-evidence.js';
+import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
 import type { ControlRisk } from '../control/classification-types.js';
 
@@ -24,6 +24,7 @@ export interface VerificationRecord {
 
 export class VerificationPolicy {
   private hasUnverifiedModifications: boolean = false;
+  private modifiedFiles: Set<string> = new Set();
   private lastVerification?: VerificationRecord;
   private verificationHistory: VerificationRecord[] = [];
   private repairCycles: number = 0;
@@ -92,7 +93,13 @@ export class VerificationPolicy {
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
   recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string }): void {
-    this.hasUnverifiedModifications = true;
+    if (filePath) {
+      this.modifiedFiles.add(filePath);
+    }
+    const isNonExec = filePath ? isNonExecutableFile(filePath) : false;
+    if (!filePath || !isNonExec) {
+      this.hasUnverifiedModifications = true;
+    }
     if (options?.impactedTestSuites) {
       for (const t of options.impactedTestSuites) {
         this.pendingTargetedTests.add(t);
@@ -171,9 +178,18 @@ export class VerificationPolicy {
    * Kiểm tra xem Agent có được phép kết thúc nhiệm vụ (Final Answer) hay chưa
    */
   canComplete(activeSkillIds: string[] = []): { allowed: boolean; reason?: string; errorCode?: string } {
-    const mandatesVerification = this.hasUnverifiedModifications
+    // Miễn trừ kiểm thử bắt buộc nếu toàn bộ các file đã can thiệp là file phi thực thi (docs/markdown/configs)
+    const hasOnlyNonExecutableModifications =
+      this.modifiedFiles.size > 0 &&
+      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f));
+
+    const mandatesVerification = (!hasOnlyNonExecutableModifications && this.hasUnverifiedModifications)
       || this.pendingTargetedTests.size > 0
       || activeSkillIds.some((id) => this.requiredSkills.has(id));
+
+    if (!mandatesVerification) {
+      return { allowed: true };
+    }
 
     if (mandatesVerification && !this.lastVerification) {
       return {
@@ -236,6 +252,7 @@ export class VerificationPolicy {
 
   reset(): void {
     this.hasUnverifiedModifications = false;
+    this.modifiedFiles.clear();
     this.lastVerification = undefined;
     this.verificationHistory = [];
     this.repairCycles = 0;

@@ -62,7 +62,7 @@ export function hasUnfulfilledDeferredPromise(text: string): boolean {
   const isSubstantialAnswer = text.trim().length > 150 && lines.filter((l) => l.trim()).length >= 2;
   return lines.some((line) => {
     const normalized = normalizeForMatching(line)
-      .replace(/(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?]*/g, ' ');
+      .replace(/(?:if you (?:want|would like|agree|approve|wish)|if needed|neu ban (?:muon|can|dong y|yeu cau|cho phep)|neu can)[^.!?]*/g, ' ');
     if (/^(?:if |suppose |neu |gia su )/.test(normalized)) return false;
     if (/\b(?:proposed|proposal|recommendation|hypothetical|for example|de xuat|phuong an|gia dinh|vi du|minh hoa)\b/.test(normalized)
       && !/\b(?:i|we|toi|minh|em|chung toi)\s+(?:will|shall|se|can phai)\b/.test(normalized)) return false;
@@ -71,6 +71,15 @@ export function hasUnfulfilledDeferredPromise(text: string): boolean {
       const isExpositoryPromise = /\b(?:i|we)\s+(?:will|shall|am going to)\s+(?:now\s+)?(?:explain|analy[sz]e|describe|clarify|detail|break down|outline|summarize|present|discuss)\b/.test(normalized)
         || /\b(?:toi|chung toi|minh|em)\s+(?:se|du dinh|chuan bi)\s+(?:ngay\s+)?(?:giai thich|phan tich|trinh bay|lam ro|tong hop|tom tat|chia se|neu|chi ra|di sau)\b/.test(normalized);
       if (isExpositoryPromise) return false;
+
+      // Miễn trừ cho câu kết lộ trình tương lai / đề xuất hỗ trợ / courtesy closing
+      const isFutureRoadmapOrAssistanceOffer =
+        /\b(?:trong|o)\s+(?:cac\s+)?(?:buoc|giai doan|phan|phien)\s+(?:tiep theo|toi|sau)\b/.test(normalized)
+        || /\b(?:in (?:the\s+)?next (?:steps?|phases?|iterations?)|in future steps?)\b/.test(normalized)
+        || /\b(?:san sang|ready to)\s+(?:ho tro|giup|assist|help)\b/.test(normalized)
+        || /\b(?:khi|when)\s+(?:ban\s+)?(?:can|muon|yeu cau|need|request)\b/.test(normalized)
+        || /\b(?:neu|if)\s+(?:ban\s+)?(?:dong y|muon|can|agree|wish)\b/.test(normalized);
+      if (isFutureRoadmapOrAssistanceOffer) return false;
     }
 
     return /\b(?:i|we)\s+(?:will|shall|am going to|are going to|plan to|need to|intend to|am about to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|generate|add|remove|delete|configure|install)\b/.test(normalized)
