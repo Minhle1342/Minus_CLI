@@ -300,3 +300,32 @@ test('unresolved reasoning never becomes an unchecked final answer', async () =>
     assert.ok(session.getEvents().some((event) => event.type === 'turn/end' && event.data.reason === 'missing-final-answer'));
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
+
+test('exploration tasks with cause investigation and expository introductions complete without verification or deferred-work blocks', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-explore-'));
+  try {
+    const workspace = new Workspace(rootDir);
+    await fs.mkdir(path.join(rootDir, 'src'));
+    await fs.writeFile(path.join(rootDir, 'src/main.ts'), 'export const main = 1;');
+    await fs.writeFile(path.join(rootDir, 'src/ui.ts'), 'export const render = () => {};');
+
+    const substantiveAnswer = [
+      'Chào bạn, tôi sẽ phân tích nguyên nhân và giải thích cơ chế của hệ thống chi tiết như sau:',
+      '1. Vòng lặp AgentLoop tại src/main.ts điều phối các bước gọi công cụ.',
+      '2. Giao diện TUI tại src/ui.ts xử lý hiển thị cảnh báo cho người dùng.',
+      '3. Nguyên nhân gây ra cảnh báo là do số lần thử lại vượt quá ngưỡng an toàn cho phép.',
+      'Dưới đây là tóm tắt các điểm cần lưu ý để cấu hình hệ thống vận hành trơn tru hơn.',
+    ].join('\n\n');
+
+    const llm = new ScriptedCompletionLLM([
+      { text: substantiveAnswer, toolCalls: [] },
+    ]);
+    const session = new Session();
+    session.addUserMessage('Nguyên nhân khiến TUI hiển thị cảnh báo này và cơ chế vận hành?');
+    const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 3, workspace });
+    const result = await loop.run(session);
+    assert.equal(result, substantiveAnswer);
+    assert.equal(llm.calls, 1);
+  } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+

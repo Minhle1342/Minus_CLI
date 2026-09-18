@@ -10,6 +10,7 @@ export * from './components/TelemetryBar.js';
 export * from './components/StepStream.js';
 export * from './components/LiveReasoningBox.js';
 export * from './components/DiffPreviewBox.js';
+export * from './components/PermissionPromptBox.js';
 export * from './components/InputPromptBar.js';
 export * from './components/App.js';
 
@@ -27,12 +28,13 @@ export function renderInkApp(
   options: {
     onSubmitPrompt?: (prompt: string) => void;
     onAbort?: () => void;
+    patchConsole?: boolean;
   } = {}
 ): InkAppHandle {
   const instance = render(
     <App store={store} onSubmitPrompt={options.onSubmitPrompt} onAbort={options.onAbort} />,
     {
-      patchConsole: false,
+      patchConsole: options.patchConsole ?? true,
     }
   );
 

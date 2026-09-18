@@ -7,6 +7,7 @@ import { TelemetryBar } from './TelemetryBar.js';
 import { StepStream } from './StepStream.js';
 import { LiveReasoningBox } from './LiveReasoningBox.js';
 import { DiffPreviewBox } from './DiffPreviewBox.js';
+import { PermissionPromptBox } from './PermissionPromptBox.js';
 import { InputPromptBar } from './InputPromptBar.js';
 
 interface AppProps {
@@ -44,6 +45,15 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
       onAbort();
     } else {
       store.abortCurrent();
+    }
+  };
+
+  const handleResolvePermission = (approved: boolean, rememberSession?: boolean) => {
+    if (state.activePermission) {
+      try {
+        state.activePermission.resolve(approved, rememberSession);
+      } catch {}
+      store.dispatch({ type: 'RESOLVE_PERMISSION' });
     }
   };
 
@@ -121,12 +131,20 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
         </Box>
       )}
 
-      {/* 10. Input Prompt Bar (when idle or ready, supports Esc/Ctrl+C abort) */}
+      {/* 10. Active Permission Request Modal */}
+      {state.activePermission && (
+        <PermissionPromptBox
+          permission={state.activePermission}
+          onResolve={handleResolvePermission}
+        />
+      )}
+
+      {/* 11. Input Prompt Bar (when idle or ready, disabled while tool/thinking/permission is active) */}
       <InputPromptBar
         onSubmit={handleSubmit}
         onToggleCompact={handleToggleCompact}
         onAbort={handleAbort}
-        disabled={state.status === 'executing_tool' || state.status === 'thinking'}
+        disabled={state.status === 'executing_tool' || state.status === 'thinking' || Boolean(state.activePermission)}
         workspacePath={state.workspacePath}
       />
     </Box>

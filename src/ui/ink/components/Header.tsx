@@ -19,7 +19,9 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   activePhase,
 }) => {
-  const shortWorkspace = workspacePath.length > 30 ? `…${workspacePath.slice(-28)}` : workspacePath;
+  const safeWorkspace = workspacePath || '';
+  const shortWorkspace = safeWorkspace.length > 30 ? `…${safeWorkspace.slice(-28)}` : safeWorkspace;
+  const safeSandbox = (sandboxMode || 'local').toUpperCase();
 
   let statusColor = 'gray';
   let statusLabel = 'IDLE';
@@ -45,7 +47,7 @@ export const Header: React.FC<HeaderProps> = ({
           <Text color="gray">│</Text>
           <Text color="white">🤖 {modelName}</Text>
           <Text color="gray">│</Text>
-          <Text color="white">🛡️  {sandboxMode.toUpperCase()}</Text>
+          <Text color="white">🛡️  {safeSandbox}</Text>
         </Box>
         <Box gap={1}>
           <Text color="gray">📁 {shortWorkspace}</Text>

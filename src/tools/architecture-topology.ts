@@ -1,59 +1,96 @@
-import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
-import { Workspace } from '../workspace/workspace.js';
-import { CodebaseIntelligenceService } from './codebase-intelligence.js';
+import { Type } from "@google/genai";
+import { ToolDefinition } from "./types.js";
+import { Workspace } from "../workspace/workspace.js";
+import { CodebaseIntelligenceService } from "./codebase-intelligence.js";
 
 let sharedIntelligenceService: CodebaseIntelligenceService | undefined;
 
-export function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceService {
+export function getIntelligenceService(
+  workspace: Workspace,
+): CodebaseIntelligenceService {
   if (!sharedIntelligenceService) {
     sharedIntelligenceService = new CodebaseIntelligenceService(workspace);
   }
   return sharedIntelligenceService;
 }
 
-export function createGetArchitectureTopologyTool(service?: CodebaseIntelligenceService): ToolDefinition {
+export function createGetArchitectureTopologyTool(
+  service?: CodebaseIntelligenceService,
+): ToolDefinition {
   return {
-    name: 'get_architecture_topology',
+    name: "get_architecture_topology",
     description:
-      'Phân tích bản đồ kiến trúc & topo phân tầng của codebase (Controllers, Services, Repositories, UI, Tools, Config, Utils, Tests). ' +
-      'Sử dụng TypeScript Compiler AST & Module Resolution để giải quyết chính xác đường dẫn import (bao gồm tsconfig paths aliases). ' +
-      'Tự động phát hiện Circular Dependencies (vòng lặp phụ thuộc), vi phạm phân tầng Clean Architecture, và tính toán chỉ số ghép nối Robert C. Martin (Afferent/Efferent coupling, Instability, Hub nodes). ' +
-      'Hỗ trợ tham số mode ("summary" | "detailed" | "full") để tối ưu hóa cửa sổ ngữ cảnh token cho LLM.',
+      "Phân tích bản đồ kiến trúc & topo phân tầng của codebase (Controllers, Services, Repositories, UI, Tools, Config, Utils, Tests). " +
+      "Sử dụng TypeScript Compiler AST & Module Resolution để giải quyết chính xác đường dẫn import (bao gồm tsconfig paths aliases). " +
+      "Tự động phát hiện Circular Dependencies (vòng lặp phụ thuộc), vi phạm phân tầng Clean Architecture, và tính toán chỉ số ghép nối Robert C. Martin (Afferent/Efferent coupling, Instability, Hub nodes). " +
+      'Hỗ trợ tham số mode ("summary" | "detailed" | "full") để tối ưu hóa cửa sổ ngữ cảnh token cho LLM. ' +
+      "Hỗ trợ pagination cho layers/files (maxLayers, maxFilesPerLayer) và trả về truncated flag khi bị cắt.",
     parameters: {
       type: Type.OBJECT,
       properties: {
         entryDir: {
           type: Type.STRING,
-          description: 'Thư mục gốc bắt đầu quét topo (mặc định "src" hoặc ".").',
+          description:
+            'Thư mục gốc bắt đầu quét topo (mặc định "src" hoặc ".").',
         },
         mode: {
           type: Type.STRING,
           description:
-            'Chế độ hiển thị kết quả nhằm tối ưu token: ' +
+            "Chế độ hiển thị kết quả nhằm tối ưu token: " +
             '"summary" (mặc định - trả về số lượng tầng, metrics bất ổn định, top hub nodes, các chu trình vòng lặp và vi phạm phân tầng; tiết kiệm >90% token), ' +
             '"detailed" (bao gồm danh sách file cụ thể từng tầng), ' +
             '"full" (trả về toàn bộ ma trận dependencyGraph thô của tất cả các file).',
-          enum: ['summary', 'detailed', 'full'],
+          enum: ["summary", "detailed", "full"],
         },
         focusLayer: {
           type: Type.STRING,
           description:
             'Tùy chọn lọc chỉ xem thông tin của một tầng kiến trúc cụ thể (ví dụ: "controller", "service", "repository", "ui", "tools", "utils", "config", "test").',
-          enum: ['controller', 'service', 'repository', 'ui', 'tools', 'utils', 'config', 'test', 'other'],
+          enum: [
+            "controller",
+            "service",
+            "repository",
+            "ui",
+            "tools",
+            "utils",
+            "config",
+            "test",
+            "other",
+          ],
         },
         forceRefresh: {
           type: Type.BOOLEAN,
-          description: 'Bỏ qua bộ nhớ đệm 30s và quét mới toàn bộ từ đĩa (mặc định false).',
+          description:
+            "Bỏ qua bộ nhớ đệm 30s và quét mới toàn bộ từ đĩa (mặc định false).",
+        },
+        maxLayers: {
+          type: Type.INTEGER,
+          description:
+            "Số lượng tầng kiến trúc tối đa trả về (mặc định: tất cả). Dùng cho pagination.",
+        },
+        maxFilesPerLayer: {
+          type: Type.INTEGER,
+          description:
+            "Số file tối đa mỗi tầng (mặc định: 100). Dùng cho pagination.",
         },
       },
       required: [],
     },
-    async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-      const entryDir = args.entryDir ? String(args.entryDir).trim() : 'src';
-      const mode = (args.mode as 'summary' | 'detailed' | 'full') || 'summary';
-      const focusLayer = args.focusLayer ? String(args.focusLayer).trim() : undefined;
+    async execute(
+      args: Record<string, any>,
+      workspace: Workspace,
+    ): Promise<Record<string, any>> {
+      const entryDir = args.entryDir ? String(args.entryDir).trim() : "src";
+      const mode = (args.mode as "summary" | "detailed" | "full") || "summary";
+      const focusLayer = args.focusLayer
+        ? String(args.focusLayer).trim()
+        : undefined;
       const forceRefresh = Boolean(args.forceRefresh);
+      const maxLayers = Math.max(1, Number(args.maxLayers) || 0) || undefined;
+      const maxFilesPerLayer = Math.max(
+        1,
+        Number(args.maxFilesPerLayer) || 100,
+      );
 
       const engine = service || getIntelligenceService(workspace);
       const rawTopology = engine.getArchitectureTopology(entryDir, {
@@ -68,9 +105,50 @@ export function createGetArchitectureTopologyTool(service?: CodebaseIntelligence
         layers = { [focusLayer]: layers[focusLayer] };
       }
 
+      // Apply pagination caps
+      let layersTotal = Object.keys(layers).length;
+      let filesTotal = 0;
+      for (const layer of Object.values(layers)) {
+        filesTotal += layer.files.length;
+      }
+      let truncated = false;
+
+      if (maxLayers || maxFilesPerLayer < Infinity) {
+        const layerKeys = Object.keys(layers);
+        const limitedLayers: typeof layers = {};
+        let layerCount = 0;
+        for (const key of layerKeys) {
+          if (maxLayers && layerCount >= maxLayers) {
+            truncated = true;
+            break;
+          }
+          const layer = layers[key];
+          if (maxFilesPerLayer && layer.files.length > maxFilesPerLayer) {
+            limitedLayers[key] = {
+              ...layer,
+              files: layer.files.slice(0, maxFilesPerLayer),
+            };
+            truncated = true;
+          } else {
+            limitedLayers[key] = layer;
+          }
+          layerCount++;
+        }
+        layers = limitedLayers;
+      }
+
+      let layersReturned = Object.keys(layers).length;
+      let filesReturned = 0;
+      for (const layer of Object.values(layers)) {
+        filesReturned += layer.files.length;
+      }
+
       // Xây dựng response phù hợp với mode theo nguyên lý Tool Design
-      if (mode === 'summary') {
-        const layerSummaries: Record<string, { name: string; fileCount: number }> = {};
+      if (mode === "summary") {
+        const layerSummaries: Record<
+          string,
+          { name: string; fileCount: number }
+        > = {};
         for (const [key, layer] of Object.entries(layers)) {
           layerSummaries[key] = {
             name: layer.name,
@@ -80,7 +158,7 @@ export function createGetArchitectureTopologyTool(service?: CodebaseIntelligence
 
         return {
           success: true,
-          mode: 'summary',
+          mode: "summary",
           topology: {
             totalFiles: rawTopology.totalFiles,
             totalDependencies: rawTopology.totalDependencies,
@@ -96,14 +174,21 @@ export function createGetArchitectureTopologyTool(service?: CodebaseIntelligence
             averageInstability: rawTopology.metrics?.averageInstability,
             topHubs: rawTopology.metrics?.hubNodes.slice(0, 3),
           },
-          hint: 'To see detailed file lists per layer, use mode="detailed". To retrieve the full raw dependency graph, use mode="full".',
+          pagination: {
+            layersTotal,
+            layersReturned,
+            filesTotal,
+            filesReturned,
+            truncated,
+          },
+          hint: 'To see detailed file lists per layer, use mode="detailed". To retrieve the full raw dependency graph, use mode="full". Use maxLayers/maxFilesPerLayer for pagination.',
         };
       }
 
-      if (mode === 'detailed') {
+      if (mode === "detailed") {
         return {
           success: true,
-          mode: 'detailed',
+          mode: "detailed",
           topology: {
             totalFiles: rawTopology.totalFiles,
             totalDependencies: rawTopology.totalDependencies,
@@ -112,16 +197,30 @@ export function createGetArchitectureTopologyTool(service?: CodebaseIntelligence
             layerViolations: rawTopology.layerViolations,
             metrics: rawTopology.metrics,
           },
+          pagination: {
+            layersTotal,
+            layersReturned,
+            filesTotal,
+            filesReturned,
+            truncated,
+          },
         };
       }
 
       // mode === 'full'
       return {
         success: true,
-        mode: 'full',
+        mode: "full",
         topology: {
           ...rawTopology,
           layers,
+        },
+        pagination: {
+          layersTotal,
+          layersReturned,
+          filesTotal,
+          filesReturned,
+          truncated,
         },
       };
     },
@@ -129,4 +228,3 @@ export function createGetArchitectureTopologyTool(service?: CodebaseIntelligence
 }
 
 export const getArchitectureTopologyTool = createGetArchitectureTopologyTool();
-

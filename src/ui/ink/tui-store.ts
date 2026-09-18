@@ -51,6 +51,7 @@ export class StreamBatcher {
       this.timer = setTimeout(() => {
         this.flush();
       }, this.flushIntervalMs);
+      this.timer.unref?.();
     }
   }
 
@@ -62,7 +63,9 @@ export class StreamBatcher {
     if (this.buffer.length > 0) {
       const chunk = this.buffer;
       this.buffer = '';
-      this.onFlush(chunk);
+      try {
+        this.onFlush(chunk);
+      } catch {}
     }
   }
 
@@ -74,6 +77,8 @@ export class StreamBatcher {
     this.buffer = '';
   }
 }
+
+let stepSequenceCounter = 0;
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
   switch (action.type) {
@@ -108,7 +113,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
     case 'TOOL_START': {
       const newStepItem: TuiStepItem = {
-        id: `step-${action.step}-${Date.now()}`,
+        id: `step-${action.step}-${Date.now()}-${++stepSequenceCounter}`,
         step: action.step,
         maxSteps: action.maxSteps,
         phase: action.phase,
@@ -146,11 +151,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           tokens: action.tokens,
         };
       }
+      const hasRunningTools = updatedSteps.some((s) => s.status === 'running');
       return {
         ...state,
-        status: 'thinking',
-        isThinking: false,
-        thinkingStartedAt: null,
+        status: hasRunningTools ? 'executing_tool' : 'thinking',
+        isThinking: !hasRunningTools,
+        thinkingStartedAt: hasRunningTools ? state.thinkingStartedAt : null,
         steps: updatedSteps,
       };
     }
@@ -355,9 +361,16 @@ export class TuiStore extends EventEmitter {
 
     const onAbortRequested = () => {
       batcher.clear();
-      // Forward abort signal to kernel if supported
+      // Forward abort signal to kernel and event bus
+      try {
+        events.emit('agent:abort');
+        events.emit('abort');
+      } catch {}
       if (typeof (kernel as any).cancelCurrentTask === 'function') {
         (kernel as any).cancelCurrentTask();
+      }
+      if (typeof (kernel as any).abort === 'function') {
+        (kernel as any).abort();
       }
     };
 

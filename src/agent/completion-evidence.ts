@@ -278,6 +278,10 @@ export class CompletionEvidenceGate {
         || /\b(?:da\s+(?:sua|fix|trien\s+khai|khac\s+phuc)\s+(?:tu\s+truoc|truoc\s+do|san))\b/.test(sentence)
         || /\b(?:co\s+san|von\s+da\s+duoc|da\s+ton\s+tai\s+tu\s+truoc)\b/.test(sentence);
 
+      const isDocOrAnalysisClaim =
+        /\b(?:viet|tao|cap\s+nhat|written|wrote|created|updated)\b.{0,40}\b(?:giai\s+thich|phan\s+tich|bao\s+cao|tai\s+lieu|cau\s+tra\s+loi|tom\s+tat|danh\s+sach|explanation|analysis|report|documentation|summary|overview|answer|response|findings)\b/.test(sentence);
+      if (isDocOrAnalysisClaim) return false;
+
       return isDirect && !isPassiveOrHistorical;
     });
 

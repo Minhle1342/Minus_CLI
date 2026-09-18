@@ -8,27 +8,29 @@ interface DiffPreviewBoxProps {
 
 export const DiffPreviewBox: React.FC<DiffPreviewBoxProps> = ({ diff }) => {
   const maxLines = 15;
-  const renderLines = diff.lines.slice(0, maxLines);
-  const remainingCount = diff.lines.length - maxLines;
+  const lines = Array.isArray(diff?.lines) ? diff.lines : [];
+  const renderLines = lines.slice(0, maxLines);
+  const remainingCount = lines.length - maxLines;
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
         <Text color="red" bold>
-          {diff.isAutoApproved ? '⚡ [AUTO-APPROVED DIFF]' : '📝 [DIFF PREVIEW]'}: {diff.file}
+          {diff?.isAutoApproved ? '⚡ [AUTO-APPROVED DIFF]' : '📝 [DIFF PREVIEW]'}: {diff?.file || 'unknown'}
         </Text>
       </Box>
       <Box flexDirection="column" marginTop={0}>
         {renderLines.map((line, idx) => {
+          const text = typeof line === 'string' ? line : String(line ?? '');
           let lineColor = 'gray';
-          if (line.startsWith('+')) lineColor = 'white';
-          else if (line.startsWith('-')) lineColor = 'red';
-          else if (line.startsWith('@@')) lineColor = 'red';
-          else if (line.startsWith('---') || line.startsWith('+++')) lineColor = 'white';
+          if (text.startsWith('+')) lineColor = 'white';
+          else if (text.startsWith('-')) lineColor = 'red';
+          else if (text.startsWith('@@')) lineColor = 'red';
+          else if (text.startsWith('---') || text.startsWith('+++')) lineColor = 'white';
 
           return (
-            <Text key={idx} color={lineColor}>
-              {line.length > 95 ? `${line.slice(0, 92)}…` : line}
+            <Text key={`diff-line-${idx}`} color={lineColor}>
+              {text.length > 95 ? `${text.slice(0, 92)}…` : text}
             </Text>
           );
         })}

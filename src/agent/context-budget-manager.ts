@@ -1,16 +1,17 @@
-import crypto from 'node:crypto';
-import type { Content, FunctionDeclaration } from '@google/genai';
-import { ExactTokenizer } from './exact-tokenizer.js';
+import crypto from "node:crypto";
+import type { Content, FunctionDeclaration } from "@google/genai";
+import { ExactTokenizer } from "./exact-tokenizer.js";
 import {
   ContextCompactor,
   type CompactionOptions,
   type CompactionStats,
   type MaskedObservationRecord,
-} from './context-compactor.js';
-import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
+} from "./context-compactor.js";
+import type { ArchivedTurnDocument } from "../context/turn-memory-retriever.js";
 
-export type ContextManagementMode = 'legacy' | 'shadow' | 'enforce';
-export type TokenCountSource = 'provider' | 'tokenizer' | 'calibrated' | 'conservative';
+export type ContextManagementMode = "legacy" | "shadow" | "enforce" | "auto";
+export type TokenCountSource =
+  "provider" | "tokenizer" | "calibrated" | "conservative";
 
 export interface ModelRequestEnvelope {
   provider: string;
@@ -37,19 +38,23 @@ export interface RequestTokenCount {
 
 export interface RequestTokenCounter {
   count(envelope: ModelRequestEnvelope): Promise<RequestTokenCount>;
-  observe?(model: string, estimatedInputTokens: number, actualInputTokens: number): void;
+  observe?(
+    model: string,
+    estimatedInputTokens: number,
+    actualInputTokens: number,
+  ): void;
 }
 
 export interface CompactionEvidenceRef {
   value: string;
   sourceHash: string;
-  sourceKind: 'history' | 'tool-result' | 'archive';
+  sourceKind: "history" | "tool-result" | "archive";
 }
 
 export interface VerificationEvidenceState {
   command?: string;
   exitCode?: number;
-  status: 'passed' | 'failed' | 'unknown';
+  status: "passed" | "failed" | "unknown";
   sourceHash: string;
 }
 
@@ -77,7 +82,7 @@ export interface ContextPreparationResult {
   checkpointObservations?: MaskedObservationRecord[];
   state?: CompactionStateV1;
   withinBudget: boolean;
-  failureReason?: 'CONTEXT_BUDGET_UNSATISFIABLE';
+  failureReason?: "CONTEXT_BUDGET_UNSATISFIABLE";
 }
 
 export interface ContextBudgetManagerOptions {
@@ -86,13 +91,58 @@ export interface ContextBudgetManagerOptions {
   counter?: RequestTokenCounter;
 }
 
-export interface ContextPrepareOptions extends Omit<CompactionOptions, 'requestOverheadTokens' | 'outputReserveTokens' | 'modelName'> {
+export interface ContextPrepareOptions extends Omit<
+  CompactionOptions,
+  "requestOverheadTokens" | "outputReserveTokens" | "modelName"
+> {
   previousState?: CompactionStateV1;
 }
 
-export function resolveContextManagementMode(value?: string): ContextManagementMode {
+export function resolveContextManagementMode(
+  value?: string,
+): ContextManagementMode {
   const normalized = value?.trim().toLowerCase();
-  return normalized === 'shadow' || normalized === 'enforce' ? normalized : 'legacy';
+  if (
+    normalized === "legacy" ||
+    normalized === "shadow" ||
+    normalized === "enforce" ||
+    normalized === "auto"
+  ) {
+    return normalized;
+  }
+  return "auto";
+}
+
+const KNOWN_PROVIDERS = new Set([
+  "gemini",
+  "google",
+  "vertex",
+  "openai",
+  "gpt",
+  "anthropic",
+  "claude",
+  "groq",
+  "cerebras",
+  "sambanova",
+  "mistral",
+  "cohere",
+  "deepseek",
+  "xai",
+  "grok",
+]);
+
+function isKnownProvider(provider: string): boolean {
+  const lower = provider.toLowerCase();
+  return (
+    KNOWN_PROVIDERS.has(lower) ||
+    lower.includes("gemini") ||
+    lower.includes("gpt") ||
+    lower.includes("claude")
+  );
+}
+
+function resolveAutoMode(provider: string): "legacy" | "enforce" {
+  return isKnownProvider(provider) ? "enforce" : "legacy";
 }
 
 /**
@@ -104,38 +154,56 @@ export class CalibratedRequestTokenCounter implements RequestTokenCounter {
   private readonly observedRatios = new Map<string, number[]>();
 
   async count(envelope: ModelRequestEnvelope): Promise<RequestTokenCount> {
-    const historyTokens = ContextCompactor.countHistoryTokens(envelope.history, envelope.model);
+    const historyTokens = ContextCompactor.countHistoryTokens(
+      envelope.history,
+      envelope.model,
+    );
     const staticText = JSON.stringify({
       systemPrompt: envelope.systemPrompt,
       tools: envelope.tools,
-      dynamicContext: envelope.dynamicContext || '',
+      dynamicContext: envelope.dynamicContext || "",
     });
-    const nonHistoryTokens = ExactTokenizer.countTokens(staticText, envelope.model);
+    const nonHistoryTokens = ExactTokenizer.countTokens(
+      staticText,
+      envelope.model,
+    );
     const inputTokens = historyTokens + nonHistoryTokens;
     const ratios = this.observedRatios.get(envelope.model.toLowerCase()) || [];
     let calibratedRatio = 1.0;
     if (ratios.length > 0) {
-      const validRatios = ratios.filter((r) => Number.isFinite(r) && r >= 0.5 && r <= 2.5);
+      const validRatios = ratios.filter(
+        (r) => Number.isFinite(r) && r >= 0.5 && r <= 2.5,
+      );
       if (validRatios.length > 0) {
         const sorted = [...validRatios].sort((a, b) => a - b);
-        const p90Index = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.90));
+        const p90Index = Math.min(
+          sorted.length - 1,
+          Math.floor(sorted.length * 0.9),
+        );
         calibratedRatio = sorted[p90Index];
       }
     }
     // Giới hạn sai số biên an toàn trong khoảng [0.05, 0.20] (tối đa 20% margin, không bùng nổ do outlier)
-    const errorMarginRatio = Math.min(0.20, Math.max(0.05, calibratedRatio * 1.05 - 1));
+    const errorMarginRatio = Math.min(
+      0.2,
+      Math.max(0.05, calibratedRatio * 1.05 - 1),
+    );
     return {
       inputTokens,
       upperBoundTokens: Math.ceil(inputTokens * (1 + errorMarginRatio)),
       historyTokens,
       nonHistoryTokens,
-      source: ratios.length > 0 ? 'calibrated' : 'tokenizer',
+      source: ratios.length > 0 ? "calibrated" : "tokenizer",
       hardBound: false,
       errorMarginRatio,
     };
   }
 
-  observe(model: string, estimatedInputTokens: number, actualInputTokens: number): void {
+  observe(
+    model: string,
+    estimatedInputTokens: number,
+    actualInputTokens: number,
+  ): void {
     if (estimatedInputTokens <= 0 || actualInputTokens <= 0) return;
     const ratio = actualInputTokens / estimatedInputTokens;
     // Bỏ qua các outlier bất thường do turn rỗng, lệch cache hoặc chênh lệch snapshot
@@ -149,16 +217,24 @@ export class CalibratedRequestTokenCounter implements RequestTokenCounter {
 }
 
 function textParts(history: Content[]): string[] {
-  return history.flatMap((message) => (message.parts || []))
-    .map((part: any) => typeof part.text === 'string' ? part.text.trim() : '')
+  return history
+    .flatMap((message) => message.parts || [])
+    .map((part: any) => (typeof part.text === "string" ? part.text.trim() : ""))
     .filter(Boolean);
 }
 
-function evidence(value: string, sourceKind: CompactionEvidenceRef['sourceKind']): CompactionEvidenceRef {
+function evidence(
+  value: string,
+  sourceKind: CompactionEvidenceRef["sourceKind"],
+): CompactionEvidenceRef {
   return {
     value,
     sourceKind,
-    sourceHash: crypto.createHash('sha256').update(value).digest('hex').slice(0, 16),
+    sourceHash: crypto
+      .createHash("sha256")
+      .update(value)
+      .digest("hex")
+      .slice(0, 16),
   };
 }
 
@@ -170,43 +246,73 @@ function buildState(
   const texts = textParts(history);
   const archived = stats.archivedTurns || [];
   const masked = stats.maskedObservations || [];
-  const decisions = archived.flatMap((turn: ArchivedTurnDocument) => turn.keyDecisions || []);
+  const decisions = archived.flatMap(
+    (turn: ArchivedTurnDocument) => turn.keyDecisions || [],
+  );
   const files = [
-    ...archived.flatMap((turn: ArchivedTurnDocument) => turn.filesTouched || []),
-    ...masked.map((item: MaskedObservationRecord) => item.targetPath || ''),
+    ...archived.flatMap(
+      (turn: ArchivedTurnDocument) => turn.filesTouched || [],
+    ),
+    ...masked.map((item: MaskedObservationRecord) => item.targetPath || ""),
   ].filter(Boolean);
   const verification: VerificationEvidenceState[] = [];
   const commandCalls = new Map<string, string>();
 
   for (const message of history) {
     for (const part of message.parts || []) {
-      const call = (part as any).functionCall as { id?: string; name?: string; args?: Record<string, any> } | undefined;
-      if (call?.id && call.name === 'run_command') {
-        const command = typeof call.args?.command === 'string' ? call.args.command.trim() : '';
+      const call = (part as any).functionCall as
+        { id?: string; name?: string; args?: Record<string, any> } | undefined;
+      if (call?.id && call.name === "run_command") {
+        const command =
+          typeof call.args?.command === "string"
+            ? call.args.command.trim()
+            : "";
         if (command) commandCalls.set(call.id, command);
       }
-      const response = (part as any).functionResponse?.response as Record<string, any> | undefined;
+      const response = (part as any).functionResponse?.response as
+        Record<string, any> | undefined;
       if (!response) continue;
-      const responseId = String((part as any).functionResponse?.id || '');
-      const command = commandCalls.get(responseId)
-        || (typeof response.command === 'string' ? response.command : undefined);
-      const exitCode = typeof response.exitCode === 'number' ? response.exitCode : undefined;
+      const responseId = String((part as any).functionResponse?.id || "");
+      const command =
+        commandCalls.get(responseId) ||
+        (typeof response.command === "string" ? response.command : undefined);
+      const exitCode =
+        typeof response.exitCode === "number" ? response.exitCode : undefined;
       const succeeded = response.success === true || exitCode === 0;
-      const failed = response.success === false || (exitCode !== undefined && exitCode !== 0);
+      const failed =
+        response.success === false ||
+        (exitCode !== undefined && exitCode !== 0);
       if (!command || (!succeeded && !failed)) continue;
-      const serialized = JSON.stringify({ responseId, command, exitCode, success: response.success });
+      const serialized = JSON.stringify({
+        responseId,
+        command,
+        exitCode,
+        success: response.success,
+      });
       verification.push({
         command,
         exitCode,
-        status: succeeded ? 'passed' : 'failed',
-        sourceHash: crypto.createHash('sha256').update(serialized).digest('hex').slice(0, 16),
+        status: succeeded ? "passed" : "failed",
+        sourceHash: crypto
+          .createHash("sha256")
+          .update(serialized)
+          .digest("hex")
+          .slice(0, 16),
       });
     }
   }
 
-  const newDecisionRefs = Array.from(new Set(decisions)).slice(0, 20).map((value) => evidence(value, 'archive'));
-  const newFileRefs = Array.from(new Set(files)).slice(0, 50).map((value) => evidence(value, 'archive'));
-  const mergeRefs = (older: CompactionEvidenceRef[] = [], newer: CompactionEvidenceRef[] = [], limit: number) => {
+  const newDecisionRefs = Array.from(new Set(decisions))
+    .slice(0, 20)
+    .map((value) => evidence(value, "archive"));
+  const newFileRefs = Array.from(new Set(files))
+    .slice(0, 50)
+    .map((value) => evidence(value, "archive"));
+  const mergeRefs = (
+    older: CompactionEvidenceRef[] = [],
+    newer: CompactionEvidenceRef[] = [],
+    limit: number,
+  ) => {
     const byHash = new Map<string, CompactionEvidenceRef>();
     for (const item of [...older, ...newer]) byHash.set(item.sourceHash, item);
     return Array.from(byHash.values()).slice(-limit);
@@ -219,13 +325,28 @@ function buildState(
   return {
     schemaVersion: 1,
     generation: (previous?.generation || 0) + 1,
-    sourceFingerprint: crypto.createHash('sha256').update(JSON.stringify(history)).digest('hex'),
-    objective: previous?.objective || (texts[0] ? evidence(texts[0].slice(0, 1_000), 'history') : undefined),
+    sourceFingerprint: crypto
+      .createHash("sha256")
+      .update(JSON.stringify(history))
+      .digest("hex"),
+    objective:
+      previous?.objective ||
+      (texts[0] ? evidence(texts[0].slice(0, 1_000), "history") : undefined),
     decisions: mergeRefs(previous?.decisions, newDecisionRefs, 20),
     files: mergeRefs(previous?.files, newFileRefs, 50),
     verification: Array.from(verificationByHash.values()).slice(-20),
-    archivedTurnIds: Array.from(new Set([...(previous?.archivedTurnIds || []), ...archived.map((turn) => turn.id)])),
-    maskedObservationIds: Array.from(new Set([...(previous?.maskedObservationIds || []), ...masked.map((item) => item.id)])),
+    archivedTurnIds: Array.from(
+      new Set([
+        ...(previous?.archivedTurnIds || []),
+        ...archived.map((turn) => turn.id),
+      ]),
+    ),
+    maskedObservationIds: Array.from(
+      new Set([
+        ...(previous?.maskedObservationIds || []),
+        ...masked.map((item) => item.id),
+      ]),
+    ),
   };
 }
 
@@ -238,8 +359,11 @@ export class ContextBudgetManager {
     private readonly compactor: ContextCompactor,
     options: ContextBudgetManagerOptions = {},
   ) {
-    this.mode = options.mode || 'legacy';
-    this.triggerRatio = Math.min(0.95, Math.max(0.5, options.triggerRatio ?? 0.75));
+    this.mode = options.mode || "auto";
+    this.triggerRatio = Math.min(
+      0.95,
+      Math.max(0.5, options.triggerRatio ?? 0.75),
+    );
     this.counter = options.counter || new CalibratedRequestTokenCounter();
   }
 
@@ -248,14 +372,24 @@ export class ContextBudgetManager {
     options: ContextPrepareOptions = {},
   ): Promise<ContextPreparationResult> {
     const before = await this.counter.count(envelope);
-    const usableInputTokens = Math.max(0, envelope.maxInputTokens - envelope.outputReserveTokens);
+    const usableInputTokens = Math.max(
+      0,
+      envelope.maxInputTokens - envelope.outputReserveTokens,
+    );
     const targetInputTokens = Math.min(
       envelope.maxInputTokens,
       Math.max(1, envelope.targetInputTokens ?? envelope.maxInputTokens),
     );
-    const targetUsableInputTokens = Math.max(0, targetInputTokens - envelope.outputReserveTokens);
-    const shouldCompact = before.upperBoundTokens > Math.floor(targetUsableInputTokens * this.triggerRatio);
-    const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(envelope.history);
+    const targetUsableInputTokens = Math.max(
+      0,
+      targetInputTokens - envelope.outputReserveTokens,
+    );
+    const shouldCompact =
+      before.upperBoundTokens >
+      Math.floor(targetUsableInputTokens * this.triggerRatio);
+    const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(
+      envelope.history,
+    );
 
     if (!shouldCompact) {
       return {
@@ -279,21 +413,33 @@ export class ContextBudgetManager {
       modelName: envelope.model,
       maxInputTokens: Math.max(
         1,
-        Math.floor(targetUsableInputTokens / (1 + before.errorMarginRatio)) + envelope.outputReserveTokens,
+        Math.floor(targetUsableInputTokens / (1 + before.errorMarginRatio)) +
+          envelope.outputReserveTokens,
       ),
     };
-    const legacy = this.mode !== 'enforce'
+
+    // Resolve effective mode for this request (handles 'auto')
+    const effectiveMode =
+      this.mode === "auto" ? resolveAutoMode(envelope.provider) : this.mode;
+    const useEnforce = effectiveMode === "enforce";
+    const useLegacy = effectiveMode === "legacy";
+
+    const legacy = !useEnforce
       ? this.compactor.compact(envelope.history, baseOptions)
       : undefined;
-    const candidate = this.mode !== 'legacy'
-      ? this.compactor.compact(envelope.history, { ...baseOptions, enforceBudget: true })
+    const candidate = !useLegacy
+      ? this.compactor.compact(envelope.history, {
+          ...baseOptions,
+          enforceBudget: true,
+        })
       : undefined;
-    const selected = (this.mode === 'enforce' ? candidate! : legacy!) || candidate || legacy;
+    const selected = (useEnforce ? candidate! : legacy!) || candidate || legacy;
     const selectedEnvelope = { ...envelope, history: selected.messages };
     const after = await this.counter.count(selectedEnvelope);
-    const candidateAfter = this.mode === 'shadow' && candidate
-      ? await this.counter.count({ ...envelope, history: candidate.messages })
-      : undefined;
+    const candidateAfter =
+      this.mode === "shadow" && candidate
+        ? await this.counter.count({ ...envelope, history: candidate.messages })
+        : undefined;
     let finalSelected = selected;
     let finalAfter = after;
     let withinBudget = after.upperBoundTokens <= usableInputTokens;
@@ -301,19 +447,31 @@ export class ContextBudgetManager {
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
     if (!withinBudget && envelope.history.length > 2) {
-      const emergencyBudgetTokens = Math.max(1, usableInputTokens - before.nonHistoryTokens);
+      const emergencyBudgetTokens = Math.max(
+        1,
+        usableInputTokens - before.nonHistoryTokens,
+      );
       const emergencyCandidate = this.compactor.compact(selected.messages, {
         ...baseOptions,
         enforceBudget: true,
-        maxInputTokens: Math.max(1, emergencyBudgetTokens + envelope.outputReserveTokens),
+        maxInputTokens: Math.max(
+          1,
+          emergencyBudgetTokens + envelope.outputReserveTokens,
+        ),
         enableRollingTurns: true,
         preserveLastNTurns: 2,
         enableObservationMasking: true,
       });
       if (emergencyCandidate.stats.charsSaved > 0) {
-        const emergencyEnvelope = { ...envelope, history: emergencyCandidate.messages };
+        const emergencyEnvelope = {
+          ...envelope,
+          history: emergencyCandidate.messages,
+        };
         const emergencyAfter = await this.counter.count(emergencyEnvelope);
-        if (emergencyAfter.upperBoundTokens <= usableInputTokens || emergencyAfter.upperBoundTokens < finalAfter.upperBoundTokens) {
+        if (
+          emergencyAfter.upperBoundTokens <= usableInputTokens ||
+          emergencyAfter.upperBoundTokens < finalAfter.upperBoundTokens
+        ) {
           finalSelected = emergencyCandidate;
           finalAfter = emergencyAfter;
           withinBudget = emergencyAfter.upperBoundTokens <= usableInputTokens;
@@ -330,15 +488,23 @@ export class ContextBudgetManager {
       candidateAfter,
       compactionStats: finalSelected.stats,
       checkpointObservations,
-      state: buildState(finalSelected.messages, finalSelected.stats, previousState),
+      state: buildState(
+        finalSelected.messages,
+        finalSelected.stats,
+        previousState,
+      ),
       withinBudget,
-      ...(this.mode === 'enforce' && !withinBudget
-        ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const }
+      ...(effectiveMode === "enforce" && !withinBudget
+        ? { failureReason: "CONTEXT_BUDGET_UNSATISFIABLE" as const }
         : {}),
     };
   }
 
-  observeActualUsage(model: string, estimatedInputTokens: number, actualInputTokens?: number): void {
+  observeActualUsage(
+    model: string,
+    estimatedInputTokens: number,
+    actualInputTokens?: number,
+  ): void {
     if (actualInputTokens === undefined) return;
     this.counter.observe?.(model, estimatedInputTokens, actualInputTokens);
   }

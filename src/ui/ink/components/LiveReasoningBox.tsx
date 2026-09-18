@@ -42,7 +42,7 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
       <Box paddingX={1} marginY={0} gap={1}>
         <Text color="red" bold>🧠 Thinking:</Text>
         <Text color="white" italic>{truncatedSummary}</Text>
-        <Text color="dim">(Ctrl+O để xem chi tiết)</Text>
+        <Text color="gray" dimColor>(Ctrl+O để xem chi tiết)</Text>
       </Box>
     );
   }

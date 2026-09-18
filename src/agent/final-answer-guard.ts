@@ -59,12 +59,20 @@ export function hasUnfulfilledDeferredPromise(text: string): boolean {
     // Remove the introductory sentence only. Later promises are still checked.
     lines = lines.slice(1);
   }
+  const isSubstantialAnswer = text.trim().length > 150 && lines.filter((l) => l.trim()).length >= 2;
   return lines.some((line) => {
     const normalized = normalizeForMatching(line)
       .replace(/(?:if you (?:want|would like)|if needed|neu ban (?:muon|can)|neu can)[^.!?]*/g, ' ');
     if (/^(?:if |suppose |neu |gia su )/.test(normalized)) return false;
     if (/\b(?:proposed|proposal|recommendation|hypothetical|for example|de xuat|phuong an|gia dinh|vi du|minh hoa)\b/.test(normalized)
       && !/\b(?:i|we|toi|minh|em|chung toi)\s+(?:will|shall|se|can phai)\b/.test(normalized)) return false;
+    // In substantive answers, expository phrases like "Tôi sẽ phân tích / giải thích / trình bày / I will explain / analyze / breakdown" are explanatory rhetoric, not deferred execution.
+    if (isSubstantialAnswer) {
+      const isExpositoryPromise = /\b(?:i|we)\s+(?:will|shall|am going to)\s+(?:now\s+)?(?:explain|analy[sz]e|describe|clarify|detail|break down|outline|summarize|present|discuss)\b/.test(normalized)
+        || /\b(?:toi|chung toi|minh|em)\s+(?:se|du dinh|chuan bi)\s+(?:ngay\s+)?(?:giai thich|phan tich|trinh bay|lam ro|tong hop|tom tat|chia se|neu|chi ra|di sau)\b/.test(normalized);
+      if (isExpositoryPromise) return false;
+    }
+
     return /\b(?:i|we)\s+(?:will|shall|am going to|are going to|plan to|need to|intend to|am about to)\s+(?:now\s+)?(?:continue|proceed|retry|try|run|execute|test|benchmark|measure|inspect|investigate|switch|use|fix|check|analy[sz]e|work|implement|develop|create|write|code|design|redesign|refactor|modify|update|edit|change|patch|build|generate|add|remove|delete|configure|install)\b/.test(normalized)
       || /\b(?:i'll|we'll|i'm going to|we're going to)\s+(?:now\s+)?(?:continue|run|execute|test|inspect|investigate|fix|check|analy[sz]e|implement|create|write|design|refactor|modify|update|edit|build|add|remove|install)\b/.test(normalized)
       || /\b(?:toi|chung toi|minh|em)\s+(?:se|can phai|can|du dinh|chuan bi|se tien hanh|se bat dau)\s+(?:ngay\s+)?(?:tiep tuc|thu|chay|thuc hien|kiem thu|test|do|benchmark|kiem tra|dieu tra|chuyen|su dung|sua|phan tich|lam|tien hanh|thiet ke|trien khai|viet|code|tao|xay dung|chinh sua|cap nhat|thay the|them|xoa|cai dat|cau hinh|refactor|chuan doan)\b/.test(normalized);
@@ -338,10 +346,13 @@ export function verifyWorkspaceGrounding(
     const add = (raw: string) => {
       let candidate = raw.trim().replace(/^<|>$/g, '').replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+)?)$/, '');
       if (/^https?:|^app:|^codex:/i.test(candidate)) return;
-      try { candidate = decodeURIComponent(candidate); } catch { return; }
       candidate = candidate.replace(/^file:\/\/\//i, '').replace(/\\/g, '/');
       if (/^\/[a-z]:\//i.test(candidate)) candidate = candidate.slice(1);
-      if (candidate && !candidate.includes('node_modules/')) candidates.add(candidate);
+      if (candidate && !candidate.includes('node_modules/')) {
+        if (!/^(?:path\/|example\/|examples\/|samples?\/|foo\/|bar\/|\.{3}\/)/i.test(candidate)) {
+          candidates.add(candidate);
+        }
+      }
     };
     // Markdown targets can contain spaces inside <...>; retain line anchors until add().
     const withoutLinks = line.replace(/\[[^\]]*\]\((<[^>]+>|[^)]+)\)/g, (_, target: string) => {
@@ -380,6 +391,12 @@ export function evaluateArchitectureAnalysis(
   if (!detectArchitectureAnalysisIntent(context?.userRequest).isArchitectureQuery) return undefined;
   const grounding = verifyWorkspaceGrounding(answer, context?.workspace);
   if (grounding.invalidFiles.length) {
+    if (grounding.validFiles.length >= 2 && grounding.validFiles.length > grounding.invalidFiles.length) {
+      return {
+        allow: true,
+        advisories: [`Some referenced paths could not be found locally: ${grounding.invalidFiles.join(', ')}.`],
+      };
+    }
     return {
       allow: false, reason: 'unverified-architecture-claims', recovery: 'inspect-evidence',
       continuationPrompt: `[SYSTEM SOURCE CHECK]: ${grounding.reasons.join(' ')} Correct the citations using existing evidence, inspect the specific missing source if necessary, or label hypothetical paths as proposals. No minimum length or fixed outline is required.`,

@@ -57,6 +57,7 @@ import { ClassificationEngine } from '../control/classification-engine.js';
 import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
 import { ThisTurnToolGate, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
+import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 import { LatencyOrchestrator } from './latency-orchestrator.js';
@@ -3097,8 +3098,15 @@ export class AgentLoop {
 
       const completionState = getTurnCompletionState(session, turn);
       const hasCodeMutations = completionState.hasMutations;
-      const codeChangeRequired = initialTurnClassification.requiredCapabilities.includes('edit')
-        || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
+      const isExplorationOrReadOnly = !hasCodeMutations && (
+        initialTurnClassification.taskClass === 'exploration'
+        || initialTurnClassification.phase === 'explore'
+        || isReadOnlyRequest(turnUserRequest)
+      );
+      const codeChangeRequired = !isExplorationOrReadOnly && (
+        initialTurnClassification.requiredCapabilities.includes('edit')
+        || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
+      );
       const policyDecision = isSubagent
         ? { allow: true }
         : this.finalAnswerGuard.evaluate(finalAnswer, {
@@ -3138,7 +3146,7 @@ export class AgentLoop {
           completionState,
           evidenceDecision,
         });
-      const finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
+      let finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
           ? policyDecision

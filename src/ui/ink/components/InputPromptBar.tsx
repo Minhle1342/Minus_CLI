@@ -1,8 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { SLASH_COMMANDS } from '../../cli-ui.js';
 import { Workspace } from '../../../workspace/workspace.js';
 import { FileMentionEngine } from '../../../workspace/file-attachment.js';
+import {
+  LineEditorState,
+  insertText,
+  deleteBackward,
+  deleteForward,
+  deleteWordBackward,
+  deleteToStart,
+  deleteToEnd,
+  moveCursor,
+} from './input-line-editor.js';
 
 export interface InputPromptBarProps {
   onSubmit: (value: string) => void;
@@ -11,6 +21,8 @@ export interface InputPromptBarProps {
   disabled?: boolean;
   workspacePath?: string;
   workspace?: Workspace;
+  initialHistory?: string[];
+  maxHistory?: number;
 }
 
 interface SuggestionItem {
@@ -22,22 +34,6 @@ interface SuggestionItem {
   mentionEnd?: number;
 }
 
-function useDebounce<T>(value: T, delay: number = 150): T {
-  const [debouncedValue, setDebouncedValue] = useState<T>(value);
-
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedValue(value);
-    }, delay);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [value, delay]);
-
-  return debouncedValue;
-}
-
 export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   onSubmit,
   onToggleCompact,
@@ -45,14 +41,19 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   disabled = false,
   workspacePath,
   workspace: externalWorkspace,
+  initialHistory = [],
+  maxHistory = 100,
 }) => {
   const [value, setValue] = useState('');
+  const [cursorOffset, setCursorOffset] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isDismissed, setIsDismissed] = useState(false);
   const [hasNavigated, setHasNavigated] = useState(false);
 
-  // Debounce input value for heavy file-system scanning in @mentions
-  const debouncedValue = useDebounce(value, 150);
+  // Command History
+  const [history, setHistory] = useState<string[]>(initialHistory);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+  const [tempValue, setTempValue] = useState<string>('');
 
   // Khởi tạo hoặc tái sử dụng Workspace instance để quét gợi ý file
   const activeWorkspace = useMemo(() => {
@@ -64,21 +65,19 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     }
   }, [externalWorkspace, workspacePath]);
 
-  // Tính toán danh sách gợi ý Slash Commands hoặc File Mentions
+  // Tính toán danh sách gợi ý Slash Commands hoặc File Mentions theo thời gian thực (đồng bộ vị trí con trỏ)
   const { suggestions, suggestionType } = useMemo<{
     suggestions: SuggestionItem[];
     suggestionType: 'command' | 'file' | 'none';
   }>(() => {
-    const trimmed = value.trimStart();
-
-    // 1. Gợi ý File Mentions (@...) sử dụng debouncedValue để tránh nghẽn I/O
-    if (debouncedValue.includes('@') && activeWorkspace) {
-      const activeMention = FileMentionEngine.extractActiveMention(debouncedValue);
+    // 1. Gợi ý File Mentions (@...) dựa trên con trỏ thực tế
+    if (activeWorkspace) {
+      const activeMention = FileMentionEngine.extractActiveMention(value, cursorOffset);
       if (activeMention) {
         const fileSuggestions = FileMentionEngine.getFileSuggestions(
-          debouncedValue,
+          value,
           activeWorkspace,
-          debouncedValue.length,
+          cursorOffset,
           5
         );
 
@@ -98,9 +97,11 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       }
     }
 
-    // 2. Gợi ý Slash Commands (/...)
-    if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-      const query = trimmed.toLowerCase();
+    // 2. Gợi ý Slash Commands (/...) tính đến vị trí con trỏ
+    const textBeforeCursor = value.slice(0, cursorOffset);
+    const trimmedBefore = textBeforeCursor.trimStart();
+    if (trimmedBefore.startsWith('/') && !trimmedBefore.includes(' ')) {
+      const query = trimmedBefore.toLowerCase();
       const matched = SLASH_COMMANDS.filter((cmd) => {
         if (cmd.command.toLowerCase().startsWith(query)) return true;
         return cmd.aliases?.some((alias) => alias.toLowerCase().startsWith(query));
@@ -120,18 +121,29 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     }
 
     return { suggestions: [], suggestionType: 'none' };
-  }, [value, debouncedValue, activeWorkspace]);
+  }, [value, cursorOffset, activeWorkspace]);
 
-  // Áp dụng lựa chọn gợi ý vào thanh nhập liệu
+  // Áp dụng lựa chọn gợi ý vào thanh nhập liệu chính xác tại vị trí mention
   const applySelectedSuggestion = (item: SuggestionItem) => {
     if (item.type === 'command') {
-      setValue(item.valueToInsert + ' ');
+      const textAfterCursor = value.slice(cursorOffset);
+      const newValue = item.valueToInsert + ' ' + textAfterCursor.trimStart();
+      setValue(newValue);
+      setCursorOffset(item.valueToInsert.length + 1);
     } else if (item.mentionStart !== undefined && item.mentionEnd !== undefined) {
       const before = value.slice(0, item.mentionStart);
       const after = value.slice(item.mentionEnd);
-      setValue(`${before}@${item.valueToInsert} ${after}`);
+      const inserted = `@${item.valueToInsert} `;
+      const newValue = `${before}${inserted}${after}`;
+      setValue(newValue);
+      setCursorOffset(before.length + inserted.length);
     } else {
-      setValue((prev) => `${prev} @${item.valueToInsert} `);
+      const before = value.slice(0, cursorOffset);
+      const after = value.slice(cursorOffset);
+      const inserted = `@${item.valueToInsert} `;
+      const newValue = `${before}${inserted}${after}`;
+      setValue(newValue);
+      setCursorOffset(before.length + inserted.length);
     }
     setSelectedIndex(0);
     setHasNavigated(false);
@@ -152,32 +164,92 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       return;
     }
 
-    // Phím Escape: Tạm thời đóng danh sách gợi ý
-    if (key.escape) {
-      setIsDismissed(true);
-      setHasNavigated(false);
+    // Phím tắt Ctrl+C: Xóa trắng dòng hoặc hủy
+    if (key.ctrl && input === 'c') {
+      if (value.length > 0) {
+        setValue('');
+        setCursorOffset(0);
+        setHistoryIndex(-1);
+        setTempValue('');
+        setIsDismissed(false);
+        setSelectedIndex(0);
+        setHasNavigated(false);
+      } else {
+        onAbort?.();
+      }
       return;
     }
 
     const hasActiveSuggestions = suggestions.length > 0 && !isDismissed;
 
-    // Phím điều hướng Mũi tên Xuống (Down Arrow): Di chuyển xuống item kế tiếp
-    if (key.downArrow && hasActiveSuggestions) {
-      setSelectedIndex((prev) => (prev + 1) % suggestions.length);
-      setHasNavigated(true);
+    // Phím Escape: Tạm thời đóng danh sách gợi ý nếu đang mở, hoặc xóa trắng dòng nếu không có gợi ý
+    if (key.escape) {
+      if (hasActiveSuggestions) {
+        setIsDismissed(true);
+        setHasNavigated(false);
+      } else if (value.length > 0) {
+        setValue('');
+        setCursorOffset(0);
+        setHistoryIndex(-1);
+        setTempValue('');
+      } else {
+        onAbort?.();
+      }
       return;
     }
 
-    // Phím điều hướng Mũi tên Lên (Up Arrow): Di chuyển lên item trước
-    if (key.upArrow && hasActiveSuggestions) {
-      setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
-      setHasNavigated(true);
+    // Phím Mũi tên Xuống (Down Arrow)
+    if (key.downArrow) {
+      if (hasActiveSuggestions) {
+        setSelectedIndex((prev) => (prev + 1) % suggestions.length);
+        setHasNavigated(true);
+      } else if (historyIndex !== -1) {
+        // Duyệt History về phía gần nhất
+        if (historyIndex < history.length - 1) {
+          const nextIndex = historyIndex + 1;
+          setHistoryIndex(nextIndex);
+          const hist = history[nextIndex];
+          setValue(hist);
+          setCursorOffset(hist.length);
+        } else {
+          // Quay lại draft ban đầu trước khi duyệt history
+          setHistoryIndex(-1);
+          setValue(tempValue);
+          setCursorOffset(tempValue.length);
+        }
+      }
+      return;
+    }
+
+    // Phím Mũi tên Lên (Up Arrow)
+    if (key.upArrow) {
+      if (hasActiveSuggestions) {
+        setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+        setHasNavigated(true);
+      } else if (history.length > 0) {
+        // Duyệt History về phía cũ hơn
+        if (historyIndex === -1) {
+          setTempValue(value);
+          const nextIndex = history.length - 1;
+          setHistoryIndex(nextIndex);
+          const hist = history[nextIndex];
+          setValue(hist);
+          setCursorOffset(hist.length);
+        } else if (historyIndex > 0) {
+          const nextIndex = historyIndex - 1;
+          setHistoryIndex(nextIndex);
+          const hist = history[nextIndex];
+          setValue(hist);
+          setCursorOffset(hist.length);
+        }
+      }
       return;
     }
 
     // Phím Tab: Điền gợi ý đang chọn
     if (key.tab && hasActiveSuggestions) {
-      const selected = suggestions[selectedIndex] || suggestions[0];
+      const activeIdx = Math.min(Math.max(0, selectedIndex), suggestions.length - 1);
+      const selected = suggestions[activeIdx];
       if (selected) {
         applySelectedSuggestion(selected);
       }
@@ -186,19 +258,27 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
 
     // Phím Return / Enter
     if (key.return) {
-      // Nếu người dùng đang điều hướng danh sách gợi ý bằng mũi tên, Enter sẽ áp dụng lựa chọn
       if (hasActiveSuggestions && hasNavigated) {
-        const selected = suggestions[selectedIndex];
+        const activeIdx = Math.min(Math.max(0, selectedIndex), suggestions.length - 1);
+        const selected = suggestions[activeIdx];
         if (selected) {
           applySelectedSuggestion(selected);
           return;
         }
       }
 
-      // Ngược lại, thực thi nộp prompt bình thường
+      // Nộp prompt bình thường
       const trimmed = value.trim();
       if (trimmed.length > 0) {
+        setHistory((prev) => {
+          if (prev.length > 0 && prev[prev.length - 1] === trimmed) return prev;
+          const updated = [...prev, trimmed];
+          return updated.length > maxHistory ? updated.slice(updated.length - maxHistory) : updated;
+        });
+        setHistoryIndex(-1);
+        setTempValue('');
         setValue('');
+        setCursorOffset(0);
         setSelectedIndex(0);
         setHasNavigated(false);
         setIsDismissed(false);
@@ -207,18 +287,94 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       return;
     }
 
-    // Phím Backspace / Delete
-    if (key.backspace || key.delete) {
-      setValue((prev) => prev.slice(0, -1));
+    // 1. Home / Ctrl+A: Về đầu dòng
+    if (key.home || (key.ctrl && input === 'a')) {
+      setCursorOffset(0);
+      return;
+    }
+
+    // 2. End / Ctrl+E: Về cuối dòng
+    if (key.end || (key.ctrl && input === 'e')) {
+      setCursorOffset(value.length);
+      return;
+    }
+
+    // 3. Ctrl+U: Xóa từ con trỏ về đầu dòng
+    if (key.ctrl && input === 'u') {
+      const next = deleteToStart({ value, cursorOffset });
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
       return;
     }
 
-    // Các ký tự thông thường
+    // 4. Ctrl+K: Xóa từ con trỏ tới cuối dòng
+    if (key.ctrl && input === 'k') {
+      const next = deleteToEnd({ value, cursorOffset });
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
+      setSelectedIndex(0);
+      setHasNavigated(false);
+      return;
+    }
+
+    // 5. Ctrl+W: Xóa từ phía trước
+    if (key.ctrl && input === 'w') {
+      const next = deleteWordBackward({ value, cursorOffset });
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
+      setSelectedIndex(0);
+      setHasNavigated(false);
+      return;
+    }
+
+    // 6. Left Arrow: Sang trái (Ctrl+Left / Alt+Left nhảy theo từ)
+    if (key.leftArrow) {
+      const mode = (key.ctrl || key.meta) ? 'wordLeft' : 'left';
+      const next = moveCursor({ value, cursorOffset }, mode);
+      setCursorOffset(next.cursorOffset);
+      return;
+    }
+
+    // 7. Right Arrow: Sang phải (Ctrl+Right / Alt+Right nhảy theo từ)
+    if (key.rightArrow) {
+      const mode = (key.ctrl || key.meta) ? 'wordRight' : 'right';
+      const next = moveCursor({ value, cursorOffset }, mode);
+      setCursorOffset(next.cursorOffset);
+      return;
+    }
+
+    // 8. Delete: Xóa ký tự phía sau con trỏ
+    if (key.delete) {
+      const next = deleteForward({ value, cursorOffset });
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
+      setSelectedIndex(0);
+      setHasNavigated(false);
+      return;
+    }
+
+    // 9. Backspace: Xóa ký tự phía trước con trỏ
+    if (key.backspace) {
+      const next = deleteBackward({ value, cursorOffset });
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
+      setSelectedIndex(0);
+      setHasNavigated(false);
+      return;
+    }
+
+    // 10. Các ký tự thông thường hoặc đoạn văn bản dán (paste)
     if (!key.ctrl && !key.meta && input) {
-      setValue((prev) => prev + input);
+      const next = insertText({ value, cursorOffset }, input);
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -226,6 +382,9 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   });
 
   const showSuggestions = suggestions.length > 0 && !isDismissed;
+  const safeSelectedIndex = suggestions.length > 0
+    ? Math.min(Math.max(0, selectedIndex), suggestions.length - 1)
+    : 0;
 
   return (
     <Box flexDirection="column" paddingX={1} marginY={0}>
@@ -244,7 +403,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
           </Box>
           <Box flexDirection="column" marginTop={0}>
             {suggestions.map((item, index) => {
-              const isSelected = index === selectedIndex;
+              const isSelected = index === safeSelectedIndex;
               const badge = item.type === 'directory' ? '[DIR]' : item.type === 'file' ? '[FILE]' : '[CMD]';
 
               return (
@@ -274,7 +433,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
         </Box>
       )}
 
-      {/* Dòng nhập lệnh chính */}
+      {/* Dòng nhập lệnh chính với cursor rendering chân thực */}
       {disabled ? (
         <Box gap={1} marginTop={0}>
           <Text color="red" bold>❯</Text>
@@ -283,8 +442,22 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       ) : (
         <Box gap={1} marginTop={0}>
           <Text color="red" bold>❯</Text>
-          <Text color="white">{value}</Text>
-          <Text color="red">█</Text>
+          {value.length === 0 ? (
+            <Text color="red">█</Text>
+          ) : cursorOffset >= value.length ? (
+            <Box>
+              <Text color="white">{value}</Text>
+              <Text color="red">█</Text>
+            </Box>
+          ) : (
+            <Box>
+              <Text color="white">{value.slice(0, cursorOffset)}</Text>
+              <Text backgroundColor="white" color="black">
+                {value[cursorOffset]}
+              </Text>
+              <Text color="white">{value.slice(cursorOffset + 1)}</Text>
+            </Box>
+          )}
         </Box>
       )}
     </Box>
