@@ -12,29 +12,29 @@ import { toolError, toolSuccess } from './tool-result.js';
  */
 export const findReferencesTool: ToolDefinition = {
   name: 'find_references',
-  description: 'Tìm kiếm tất cả các vị trí tham chiếu (references) thực tế tới một symbol trong toàn bộ dự án bằng TypeScript Language Service.',
+  description: 'Find all real references to a symbol across the project using the TypeScript Language Service.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn file định nghĩa symbol (ví dụ: "src/services/user-service.ts"). Alias: "filePath".',
+        description: 'Path to the file that defines the symbol (for example, "src/services/user-service.ts"). Alias: "filePath".',
       },
       filePath: {
         type: Type.STRING,
-        description: 'Alias cho "path": Đường dẫn file định nghĩa symbol.',
+        description: 'Alias for path: the file path that defines the symbol.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tên symbol cần tìm tham chiếu. Alias: "symbolName".',
+        description: 'Name of the symbol whose references should be found. Alias: "symbolName".',
       },
       symbolName: {
         type: Type.STRING,
-        description: 'Alias cho "symbol": Tên symbol cần tìm tham chiếu.',
+        description: 'Alias for symbol: the name whose references should be found.',
       },
       limit: {
         type: Type.INTEGER,
-        description: 'Số lượng kết quả tối đa cần trả về (mặc định: 50).',
+        description: 'Maximum number of results to return (default: 50).',
       },
     },
     required: [],

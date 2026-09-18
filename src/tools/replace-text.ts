@@ -33,34 +33,34 @@ interface NormalizedText {
  */
 export const replaceTextTool: ToolDefinition = {
   name: 'replace_text',
-  description: 'Thay thế duy nhất một đoạn oldText trong file. Chế độ auto khớp an toàn cả LF/CRLF, Unicode (NFC/NFD) và chênh lệch indentation của block nhiều dòng; không dùng fuzzy semantic matching. Khuyến nghị: chọn oldText ngắn gọn (3-15 dòng mỏ neo duy nhất), tránh truyền cả block quá lớn (>50 dòng). Có thể truyền expectedFileHash lấy từ read_file để chặn sửa trên nội dung đã cũ.',
+  description: 'Replace one oldText block in a file. Auto mode safely handles LF/CRLF, Unicode (NFC/NFD), and indentation differences in multi-line blocks without fuzzy semantic matching. Prefer a concise, unique 3–15-line anchor; avoid sending blocks larger than 50 lines. Pass expectedFileHash from read_file to prevent editing stale content.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới file cần sửa (ví dụ: "src/index.ts")',
+        description: 'Workspace-relative path to the file to edit (for example, "src/index.ts").',
       },
       oldText: {
         type: Type.STRING,
-        description: 'Đoạn văn bản/code gốc cần thay thế (khuyến nghị 3-15 dòng mỏ neo duy nhất; tự động xử lý sai khác LF/CRLF và Unicode dựng sẵn/tổ hợp)',
+        description: 'Original text or code to replace. A unique 3–15-line anchor is recommended; LF/CRLF and Unicode composed/decomposed differences are handled automatically.',
       },
       newText: {
         type: Type.STRING,
-        description: 'Đoạn văn bản/code mới sẽ thay thế vào',
+        description: 'New text or code that replaces oldText.',
       },
       matchMode: {
         type: Type.STRING,
         enum: ['auto', 'exact'],
-        description: 'auto (mặc định) cho phép tương đương LF/CRLF và indentation; exact chỉ khớp byte-for-byte.',
+        description: 'auto (default) accepts equivalent LF/CRLF and indentation; exact matches byte-for-byte only.',
       },
       expectedFileHash: {
         type: Type.STRING,
-        description: 'Tuỳ chọn: contentHash do read_file trả về. Tool từ chối ghi nếu file đã thay đổi sau lần đọc.',
+        description: 'Optional contentHash returned by read_file. The tool refuses to write if the file changed after it was read.',
       },
       expectedOccurrences: {
         type: Type.INTEGER,
-        description: 'Số lượng vị trí oldText dự kiến xuất hiện (mặc định: 1).',
+        description: 'Expected number of oldText occurrences (default: 1).',
       },
     },
     required: ['path', 'oldText', 'newText'],

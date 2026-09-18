@@ -14,21 +14,21 @@ import { toolError, toolSuccess } from './tool-result.js';
  */
 export const moveFileTool: ToolDefinition = {
   name: 'move_file',
-  description: 'Di chuyển hoặc đổi tên một file trong workspace. Tự động tạo thư mục đích nếu cần và chống ghi đè lên file đích đã tồn tại.',
+  description: 'Move or rename a file in the workspace. Creates destination directories as needed and prevents overwriting an existing destination file.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       sourcePath: {
         type: Type.STRING,
-        description: 'Đường dẫn file nguồn hiện tại (ví dụ: "src/old-name.ts")',
+        description: 'Current source-file path (for example, "src/old-name.ts").',
       },
       targetPath: {
         type: Type.STRING,
-        description: 'Đường dẫn file đích mới (ví dụ: "src/new-name.ts")',
+        description: 'New destination-file path (for example, "src/new-name.ts").',
       },
       expectedSourceHash: {
         type: Type.STRING,
-        description: 'Tuỳ chọn: contentHash của file nguồn từ read_file để đảm bảo phiên bản chính xác.',
+        description: 'Optional source-file contentHash from read_file to ensure the expected version is moved.',
       },
     },
     required: ['sourcePath', 'targetPath'],

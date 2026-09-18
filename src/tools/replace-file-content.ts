@@ -19,46 +19,46 @@ import {
  */
 export const replaceFileContentTool: ToolDefinition = {
   name: 'replace_file_content',
-  description: 'Thay thế một khối nội dung đơn lẻ liền kề (single contiguous block) trong file hiện có theo phạm vi dòng StartLine và EndLine (1-indexed). TargetContent phải khớp chính xác với nội dung cần sửa trong file bao gồm cả khoảng trắng thụt lề. Tự động xử lý khác biệt LF/CRLF và phân tích Blast Radius.',
+  description: 'Replace one contiguous content block in an existing file within the 1-based StartLine–EndLine range. TargetContent must exactly match the file content, including indentation. Automatically handles LF/CRLF differences and analyzes blast radius.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       TargetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tuyệt đối hoặc tương đối tới file cần sửa đổi (ví dụ: "src/index.ts")',
+        description: 'Absolute or workspace-relative path to the file to edit (for example, "src/index.ts").',
       },
       Instruction: {
         type: Type.STRING,
-        description: 'Mô tả tóm lược về thao tác chỉnh sửa đang thực hiện trên file.',
+        description: 'Brief summary of the edit being made to the file.',
       },
       Description: {
         type: Type.STRING,
-        description: 'Giải thích lý do thay đổi và bối cảnh kỹ thuật cho người dùng.',
+        description: 'Explain the reason for the change and its technical context for the user.',
       },
       StartLine: {
         type: Type.INTEGER,
-        description: 'Chỉ số dòng bắt đầu của phạm vi chứa TargetContent (1-indexed, inclusive).',
+        description: 'First line of the range containing TargetContent (1-based, inclusive).',
       },
       EndLine: {
         type: Type.INTEGER,
-        description: 'Chỉ số dòng kết thúc của phạm vi chứa TargetContent (1-indexed, inclusive).',
+        description: 'Last line of the range containing TargetContent (1-based, inclusive).',
       },
       TargetContent: {
         type: Type.STRING,
-        description: 'Đoạn văn bản/mã nguồn chính xác cần thay thế. Phải khớp chính xác với nội dung trong file.',
+        description: 'Exact text or source code to replace. It must exactly match the file content.',
       },
       ReplacementContent: {
         type: Type.STRING,
-        description: 'Nội dung mới thay thế hoàn chỉnh cho TargetContent.',
+        description: 'Complete new content that replaces TargetContent.',
       },
       AllowMultiple: {
         type: Type.BOOLEAN,
-        description: 'Nếu true, cho phép thay thế tất cả vị trí TargetContent nếu xuất hiện nhiều lần trong phạm vi. Nếu false, báo lỗi nếu tìm thấy nhiều hơn 1 vị trí.',
+        description: 'When true, replace every TargetContent occurrence in the range. When false, return an error if more than one occurrence is found.',
       },
       TargetLintErrorIds: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách tùy chọn các mã lỗi lint mà thay đổi này nhằm giải quyết.',
+        description: 'Optional list of lint error IDs this change is intended to resolve.',
       },
     },
     required: [

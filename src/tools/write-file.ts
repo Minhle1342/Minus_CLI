@@ -19,21 +19,21 @@ import {
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Tạo file mới hoặc ghi đè toàn bộ nội dung file trong workspace. Hỗ trợ tham số overwrite: false để bảo đảm an toàn chống ghi đè nhầm file đã tồn tại.',
+  description: 'Create a new file or overwrite an entire file in the workspace. Set overwrite to false to prevent accidentally replacing an existing file.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới file cần tạo hoặc ghi đè (ví dụ: "src/utils/helper.ts")',
+        description: 'Workspace-relative path of the file to create or overwrite (for example, "src/utils/helper.ts").',
       },
       content: {
         type: Type.STRING,
-        description: 'Toàn bộ nội dung văn bản sẽ ghi vào file',
+        description: 'Complete text content to write to the file.',
       },
       overwrite: {
         type: Type.BOOLEAN,
-        description: 'Cho phép ghi đè nếu file đã tồn tại (mặc định: true). Nếu đặt false, tool sẽ từ chối ghi đè nếu file đã có sẵn.',
+        description: 'Allow overwriting an existing file (default: true). When false, the tool refuses to overwrite a file that already exists.',
       },
     },
     required: ['path', 'content'],

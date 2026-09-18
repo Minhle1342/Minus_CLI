@@ -17,41 +17,41 @@ import { nativeBatchReadFilesAsync } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Công cụ đọc file & mã nguồn chính trong workspace, kèm contentHash để sửa code an toàn. Nếu đường dẫn là thư mục, tự động liệt kê danh sách tệp/thư mục con. Ưu tiên "symbol" để lấy đúng declaration trong 1 lượt: TypeScript/JavaScript dùng compiler AST, Python dùng ranh giới indentation. Cũng hỗ trợ startLine/endLine (hoặc offset/limit, tối đa 800 dòng), outlineOnly, và tự động cắt dòng siêu dài (>2000 ký tự) để bảo vệ context window.',
+  description: 'Primary workspace file and source-code reader, returning a contentHash for safe edits. When the path is a directory, it lists child files and directories. Prefer "symbol" to retrieve a declaration in one call: TypeScript/JavaScript uses the compiler AST and Python uses indentation boundaries. Also supports startLine/endLine (or offset/limit, up to 800 lines), outlineOnly, and truncates extremely long lines (>2,000 characters) to protect the context window.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn tương đối tới file hoặc thư mục cần đọc (ví dụ: "package.json", "src/index.ts", "src")',
+        description: 'Workspace-relative path to the file or directory to read (for example, "package.json", "src/index.ts", or "src").',
       },
       startLine: {
         type: Type.INTEGER,
-        description: 'Dòng bắt đầu đọc (1-indexed, tuỳ chọn). Khuyến nghị đọc khoảng 150-300 dòng mỗi lần. Tối đa 800 dòng/lần gọi.',
+        description: 'Optional 1-based starting line. Reading 150–300 lines per call is recommended; the maximum is 800 lines per call.',
       },
       endLine: {
         type: Type.INTEGER,
-        description: 'Dòng kết thúc đọc (1-indexed, tuỳ chọn). Nếu bỏ trống trên file lớn (>350 dòng), mặc định đọc 250 dòng tiếp theo.',
+        description: 'Optional 1-based ending line. If omitted for a large file (>350 lines), the next 250 lines are read by default.',
       },
       offset: {
         type: Type.INTEGER,
-        description: 'Alias tương thích cho startLine (1-indexed, mặc định 1).',
+        description: 'Compatibility alias for startLine (1-based; defaults to 1).',
       },
       limit: {
         type: Type.INTEGER,
-        description: 'Alias tương thích: số dòng tối đa cần đọc (mặc định 250 dòng trên file lớn, tối đa 800 dòng).',
+        description: 'Compatibility alias for the maximum number of lines to read (250 by default for large files; 800 maximum).',
       },
       outlineOnly: {
         type: Type.BOOLEAN,
-        description: 'Nếu true, chỉ trả về sơ đồ Outline các hàm, lớp, interface kèm số dòng để tiết kiệm token (hoạt động tốt trên cả file lớn > 200KB).',
+        description: 'When true, return only an outline of functions, classes, and interfaces with line numbers to save tokens; works for files larger than 200 KB.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'ƯU TIÊN DÙNG khi đã biết symbol: tên đơn ("runQueryPipeline") hoặc tên định danh ("AgentLoop.runInternal"). TS/JS dùng compiler AST; Python dùng indentation parser. Nếu tên đơn trùng nhau, tool trả danh sách qualifiedName để tự phục hồi.',
+        description: 'Prefer this when the symbol is known: use either a simple name ("runQueryPipeline") or a qualified name ("AgentLoop.runInternal"). TS/JS uses the compiler AST and Python uses an indentation parser. For ambiguous simple names, the tool returns qualified names for recovery.',
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,
-        description: 'Mặc định true. Đặt false khi cần sao chép content nguyên bản vào oldText của replace_text.',
+        description: 'Defaults to true. Set to false when copying unmodified content into replace_text oldText.',
       },
     },
     required: ['path'],

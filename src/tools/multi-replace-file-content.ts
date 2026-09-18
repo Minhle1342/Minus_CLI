@@ -27,47 +27,47 @@ export interface ReplacementChunkInput {
  */
 export const multiReplaceFileContentTool: ToolDefinition = {
   name: 'multi_replace_file_content',
-  description: 'Thực hiện nhiều khối chỉnh sửa không liền kề (MULTIPLE, NON-CONTIGUOUS edits) trên cùng một file trong một lần gọi nguyên tử (atomic edit). Nhận danh sách ReplacementChunks, thẩm định tất cả các chunk trước khi ghi đĩa và áp dụng theo thứ tự từ dưới lên trên (bottom-up) để bảo toàn tuyệt đối chỉ số dòng. Tự động xử lý LF/CRLF và phân tích Blast Radius.',
+  description: 'Perform multiple non-contiguous edits in one file as a single atomic operation. Accepts ReplacementChunks, validates every chunk before writing, and applies them bottom-up to preserve line indexes. Automatically handles LF/CRLF differences and analyzes blast radius.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       TargetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tuyệt đối hoặc tương đối tới file cần sửa đổi (ví dụ: "src/index.ts")',
+        description: 'Absolute or workspace-relative path to the file to edit (for example, "src/index.ts").',
       },
       Instruction: {
         type: Type.STRING,
-        description: 'Mô tả tổng quát về tập hợp các thay đổi đang thực hiện trên file.',
+        description: 'General summary of the set of edits being made to the file.',
       },
       Description: {
         type: Type.STRING,
-        description: 'Giải thích lý do thay đổi và bối cảnh kỹ thuật cho người dùng.',
+        description: 'Explain the reason for the change and its technical context for the user.',
       },
       ReplacementChunks: {
         type: Type.ARRAY,
-        description: 'Danh sách các khối thay thế cần thực hiện. Mỗi khối chỉ định phạm vi dòng và nội dung thay thế.',
+        description: 'List of replacement chunks to apply. Each chunk specifies a line range and replacement content.',
         items: {
           type: Type.OBJECT,
           properties: {
             StartLine: {
               type: Type.INTEGER,
-              description: 'Chỉ số dòng bắt đầu của chunk (1-indexed, inclusive).',
+            description: 'First line of the chunk (1-based, inclusive).',
             },
             EndLine: {
               type: Type.INTEGER,
-              description: 'Chỉ số dòng kết thúc của chunk (1-indexed, inclusive).',
+            description: 'Last line of the chunk (1-based, inclusive).',
             },
             TargetContent: {
               type: Type.STRING,
-              description: 'Đoạn văn bản/mã nguồn chính xác cần thay thế.',
+            description: 'Exact text or source code to replace.',
             },
             ReplacementContent: {
               type: Type.STRING,
-              description: 'Nội dung mới thay thế cho TargetContent.',
+            description: 'New content that replaces TargetContent.',
             },
             AllowMultiple: {
               type: Type.BOOLEAN,
-              description: 'Nếu true, cho phép thay thế nhiều lần nếu TargetContent xuất hiện nhiều lần trong phạm vi dòng của chunk.',
+            description: 'When true, allow multiple replacements if TargetContent occurs more than once within the chunk line range.',
             },
           },
           required: [
@@ -81,17 +81,17 @@ export const multiReplaceFileContentTool: ToolDefinition = {
       },
       ArtifactMetadata: {
         type: Type.OBJECT,
-        description: 'Metadata tùy chọn nếu file được chỉnh sửa là một artifact.',
+        description: 'Optional metadata when the edited file is an artifact.',
         properties: {
-          Summary: { type: Type.STRING, description: 'Tóm tắt nội dung sau khi cập nhật' },
-          UserFacing: { type: Type.BOOLEAN, description: 'True nếu hiển thị cho người dùng' },
-          RequestFeedback: { type: Type.BOOLEAN, description: 'True nếu yêu cầu xác nhận' },
+          Summary: { type: Type.STRING, description: 'Summary of the updated content.' },
+          UserFacing: { type: Type.BOOLEAN, description: 'True when the artifact is shown to the user.' },
+          RequestFeedback: { type: Type.BOOLEAN, description: 'True when confirmation is requested.' },
         },
       },
       TargetLintErrorIds: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách tùy chọn các mã lỗi lint mà thay đổi này nhằm giải quyết.',
+        description: 'Optional list of lint error IDs this change is intended to resolve.',
       },
     },
     required: [
