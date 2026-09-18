@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { FinalAnswerGuard, verifyWorkspaceGrounding, detectAnalysisOrInvestigationIntent, hasUnfulfilledDeferredPromise } from './final-answer-guard.js';
 import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
-import { CompletionEvidenceGate } from './completion-evidence.js';
-import { collectCompletionObservations, getTurnCompletionState } from './completion-observations.js';
+import { CompletionEvidenceGate, isVerificationCommand } from './completion-evidence.js';
+import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { createReportFindingsTool } from '../tools/report-findings.js';
 import { Session } from '../session/session.js';
@@ -328,4 +328,45 @@ test('exploration tasks with cause investigation and expository introductions co
     assert.equal(llm.calls, 1);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
+
+test('Evidence Gate does not trigger false positives on 0-file scripts, CommandLine, analysis, or negation', () => {
+  const gate = new CompletionEvidenceGate();
+
+  // 1. run_node_script with modifiedFiles: [] is not treated as a mutation
+  const session1 = new Session();
+  record(session1, 1, 'run_node_script', { script: 'console.log(1)' }, { success: true, exitCode: 0, totalModifiedFiles: 0, modifiedFiles: [] });
+  assert.equal(hasObservedMutation('run_node_script', { success: true, exitCode: 0, totalModifiedFiles: 0, modifiedFiles: [] }), false);
+  const decision1 = gate.evaluate('The script executed and returned 1.', session1, { turn: 1 });
+  assert.equal(decision1.allow, true, '0-file script execution must not demand test verification');
+
+  // 2. run_command with CommandLine: 'npm test' recognized as verification blocker
+  const session2 = new Session();
+  record(session2, 1, 'run_command', { CommandLine: 'npm test' }, { exitCode: 1, error: 'Tests failed' });
+  const decision2 = gate.evaluate('Cannot proceed because verification is blocked: test failed.', session2, { turn: 1 });
+  assert.equal(decision2.allow, true, 'CommandLine verification failure must support verification blocker claim');
+
+  // 3. Technical analysis explaining why a test failed
+  const session3 = new Session();
+  record(session3, 1, 'read_file', { path: 'src/calc.ts' }, { content: 'export function add(a, b) { return a - b; }' });
+  const decision3 = gate.evaluate(
+    'Qua kiểm tra mã nguồn, test bị thất bại là do hàm add thực hiện phép trừ thay vì cộng. Cần sửa lại dấu phép tính.',
+    session3,
+    { turn: 1, userRequest: 'Tại sao test lại bị thất bại?' }
+  );
+  assert.equal(decision3.allow, true, 'Diagnostic explanation of test failure must not be penalized as live blocker');
+
+  // 4. Negation statements like "không thể chạy test" or "cannot run tests"
+  const session4 = new Session();
+  record(session4, 1, 'read_file', { path: 'package.json' }, { content: '{}' });
+  const decision4 = gate.evaluate('Tôi không thể chạy test vì package.json không cấu hình test script.', session4, { turn: 1 });
+  assert.equal(decision4.allow, true, 'Negative statement "không thể chạy test" must not claim unperformed test pass');
+
+  // 5. Windows backslash paths, python unittest, and playwright in verification commands
+  assert.equal(isVerificationCommand('node test\\foo.test.js'), true);
+  assert.equal(isVerificationCommand('node tests\\foo.test.js'), true);
+  assert.equal(isVerificationCommand('python -m unittest discover'), true);
+  assert.equal(isVerificationCommand('python -m pytest tests/'), true);
+  assert.equal(isVerificationCommand('npx playwright test'), true);
+});
+
 

@@ -42,7 +42,12 @@ const INSPECTION_TOOLS = new Set([
 ]);
 
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
-const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify))\b|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)|ctest|make\s+(?:test|check)|composer\s+test|bundle\s+exec\s+rspec|phpunit|tsc(?:\s|$))\b|\b(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|test\/)|\b(?:npx\s+(?:vitest|jest|mocha|ava)\b)|\bnode\s+--test\b/i;
+const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test\b|run\s+(?:[a-z0-9_-]*test[a-z0-9_-]*|build|lint|typecheck|check|verify)\b)|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)|ctest|make\s+(?:test|check)|composer\s+test|bundle\s+exec\s+rspec|phpunit|tsc(?:\s|$))\b|\b(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|(?:--[a-z0-9_-]+\s+)*(?:test|tests)[\\/]|(?:[^\s]*[\\/])*(?:test|tests)\.[cm]?[jt]sx?\b)|\b(?:npx\s+(?:playwright\s+test|cypress\s+run|vitest|jest|mocha|ava)\b)|\bnode\s+--test\b|\bpython(?:3)?(?:\.exe)?\s+(?:-m\s+(?:unittest|pytest)\b|(?:[^\s]*[\\/])*(?:test_[^\s]+\.py|[^\s]+_test\.py|tests?\.py)\b)/i;
+
+export function extractCommandString(args: Record<string, any> = {}, result: Record<string, any> = {}): string {
+  const candidate = args.command ?? args.CommandLine ?? args.commandLine ?? args.cmd ?? result.command ?? result.CommandLine ?? '';
+  return typeof candidate === 'string' ? candidate : String(candidate || '');
+}
 
 export function isToolResultFailure(result: Record<string, any>): boolean {
   return toolResultFailed(result);
@@ -70,7 +75,8 @@ export function classifyToolEvidence(
   if (hasObservedMutation(toolName, result)) return ['mutation'];
   if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];
   if (toolName === 'run_command') {
-    return isVerificationCommand(args.command ?? result.command) ? ['verification'] : ['other'];
+    const cmd = extractCommandString(args, result);
+    return isVerificationCommand(cmd) ? ['verification'] : ['other'];
   }
   if (toolName === 'get_diagnostics') {
     if (result.clean === true && (!result.totalErrors || result.totalErrors === 0)) {
@@ -213,10 +219,12 @@ export class CompletionEvidenceGate {
 
       if (!isDirect) return false;
 
-      // Loại trừ câu phủ định ("did not run tests", "chưa chạy kiểm thử", "không chạy test")
+      // Loại trừ câu phủ định ("did not run tests", "chưa chạy kiểm thử", "không thể chạy test", "cannot run")
       const isNegative =
-        /\b(?:did\s+not|didn't|have\s+not|haven't|not\s+yet)\s+(?:run|ran|execute|test|verify)\b/.test(sentence)
-        || /\b(?:chua|khong|chua\s+kip)\s+(?:chay|test|kiem\s+thu|thuc\s+hien)\b/.test(sentence);
+        /\b(?:did\s+not|didn't|have\s+not|haven't|not\s+yet|cannot|can't|could\s+not|couldn't|unable\s+to|without|never)\s+(?:run|ran|execute|executing|test|testing|verify|verifying)\b/.test(sentence)
+        || /\b(?:chua|khong|chua\s+kip)(?:\s+(?:the|can|kip|he))?\s+(?:chay|test|kiem\s+thu|thuc\s+hien|xac\s+minh)\b/.test(sentence)
+        || /\b(?:no\s+tests?\s+(?:were|have\s+been)\s+run|tests?\s+have\s+not\s+been\s+run|tests?\s+were\s+not\s+run)\b/.test(sentence)
+        || /\b(?:chua\s+(?:co\s+)?test\s+nao\s+duoc\s+chay|chua\s+chay\s+test)\b/.test(sentence);
 
       return !isNegative;
     });
@@ -279,7 +287,7 @@ export class CompletionEvidenceGate {
         || /\b(?:co\s+san|von\s+da\s+duoc|da\s+ton\s+tai\s+tu\s+truoc)\b/.test(sentence);
 
       const isDocOrAnalysisClaim =
-        /\b(?:viet|tao|cap\s+nhat|written|wrote|created|updated)\b.{0,40}\b(?:giai\s+thich|phan\s+tich|bao\s+cao|tai\s+lieu|cau\s+tra\s+loi|tom\s+tat|danh\s+sach|explanation|analysis|report|documentation|summary|overview|answer|response|findings)\b/.test(sentence);
+        /\b(?:viet|tao|cap\s+nhat|written|wrote|created|updated)\b.{0,40}\b(?:giai\s+thich|phan\s+tich|bao\s+cao|tai\s+lieu|cau\s+tra\s+loi|tom\s+tat|danh\s+sach|explanation|analysis|report|documentation|summary|overview|answer|response|findings|ke\s+hoach|plan|ghi\s+chu|note|phuong\s+an|approach)\b/.test(sentence);
       if (isDocOrAnalysisClaim) return false;
 
       return isDirect && !isPassiveOrHistorical;
@@ -295,7 +303,7 @@ export class CompletionEvidenceGate {
     const hasSuccessfulCommit = successful.some((item) =>
       item.toolName === 'git_commit'
       || (item.toolName === 'git_command' && ['commit'].includes(String(item.args.subcommand || '').trim().toLowerCase()))
-      || (item.toolName === 'run_command' && /\bgit\s+commit\b/i.test(String(item.args.command || '')))
+      || (item.toolName === 'run_command' && /\bgit\s+commit\b/i.test(extractCommandString(item.args, item.payload)))
     );
     if (claimsCommit && !hasSuccessfulCommit) {
       reasons.push('The final answer claims a commit without a successful git_commit result.');
@@ -305,7 +313,7 @@ export class CompletionEvidenceGate {
     const hasSuccessfulPush = successful.some((item) =>
       item.toolName === 'git_push'
       || (item.toolName === 'git_command' && ['push'].includes(String(item.args.subcommand || '').trim().toLowerCase()))
-      || (item.toolName === 'run_command' && /\bgit\s+push\b/i.test(String(item.args.command || '')))
+      || (item.toolName === 'run_command' && /\bgit\s+push\b/i.test(extractCommandString(item.args, item.payload)))
     );
     if (claimsPush && !hasSuccessfulPush) {
       reasons.push('The final answer claims a push without a successful git_push result.');
@@ -315,12 +323,20 @@ export class CompletionEvidenceGate {
     if (executions.length > 0 && claimsBlocker) {
       const hasInspections = successful.some((item) => item.kinds.includes('inspection'));
       const isSubstantialTechnicalExplanation = trimmedAnswer.length >= 60;
+      const isExplainingFailureCause =
+        /\b(?:la\s+do|nguyen\s+nhan|do|vi|boi\s+vi|boi\s+do|because|due\s+to|caused\s+by|reason\s+(?:is|for))\b/.test(normalized)
+        || Boolean(
+          options.userRequest &&
+          /\b(?:tai\s+sao|nguyen\s+nhan|vi\s+sao|tai\s+sao\s+lai|dieu\s+tra|phan\s+tich|giai\s+thich|why|reason|cause|investigate|analyze|explain|how\s+come)\b/i.test(
+            options.userRequest.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          )
+        );
 
       const blockerChecks: Array<{ claimed: boolean; supported: boolean; label: string }> = [
         {
           claimed: /\b(?:test|tests|build|lint|typecheck|verification|kiem\s+thu|bien\s+dich)\b.{0,60}\b(?:that\s+bai|fail|failed|error|loi|blocked|bi\s+chan)\b/.test(normalized)
             || /\b(?:blocked|cannot|unable|khong the|bi chan|that bai)\b.{0,40}\b(?:test|tests|build|lint|typecheck|verification)\b/.test(normalized),
-          supported: failures.some((item) => (item.toolName === 'run_command' && isVerificationCommand(item.args.command)) || item.toolName === 'run_test_suite'),
+          supported: failures.some((item) => (item.toolName === 'run_command' && isVerificationCommand(extractCommandString(item.args, item.payload))) || item.toolName === 'run_test_suite'),
           label: 'verification command failure',
         },
         {
@@ -328,7 +344,7 @@ export class CompletionEvidenceGate {
           supported: failures.some((item) =>
             item.toolName === 'git_push'
             || (item.toolName === 'git_command' && ['push'].includes(String(item.args.subcommand || '').trim().toLowerCase()))
-            || (item.toolName === 'run_command' && /\bgit\s+push\b/i.test(String(item.args.command || '')))
+            || (item.toolName === 'run_command' && /\bgit\s+push\b/i.test(extractCommandString(item.args, item.payload)))
           ),
           label: 'push command failure',
         },
@@ -337,7 +353,7 @@ export class CompletionEvidenceGate {
           supported: failures.some((item) =>
             item.toolName === 'git_commit'
             || (item.toolName === 'git_command' && ['commit'].includes(String(item.args.subcommand || '').trim().toLowerCase()))
-            || (item.toolName === 'run_command' && /\bgit\s+commit\b/i.test(String(item.args.command || '')))
+            || (item.toolName === 'run_command' && /\bgit\s+commit\b/i.test(extractCommandString(item.args, item.payload)))
           ),
           label: 'commit command failure',
         },
@@ -350,8 +366,11 @@ export class CompletionEvidenceGate {
 
       const specificCommandClaims = blockerChecks.filter((check) => check.claimed);
       if (specificCommandClaims.length > 0) {
-        for (const unsupported of specificCommandClaims.filter((check) => !check.supported)) {
-          reasons.push(`The final answer reports a ${unsupported.label} blocker without a matching failed tool observation.`);
+        const isLegitimateAnalysis = hasInspections && isSubstantialTechnicalExplanation && isExplainingFailureCause;
+        if (!isLegitimateAnalysis) {
+          for (const unsupported of specificCommandClaims.filter((check) => !check.supported)) {
+            reasons.push(`The final answer reports a ${unsupported.label} blocker without a matching failed tool observation.`);
+          }
         }
       } else if (failures.length === 0 && !(hasInspections && isSubstantialTechnicalExplanation)) {
         // Chỉ phạt nếu không có tool lỗi VÀ cũng không có khảo sát mã kèm giải thích kỹ thuật hợp lệ

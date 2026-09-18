@@ -14,6 +14,7 @@ import { ReviewManager } from '../../agent/review-manager.js';
 import { createReviewTools } from '../../tools/review-tools.js';
 import { VerificationPolicy } from '../../skills/verification-policy.js';
 import { SuperpowersWorkflowMap } from '../../skills/workflow-map.js';
+import { OcrReviewService } from '../../review/open-code-review.js';
 
 const FILE_MUTATION_TOOLS = new Set([
   'write_file',
@@ -39,6 +40,7 @@ export class SuperpowersPlugin implements AgentPlugin {
   private worktreeManager?: WorktreeManager;
   private approvalManager = new ApprovalManager();
   private reviewManager = new ReviewManager();
+  private ocrReview?: OcrReviewService;
   private verificationPolicy = new VerificationPolicy();
   private workflowMap = new SuperpowersWorkflowMap();
   private onWorkspaceChanged?: (oldPath: string, newPath: string) => void;
@@ -56,6 +58,7 @@ export class SuperpowersPlugin implements AgentPlugin {
 
   async apply(ctx: KernelContext): Promise<void> {
     this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
+    this.ocrReview = new OcrReviewService(ctx.workspace.rootDir);
 
     // 1. Nạp Superpowers Skills
     SuperpowersSource.registerSuperpowers(this.skillRegistry);
@@ -72,6 +75,7 @@ export class SuperpowersPlugin implements AgentPlugin {
     }
     this.onWorkspaceChanged = () => {
       this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
+      this.ocrReview?.setWorkspace(ctx.workspace.rootDir);
       (ctx as any).worktrees = this.worktreeManager;
       for (const tool of createWorktreeTools(this.worktreeManager)) ctx.tools.register(tool);
       for (const tool of createGitTools(ctx.workspace)) ctx.tools.register(tool);
@@ -83,7 +87,7 @@ export class SuperpowersPlugin implements AgentPlugin {
       ctx.tools.register(tool);
     }
 
-    const reviewTools = createReviewTools(this.reviewManager);
+    const reviewTools = createReviewTools(this.reviewManager, this.ocrReview);
     for (const tool of reviewTools) {
       ctx.tools.register(tool);
     }
@@ -145,6 +149,7 @@ export class SuperpowersPlugin implements AgentPlugin {
     (ctx as any).worktrees = this.worktreeManager;
     (ctx as any).approvals = this.approvalManager;
     (ctx as any).reviews = this.reviewManager;
+    (ctx as any).ocrReview = this.ocrReview;
     (ctx as any).verification = this.verificationPolicy;
     (ctx as any).workflow = this.workflowMap;
   }
@@ -179,6 +184,10 @@ export class SuperpowersPlugin implements AgentPlugin {
 
   getReviewManager(): ReviewManager {
     return this.reviewManager;
+  }
+
+  getOcrReviewService(): OcrReviewService | undefined {
+    return this.ocrReview;
   }
 
   getVerificationPolicy(): VerificationPolicy {

@@ -4,7 +4,8 @@ import {
   EpistemicInvestigationGating, 
   CrossAgentDualInvestigator, 
   TestTimeMonteCarloRollout, 
-  EpistemicDistillationBarrier 
+  EpistemicDistillationBarrier,
+  isCoreModulePath,
 } from './agent/epistemic-investigation-engine.js';
 import { HypothesisTracker } from './agent/hypothesis-tracker.js';
 import { DynamicContextArbiter } from './agent/dynamic-context-arbiter.js';
@@ -183,6 +184,98 @@ async function runTests() {
     assert.ok(result.renderedContext.includes('EPISTEMIC ARBITER VERDICT'), 'Rendered context must contain distilled verdict');
     assert.ok(result.totalTokens <= 1600, 'Total tokens must respect budget');
     console.log('   ✅ DynamicContextArbiter seamlessly includes Epistemic Arbiter Verdict at Priority 1.44');
+  }
+
+  // Test 8: Core Module Path Boundary Test (No False Positives)
+  console.log('8. Testing Core Module Path Boundaries (False Positive Elimination)...');
+  {
+    // Must NOT match non-core files that happen to contain substrings like 'db' or 'core'
+    assert.strictEqual(isCoreModulePath('feedback.ts'), false, 'feedback.ts must not be classified as core module');
+    assert.strictEqual(isCoreModulePath('sandbox.ts'), false, 'sandbox.ts must not be classified as core module');
+    assert.strictEqual(isCoreModulePath('scoreboard.ts'), false, 'scoreboard.ts must not be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/agent/score.ts'), false, 'score.ts must not be classified as core module');
+    assert.strictEqual(isCoreModulePath('dashboard.ts'), false, 'dashboard.ts must not be classified as core module');
+
+    // Must match actual core modules
+    assert.strictEqual(isCoreModulePath('src/core/parser.ts'), true, 'src/core/parser.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/db/client.ts'), true, 'src/db/client.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/database/schema.ts'), true, 'src/database/schema.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/tools/tool-runner.ts'), true, 'src/tools/tool-runner.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/entities/user.ts'), true, 'src/entities/user.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('types.ts'), true, 'types.ts must be classified as core module');
+    assert.strictEqual(isCoreModulePath('src/security/auth.ts'), true, 'src/security/auth.ts must be classified as core module');
+    console.log('   ✅ Core module path boundary accurately separates core modules from substring collisions');
+  }
+
+  // Test 9: Distillation Barrier Hard Ceiling & Critical Warning Preservation
+  console.log('9. Testing Distillation Barrier Token Ceiling & Critical Warning Preservation...');
+  {
+    const barrier = new EpistemicDistillationBarrier();
+    const oversizedVerdict = {
+      outcome: 'REFINED_HYPOTHESIS' as const,
+      confidence: 0.75,
+      thesisClaim: 'Super long thesis claim explaining everything in extraordinary details that goes on and on...',
+      antithesisRebuttal: 'Equally long rebuttal with vast amounts of skeptical arguments questioning everything...',
+      epistemicArbiterReasoning: 'Very long reasoning '.repeat(30), // Very long narrative
+      recommendedAction: 'Mandatory action '.repeat(20),
+      falsificationCriteria: 'Run all tests',
+      distilledTokens: 0,
+    };
+    const rolloutWithWarning = {
+      steps: [],
+      meanScore: 0.65,
+      passedSyntaxCheck: true,
+      criticalRisksIdentified: ['Module mục tiêu thuộc lõi hệ thống có blast radius CRITICAL', 'Môi trường bất ổn'],
+      recommendation: 'TRY_ALTERNATIVE' as const,
+    };
+
+    const { distilledText, tokenCount } = barrier.distill(oversizedVerdict, rolloutWithWarning);
+    assert.ok(tokenCount <= EpistemicDistillationBarrier.MAX_DISTILLED_TOKENS, `Token count (${tokenCount}) must strictly be <= 180`);
+    assert.match(distilledText, /• Critical Warning:/, 'Critical Warning MUST be preserved even when context exceeds budget');
+    assert.match(distilledText, /blast radius CRITICAL/, 'Critical warning content must be present in distilled output');
+    console.log(`   ✅ Distillation Barrier enforced hard ceiling (${tokenCount} <= 180) and PRESERVED Critical Warning`);
+  }
+
+  // Test 10: Dialectical Verdict Comprehensive Outcomes (All 4 states active)
+  console.log('10. Testing Dialectical Verdict Outcomes (REJECTED_THESIS & INSUFFICIENT_EVIDENCE)...');
+  {
+    const investigator = new CrossAgentDualInvestigator();
+
+    // Case 1: INSUFFICIENT_EVIDENCE when no error, no files, no hypothesis
+    const insufficient = investigator.investigate({
+      phase: 'implement',
+      risk: 'LOW',
+      consecutiveFailures: 0,
+    });
+    assert.strictEqual(insufficient.outcome, 'INSUFFICIENT_EVIDENCE', 'Should return INSUFFICIENT_EVIDENCE without specific target/error');
+
+    // Case 2: REJECTED_THESIS when consecutiveFailures >= 3 on core/critical module
+    const rejected = investigator.investigate({
+      phase: 'implement',
+      risk: 'CRITICAL',
+      consecutiveFailures: 3,
+      targetFiles: ['src/core/kernel.ts'],
+      recentError: 'TypeError: Cannot read properties of undefined',
+    });
+    assert.strictEqual(rejected.outcome, 'REJECTED_THESIS', 'Should return REJECTED_THESIS after 3 failures on core module');
+    assert.match(rejected.recommendedAction, /Bác bỏ giả thuyết hiện tại/);
+
+    console.log('   ✅ All 4 dialectical outcomes (including REJECTED_THESIS & INSUFFICIENT_EVIDENCE) are fully operational');
+  }
+
+  // Test 11: Operational Error Code Gating Support
+  console.log('11. Testing Operational Error Code Gating...');
+  {
+    const operationalResult = EpistemicInvestigationGating.shouldActivate({
+      phase: 'implement',
+      risk: 'LOW',
+      consecutiveFailures: 1,
+      errorCode: 'TOOL_NOT_ALLOWED_THIS_TURN',
+      recentError: 'Tool submit_solution is not authorized by decision',
+    });
+    assert.strictEqual(operationalResult.activate, false, 'Operational error code must bypass epistemic investigation');
+    assert.match(operationalResult.reason, /TOOL_NOT_ALLOWED_THIS_TURN/);
+    console.log('   ✅ Structured error codes bypass gating for deterministic operational recovery');
   }
 
   console.log('\n🎉 ALL EPISTEMIC INVESTIGATION SUITE TESTS PASSED SUCCESSFULLY!');

@@ -37,7 +37,7 @@ import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } fr
 import { VerificationPolicy } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
-import { HypothesisTracker } from './hypothesis-tracker.js';
+import { HypothesisTracker, type BlastRadiusRisk } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
 import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.js';
 import { CriticGate } from './critic-gate.js';
@@ -74,6 +74,7 @@ import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
+import type { OcrGateDecision, OcrReviewService } from '../review/open-code-review.js';
 import {
   ReliableToolOrchestrationTelemetry,
   applyReliableToolRouteToDeclarations,
@@ -1627,10 +1628,17 @@ export class AgentLoop {
       // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
       // Gated to prevent context dilution and latency/accuracy degradation
       const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+      const baselineRisk: BlastRadiusRisk =
+        (classification.risk === 'R5' || classification.risk === 'R4') ? 'CRITICAL' :
+        classification.risk === 'R3' ? 'HIGH' :
+        classification.risk === 'R2' ? 'MEDIUM' : 'LOW';
+      const effectiveEpistemicRisk: BlastRadiusRisk = activeHypothesis?.blastRadius
+        || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
+
       const epistemicResult = this.epistemicEngine.investigate({
         hypothesis: activeHypothesis,
         phase: classification.phase === 'release' ? 'verify' : classification.phase,
-        risk: activeHypothesis?.blastRadius || (consecutiveFails >= 2 ? 'HIGH' : 'LOW'),
+        risk: effectiveEpistemicRisk,
         consecutiveFailures: consecutiveFails,
         recentError: rawReflection || undefined,
         targetFiles: activeHypothesis?.targetFiles,
@@ -2433,6 +2441,32 @@ export class AgentLoop {
                 }
               } catch {}
             }
+
+            let ocrCompletion: OcrGateDecision = {
+              allow: true,
+              reason: 'not-applicable',
+              blockingFindings: [],
+              advisoryFindings: [],
+            };
+            if (
+              toolName === 'submit_solution'
+              && policyCompletion?.allowed === true
+              && completionEvidence?.allow === true
+              && !isSubagent
+              && !isMockLLM
+            ) {
+              const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
+              if (ocrReview) {
+                const completionState = getTurnCompletionState(session, turn);
+                ocrCompletion = await ocrReview.evaluateCompletion({
+                  session,
+                  filesModified: completionState.filesModified,
+                  background: turnUserRequest,
+                  signal: options?.signal,
+                });
+                await this.persistSession(session);
+              }
+            }
             // Phase 1 ACI Guardrails Pre-validation (SWE-agent)
             const aciValidation = this.aciGuardrails.validate({
               toolName,
@@ -2446,7 +2480,31 @@ export class AgentLoop {
               ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode)
               : { allowed: true };
 
-            if (!aciValidation.allowed) {
+            const submitGateBlocked = toolName === 'submit_solution' && (
+              policyCompletion?.allowed !== true
+              || completionEvidence?.allow !== true
+              || !ocrCompletion.allow
+            );
+            if (submitGateBlocked) {
+              const error = !ocrCompletion.allow
+                ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
+                : policyCompletion?.reason
+                  || completionEvidence?.continuationPrompt
+                  || 'Completion evidence is incomplete.';
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                result: {
+                  success: false,
+                  error,
+                  errorCode: !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED' : 'COMPLETION_EVIDENCE_REQUIRED',
+                  retryable: true,
+                  ocrRunId: ocrCompletion.run?.runId,
+                  ocrArtifact: ocrCompletion.run?.artifactRef,
+                },
+                durationMs: 1,
+              };
+            } else if (!aciValidation.allowed) {
               executionResult = {
                 toolName,
                 args: toolArgs,
@@ -2491,7 +2549,7 @@ export class AgentLoop {
                   } : {}),
                   ...(toolName === 'submit_solution' ? {
                     completionEvidenceVerified: true,
-                    completionEvidenceReason: undefined,
+                    completionEvidenceReason: ocrCompletion.run?.runId,
                   } : {}),
                 },
                 toolCallId,
@@ -3154,6 +3212,28 @@ export class AgentLoop {
           completionState,
           evidenceDecision,
         });
+      let ocrDecision: OcrGateDecision = {
+        allow: true,
+        reason: 'not-applicable',
+        blockingFindings: [],
+        advisoryFindings: [],
+      };
+      const priorCompletionGatesAllow = policyDecision.allow
+        && criticDecision.approved
+        && evidenceDecision.allow
+        && verificationDecision.allowed;
+      if (!isSubagent && !isMockLLM && priorCompletionGatesAllow) {
+        const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
+        if (ocrReview) {
+          ocrDecision = await ocrReview.evaluateCompletion({
+            session,
+            filesModified: completionState.filesModified,
+            background: turnUserRequest,
+            signal: options?.signal,
+          });
+          await this.persistSession(session);
+        }
+      }
       let finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
         ? (policyDecision.allow ? { allow: true } : policyDecision)
         : (!policyDecision.allow
@@ -3179,7 +3259,14 @@ export class AgentLoop {
                   recovery: 'verify-changes',
                   continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
                 }
-                : { allow: true });
+                : (!ocrDecision.allow)
+                  ? {
+                    allow: false,
+                    reason: 'unverified-evidence' as const,
+                    recovery: 'verify-changes',
+                    continuationPrompt: ocrDecision.continuationPrompt,
+                  }
+                  : { allow: true });
 
       if (!finalAnswerDecision.allow) {
         {
@@ -3233,6 +3320,17 @@ export class AgentLoop {
       }
       consecutiveIncompleteFinals = 0;
       this.adaptiveReasoning.reset();
+
+      if (ocrDecision.allow && ocrDecision.advisoryFindings.length > 0) {
+        finalAnswer = [
+          finalAnswer,
+          '',
+          'OpenCodeReview advisories:',
+          ...ocrDecision.advisoryFindings.slice(0, 8).map((finding) =>
+            `- [${finding.severity.toUpperCase()}] ${finding.path}:${finding.startLine || '?'} — ${finding.content}`,
+          ),
+        ].join('\n');
+      }
 
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();

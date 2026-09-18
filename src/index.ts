@@ -52,6 +52,7 @@ import {
   normalizePresetTier,
 } from './llm/token-config.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
+import type { OcrReviewService } from './review/open-code-review.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -1306,6 +1307,109 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/tasks') {
         CLI.renderTasks(kernel.ctx.tasks.listTasks());
+        continue;
+      }
+
+      if (trimmed === '/ocr' || trimmed.startsWith('/ocr ')) {
+        const ocrReview = (kernel.ctx as any).ocrReview as OcrReviewService | undefined;
+        if (!ocrReview) {
+          console.log(`\n${c.red}OpenCodeReview integration is unavailable in this kernel.${c.reset}\n`);
+          continue;
+        }
+
+        const [, rawAction = 'status', ...rawArgs] = trimmed.split(/\s+/);
+        const action = rawAction.toLowerCase();
+        try {
+          if (action === 'enable') {
+            console.log(`\n${c.brightCyan}Checking OpenCodeReview CLI and LLM connectivity...${c.reset}`);
+            const doctor = await ocrReview.doctor({ testLlm: true });
+            if (!doctor.ok) {
+              console.log(`${c.red}OCR was not enabled:${c.reset} ${doctor.errors.join(' ')}`);
+            } else {
+              ocrReview.updateConfig({ enabled: true });
+              console.log(`${c.green}OCR completion gate enabled${c.reset} (OpenCodeReview ${doctor.version}).`);
+            }
+            console.log('');
+            continue;
+          }
+
+          if (action === 'disable') {
+            ocrReview.updateConfig({ enabled: false });
+            console.log(`\n${c.yellow}OCR completion gate disabled for this workspace.${c.reset}\n`);
+            continue;
+          }
+
+          if (action === 'doctor') {
+            const doctor = await ocrReview.doctor({ testLlm: true });
+            const color = doctor.ok ? c.green : c.red;
+            console.log(`\n${color}${doctor.ok ? 'OCR doctor passed' : 'OCR doctor failed'}${c.reset}`);
+            console.log(`  Installed: ${doctor.installed ? 'yes' : 'no'}${doctor.version ? ` (${doctor.version})` : ''}`);
+            console.log(`  LLM ready: ${doctor.llmReady === undefined ? 'not tested' : doctor.llmReady ? 'yes' : 'no'}`);
+            for (const error of doctor.errors) console.log(`  ${c.red}- ${error}${c.reset}`);
+            console.log('');
+            continue;
+          }
+
+          if (action === 'review' || action === 'scan') {
+            console.log(`\n${c.brightCyan}Running OpenCodeReview (${action})...${c.reset}`);
+            const run = await ocrReview.run({
+              mode: action === 'scan' ? 'scan' : 'workspace',
+              paths: action === 'scan' && rawArgs.length ? rawArgs : undefined,
+              trigger: 'manual',
+              force: true,
+            });
+            const color = run.gateStatus === 'pass' ? c.green : run.gateStatus === 'block' ? c.red : c.yellow;
+            console.log(`${color}${run.status}${c.reset}: ${run.findings.length} finding(s), gate=${run.gateStatus}`);
+            console.log(`  Run: ${run.runId}${run.artifactRef ? ` · ${run.artifactRef}` : ''}`);
+            for (const finding of run.findings) {
+              console.log(`  [${finding.id}] ${finding.severity.toUpperCase()} ${finding.path}:${finding.startLine || '?'} — ${finding.content}`);
+            }
+            if (run.message) console.log(`  ${c.yellow}${run.message}${c.reset}`);
+            console.log('');
+            continue;
+          }
+
+          if (action === 'show') {
+            const run = ocrReview.getLastRun();
+            if (!run) {
+              console.log(`\n${c.slate}No OpenCodeReview run is available in this process.${c.reset}\n`);
+            } else {
+              console.log(`\n${c.bold}OpenCodeReview ${run.runId}${c.reset} · ${run.status} · gate=${run.gateStatus}`);
+              for (const finding of run.findings) {
+                console.log(`  [${finding.id}] ${finding.severity.toUpperCase()} ${finding.path}:${finding.startLine || '?'} — ${finding.content}`);
+              }
+              console.log(`  Artifact: ${run.artifactRef || 'unavailable'}\n`);
+            }
+            continue;
+          }
+
+          if (action === 'waive') {
+            const [findingId, ...reasonParts] = rawArgs;
+            const reason = reasonParts.join(' ');
+            if (!findingId || !reason) {
+              console.log(`\n${c.yellow}Usage: /ocr waive <finding-id> <reason>${c.reset}\n`);
+              continue;
+            }
+            const waiver = ocrReview.waive(activeSession, findingId, reason);
+            await sessionPersistence.save(activeSession);
+            console.log(`\n${c.green}Waived ${waiver.findingId}${c.reset} for the current reviewed input: ${waiver.reason}\n`);
+            continue;
+          }
+
+          if (action !== 'status') {
+            console.log(`\n${c.yellow}Usage: /ocr [status|doctor|enable|disable|review|scan [paths...]|show|waive <id> <reason>]${c.reset}\n`);
+            continue;
+          }
+
+          const config = ocrReview.getConfig();
+          const lastRun = ocrReview.getLastRun();
+          console.log(`\n${c.bold}OpenCodeReview${c.reset}`);
+          console.log(`  Gate: ${config.enabled ? `${c.green}enabled${c.reset}` : `${c.yellow}disabled${c.reset}`} · ${config.gateMode}`);
+          console.log(`  Effort: ${config.effort} · concurrency=${config.concurrency} · timeout=${config.timeoutMinutes}m · budget=${config.maxTokensBudget}`);
+          console.log(`  Last run: ${lastRun ? `${lastRun.status} (${lastRun.gateStatus}) · ${lastRun.runId}` : 'none'}\n`);
+        } catch (error: any) {
+          console.log(`\n${c.red}OCR command failed:${c.reset} ${error?.message || String(error)}\n`);
+        }
         continue;
       }
 

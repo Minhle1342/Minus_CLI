@@ -2,8 +2,9 @@ import { ToolDefinition } from './types.js';
 import { Type } from '@google/genai';
 import { ReviewManager, ReviewVerdict } from '../agent/review-manager.js';
 import { Workspace } from '../workspace/workspace.js';
+import { OcrReviewService, type OcrReviewMode } from '../review/open-code-review.js';
 
-export function createReviewTools(reviewManager: ReviewManager): ToolDefinition[] {
+export function createReviewTools(reviewManager: ReviewManager, ocrReview?: OcrReviewService): ToolDefinition[] {
   const requestReviewTool: ToolDefinition = {
     name: 'request_review',
     description: 'Submit an implementation task for spec compliance and architecture review before completing.',
@@ -66,5 +67,65 @@ export function createReviewTools(reviewManager: ReviewManager): ToolDefinition[
     },
   };
 
-  return [requestReviewTool, submitReviewTool];
+  const tools = [requestReviewTool, submitReviewTool];
+  if (!ocrReview) return tools;
+
+  const runCodeReviewTool: ToolDefinition = {
+    name: 'run_code_review',
+    description: 'Run OpenCodeReview over workspace changes, a branch range, a commit, or complete files and return structured findings.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        mode: {
+          type: Type.STRING,
+          description: 'Review mode: workspace, range, commit, or scan. Defaults to workspace.',
+        },
+        from: { type: Type.STRING, description: 'Base ref for range mode.' },
+        to: { type: Type.STRING, description: 'Target ref for range mode.' },
+        commit: { type: Type.STRING, description: 'Commit hash or ref for commit mode.' },
+        paths: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Repository-relative paths for scan scope or completion identity.',
+        },
+        background: { type: Type.STRING, description: 'Requirements or business context for the reviewer.' },
+        rulePath: { type: Type.STRING, description: 'Workspace-relative custom OCR rule file.' },
+        resumeSessionId: { type: Type.STRING, description: 'OCR session to resume for range or commit mode.' },
+        force: { type: Type.BOOLEAN, description: 'Ignore a fresh cached result and run OCR again.' },
+      },
+    },
+    execute: async (args, _workspace, context) => {
+      try {
+        const run = await ocrReview.run({
+          mode: (args.mode ? String(args.mode) : 'workspace') as OcrReviewMode,
+          from: args.from ? String(args.from) : undefined,
+          to: args.to ? String(args.to) : undefined,
+          commit: args.commit ? String(args.commit) : undefined,
+          paths: Array.isArray(args.paths) ? args.paths.map(String) : undefined,
+          background: args.background ? String(args.background) : context?.userRequest,
+          rulePath: args.rulePath ? String(args.rulePath) : undefined,
+          resumeSessionId: args.resumeSessionId ? String(args.resumeSessionId) : undefined,
+          force: Boolean(args.force),
+          trigger: 'manual',
+          signal: context?.signal,
+        });
+        return { success: run.status !== 'failed', ...run };
+      } catch (err: any) {
+        return { success: false, error: err.message, errorCode: 'OCR_REVIEW_FAILED' };
+      }
+    },
+  };
+
+  const getCodeReviewStatusTool: ToolDefinition = {
+    name: 'get_code_review_status',
+    description: 'Inspect OpenCodeReview enablement, gate settings, and the latest review result without running a review.',
+    parameters: { type: Type.OBJECT, properties: {} },
+    execute: async () => ({
+      success: true,
+      config: ocrReview.getConfig(),
+      lastRun: ocrReview.getLastRun(),
+    }),
+  };
+
+  return [...tools, runCodeReviewTool, getCodeReviewStatusTool];
 }

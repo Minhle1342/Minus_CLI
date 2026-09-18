@@ -9,6 +9,7 @@
     "dev": "node --max-old-space-size=4096 --import tsx src/index.ts",
     "test": "node --max-old-space-size=4096 --import tsx src/test-suite.ts",
     "test:completion": "node --import tsx --test src/agent/completion-policy.test.ts",
+    "test:ocr": "node --import tsx --test src/review/open-code-review.test.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",
     "test:latency": "tsx src/test-latency-optimization.ts",
     "test:compaction": "node --import tsx --test src/agent/context-budget-manager.test.ts",
@@ -43,6 +44,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@alibaba-group/open-code-review": "1.12.5",
     "@google/genai": "^2.18.0",
     "dotenv": "^16.4.7",
     "ink": "^7.1.1",

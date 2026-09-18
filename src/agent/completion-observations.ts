@@ -54,8 +54,11 @@ export function observedMutationFiles(toolName: string, args: Record<string, any
   if (!hasObservedMutation(toolName, result)) return [];
   const files = new Set<string>();
   const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) files.add(value.trim()); };
-  for (const key of ['filesModified', 'filesCreated', 'filesDeleted', 'changedFiles']) {
+  for (const key of ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles']) {
     if (Array.isArray(result[key])) for (const file of result[key]) add(typeof file === 'string' ? file : file?.path);
+  }
+  if (Array.isArray(args.targetFiles)) {
+    for (const file of args.targetFiles) add(file);
   }
   if (FILE_MUTATION_TOOLS.has(toolName)) {
     for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path', 'sourcePath', 'targetPath']) {
@@ -70,7 +73,8 @@ export function hasObservedMutation(toolName: string, result: Record<string, any
   // Inspection and reporting tools can describe changed files without changing them.
   if (!FILE_MUTATION_TOOLS.has(toolName) && result.mutationApplied !== true) return false;
   if (toolResultFailed(result) || result.changed === false || result.noChanges === true || result.rolledBack === true) return false;
-  const lists = ['filesModified', 'filesCreated', 'filesDeleted', 'changedFiles']
+  if (typeof result.totalModifiedFiles === 'number' && result.totalModifiedFiles === 0) return false;
+  const lists = ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles']
     .map((key) => result[key]).filter(Array.isArray);
   if (lists.length) return lists.some((files) => files.length > 0);
   return FILE_MUTATION_TOOLS.has(toolName);

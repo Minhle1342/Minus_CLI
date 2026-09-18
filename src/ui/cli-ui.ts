@@ -109,6 +109,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/sandbox', description: 'Xem trạng thái sandbox', category: 'Execution' },
   { command: '/docker', usage: '/docker [on|off|toggle|start|status]', description: 'Cấu hình bật / tắt hoặc mở Docker Desktop khi chạy dev', category: 'Execution', aliases: ['/docker-desktop'] },
   { command: '/tasks', description: 'Xem background tasks', category: 'Execution' },
+  { command: '/ocr', usage: '/ocr [status|doctor|enable|disable|review|scan|show|waive]', description: 'OpenCodeReview gate and manual review', category: 'Review' },
   { command: '/queue', usage: '/queue [list|cancel <id>|clear|add <text>]', description: 'Quản lý hàng đợi tin nhắn Queued Messages (Antigravity-style)', category: 'Execution', aliases: ['/q'] },
   { command: '/steer', usage: '/steer <yêu cầu điều chỉnh>', description: 'Đưa tin nhắn vào hàng đợi để bẻ lái Agent ngay trong bước kế tiếp', category: 'Execution' },
   { command: '/cancel', usage: '/cancel [all|goal|tasks|subagents]', description: 'Hủy tác vụ/goal/subagent đang chạy (hoặc bấm Ctrl+C / Esc trong khi thực thi)', category: 'Execution', aliases: ['/stop', '/abort'] },

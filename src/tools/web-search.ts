@@ -335,8 +335,14 @@ export async function executeDuckDuckGoFallback(
       signal: controller.signal,
     });
 
-    if (!res.ok) {
-      return { ok: false, results: [], error: `DuckDuckGo fallback returned HTTP status ${res.status}` };
+    if (!res.ok || res.status === 202) {
+      return {
+        ok: false,
+        results: [],
+        error: res.status === 202
+          ? 'DuckDuckGo fallback rate-limited the request (HTTP 202).'
+          : `DuckDuckGo fallback returned HTTP status ${res.status}`,
+      };
     }
 
     const html = await res.text();
@@ -345,15 +351,23 @@ export async function executeDuckDuckGoFallback(
     const blocks = html.split('<div class="result results_links');
     for (let i = 1; i < Math.min(blocks.length, 15); i++) {
       const block = blocks[i];
-      const linkMatch = block.match(/href="([^"]+)"/);
-      const titleMatch = block.match(/<a class="result__a"[^>]*>([\s\S]*?)<\/a>/);
-      const snippetMatch = block.match(/<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+      if (block.includes('result--ad') || block.includes('result__body--ad')) continue;
+
+      const titleMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+      const linkMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"/i)
+        || block.match(/href="([^"]+)"[^>]*class="[^"]*result__a/i)
+        || block.match(/href="([^"]+)"/i);
+      const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
+        || block.match(/<div[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
 
       if (titleMatch && (linkMatch || snippetMatch)) {
         let rawUrl = linkMatch ? linkMatch[1] : '';
         if (rawUrl.includes('uddg=')) {
           const uddgMatch = rawUrl.match(/uddg=([^&]+)/);
           if (uddgMatch) rawUrl = decodeURIComponent(uddgMatch[1]);
+        }
+        if (rawUrl.startsWith('//')) {
+          rawUrl = `https:${rawUrl}`;
         }
         const cleanTitle = (titleMatch[1] || '').replace(/<[^>]+>/g, '').trim();
         const cleanSnippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : '';
@@ -368,7 +382,11 @@ export async function executeDuckDuckGoFallback(
       }
     }
 
-    return { ok: true, results };
+    return {
+      ok: true,
+      results,
+      error: results.length === 0 ? 'No matching results found.' : undefined,
+    };
   } catch (err: any) {
     const timedOut = err?.name === 'AbortError' || controller.signal.aborted;
     return {
@@ -412,33 +430,51 @@ function buildInvestigationLeads(results: Array<{ url: string; title: string }>)
 async function extractTopContentFromResults(
   results: Array<{ url: string; title: string }>,
   fetchImpl: FetchImplementation,
-  signal: AbortSignal,
+  parentSignal?: AbortSignal,
+  timeoutMs = 8000,
 ): Promise<Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined> {
   if (results.length === 0) return undefined;
+  if (parentSignal?.aborted) return undefined;
+
   const targets = results.slice(0, 1);
-  const fetchedItems = await Promise.all(targets.map(async (item) => {
-    try {
-      const res = await fetchImpl(item.url, {
-        method: 'GET',
-        headers: { 'User-Agent': 'CodingAgent-DeepInvestigator/2.0', Accept: 'text/html,application/xhtml+xml,text/plain;q=0.8' },
-        signal,
-      });
-      if (!res.ok) return null;
-      const text = await res.text();
-      const { markdown, title } = htmlToCleanMarkdown(text, item.url);
-      const codeBlocks = extractCodeBlocksFromHtml(text);
-      return {
-        url: item.url,
-        title: title || item.title,
-        markdown: markdown.slice(0, 3000),
-        codeBlocks: codeBlocks.slice(0, 5),
-      };
-    } catch {
-      return null;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  const onParentAbort = () => controller.abort();
+  if (parentSignal) {
+    parentSignal.addEventListener('abort', onParentAbort, { once: true });
+  }
+
+  try {
+    const fetchedItems = await Promise.all(targets.map(async (item) => {
+      try {
+        const res = await fetchImpl(item.url, {
+          method: 'GET',
+          headers: { 'User-Agent': 'CodingAgent-DeepInvestigator/2.0', Accept: 'text/html,application/xhtml+xml,text/plain;q=0.8' },
+          signal: controller.signal,
+        });
+        if (!res.ok) return null;
+        const text = await res.text();
+        const { markdown, title } = htmlToCleanMarkdown(text, item.url);
+        const codeBlocks = extractCodeBlocksFromHtml(text);
+        return {
+          url: item.url,
+          title: title || item.title,
+          markdown: markdown.slice(0, 3000),
+          codeBlocks: codeBlocks.slice(0, 5),
+        };
+      } catch {
+        return null;
+      }
+    }));
+    const filtered = fetchedItems.filter((i): i is NonNullable<typeof i> => Boolean(i));
+    return filtered.length > 0 ? filtered : undefined;
+  } finally {
+    clearTimeout(timeoutId);
+    if (parentSignal) {
+      parentSignal.removeEventListener('abort', onParentAbort);
     }
-  }));
-  const filtered = fetchedItems.filter((i): i is NonNullable<typeof i> => Boolean(i));
-  return filtered.length > 0 ? filtered : undefined;
+  }
 }
 
 /** Creates a web_search tool backed by an operator-controlled SearXNG instance. */
@@ -461,7 +497,7 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
         },
         format: {
           type: Type.STRING,
-          description: 'Response format: "concise" (default, returns essential title, url, snippet to save tokens) or "detailed" (includes engines, ranking scores, matched queries).',
+          description: 'Response format: "concise" (returns essential title, url, snippet to save tokens) or "detailed" (default, includes engines, ranking scores, matched queries).',
           enum: ['concise', 'detailed'],
         },
         keywords: {
@@ -578,6 +614,7 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
 
       try {
         const attempts = await Promise.all(queries.map((query, index) => searchOnce(query, urls[index])));
+        clearTimeout(timeout);
         const successes = attempts.filter((attempt): attempt is SearchSuccess => attempt.ok);
         const failures = attempts.filter((attempt): attempt is SearchFailure => !attempt.ok);
         const isConcise = args.format === 'concise';
@@ -612,7 +649,7 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
             const leads = buildInvestigationLeads(fallbackResults);
             let fallbackTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
             if (Boolean(args.fetch_top_content)) {
-              fallbackTopContent = await extractTopContentFromResults(fallbackResults, fetchImpl, controller.signal);
+              fallbackTopContent = await extractTopContentFromResults(fallbackResults, fetchImpl);
             }
 
             if (isConcise) {
@@ -689,7 +726,7 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
 
         let extractedTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
         if (Boolean(args.fetch_top_content) && results.length > 0) {
-          extractedTopContent = await extractTopContentFromResults(results, fetchImpl, controller.signal);
+          extractedTopContent = await extractTopContentFromResults(results, fetchImpl);
         }
 
         const investigationLeads = buildInvestigationLeads(results);

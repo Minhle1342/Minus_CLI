@@ -347,6 +347,16 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
     retryable: true,
     description: 'Submit completed implementation for independent spec & quality review.',
   },
+  {
+    name: 'review.run',
+    toolName: 'run_code_review',
+    category: 'review',
+    sideEffect: 'external',
+    reversible: true,
+    requiresApproval: true,
+    retryable: true,
+    description: 'Run the configured OpenCodeReview model over repository changes or selected files.',
+  },
 ];
 
 export function createDefaultCapabilityCatalog(): CapabilityCatalog {

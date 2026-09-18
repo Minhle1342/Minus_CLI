@@ -110,7 +110,7 @@ import {
   WEB_SEARCH_DECISION_POLICY,
   WEB_SEARCH_PROMPT_SECTION_ID,
 } from './kernel/plugins/search-plugin.js';
-import { createWebSearchTool } from './tools/web-search.js';
+import { createWebSearchTool, executeDuckDuckGoFallback, executeWebSearch } from './tools/web-search.js';
 import { createWebFetchTool, htmlToCleanMarkdown, extractCodeBlocksFromHtml } from './tools/web-fetch.js';
 import { createSearchCodebaseFastTool } from './tools/search-code-tool.js';
 import { LocalProcessSandbox } from './sandbox/local-sandbox.js';
@@ -4356,6 +4356,86 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
   assert(
     jsonDisabledRes.errorCode === 'SEARXNG_JSON_DISABLED',
     'web_search explains how to enable the SearXNG JSON API after HTTP 403',
+  );
+
+  // 2b. Kiểm thử DuckDuckGo Fallback parser & Decoupled Signal khi SearXNG không khả dụng
+  const mockDdgHtml = `
+    <div class="result results_links result--ad">
+      <a href="https://duckduckgo.com/y.js?ad_id=123" class="result__a">Ad Title</a>
+      <a class="result__snippet">Ad snippet</a>
+    </div>
+    <div class="result results_links">
+      <a rel="nofollow" class="result__a js-result-title-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fen&rut=abc">Node.js Official Site</a>
+      <a class="result__snippet">Node.js is a free open-source JavaScript runtime.</a>
+    </div>
+    <div class="result results_links">
+      <a class="result__a" href="https://github.com/nodejs/node">Node GitHub Repo</a>
+      <div class="result__snippet">Node.js source code repository.</div>
+    </div>
+  `;
+
+  const ddgRes = await executeDuckDuckGoFallback('nodejs', {
+    fetchImpl: (async () => new Response(mockDdgHtml, { status: 200 })) as typeof fetch,
+  });
+  assert(
+    ddgRes.ok === true
+    && ddgRes.results.length === 2
+    && ddgRes.results[0].title === 'Node.js Official Site'
+    && ddgRes.results[0].url === 'https://nodejs.org/en'
+    && ddgRes.results[0].snippet.includes('free open-source')
+    && ddgRes.results[1].url === 'https://github.com/nodejs/node',
+    'executeDuckDuckGoFallback bỏ qua quảng cáo, trích xuất class result__a linh hoạt và giải mã URL uddg',
+  );
+
+  const fallbackTimeoutTool = createWebSearchTool({
+    baseUrl: 'http://127.0.0.1:9999/searxng-timeout',
+    timeoutMs: 50,
+    fetchImpl: (async (req: string | URL | Request) => {
+      const urlStr = String(req);
+      if (urlStr.includes('searxng-timeout')) {
+        const err = new Error('The operation was aborted.');
+        err.name = 'AbortError';
+        throw err;
+      }
+      if (urlStr.includes('duckduckgo.com')) {
+        return new Response(mockDdgHtml, { status: 200 });
+      }
+      return new Response(`
+        <html><body><article>
+          <h1>Node.js v20 Released</h1>
+          <pre><code>const test = require('node:test');</code></pre>
+        </article></body></html>
+      `, { status: 200 });
+    }) as typeof fetch,
+  });
+
+  const fallbackTimeoutRes = await fallbackTimeoutTool.execute({
+    query: 'nodejs',
+    format: 'concise',
+    fetch_top_content: true,
+  }, workspace);
+
+  assert(
+    fallbackTimeoutRes.provider === 'duckduckgo_fallback'
+    && fallbackTimeoutRes.returnedResults === 2
+    && fallbackTimeoutRes.extractedTopContent?.length === 1
+    && fallbackTimeoutRes.extractedTopContent[0].codeBlocks[0].includes('node:test'),
+    'web_search tự động fallback sang DuckDuckGo và trích xuất top content mà không bị crash bởi AbortSignal của SearXNG',
+  );
+
+  const rateLimitedDdgTool = createWebSearchTool({
+    baseUrl: 'http://127.0.0.1:9999/searxng-dead',
+    fetchImpl: (async (req: string | URL | Request) => {
+      const urlStr = String(req);
+      if (urlStr.includes('searxng-dead')) throw new Error('Connection refused');
+      return new Response('Rate limited', { status: 202 });
+    }) as typeof fetch,
+  });
+  const rateLimitedDdgRes = await rateLimitedDdgTool.execute({ query: 'test' }, workspace);
+  assert(
+    rateLimitedDdgRes.success === false
+    && rateLimitedDdgRes.error.includes('HTTP 202'),
+    'web_search phát hiện và báo lỗi rõ ràng khi DuckDuckGo rate limit với mã HTTP 202',
   );
 
   // 2b. Kiểm tra Codex Web Investigation Suite (web_search + web_fetch + prompt injection defense)

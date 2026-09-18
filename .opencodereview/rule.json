@@ -1,0 +1,30 @@
+{
+  "rules": [
+    {
+      "path": "src/security/**/*",
+      "rule": "Prioritize authentication, authorization, secret exposure, command injection, path traversal, unsafe process execution, and fail-open security behavior. Report only actionable issues with a concrete exploit or failure path.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "crates/minus_core/src/security/**/*",
+      "rule": "Prioritize authentication, authorization, secret exposure, command injection, path traversal, unsafe process execution, and fail-open security behavior. Report only actionable issues with a concrete exploit or failure path.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/agent/**/*",
+      "rule": "Check completion gates for bypasses, stale evidence reuse, fail-open error handling, race conditions, and paths that can mark work complete before required verification succeeds.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "src/control-plane/**/*",
+      "rule": "Check control-plane state transitions, authorization boundaries, idempotency, cancellation, and persistence for bypasses or inconsistent terminal states.",
+      "merge_system_rule": true
+    }
+  ],
+  "excludes": [
+    "dist/**",
+    "node_modules/**",
+    ".codingagent/**",
+    "coverage/**"
+  ]
+}

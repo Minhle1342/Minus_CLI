@@ -2,7 +2,17 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { BlastRadiusRisk, Hypothesis } from './hypothesis-tracker.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
-import { SpeculativeBranchManager } from './speculative-branch-manager.js';
+
+/**
+ * Kiểm tra xem tệp có thuộc module chia sẻ lõi (core/db/entity/types/security/etc.) hay không.
+ * Sử dụng ranh giới phân tách đường dẫn (path boundary) để tránh false positives
+ * với các tệp như feedback.ts, sandbox.ts, scoreboard.ts.
+ */
+export function isCoreModulePath(filePath?: string): boolean {
+  if (!filePath) return false;
+  const normalized = filePath.replace(/\\/g, '/');
+  return /(?:^|[\\/])(?:core|db|database|entity|entities|types|tool-runner|security|query-engine)(?:[\\/._-]|$)/i.test(normalized);
+}
 
 export type DialecticalStance = 'thesis' | 'antithesis' | 'synthesis';
 
@@ -42,6 +52,7 @@ export interface EpistemicInvestigationInputs {
   risk: BlastRadiusRisk;
   consecutiveFailures: number;
   recentError?: string;
+  errorCode?: string;
   targetFiles?: string[];
   proposedFixSummary?: string;
   workspaceRoot?: string;
@@ -68,7 +79,7 @@ export interface EpistemicInvestigationResult {
  */
 export class EpistemicInvestigationGating {
   static shouldActivate(inputs: EpistemicInvestigationInputs): { activate: boolean; reason: string } {
-    const operationalFailure = inputs.recentError?.match(
+    const operationalFailure = inputs.errorCode || inputs.recentError?.match(
       /\b(?:PACKAGE_JSON_NOT_FOUND|TOOL_NOT_ALLOWED_THIS_TURN|APPROVAL_REQUIRED|CONTEXT_BUDGET_UNSATISFIABLE|COMMAND_NOT_FOUND|WORKSPACE_PATH_NOT_FOUND)\b/i,
     )?.[0];
     const hasHighRiskHypothesis = inputs.hypothesis
@@ -148,9 +159,7 @@ export class CrossAgentDualInvestigator {
       ? inputs.targetFiles.join(', ')
       : 'target files';
 
-    const hasCoreModuleTarget = (inputs.targetFiles || []).some(f => 
-      f.includes('core') || f.includes('db') || f.includes('entity') || f.includes('types') || f.includes('tool-runner') || f.includes('security') || f.includes('query-engine')
-    );
+    const hasCoreModuleTarget = (inputs.targetFiles || []).some(f => isCoreModulePath(f));
 
     const hasSurfaceSymptomError = Boolean(
       inputs.recentError?.includes('TypeError') || 
@@ -177,7 +186,19 @@ export class CrossAgentDualInvestigator {
     let arbiterReasoning = '';
     let recommendedAction = '';
 
-    if (risk === 'CRITICAL' && inputs.consecutiveFailures >= 2) {
+    const hasSpecificEvidence = Boolean(inputs.recentError || (inputs.targetFiles && inputs.targetFiles.length > 0) || inputs.hypothesis);
+
+    if (!hasSpecificEvidence) {
+      outcome = 'INSUFFICIENT_EVIDENCE';
+      confidence = 0.50;
+      arbiterReasoning = `Thiếu bằng chứng thực nghiệm: Chưa xác định được tệp mục tiêu hoặc dấu vết lỗi cụ thể.`;
+      recommendedAction = `Thực hiện định vị lỗi (read/grep/find) trước khi đề xuất thay đổi hoặc tạo giả thuyết mới.`;
+    } else if (inputs.consecutiveFailures >= 3 && (hasCoreModuleTarget || risk === 'CRITICAL')) {
+      outcome = 'REJECTED_THESIS';
+      confidence = 0.88;
+      arbiterReasoning = `Đã xảy ra ${inputs.consecutiveFailures} lần lỗi liên tiếp trên module cốt lõi/rủi ro cao. Giả thuyết/phương án hiện tại bị bác bỏ do nguy cơ hồi quy nghiêm trọng.`;
+      recommendedAction = `Bác bỏ giả thuyết hiện tại; thực hiện chuyển hướng chiến lược (Strategic Pivot) và tái lập giả thuyết mới từ trace lỗi thực tế.`;
+    } else if (risk === 'CRITICAL' && inputs.consecutiveFailures >= 2) {
       outcome = 'REFINED_HYPOTHESIS';
       confidence = 0.75;
       arbiterReasoning = `Rủi ro CRITICAL kèm ${inputs.consecutiveFailures} lần lỗi liên tiếp: Thesis chưa được kiểm chứng độc lập. Cần siết chặt tiêu chí phản nghiệm trước khi áp dụng code patch.`;
@@ -228,15 +249,36 @@ export class TestTimeMonteCarloRollout {
 
     // Step 1: Phân tích thay đổi đề xuất đối với cú pháp & hợp đồng giao diện
     const isHighRisk = inputs.risk === 'HIGH' || inputs.risk === 'CRITICAL';
-    const step1Valid = true; // AST / Syntax check giả lập
-    const step1Score = isHighRisk ? 0.82 : 0.95;
+    let step1Valid = true;
+
+    // Empirical AST / syntax validation nếu workspaceRoot & targetFiles tồn tại trên đĩa
+    if (inputs.workspaceRoot && inputs.targetFiles && inputs.targetFiles.length > 0) {
+      for (const file of inputs.targetFiles) {
+        const fullPath = path.isAbsolute(file) ? file : path.join(inputs.workspaceRoot, file);
+        if (fs.existsSync(fullPath)) {
+          try {
+            const content = fs.readFileSync(fullPath, 'utf8');
+            if (file.endsWith('.json')) {
+              JSON.parse(content);
+            }
+          } catch {
+            step1Valid = false;
+            criticalRisks.push(`Tệp mục tiêu [${file}] hiện tại không hợp lệ cú pháp`);
+          }
+        }
+      }
+    }
+
+    const step1Score = !step1Valid ? 0.30 : (isHighRisk ? 0.82 : 0.95);
 
     steps.push({
       stepIndex: 1,
       action: `Speculative Dry-Run: Áp dụng patch đề xuất lên bộ đệm tạm`,
-      predictedOutcome: `Patch áp dụng thành công mà không gây mâu thuẫn cú pháp tệp`,
+      predictedOutcome: step1Valid 
+        ? `Patch áp dụng thành công mà không gây mâu thuẫn cú pháp tệp`
+        : `Phát hiện lỗi cú pháp hiện hữu trên tệp mục tiêu`,
       syntaxValid: step1Valid,
-      regressionRisk: isHighRisk ? 'MEDIUM' : 'NONE',
+      regressionRisk: !step1Valid ? 'HIGH' : (isHighRisk ? 'MEDIUM' : 'NONE'),
       score: step1Score,
     });
 
@@ -244,9 +286,7 @@ export class TestTimeMonteCarloRollout {
     let step2Regression: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
     let step2Score = 0.88;
 
-    const hasCoreModuleTarget = (inputs.targetFiles || []).some(f => 
-      f.includes('core') || f.includes('db') || f.includes('entity') || f.includes('types') || f.includes('tool-runner') || f.includes('security') || f.includes('query-engine')
-    );
+    const hasCoreModuleTarget = (inputs.targetFiles || []).some(f => isCoreModulePath(f));
 
     if (inputs.consecutiveFailures >= 2) {
       step2Regression = 'MEDIUM';
@@ -315,28 +355,58 @@ export class EpistemicDistillationBarrier {
       speculativeRollout.recommendation === 'PROCEED' ? '🟢 PROCEED' :
       speculativeRollout.recommendation === 'TRY_ALTERNATIVE' ? '🟡 CAUTION (Refine Patch)' : '🔴 ABORT';
 
-    const lines: string[] = [
-      `⚖️ [EPISTEMIC ARBITER VERDICT - DEBIASED]:`,
-      `• Consensus: ${outcomeSymbol} (Confidence: ${Math.round(dialecticalVerdict.confidence * 100)}%)`,
-      `• Antithesis Risk Guard: ${dialecticalVerdict.epistemicArbiterReasoning}`,
-      `• Speculative Rollout: ${rolloutSymbol} (Feasibility: ${Math.round(speculativeRollout.meanScore * 100)}%, Syntax: OK)`,
-    ];
+    let arbiterReasoning = dialecticalVerdict.epistemicArbiterReasoning || '';
+    let action = dialecticalVerdict.recommendedAction || '';
+    let warnings = [...(speculativeRollout.criticalRisksIdentified || [])];
 
-    if (speculativeRollout.criticalRisksIdentified.length > 0) {
-      lines.push(`• Critical Warning: ${speculativeRollout.criticalRisksIdentified.join('; ')}`);
-    }
+    const buildDistilled = (reasoningText: string, actionText: string, warningList: string[]) => {
+      const lines: string[] = [
+        `⚖️ [EPISTEMIC ARBITER VERDICT - DEBIASED]:`,
+        `• Consensus: ${outcomeSymbol} (Confidence: ${Math.round(dialecticalVerdict.confidence * 100)}%)`,
+        `• Antithesis Risk Guard: ${reasoningText}`,
+        `• Speculative Rollout: ${rolloutSymbol} (Feasibility: ${Math.round(speculativeRollout.meanScore * 100)}%, Syntax: OK)`,
+      ];
 
-    lines.push(`👉 Mandatory Rule: ${dialecticalVerdict.recommendedAction}`);
+      if (warningList.length > 0) {
+        lines.push(`• Critical Warning: ${warningList.join('; ')}`);
+      }
 
-    let distilledText = lines.join('\n');
+      lines.push(`👉 Mandatory Rule: ${actionText}`);
+      return lines.join('\n');
+    };
+
+    let distilledText = buildDistilled(arbiterReasoning, action, warnings);
     let tokenCount = ExactTokenizer.countTokens(distilledText);
 
-    // Hard ceiling enforcement: Nếu vì lý do nào đó vượt quá 180 tokens, cắt gọt dòng cuối
+    // Hard ceiling enforcement: Đảm bảo trần cứng MAX_DISTILLED_TOKENS mà KHÔNG bỏ rơi Critical Warning
     if (tokenCount > EpistemicDistillationBarrier.MAX_DISTILLED_TOKENS) {
-      const truncatedLines = lines.slice(0, 4);
-      truncatedLines.push(`👉 Action: ${dialecticalVerdict.recommendedAction.slice(0, 100)}...`);
-      distilledText = truncatedLines.join('\n');
-      tokenCount = ExactTokenizer.countTokens(distilledText);
+      // 1. Tinh gọn cảnh báo nếu quá dài
+      warnings = warnings.map(w => (w.length > 90 ? `${w.slice(0, 87)}...` : w)).slice(0, 2);
+
+      // 2. Cắt tỉa reasoning và action nếu vượt ngân sách
+      while (tokenCount > EpistemicDistillationBarrier.MAX_DISTILLED_TOKENS && (arbiterReasoning.length > 40 || action.length > 40)) {
+        if (arbiterReasoning.length > action.length && arbiterReasoning.length > 40) {
+          arbiterReasoning = `${arbiterReasoning.slice(0, Math.max(40, arbiterReasoning.length - 30))}...`;
+        } else if (action.length > 40) {
+          action = `${action.slice(0, Math.max(40, action.length - 20))}...`;
+        } else {
+          arbiterReasoning = `${arbiterReasoning.slice(0, Math.max(20, arbiterReasoning.length - 15))}...`;
+        }
+        distilledText = buildDistilled(arbiterReasoning, action, warnings);
+        tokenCount = ExactTokenizer.countTokens(distilledText);
+      }
+
+      // 3. Fallback an toàn tuyệt đối nếu tokenCount vẫn > 180 (e.g. vì warnings hoặc symbols quá dài)
+      while (tokenCount > EpistemicDistillationBarrier.MAX_DISTILLED_TOKENS && warnings.length > 1) {
+        warnings = warnings.slice(0, 1);
+        distilledText = buildDistilled(arbiterReasoning, action, warnings);
+        tokenCount = ExactTokenizer.countTokens(distilledText);
+      }
+      while (tokenCount > EpistemicDistillationBarrier.MAX_DISTILLED_TOKENS && warnings.length > 0 && warnings[0].length > 30) {
+        warnings[0] = `${warnings[0].slice(0, 27)}...`;
+        distilledText = buildDistilled(arbiterReasoning, action, warnings);
+        tokenCount = ExactTokenizer.countTokens(distilledText);
+      }
     }
 
     dialecticalVerdict.distilledTokens = tokenCount;

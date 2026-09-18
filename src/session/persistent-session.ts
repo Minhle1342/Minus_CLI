@@ -25,12 +25,25 @@ export function getSessionFilePath(workspaceDirOrPath?: string): string {
 
 export const SESSION_FILE = getSessionFilePath();
 
+export interface OcrSessionConfig {
+  enabled?: boolean;
+  gateMode?: 'enforce';
+  effort?: 'low' | 'medium' | 'high';
+  concurrency?: number;
+  timeoutMinutes?: number;
+  maxTokensBudget?: number;
+  provider?: string;
+  model?: string;
+  rulePath?: string;
+}
+
 export interface SessionData {
   modelName?: string;
   workspacePath?: string;
   activeSessionId?: string;
   tokenConfig?: import('../llm/token-config.js').TokenConfig;
   autoStartDocker?: boolean;
+  ocr?: OcrSessionConfig;
   lastUpdated?: string;
 }
 
