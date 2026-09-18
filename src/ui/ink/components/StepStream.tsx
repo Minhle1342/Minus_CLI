@@ -105,6 +105,53 @@ export function formatToolTargetWithLines(toolName: string, args: Record<string,
   );
 }
 
+/**
+ * Làm sạch và định dạng thông điệp lỗi hiển thị trên TUI
+ * Loại bỏ các tiền tố binary path dài dòng (Command failed: ...) và ưu tiên dòng lỗi bản chất
+ */
+export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
+  if (!rawErr) return '';
+  let errStr = typeof rawErr === 'object' && rawErr !== null
+    ? ((rawErr as any).message || JSON.stringify(rawErr))
+    : String(rawErr);
+
+  // Nếu chuỗi chứa nhiều dòng, chuẩn hóa
+  const lines = errStr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  // Xử lý các trường hợp chứa "Command failed: C:\...\node.exe ..."
+  if (/Command failed:\s*/i.test(errStr)) {
+    // 1. Tìm dòng lỗi ngoại lệ thực sự (TypeError, SyntaxError, Error, v.v.)
+    const exceptionLine = lines.find((l) =>
+      /(?:(?:[A-Z][a-zA-Z0-9_]*Error|Error|FATAL ERROR|ERR_[A-Z0-9_]+)(?:\s*\[[^\]]+\])?:\s*[^\n]+)/.test(l) &&
+      !/^Command failed:\s*/i.test(l)
+    );
+
+    if (exceptionLine) {
+      // Nếu có tiền tố như "Script execution failed with exit code X: Command failed: ...", giữ tiền tố thoát code
+      const exitCodePrefix = errStr.match(/^(?:Script execution failed with exit code \d+|Command failed with exit code \d+):/i);
+      errStr = exitCodePrefix ? `${exitCodePrefix[0]} ${exceptionLine}` : exceptionLine;
+    } else {
+      // Tìm dòng không phải command invocation, không phải stack trace
+      const nonCmdLines = lines.filter((l) => !/^Command failed:\s*/i.test(l) && !/^at\s+/i.test(l) && !/^\^/i.test(l) && !/^Node\.js v/i.test(l));
+      if (nonCmdLines.length > 0) {
+        const exitCodePrefix = errStr.match(/^(?:Script execution failed with exit code \d+|Command failed with exit code \d+):/i);
+        errStr = exitCodePrefix ? `${exitCodePrefix[0]} ${nonCmdLines[0]}` : nonCmdLines[0];
+      } else {
+        // Nếu chỉ có 1 dòng Command failed, loại bỏ đường dẫn thư mục tuyệt đối dài dòng
+        // VD: Command failed: C:\Program Files\nodejs\node.exe D:\path\file.mjs -> Command failed: node.exe file.mjs
+        errStr = errStr.replace(/Command failed:\s*"?.*[/\\]([a-zA-Z0-9_.-]+(?:\.exe)?)"?/i, 'Command failed: $1');
+      }
+    }
+  }
+
+  // Tách dòng đầu tiên để hiển thị trên 1 dòng
+  const firstLine = errStr.split(/\r?\n/)[0].trim();
+  if (firstLine.length <= maxLen) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, maxLen - 1)}…`;
+}
+
 interface StepStreamProps {
   steps: TuiStepItem[];
   maxVisible?: number;
@@ -167,7 +214,7 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
             step.result.message ||
             (step.result.stderr ? String(step.result.stderr).trim().split('\n')[0] : 'Unknown error')
           : null;
-        const errDetail = rawErr ? String(rawErr) : null;
+        const errDetail = rawErr ? formatTuiErrorDetail(rawErr) : null;
 
         return (
           <Box key={step.id} flexDirection="column">
@@ -182,7 +229,7 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
             </Box>
             {isError && errDetail && (
               <Box paddingLeft={2}>
-                <Text color="red">└─ {String(errDetail).slice(0, 90)}</Text>
+                <Text color="red">└─ {errDetail}</Text>
               </Box>
             )}
           </Box>

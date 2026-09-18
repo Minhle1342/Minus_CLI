@@ -140,6 +140,23 @@ export class SkillActivator {
         continue;
       }
 
+      // Cơ chế Slash-Command Gated nghiêm ngặt: explain-like-socrates CHỈ được kích hoạt khi người dùng nhập /explain-like-socrates (hoặc /socrates)
+      if (skill.id === 'explain-like-socrates') {
+        let socratesMatch = false;
+        if (context.userRequest) {
+          const lower = context.userRequest.toLowerCase().trim();
+          socratesMatch =
+            lower.startsWith('/explain-like-socrates') ||
+            lower.includes('/explain-like-socrates') ||
+            lower.startsWith('/socrates') ||
+            lower.includes('/socrates');
+        }
+        if (explicitlyEnabled || socratesMatch) {
+          candidateSkills.push(skill);
+        }
+        continue;
+      }
+
       // Khớp phân loại ngữ cảnh từ userRequest (Classification)
       let matchesContext = false;
       if (context.userRequest) {

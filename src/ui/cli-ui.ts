@@ -138,6 +138,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/context', usage: '/context [inspect|compact|guardian|snapshot|briefing|save|status]', description: 'Kiểm soát Context Window, kích hoạt Context Guardian và Context Agent', category: 'Context', aliases: ['/ctx'] },
   { command: '/snapshot', usage: '/snapshot [save|inspect]', description: 'Chụp Context Guardian Snapshot bảo tồn bất biến kiến trúc trước khi nén', category: 'Context' },
   { command: '/briefing', usage: '/briefing', description: 'Tải và hiển thị Thẻ Tóm Tắt Chuyển Giao Context Agent / Guardian', category: 'Context' },
+  { command: '/explain-like-socrates', usage: '/explain-like-socrates <khái niệm hoặc câu hỏi cần giải thích>', description: 'Giải thích ý tưởng/khái niệm theo phong cách đối thoại Socrates qua suy luận từng bước và ví dụ ẩn dụ đơn giản', category: 'Exploration', aliases: ['/socrates'] },
   { command: '/clear', description: 'Xoá màn hình terminal', category: 'General' },
   { command: '/help', description: 'Hiển thị hướng dẫn', category: 'General', aliases: ['/?'] },
   { command: '/exit', description: 'Thoát chương trình', category: 'General', aliases: ['/quit'] },

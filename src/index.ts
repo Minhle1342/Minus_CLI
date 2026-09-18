@@ -1328,6 +1328,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         continue;
       }
 
+      // Lệnh Giải thích theo đối thoại Socrates (/explain-like-socrates hoặc /socrates)
+      // Nếu chỉ gõ tên lệnh không kèm câu hỏi/chủ đề -> Hiển thị hướng dẫn sử dụng
+      if (trimmed === '/explain-like-socrates' || trimmed === '/socrates') {
+        console.log(`\n${c.yellow}⚠️ Cách dùng:${c.reset} ${c.bold}/explain-like-socrates <khái niệm hoặc câu hỏi cần giải thích>${c.reset}`);
+        console.log(`${c.gray}Ví dụ: /explain-like-socrates Cơ chế hoạt động của Event Loop trong Node.js${c.reset}\n`);
+        continue;
+      }
+
       // Lệnh Quản lý và Điều phối Subagents & Benchmark Specialists (/agents hoặc /subagents)
       if (
         trimmed === '/agents' ||

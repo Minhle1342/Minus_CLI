@@ -41,6 +41,58 @@ const ERROR_AS_200_PATTERNS = [
 ];
 
 /**
+ * Trích xuất thông điệp lỗi súc tích, chính xác từ stderr hoặc execErr
+ * Loại bỏ tiền tố Command failed dài dòng chứa đường dẫn tuyệt đối của node.exe và scratch file
+ */
+export function extractCleanScriptErrorMessage(stderr: string, execErr?: any): string {
+  const combined = `${stderr || ''}\n${execErr?.message || ''}`.trim();
+  if (!combined) return 'Unknown runtime error';
+
+  // 1. Nhận diện các mẫu lỗi ngoại lệ JavaScript/Node chuẩn (TypeError, SyntaxError, Error [ERR_...], v.v.)
+  const errorPatterns = [
+    /(?:^|\n)((?:TypeError|ReferenceError|SyntaxError|RangeError|URIError|AssertionError|Error)(?:\s*\[[^\]]+\])?:\s*[^\n]+)/i,
+    /(?:^|\n)(Cannot find (?:module|package)\s+['"][^'"]+['"][^\n]*)/i,
+    /(?:^|\n)(ERR_[A-Z0-9_]+:\s*[^\n]+)/i,
+    /(?:^|\n)(UnhandledPromiseRejection(?:Warning)?:\s*[^\n]+)/i,
+    /(?:^|\n)(FATAL ERROR:[^\n]+)/i,
+  ];
+
+  for (const pattern of errorPatterns) {
+    const match = combined.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+
+  // 2. Nếu không khớp mẫu chuẩn, tách các dòng và lọc bỏ rác hệ thống
+  const lines = combined
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const cleanLines = lines.filter((line) => {
+    if (/^Command failed:\s*/i.test(line)) return false;
+    if (/^Node\.js v\d+/i.test(line)) return false;
+    if (/^\(Use `node --trace-warnings/i.test(line)) return false;
+    if (/^\^+\s*$/.test(line)) return false; // Caret pointers
+    if (/^at\s+/i.test(line)) return false; // Stack trace frame
+    return true;
+  });
+
+  if (cleanLines.length > 0) {
+    return cleanLines[0];
+  }
+
+  // 3. Fallback: Nếu chỉ còn thông báo Command failed, cố gắng bóc tách phần lệnh
+  if (execErr?.message) {
+    const stripped = execErr.message.replace(/^Command failed:[^\n]*\n?/i, '').trim();
+    if (stripped) return stripped.split(/\r?\n/)[0].trim();
+  }
+
+  return 'Unknown runtime error';
+}
+
+/**
  * Trích xuất bản đồ trạng thái git snapshot dạng { relativePath: mtimeMs }
  */
 function getGitStatusSnapshot(rootDir: string): Map<string, number> {
@@ -379,13 +431,14 @@ export const runNodeScriptTool: ToolDefinition = {
         }
 
         // Phân loại lỗi runtime với classifyToolFailure
-        const failureDiag = classifyToolFailure('run_node_script', execErr);
+        const cleanErrorMsg = extractCleanScriptErrorMessage(stderr, execErr);
+        const failureDiag = classifyToolFailure('run_node_script', new Error(cleanErrorMsg));
         const recoveryAction = failureDiag.recoveryAction || 'Inspect stderr and syntax in scriptContent before retrying.';
         return {
           success: false,
           is_error: true,
           errorCode: 'SCRIPT_EXECUTION_FAILED',
-          error: `Script execution failed with exit code ${exitCode}: ${execErr.message || 'Unknown runtime error'}`,
+          error: `Script execution failed with exit code ${exitCode}: ${cleanErrorMsg}`,
           category: failureDiag.category,
           recoveryAction,
           actionableFix: `Inspect the stderr stack trace. Confirm that target files and directories exist, that imported modules are available, and that file permissions allow writes.`,

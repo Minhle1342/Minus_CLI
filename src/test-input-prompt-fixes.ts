@@ -14,7 +14,7 @@ import {
 } from './ui/ink/components/input-line-editor.js';
 import { InputPromptBar } from './ui/ink/components/InputPromptBar.js';
 import { PermissionPromptBox } from './ui/ink/components/PermissionPromptBox.js';
-import { formatToolTargetWithLines } from './ui/ink/components/StepStream.js';
+import { formatToolTargetWithLines, formatTuiErrorDetail } from './ui/ink/components/StepStream.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { DomainIntentGuardian } from './agent/domain-intent-guardian.js';
 import { hasUnfulfilledDeferredPromise } from './agent/final-answer-guard.js';
@@ -569,6 +569,36 @@ Trong các bước tiếp theo, tôi sẽ hỗ trợ bạn triển khai tính n�
       plan.autoReconcileRemainingTasks('Delivery of substantive final answer');
       assert.strictEqual(plan.isAllTasksCompleted(), true, 'All tasks should now be in terminal state (COMPLETED or SKIPPED)');
       assert.strictEqual(plan.getCompletionBlocker(), undefined);
+    });
+  });
+
+  describe('11. TUI Error Detail Formatting (formatTuiErrorDetail)', () => {
+    it('should strip long binary path prefixes like Command failed: C:\\...\\node.exe', () => {
+      const raw = `Script execution failed with exit code 1: Command failed: C:\\Program Files\\nodejs\\node.exe D:\\APIGo\\.codingagent\\scratch\\batch-script-123.mjs\nTypeError: Cannot read properties of undefined (reading 'name')`;
+      const cleaned = formatTuiErrorDetail(raw);
+      assert.strictEqual(
+        cleaned,
+        `Script execution failed with exit code 1: TypeError: Cannot read properties of undefined (reading 'name')`
+      );
+    });
+
+    it('should replace standalone Command failed with binary basename if no exception is found', () => {
+      const raw = `Command failed: C:\\Users\\HP\\AppData\\Local\\Programs\\git.exe checkout nonexistent-branch`;
+      const cleaned = formatTuiErrorDetail(raw);
+      assert.strictEqual(cleaned, 'Command failed: git.exe checkout nonexistent-branch');
+    });
+
+    it('should preserve concise error messages without modifications', () => {
+      const raw = `SyntaxError: Unexpected token '}'`;
+      const cleaned = formatTuiErrorDetail(raw);
+      assert.strictEqual(cleaned, `SyntaxError: Unexpected token '}'`);
+    });
+
+    it('should truncate strings exceeding maxLen gracefully with ellipsis', () => {
+      const longMessage = 'A'.repeat(200);
+      const cleaned = formatTuiErrorDetail(longMessage, 100);
+      assert.strictEqual(cleaned.length, 100);
+      assert.ok(cleaned.endsWith('…'));
     });
   });
 });

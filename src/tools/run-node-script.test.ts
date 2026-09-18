@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { runNodeScriptTool } from './run-node-script.js';
+import { runNodeScriptTool, extractCleanScriptErrorMessage } from './run-node-script.js';
 import { ToolRegistry } from './registry.js';
 import { isMutationTool } from './diff-generator.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -210,4 +210,53 @@ test('ToolRegistry & Guardian Alternatives Integration', () => {
     DEFAULT_TOOL_ALTERNATIVES['run_node_script'].includes('apply_patch'),
     'Phải bao gồm apply_patch trong danh sách công cụ thay thế'
   );
+});
+
+test('extractCleanScriptErrorMessage: extracts concise and accurate error without command path noise', () => {
+  // Test case 1: Node.js execFile error message with Command failed prefix and TypeError
+  const execErrLike = {
+    message: 'Command failed: C:\\Program Files\\nodejs\\node.exe D:\\APIGo\\.codingagent\\scratch\\batch-script-123.mjs\nfile:///D:/APIGo/scratch.mjs:2\nconst a = b.c;\n            ^\nTypeError: Cannot read properties of undefined (reading \'c\')\n    at file:///D:/APIGo/scratch.mjs:2:13',
+  };
+  const clean1 = extractCleanScriptErrorMessage('', execErrLike);
+  assert.equal(clean1, "TypeError: Cannot read properties of undefined (reading 'c')");
+
+  // Test case 2: stderr has Error [ERR_MODULE_NOT_FOUND]
+  const stderr2 = `
+node:internal/modules/esm/resolve:265
+  throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+  ^
+
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'nonexistent-lib' imported from D:\\project\\script.mjs
+    at new NodeError (node:internal/errors:405:5)
+`;
+  const clean2 = extractCleanScriptErrorMessage(stderr2);
+  assert.match(clean2, /Error \[ERR_MODULE_NOT_FOUND\]: Cannot find package 'nonexistent-lib'/);
+
+  // Test case 3: Custom script error via console.error and exit
+  const stderr3 = 'Custom database connection failed at localhost:5432\n';
+  const clean3 = extractCleanScriptErrorMessage(stderr3);
+  assert.equal(clean3, 'Custom database connection failed at localhost:5432');
+});
+
+test('runNodeScriptTool: runtime exception execution produces clean error without Command failed prefix', async () => {
+  const workspace = new Workspace(process.cwd());
+
+  const result = await runNodeScriptTool.execute(
+    {
+      scriptContent: 'throw new TypeError("Simulated runtime failure: invalid property access");',
+      description: 'Test runtime exception handling and clean error formatting',
+      timeoutMs: 5000,
+    },
+    workspace
+  );
+
+  assert.equal(result.success, false, 'Runtime error phải có success = false');
+  assert.equal(result.is_error, true, 'Runtime error phải có is_error = true');
+  assert.equal(result.errorCode, 'SCRIPT_EXECUTION_FAILED');
+  assert.equal(result.exitCode, 1);
+
+  // Quan trọng: result.error không được chứa "Command failed:" hay đường dẫn tuyệt đối dài dòng
+  assert.doesNotMatch(result.error, /Command failed:/i, 'Thông điệp lỗi không được chứa tiền tố Command failed: rác');
+  assert.match(result.error, /Script execution failed with exit code 1: TypeError: Simulated runtime failure/);
+  assert.ok(result.stderr, 'Full stderr vẫn phải được lưu lại đầy đủ để debug sâu');
 });

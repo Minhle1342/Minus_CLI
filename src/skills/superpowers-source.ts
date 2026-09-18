@@ -183,6 +183,15 @@ export const SUPERPOWERS_BUILTIN_SKILLS: Omit<SkillManifest, 'path' | 'source'>[
     requiredCapabilities: ['git.status', 'git.stage', 'git.commit', 'git.push', 'worktree.remove', 'shell.verify'],
     tags: ['git', 'cleanup', 'release', 'superpowers'],
   },
+  {
+    id: 'explain-like-socrates',
+    name: 'Explain Like Socrates',
+    version: '1.0.0',
+    description: 'Explains ideas using the conversational reasoning style of Socratic dialogue. Guides the user toward understanding through reflective reasoning, small thought experiments, and a single simple analogy.',
+    priority: 15,
+    autoActivate: false,
+    tags: ['socrates', 'dialogue', 'explanation', 'teaching', 'reasoning', 'philosophy', 'slash-gated-skill'],
+  },
 ];
 
 /**
