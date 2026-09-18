@@ -58,5 +58,8 @@ export const SearchPlugin: AgentPlugin = {
       priority: -100,
     });
   },
+  dispose(ctx: KernelContext) {
+    ctx.systemPrompt.unregister(WEB_SEARCH_PROMPT_SECTION_ID);
+  },
 };
 

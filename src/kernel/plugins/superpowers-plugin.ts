@@ -15,6 +15,18 @@ import { createReviewTools } from '../../tools/review-tools.js';
 import { VerificationPolicy } from '../../skills/verification-policy.js';
 import { SuperpowersWorkflowMap } from '../../skills/workflow-map.js';
 
+const FILE_MUTATION_TOOLS = new Set([
+  'write_file',
+  'write_to_file',
+  'replace_text',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'apply_patch',
+  'create_file',
+  'delete_file',
+  'move_file',
+]);
+
 export class SuperpowersPlugin implements AgentPlugin {
   readonly name = 'superpowers';
   readonly version = '1.0.0';
@@ -29,6 +41,14 @@ export class SuperpowersPlugin implements AgentPlugin {
   private reviewManager = new ReviewManager();
   private verificationPolicy = new VerificationPolicy();
   private workflowMap = new SuperpowersWorkflowMap();
+  private onWorkspaceChanged?: (oldPath: string, newPath: string) => void;
+  private onToolAfter?: (
+    toolName: string,
+    result: Record<string, any>,
+    durationMs: number,
+    args: Record<string, any>,
+    context?: { sessionId?: string; agentId?: string; turn?: number },
+  ) => void;
 
   constructor() {
     this.activator = new SkillActivator(this.skillRegistry, this.capabilityCatalog);
@@ -50,9 +70,13 @@ export class SuperpowersPlugin implements AgentPlugin {
     for (const tool of gitTools) {
       ctx.tools.register(tool);
     }
-    ctx.events.on('workspace:changed', () => {
+    this.onWorkspaceChanged = () => {
+      this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
+      (ctx as any).worktrees = this.worktreeManager;
+      for (const tool of createWorktreeTools(this.worktreeManager)) ctx.tools.register(tool);
       for (const tool of createGitTools(ctx.workspace)) ctx.tools.register(tool);
-    });
+    };
+    ctx.events.on('workspace:changed', this.onWorkspaceChanged);
 
     const approvalTools = createApprovalTools(this.approvalManager);
     for (const tool of approvalTools) {
@@ -97,10 +121,10 @@ export class SuperpowersPlugin implements AgentPlugin {
     });
 
     // 4. Theo dõi thay đổi code & xác thực qua VerificationPolicy
-    ctx.events.on('tool:after', (toolName, result, _durationMs, args) => {
+    this.onToolAfter = (toolName, result, _durationMs, args) => {
       const failed = Boolean(result?.error || result?.errorCode || result?.success === false
         || (typeof result?.exitCode === 'number' && result.exitCode !== 0));
-      if (['write_file', 'replace_text'].includes(toolName) && !failed) {
+      if (FILE_MUTATION_TOOLS.has(toolName) && !failed) {
         this.verificationPolicy.recordModification();
       } else if (toolName === 'run_command') {
         this.verificationPolicy.recordVerification(
@@ -110,7 +134,8 @@ export class SuperpowersPlugin implements AgentPlugin {
           result?.exitCode
         );
       }
-    });
+    };
+    ctx.events.on('tool:after', this.onToolAfter);
 
     // 5. Gắn các services vào KernelContext mở rộng
     (ctx as any).skills = this.skillRegistry;
@@ -122,6 +147,18 @@ export class SuperpowersPlugin implements AgentPlugin {
     (ctx as any).reviews = this.reviewManager;
     (ctx as any).verification = this.verificationPolicy;
     (ctx as any).workflow = this.workflowMap;
+  }
+
+  dispose(ctx: KernelContext): void {
+    if (this.onWorkspaceChanged) {
+      ctx.events.off('workspace:changed', this.onWorkspaceChanged);
+      this.onWorkspaceChanged = undefined;
+    }
+    if (this.onToolAfter) {
+      ctx.events.off('tool:after', this.onToolAfter);
+      this.onToolAfter = undefined;
+    }
+    ctx.agentHooks.unregister('superpowers-activator');
   }
 
   getSkillRegistry(): SkillRegistry {

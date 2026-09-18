@@ -95,6 +95,8 @@ export interface KernelEvents {
   'model:changed': (newModel: string) => void;
   'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
   'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
+  'agent:abort': () => void;
+  'abort': () => void;
 }
 
 /** Typed event surface for plugins and live agent observers. */
@@ -269,13 +271,24 @@ export class AgentKernel {
         const oldPath = this.ctx.workspace.rootDir;
         void disposeLspManager(oldWorkspace);
         this.ctx.workspace = newWs;
-        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, this.ctx.compose);
+        const oldTasks = this.ctx.tasks;
+        if (oldTasks) {
+          void oldTasks.dispose().catch(() => {});
+        }
+        const newTasks = new TaskManager(newWs.rootDir);
+        (this.ctx as any).tasks = newTasks;
+        this.ctx.tools.attachTaskManager(newTasks);
+
+        const newCompose = new ComposeController(newWs.rootDir, this.ctx.plan, this.ctx.critic);
+        (this.ctx as any).compose = newCompose;
+        newCompose.init().catch(() => {});
+
+        this.ctx.toolRunner = new ToolRunner(this.ctx.tools, newWs, this.ctx.permissions, newCompose);
         (this.ctx as any).checkpoints = new CheckpointManager(newWs.rootDir);
         this.ctx.memory.setWorkspace(newWs.rootDir);
         this.ctx.repositoryMemory.setWorkspace(newWs);
         this.ctx.dream.setWorkspace(newWs.rootDir, this.ctx.memory, this.ctx.repositoryMemory);
         this.ctx.sessions.setWorkspace(newWs.rootDir);
-        (this.ctx as any).tasks = new TaskManager(newWs.rootDir);
         this.ctx.sandbox.updateWorkspace(newWs.rootDir).catch(() => { });
         this.ctx.checkpoints.init().catch(() => { });
         this.ctx.memory.init(newWs).catch(() => { });
@@ -291,12 +304,22 @@ export class AgentKernel {
     };
   }
 
+  abort(): void {
+    this.ctx.events.emit('agent:abort');
+    this.ctx.events.emit('abort');
+  }
+
+  cancelCurrentTask(): void {
+    this.abort();
+  }
+
   /**
    * Đăng ký một Plugin vào Kernel
    */
   async use(plugin: AgentPlugin): Promise<this> {
     if (this.plugins.has(plugin.name)) {
       console.warn(`Plugin "${plugin.name}" đã được đăng ký trước đó. Đang nạp lại.`);
+      await this.unuse(plugin.name);
     }
 
     this.plugins.set(plugin.name, plugin);
@@ -358,10 +381,12 @@ export class AgentKernel {
         await Promise.resolve(plugin.dispose(this.ctx)).catch(() => {});
       }
     }
+    this.plugins.clear();
+    this.ctx.schedules.dispose();
+    void disposeLspManager(this.ctx.workspace);
     await this.ctx.sandbox.dispose().catch(() => {});
     await this.ctx.tasks.dispose().catch(() => {});
     this.isInitialized = false;
     this.ctx.events.emit('kernel:disposed');
   }
 }
-

@@ -102,6 +102,28 @@ test('tool-use-guardian: Pre-Call Validation - In-Memory Syntax Check', async ()
   assert.equal(result.suggestedAlternative, 'apply_patch', 'Phải gợi ý công cụ thay thế apply_patch');
 });
 
+test('runNodeScriptTool: supports valid ESM top-level await and CommonJS require()', async () => {
+  const workspace = new Workspace(process.cwd());
+
+  const esmResult = await runNodeScriptTool.execute(
+    {
+      scriptContent: 'const os = await import("node:os"); console.log(os.platform());',
+      description: 'Verify ESM top-level await support',
+    },
+    workspace,
+  );
+  assert.equal(esmResult.success, true);
+
+  const cjsResult = await runNodeScriptTool.execute(
+    {
+      scriptContent: 'const path = require("node:path"); console.log(path.sep);',
+      description: 'Verify CommonJS require support',
+    },
+    workspace,
+  );
+  assert.equal(cjsResult.success, true);
+});
+
 test('tool-use-guardian: Pre-Call Validation - Payload Size Limit', async () => {
   const workspace = new Workspace(process.cwd());
 

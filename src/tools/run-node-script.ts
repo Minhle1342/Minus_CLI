@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
 import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -20,6 +19,13 @@ import {
 } from './tool-use-guardian.js';
 
 const execFileAsync = promisify(execFile);
+
+function selectScriptExtension(scriptContent: string): '.mjs' | '.cjs' {
+  const usesStaticEsmSyntax = /(^|\n)\s*(?:import\s+(?!\()|export\s+)/m.test(scriptContent);
+  const usesCommonJsRequire = /\brequire\s*\(/.test(scriptContent);
+
+  return usesCommonJsRequire && !usesStaticEsmSyntax ? '.cjs' : '.mjs';
+}
 
 /**
  * Giới hạn kích thước mã nguồn script (Pre-Call Payload Size Guard)
@@ -168,7 +174,7 @@ export const runNodeScriptTool: ToolDefinition = {
       scriptContent: {
         type: Type.STRING,
         description:
-          'The complete JavaScript/Node.js source code (ESM or CJS) to execute. Must be self-contained and perform file updates using workspace-relative or absolute paths.\n' +
+          'The complete self-contained JavaScript/Node.js source code to execute. ESM scripts may use static import and top-level await; CommonJS scripts may use require(). Do not mix ESM syntax with require() in the same script. Use workspace-relative or absolute paths for file updates.\n' +
           'Example:\n' +
           '  import fs from "node:fs/promises";\n' +
           '  const targets = ["src/a.ts", "src/b.ts"];\n' +
@@ -290,31 +296,6 @@ export const runNodeScriptTool: ToolDefinition = {
     }
 
     // 1.3 In-Memory Syntax Pre-validation: Bắt lỗi cú pháp sớm mà không tốn chi phí spawn subprocess
-    try {
-      new vm.Script(scriptContent, { filename: 'script-precheck.js' });
-    } catch (syntaxErr: any) {
-      const diag: ToolFailureDiagnosis = {
-        category: 'SCHEMA_MISMATCH',
-        message: `JavaScript Syntax Error in scriptContent: ${syntaxErr.message}`,
-        isRetryable: false,
-        maxRetries: 0,
-        backoffMs: 0,
-        recoveryAction: 'Fix the syntax error in scriptContent before running the script.',
-        suggestedAlternative,
-      };
-      return {
-        success: false,
-        is_error: true,
-        errorCode: 'SYNTAX_ERROR',
-        error: diag.message,
-        category: diag.category,
-        recoveryAction: diag.recoveryAction,
-        actionableFix: `Inspect syntax near the reported token (${syntaxErr.message}). Verify unmatched brackets, valid import statements, and valid JavaScript syntax.`,
-        suggestedAlternative: diag.suggestedAlternative,
-        guardianDiagnosis: diag,
-      };
-    }
-
     // 1.4 Pre-Mutation Evidence Gate Integration: Chặn sửa đổi khi chưa đủ bằng chứng trong bugfix/refactor
     const gateContext = (context as any)?.preMutationGateContext || (context as any)?.preMutationGate;
     const isEvidenceControlledTask = Boolean(
@@ -367,7 +348,7 @@ export const runNodeScriptTool: ToolDefinition = {
     const scratchDir = path.resolve(workspace.rootDir, '.codingagent', 'scratch');
     await fs.mkdir(scratchDir, { recursive: true });
 
-    const scriptFileName = `batch-script-${Date.now()}-${randomUUID().slice(0, 8)}.mjs`;
+    const scriptFileName = `batch-script-${Date.now()}-${randomUUID().slice(0, 8)}${selectScriptExtension(scriptContent)}`;
     const tempScriptPath = path.resolve(scratchDir, scriptFileName);
 
     const startTime = Date.now();
@@ -375,6 +356,38 @@ export const runNodeScriptTool: ToolDefinition = {
 
     try {
       await fs.writeFile(tempScriptPath, scriptContent, 'utf-8');
+
+      // Validate using the same module mode Node will use to execute the script.
+      // vm.Script parses classic scripts and rejects valid ESM top-level await/import.
+      try {
+        await execFileAsync(process.execPath, ['--check', tempScriptPath], {
+          cwd: workspace.rootDir,
+          timeout: effectiveTimeout,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+      } catch (syntaxErr: any) {
+        const cleanSyntaxError = extractCleanScriptErrorMessage(syntaxErr.stderr || '', syntaxErr);
+        const diag: ToolFailureDiagnosis = {
+          category: 'SCHEMA_MISMATCH',
+          message: `JavaScript Syntax Error in scriptContent: ${cleanSyntaxError}`,
+          isRetryable: false,
+          maxRetries: 0,
+          backoffMs: 0,
+          recoveryAction: 'Fix the syntax error in scriptContent before running the script.',
+          suggestedAlternative,
+        };
+        return {
+          success: false,
+          is_error: true,
+          errorCode: 'SYNTAX_ERROR',
+          error: diag.message,
+          category: diag.category,
+          recoveryAction: diag.recoveryAction,
+          actionableFix: `Inspect syntax near the reported token (${cleanSyntaxError}). Verify unmatched brackets and use one module system consistently: ESM import/top-level await or CommonJS require().`,
+          suggestedAlternative: diag.suggestedAlternative,
+          guardianDiagnosis: diag,
+        };
+      }
 
       // =========================================================================
       // STEP 3: Thực thi script trong subprocess độc lập với Hard Timeout
