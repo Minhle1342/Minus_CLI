@@ -27,6 +27,28 @@ test('VerificationPolicy blocks mutation in bugfix mode when reproduction proof 
   assert.equal(policy.canMutate('feature', 'enforce').allowed, true);
 });
 
+test('VerificationPolicy allows scratch and test reproduction file mutations unconditionally', () => {
+  const policy = new VerificationPolicy();
+
+  // Scratch files are allowed even in enforce mode without reproduction proof
+  const scratchCheck1 = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'scratch/reproduce_auth.py' });
+  assert.equal(scratchCheck1.allowed, true);
+
+  const scratchCheck2 = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'temp/repro_test.ts', isScratchFile: true });
+  assert.equal(scratchCheck2.allowed, true);
+
+  // Production files remain blocked without reproduction proof
+  const prodCheck = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'src/auth/service.ts' });
+  assert.equal(prodCheck.allowed, false);
+
+  // But allowed if criticApproved is true
+  const criticApprovedCheck = policy.canMutate('bugfix', 'enforce', {
+    targetFilePath: 'src/auth/service.ts',
+    criticApproved: true,
+  });
+  assert.equal(criticApprovedCheck.allowed, true);
+});
+
 test('VerificationPolicy reset clears reproduction proof', () => {
   const policy = new VerificationPolicy();
   policy.recordReproductionAttempt('pytest tests/test_bug.py', true);

@@ -73,9 +73,18 @@ export const analyzeImpactTool: ToolDefinition = {
     required: [],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || args.filePath || '').trim();
-    const symbol = args.symbol || args.symbolName ? String(args.symbol || args.symbolName).trim() : undefined;
+    const targetCandidate = String(args.target || args.targetFile || '').trim();
+    let rawPath = String(args.path || args.filePath || '').trim();
+    let symbol = args.symbol || args.symbolName ? String(args.symbol || args.symbolName).trim() : undefined;
     const depth = typeof args.depth === 'number' ? args.depth : 2;
+
+    if (!rawPath && targetCandidate) {
+      if (targetCandidate.includes('/') || targetCandidate.includes('\\') || targetCandidate.includes('.')) {
+        rawPath = targetCandidate;
+      } else if (!symbol) {
+        symbol = targetCandidate;
+      }
+    }
 
     if (!rawPath) {
       return toolError('Tham số "path" (hoặc "filePath") là bắt buộc.', 'INVALID_ARGS');

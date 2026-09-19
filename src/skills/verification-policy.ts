@@ -22,6 +22,19 @@ export interface VerificationRecord {
   hasNewFailures?: boolean;
 }
 
+export function isScratchPath(filePath: string): boolean {
+  const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
+  return (
+    normalized.startsWith('scratch/') ||
+    normalized.startsWith('.scratch/') ||
+    normalized.startsWith('temp/') ||
+    normalized.startsWith('.temp/') ||
+    /(?:^|[\\/])(?:scratch|throwaway|repro|reproduce)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(normalized) ||
+    /(?:^|[\\/])scratch[\\/]/i.test(normalized) ||
+    /(?:^|[\\/])temp[\\/]/i.test(normalized)
+  );
+}
+
 export class VerificationPolicy {
   private hasUnverifiedModifications: boolean = false;
   private modifiedFiles: Set<string> = new Set();
@@ -75,16 +88,34 @@ export class VerificationPolicy {
   }
 
   /**
-   * Agentless & AutoCodeRover protocol: Bugfix tasks require a confirmed failing reproduction test
-   * before applying mutations to product code.
+   * Agentless & AutoCodeRover protocol + Dual-Agent Exploration Gating:
+   * Bugfix tasks require a confirmed failing reproduction test (or Dual-Agent approved root-cause analysis)
+   * before applying mutations to product code. Scratch/repro files are always allowed.
    */
-  canMutate(taskClass?: string, gateMode: 'off' | 'observe' | 'enforce' = 'observe'): { allowed: boolean; reason?: string } {
-    if (gateMode !== 'enforce') return { allowed: true };
-    if (taskClass === 'bugfix' && !this.hasReproductionProof) {
-      return {
-        allowed: false,
-        reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix task requires a failing test execution proof before modifying code (Agentless reproduction protocol).',
-      };
+  canMutate(
+    taskClass?: string,
+    gateMode: 'off' | 'observe' | 'enforce' = 'observe',
+    options?: {
+      targetFilePath?: string;
+      isScratchFile?: boolean;
+      criticApproved?: boolean;
+    },
+  ): { allowed: boolean; reason?: string } {
+    if (gateMode === 'off') return { allowed: true };
+
+    // Scratch files and reproduction test scripts are ALWAYS permitted for writing reproduction cases
+    if (options?.isScratchFile || (options?.targetFilePath && isScratchPath(options.targetFilePath))) {
+      return { allowed: true };
+    }
+
+    if (gateMode === 'enforce') {
+      const isBugfixOrSecurity = taskClass === 'bugfix' || taskClass === 'security';
+      if (isBugfixOrSecurity && !this.hasReproductionProof && !options?.criticApproved) {
+        return {
+          allowed: false,
+          reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix/security task requires a failing reproduction test execution (e.g. scratch/reproduce_*.py or failing unit test) or a Dual-Agent Verifier approved exploration analysis before modifying production code.',
+        };
+      }
     }
     return { allowed: true };
   }

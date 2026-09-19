@@ -66,6 +66,13 @@ export class HypothesisTracker {
   }
 
   /**
+   * Lấy giả thuyết gần nhất được tạo ra trong phiên làm việc
+   */
+  getLatestHypothesis(): Hypothesis | undefined {
+    return this.hypotheses.at(-1);
+  }
+
+  /**
    * Đánh dấu giả thuyết đang trong quá trình chạy test/verification
    */
   markTesting(id?: string): void {

@@ -139,9 +139,17 @@ function collectNativeMaskedObservations(
   return records;
 }
 
+function normalizeFilePathVariants(filePath: string): string[] {
+  if (!filePath || typeof filePath !== 'string') return [];
+  const normalized = path.normalize(filePath).toLowerCase();
+  const resolved = path.resolve(filePath).toLowerCase();
+  const forwardNormalized = normalized.replace(/\\/g, '/');
+  const forwardResolved = resolved.replace(/\\/g, '/');
+  return Array.from(new Set([normalized, resolved, forwardNormalized, forwardResolved]));
+}
+
 function isVerificationOrFailure(response: any): boolean {
   const payload = response?.response as Record<string, any> | undefined;
-  if (response?.name === 'run_command') return true;
   return payload?.success === false
     || (typeof payload?.exitCode === 'number' && payload.exitCode !== 0)
     || payload?.status === 'error'
@@ -358,10 +366,11 @@ export class ContextCompactor {
       const turnLines = text.split('\n').filter((line) => line.trimStart().startsWith('• Turn #'));
       const retained = turnLines.slice(-12);
       prunedPartsCount++;
+      const rangeLabel = turnLines.length === 1 ? '1 TURN' : `${turnLines.length} TURNS`;
       return {
         role: 'user',
         parts: [{
-          text: `${ROLLING_SYNOPSIS_MARKER} - ${turnLines.length} ARCHIVED]:\n${retained.join('\n')}\n> Older details remain retrievable from archived turn memory.`,
+          text: `${ROLLING_SYNOPSIS_MARKER} - ${rangeLabel} ARCHIVED]:\n${retained.join('\n')}\n> Older details remain retrievable from archived turn memory.`,
         }],
       };
     });
@@ -512,8 +521,10 @@ export class ContextCompactor {
       ? allTouched.map((f) => `- [TOUCHED] ${f}`)
       : ['- No workspace files modified in archived turns.'];
 
+    const totalArchivedTurns = priorSynopsisLines.length + oldUserTurnIndices.length;
+    const turnRangeLabel = totalArchivedTurns === 1 ? 'TURN 1' : `TURNS 1 to ${totalArchivedTurns}`;
     const structuredSummary = [
-      `${ROLLING_SYNOPSIS_MARKER} - TURNS 1 to ${oldUserTurnIndices.length} ARCHIVED]:`,
+      `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
       `> Ngữ cảnh các lượt trao đổi cũ đã được nén theo chuẩn Anchored Structured Compression (/context-compression):`,
       ``,
       `## 1. Session Intent`,
@@ -648,7 +659,7 @@ export class ContextCompactor {
 
     // 2. Chuẩn bị danh sách file bị sửa đổi và cấu hình Phase-Aware
     const mutatedFilesNormalized = new Set(
-      (options?.mutatedFiles || []).map((f) => path.normalize(f).toLowerCase())
+      (options?.mutatedFiles || []).flatMap((f) => normalizeFilePathVariants(f))
     );
 
     let effectivePreserveLastN = options?.cognitivePhase === 'explore'
@@ -698,10 +709,12 @@ export class ContextCompactor {
         if (typeof resp.response === 'object' && resp.response !== null) {
           const r = resp.response as Record<string, any>;
           const rawFilePath = r.path || r.filePath || r.targetFile;
-          const normalizedPath = rawFilePath ? path.normalize(String(rawFilePath)).toLowerCase() : '';
+          const isMutated = Boolean(
+            rawFilePath && normalizeFilePathVariants(String(rawFilePath)).some((v) => mutatedFilesNormalized.has(v))
+          );
 
           // Cơ chế 1: Superseded State Deduplication (Khử trạng thái cũ của file đã bị sửa)
-          if (normalizedPath && mutatedFilesNormalized.has(normalizedPath)) {
+          if (isMutated) {
             prunedPartsCount++;
             const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" đã được sửa đổi ở bước sau. Vui lòng đọc lại file nếu cần nội dung mới nhất]`;
             maskedObservations.push(createMaskedObservationRecord(resp, resp.response, `obs-${msgIdx}`, supersededMask));

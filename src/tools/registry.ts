@@ -49,7 +49,7 @@ import { createReportFindingsTool } from './report-findings.js';
 import { createHypothesisTool } from './hypothesis-tool.js';
 import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
 import { createGitTools } from './git-tools.js';
-import { ToolRetriever, ToolRetrieverConfig } from './tool-retriever.js';
+import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
 
@@ -58,8 +58,9 @@ export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
   getAll(): ToolDefinition[];
   getFunctionDeclarations(): FunctionDeclaration[];
-  getRelevantTools?(query: string): FunctionDeclaration[];
+  getRelevantTools?(query: ToolRetrievalQueryInput): FunctionDeclaration[];
   getRetriever?(): ToolRetriever;
+  getToolCatalogStubs?(): ToolCompactStub[];
 }
 
 /**
@@ -326,8 +327,12 @@ export class ToolRegistry implements ToolProvider {
   /**
    * Dynamic Tool Retrieval (RATS): Lấy tập hợp FunctionDeclaration phù hợp nhất với ngữ cảnh hiện tại
    */
-  getRelevantTools(query: string): FunctionDeclaration[] {
+  getRelevantTools(query: ToolRetrievalQueryInput): FunctionDeclaration[] {
     return this.retriever.retrieve(query, modelVisibleTools(this.getAll()));
+  }
+
+  getToolCatalogStubs(): ToolCompactStub[] {
+    return this.retriever.getToolCatalogStubs(modelVisibleTools(this.getAll()));
   }
 
   getRetriever(): ToolRetriever {
@@ -443,8 +448,12 @@ export class ToolScope implements ToolProvider {
       }));
   }
 
-  getRelevantTools(query: string): FunctionDeclaration[] {
+  getRelevantTools(query: ToolRetrievalQueryInput): FunctionDeclaration[] {
     return this.retriever.retrieve(query, modelVisibleTools(this.getAll()));
+  }
+
+  getToolCatalogStubs(): ToolCompactStub[] {
+    return this.retriever.getToolCatalogStubs(modelVisibleTools(this.getAll()));
   }
 
   getRetriever(): ToolRetriever {

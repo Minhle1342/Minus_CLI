@@ -13,7 +13,7 @@ pub struct RsCompactionResult {
     pub masked_count: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct RawSessionMessage {
     pub role: String,
     #[serde(default)]
@@ -85,6 +85,7 @@ pub fn compact_history_native(
     let mut masked_count = 0u32;
 
     // 1. Masking các tool results cũ nằm trước ngưỡng preserve_last_n
+    // Đảm bảo functionResponse.response luôn là Value::Object hợp lệ với API schema
     for (idx, msg) in messages.iter_mut().enumerate() {
         if tool_result_indices.len() <= preserve_count || idx >= mask_cutoff_idx {
             continue;
@@ -97,13 +98,32 @@ pub fn compact_history_native(
                     if let Some(response_val) = resp_obj.get_mut("response") {
                         let response_str = response_val.to_string();
                         if response_str.len() > max_chars_per_tool as usize {
-                            let head_len = (max_chars_per_tool / 2) as usize;
-                            let mut truncated = response_str.chars().take(head_len).collect::<String>();
-                            truncated.push_str(&format!(
-                                "\n[... Đã lược bớt {} ký tự bởi minus_core Context Compactor ...]\n",
-                                response_str.len().saturating_sub(max_chars_per_tool as usize)
-                            ));
-                            *response_val = Value::String(truncated);
+                            let path_val = response_val.get("path")
+                                .or_else(|| response_val.get("filePath"))
+                                .or_else(|| response_val.get("targetFile"))
+                                .cloned();
+                            let exit_code_val = response_val.get("exitCode").cloned();
+                            let status_val = response_val.get("status").cloned();
+
+                            let mut map = serde_json::Map::new();
+                            map.insert(
+                                "status".to_string(),
+                                status_val.unwrap_or_else(|| Value::String("masked".to_string())),
+                            );
+                            if let Some(p) = path_val {
+                                map.insert("path".to_string(), p);
+                            }
+                            if let Some(ec) = exit_code_val {
+                                map.insert("exitCode".to_string(), ec);
+                            }
+                            map.insert(
+                                "observationMask".to_string(),
+                                Value::String(format!(
+                                    "[OBSERVATION MASKED: Đã lược bớt {} ký tự bởi minus_core Native Compactor]",
+                                    response_str.len().saturating_sub(max_chars_per_tool as usize)
+                                )),
+                            );
+                            *response_val = Value::Object(map);
                             masked_count += 1;
                         }
                     }
@@ -126,34 +146,62 @@ pub fn compact_history_native(
         }
     }
 
-    // 2. Kiểm tra nếu vẫn vượt quá ngân sách token tối đa -> Tỉa bớt các tin nhắn trung gian
-    let mut current_chars = count_total_message_chars(&messages);
+    // 2. Kiểm tra nếu vẫn vượt quá ngân sách token tối đa -> Tỉa bớt các turn trung gian theo ranh giới Turn nguyên tử
+    // Bảo toàn hoàn toàn cặp tool call / response invariants
+    let current_chars = count_total_message_chars(&messages);
     let target_chars = (max_tokens as f64 * 3.8) as usize;
     let mut pruned_count = 0u32;
 
-    if current_chars > target_chars && messages.len() > preserve_count + 1 {
-        let mut pruned_messages = Vec::new();
-        // Giữ lại tin nhắn đầu tiên (warm-start / instructions)
-        pruned_messages.push(messages.remove(0));
+    let user_turn_indices: Vec<usize> = messages.iter().enumerate()
+        .filter(|(_, msg)| msg.role == "user" && !msg.parts.iter().any(|p| p.function_response.is_some()))
+        .map(|(idx, _)| idx)
+        .collect();
 
-        let available_middle = messages.len().saturating_sub(preserve_count);
-        let mut skipped_idx = 0;
+    let preserved_turns = (preserve_last_n as usize).max(1);
 
-        while current_chars > target_chars && skipped_idx < available_middle && !messages.is_empty() {
-            let removed = messages.remove(0);
-            let removed_chars = count_single_message_chars(&removed);
-            current_chars = current_chars.saturating_sub(removed_chars);
-            pruned_count += 1;
-            skipped_idx += 1;
+    if current_chars > target_chars && user_turn_indices.len() > preserved_turns + 1 {
+        let max_prunable_turn = user_turn_indices.len() - preserved_turns;
+        let mut prune_until_turn_idx = 1;
+        let mut chars_after_prune = current_chars;
+
+        for k in 1..max_prunable_turn {
+            let turn_start = user_turn_indices[k];
+            let turn_end = user_turn_indices[k + 1];
+            let turn_chars: usize = messages[turn_start..turn_end]
+                .iter()
+                .map(count_single_message_chars)
+                .sum();
+            chars_after_prune = chars_after_prune.saturating_sub(turn_chars);
+            prune_until_turn_idx = k + 1;
+            pruned_count += (turn_end - turn_start) as u32;
+
+            if chars_after_prune <= target_chars {
+                break;
+            }
         }
 
-        if pruned_count > 0 {
-            pruned_messages.push(RawSessionMessage {
+        if prune_until_turn_idx > 1 {
+            let turn0_end = user_turn_indices[1];
+            let prune_end = user_turn_indices[prune_until_turn_idx];
+            let pruned_turns_total = prune_until_turn_idx - 1;
+
+            let mut new_messages = Vec::new();
+            // Turn 0 (Goal ban đầu)
+            new_messages.extend_from_slice(&messages[0..turn0_end]);
+
+            // Rolling Synopsis cho các intermediate turns đã lược bỏ
+            let turn_range_str = if pruned_turns_total == 1 {
+                "TURN 1".to_string()
+            } else {
+                format!("TURNS 1 to {}", pruned_turns_total)
+            };
+            new_messages.push(RawSessionMessage {
                 role: "user".to_string(),
                 parts: vec![RawContentPart {
                     text: Some(format!(
-                        "[ROLLING DIALOGUE SYNOPSIS - MINUS_CORE]: Đã lưu trữ và lược bỏ {} bước đối thoại trung gian trước đó để tối ưu hoá ngân sách bộ nhớ.",
-                        pruned_count
+                        "[ROLLING DIALOGUE SYNOPSIS - MINUS_CORE - {} ARCHIVED]: Đã lưu trữ và lược bỏ {} lượt đối thoại trung gian trước đó để tối ưu hoá ngân sách bộ nhớ.",
+                        turn_range_str,
+                        pruned_turns_total
                     )),
                     function_call: None,
                     function_response: None,
@@ -161,10 +209,11 @@ pub fn compact_history_native(
                 }],
                 extra: Value::Object(serde_json::Map::new()),
             });
-        }
 
-        pruned_messages.append(&mut messages);
-        messages = pruned_messages;
+            // Active Preserved Tail Window
+            new_messages.extend_from_slice(&messages[prune_end..]);
+            messages = new_messages;
+        }
     }
 
     let final_json = serde_json::to_string(&messages).unwrap_or_else(|_| messages_json.to_string());
@@ -235,7 +284,31 @@ mod tests {
         let old_response = messages[2].parts[0].function_response.as_ref().unwrap();
         let current_response = messages[4].parts[0].function_response.as_ref().unwrap();
 
-        assert!(old_response["response"].is_string());
+        assert!(old_response["response"].is_object());
+        assert_eq!(old_response["response"]["status"], "masked");
         assert_eq!(current_response["response"]["content"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn test_turn_pruning_preserves_tool_pairing() {
+        let raw_json = r#"[
+            {"role":"user","parts":[{"text":"Turn 0: Task start"}]},
+            {"role":"model","parts":[{"functionCall":{"id":"c0","name":"tool0"}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"c0","name":"tool0","response":{"result":"ok0"}}}]},
+            {"role":"user","parts":[{"text":"Turn 1: Intermediate step"}]},
+            {"role":"model","parts":[{"functionCall":{"id":"c1","name":"tool1"}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"c1","name":"tool1","response":{"result":"ok1"}}}]},
+            {"role":"user","parts":[{"text":"Turn 2: Final step"}]},
+            {"role":"model","parts":[{"functionCall":{"id":"c2","name":"tool2"}}]},
+            {"role":"user","parts":[{"functionResponse":{"id":"c2","name":"tool2","response":{"result":"ok2"}}}]}
+        ]"#;
+
+        let res = compact_history_native(raw_json, 10, 1, 1000);
+        assert!(res.pruned_count > 0);
+        let messages: Vec<RawSessionMessage> = serde_json::from_str(&res.compacted_messages_json).unwrap();
+
+        assert_eq!(messages[0].parts[0].text.as_deref(), Some("Turn 0: Task start"));
+        assert!(messages.iter().any(|m| m.parts.iter().any(|p| p.text.as_deref().unwrap_or("").contains("ROLLING DIALOGUE SYNOPSIS"))));
+        assert!(messages.iter().any(|m| m.parts.iter().any(|p| p.text.as_deref() == Some("Turn 2: Final step"))));
     }
 }

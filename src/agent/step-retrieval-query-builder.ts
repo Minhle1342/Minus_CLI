@@ -20,6 +20,8 @@ export interface StepRetrievalQueryInput {
 
 export interface StepRetrievalQueryResult {
   query: string;
+  denseQuery: string;
+  lexicalQuery: string;
   fingerprint: string;
   failureSignature: string;
   discoveredFiles: string[];
@@ -41,6 +43,30 @@ export class StepRetrievalQueryBuilder {
     ];
     const activeSymbols = [...(input.activeTask?.symbols || []), ...discoveredSymbols];
 
+    // Dense Action Intent: Chắt lọc mục tiêu nghiệp vụ thuần túy không chứa log rác
+    const denseParts = [
+      input.userRequest,
+      input.activeTask?.title,
+      input.activeTask?.acceptanceCriteria,
+      input.hypothesis?.statement ? `Objective: ${input.hypothesis.statement}` : '',
+      input.phase ? `Stage: ${input.phase}` : '',
+    ].filter(Boolean);
+    const denseQuery = denseParts.join(' ').slice(0, 1_000);
+
+    // Lexical Coordinates: Tọa độ chính xác (files, symbols, error signatures)
+    const lexicalParts = [
+      input.phase ? `phase:${input.phase}` : '',
+      input.taskClass ? `task:${input.taskClass}` : '',
+      input.activeTask?.notes ? `notes:${input.activeTask.notes}` : '',
+      activeFiles.length ? `files:${[...new Set(activeFiles)].join(' ')}` : '',
+      activeSymbols.length ? `symbols:${[...new Set(activeSymbols)].join(' ')}` : '',
+      input.lastToolName ? `last-tool:${input.lastToolName}` : '',
+      failureSignature ? `failure-sig:${failureSignature}` : '',
+      toolEvidence ? `evidence:${toolEvidence}` : '',
+    ].filter(Boolean);
+    const lexicalQuery = lexicalParts.join('\n').slice(0, 7_000);
+
+    // Full Unified Query (giữ nguyên tương thích 100% cho BM25 và benchmark)
     const parts = [
       input.userRequest,
       input.activeTask?.title,
@@ -67,6 +93,8 @@ export class StepRetrievalQueryBuilder {
 
     return {
       query,
+      denseQuery,
+      lexicalQuery,
       fingerprint: crypto.createHash('sha256').update(fingerprintPayload).digest('hex'),
       failureSignature,
       discoveredFiles: [...new Set(discoveredFiles)],

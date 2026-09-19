@@ -126,6 +126,8 @@ export interface CompletionEvidenceOptions {
   expectedDiffHash?: string;
   hasSubmittedSolution?: boolean;
   isPreCallSubmissionCheck?: boolean;
+  hasReproduction?: boolean;
+  taskClass?: string;
 }
 
 function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): string {
@@ -190,6 +192,9 @@ export class CompletionEvidenceGate {
     }
     if (!hasCertifiedSubmission && (options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
+    }
+    if (!hasCertifiedSubmission && (options.taskClass === 'bugfix' || options.taskClass === 'security') && options.hasReproduction === false && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+      reasons.push('Bugfix resolution requires verified reproduction test evidence (fail-to-pass proof) before completion.');
     }
 
     // Collect string fragments from executed tool results so quotes/summaries of logs are not misclassified as new claims

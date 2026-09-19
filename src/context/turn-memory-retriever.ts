@@ -415,13 +415,35 @@ export class TurnMemoryRetriever {
    * Truy hồi chính xác 1 observation theo ID hoặc targetPath
    */
   retrieveMaskedObservation(idOrTarget: string): MaskedObservationRecord | undefined {
-    if (!idOrTarget) return undefined;
-    if (this.maskedObservationsMap.has(idOrTarget)) {
-      return this.maskedObservationsMap.get(idOrTarget);
+    if (!idOrTarget || typeof idOrTarget !== 'string') return undefined;
+    const trimmed = idOrTarget.trim();
+    if (this.maskedObservationsMap.has(trimmed)) {
+      return this.maskedObservationsMap.get(trimmed);
     }
-    const normalizedTarget = path.normalize(idOrTarget).toLowerCase();
+    const targetVariants = new Set([
+      trimmed,
+      trimmed.toLowerCase(),
+      path.normalize(trimmed).toLowerCase(),
+      path.resolve(trimmed).toLowerCase(),
+      path.normalize(trimmed).toLowerCase().replace(/\\/g, '/'),
+      path.resolve(trimmed).toLowerCase().replace(/\\/g, '/'),
+    ]);
     for (const record of this.maskedObservationsMap.values()) {
-      if (record.targetPath && path.normalize(record.targetPath).toLowerCase() === normalizedTarget) {
+      if (record.id && targetVariants.has(record.id)) return record;
+      if (record.targetPath) {
+        const recordVariants = [
+          record.targetPath,
+          record.targetPath.toLowerCase(),
+          path.normalize(record.targetPath).toLowerCase(),
+          path.resolve(record.targetPath).toLowerCase(),
+          path.normalize(record.targetPath).toLowerCase().replace(/\\/g, '/'),
+          path.resolve(record.targetPath).toLowerCase().replace(/\\/g, '/'),
+        ];
+        if (recordVariants.some((v) => targetVariants.has(v))) {
+          return record;
+        }
+      }
+      if (record.command && (record.command === trimmed || record.command.toLowerCase() === trimmed.toLowerCase())) {
         return record;
       }
     }

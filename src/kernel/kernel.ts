@@ -30,6 +30,7 @@ import { DreamManager } from '../dream/dream-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
+import { VerificationPolicy } from '../skills/verification-policy.js';
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -37,6 +38,8 @@ export interface KernelEvents {
   'plugin:registered': (pluginName: string) => void;
   'step:before': (step: number, maxSteps: number, phase?: import('../control/classification-types.js').TaskPhase) => void;
   'step:after': (step: number) => void;
+  'router:decision': (decision: import('../agent/reliable-tool-orchestration.js').ReliableToolRouteDecision) => void;
+  'gate:exploration_sufficiency': (decision: import('../agent/critic-gate.js').ExplorationSufficiencyDecision) => void;
   'tool:before': (toolName: string, args: Record<string, any>) => void;
   'tool:after': (
     toolName: string,
@@ -157,6 +160,7 @@ export interface KernelContext {
   reflection: ReflectionEngine;
   hypothesis: HypothesisTracker;
   critic: CriticGate;
+  verification: VerificationPolicy;
   sandbox: SandboxManager;
   tasks: TaskManager;
   schedules: ScheduleManager;
@@ -212,6 +216,7 @@ export class AgentKernel {
     const reflection = new ReflectionEngine();
     const hypothesis = new HypothesisTracker();
     const critic = new CriticGate();
+    const verification = new VerificationPolicy();
     const compose = new ComposeController(workspace.rootDir, plan, critic);
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
@@ -255,6 +260,7 @@ export class AgentKernel {
       reflection,
       hypothesis,
       critic,
+      verification,
       sandbox,
       tasks,
       schedules,

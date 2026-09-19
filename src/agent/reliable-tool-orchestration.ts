@@ -106,7 +106,7 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     return selectVisible(input, {
       stage: 'ready_for_mutation',
       preferredTool: 'analyze_impact',
-      fallbackTools: ['replace_text', 'run_command', 'get_diagnostics'],
+      fallbackTools: ['read_file', 'replace_text', 'run_command', 'get_diagnostics'],
       confidence: 'high',
       reasonCodes: ['EVIDENCE_SUFFICIENT_ABSTAIN_RETRIEVAL', 'ENTER_MUTATION_PHASE'],
       guidance: '[Repoformer Abstention] Sufficient codebase evidence acquired. Broad discovery is locked to avoid attention dilution. Proceed directly to impact check, mutation, and verification.',
@@ -230,8 +230,8 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     return selectVisible(input, {
       stage: 'ready_for_mutation',
       preferredTool: 'analyze_impact',
-      fallbackTools: ['query_call_graph', 'get_diagnostics', 'replace_text'],
-      suggestedArgs: { target: symbol, ...(path ? { path } : {}), direction: 'upstream' },
+      fallbackTools: ['read_file', 'query_call_graph', 'get_diagnostics', 'replace_text'],
+      suggestedArgs: { ...(path ? { path } : {}), symbol, depth: 2 },
       confidence: result?.completeDeclaration === false ? 'medium' : 'high',
       reasonCodes: ['EXACT_BODY_ACQUIRED', 'IMPACT_BEFORE_MUTATION'],
       guidance: `The exact ${symbol} body is now available. Check upstream impact once, then mutate and run the related tests; do not cycle back to discovery without new evidence.`,
@@ -339,7 +339,7 @@ export class ReliableToolOrchestrationTelemetry {
     if (actualTool === decision.selectedTool) this.followed++;
     else if (decision.fallbackTools.includes(actualTool)) this.fallbackSelections++;
     if (this.previousTool === 'read_file' && actualTool === 'read_file' && !result?.symbol) this.exactBodyRoundTrips++;
-    if (decision.stage === 'ready_for_mutation' && RELIABLE_CONTEXT_TOOL_NAMES.has(actualTool) && actualTool !== 'analyze_impact' && actualTool !== 'query_call_graph') {
+    if (decision.stage === 'ready_for_mutation' && RELIABLE_CONTEXT_TOOL_NAMES.has(actualTool) && actualTool !== 'analyze_impact' && actualTool !== 'query_call_graph' && actualTool !== 'read_file') {
       this.invalidCycles++;
     }
     this.previousTool = actualTool;

@@ -12,6 +12,7 @@
  */
 
 import { isMutationTool } from '../tools/diff-generator.js';
+import { isScratchPath } from '../skills/verification-policy.js';
 
 export interface DomainIntentContract {
   coreGoal: string;
@@ -139,6 +140,13 @@ export class DomainIntentGuardian {
     return this.contract;
   }
 
+  public getAuditSummary(): { blockedTamperAttempts: number; consecutiveDriftWarnings: number } {
+    return {
+      blockedTamperAttempts: this.blockedTamperAttempts,
+      consecutiveDriftWarnings: this.consecutiveDriftWarnings,
+    };
+  }
+
   public isTestFile(filePath: string): boolean {
     if (!filePath) return false;
     const normalized = filePath.replace(/\\/g, '/');
@@ -160,7 +168,7 @@ export class DomainIntentGuardian {
       const targetPath = (args.TargetFile || args.AbsolutePath || args.path || args.target_path || args.file_path || '').toString();
 
       // Cho phép tự do tạo scratch tests để thử nghiệm
-      const isScratch = targetPath.includes('scratch/') || targetPath.includes('scratch\\');
+      const isScratch = isScratchPath(targetPath);
       if (targetPath && !isScratch && this.isTestFile(targetPath) && !this.contract.allowTestFileModification) {
         this.blockedTamperAttempts++;
         return {

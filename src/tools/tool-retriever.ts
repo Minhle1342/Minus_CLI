@@ -2,6 +2,7 @@ import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { getNativeCore } from '../native/index.js';
+import { ToolTransitionGraph } from './tool-transition-graph.js';
 
 export interface ToolDocument {
   id: string;
@@ -10,6 +11,13 @@ export interface ToolDocument {
   tags: string;
   description: string;
   parameters: string;
+}
+
+export interface ToolCompactStub {
+  name: string;
+  category: string;
+  description: string;
+  parameterNames: string[];
 }
 
 export interface ToolRetrieverConfig {
@@ -25,6 +33,16 @@ export interface ToolRetrieverConfig {
   minScore?: number;
 }
 
+export type ToolRetrievalQueryInput =
+  | string
+  | {
+      query: string;
+      denseQuery?: string;
+      lexicalQuery?: string;
+      lastToolName?: string;
+      lastToolResult?: unknown;
+    };
+
 /**
  * ToolRetriever - Dynamic Tool Retrieval (RATS) Engine
  * 
@@ -32,12 +50,14 @@ export interface ToolRetrieverConfig {
  * 1. Đánh chỉ mục BM25 / Fuzzy Search in-memory cho toàn bộ tool schemas.
  * 2. Bảo toàn một tập Core Anchor nhỏ; capability chuyên biệt được retrieve theo ngữ cảnh.
  * 3. Truy xuất động Top-K tool phù hợp nhất với task/ngữ cảnh hiện tại của từng bước lặp.
- * 4. Áp dụng KV-Cache Prefix Alignment: Luôn sắp xếp cố định theo tên để tối đa hóa Cache Hit Rate.
+ * 4. Tích hợp Tool Transition Graph (ToolNet DAG) để dự đoán công cụ kế tiếp theo xác suất Markov.
+ * 5. Áp dụng KV-Cache Prefix Alignment: Luôn sắp xếp cố định theo tên để tối đa hóa Cache Hit Rate.
  */
 export class ToolRetriever {
   private miniSearch: MiniSearch<ToolDocument>;
   private toolsMap = new Map<string, ToolDefinition>();
   private config: Required<ToolRetrieverConfig>;
+  private transitionGraph = new ToolTransitionGraph();
 
   constructor(config?: ToolRetrieverConfig) {
     this.config = {
@@ -101,9 +121,29 @@ export class ToolRetriever {
   }
 
   /**
+   * Lấy danh mục rút gọn (Compact Tool Stubs) phục vụ Two-Tier Lazy Schema Loading
+   */
+  getToolCatalogStubs(tools?: ToolDefinition[]): ToolCompactStub[] {
+    const pool = tools || Array.from(this.toolsMap.values());
+    return pool.map((t) => ({
+      name: t.name,
+      category: this.inferCategory(t),
+      description: t.description || '',
+      parameterNames: Object.keys(t.parameters?.properties || {}),
+    }));
+  }
+
+  /**
+   * Getter truy cập ToolTransitionGraph
+   */
+  getTransitionGraph(): ToolTransitionGraph {
+    return this.transitionGraph;
+  }
+
+  /**
    * Truy xuất động danh sách FunctionDeclaration phù hợp nhất với ngữ cảnh
    */
-  retrieve(query: string, allTools?: ToolDefinition[]): FunctionDeclaration[] {
+  retrieve(queryInput: ToolRetrievalQueryInput, allTools?: ToolDefinition[]): FunctionDeclaration[] {
     const pool = allTools || Array.from(this.toolsMap.values());
     const poolMap = new Map(pool.map((tool) => [tool.name, tool]));
 
@@ -112,7 +152,17 @@ export class ToolRetriever {
       return this.formatDeclarations(pool);
     }
 
-    const cleanedQuery = (query || '').trim();
+    const rawQuery = typeof queryInput === 'string' ? queryInput : (queryInput.query || '');
+    const denseQuery = typeof queryInput === 'string' ? queryInput : (queryInput.denseQuery || queryInput.query || '');
+    const lexicalQuery = typeof queryInput === 'string' ? queryInput : (queryInput.lexicalQuery || queryInput.query || '');
+    const lastToolName = typeof queryInput === 'object' && queryInput.lastToolName
+      ? queryInput.lastToolName
+      : (/last-tool:([a-zA-Z0-9_-]+)/i.exec(rawQuery)?.[1] || undefined);
+    const lastToolResult = typeof queryInput === 'object' && queryInput.lastToolResult !== undefined
+      ? queryInput.lastToolResult
+      : (/evidence:(.+)/s.exec(rawQuery)?.[1] || undefined);
+
+    const cleanedQuery = rawQuery.trim();
     const lowerQ = cleanedQuery.toLowerCase();
     const isGameQuery = /\b(game|pixel|sprite|tilemap|physics|unity|engine|scaffold|asset)\b/i.test(lowerQ);
     const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
@@ -143,20 +193,21 @@ export class ToolRetriever {
       }
     }
 
-    // 2. Hybrid retrieval: lexical BM25/fuzzy + local semantic candidates trên activePool.
-    if (cleanedQuery.length > 0) {
+    // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph
+    if (cleanedQuery.length > 0 || lastToolName) {
       try {
-        const searchHits = this.miniSearch.search(cleanedQuery);
+        const searchHits = this.miniSearch.search(lexicalQuery || cleanedQuery);
         const lexicalRank = new Map<string, number>();
         searchHits
           .filter((hit) => hit.score >= this.config.minScore && activePoolMap.has(hit.id))
           .forEach((hit, index) => lexicalRank.set(hit.id, index + 1));
 
-        const queryTerms = this.semanticTerms(cleanedQuery);
+        const targetDense = denseQuery.trim() || cleanedQuery;
+        const queryTerms = this.semanticTerms(targetDense);
         const native = getNativeCore();
         let queryVector: number[] | undefined;
         if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
-          try { queryVector = native.rsGenerateSubwordEmbedding(cleanedQuery); } catch {}
+          try { queryVector = native.rsGenerateSubwordEmbedding(targetDense); } catch {}
         }
 
         const semanticCandidates = activePool.map((tool) => {
@@ -171,8 +222,9 @@ export class ToolRetriever {
               semanticScore = Math.max(semanticScore, Math.max(0, native.rsCosineSimilarity(queryVector, toolVector)));
             } catch {}
           }
-          semanticScore += this.hierarchyBoost(cleanedQuery, category, tool.name);
-          return { name: tool.name, score: semanticScore };
+          const graphBoost = this.transitionGraph.getTransitionBoost(lastToolName, lastToolResult, tool.name);
+          semanticScore += this.hierarchyBoost(cleanedQuery, category, tool.name) + graphBoost;
+          return { name: tool.name, score: semanticScore, graphBoost };
         }).filter((candidate) => candidate.score > 0)
           .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
@@ -182,7 +234,8 @@ export class ToolRetriever {
           .map((tool) => {
             const lr = lexicalRank.get(tool.name);
             const sr = semanticRank.get(tool.name);
-            const score = (lr ? 1 / (60 + lr) : 0) + (sr ? 1 / (60 + sr) : 0);
+            const graphBoost = this.transitionGraph.getTransitionBoost(lastToolName, lastToolResult, tool.name);
+            const score = (lr ? 1 / (60 + lr) : 0) + (sr ? 1 / (60 + sr) : 0) + (graphBoost * 0.4);
             return { name: tool.name, score };
           })
           .filter((candidate) => candidate.score > 0 && !selectedToolNames.has(candidate.name))

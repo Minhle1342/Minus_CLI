@@ -208,8 +208,9 @@ export class CognitiveHarness {
       const negativeGate = [
         'NEVER fabricate mock test data inside production code to force a green test.',
         'NEVER comment out or silence compiler/LSP diagnostics.',
-        'NEVER modify code blindly without inspecting actual lines with read_file first.',
-        'NEVER guess or hallucinate test commands or binary output paths (e.g. bin/Release/..., build/...) without inspecting project manifests or confirming file existence with list_files.',
+        'NEVER modify production code blindly without inspecting actual lines with read_file/view_file first.',
+        'NEVER attempt bugfix code changes without writing or running a reproduction test (Agentless reproduction protocol).',
+        'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
         'NEVER declare victory without running empirical verification (e.g. npm run build / test).',
       ];
 
@@ -225,10 +226,11 @@ export class CognitiveHarness {
           : 'Check if the reported issue is an application defect vs environment misconfiguration.',
         falsificationCriteria: 'If verification tests still fail after this mutation, the root-cause hypothesis is INVALID and must be discarded immediately.',
         executionTopology: [
-          'Ground Truth Inspection: Read exact target lines and verify line numbers + hashes.',
-          'Falsifiable Hypothesis: State the exact causal mechanism of the defect.',
-          'Surgical Mutation: Apply the minimal atomic change (replace_text / apply_patch).',
-          'Empirical Falsification Test: Run compiler/test commands to validate or falsify the fix.',
+          'Phase 1 (Exploration & Localization): Inspect exact target lines, trace call graph dependencies, and identify root cause.',
+          'Phase 2 (Reproduction Gating): Write reproduction test (e.g. scratch/reproduce_*.py) and confirm failing execution.',
+          'Phase 3 (Dual-Agent Sufficiency): Verify exploration completeness and blast radius closure before unlocking mutations.',
+          'Phase 4 (Surgical Implementation): Apply the minimal atomic change (replace_text / apply_patch).',
+          'Phase 5 (Empirical Verification): Re-run reproduction test (must PASS) and full project test suite.',
         ],
         actionBoundary: 'Touch only the specific files necessary for this fix; leave unrelated files untouched.',
       };

@@ -160,7 +160,7 @@ test('mode resolver and telemetry expose adoption, fallback, cycles, and transit
   telemetry.recordExecution(discovery, 'search_codebase_fast', {});
   const ready = decideReliableToolRoute({ lastToolName: 'read_file', lastToolResult: { symbol: 'parse', path: 'src/parser.ts' } });
   telemetry.recordDecision(ready);
-  telemetry.recordExecution(ready, 'read_file', {});
+  telemetry.recordExecution(ready, 'search_codebase_fast', {});
   const snapshot = telemetry.snapshot();
   assert.equal(snapshot.decisions, 2);
   assert.equal(snapshot.followed, 1);
@@ -268,3 +268,30 @@ test('Repoformer abstention gate locks broad discovery tools when evidence is su
   assert.equal(filtered.some((t) => t.name === 'read_compressed_code'), false);
   assert.equal(filtered.some((t) => t.name === 'replace_text'), true);
 });
+
+test('Repoformer abstention gate preserves read_file in fallbackTools during ready_for_mutation', () => {
+  const allTools = [
+    { name: 'search_codebase_fast' },
+    { name: 'read_compressed_code' },
+    { name: 'get_symbol_context_360' },
+    { name: 'read_file' },
+    { name: 'replace_text' },
+  ];
+  const abstained = decideReliableToolRoute({
+    evidenceSufficient: true,
+    visibleToolNames: allTools.map((t) => t.name),
+  });
+  const filtered = applyReliableToolRouteToDeclarations(allTools, abstained, 'enforce');
+  assert.equal(filtered.some((t) => t.name === 'read_file'), true);
+  assert.equal(filtered.some((t) => t.name === 'replace_text'), true);
+});
+
+test('decideReliableToolRoute passes clean path and symbol args for analyze_impact', () => {
+  const route = decideReliableToolRoute({
+    lastToolName: 'read_file',
+    lastToolResult: { path: 'src/service.ts', symbol: 'run', completeDeclaration: true },
+  });
+  assert.equal(route.selectedTool, 'analyze_impact');
+  assert.deepEqual(route.suggestedArgs, { path: 'src/service.ts', symbol: 'run', depth: 2 });
+});
+

@@ -5,9 +5,11 @@ import { CompletionEvidenceGate, type CompletionEvidenceDecision } from './compl
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 import type { HypothesisTracker } from './hypothesis-tracker.js';
+import type { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { WorkspaceStateVerifier, type CleanlinessCheckResult } from '../workspace/workspace-state-verifier.js';
 import { AuditLedger, type TaskAuditRecord } from './audit-ledger.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
+import { isScratchPath } from '../skills/verification-policy.js';
 
 export interface CriticEvaluation {
   approved: boolean;
@@ -24,6 +26,44 @@ export interface ComposeAcceptanceContract {
   lastMutationSeq: number;
   changedFiles: string[];
   registeredFiles: string[];
+}
+
+export interface ExplorationSufficiencyParams {
+  taskClass?: string;
+  session: Session;
+  targetFilePath?: string;
+  hasReproduction?: boolean;
+  hypothesisTracker?: HypothesisTracker;
+  domainGuardian?: DomainIntentGuardian;
+  userRequest?: string;
+  gateMode?: 'off' | 'observe' | 'enforce';
+}
+
+export interface ExplorationSufficiencyDecision {
+  allowed: boolean;
+  score: number; // 0 - 100
+  reasons: string[];
+  inspectedFiles: string[];
+  critiquePrompt?: string;
+  remediationHint?: string;
+}
+
+function extractInspectedFilesFromSession(session: Session): Set<string> {
+  const inspected = new Set<string>();
+  try {
+    const events = (session as any).getEvents ? (session as any).getEvents() : [];
+    for (const event of events) {
+      if (event.type === 'tool/call') {
+        const toolName = event.data?.toolName;
+        const args = event.data?.args || {};
+        const p = args.path || args.filePath || args.targetFile || args.AbsolutePath || args.file || args.SearchPath || '';
+        if (typeof p === 'string' && p.trim()) {
+          inspected.add(p.trim().replace(/\\/g, '/').toLowerCase());
+        }
+      }
+    }
+  } catch {}
+  return inspected;
 }
 
 function extractModifiedFiles(session: Session, filesModified?: string[], turn?: number): Set<string> {
@@ -60,6 +100,119 @@ export class CriticGate {
   }
 
   /**
+   * Dual-Agent Verifier: Đánh giá độc lập xem pha Exploration đã thu thập đủ thông tin để tiến sang Implementation chưa.
+   * Rào chắn bảo vệ: Chặn sửa đổi mã nguồn nếu LLM chưa đọc file đích hoặc chưa có bằng chứng tái hiện lỗi (Reproduction Test).
+   */
+  evaluateExplorationSufficiency(params: ExplorationSufficiencyParams): ExplorationSufficiencyDecision {
+    const {
+      taskClass,
+      session,
+      targetFilePath = '',
+      hasReproduction = false,
+      hypothesisTracker,
+      gateMode = 'observe',
+    } = params;
+
+    const reasons: string[] = [];
+    let score = 100;
+
+    const normalizedTarget = targetFilePath.trim().replace(/\\/g, '/').toLowerCase();
+    const isScratch = isScratchPath(normalizedTarget);
+
+    // Scratch files / reproduction scripts are always allowed
+    if (isScratch) {
+      return {
+        allowed: true,
+        score: 100,
+        reasons: [],
+        inspectedFiles: [],
+      };
+    }
+
+    const inspectedFiles = extractInspectedFilesFromSession(session);
+    const hasInspectedTarget = Array.from(inspectedFiles).some((f) =>
+      normalizedTarget.endsWith(f) || f.endsWith(normalizedTarget) || normalizedTarget.includes(f) || f.includes(normalizedTarget)
+    );
+
+    // 1. Target Inspection Invariant: Must inspect target before mutating
+    if (normalizedTarget && !hasInspectedTarget) {
+      score -= 50;
+      reasons.push(
+        `Target file '${targetFilePath}' has NOT been inspected with read_file/view_file before attempting modification.`,
+      );
+    }
+
+    // 2. Reproduction Proof Invariant (Bugfix / Security)
+    const isBugfixOrSecurity = taskClass === 'bugfix' || taskClass === 'security';
+    if (isBugfixOrSecurity && !hasReproduction) {
+      const latestHypo = hypothesisTracker?.getLatestHypothesis();
+      const hasVerifiedHypo = latestHypo && (latestHypo.status === 'supported' || latestHypo.status === 'validated');
+      if (!hasVerifiedHypo) {
+        score -= 50;
+        reasons.push(
+          'No failing reproduction test execution (e.g. scratch/reproduce_*.py or failing unit test) found for bugfix task.',
+        );
+      }
+    }
+
+    // 3. Hypothesis Falsification Invariant: Cannot mutate based on a falsified hypothesis
+    if (hypothesisTracker) {
+      const latestHypo = hypothesisTracker.getLatestHypothesis();
+      if (latestHypo && latestHypo.status === 'falsified') {
+        score -= 50;
+        reasons.push(
+          `Latest hypothesis [${latestHypo.id}] "${latestHypo.statement}" was FALSIFIED (${latestHypo.rejectionReason || 'test failed'}). Formulate and test a new hypothesis before mutating code.`,
+        );
+      }
+    }
+
+    // 4. Goal Guardian Audit Invariant: Check for blocked tamper attempts or severe drift
+    if (params.domainGuardian) {
+      const audit = params.domainGuardian.getAuditSummary();
+      if (audit.blockedTamperAttempts > 0) {
+        score -= 30;
+        reasons.push(
+          `Domain Intent Guardian blocked ${audit.blockedTamperAttempts} test tampering attempt(s).`,
+        );
+      }
+      if (audit.consecutiveDriftWarnings > 1) {
+        score -= 20;
+        reasons.push(
+          `Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`,
+        );
+      }
+    }
+
+    const allowed = gateMode !== 'enforce' || score >= 60;
+
+    let critiquePrompt: string | undefined;
+    let remediationHint: string | undefined;
+
+    if (!allowed) {
+      critiquePrompt = [
+        `\n🛑 [DUAL-AGENT EXPLORATION SUFFICIENCY GATE REJECTION - SCORE: ${score}/100]:`,
+        `The independent Verifier determined that exploration information is INSUFFICIENT to begin implementation:`,
+        ...reasons.map((r) => `  ❌ ${r}`),
+        `\n👉 REQUIRED REMEDIATION ACTIONS:`,
+        `1. Inspect the target file (${targetFilePath}) with read_file/view_file to understand existing logic and exact line numbers.`,
+        `2. For bugfixes, write a reproduction script (e.g. scratch/reproduce_issue.py) or execute a test command to establish reproduction proof.`,
+        `3. Formulate and verify the causal hypothesis before applying mutations.`,
+      ].join('\n');
+
+      remediationHint = reasons.join('; ');
+    }
+
+    return {
+      allowed,
+      score: Math.max(0, score),
+      reasons,
+      inspectedFiles: Array.from(inspectedFiles),
+      critiquePrompt,
+      remediationHint,
+    };
+  }
+
+  /**
    * Đánh giá độc lập toàn diện trước khi cho phép Agent kết thúc task (Hard-Gated Critic Invariant)
    */
   evaluate(params: {
@@ -67,6 +220,7 @@ export class CriticGate {
     session: Session;
     workspace: Workspace;
     hypothesisTracker?: HypothesisTracker;
+    domainGuardian?: DomainIntentGuardian;
     userRequest?: string;
     filesModified?: string[];
     turn?: number;
@@ -74,7 +228,7 @@ export class CriticGate {
     completionState?: TurnCompletionState;
     evidenceDecision?: CompletionEvidenceDecision;
   }): CriticEvaluation {
-    const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified, turn, hasSubmittedSolution } = params;
+    const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
     let lspErrors: DiagnosticItem[] = [];
@@ -155,6 +309,19 @@ export class CriticGate {
       }
     }
 
+    // 4. Thẩm định Goal Guardian Audit
+    if (domainGuardian) {
+      const audit = domainGuardian.getAuditSummary();
+      if (audit.blockedTamperAttempts > 0) {
+        score -= 30;
+        reasons.push(`Domain Intent Guardian detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
+      }
+      if (audit.consecutiveDriftWarnings > 1) {
+        score -= 20;
+        reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
+      }
+    }
+
     // Hard Gate: Không bao giờ approve nếu còn bất kỳ lỗi compiler / syntax / missing import nào
     const approved = lspErrors.length === 0 && score >= 80 && evidenceDecision.allow;
 
@@ -212,6 +379,7 @@ export class CriticGate {
     session: Session;
     workspace: Workspace;
     hypothesisTracker?: HypothesisTracker;
+    domainGuardian?: DomainIntentGuardian;
     userRequest?: string;
     filesModified?: string[];
     turn?: number;
@@ -219,7 +387,7 @@ export class CriticGate {
     completionState?: TurnCompletionState;
     evidenceDecision?: CompletionEvidenceDecision;
   }): Promise<CriticEvaluation> {
-    const { finalAnswer, session, workspace, hypothesisTracker, userRequest, filesModified, turn, hasSubmittedSolution } = params;
+    const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
     let lspErrors: DiagnosticItem[] = [];
@@ -290,6 +458,19 @@ export class CriticGate {
       if (active && active.status === 'testing') {
         score -= 20;
         reasons.push(`Hypothesis [${active.id}] "${active.statement}" remains in 'testing' state without validation outcome.`);
+      }
+    }
+
+    // 4. Thẩm định Goal Guardian Audit
+    if (domainGuardian) {
+      const audit = domainGuardian.getAuditSummary();
+      if (audit.blockedTamperAttempts > 0) {
+        score -= 30;
+        reasons.push(`Domain Intent Guardian detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
+      }
+      if (audit.consecutiveDriftWarnings > 1) {
+        score -= 20;
+        reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
       }
     }
 

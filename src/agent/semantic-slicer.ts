@@ -1,5 +1,4 @@
 import ts from 'typescript';
-import { nativeExtractFileSymbols } from '../native/index.js';
 
 export type SymbolParser = 'typescript-ast' | 'python-indentation' | 'heuristic';
 export type ExtractionConfidence = 'high' | 'medium' | 'low';
@@ -95,29 +94,6 @@ export class SemanticSlicer {
   }
 
   private static parseSymbols(filePath: string, content: string): ParsedSymbols {
-    // 1. Rust Native Fast Path: Trích xuất symbol cực nhanh (<1ms, không tạo AST trong JS Heap)
-    try {
-      const nativeSymbols = nativeExtractFileSymbols(filePath, content);
-      if (nativeSymbols && nativeSymbols.length > 0) {
-        return {
-          symbols: nativeSymbols.map((s) => ({
-            name: s.name,
-            qualifiedName: s.name,
-            kind: (s.kind || 'variable') as CodeSymbol['kind'],
-            startLine: s.line,
-            endLine: s.line,
-            signature: s.typeSignature || s.name,
-            parser: 'typescript-ast',
-            confidence: 'high',
-          })),
-          parser: 'typescript-ast',
-          confidence: 'high',
-        };
-      }
-    } catch {
-      // Fallback to TS/Python AST
-    }
-
     const extension = filePath.toLowerCase().match(/\.[^.\\/]+$/)?.[0] || '';
     if (['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'].includes(extension)) {
       return this.parseTypeScript(filePath, content);

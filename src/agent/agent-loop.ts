@@ -34,13 +34,13 @@ import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInv
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
-import { VerificationPolicy } from '../skills/verification-policy.js';
+import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
 import { HypothesisTracker, type BlastRadiusRisk } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
 import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.js';
-import { CriticGate } from './critic-gate.js';
+import { CriticGate, type ExplorationSufficiencyDecision } from './critic-gate.js';
 import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
 import { registerReportFindingsTool } from '../tools/report-findings.js';
 import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
@@ -86,13 +86,7 @@ import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
 import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1 } from './context-budget-manager.js';
 
 export function isScratchFilePath(filePath: string): boolean {
-  const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
-  return (
-    normalized.startsWith('scratch/') ||
-    normalized.startsWith('.scratch/') ||
-    /(?:^|[\\/])(?:scratch|throwaway)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(normalized) ||
-    /(?:^|[\\/])scratch[\\/]/i.test(normalized)
-  );
+  return isScratchPath(filePath);
 }
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
@@ -268,7 +262,7 @@ export class AgentLoop {
   readonly domainIntentGuardian = new DomainIntentGuardian();
   readonly finalAnswerGuard = new FinalAnswerGuard();
   readonly completionEvidenceGate = new CompletionEvidenceGate();
-  readonly verificationPolicy = new VerificationPolicy();
+  readonly verificationPolicy: VerificationPolicy;
   readonly reflectionEngine: ReflectionEngine;
   readonly memoryManager: ProjectMemoryManager;
   readonly hypothesisTracker = new HypothesisTracker();
@@ -335,7 +329,23 @@ export class AgentLoop {
 
   private isEvidenceSufficient(): boolean {
     const last = this.lastToolExecution;
-    return Boolean(last?.toolName === 'read_file' && last?.result?.symbol && last?.result?.completeDeclaration);
+    if (!last || last.result?.error || last.result?.success === false) return false;
+
+    if (last.toolName === 'read_file' && last.result?.symbol && last.result?.completeDeclaration) {
+      return true;
+    }
+    if (this.verificationPolicy.hasReproduction()) {
+      return true;
+    }
+    const targetFile = this.hypothesisTracker.getLatestHypothesis()?.targetFiles?.[0];
+    if (targetFile && last.toolName === 'read_file' && last.result?.path) {
+      const normalizedTarget = targetFile.replace(/\\/g, '/').toLowerCase();
+      const normalizedPath = String(last.result.path).replace(/\\/g, '/').toLowerCase();
+      if (normalizedPath.endsWith(normalizedTarget) || normalizedTarget.endsWith(normalizedPath)) {
+        return true;
+      }
+    }
+    return false;
   }
   readonly stepPromptPolicy = new StepPromptPolicy();
   private stepDynamicSuffixes = new Map<number, string>();
@@ -387,7 +397,8 @@ export class AgentLoop {
       this.memoryManager = this.kernel.ctx.memory;
       this.repositoryMemory = this.kernel.ctx.repositoryMemory;
       this.effectLedger = new EffectLedger();
-      this.criticGate = new CriticGate(this.completionEvidenceGate);
+      this.verificationPolicy = this.kernel.ctx.verification || new VerificationPolicy();
+      this.criticGate = this.kernel.ctx.critic || new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
       this.rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
@@ -433,6 +444,7 @@ export class AgentLoop {
       this.memoryManager = new ProjectMemoryManager(this._workspace.rootDir);
       this.repositoryMemory = new CitationValidatedRepositoryMemory(this._workspace);
       this.effectLedger = new EffectLedger();
+      this.verificationPolicy = new VerificationPolicy();
       this.criticGate = new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
@@ -1242,7 +1254,13 @@ export class AgentLoop {
         activeToolDeclarations = this.cachedTurnToolDeclarations;
       } else {
         activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
-          ? candidateProvider.getRelevantTools(activeStepQuery)
+          ? candidateProvider.getRelevantTools({
+              query: retrievalState.query,
+              denseQuery: retrievalState.denseQuery,
+              lexicalQuery: retrievalState.lexicalQuery,
+              lastToolName: this.lastToolExecution?.toolName,
+              lastToolResult: this.lastToolExecution?.result,
+            })
           : candidateProvider.getFunctionDeclarations();
         this.cachedTurnNumber = turn;
         this.cachedTurnToolDeclarations = activeToolDeclarations;
@@ -1287,6 +1305,7 @@ export class AgentLoop {
         evidenceSufficient: this.isEvidenceSufficient(),
       });
       this.reliableToolOrchestrationTelemetry.recordDecision(reliableRouteDecision);
+      this.kernel?.ctx.events.emit('router:decision', reliableRouteDecision);
       activeToolDeclarations = applyReliableToolRouteToDeclarations(
         activeToolDeclarations,
         reliableRouteDecision,
@@ -2525,10 +2544,32 @@ export class AgentLoop {
               workspaceRoot: this._workspace.rootDir,
             }, resolveAciGuardrailMode());
 
-            // Phase 3 Reproduction Gate (Agentless & AutoCodeRover)
+            // Phase 3 Dual-Agent Exploration Sufficiency & Reproduction Gate (Agentless & AutoCodeRover & Dual-Agent Verifier)
+            const targetFilePath = String(toolArgs?.path || toolArgs?.filePath || toolArgs?.file || toolArgs?.targetFile || toolArgs?.AbsolutePath || '');
+            const isScratch = isScratchFilePath(targetFilePath);
             const reproductionMode = process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe';
+
+            const explorationSufficiency: ExplorationSufficiencyDecision = isMutationTool(toolName) && !isScratch
+              ? this.criticGate.evaluateExplorationSufficiency({
+                  taskClass: classification.taskClass,
+                  session,
+                  targetFilePath,
+                  hasReproduction: this.verificationPolicy.hasReproduction(),
+                  hypothesisTracker: this.hypothesisTracker,
+                  domainGuardian: this.domainIntentGuardian,
+                  userRequest: turnUserRequest,
+                  gateMode: reproductionMode,
+                })
+              : { allowed: true, score: 100, reasons: [], inspectedFiles: [] };
+
+            this.kernel?.ctx.events.emit('gate:exploration_sufficiency', explorationSufficiency);
+
             const reproductionCheck = isMutationTool(toolName)
-              ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode)
+              ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode, {
+                  targetFilePath,
+                  isScratchFile: isScratch,
+                  criticApproved: explorationSufficiency.allowed,
+                })
               : { allowed: true };
 
             const submitGateBlocked = toolName === 'submit_solution' && (
@@ -2564,6 +2605,18 @@ export class AgentLoop {
                   error: aciValidation.rejectionMessage,
                   reasonCode: aciValidation.reasonCode,
                   remediationHint: aciValidation.remediationHint,
+                },
+                durationMs: 1,
+              };
+            } else if (!explorationSufficiency.allowed) {
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                result: {
+                  success: false,
+                  error: explorationSufficiency.critiquePrompt || explorationSufficiency.reasons.join('; '),
+                  reasonCode: 'EXPLORATION_SUFFICIENCY_BLOCKED',
+                  remediationHint: explorationSufficiency.remediationHint,
                 },
                 durationMs: 1,
               };
@@ -2954,7 +3007,6 @@ export class AgentLoop {
             }
           }
 
-
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
           const payloadToRecord = {
             ...executionResult.result,
@@ -2991,10 +3043,14 @@ export class AgentLoop {
           });
           if (this.trajectorySteps.length > 20) this.trajectorySteps.shift();
 
-          if (toolName === 'run_command' && isVerificationCommand(String(toolArgs?.command || ''))) {
+          const cmdStr = String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
+          const isVerifOrReproCommand = isVerificationCommand(cmdStr)
+            || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
+            || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
+          if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
             const isFailure = isToolResultFailure(executionResult.result) || executionResult.result?.exitCode !== 0;
             if (isFailure) {
-              this.verificationPolicy.recordReproductionAttempt(String(toolArgs.command), true);
+              this.verificationPolicy.recordReproductionAttempt(cmdStr, true);
             }
           }
           this.lastToolExecution = {
@@ -3276,6 +3332,8 @@ export class AgentLoop {
           codeChangeRequired,
           userRequest: turnUserRequest,
           hasSubmittedSolution,
+          taskClass: initialTurnClassification.taskClass,
+          hasReproduction: this.verificationPolicy.hasReproduction(),
         });
       const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
       if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
@@ -3291,6 +3349,7 @@ export class AgentLoop {
           session,
           workspace: this._workspace,
           hypothesisTracker: this.hypothesisTracker,
+          domainGuardian: this.domainIntentGuardian,
           userRequest: turnUserRequest,
           turn,
           hasSubmittedSolution,
