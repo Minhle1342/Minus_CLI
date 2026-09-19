@@ -85,31 +85,6 @@ export class LoopProgressGuard {
       || (typeof result.exitCode === 'number' && result.exitCode !== 0),
     );
 
-    if (isFailure && toolName === 'run_command') {
-      const groupedEnvironmentFailure = (
-        (result.errorCode === 'COMMAND_NOT_FOUND' && result.missingExecutable)
-        || (['NATIVE_DEPENDENCY_MISSING', 'PACKAGE_DEPENDENCY_MISSING'].includes(result.errorCode) && result.missingDependency)
-      );
-      const callFingerprint = stableStringify(groupedEnvironmentFailure
-        ? {
-            toolName,
-            errorCode: result.errorCode,
-            missingExecutable: result.missingExecutable,
-            missingDependency: result.missingDependency,
-          }
-        : { toolName, args });
-      const resultFingerprint = stableStringify({
-        error: result.error,
-        errorCode: result.errorCode,
-        missingExecutable: result.missingExecutable,
-        missingDependency: result.missingDependency,
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-      });
-      return this.recordObservation(callFingerprint, resultFingerprint, toolName, true);
-    }
-
     if (isFailure) {
       return { repetitionCount: 0, shouldStop: false };
     }
@@ -176,7 +151,7 @@ export class LoopProgressGuard {
       return alternatingDecision;
     }
 
-    return this.recordObservation(callFingerprint, resultFingerprint, toolName, false);
+    return this.recordObservation(callFingerprint, resultFingerprint, toolName);
   }
 
   /**
@@ -276,20 +251,15 @@ export class LoopProgressGuard {
     callFingerprint: string,
     resultFingerprint: string,
     toolName: string,
-    failed: boolean,
   ): ToolProgressDecision {
     const previous = this.seen.get(callFingerprint);
     const repetitionCount = previous?.resultFingerprint === resultFingerprint ? previous.repetitionCount + 1 : 1;
     this.seen.set(callFingerprint, { resultFingerprint, repetitionCount });
     if (repetitionCount < 2) return { repetitionCount, shouldStop: false };
 
-    const message = failed
-      ? repetitionCount === 2
-        ? `[SYSTEM LOOP GUARD]: The same run_command failure class occurred twice. Treat the environment diagnostic as authoritative; change runtime, image, dependencies, permissions, or command strategy before calling run_command again.`
-        : `[SYSTEM LOOP GUARD]: The same run_command failure persisted ${repetitionCount} times. Change strategy now; repeated failure to change strategy will end the turn with an explicit blocker report.`
-      : repetitionCount === 2
-        ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Treat this observation as authoritative and do not call it again unless a workspace-changing action occurs. An empty workspace is a valid state; proceed by creating the requested project files.`
-        : `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result ${repetitionCount} times without progress. Change strategy now; repeated failure to change strategy will end the turn with an explicit blocker report.`;
+    const message = repetitionCount === 2
+      ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Treat this observation as authoritative and do not call it again unless a workspace-changing action occurs. An empty workspace is a valid state; proceed by creating the requested project files.`
+      : `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result ${repetitionCount} times without progress. Change strategy now; repeated failure to change strategy will end the turn with an explicit blocker report.`;
 
     return { repetitionCount, message, shouldStop: repetitionCount >= 3 };
   }

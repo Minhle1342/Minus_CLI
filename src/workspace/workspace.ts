@@ -15,45 +15,154 @@ export class Workspace {
   readonly rootDir: string;
   readonly realRootDir: string;
 
-  // Danh sách các thư mục bỏ qua khi duyệt codebase
+  // Danh sách các thư mục bỏ qua khi duyệt codebase (Đa ngôn ngữ & đa Framework)
   readonly ignoredDirectories: readonly string[] = [
+    // JS/TS & Web Frameworks
     'node_modules',
-    '.git',
     'dist',
     'build',
     'coverage',
+    '.turbo',
+    '.next',
+    '.nuxt',
+    '.svelte-kit',
+    '.output',
+    '.npm-cache',
+
+    // Agent internals & Sandboxes
     '.gemini',
     '.codingagent',
     '.minus',
+    '.gitnexus',
+    '.eval-sandbox',
+    '.opencodereview',
+
+    // Version Control & VCS
+    '.git',
+    '.svn',
+    '.hg',
+
+    // Rust & Maven
+    'target',
+
+    // Python
+    '__pycache__',
+    '.venv',
+    'venv',
+    'env',
+    '.pytest_cache',
+    '.mypy_cache',
+    '.ruff_cache',
+    '.tox',
+
+    // Java / Kotlin / Gradle
+    '.gradle',
+    '.m2',
+    'out',
+
+    // C# / .NET / Unity
+    'bin',
+    'obj',
+    '.vs',
+    'Library',
+    'Packages',
+    'Logs',
+    'Builds',
+
+    // PHP / Composer / Elixir / Swift / iOS / Flutter
+    'vendor',
+    '_build',
+    'deps',
+    '.dart_tool',
+    '.flutter-plugins',
+    '.flutter-plugins-dependencies',
+    '.build',
+    '.swiftpm',
+    'DerivedData',
+    'Pods',
+
+    // C / C++ / CMake
+    'cmake-build-debug',
+    'cmake-build-release',
+    '.cache',
+
+    // IDEs & OS
+    '.idea',
+    '.vscode',
+    '.DS_Store',
+    'Thumbs.db',
+
+    // Temporary
     'temp',
-    '.turbo',
-    '.next',
+    'tmp',
   ];
 
   // Danh sách các phần mở rộng file nhị phân bỏ qua khi tìm kiếm text
   readonly binaryExtensions: readonly string[] = [
+    // Images
     '.png',
     '.jpg',
     '.jpeg',
     '.gif',
     '.ico',
+    '.webp',
+    '.avif',
+    '.bmp',
+    '.tiff',
+    // Documents / Archives
     '.pdf',
     '.zip',
     '.tar',
     '.gz',
+    '.7z',
+    '.rar',
+    '.bz2',
+    '.xz',
+    '.jar',
+    '.apk',
+    '.aar',
+    '.ipa',
+    '.dmg',
+    '.iso',
+    // Executables / Native Libs / Bytecode
     '.exe',
     '.bin',
     '.dll',
     '.so',
     '.dylib',
+    '.node',
+    '.o',
+    '.a',
+    '.lib',
+    '.obj',
+    '.wasm',
+    '.class',
+    '.pyc',
+    // Fonts
     '.woff',
     '.woff2',
     '.ttf',
     '.eot',
+    '.otf',
+    // Audio / Video
     '.mp3',
     '.mp4',
     '.avi',
     '.mov',
+    '.mkv',
+    '.flac',
+    '.wav',
+    '.webm',
+    // Databases / AI Model Weights
+    '.sqlite',
+    '.db',
+    '.parquet',
+    '.feather',
+    '.onnx',
+    '.pt',
+    '.pth',
+    '.safetensors',
+    '.h5',
   ];
 
   // Danh sách các file nhạy cảm cần chặn ghi đè trực tiếp (mặc định rỗng hoặc tùy chỉnh khi cần)
@@ -136,10 +245,11 @@ export class Workspace {
   }
 
   /**
-   * Kiểm tra xem một thư mục có nằm trong danh sách bỏ qua hay không.
+   * Kiểm tra xem một thư mục có nằm trong danh sách bỏ qua hay không (không phân biệt hoa thường).
    */
   isIgnoredDirectory(dirName: string): boolean {
-    return this.ignoredDirectories.includes(dirName);
+    const base = path.basename(dirName).toLowerCase();
+    return this.ignoredDirectories.some((ig) => ig.toLowerCase() === base);
   }
 
   /**

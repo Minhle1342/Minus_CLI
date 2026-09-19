@@ -61,8 +61,8 @@ export function isNonExecutableFile(filePath: string): boolean {
   const normalizedPath = (filePath || '').trim().toLowerCase();
   if (!normalizedPath) return false;
   return (
-    /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|gitignore|gitattributes|editorconfig|npmignore|dockerignore)$/i.test(normalizedPath)
-    || /(?:^|[/\\])(?:\.env(?:\.[a-zA-Z0-9_-]+)?|\.gitignore|\.editorconfig|license|copying|notice)$/i.test(normalizedPath)
+    /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|json|jsonc|json5|ya?ml|toml|ini|xml|html?|css|scss|sass|less|map|lock|lockb|dockerignore|gitignore|gitattributes|editorconfig|npmignore)$/i.test(normalizedPath)
+    || /(?:^|[/\\])(?:\.env(?:\.[a-zA-Z0-9_-]+)?|\.gitignore|\.editorconfig|license|copying|notice|dockerfile|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(normalizedPath)
   );
 }
 
@@ -125,6 +125,7 @@ export interface CompletionEvidenceOptions {
   expectedWorkspaceDigest?: string;
   expectedDiffHash?: string;
   hasSubmittedSolution?: boolean;
+  isPreCallSubmissionCheck?: boolean;
 }
 
 function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): string {
@@ -168,7 +169,9 @@ export class CompletionEvidenceGate {
     );
 
     // A fresh submission certifies completion requirements, never unrelated Git or execution claims.
-    const hasCertifiedSubmission = hasSubmitSolutionTool || (options.hasSubmittedSolution === true && mutations.length === 0);
+    const hasCertifiedSubmission = hasSubmitSolutionTool
+      || options.hasSubmittedSolution === true
+      || options.isPreCallSubmissionCheck === true;
 
     const reasons: string[] = [];
 

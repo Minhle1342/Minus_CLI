@@ -130,20 +130,27 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const newValue = item.valueToInsert + ' ' + textAfterCursor.trimStart();
       setValue(newValue);
       setCursorOffset(item.valueToInsert.length + 1);
-    } else if (item.mentionStart !== undefined && item.mentionEnd !== undefined) {
-      const before = value.slice(0, item.mentionStart);
-      const after = value.slice(item.mentionEnd);
-      const inserted = `@${item.valueToInsert} `;
-      const newValue = `${before}${inserted}${after}`;
-      setValue(newValue);
-      setCursorOffset(before.length + inserted.length);
     } else {
-      const before = value.slice(0, cursorOffset);
-      const after = value.slice(cursorOffset);
-      const inserted = `@${item.valueToInsert} `;
-      const newValue = `${before}${inserted}${after}`;
-      setValue(newValue);
-      setCursorOffset(before.length + inserted.length);
+      const formattedInsert = item.valueToInsert.includes(' ')
+        ? `"${item.valueToInsert}"`
+        : item.valueToInsert;
+      // Nếu là thư mục, không thêm khoảng trắng để người dùng gõ tiếp đường dẫn con
+      const trailingSuffix = item.type === 'directory' ? '' : ' ';
+      const inserted = `@${formattedInsert}${trailingSuffix}`;
+
+      if (item.mentionStart !== undefined && item.mentionEnd !== undefined) {
+        const before = value.slice(0, item.mentionStart);
+        const after = value.slice(item.mentionEnd);
+        const newValue = `${before}${inserted}${after}`;
+        setValue(newValue);
+        setCursorOffset(before.length + inserted.length);
+      } else {
+        const before = value.slice(0, cursorOffset);
+        const after = value.slice(cursorOffset);
+        const newValue = `${before}${inserted}${after}`;
+        setValue(newValue);
+        setCursorOffset(before.length + inserted.length);
+      }
     }
     setSelectedIndex(0);
     setHasNavigated(false);

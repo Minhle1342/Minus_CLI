@@ -5,6 +5,7 @@ import { TreeScanResult, TreeNode, getFileExtensionBadge } from '../workspace/tr
 import { ContextInspectionReport } from '../context/context-inspector.js';
 import type { BrainstormingSessionResult } from '../agent/multi-agent-brainstorming.js';
 import type { QualityGateResult } from '../agent/agent-orchestrator.js';
+import { formatTuiErrorDetail } from './ink/components/StepStream.js';
 
 export interface UICollapsePreferences {
   thinking: boolean;
@@ -1797,7 +1798,8 @@ export class CLI {
       const firstStderrLine = result.stderr ? String(result.stderr).trim().split('\n')[0] : '';
       const exitDetail = typeof result.exitCode === 'number' && result.exitCode !== 0 ? `Process exited with code ${result.exitCode}` : '';
       const errDetail = result.error || result.message || firstStderrLine || exitDetail || 'Unknown error';
-      console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${errDetail}`);
+      const cleanErr = formatTuiErrorDetail(errDetail, 120);
+      console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${cleanErr}`);
       return;
     }
 
@@ -1886,7 +1888,8 @@ export class CLI {
       const firstStderrLine = opts.result.stderr ? String(opts.result.stderr).trim().split('\n')[0] : '';
       const exitDetail = typeof opts.result.exitCode === 'number' && opts.result.exitCode !== 0 ? `Process exited with code ${opts.result.exitCode}` : '';
       const errDetail = opts.result.error || opts.result.message || firstStderrLine || exitDetail || 'Unknown error';
-      process.stdout.write(`    ${c.crimson}└─ ${truncateDisplayText(String(errDetail), 100)}${c.reset}\n`);
+      const cleanErr = formatTuiErrorDetail(errDetail, 120);
+      process.stdout.write(`    ${c.crimson}└─ ${cleanErr}${c.reset}\n`);
     }
   }
 

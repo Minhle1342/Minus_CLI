@@ -21,6 +21,14 @@ import { hasUnfulfilledDeferredPromise } from './agent/final-answer-guard.js';
 import { PlanManager } from './agent/plan-manager.js';
 import { FileMentionEngine } from './workspace/file-attachment.js';
 import { Workspace } from './workspace/workspace.js';
+import { isNonExecutableFile, CompletionEvidenceGate } from './agent/completion-evidence.js';
+import { createSubmitSolutionTool } from './tools/submit-solution.js';
+import {
+  SolutionGroundingAuditor,
+  extractTechnicalEntities,
+  computeInformationDensity,
+} from './agent/solution-grounding-auditor.js';
+import { Session } from './session/session.js';
 
 describe('Text Input & Prompt Bug Fixes (TUI)', () => {
   describe('1. Input Sanitization (Newlines & Control Characters)', () => {
@@ -599,6 +607,159 @@ Trong các bước tiếp theo, tôi sẽ hỗ trợ bạn triển khai tính n�
       const cleaned = formatTuiErrorDetail(longMessage, 100);
       assert.strictEqual(cleaned.length, 100);
       assert.ok(cleaned.endsWith('…'));
+    });
+
+    it('should format [SYSTEM EVIDENCE GATE] multi-line errors to show root cause on a single line', () => {
+      const rawGateError = `[SYSTEM EVIDENCE GATE]: Completion claims do not match observed outcomes.\n- No successful test/build/lint/typecheck command was observed after the latest code modification.\nVerify the changes with an appropriate check, or report the concrete verification blocker.`;
+      const cleaned = formatTuiErrorDetail(rawGateError, 140);
+      assert.strictEqual(
+        cleaned,
+        `[SYSTEM EVIDENCE GATE]: No successful test/build/lint/typecheck command was observed after the latest code modification.`
+      );
+      assert.strictEqual(cleaned.includes('\n'), false, 'TUI error detail must not contain newlines');
+    });
+
+    it('should format [CRITIC GATE REJECTION] multi-line errors to show primary reason on a single line', () => {
+      const rawCriticError = `🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: 0/100]:\nTask completion rejected by independent Verifier due to unsatisfied invariants:\n  ❌ Detected 2 unresolved syntax / compiler / missing import error(s).`;
+      const cleaned = formatTuiErrorDetail(rawCriticError, 140);
+      assert.strictEqual(
+        cleaned,
+        `[CRITIC GATE]: Detected 2 unresolved syntax / compiler / missing import error(s).`
+      );
+      assert.strictEqual(cleaned.includes('\n'), false, 'TUI error detail must not contain newlines');
+    });
+  });
+
+  describe('12. Non-Executable File Classification & Evidence Gate', () => {
+    it('isNonExecutableFile: should recognize web templates, styles, markup, configs, and lockfiles', () => {
+      assert.strictEqual(isNonExecutableFile('index.html'), true);
+      assert.strictEqual(isNonExecutableFile('src/views/home.html'), true);
+      assert.strictEqual(isNonExecutableFile('public/styles.css'), true);
+      assert.strictEqual(isNonExecutableFile('src/styles/app.scss'), true);
+      assert.strictEqual(isNonExecutableFile('config.json'), true);
+      assert.strictEqual(isNonExecutableFile('settings.json5'), true);
+      assert.strictEqual(isNonExecutableFile('deploy/docker-compose.yaml'), true);
+      assert.strictEqual(isNonExecutableFile('config.toml'), true);
+      assert.strictEqual(isNonExecutableFile('package-lock.json'), true);
+      assert.strictEqual(isNonExecutableFile('pnpm-lock.yaml'), true);
+      assert.strictEqual(isNonExecutableFile('yarn.lock'), true);
+      assert.strictEqual(isNonExecutableFile('.env.local'), true);
+      assert.strictEqual(isNonExecutableFile('README.md'), true);
+    });
+
+    it('isNonExecutableFile: should correctly identify executable source code files', () => {
+      assert.strictEqual(isNonExecutableFile('src/main.ts'), false);
+      assert.strictEqual(isNonExecutableFile('src/App.tsx'), false);
+      assert.strictEqual(isNonExecutableFile('server.js'), false);
+      assert.strictEqual(isNonExecutableFile('main.py'), false);
+      assert.strictEqual(isNonExecutableFile('Program.cs'), false);
+      assert.strictEqual(isNonExecutableFile('main.go'), false);
+      assert.strictEqual(isNonExecutableFile('main.rs'), false);
+    });
+
+    it('CompletionEvidenceGate: should permit completion when only non-executable files were modified', () => {
+      const gate = new CompletionEvidenceGate();
+      const session = new Session();
+      session.append('turn/start', { turn: 1 });
+      session.append('tool/call', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', args: { targetFile: 'index.html' } });
+      session.append('tool/result', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', result: { success: true, filesModified: ['index.html'] } });
+
+      const decision = gate.evaluate('Đã xóa cụm từ 5S GROUP trong index.html.', session, { turn: 1, codeChangeRequired: true });
+      assert.strictEqual(decision.allow, true, 'Editing non-executable HTML file must not demand automated test runner');
+    });
+
+    it('CompletionEvidenceGate: should permit submit_solution pre-call check when isPreCallSubmissionCheck is true', () => {
+      const gate = new CompletionEvidenceGate();
+      const session = new Session();
+      session.append('turn/start', { turn: 1 });
+      session.append('tool/call', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', args: { targetFile: 'src/App.tsx' } });
+      session.append('tool/result', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', result: { success: true, filesModified: ['src/App.tsx'] } });
+
+      const preCallDecision = gate.evaluate('', session, { turn: 1, codeChangeRequired: true, isPreCallSubmissionCheck: true });
+      assert.strictEqual(preCallDecision.allow, true, 'isPreCallSubmissionCheck must allow submit_solution tool invocation');
+    });
+  });
+
+  describe('13. submit_solution Semantic Validation', () => {
+    it('submit_solution tool: should accept concise action summaries describing phrase removals', async () => {
+      const workspace = new Workspace(process.cwd());
+      const tool = createSubmitSolutionTool(workspace);
+      const result = await tool.execute({
+        summary: "Đã hoàn tất việc xóa cụm từ '5S GROUP' khỏi các file giao diện.",
+        filesModified: ['src/App.tsx', 'index.html'],
+        verificationEvidence: 'Đã kiểm tra diff và đảm bảo không còn chuỗi 5S GROUP',
+      }, workspace);
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.submitted, true);
+      assert.strictEqual(result.nextAction, 'final_answer');
+    });
+
+    it('submit_solution tool: should still reject empty or purely evasive pseudo summaries', async () => {
+      const workspace = new Workspace(process.cwd());
+      const tool = createSubmitSolutionTool(workspace);
+      const result = await tool.execute({
+        summary: 'Đã cung cấp câu trả lời chi tiết và đầy đủ.',
+      }, workspace);
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual((result as any).errorCode, 'INVALID_SUMMARY_CONTENT');
+    });
+
+    it('submit_solution tool: should support Typed Evidence parameters (resolutionType, verificationMethod)', async () => {
+      const workspace = new Workspace(process.cwd());
+      const tool = createSubmitSolutionTool(workspace);
+      const result = await tool.execute({
+        summary: 'Cập nhật cấu hình build và sửa lỗi type error trong src/agent/agent-loop.ts',
+        resolutionType: 'code_fix',
+        verificationMethod: 'static_diagnostics_clean',
+        filesModified: ['src/agent/agent-loop.ts'],
+        verificationEvidence: 'LSP diagnostics reported 0 errors',
+      }, workspace);
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.resolutionType, 'code_fix');
+      assert.strictEqual(result.verificationMethod, 'static_diagnostics_clean');
+      assert.ok(typeof result.groundingScore === 'number' && result.groundingScore >= 85);
+    });
+  });
+
+  describe('14. SolutionGroundingAuditor Grounding & Entity Extraction', () => {
+    it('extractTechnicalEntities: should extract file paths, quoted strings, and code symbols', () => {
+      const text = 'Đã sửa hàm `executeCommand()` trong src/agent/agent-loop.ts và xóa chuỗi "5S GROUP". Exit 0.';
+      const entities = extractTechnicalEntities(text);
+
+      assert.ok(entities.includes('executeCommand()'));
+      assert.ok(entities.includes('src/agent/agent-loop.ts'));
+      assert.ok(entities.includes('5S GROUP'));
+      assert.ok(entities.some((e) => e.toLowerCase().includes('exit 0')));
+    });
+
+    it('computeInformationDensity: should give high density for technical summaries and low density for empty fluff', () => {
+      const technicalText = 'Đã sửa hàm `onAbort` trong file src/main.ts và xóa biến `tempFlag`.';
+      const technicalEntities = extractTechnicalEntities(technicalText);
+      const techDensity = computeInformationDensity(technicalText, technicalEntities);
+
+      const fluffText = 'Tôi đã hoàn tất toàn bộ yêu cầu của bạn một cách xuất sắc và cung cấp câu trả lời chi tiết.';
+      const fluffEntities = extractTechnicalEntities(fluffText);
+      const fluffDensity = computeInformationDensity(fluffText, fluffEntities);
+
+      assert.ok(techDensity > fluffDensity, 'Technical summary must have higher information density than fluff');
+      assert.ok(fluffDensity === 0, 'Fluff text without entities must have 0 information density');
+    });
+
+    it('SolutionGroundingAuditor: should auto-reconcile mutated files from session ledger', () => {
+      const session = new Session();
+      session.append('turn/start', { turn: 1 });
+      session.append('tool/call', { turn: 1, toolCallId: 'm1', toolName: 'replace_file_content', args: { targetFile: 'src/config.json' } });
+      session.append('tool/result', { turn: 1, toolCallId: 'm1', toolName: 'replace_file_content', result: { success: true, filesModified: ['src/config.json'] } });
+
+      const audit = SolutionGroundingAuditor.audit({
+        summary: 'Đã cập nhật cấu hình timeout trong src/config.json',
+      }, { session, turn: 1 });
+
+      assert.strictEqual(audit.allowed, true);
+      assert.deepStrictEqual(audit.reconciledFilesModified, ['src/config.json'], 'Mutations from session ledger must be auto-reconciled');
     });
   });
 });

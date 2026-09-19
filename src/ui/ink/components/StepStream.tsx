@@ -107,19 +107,40 @@ export function formatToolTargetWithLines(toolName: string, args: Record<string,
 
 /**
  * Làm sạch và định dạng thông điệp lỗi hiển thị trên TUI
- * Loại bỏ các tiền tố binary path dài dòng (Command failed: ...) và ưu tiên dòng lỗi bản chất
+ * Loại bỏ các tiền tố binary path dài dòng (Command failed: ...), ưu tiên dòng lỗi bản chất
+ * và không bao giờ để lọt ký tự xuống dòng làm vỡ thụt lề terminal
  */
 export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
   if (!rawErr) return '';
   let errStr = typeof rawErr === 'object' && rawErr !== null
-    ? ((rawErr as any).message || JSON.stringify(rawErr))
+    ? ((rawErr as any).message || (rawErr as any).error || JSON.stringify(rawErr))
     : String(rawErr);
 
   // Nếu chuỗi chứa nhiều dòng, chuẩn hóa
   const lines = errStr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return '';
 
-  // Xử lý các trường hợp chứa "Command failed: C:\...\node.exe ..."
-  if (/Command failed:\s*/i.test(errStr)) {
+  // 1. Xử lý [SYSTEM EVIDENCE GATE]
+  if (/\[SYSTEM EVIDENCE GATE\]/i.test(errStr)) {
+    const reasonLine = lines.find((l) => /^-\s+|^•\s+|^(?:No successful|The request|The final answer)/i.test(l));
+    if (reasonLine) {
+      const cleanReason = reasonLine.replace(/^[-•]\s*/, '').trim();
+      errStr = `[SYSTEM EVIDENCE GATE]: ${cleanReason}`;
+    } else {
+      errStr = lines[0];
+    }
+  }
+  // 2. Xử lý [CRITIC GATE REJECTION]
+  else if (/\[CRITIC GATE REJECTION/i.test(errStr)) {
+    const reasonLine = lines.find((l) => /^(?:❌|•|\[HARD)/i.test(l));
+    if (reasonLine) {
+      errStr = `[CRITIC GATE]: ${reasonLine.replace(/^[❌•]\s*/, '').trim()}`;
+    } else {
+      errStr = lines[0];
+    }
+  }
+  // 3. Xử lý các trường hợp chứa "Command failed: C:\...\node.exe ..."
+  else if (/Command failed:\s*/i.test(errStr)) {
     // 1. Tìm dòng lỗi ngoại lệ thực sự (TypeError, SyntaxError, Error, v.v.)
     const exceptionLine = lines.find((l) =>
       /(?:(?:[A-Z][a-zA-Z0-9_]*Error|Error|FATAL ERROR|ERR_[A-Z0-9_]+)(?:\s*\[[^\]]+\])?:\s*[^\n]+)/.test(l) &&
@@ -144,12 +165,12 @@ export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
     }
   }
 
-  // Tách dòng đầu tiên để hiển thị trên 1 dòng
-  const firstLine = errStr.split(/\r?\n/)[0].trim();
-  if (firstLine.length <= maxLen) {
-    return firstLine;
+  // Chuyển toàn bộ ký tự xuống dòng thành dấu cách để đảm bảo output luôn nằm gọn trên 1 dòng
+  const singleLine = errStr.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= maxLen) {
+    return singleLine;
   }
-  return `${firstLine.slice(0, maxLen - 1)}…`;
+  return `${singleLine.slice(0, maxLen - 1)}…`;
 }
 
 interface StepStreamProps {

@@ -162,6 +162,24 @@ export function diagnoseCommandFailure(
     };
   }
 
+  if (/MSB1003|does not contain a project or solution file/i.test(combinedOutput)) {
+    return {
+      success: false,
+      errorCode: 'DOTNET_PROJECT_OR_SOLUTION_NOT_FOUND',
+      diagnostic: 'Lệnh .NET (dotnet test/build/run) không tìm thấy file .csproj hoặc .sln trong thư mục hiện tại.',
+      suggestion: 'Kiểm tra đường dẫn file .csproj hoặc .sln trong các thư mục con (ví dụ: "dotnet test path/to/project.csproj" hoặc "dotnet test src/MySolution.sln"), hoặc xác minh xem dự án hiện tại có phải là dự án .NET hay không.',
+    };
+  }
+
+  if (/NETSDK1004|project\.assets\.json.*not found.*Run a NuGet package restore/i.test(combinedOutput)) {
+    return {
+      success: false,
+      errorCode: 'DOTNET_RESTORE_REQUIRED',
+      diagnostic: 'File cấu hình dependency của .NET (project.assets.json) chưa được khởi tạo.',
+      suggestion: 'Chạy "dotnet restore" để tải các gói NuGet cần thiết trước khi chạy build hoặc test.',
+    };
+  }
+
   return {
     success: false,
     errorCode: 'COMMAND_FAILED',

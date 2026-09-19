@@ -541,6 +541,22 @@ go 1.22
       assert.ok(diag.suggestion.includes('powershell'));
     });
 
+    it('should diagnose MSB1003 as DOTNET_PROJECT_OR_SOLUTION_NOT_FOUND', async () => {
+      const { diagnoseCommandFailure } = await import('./sandbox/command-diagnostics.js');
+      const diag = diagnoseCommandFailure('dotnet test', {
+        stdout: 'MSBUILD : error MSB1003: Specify a project or solution file. The current working directory does not contain a project or solution file.',
+        stderr: '',
+        exitCode: 1,
+        durationMs: 2307,
+        sandboxType: 'local',
+        success: false,
+      });
+
+      assert.ok(diag);
+      assert.strictEqual(diag.errorCode, 'DOTNET_PROJECT_OR_SOLUTION_NOT_FOUND');
+      assert.ok(diag.suggestion.includes('.csproj'));
+    });
+
     it('should normalize PowerShell call operator "&" on Windows in normalizeWindowsCommand', async () => {
       const { normalizeWindowsCommand } = await import('./tools/command-preflight-guard.js');
       const originalPlatform = process.platform;

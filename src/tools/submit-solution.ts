@@ -2,13 +2,19 @@ import type { ToolRegistry } from './registry.js';
 import type { ToolDefinition } from './types.js';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
-import { normalizeForMatching } from '../agent/final-answer-guard.js';
+import {
+  SolutionGroundingAuditor,
+  type ResolutionType,
+  type VerificationMethod,
+} from '../agent/solution-grounding-auditor.js';
 
 export interface SubmitSolutionArgs {
   summary: string;
   rootCause?: string;
   filesModified?: string[];
   verificationEvidence?: string;
+  resolutionType?: ResolutionType;
+  verificationMethod?: VerificationMethod;
 }
 
 export interface SubmitSolutionResult {
@@ -18,6 +24,10 @@ export interface SubmitSolutionResult {
   rootCause?: string;
   filesModified: string[];
   verificationEvidence: string;
+  resolutionType?: ResolutionType;
+  verificationMethod?: VerificationMethod;
+  groundingScore?: number;
+  informationDensity?: number;
   timestamp: string;
   nextAction?: string;
   message: string;
@@ -38,20 +48,30 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       properties: {
         summary: {
           type: 'STRING',
-          description: 'A comprehensive summary of the implemented solution and verified outcomes.',
+          description: 'A comprehensive summary of the implemented solution, files modified, and verified outcomes.',
         },
-        rootCause: {
+        resolutionType: {
           type: 'STRING',
-          description: 'Optional. Explanation of the root cause identified during debugging or investigation.',
+          enum: ['code_fix', 'code_refactor', 'text_or_asset_edit', 'configuration_change', 'investigation_only', 'feature', 'other'],
+          description: 'Optional. Nature of the implemented resolution (e.g. code_fix, text_or_asset_edit).',
         },
         filesModified: {
           type: 'ARRAY',
           items: { type: 'STRING' },
           description: 'List of relative file paths that were modified, created, or deleted as part of the solution.',
         },
+        verificationMethod: {
+          type: 'STRING',
+          enum: ['automated_test_pass', 'static_diagnostics_clean', 'diff_visual_inspection', 'direct_validation', 'not_applicable'],
+          description: 'Optional. Verification strategy employed (e.g. automated_test_pass, static_diagnostics_clean, diff_visual_inspection).',
+        },
         verificationEvidence: {
           type: 'STRING',
           description: 'Optional. The verification command executed (e.g. "npm test", "pytest") or rationale if automated tests were not executed.',
+        },
+        rootCause: {
+          type: 'STRING',
+          description: 'Optional. Explanation of the root cause identified during debugging or investigation.',
         },
       },
       required: ['summary'],
@@ -59,25 +79,31 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
     execute: async (args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<SubmitSolutionResult> => {
       const summary = (args.summary || '').trim();
       const verificationEvidence = (args.verificationEvidence || '').trim() || 'Verified via inspection and direct validation';
-      const filesModified = Array.isArray(args.filesModified)
-        ? args.filesModified.map((f) => String(f).trim()).filter(Boolean)
-        : [];
       const rootCause = args.rootCause ? String(args.rootCause).trim() : undefined;
+      const resolutionType = args.resolutionType as ResolutionType | undefined;
+      const verificationMethod = args.verificationMethod as VerificationMethod | undefined;
 
-      if (!summary) {
-        throw new Error('Missing required argument: "summary" cannot be empty.');
-      }
-      // Tool-Use Guardian: Semantic Pre-Validation cho summary của submit_solution
-      const normalizedSummary = normalizeForMatching(summary);
-      const isPseudoClaim = /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalizedSummary)
-        || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(normalizedSummary);
-      if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
+      // Thẩm định bằng chứng thực nghiệm & Information Grounding qua SolutionGroundingAuditor
+      const audit = SolutionGroundingAuditor.audit({
+        summary,
+        rootCause,
+        filesModified: args.filesModified,
+        verificationEvidence,
+        resolutionType,
+        verificationMethod,
+      }, {
+        session: (context as any)?.session,
+        turn: context?.turn,
+        workspaceRoot: workspace.rootDir,
+      });
+
+      if (!audit.allowed) {
         return {
           success: false,
           submitted: false,
-          error: 'submit_solution bị từ chối: trường "summary" chỉ chứa câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...", "sẽ báo cáo...") mà không có nội dung phân tích, trích dẫn file/hàm hay giải pháp cụ thể.',
-          errorCode: 'INVALID_SUMMARY_CONTENT',
-          suggestion: 'Hãy đưa trực tiếp kết quả phân tích nguyên nhân gốc rễ, vị trí phát sinh lỗi và giải pháp vào trường "summary" hoặc cung cấp toàn bộ nội dung cho người dùng bằng văn bản trực tiếp.',
+          error: audit.reasons.join('\n') || 'submit_solution bị từ chối do thiếu bằng chứng thực nghiệm.',
+          errorCode: audit.errorCode || 'INVALID_SUMMARY_CONTENT',
+          suggestion: audit.suggestion || 'Hãy đưa trực tiếp kết quả phân tích nguyên nhân gốc rễ, vị trí phát sinh lỗi và giải pháp cụ thể vào trường "summary".',
         } as any;
       }
 
@@ -88,8 +114,12 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         submitted: true,
         summary,
         rootCause,
-        filesModified,
+        filesModified: audit.reconciledFilesModified,
         verificationEvidence,
+        resolutionType,
+        verificationMethod,
+        groundingScore: audit.score,
+        informationDensity: audit.informationDensity,
         timestamp,
         nextAction: 'final_answer',
         message: 'Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final comprehensive answer and summary to the user in the EXACT SAME LANGUAGE as the user\'s original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Present your findings, file paths, code logic, and verification proof clearly and professionally. Do not emit generic stubs or English placeholders.',

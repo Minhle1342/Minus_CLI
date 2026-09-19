@@ -291,7 +291,19 @@ export class AgentLoop {
   private drainScheduled = false;
   private runQueues = new Map<string, Promise<string>>();
   readonly MAX_CIRCUIT_BREAKER_RETRIES = 5;
-  private consecutiveCircuitBreakerRetries = 0;
+  private circuitBreakerRetriesBySession = new Map<string, number>();
+
+  private getCircuitBreakerRetries(sessionId: string): number {
+    return this.circuitBreakerRetriesBySession.get(sessionId) || 0;
+  }
+
+  private setCircuitBreakerRetries(sessionId: string, count: number): void {
+    if (count <= 0) {
+      this.circuitBreakerRetriesBySession.delete(sessionId);
+    } else {
+      this.circuitBreakerRetriesBySession.set(sessionId, count);
+    }
+  }
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
@@ -598,11 +610,12 @@ export class AgentLoop {
   ): Promise<string> {
     while (true) {
       try {
+        const retries = this.getCircuitBreakerRetries(session.id);
         const result = await this.runInternal(session, {
           ...options,
-          isCircuitBreakerRetry: this.consecutiveCircuitBreakerRetries > 0,
+          isCircuitBreakerRetry: retries > 0,
         });
-        this.consecutiveCircuitBreakerRetries = 0;
+        this.setCircuitBreakerRetries(session.id, 0);
         return result;
       } catch (error: any) {
         // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
@@ -615,7 +628,7 @@ export class AgentLoop {
           ));
 
         if (isCancelled) {
-          this.consecutiveCircuitBreakerRetries = 0;
+          this.setCircuitBreakerRetries(session.id, 0);
           throw error;
         }
 
@@ -623,9 +636,11 @@ export class AgentLoop {
         const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
         const isServerError = errClassification.kind === 'SERVER_ERROR';
         const isRetryableLLMError = isQuotaOrRateLimit || isServerError;
+        const currentRetries = this.getCircuitBreakerRetries(session.id);
 
-        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries < this.MAX_CIRCUIT_BREAKER_RETRIES) {
-          this.consecutiveCircuitBreakerRetries++;
+        if (isRetryableLLMError && currentRetries < this.MAX_CIRCUIT_BREAKER_RETRIES) {
+          const nextRetries = currentRetries + 1;
+          this.setCircuitBreakerRetries(session.id, nextRetries);
 
           // 1. Phục hồi an toàn session invariants (đóng open step/turn)
           try {
@@ -644,7 +659,7 @@ export class AgentLoop {
           const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(this.llm?.constructor?.name?.includes('Mock'));
           const backoffMs = isTestEnv
             ? 5
-            : (errClassification.retryAfterMs ?? Math.min(1500 * Math.pow(1.5, this.consecutiveCircuitBreakerRetries - 1), 8000));
+            : (errClassification.retryAfterMs ?? Math.min(1500 * Math.pow(1.5, nextRetries - 1), 8000));
 
           const sleepResult = await this.sleepWithWakeup(session.id, backoffMs, options?.signal);
           if (sleepResult.aborted || options?.signal?.aborted) {
@@ -655,7 +670,7 @@ export class AgentLoop {
           continue;
         }
 
-        if (isRetryableLLMError && this.consecutiveCircuitBreakerRetries >= this.MAX_CIRCUIT_BREAKER_RETRIES) {
+        if (isRetryableLLMError && currentRetries >= this.MAX_CIRCUIT_BREAKER_RETRIES) {
           const detailMsg = isServerError
             ? `LLM Provider đang quá tải hoặc không khả dụng: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng máy chủ LLM vẫn báo lỗi (${errClassification.kind}: ${errClassification.message || 'Mô hình đang chịu tải cao tạm thời / 503 UNAVAILABLE'}). Vui lòng chờ vài phút rồi thử lại hoặc đổi sang model khác bằng lệnh /model.`
             : `LLM đã hết Quota: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng LLM vẫn báo lỗi hạn mức (${errClassification.kind}: ${errClassification.message || 'Hạn mức API đã cạn kiệt hoặc bị giới hạn tần suất liên tục'}). Vui lòng đổi sang model khác bằng lệnh /model hoặc kiểm tra gói cước billing.`;
@@ -663,11 +678,11 @@ export class AgentLoop {
           (quotaExhaustedError as any).isQuotaExhausted = isQuotaOrRateLimit;
           (quotaExhaustedError as any).isServerUnavailable = isServerError;
           (quotaExhaustedError as any).originalClassification = errClassification;
-          this.consecutiveCircuitBreakerRetries = 0;
+          this.setCircuitBreakerRetries(session.id, 0);
           throw quotaExhaustedError;
         }
 
-        this.consecutiveCircuitBreakerRetries = 0;
+        this.setCircuitBreakerRetries(session.id, 0);
         throw error;
       }
     }
@@ -824,7 +839,6 @@ export class AgentLoop {
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
     }
-    let consecutiveUnproductiveSteps = 0;
     let consecutiveEmptyTurns = 0;
     let consecutiveIncompleteFinals = 0;
     let consecutivePlanCompletionRejects = 0;
@@ -861,7 +875,6 @@ export class AgentLoop {
     const maxIncompleteFinalRetries = 3;
     const maxPlanCompletionRetries = 3;
     const maxNoProgressStrategyChanges = 3;
-
     const claimedSteerItems: AgentInboxItem[] = [];
     const resolveSteerItems = (answer: string) => {
       while (claimedSteerItems.length > 0) {
@@ -880,7 +893,19 @@ export class AgentLoop {
       }
     };
 
-    this.setAgentStatus('running', session, turn);
+    const onAbort = () => {
+      this.subagentManager.stopAll();
+    };
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        this.subagentManager.stopAll();
+      } else {
+        options.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+
+    try {
+      this.setAgentStatus('running', session, turn);
 
     const isRootAgent = this.agentId === 'root'
       || this.agentId === 'main'
@@ -967,10 +992,12 @@ export class AgentLoop {
     for (let step = 1; step <= effectiveMaxSteps; step++) {
       if (options?.signal?.aborted) {
         const cancellationMessage = 'Agent stopped: cancellation requested.';
+        this.subagentManager.stopAll();
         await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
         this.goalManager.disarm();
         rejectSteerItems(new Error(cancellationMessage));
+        this.inbox.clear(session.id, cancellationMessage);
         return cancellationMessage;
       }
 
@@ -996,7 +1023,6 @@ export class AgentLoop {
           step,
           turn,
         });
-        consecutiveUnproductiveSteps = 0;
         consecutiveEmptyTurns = 0;
         consecutiveIncompleteFinals = 0;
         consecutivePlanCompletionRejects = 0;
@@ -1929,7 +1955,7 @@ export class AgentLoop {
           endedAt: Date.now(),
         });
       }
-      this.consecutiveCircuitBreakerRetries = 0;
+      this.setCircuitBreakerRetries(session.id, 0);
       const requestDurationMs = Date.now() - requestStartedAt;
       const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
       response.usage = {
@@ -2155,6 +2181,7 @@ export class AgentLoop {
           name: typeof call?.name === 'string' && call.name.trim()
             ? call.name.trim()
             : '__invalid_tool_call__',
+          args: call?.args ?? call?.arguments ?? {},
         }));
         const toolCallIds = normalizedToolCalls.map((call: any, callIndex: number) => (call as any).id || `call-${turn}-${step}-${callIndex}`);
         const toolCallsWithIds = normalizedToolCalls.map((call: any, callIndex: number) => ({
@@ -2212,54 +2239,72 @@ export class AgentLoop {
             && !startedConcurrentPartitions.has(callIndex)
           ) {
             startedConcurrentPartitions.add(callIndex);
-            for (const scheduled of readPartition.calls) {
-              session.append('tool/call', {
-                turn,
-                step,
-                toolName: scheduled.name,
-                toolCallId: scheduled.id,
-                assistantSeq,
-                args: scheduled.args,
-                thoughtSignature: responseFunctionCallParts[scheduled.index]?.thoughtSignature,
-              });
-              this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
-              CLI.renderToolCall(scheduled.name, scheduled.args);
-            }
-
-            const batchStartedAt = Date.now();
-            const settled = await Promise.allSettled(readPartition.calls.map((scheduled) => (
-              stepToolRunner.run(scheduled.name, scheduled.args, {
-                sessionId: session.id,
-                agentId: this.agentId,
-                turn,
-                userRequest: turnUserRequest,
-                signal: options?.signal,
-                ...(toolControlMode === 'enforce' ? {
-                  decisionId: activeDecisionId,
-                  allowedToolNames: visibleToolNames,
-                  allowedToolSetHash: activeToolSetHash,
-                  classificationPhase: classification.phase,
-                  classificationRisk: classification.risk,
-                  maxToolCalls: recommendedToolDecision.maxToolCalls,
-                } : {}),
-              })
-            )));
-            readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
-            settled.forEach((outcome, resultIndex) => {
-              const scheduled = readPartition.calls[resultIndex];
-              preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
-                ? outcome.value
-                : {
+            if (hasSubmittedSolution) {
+              for (const scheduled of readPartition.calls) {
+                preexecutedReadResults.set(scheduled.index, {
                   toolName: scheduled.name,
                   args: scheduled.args,
                   durationMs: 0,
                   result: {
-                    error: outcome.reason?.message || String(outcome.reason),
-                    errorCode: 'TOOL_EXECUTION_REJECTED',
-                    retryable: true,
+                    success: false,
+                    submitted: true,
+                    summary: submittedSolutionSummary || 'Task completed and submitted.',
+                    nextAction: 'final_answer',
+                    errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+                    message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
                   },
                 });
-            });
+              }
+            } else {
+              for (const scheduled of readPartition.calls) {
+                session.append('tool/call', {
+                  turn,
+                  step,
+                  toolName: scheduled.name,
+                  toolCallId: scheduled.id,
+                  assistantSeq,
+                  args: scheduled.args,
+                  thoughtSignature: responseFunctionCallParts[scheduled.index]?.thoughtSignature,
+                });
+                this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
+                CLI.renderToolCall(scheduled.name, scheduled.args);
+              }
+
+              const batchStartedAt = Date.now();
+              const settled = await Promise.allSettled(readPartition.calls.map((scheduled) => (
+                stepToolRunner.run(scheduled.name, scheduled.args, {
+                  sessionId: session.id,
+                  agentId: this.agentId,
+                  turn,
+                  userRequest: turnUserRequest,
+                  signal: options?.signal,
+                  ...(toolControlMode === 'enforce' ? {
+                    decisionId: activeDecisionId,
+                    allowedToolNames: visibleToolNames,
+                    allowedToolSetHash: activeToolSetHash,
+                    classificationPhase: classification.phase,
+                    classificationRisk: classification.risk,
+                    maxToolCalls: recommendedToolDecision.maxToolCalls,
+                  } : {}),
+                })
+              )));
+              readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
+              settled.forEach((outcome, resultIndex) => {
+                const scheduled = readPartition.calls[resultIndex];
+                preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
+                  ? outcome.value
+                  : {
+                    toolName: scheduled.name,
+                    args: scheduled.args,
+                    durationMs: 0,
+                    result: {
+                      error: outcome.reason?.message || String(outcome.reason),
+                      errorCode: 'TOOL_EXECUTION_REJECTED',
+                      retryable: true,
+                    },
+                  });
+              });
+            }
           }
 
           if (options?.signal?.aborted && !preexecutedReadResults.has(callIndex)) {
@@ -2379,9 +2424,7 @@ export class AgentLoop {
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
           // Chặn toàn bộ các tool call dư thừa (kể cả read_file, run_command) nếu nhiệm vụ đã được submit_solution hoàn tất
           let executionResult: ToolExecutionResult;
-          if (preexecutedReadResult) {
-            executionResult = preexecutedReadResult;
-          } else if (hasSubmittedSolution) {
+          if (hasSubmittedSolution) {
             const redundantPayload = {
               success: false,
               submitted: true,
@@ -2391,13 +2434,17 @@ export class AgentLoop {
               message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
+          } else if (preexecutedReadResult) {
+            executionResult = preexecutedReadResult;
           } else {
             // Chạy tool qua pipeline an toàn
+            const originalCodeChangeRequired = this.verificationPolicy.hasPendingModifications()
+              || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0));
             let completionEvidence = toolName === 'submit_solution'
               ? this.completionEvidenceGate.evaluate('', session, {
                 turn,
-                codeChangeRequired: this.verificationPolicy.hasPendingModifications()
-                  || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0)),
+                codeChangeRequired: originalCodeChangeRequired,
+                isPreCallSubmissionCheck: true,
               })
               : undefined;
             let policyCompletion = toolName === 'submit_solution'
@@ -2407,12 +2454,14 @@ export class AgentLoop {
             // Tool-Use Guardian: JIT Pre-Call Validation Guard cho submit_solution
             if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
               try {
-                const tsService = getOrCreateTypeScriptService(this._workspace);
                 let errors: any[] = [];
                 if (this.targetFilesModifiedInTurn.size > 0) {
+                  const tsService = getOrCreateTypeScriptService(this._workspace);
                   for (const modFile of this.targetFilesModifiedInTurn) {
                     if (/\.[cm]?[jt]sx?$/i.test(modFile)) {
-                      errors.push(...tsService.getDiagnostics(modFile).filter((d: any) => d.category === 'error'));
+                      try {
+                        errors.push(...tsService.getDiagnostics(modFile).filter((d: any) => d.category === 'error'));
+                      } catch {}
                     }
                   }
                 } else {
@@ -2430,7 +2479,9 @@ export class AgentLoop {
                   policyCompletion = this.verificationPolicy.canComplete();
                   completionEvidence = this.completionEvidenceGate.evaluate('', session, {
                     turn,
-                    codeChangeRequired: false,
+                    codeChangeRequired: originalCodeChangeRequired,
+                    isPreCallSubmissionCheck: true,
+                    hasSubmittedSolution: true,
                   });
                 } else {
                   policyCompletion = {
@@ -2746,6 +2797,23 @@ export class AgentLoop {
                 String(toolArgs.statement || 'Hypothesis verified').slice(0, 240),
                 0,
               );
+            } else if (hStatus === 'refuted' || hStatus === 'falsified') {
+              const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
+                hId,
+                this.hypothesisTracker,
+              ).catch(() => undefined);
+              if (rollbackOutcome?.rolledBack && executionResult.result && typeof executionResult.result === 'object') {
+                try {
+                  if (Object.isExtensible(executionResult.result)) {
+                    executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
+                  } else {
+                    executionResult.result = {
+                      ...executionResult.result,
+                      _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
+                    };
+                  }
+                } catch { }
+              }
             }
           }
 
@@ -2757,6 +2825,12 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
           } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
             this.reflectionEngine.reset();
+            if (isVerificationCommand(toolArgs.command)) {
+              const lastCp = this.checkpointManager.getLastCheckpoint();
+              if (lastCp) {
+                this.rollbackOrchestrator.markGreenCheckpoint(lastCp);
+              }
+            }
           }
 
           const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
@@ -2771,6 +2845,22 @@ export class AgentLoop {
             CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
             if (activeHypothesis) {
               this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
+              const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
+                activeHypothesis.id,
+                this.hypothesisTracker,
+              ).catch(() => undefined);
+              if (rollbackOutcome?.rolledBack && executionResult.result && typeof executionResult.result === 'object') {
+                try {
+                  if (Object.isExtensible(executionResult.result)) {
+                    executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
+                  } else {
+                    executionResult.result = {
+                      ...executionResult.result,
+                      _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
+                    };
+                  }
+                } catch { }
+              }
             }
           }
 
@@ -2834,7 +2924,6 @@ export class AgentLoop {
             || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
           let lspPreExecutionWarning: string | undefined;
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
-            consecutiveUnproductiveSteps = 0;
             const mutFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
             for (const targetStr of mutFiles) {
               this.targetFilesModifiedInTurn.add(targetStr);
@@ -2856,8 +2945,6 @@ export class AgentLoop {
                 }
               } catch {}
             }
-          } else if (!isMutatingOrVerification) {
-            consecutiveUnproductiveSteps++;
           }
 
           // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
@@ -2886,7 +2973,6 @@ export class AgentLoop {
             ...(cognitiveBrake.active
               ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
               : {}),
-
             ...(progressDecision.message
               ? { _system_loop_guard: progressDecision.message }
               : {}),
@@ -3385,6 +3471,17 @@ export class AgentLoop {
     }
 
     return timeoutMessage;
+    } finally {
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', onAbort);
+      }
+      if (claimedSteerItems.length > 0) {
+        rejectSteerItems(new Error('Agent turn ended abruptly before steer message could be resolved.'));
+      }
+      if (options?.signal?.aborted) {
+        this.inbox.clear(session.id, 'Agent execution cancelled.');
+      }
+    }
   }
 
   /** Queue a model-visible input and drain it through serialized turns. */
@@ -3775,7 +3872,7 @@ export class AgentLoop {
     agentId: string,
     _session: Session,
     options: SubagentOptions,
-    _signal: AbortSignal,
+    signal: AbortSignal,
   ): AgentLoop {
     const childRegistry = new ToolRegistry();
     const forbidden = new Set(['delegate_agent', 'spawn_agent', 'get_agent_result', 'wait_agent', 'stop_agent', 'resume_agent']);
@@ -3791,7 +3888,7 @@ export class AgentLoop {
       toolNames: allowedNames,
       brief: options.brief,
     });
-    return new AgentLoop(this.llm, childRegistry, {
+    const childLoop = new AgentLoop(this.llm, childRegistry, {
       workspace: options.worktreePath ? new Workspace(options.worktreePath) : this._workspace,
       maxSteps: options.maxSteps ?? this.maxSteps,
       toolScope: childScope,
@@ -3802,5 +3899,13 @@ export class AgentLoop {
       enableStepSummarization: false,
       promptSections: subagentSections,
     });
+    if (signal?.aborted) {
+      childLoop.subagentManager.stopAll();
+    } else if (signal) {
+      signal.addEventListener('abort', () => {
+        childLoop.subagentManager.stopAll();
+      }, { once: true });
+    }
+    return childLoop;
   }
 }

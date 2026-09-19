@@ -51,8 +51,9 @@ export class FileMentionEngine {
 
   /**
    * Quét và lập danh mục toàn bộ file và thư mục trong Workspace (bỏ qua ignored directories)
+   * Sử dụng BFS (Breadth-First Search) để đảm bảo các file/thư mục ở tầng nông (root, src,...) luôn được ưu tiên bắt trọn trước
    */
-  static listWorkspaceEntries(workspace: Workspace, maxDepth = 5, maxEntries = 1000): WorkspaceEntryInfo[] {
+  static listWorkspaceEntries(workspace: Workspace, maxDepth = 12, maxEntries = 10000): WorkspaceEntryInfo[] {
     const rootDir = workspace.rootDir;
     const cached = this.cache.get(rootDir);
     const now = Date.now();
@@ -62,62 +63,71 @@ export class FileMentionEngine {
     }
 
     const results: WorkspaceEntryInfo[] = [];
+    const queue: Array<{ dirPath: string; depth: number }> = [{ dirPath: rootDir, depth: 0 }];
 
-    const traverse = (currentDir: string, depth: number) => {
-      if (depth > maxDepth || results.length >= maxEntries) return;
+    while (queue.length > 0 && results.length < maxEntries) {
+      const { dirPath: currentDir, depth } = queue.shift()!;
+      if (depth > maxDepth) continue;
 
       let items: fs.Dirent[];
       try {
         items = fs.readdirSync(currentDir, { withFileTypes: true });
       } catch {
-        return;
+        continue;
       }
 
-      for (const item of items) {
-        if (results.length >= maxEntries) break;
+      const dirItems: fs.Dirent[] = [];
+      const fileItems: fs.Dirent[] = [];
 
+      for (const item of items) {
+        if (item.isDirectory()) {
+          if (!workspace.isIgnoredDirectory(item.name)) {
+            dirItems.push(item);
+          }
+        } else if (item.isFile()) {
+          fileItems.push(item);
+        }
+      }
+
+      dirItems.sort((a, b) => a.name.localeCompare(b.name));
+      fileItems.sort((a, b) => a.name.localeCompare(b.name));
+
+      for (const item of dirItems) {
+        if (results.length >= maxEntries) break;
         const fullPath = path.join(currentDir, item.name);
         const relPath = workspace.toRelativePath(fullPath);
 
-        if (item.isDirectory()) {
-          if (workspace.isIgnoredDirectory(item.name)) continue;
+        results.push({
+          relativePath: relPath,
+          displayPath: `${relPath}/`,
+          type: 'directory',
+          sizeBytes: 0,
+        });
 
-          results.push({
-            relativePath: relPath,
-            displayPath: `${relPath}/`,
-            type: 'directory',
-            sizeBytes: 0,
-          });
-
-          traverse(fullPath, depth + 1);
-        } else if (item.isFile()) {
-          if (workspace.isBinaryFile(item.name)) continue;
-
-          let sizeBytes = 0;
-          try {
-            const stat = fs.statSync(fullPath);
-            sizeBytes = stat.size;
-          } catch {}
-
-          results.push({
-            relativePath: relPath,
-            displayPath: relPath,
-            type: 'file',
-            sizeBytes,
-          });
+        if (depth + 1 <= maxDepth) {
+          queue.push({ dirPath: fullPath, depth: depth + 1 });
         }
       }
-    };
 
-    traverse(rootDir, 0);
+      for (const item of fileItems) {
+        if (results.length >= maxEntries) break;
+        const fullPath = path.join(currentDir, item.name);
+        const relPath = workspace.toRelativePath(fullPath);
 
-    // Sắp xếp ưu tiên: thư mục ở trên, sau đó theo alphabet
-    results.sort((a, b) => {
-      if (a.type !== b.type) {
-        return a.type === 'directory' ? -1 : 1;
+        let sizeBytes = 0;
+        try {
+          const stat = fs.statSync(fullPath);
+          sizeBytes = stat.size;
+        } catch {}
+
+        results.push({
+          relativePath: relPath,
+          displayPath: relPath,
+          type: 'file',
+          sizeBytes,
+        });
       }
-      return a.relativePath.localeCompare(b.relativePath);
-    });
+    }
 
     this.cache.set(rootDir, { entries: results, timestamp: now });
     return results;
@@ -125,6 +135,8 @@ export class FileMentionEngine {
 
   /**
    * Trích xuất token mention (@path) đang được gõ tại vị trí con trỏ
+   * Hỗ trợ đường dẫn có khoảng trắng nếu bao trong ngoặc kép @"path with spaces"
+   * Hỗ trợ Unicode (Tiếng Việt), Next.js route symbols (), [], @, +, #,...
    */
   static extractActiveMention(line: string, cursorColumn = line.length): { query: string; start: number; end: number } | null {
     const textBeforeCursor = line.slice(0, cursorColumn);
@@ -132,19 +144,34 @@ export class FileMentionEngine {
 
     if (atIndex === -1) return null;
 
-    // Kiểm tra ký tự trước '@' (phải là đầu dòng hoặc khoảng trắng hoặc dấu mở ngoặc)
-    if (atIndex > 0 && !/[\s(=,;:[{]/.test(textBeforeCursor[atIndex - 1])) {
+    // Kiểm tra ký tự trước '@' (phải là đầu dòng hoặc khoảng trắng hoặc dấu mở ngoặc hoặc dấu nháy)
+    if (atIndex > 0 && !/[\s(=,;:[{"'`]/.test(textBeforeCursor[atIndex - 1])) {
       return null;
     }
 
-    const query = textBeforeCursor.slice(atIndex + 1);
-    // Không chứa khoảng trắng trong mention query
-    if (/\s/.test(query)) {
+    const rawQuery = textBeforeCursor.slice(atIndex + 1);
+
+    // Nếu query bắt đầu bằng dấu ngoặc kép @"...", bóc tách tới con trỏ
+    if (rawQuery.startsWith('"') || rawQuery.startsWith("'")) {
+      const quoteChar = rawQuery[0];
+      const queryInside = rawQuery.slice(1);
+      if (queryInside.includes(quoteChar)) {
+        return null;
+      }
+      return {
+        query: queryInside,
+        start: atIndex,
+        end: cursorColumn,
+      };
+    }
+
+    // Nếu không có dấu ngoặc kép, không cho phép khoảng trắng trong query
+    if (/\s/.test(rawQuery)) {
       return null;
     }
 
     return {
-      query,
+      query: rawQuery,
       start: atIndex,
       end: cursorColumn,
     };
@@ -162,12 +189,21 @@ export class FileMentionEngine {
     const mention = this.extractActiveMention(line, cursorColumn);
     if (!mention) return [];
 
-    const rawQuery = mention.query.toLowerCase().replace(/\\/g, '/');
+    let rawQuery = mention.query.toLowerCase().replace(/\\/g, '/');
+    if (rawQuery.startsWith('./')) {
+      rawQuery = rawQuery.slice(2);
+    }
+
     const entries = this.listWorkspaceEntries(workspace);
 
     if (rawQuery === '') {
-      // Khi vừa gõ '@', gợi ý các thư mục và file gốc hàng đầu
-      return entries.slice(0, limit).map((e, idx) => ({
+      // Khi vừa gõ '@', cân bằng gợi ý: ưu tiên các thư mục và file cấp cao nhất (root)
+      const topDirectories = entries.filter((e) => e.type === 'directory' && !e.relativePath.includes('/')).slice(0, Math.ceil(limit / 2));
+      const topFiles = entries.filter((e) => e.type === 'file' && !e.relativePath.includes('/')).slice(0, limit - topDirectories.length);
+      const balanced = [...topDirectories, ...topFiles];
+      const fallbackList = balanced.length > 0 ? balanced : entries.slice(0, limit);
+
+      return fallbackList.map((e, idx) => ({
         displayPath: e.displayPath,
         fullPath: e.relativePath,
         type: e.type,
@@ -181,6 +217,9 @@ export class FileMentionEngine {
       }));
     }
 
+    const isFolderQuery = rawQuery.endsWith('/');
+    const trimmedQuery = isFolderQuery ? rawQuery.slice(0, -1) : rawQuery;
+
     const matched: FileMentionSuggestion[] = [];
 
     for (const entry of entries) {
@@ -190,20 +229,32 @@ export class FileMentionEngine {
       let matchedBy: 'exact' | 'prefix' | 'contains' | 'fuzzy' | null = null;
       let score = 100;
 
-      if (target === rawQuery || baseName === rawQuery) {
-        matchedBy = 'exact';
-        score = 0;
-      } else if (target.startsWith(rawQuery) || baseName.startsWith(rawQuery)) {
-        matchedBy = 'prefix';
-        score = 10 + target.length - rawQuery.length;
-      } else if (target.includes(rawQuery) || baseName.includes(rawQuery)) {
-        matchedBy = 'contains';
-        score = 30 + target.indexOf(rawQuery);
-      } else if (rawQuery.length >= 3) {
-        const dist = this.levenshtein(rawQuery, baseName.slice(0, rawQuery.length + 2));
-        if (dist <= 2) {
-          matchedBy = 'fuzzy';
-          score = 50 + dist * 5;
+      if (isFolderQuery) {
+        if (target.startsWith(rawQuery)) {
+          matchedBy = 'prefix';
+          const subPath = target.slice(rawQuery.length);
+          const depthPenalty = (subPath.match(/\//g) || []).length * 10;
+          score = 5 + depthPenalty + subPath.length;
+        } else if (target === trimmedQuery) {
+          matchedBy = 'exact';
+          score = 0;
+        }
+      } else {
+        if (target === rawQuery || baseName === rawQuery) {
+          matchedBy = 'exact';
+          score = 0;
+        } else if (target.startsWith(rawQuery) || baseName.startsWith(rawQuery)) {
+          matchedBy = 'prefix';
+          score = 10 + target.length - rawQuery.length;
+        } else if (target.includes(rawQuery) || baseName.includes(rawQuery)) {
+          matchedBy = 'contains';
+          score = 30 + target.indexOf(rawQuery);
+        } else if (rawQuery.length >= 3) {
+          const dist = this.levenshtein(rawQuery, baseName.slice(0, rawQuery.length + 2));
+          if (dist <= 2) {
+            matchedBy = 'fuzzy';
+            score = 50 + dist * 5;
+          }
         }
       }
 
@@ -229,17 +280,22 @@ export class FileMentionEngine {
 
   /**
    * Hỗ trợ Tab-completion cho readline khi người dùng gõ @path
+   * Bảo toàn phần văn bản phía sau con trỏ (không nuốt mất text sau Tab)
    */
-  static completeMention(line: string, workspace: Workspace): [string[], string] {
-    const mention = this.extractActiveMention(line);
+  static completeMention(line: string, workspace: Workspace, cursorColumn = line.length): [string[], string] {
+    const mention = this.extractActiveMention(line, cursorColumn);
     if (!mention) return [[], line];
 
-    const suggestions = this.getFileSuggestions(line, workspace, line.length, 10);
+    const suggestions = this.getFileSuggestions(line, workspace, cursorColumn, 10);
     if (suggestions.length === 0) return [[], line];
 
-    // Thay thế phần `@query` bằng `@displayPath` của gợi ý khớp nhất
     const prefixBeforeAt = line.slice(0, mention.start);
-    const completions = suggestions.map((s) => `${prefixBeforeAt}@${s.displayPath}`);
+    const suffixAfterMention = line.slice(mention.end);
+
+    const completions = suggestions.map((s) => {
+      const formattedPath = s.displayPath.includes(' ') ? `"${s.displayPath}"` : s.displayPath;
+      return `${prefixBeforeAt}@${formattedPath}${suffixAfterMention}`;
+    });
 
     return [completions.slice(0, 1), line];
   }
@@ -276,8 +332,9 @@ export class PromptAttachmentProcessor {
 
   /**
    * Regex phát hiện các @mention file/thư mục hoặc lệnh /add, /attach
+   * Hỗ trợ Unicode (Tiếng Việt), đường dẫn trong ngoặc kép @"...", ký tự định tuyến Next.js (), [], @, +, #,...
    */
-  private static readonly MENTION_REGEX = /(?:@([a-zA-Z0-9_.\-\/\\]+)|(?:^|\s)\/(?:add|attach)\s+([^\s]+))/g;
+  private static readonly MENTION_REGEX = /(?:@(?:"([^"]+)"|'([^']+)'|([^\s"'`]+))|(?:^|\s)\/(?:add|attach)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+)))/gu;
 
   /**
    * Bóc tách các đường dẫn được đề cập trong prompt
@@ -286,14 +343,40 @@ export class PromptAttachmentProcessor {
     const paths = new Set<string>();
     let match: RegExpExecArray | null;
 
-    const regex = new RegExp(this.MENTION_REGEX.source, 'g');
+    const regex = new RegExp(this.MENTION_REGEX.source, 'gu');
     while ((match = regex.exec(text)) !== null) {
-      const candidate = (match[1] || match[2] || '').trim();
+      const isQuoted = Boolean(match[1] || match[2] || match[4] || match[5]);
+      let candidate = (match[1] || match[2] || match[3] || match[4] || match[5] || match[6] || '').trim();
       if (candidate && !candidate.startsWith('http://') && !candidate.startsWith('https://')) {
-        // Loại bỏ dấu nháy, dấu chấm câu hoặc dấu gạch chéo ở đuôi
-        const cleaned = candidate.replace(/[,;:)\]}]+$/, '').replace(/[\/\\]+$/, '');
-        if (cleaned) {
-          paths.add(cleaned);
+        if (!isQuoted) {
+          // 1. Loại bỏ các dấu câu thông thường ở đuôi
+          candidate = candidate.replace(/[,;:\?!]+$/, '');
+
+          // 2. Cân bằng dấu đóng mở ngoặc ), ], }, > ở đuôi
+          while (candidate.endsWith(')') && (candidate.match(/\)/g) || []).length > (candidate.match(/\(/g) || []).length) {
+            candidate = candidate.slice(0, -1);
+          }
+          while (candidate.endsWith(']') && (candidate.match(/\]/g) || []).length > (candidate.match(/\[/g) || []).length) {
+            candidate = candidate.slice(0, -1);
+          }
+          while (candidate.endsWith('}') && (candidate.match(/\}/g) || []).length > (candidate.match(/\{/g) || []).length) {
+            candidate = candidate.slice(0, -1);
+          }
+          while (candidate.endsWith('>') && (candidate.match(/>/g) || []).length > (candidate.match(/</g) || []).length) {
+            candidate = candidate.slice(0, -1);
+          }
+        }
+
+        // 3. Loại bỏ dấu gạch chéo thừa ở đuôi
+        candidate = candidate.replace(/[\/\\]+$/, '');
+
+        // 4. Loại bỏ tiền tố ./ hoặc .\ nếu có
+        if (candidate.startsWith('./') || candidate.startsWith('.\\')) {
+          candidate = candidate.slice(2);
+        }
+
+        if (candidate && candidate !== '.' && candidate !== '..') {
+          paths.add(candidate);
         }
       }
     }
@@ -448,9 +531,15 @@ export class PromptAttachmentProcessor {
   }
 
   /**
-   * Tạo sơ đồ cây thư mục trực quan cho thư mục được đính kèm
+   * Tạo sơ đồ cây thư mục trực quan cho thư mục được đính kèm (giới hạn an toàn chống tràn buffer)
    */
-  private static async renderDirectoryTree(dirPath: string, workspace: Workspace, maxDepth = 3, currentDepth = 0): Promise<string> {
+  private static async renderDirectoryTree(
+    dirPath: string,
+    workspace: Workspace,
+    maxDepth = 3,
+    currentDepth = 0,
+    maxEntriesPerDir = 40,
+  ): Promise<string> {
     if (currentDepth > maxDepth) return '';
 
     let entries: fs.Dirent[];
@@ -460,18 +549,51 @@ export class PromptAttachmentProcessor {
       return '';
     }
 
-    const lines: string[] = [];
-    const indent = '  '.repeat(currentDepth);
+    const dirEntries: fs.Dirent[] = [];
+    const fileEntries: fs.Dirent[] = [];
 
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (workspace.isIgnoredDirectory(entry.name)) continue;
-        lines.push(`${indent}📁 ${entry.name}/`);
-        const subTree = await this.renderDirectoryTree(path.join(dirPath, entry.name), workspace, maxDepth, currentDepth + 1);
-        if (subTree) lines.push(subTree);
+        if (!workspace.isIgnoredDirectory(entry.name)) {
+          dirEntries.push(entry);
+        }
       } else if (entry.isFile()) {
-        lines.push(`${indent}📄 ${entry.name}`);
+        fileEntries.push(entry);
       }
+    }
+
+    dirEntries.sort((a, b) => a.name.localeCompare(b.name));
+    fileEntries.sort((a, b) => a.name.localeCompare(b.name));
+
+    const lines: string[] = [];
+    const indent = '  '.repeat(currentDepth);
+
+    let count = 0;
+    for (const entry of dirEntries) {
+      if (count >= maxEntriesPerDir) {
+        lines.push(`${indent}... (+${dirEntries.length - count} thư mục khác)`);
+        break;
+      }
+      lines.push(`${indent}📁 ${entry.name}/`);
+      const subTree = await this.renderDirectoryTree(
+        path.join(dirPath, entry.name),
+        workspace,
+        maxDepth,
+        currentDepth + 1,
+        maxEntriesPerDir,
+      );
+      if (subTree) lines.push(subTree);
+      count++;
+    }
+
+    let fileCount = 0;
+    for (const entry of fileEntries) {
+      if (fileCount >= maxEntriesPerDir) {
+        lines.push(`${indent}... (+${fileEntries.length - fileCount} tệp tin khác)`);
+        break;
+      }
+      lines.push(`${indent}📄 ${entry.name}`);
+      fileCount++;
     }
 
     return lines.join('\n');

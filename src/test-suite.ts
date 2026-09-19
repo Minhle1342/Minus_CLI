@@ -3417,12 +3417,12 @@ export async function calculateTotal(items: any[]): Promise<number> {
   });
   assert(missingCommandObservation('dotnet restore').shouldStop === false, 'Loop guard cho phép lần chẩn đoán lỗi môi trường đầu tiên');
   assert(
-    missingCommandObservation('dotnet build').message?.includes('failure class occurred twice') === true,
-    'Loop guard cảnh báo khi cùng executable tiếp tục thiếu ở lệnh khác',
+    missingCommandObservation('dotnet build').message === undefined,
+    'Repeated command failures do not trigger the removed command-action detector',
   );
   assert(
-    missingCommandObservation('dotnet test').shouldStop === true,
-    'Loop guard dừng vòng lặp sau ba lỗi COMMAND_NOT_FOUND cùng nhóm',
+    missingCommandObservation('dotnet test').shouldStop === false,
+    'Repeated command failures do not stop the turn after detector removal',
   );
 
   const finalAnswerGuard = new FinalAnswerGuard();
