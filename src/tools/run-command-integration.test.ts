@@ -12,6 +12,31 @@ import {
 } from './run-command.js';
 import { Workspace } from '../workspace/workspace.js';
 
+test('auto execution refuses a Docker-to-local downgrade for a mutating command', async () => {
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+      dockerAvailable: false, fallbackToLocal: true,
+    }),
+    exec: async () => { throw new Error('must not execute'); },
+  } as any);
+  const result = await tool.execute({ command: 'npm test' }, new Workspace());
+  assert.equal(result.commandOutcome, 'blocked_preflight');
+  assert.equal(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
+  assert.equal(result.processStarted, false);
+});
+
+test('host system-destructive commands are blocked before permission or process dispatch', async () => {
+  const result = await createRunCommandTool().execute(
+    { command: 'format C:', execution_target: 'host' },
+    new Workspace(),
+    { permissionGranted: true } as any,
+  );
+  assert.equal(result.commandOutcome, 'blocked_preflight');
+  assert.equal(result.preflightCode, 'HOST_SYSTEM_RISK');
+  assert.equal(result.processStarted, false);
+});
+
 test('Integration Phase 1 & 2: Interactive command is rejected in 0ms without spawning process', async () => {
   const tool = createRunCommandTool();
   const workspace = new Workspace();

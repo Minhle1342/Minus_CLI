@@ -33,6 +33,8 @@ export interface SandboxStatus {
   activeProvider: string;
   isIsolated: boolean;
   dockerAvailable: boolean;
+  /** Docker was requested but unavailable, so execution would otherwise run locally. */
+  fallbackToLocal?: boolean;
   containerId?: string;
   image?: string;
   runtime?: string;

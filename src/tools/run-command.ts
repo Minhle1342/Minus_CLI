@@ -21,6 +21,7 @@ import {
   normalizeWindowsCommand,
 } from './command-preflight-guard.js';
 import { annotateCommandResult } from './command-outcome.js';
+import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -921,6 +922,24 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(effectiveCommand);
 
+      // Do not silently downgrade a mutating or otherwise non-read-only command
+      // from Docker to the host. An explicit host target still goes through approval.
+      if (executionTarget === 'auto' && sandboxManager) {
+        const sandboxStatus = sandboxManager.getStatus();
+        if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus)) {
+          return {
+            command: effectiveCommand,
+            message: 'Docker isolation is unavailable; this command requires an isolated execution environment.',
+            preflightCode: 'ISOLATED_SANDBOX_REQUIRED',
+            suggestion: 'Restore Docker, or explicitly use execution_target: "host" and approve the command if host execution is intended.',
+            commandOutcome: 'blocked_preflight',
+            processStarted: false,
+            success: true,
+            durationMs: 1,
+          };
+        }
+      }
+
       // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway
       const blockedPushToMain = isBlockedGitPushToMain(effectiveCommand);
 
@@ -1081,6 +1100,18 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       if (executionTarget === 'host') {
+        const hostPolicy = evaluateHostCommandPolicy(effectiveCommand);
+        if (!hostPolicy.allowed) {
+          return {
+            command: effectiveCommand,
+            message: hostPolicy.reason,
+            preflightCode: hostPolicy.errorCode,
+            commandOutcome: 'blocked_preflight',
+            processStarted: false,
+            success: true,
+            durationMs: 1,
+          };
+        }
         const isAllowedOnHost = isAllowedShellCommand(effectiveCommand) || isAllowedShellCommand(rawCommand);
         if (!isAllowedOnHost && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {

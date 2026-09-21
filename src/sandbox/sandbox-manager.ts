@@ -16,6 +16,8 @@ export interface SandboxManagerConfig {
   memoryLimitMb?: number;
   cpuLimit?: number;
   autoSwitchRuntimes?: boolean;
+  /** Optional read-only Docker mount for inspection-only sessions. Defaults to read-write. */
+  workspaceMountMode?: 'rw' | 'ro';
 }
 
 /**
@@ -29,6 +31,7 @@ export class SandboxManager {
   private memoryLimitMb: number;
   private cpuLimit: number;
   private autoSwitchRuntimes: boolean;
+  private workspaceMountMode: 'rw' | 'ro';
   private activeRuntimeProfile?: SandboxRuntimeProfile;
   private readonly dockerProviders = new Map<string, DockerSandbox>();
   private isInitialized = false;
@@ -41,6 +44,8 @@ export class SandboxManager {
     this.cpuLimit = config.cpuLimit || 2.0;
     this.autoSwitchRuntimes = config.autoSwitchRuntimes
       ?? !['0', 'false', 'off', 'no'].includes(String(process.env.SANDBOX_RUNTIME_AUTO_SWITCH || '').toLowerCase());
+    this.workspaceMountMode = config.workspaceMountMode
+      || (String(process.env.SANDBOX_WORKSPACE_MOUNT_MODE || '').toLowerCase() === 'ro' ? 'ro' : 'rw');
 
     // Khởi tạo mặc định với Local Sandbox trước
     this.activeProvider = new LocalProcessSandbox(this.workspacePath);
@@ -144,7 +149,11 @@ export class SandboxManager {
    * Lấy trạng thái Sandbox hiện tại
    */
   getStatus(): SandboxStatus {
-    return this.activeProvider.getStatus();
+    const status = this.activeProvider.getStatus();
+    return {
+      ...status,
+      fallbackToLocal: this.mode !== 'local' && status.mode === 'local',
+    };
   }
 
   getProviderName(): string {
@@ -226,6 +235,7 @@ export class SandboxManager {
       detectedFrom: profile.detectedFrom,
       memoryLimitMb: this.memoryLimitMb,
       cpuLimit: this.cpuLimit,
+      workspaceMountMode: this.workspaceMountMode,
     });
   }
 

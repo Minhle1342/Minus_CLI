@@ -45,6 +45,29 @@ export interface DockerSandboxConfig {
   memoryLimitMb?: number;
   cpuLimit?: number;
   containerNamePrefix?: string;
+  workspaceMountMode?: 'rw' | 'ro';
+}
+
+export function buildDockerRunArgs(config: {
+  containerName: string;
+  workspacePath: string;
+  memoryLimitMb: number;
+  cpuLimit: number;
+  image: string;
+  workspaceMountMode: 'rw' | 'ro';
+}): string[] {
+  const normalizedWorkspacePath = config.workspacePath.replace(/\\/g, '/');
+  return [
+    'run', '-d', '--rm', '--name', config.containerName,
+    `--memory=${config.memoryLimitMb}m`,
+    `--cpus=${config.cpuLimit}`,
+    '--pids-limit=200',
+    '--security-opt=no-new-privileges',
+    '-v', `${normalizedWorkspacePath}:/workspace:${config.workspaceMountMode}`,
+    '-w', '/workspace',
+    config.image,
+    'tail', '-f', '/dev/null',
+  ];
 }
 
 /**
@@ -65,6 +88,7 @@ export class DockerSandbox implements ISandboxProvider {
   private workspacePath: string;
   private memoryLimitMb: number;
   private cpuLimit: number;
+  private workspaceMountMode: 'rw' | 'ro';
   private containerId: string | null = null;
   private isDockerReady = false;
 
@@ -75,6 +99,7 @@ export class DockerSandbox implements ISandboxProvider {
     this.workspacePath = path.resolve(config.workspacePath);
     this.memoryLimitMb = config.memoryLimitMb || 1024;
     this.cpuLimit = config.cpuLimit || 2.0;
+    this.workspaceMountMode = config.workspaceMountMode || 'rw';
   }
 
   /**
@@ -241,20 +266,16 @@ export class DockerSandbox implements ISandboxProvider {
     await this.cleanupOrphanedSandboxes();
 
     const containerName = `minus-sandbox-${Date.now()}`;
-    const normalizedWsPath = this.workspacePath.replace(/\\/g, '/');
 
     // Chạy container ở chế độ background (detached) với cờ tự động huỷ (--rm) khi dừng
-    const runArgs = [
-      'run', '-d', '--rm', '--name', containerName,
-      `--memory=${this.memoryLimitMb}m`,
-      `--cpus=${this.cpuLimit}`,
-      '--pids-limit=200',
-      '--security-opt=no-new-privileges',
-      '-v', `${normalizedWsPath}:/workspace:rw`,
-      '-w', '/workspace',
-      this.image,
-      'tail', '-f', '/dev/null',
-    ];
+    const runArgs = buildDockerRunArgs({
+      containerName,
+      workspacePath: this.workspacePath,
+      memoryLimitMb: this.memoryLimitMb,
+      cpuLimit: this.cpuLimit,
+      image: this.image,
+      workspaceMountMode: this.workspaceMountMode,
+    });
 
     try {
       const { stdout } = await execFileAsync('docker', runArgs, { timeout: 300000, maxBuffer: 1024 * 1024 * 5 });
