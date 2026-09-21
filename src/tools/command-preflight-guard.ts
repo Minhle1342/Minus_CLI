@@ -370,6 +370,114 @@ export function evaluateCommandPreflight(
     }
   }
 
+  // 6. Chặn workspace hoặc package script không tồn tại trong package.json
+  if (options?.workspaceRoot) {
+    const pkgCmd = extractPackageCommand(normalizedCommand);
+    if (pkgCmd) {
+      const rootPkgPath = path.join(options.workspaceRoot, 'package.json');
+      let rootPkg: any = undefined;
+      try {
+        if (fs.existsSync(rootPkgPath)) {
+          rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf8'));
+        }
+      } catch {}
+
+      // 6.1. Xác thực workspace nếu có chỉ định (--workspace, -w, --filter)
+      if (pkgCmd.workspaceName) {
+        const wsName = pkgCmd.workspaceName;
+        const directPath = path.resolve(options.workspaceRoot, wsName);
+        const directPkgPath = path.join(directPath, 'package.json');
+        const directPkgExists = fs.existsSync(directPkgPath);
+
+        const declaredWorkspaces = rootPkg?.workspaces;
+        const hasWorkspacesConfig = Array.isArray(declaredWorkspaces)
+          ? declaredWorkspaces.length > 0
+          : Boolean(declaredWorkspaces && Array.isArray(declaredWorkspaces.packages));
+
+        let matchingWorkspaceFound = directPkgExists;
+        if (!matchingWorkspaceFound) {
+          const candidateDirs = ['apps', 'packages', 'modules', 'services', 'projects', 'crates'];
+          for (const parentDir of candidateDirs) {
+            const parentPath = path.join(options.workspaceRoot, parentDir);
+            if (fs.existsSync(parentPath)) {
+              try {
+                const subEntries = fs.readdirSync(parentPath, { withFileTypes: true });
+                for (const sub of subEntries) {
+                  if (sub.isDirectory()) {
+                    const subPkgFile = path.join(parentPath, sub.name, 'package.json');
+                    if (fs.existsSync(subPkgFile)) {
+                      try {
+                        const subPkg = JSON.parse(fs.readFileSync(subPkgFile, 'utf8'));
+                        if (subPkg.name === wsName || `${parentDir}/${sub.name}` === wsName || sub.name === wsName) {
+                          matchingWorkspaceFound = true;
+                          break;
+                        }
+                      } catch {}
+                    }
+                  }
+                }
+              } catch {}
+            }
+            if (matchingWorkspaceFound) break;
+          }
+        }
+
+        if (!matchingWorkspaceFound) {
+          if (mode === 'observe') {
+            return {
+              allowed: true,
+              normalizedCommand,
+              extractedEnv,
+              reason: `[OBSERVE] Workspace "${wsName}" không tồn tại trên đĩa hoặc trong cấu hình package.json.`,
+            };
+          }
+          return {
+            allowed: false,
+            errorCode: 'WORKSPACE_NOT_FOUND',
+            reason: hasWorkspacesConfig
+              ? `Workspace "${wsName}" không tồn tại trong cấu hình Monorepo và không tìm thấy thư mục package tương ứng trên đĩa.`
+              : `Dự án hiện tại là single-package (package.json không cấu hình "workspaces") và không tồn tại thư mục "${wsName}".`,
+            suggestion: hasWorkspacesConfig
+              ? `Dùng tool "list_files" để kiểm tra thư mục monorepo (ví dụ: apps/ hoặc packages/) để xác định đúng tên workspace.`
+              : `Hãy loại bỏ cờ --workspace và chạy trực tiếp lệnh (ví dụ: "${pkgCmd.manager} ${pkgCmd.isRun ? 'run ' : ''}${pkgCmd.scriptName || 'test'}").`,
+          };
+        }
+      }
+
+      // 6.2. Xác thực script khi chạy `npm run <script>` (hoặc pnpm run, bun run)
+      if (pkgCmd.isRun && pkgCmd.scriptName && rootPkg) {
+        let targetPkg = rootPkg;
+        if (pkgCmd.workspaceName) {
+          const directSubPkg = path.join(options.workspaceRoot, pkgCmd.workspaceName, 'package.json');
+          if (fs.existsSync(directSubPkg)) {
+            try { targetPkg = JSON.parse(fs.readFileSync(directSubPkg, 'utf8')); } catch {}
+          }
+        }
+
+        const scripts = targetPkg.scripts || {};
+        if (!scripts[pkgCmd.scriptName]) {
+          const available = Object.keys(scripts);
+          if (mode === 'observe') {
+            return {
+              allowed: true,
+              normalizedCommand,
+              extractedEnv,
+              reason: `[OBSERVE] Script "${pkgCmd.scriptName}" không có trong package.json.`,
+            };
+          }
+          return {
+            allowed: false,
+            errorCode: 'PACKAGE_SCRIPT_NOT_FOUND',
+            reason: `Script "${pkgCmd.scriptName}" không được định nghĩa trong ${pkgCmd.workspaceName ? `workspace "${pkgCmd.workspaceName}" ` : ''}package.json.`,
+            suggestion: available.length > 0
+              ? `Các scripts khả dụng trong package.json: ${available.slice(0, 10).join(', ')}. Hãy chọn script phù hợp hoặc kiểm tra lại package.json.`
+              : `Tệp package.json không có scripts nào được định nghĩa. Hãy kiểm tra lại tệp package.json.`,
+          };
+        }
+      }
+    }
+  }
+
   return {
     allowed: true,
     normalizedCommand,
@@ -403,4 +511,62 @@ export function extractLocalCandidatePath(command: string): string | undefined {
   }
 
   return undefined;
+}
+
+export interface ExtractedPackageCommand {
+  manager: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  scriptName?: string;
+  workspaceName?: string;
+  isRun: boolean;
+}
+
+/**
+ * Phân tích cú pháp lệnh package manager (npm/pnpm/yarn/bun) để bóc tách workspace và script name.
+ */
+export function extractPackageCommand(command: string): ExtractedPackageCommand | undefined {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^(?:npm(?:\.cmd|\.exe)?|pnpm(?:\.cmd|\.exe)?|yarn(?:\.cmd|\.exe)?|bun(?:\.cmd|\.exe)?)\b(.*)$/i);
+  if (!match) return undefined;
+
+  const firstToken = (trimmed.match(/^\S+/)?.[0] || '').toLowerCase();
+  const manager: 'npm' | 'pnpm' | 'yarn' | 'bun' = firstToken.includes('pnpm')
+    ? 'pnpm'
+    : firstToken.includes('yarn')
+      ? 'yarn'
+      : firstToken.includes('bun')
+        ? 'bun'
+        : 'npm';
+
+  const argsStr = match[1].trim();
+
+  // Trích xuất workspace: --workspace=<ws>, --workspace <ws>, -w=<ws>, -w <ws>, --filter=<ws>, --filter <ws>, workspace <ws>
+  let workspaceName: string | undefined;
+  const wsMatch = argsStr.match(/(?:--workspace[=\s]+|-w[=\s]+|--filter[=\s]+)(['"]?)([^'"\s]+)\1/i)
+    || (manager === 'yarn' ? argsStr.match(/\bworkspace\s+(['"]?)([^'"\s]+)\1/i) : null);
+  if (wsMatch) {
+    workspaceName = wsMatch[2].trim();
+  }
+
+  // Trích xuất script name:
+  // Ví dụ: `npm run lint`, `pnpm run build`, `npm test`
+  let scriptName: string | undefined;
+  let isRun = false;
+  const runMatch = argsStr.match(/\brun\s+(['"]?)([a-zA-Z0-9_:.-]+)\1/i);
+  if (runMatch) {
+    isRun = true;
+    scriptName = runMatch[2].trim();
+  } else {
+    // Các lệnh script thông dụng gọi không cần "run"
+    const directMatch = argsStr.match(/^(?:test|start)\b/i);
+    if (directMatch) {
+      scriptName = directMatch[0].toLowerCase();
+    }
+  }
+
+  return {
+    manager,
+    scriptName,
+    workspaceName,
+    isRun,
+  };
 }

@@ -2575,6 +2575,18 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(missingPkgJsonDiag?.errorCode === 'PACKAGE_JSON_NOT_FOUND', 'Chẩn đoán đúng lỗi PACKAGE_JSON_NOT_FOUND');
   assert(Boolean(missingPkgJsonDiag?.suggestion.includes('monorepo')), 'Gợi ý kiểm tra monorepo và subfolders');
 
+  const missingWorkspaceDiag = diagnoseCommandFailure('npm run lint --workspace=apps/web', {
+    exitCode: 1,
+    stdout: '',
+    stderr: 'npm error No workspaces found:\nnpm error   --workspace=apps/web\nnpm error code ENOENT',
+    durationMs: 10,
+    sandboxType: 'local',
+  });
+  assert(missingWorkspaceDiag?.errorCode === 'WORKSPACE_NOT_FOUND', 'Chẩn đoán đúng lỗi WORKSPACE_NOT_FOUND');
+  assert(Boolean(missingWorkspaceDiag?.diagnostic.includes('apps/web')), 'Chẩn đoán chỉ rõ workspace apps/web không tồn tại');
+  assert(Boolean(missingWorkspaceDiag?.suggestion.includes('--workspace')), 'Gợi ý bỏ cờ --workspace');
+
+
   // Test ProjectMemoryManager Monorepo Auto-indexing
   const monorepoTestDir = path.join(workspace.rootDir, 'temp', 'monorepo-test-fixture');
   await fs.rm(monorepoTestDir, { recursive: true, force: true });

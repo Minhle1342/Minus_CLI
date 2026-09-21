@@ -1,5 +1,6 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type { Workspace } from '../workspace/workspace.js';
+import type { ToolControlMode } from '../control/classification-types.js';
 
 export interface ToolExecutionContext {
   sessionId?: string;
@@ -11,6 +12,8 @@ export interface ToolExecutionContext {
   permissionGranted?: boolean;
   permissionRequestId?: string;
   permissionManager?: any;
+  /** Active tool governance mode: off, shadow, or enforce */
+  controlMode?: ToolControlMode;
   /** Durable binding between the model-visible tool set and runtime authority. */
   decisionId?: string;
   allowedToolNames?: string[];

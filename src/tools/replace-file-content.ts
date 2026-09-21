@@ -74,8 +74,18 @@ export const replaceFileContentTool: ToolDefinition = {
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
     const rawPath = String(args.TargetFile || args.targetFile || args.path || args.filePath || '').trim();
-    const targetContent = String(args.TargetContent ?? args.targetContent ?? args.oldText ?? '');
-    const replacementContent = String(args.ReplacementContent ?? args.replacementContent ?? args.newText ?? '');
+    let targetContent = args.TargetContent;
+    if (!targetContent || (typeof targetContent === 'string' && targetContent.trim() === '')) {
+      targetContent = args.targetContent ?? args.oldText ?? args.old_text ?? args.searchContent ?? '';
+    }
+    targetContent = String(targetContent ?? '');
+
+    let replacementContent = args.ReplacementContent;
+    if (replacementContent === undefined || replacementContent === null) {
+      replacementContent = args.replacementContent ?? args.newText ?? args.new_text ?? args.replaceWith ?? '';
+    }
+    replacementContent = String(replacementContent ?? '');
+
     const allowMultiple = args.AllowMultiple === true || args.allowMultiple === true;
     const startLine = typeof args.StartLine === 'number' ? args.StartLine : typeof args.startLine === 'number' ? args.startLine : 1;
     const endLine = typeof args.EndLine === 'number' ? args.EndLine : typeof args.endLine === 'number' ? args.endLine : Infinity;
@@ -84,7 +94,11 @@ export const replaceFileContentTool: ToolDefinition = {
       return toolError('Tham số "TargetFile" là bắt buộc.', 'INVALID_ARGS');
     }
     if (targetContent === '') {
-      return toolError('Tham số "TargetContent" không được để trống.', 'INVALID_ARGS');
+      return toolError(
+        'Tham số "TargetContent" không được để trống. replace_file_content yêu cầu nội dung cần thay thế. Nếu muốn tạo mới hoặc ghi đè toàn bộ file, hãy dùng "write_to_file".',
+        'INVALID_ARGS',
+        { suggestedAction: 'Cung cấp đoạn code cần thay thế vào "TargetContent", hoặc dùng write_to_file để tạo mới/ghi đè toàn bộ file.' }
+      );
     }
 
     try {

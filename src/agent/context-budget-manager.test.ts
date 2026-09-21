@@ -246,7 +246,7 @@ test('Bug 3 (Medium-High): routine run_command with exitCode 0 is masked outside
   ];
 
   const result = compactor.compact(history, { force: true });
-  const oldResp = (result.messages[2].parts[0] as any).functionResponse.response;
+  const oldResp = (result.messages![2].parts![0] as any).functionResponse.response;
   assert.equal(oldResp.status, 'masked');
   assert.equal(oldResp.exitCode, 0);
   assert.match(oldResp.observationMask, /Lệnh thực thi thành công/);
@@ -275,7 +275,7 @@ test('Bug 4 (Medium): superseded state deduplication matches relative vs absolut
     mutatedFiles: [absPath], // mutatedFiles provides absolute path with system slashes
   });
 
-  const resp = (result.messages[2].parts[0] as any).functionResponse.response;
+  const resp = (result.messages![2].parts![0] as any).functionResponse.response;
   assert.equal(resp.status, 'superseded');
   assert.match(resp.observationMask, /SUPERSEDED BY RECENT MUTATION/);
 });
@@ -297,7 +297,7 @@ test('Bug 5 (Low): rolling synopsis displays accurate turn range singular vs plu
   ];
 
   const result1 = compactor.compact(history3Turns, { force: true, preserveLastNTurns: 1, enableRollingTurns: true });
-  const synopsis1 = (result1.messages[2].parts[0] as any).text;
+  const synopsis1 = (result1.messages![2].parts![0] as any).text;
   assert.match(synopsis1, /\[ROLLING DIALOGUE SYNOPSIS - TURN 1 ARCHIVED\]/);
 
   // 4 user turns: Turn 0 + Turn 1,2 (pruned) + Turn 3 (preserved) -> totalArchivedTurns = 2
@@ -313,7 +313,7 @@ test('Bug 5 (Low): rolling synopsis displays accurate turn range singular vs plu
   ];
 
   const result2 = compactor.compact(history4Turns, { force: true, preserveLastNTurns: 1, enableRollingTurns: true });
-  const synopsis2 = (result2.messages[2].parts[0] as any).text;
+  const synopsis2 = (result2.messages![2].parts![0] as any).text;
   assert.match(synopsis2, /\[ROLLING DIALOGUE SYNOPSIS - TURNS 1 to 2 ARCHIVED\]/);
 });
 

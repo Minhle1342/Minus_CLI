@@ -596,8 +596,8 @@ export class ToolUseGuardian {
       || gateContext?.hasEmpiricalEvidence
       || gateContext?.reproductionStatus?.hasPreFixRepro
     );
-    const oldText = String(args?.oldText || args?.old_text || '');
-    const newText = String(args?.newText || args?.new_text || '');
+    const oldText = String(args?.oldText || args?.old_text || args?.TargetContent || args?.targetContent || args?.searchContent || args?.searchText || '');
+    const newText = String(args?.newText || args?.new_text || args?.ReplacementContent || args?.replacementContent || args?.replaceWith || '');
     const changedLineCount = Math.max(oldText.split(/\r?\n/).length, newText.split(/\r?\n/).length);
     const isSmallInspectedEdit = toolName === 'replace_text'
       && targetInspected
@@ -774,6 +774,107 @@ export class ToolUseGuardian {
         coerced.WaitMsBeforeAsync = wait;
         changed = true;
         coercedKeys.push('WaitMsBeforeAsync');
+      }
+    }
+
+    // Top-level semantic aliases cho oldText / TargetContent và newText / ReplacementContent
+    if (actualSchema.properties.oldText && (!coerced.oldText || typeof coerced.oldText !== 'string' || coerced.oldText.trim() === '')) {
+      const candidate = coerced.old_text
+        ?? coerced.oldContent
+        ?? coerced.old_content
+        ?? coerced.TargetContent
+        ?? coerced.targetContent
+        ?? coerced.target_content
+        ?? coerced.searchContent
+        ?? coerced.search_content
+        ?? coerced.searchText
+        ?? coerced.search_text
+        ?? coerced.originalText
+        ?? coerced.original_text
+        ?? coerced.find;
+      if (typeof candidate === 'string' && candidate.trim() !== '') {
+        coerced.oldText = candidate;
+        changed = true;
+        coercedKeys.push('oldText');
+      }
+    }
+    if (actualSchema.properties.newText && (!coerced.newText || typeof coerced.newText !== 'string' || coerced.newText.trim() === '')) {
+      const candidate = coerced.new_text
+        ?? coerced.newContent
+        ?? coerced.new_content
+        ?? coerced.ReplacementContent
+        ?? coerced.replacementContent
+        ?? coerced.replacement_content
+        ?? coerced.replaceWith
+        ?? coerced.replace_with
+        ?? coerced.replacement
+        ?? coerced.updatedText
+        ?? coerced.updated_text
+        ?? coerced.replace;
+      if (typeof candidate === 'string' && candidate.trim() !== '') {
+        coerced.newText = candidate;
+        changed = true;
+        coercedKeys.push('newText');
+      }
+    }
+    if (actualSchema.properties.TargetContent && (!coerced.TargetContent || typeof coerced.TargetContent !== 'string' || coerced.TargetContent.trim() === '')) {
+      const candidate = coerced.oldText
+        ?? coerced.old_text
+        ?? coerced.oldContent
+        ?? coerced.old_content
+        ?? coerced.targetContent
+        ?? coerced.target_content
+        ?? coerced.searchContent
+        ?? coerced.search_content
+        ?? coerced.originalText
+        ?? coerced.find;
+      if (typeof candidate === 'string' && candidate.trim() !== '') {
+        coerced.TargetContent = candidate;
+        changed = true;
+        coercedKeys.push('TargetContent');
+      }
+    }
+    if (actualSchema.properties.ReplacementContent && (!coerced.ReplacementContent || typeof coerced.ReplacementContent !== 'string' || coerced.ReplacementContent.trim() === '')) {
+      const candidate = coerced.newText
+        ?? coerced.new_text
+        ?? coerced.newContent
+        ?? coerced.new_content
+        ?? coerced.replacementContent
+        ?? coerced.replacement_content
+        ?? coerced.replaceWith
+        ?? coerced.replace_with
+        ?? coerced.replacement
+        ?? coerced.updatedText
+        ?? coerced.replace;
+      if (typeof candidate === 'string' && candidate.trim() !== '') {
+        coerced.ReplacementContent = candidate;
+        changed = true;
+        coercedKeys.push('ReplacementContent');
+      }
+    }
+
+    // Xóa các key alias không có trong schema để tránh bị rejectUnknownProperties từ chối
+    const textAliasesToClean = [
+      'old_text', 'oldContent', 'old_content', 'targetContent', 'target_content',
+      'searchContent', 'search_content', 'searchText', 'search_text', 'originalText', 'original_text', 'find',
+      'new_text', 'newContent', 'new_content', 'replacementContent', 'replacement_content',
+      'replaceWith', 'replace_with', 'replacement', 'updatedText', 'updated_text', 'replace',
+    ];
+    if (actualSchema.properties.oldText && !actualSchema.properties.TargetContent) {
+      textAliasesToClean.push('TargetContent');
+    }
+    if (actualSchema.properties.newText && !actualSchema.properties.ReplacementContent) {
+      textAliasesToClean.push('ReplacementContent');
+    }
+    if (actualSchema.properties.TargetContent && !actualSchema.properties.oldText) {
+      textAliasesToClean.push('oldText');
+    }
+    if (actualSchema.properties.ReplacementContent && !actualSchema.properties.newText) {
+      textAliasesToClean.push('newText');
+    }
+    for (const alias of textAliasesToClean) {
+      if (alias in coerced && !actualSchema.properties[alias]) {
+        delete coerced[alias];
       }
     }
 

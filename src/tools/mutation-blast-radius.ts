@@ -504,7 +504,7 @@ export async function enrichMutationResultWithBlastRadius(
   if (result.success === false || result.error) return result;
   if (!['replace_text', 'write_file', 'apply_patch', 'create_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName)) return result;
 
-  const rawPath = String(result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || result.path || args.path || '');
+  const rawPath = String(result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || result.path || args.path || result.filePath || args.filePath || '');
   if (!rawPath) return result;
 
   try {

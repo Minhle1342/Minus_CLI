@@ -374,7 +374,7 @@ export class TurnMemoryRetriever {
   }
 
   /**
-   * Lưu trữ các observations đã bị mask vào bộ nhớ on-demand
+   * Lưu trữ các observations đã bị mask vào bộ nhớ on-demand (tối ưu bộ nhớ RAM)
    */
   async archiveMaskedObservations(records: MaskedObservationRecord[]): Promise<void> {
     await this.init();
@@ -383,15 +383,34 @@ export class TurnMemoryRetriever {
     let hasNew = false;
     for (const rec of records) {
       if (!this.maskedObservationsMap.has(rec.id)) {
-        this.maskedObservationsMap.set(rec.id, rec);
+        // Tối ưu RAM: Cắt gọn payload khổng lồ (> 64KB) nếu là chuỗi dài hoặc object cồng kềnh
+        let optimizedPayload = rec.originalPayload;
+        if (typeof optimizedPayload === 'string' && optimizedPayload.length > 64 * 1024) {
+          optimizedPayload = `${optimizedPayload.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY OBSERVATION: ${optimizedPayload.length} bytes]...\n${optimizedPayload.slice(-16 * 1024)}`;
+        } else if (optimizedPayload && typeof optimizedPayload === 'object') {
+          const serialized = JSON.stringify(optimizedPayload);
+          if (serialized.length > 64 * 1024) {
+            optimizedPayload = {
+              ...optimizedPayload,
+              content: typeof (optimizedPayload as any).content === 'string'
+                ? `${(optimizedPayload as any).content.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY CONTENT]...`
+                : (optimizedPayload as any).content,
+            };
+          }
+        }
+        this.maskedObservationsMap.set(rec.id, {
+          ...rec,
+          originalPayload: optimizedPayload,
+        });
         hasNew = true;
       }
     }
 
-    // Giữ tối đa 100 observations gần nhất để tối ưu bộ nhớ
-    if (this.maskedObservationsMap.size > 100) {
+    // Giữ tối đa 40 observations gần nhất để tối ưu RAM (< 50MB)
+    const MAX_MASKED_IN_MEMORY = 40;
+    if (this.maskedObservationsMap.size > MAX_MASKED_IN_MEMORY) {
       const keys = Array.from(this.maskedObservationsMap.keys());
-      const toRemove = keys.slice(0, keys.length - 100);
+      const toRemove = keys.slice(0, keys.length - MAX_MASKED_IN_MEMORY);
       for (const k of toRemove) {
         this.maskedObservationsMap.delete(k);
       }
@@ -405,7 +424,7 @@ export class TurnMemoryRetriever {
   private async persistMaskedObservations(): Promise<void> {
     try {
       const allDocs = Array.from(this.maskedObservationsMap.values());
-      await fs.writeFile(this.maskedStorageFilePath, JSON.stringify(allDocs, null, 2), 'utf8');
+      await fs.writeFile(this.maskedStorageFilePath, JSON.stringify(allDocs), 'utf8');
     } catch {
       // Không làm sập tiến trình nếu ghi file lỗi
     }

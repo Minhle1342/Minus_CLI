@@ -18,6 +18,12 @@ export interface ToolExecutionResult {
     requestId?: string;
   };
   guardianDiagnosis?: ToolFailureDiagnosis;
+  shadowObservation?: {
+    wouldAllow: boolean;
+    errorCode?: string;
+    reason?: string;
+    decisionId?: string;
+  };
 }
 
 export interface ToolExecutionGuard {
@@ -27,6 +33,70 @@ export interface ToolExecutionGuard {
     workspace: Workspace,
     context?: ToolExecutionContext,
   ): Promise<{ allow: boolean; reason?: string; errorCode?: string }>;
+}
+
+export class TurnBudgetTracker {
+  private currentTurn?: number;
+  private count: number = 0;
+
+  getCallCount(turn?: number): number {
+    if (turn !== undefined && this.currentTurn !== turn) {
+      this.currentTurn = turn;
+      this.count = 0;
+    }
+    return this.count;
+  }
+
+  increment(turn?: number): number {
+    if (turn !== undefined && this.currentTurn !== turn) {
+      this.currentTurn = turn;
+      this.count = 0;
+    }
+    this.count++;
+    return this.count;
+  }
+
+  reset(turn?: number): void {
+    this.currentTurn = turn;
+    this.count = 0;
+  }
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error('ABORTED'));
+  }
+  return new Promise((resolve, reject) => {
+    let timer: any;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('ABORTED'));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+const TOOL_CANONICAL_ALIASES: Record<string, string> = {
+  write_to_file: 'write_file',
+  replace_file_content: 'replace_text',
+  multi_replace_file_content: 'replace_text',
+  search_web: 'web_search',
+  read_url_content: 'web_fetch',
+  search_text: 'search_codebase_fast',
+};
+
+function isToolAuthorized(toolName: string, allowedNames: string[]): boolean {
+  if (allowedNames.includes(toolName)) return true;
+  const canonical = TOOL_CANONICAL_ALIASES[toolName];
+  if (canonical && allowedNames.includes(canonical)) return true;
+  for (const [alias, target] of Object.entries(TOOL_CANONICAL_ALIASES)) {
+    if (target === toolName && allowedNames.includes(alias)) return true;
+  }
+  return false;
 }
 
 /**
@@ -45,7 +115,7 @@ export class ToolRunner {
   private permissionManager?: PermissionManager;
   private executionGuard?: ToolExecutionGuard;
   readonly guardian: ToolUseGuardian;
-  private scopedCallCount: number = 0;
+  private readonly budgetTracker: TurnBudgetTracker;
 
   constructor(
     registry: ToolProvider,
@@ -53,11 +123,14 @@ export class ToolRunner {
     permissionManager?: PermissionManager,
     executionGuard?: ToolExecutionGuard,
     guardian?: ToolUseGuardian,
+    budgetTracker?: TurnBudgetTracker,
   ) {
     this.registry = registry;
     this.workspace = workspace;
     this.permissionManager = permissionManager;
+    this.executionGuard = executionGuard;
     this.guardian = guardian || new ToolUseGuardian({ workspaceDir: this.workspace?.rootDir });
+    this.budgetTracker = budgetTracker || new TurnBudgetTracker();
     if (this.workspace?.rootDir && typeof this.guardian.setWorkspaceDir === 'function') {
       this.guardian.setWorkspaceDir(this.workspace.rootDir);
     }
@@ -65,6 +138,19 @@ export class ToolRunner {
     if (this.permissionManager && typeof (this.permissionManager as any).setWorkspaceRoot === 'function') {
       (this.permissionManager as any).setWorkspaceRoot(this.workspace.rootDir);
     }
+  }
+
+  get scopedCallCount(): number {
+    return this.budgetTracker.getCallCount();
+  }
+
+  set scopedCallCount(val: number) {
+    this.budgetTracker.reset();
+    for (let i = 0; i < val; i++) this.budgetTracker.increment();
+  }
+
+  resetTurnBudget(turn?: number): void {
+    this.budgetTracker.reset(turn);
   }
 
   setExecutionGuard(executionGuard?: ToolExecutionGuard): void {
@@ -83,7 +169,14 @@ export class ToolRunner {
   }
 
   createScoped(provider: ToolProvider): ToolRunner {
-    return new ToolRunner(provider, this.workspace, this.permissionManager, this.executionGuard, this.guardian);
+    return new ToolRunner(
+      provider,
+      this.workspace,
+      this.permissionManager,
+      this.executionGuard,
+      this.guardian,
+      this.budgetTracker,
+    );
   }
 
   async run(
@@ -94,6 +187,7 @@ export class ToolRunner {
     const startTime = Date.now();
     let executionContext = context;
     let permissionMetadata: ToolExecutionResult['permission'];
+    let shadowObservation: ToolExecutionResult['shadowObservation'];
 
     if (context?.signal?.aborted) {
       return {
@@ -108,34 +202,111 @@ export class ToolRunner {
       };
     }
 
-    // Stage 0: bind runtime authority to the exact tool set shown to the model.
-    if (context?.allowedToolNames || context?.allowedToolSetHash) {
+    // Stage 0: 3-Mode Governance (off, shadow, enforce)
+    const controlMode = context?.controlMode
+      ?? ((context?.allowedToolNames || context?.allowedToolSetHash) ? 'enforce' : 'off');
+
+    if (controlMode === 'shadow' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
+      const names = context.allowedToolNames || [];
+      const hashValid = Boolean(context.decisionId && context.allowedToolSetHash && hashAllowedToolSet(names) === context.allowedToolSetHash);
+      const isAllowed = isToolAuthorized(toolName, names);
+      const currentCallCount = this.budgetTracker.getCallCount(context.turn);
+      const isWithinBudget = context.maxToolCalls === undefined || currentCallCount < context.maxToolCalls;
+
+      if (!hashValid) {
+        shadowObservation = {
+          wouldAllow: false,
+          errorCode: 'INVALID_TOOL_DECISION_BINDING',
+          reason: 'Shadow observation: decision hash binding mismatch.',
+          decisionId: context.decisionId,
+        };
+      } else if (!isAllowed) {
+        shadowObservation = {
+          wouldAllow: false,
+          errorCode: 'TOOL_NOT_ALLOWED_THIS_TURN',
+          reason: `Shadow observation: Tool "${toolName}" is not in allowed tools [${names.join(', ')}] for phase "${context.classificationPhase || 'unknown'}".`,
+          decisionId: context.decisionId,
+        };
+      } else if (!isWithinBudget) {
+        shadowObservation = {
+          wouldAllow: false,
+          errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED',
+          reason: `Shadow observation: Tool call budget (${context.maxToolCalls}) would be exhausted.`,
+          decisionId: context.decisionId,
+        };
+      } else {
+        shadowObservation = {
+          wouldAllow: true,
+          decisionId: context.decisionId,
+        };
+      }
+      this.budgetTracker.increment(context.turn);
+    } else if (controlMode === 'enforce' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
       if (!context.decisionId || !context.allowedToolSetHash || hashAllowedToolSet(names) !== context.allowedToolSetHash) {
+        const errorMsg = 'The per-turn tool authorization binding is missing or invalid.';
+        const errRes = { error: errorMsg, errorCode: 'INVALID_TOOL_DECISION_BINDING' };
+        const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
+        diagnosis.category = 'AUTHORIZATION_DENIED';
+        diagnosis.recoveryAction = 'Re-issue turn decision with valid allowlist hash.';
         return {
           toolName,
           args,
-          result: { error: 'The per-turn tool authorization binding is missing or invalid.', errorCode: 'INVALID_TOOL_DECISION_BINDING' },
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
-      if (!names.includes(toolName)) {
+      if (!isToolAuthorized(toolName, names)) {
+        const phase = context.classificationPhase || 'unknown';
+        let recoverySuggestion = '';
+        if (phase === 'plan') {
+          recoverySuggestion = ' To modify code, create an execution plan first using "create_plan" or "update_plan_task" to transition into the "implement" phase.';
+        } else if (phase === 'explore') {
+          recoverySuggestion = ' In the "explore" phase, only read and inspection tools are allowed. Gather sufficient evidence before requesting code mutations.';
+        } else if (phase === 'verify') {
+          recoverySuggestion = ' In the "verify" phase, focus on running tests and checking diagnostics.';
+        }
+        const errorMsg = `Tool "${toolName}" is not authorized in phase "${phase}" by decision ${context.decisionId}.${recoverySuggestion} Allowed tools this turn: [${names.join(', ')}].`;
+        const errRes = {
+          error: errorMsg,
+          errorCode: 'TOOL_NOT_ALLOWED_THIS_TURN',
+          phase,
+          allowedTools: names,
+          recoverySuggestion: recoverySuggestion.trim(),
+        };
+        const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
+        diagnosis.category = 'AUTHORIZATION_DENIED';
+        diagnosis.recoveryAction = recoverySuggestion.trim() || `Select an authorized tool from: ${names.slice(0, 5).join(', ')}`;
         return {
           toolName,
           args,
-          result: { error: `Tool "${toolName}" is not authorized by decision ${context.decisionId}.`, errorCode: 'TOOL_NOT_ALLOWED_THIS_TURN' },
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
-      if (context.maxToolCalls !== undefined && this.scopedCallCount >= context.maxToolCalls) {
+      const currentCallCount = this.budgetTracker.getCallCount(context.turn);
+      if (context.maxToolCalls !== undefined && currentCallCount >= context.maxToolCalls) {
+        const errorMsg = `Per-turn tool call budget (${context.maxToolCalls}) exhausted for turn ${context.turn ?? 'current'}. Please conclude current turn or provide text response to the user.`;
+        const errRes = {
+          error: errorMsg,
+          errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED',
+          budget: context.maxToolCalls,
+          turn: context.turn,
+        };
+        const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
+        diagnosis.category = 'BUDGET_EXHAUSTED';
+        diagnosis.recoveryAction = 'Conclude current turn or provide text response to the user.';
         return {
           toolName,
           args,
-          result: { error: `Per-turn tool call budget (${context.maxToolCalls}) exhausted.`, errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED' },
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
-      this.scopedCallCount++;
+      this.budgetTracker.increment(context.turn);
     }
 
     // Stage 1: Tool Lookup
@@ -210,21 +381,32 @@ export class ToolRunner {
     }
 
     // Stage 3: Workspace & Safety Policy Check
-    const targetFilePath = executionArgs.path || executionArgs.TargetFile || executionArgs.targetFile;
+    const targetFilePath = executionArgs.path
+      || executionArgs.filePath
+      || executionArgs.file
+      || executionArgs.TargetFile
+      || executionArgs.targetFile
+      || executionArgs.filename;
+
     if (targetFilePath) {
       const rawPath = String(targetFilePath);
       try {
         this.workspace.resolveSafePath(rawPath);
       } catch (err: any) {
+        const errRes = {
+          success: false,
+          error: err.message,
+          errorCode: 'SECURITY_VIOLATION',
+        };
+        const diagnosis = classifyToolFailure(toolName, err.message, errRes);
+        diagnosis.category = 'SECURITY_VIOLATION';
+        diagnosis.recoveryAction = 'Operate strictly within workspace boundaries.';
         return {
           toolName,
-          args,
-          result: {
-            success: false,
-            error: err.message,
-            errorCode: 'SECURITY_VIOLATION',
-          },
+          args: executionArgs,
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
 
@@ -233,15 +415,20 @@ export class ToolRunner {
         ['replace_text', 'write_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName) &&
         this.workspace.isProtectedFile(rawPath)
       ) {
+        const errRes = {
+          success: false,
+          error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          errorCode: 'SECURITY_VIOLATION',
+        };
+        const diagnosis = classifyToolFailure(toolName, errRes.error, errRes);
+        diagnosis.category = 'SECURITY_VIOLATION';
+        diagnosis.recoveryAction = 'Do not modify critical system configuration files.';
         return {
           toolName,
-          args,
-          result: {
-            success: false,
-            error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
-            errorCode: 'SECURITY_VIOLATION',
-          },
+          args: executionArgs,
+          result: errRes,
           durationMs: Date.now() - startTime,
+          guardianDiagnosis: diagnosis,
         };
       }
     }
@@ -313,15 +500,55 @@ export class ToolRunner {
     let attempt = 0;
     while (true) {
       attempt++;
+      if (context?.signal?.aborted) {
+        const errRes = {
+          error: 'The tool call was not executed because task execution was cancelled.',
+          errorCode: 'ABORTED',
+          retryable: true,
+        };
+        return {
+          toolName,
+          args: executionArgs,
+          result: errRes,
+          durationMs: Date.now() - startTime,
+        };
+      }
       try {
         rawResult = await tool.execute(executionArgs, this.workspace, executionContext);
         break;
       } catch (err: any) {
+        if (context?.signal?.aborted || err?.message === 'ABORTED') {
+          const errRes = {
+            error: 'The tool call was cancelled during execution.',
+            errorCode: 'ABORTED',
+            retryable: true,
+          };
+          return {
+            toolName,
+            args: executionArgs,
+            result: errRes,
+            durationMs: Date.now() - startTime,
+          };
+        }
         const failureDiagnosis = classifyToolFailure(toolName, err);
         if (failureDiagnosis.isRetryable && attempt <= failureDiagnosis.maxRetries && !context?.signal?.aborted) {
           const delay = failureDiagnosis.backoffMs * Math.pow(2, attempt - 1) + Math.random() * 200;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
+          try {
+            await abortableSleep(delay, context?.signal);
+            continue;
+          } catch {
+            const errRes = {
+              error: 'The tool call was cancelled during retry backoff.',
+              errorCode: 'ABORTED',
+              retryable: true,
+            };
+            return {
+              toolName,
+              args: executionArgs,
+              result: errRes,
+              durationMs: Date.now() - startTime,
+            };
+          }
         }
         const errRes = {
           error: `Lỗi khi thực thi tool "${toolName}": ${err.message}`,
@@ -330,7 +557,7 @@ export class ToolRunner {
         const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
         return {
           toolName,
-          args,
+          args: executionArgs,
           result: errRes,
           durationMs: Date.now() - startTime,
           guardianDiagnosis: diagnosis,
@@ -342,6 +569,46 @@ export class ToolRunner {
     let normalizedResult = typeof rawResult === 'object' && rawResult !== null
       ? rawResult
       : { output: String(rawResult) };
+
+    // Validate tool output against tool.outputSchema BEFORE injecting runtime metadata
+    if (tool.outputSchema) {
+      let candidateSnapshot: Record<string, any>;
+      try {
+        candidateSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`, {
+          omitUndefinedObjectProperties: true,
+        });
+      } catch (error: any) {
+        const errRes = { error: error.message, errorCode: 'INVALID_TOOL_RESULT' };
+        const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+        return {
+          toolName,
+          args: executionArgs,
+          result: errRes,
+          durationMs: Date.now() - startTime,
+          guardianDiagnosis: diag,
+        };
+      }
+      const outputValidation = validateSchemaValue(candidateSnapshot, tool.outputSchema as any, '$', {
+        rejectUnknownProperties: true,
+      });
+      if (!outputValidation.valid) {
+        const errRes = {
+          error: `Tool "${toolName}" returned an invalid result: ${outputValidation.errors.join('; ')}`,
+          errorCode: 'INVALID_TOOL_RESULT',
+          validationErrors: outputValidation.errors,
+        };
+        const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+        return {
+          toolName,
+          args: executionArgs,
+          result: errRes,
+          durationMs: Date.now() - startTime,
+          guardianDiagnosis: diag,
+        };
+      }
+    }
+
+    // Attach runtime mutation feedback (LSP & blast radius analysis)
     normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
     if (!normalizedResult.blastRadius) {
       normalizedResult = await enrichMutationResultWithBlastRadius(toolName, executionArgs, normalizedResult, this.workspace);
@@ -349,29 +616,11 @@ export class ToolRunner {
 
     let resultSnapshot: Record<string, any>;
     try {
-      resultSnapshot = cloneJsonStrict(normalizedResult, `Result for ${toolName}`, {
+      resultSnapshot = cloneJsonStrict(normalizedResult, `Final result for ${toolName}`, {
         omitUndefinedObjectProperties: true,
       });
     } catch (error: any) {
       const errRes = { error: error.message, errorCode: 'INVALID_TOOL_RESULT' };
-      const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
-      return {
-        toolName,
-        args: executionArgs,
-        result: errRes,
-        durationMs: Date.now() - startTime,
-        guardianDiagnosis: diag,
-      };
-    }
-    const outputValidation = validateSchemaValue(resultSnapshot, tool.outputSchema as any, '$', {
-      rejectUnknownProperties: true,
-    });
-    if (!outputValidation.valid) {
-      const errRes = {
-        error: `Tool "${toolName}" returned an invalid result: ${outputValidation.errors.join('; ')}`,
-        errorCode: 'INVALID_TOOL_RESULT',
-        validationErrors: outputValidation.errors,
-      };
       const diag = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
       return {
         toolName,
@@ -392,6 +641,7 @@ export class ToolRunner {
       durationMs: Date.now() - startTime,
       ...(permissionMetadata ? { permission: permissionMetadata } : {}),
       ...(diagnosis ? { guardianDiagnosis: diagnosis } : {}),
+      ...(shadowObservation ? { shadowObservation } : {})
     };
   }
 }

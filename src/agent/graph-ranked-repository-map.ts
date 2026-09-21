@@ -12,9 +12,23 @@ const IDENTIFIER_PATTERN = /[A-Za-z_$][A-Za-z0-9_$-]*/g;
 const MUTATION_TOOLS = new Set([
   'write_file', 'create_file', 'replace_text', 'apply_patch', 'delete_file', 'move_file',
 ]);
-const MAX_INDEXED_FILES = 5_000;
-const MAX_INDEXED_SOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_INDEXED_FILES = 2_500;
+const MAX_INDEXED_SOURCE_BYTES = 32 * 1024 * 1024;
+const MAX_CACHE_ENTRIES = 250;
+const MAX_IDENTIFIERS_PER_FILE = 200;
 const WORKER_RANK_MIN_NODES = 64;
+
+const IGNORED_IDENTIFIERS = new Set([
+  'const', 'let', 'var', 'function', 'return', 'import', 'export', 'class', 'from',
+  'as', 'default', 'async', 'await', 'try', 'catch', 'finally', 'throw', 'new', 'this',
+  'super', 'extends', 'typeof', 'instanceof', 'void', 'delete', 'in', 'of', 'for',
+  'while', 'do', 'switch', 'case', 'break', 'continue', 'true', 'false', 'null',
+  'undefined', 'interface', 'type', 'implements', 'public', 'private', 'protected',
+  'readonly', 'static', 'abstract', 'string', 'number', 'boolean', 'any', 'unknown',
+  'never', 'object', 'symbol', 'bigint', 'override', 'def', 'self', 'cls', 'None',
+  'True', 'False', 'elif', 'except', 'pass', 'lambda', 'struct', 'impl', 'fn',
+  'pub', 'mut', 'use', 'mod', 'crate', 'enum', 'trait', 'where', 'match',
+]);
 
 interface RepositoryFileNode {
   path: string;
@@ -118,6 +132,14 @@ export class GraphRankedRepositoryMap {
       this.changedFiles.add(normalized);
       this.fileCache.delete(normalized);
     }
+  }
+
+  clearCache(): void {
+    this.snapshot = undefined;
+    this.dirty = true;
+    this.changedFiles.clear();
+    this.diagnosticFiles.clear();
+    this.fileCache.clear();
   }
 
   observeToolResult(toolName: string, args: Record<string, any>, result: Record<string, any>): void {
@@ -318,8 +340,13 @@ export class GraphRankedRepositoryMap {
           const content = await fs.readFile(absolutePath, 'utf8');
           const symbols = SemanticSlicer.extractOutline(relativePath, content).symbols;
           const identifierCounts = new Map<string, number>();
-          for (const identifier of content.match(IDENTIFIER_PATTERN) || []) {
-            identifierCounts.set(identifier, (identifierCounts.get(identifier) || 0) + 1);
+          const rawMatches = content.match(IDENTIFIER_PATTERN) || [];
+          for (const identifier of rawMatches) {
+            if (identifier.length < 3 || IGNORED_IDENTIFIERS.has(identifier)) continue;
+            const current = identifierCounts.get(identifier) || 0;
+            if (identifierCounts.size < MAX_IDENTIFIERS_PER_FILE || current > 0) {
+              identifierCounts.set(identifier, current + 1);
+            }
           }
           const relativeImports: string[] = [];
           const importPattern = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]|require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
@@ -331,6 +358,10 @@ export class GraphRankedRepositoryMap {
             }
           }
           const node: RepositoryFileNode = { path: relativePath, absolutePath, symbols, identifierCounts, relativeImports };
+          if (this.fileCache.size >= MAX_CACHE_ENTRIES) {
+            const oldestKey = this.fileCache.keys().next().value;
+            if (oldestKey) this.fileCache.delete(oldestKey);
+          }
           this.fileCache.set(relativePath, { mtimeMs: stat.mtimeMs, size: stat.size, node });
           files.push(node);
           indexedBytes += stat.size;

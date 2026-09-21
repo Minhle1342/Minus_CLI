@@ -49,7 +49,7 @@ function extractPaths(toolName: string, args: Record<string, any>, result: Recor
       : [];
     return [...fromFileResults, ...(Array.isArray(result.filesModified) ? result.filesModified.map(String) : []), ...(Array.isArray(result.filesCreated) ? result.filesCreated.map(String) : [])];
   }
-  return [String(result.path || args.path || result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || '')].filter(Boolean);
+  return [String(result.path || args.path || result.filePath || args.filePath || result.TargetFile || args.TargetFile || result.targetFile || args.targetFile || '')].filter(Boolean);
 }
 
 function isFailure(result: Record<string, any>): boolean {

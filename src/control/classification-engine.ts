@@ -20,7 +20,7 @@ export interface ClassificationInput {
   minimumRisk?: ControlRisk;
 }
 
-const mutationIntent = /\b(?:implement|fix|change|modify|update|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sua|trien khai|thuc hien|thuc thi|cap nhat|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung)\b/i;
+const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung)\b/i;
 const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
 const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
 const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
@@ -47,13 +47,13 @@ export class ClassificationEngine {
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
     } else if (
-      input.hasUnverifiedChanges
-      || (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
-      || (input.previous?.phase === 'verify' && input.lastToolName === 'run_command' && !input.lastToolFailed)
+      (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
+      || (input.previous?.phase === 'verify' && ['run_command', 'run_test_suite', 'run_node_script', 'get_diagnostics'].includes(input.lastToolName || '') && !input.lastToolFailed)
+      || (input.hasUnverifiedChanges && !mutationIntent.test(normalizedText) && input.previous?.phase !== 'implement')
     ) {
       taskClass = input.previous?.taskClass || 'feature'; phase = 'verify'; risk = input.previous?.risk || 'R2';
       complexity = input.previous?.complexity || 'medium';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete', 'plan'];
+      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete', 'plan', 'edit'];
       reasons.push(input.hasUnverifiedChanges ? 'UNVERIFIED_MUTATION_EXISTS' : 'VERIFICATION_PHASE_STICKY_UNTIL_COMPLETION');
     } else if (mutationIntent.test(normalizedText)) {
       taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
@@ -73,7 +73,11 @@ export class ClassificationEngine {
         reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
         phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
-        capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        if (phase === 'plan') {
+          capabilities = ['inspect', 'search', 'plan', 'memory'];
+        } else {
+          capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        }
         if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
           reasons.push('PARETO_EVIDENCE_FAST_PATH');
         }
@@ -109,6 +113,9 @@ export class ClassificationEngine {
       const preserveMutationCapability = mutationIntent.test(normalizedText)
         && input.previous.requiredCapabilities.includes('edit')
         && (input.previous.phase === 'implement' || input.previous.phase === 'verify');
+      const preservePlanCapability = input.previous.phase === 'plan'
+        || input.previous.requiredCapabilities.includes('plan');
+
       if (preserveMutationCapability) {
         phase = 'implement';
         capabilities = Array.from(new Set<Capability>([
@@ -120,9 +127,24 @@ export class ClassificationEngine {
           'verify',
         ]));
         reasons.push('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY');
+      } else if (preservePlanCapability && !input.hasPlan && complexity === 'large') {
+        phase = 'plan';
+        capabilities = Array.from(new Set<Capability>([
+          'inspect',
+          'search',
+          'plan',
+          'memory',
+        ]));
+        reasons.push('FAILED_ACTION_PRESERVE_PLAN_CAPABILITY');
       } else {
         phase = 'explore';
-        capabilities = Array.from(new Set<Capability>(['inspect', 'search', 'memory', ...(risk === 'R0' ? [] : ['execute' as Capability])]));
+        capabilities = Array.from(new Set<Capability>([
+          'inspect',
+          'search',
+          'memory',
+          'plan',
+          ...(risk === 'R0' ? [] : ['execute' as Capability]),
+        ]));
         reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
       }
     }

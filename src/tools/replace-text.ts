@@ -66,9 +66,19 @@ export const replaceTextTool: ToolDefinition = {
     required: ['path', 'oldText', 'newText'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '');
-    const oldText = String(args.oldText ?? '');
-    const newText = String(args.newText ?? '');
+    const rawPath = String(args.path || args.filePath || args.targetFile || args.TargetFile || '');
+    let oldText = args.oldText;
+    if (!oldText || (typeof oldText === 'string' && oldText.trim() === '')) {
+      oldText = args.old_text ?? args.TargetContent ?? args.targetContent ?? args.searchContent ?? args.searchText ?? args.oldContent ?? '';
+    }
+    oldText = String(oldText ?? '');
+
+    let newText = args.newText;
+    if (newText === undefined || newText === null) {
+      newText = args.new_text ?? args.ReplacementContent ?? args.replacementContent ?? args.replaceWith ?? args.newContent ?? '';
+    }
+    newText = String(newText ?? '');
+
     const matchMode = args.matchMode === 'exact' ? 'exact' : 'auto';
     const expectedOccurrences = typeof args.expectedOccurrences === 'number' ? args.expectedOccurrences : 1;
     const expectedFileHash = args.expectedFileHash === undefined
@@ -79,7 +89,12 @@ export const replaceTextTool: ToolDefinition = {
       return { success: false, error: 'Tham số "path" là bắt buộc.', errorCode: 'INVALID_ARGS' };
     }
     if (!oldText) {
-      return { success: false, error: 'Tham số "oldText" không được để trống.', errorCode: 'INVALID_ARGS' };
+      return {
+        success: false,
+        error: 'Tham số "oldText" không được để trống. replace_text yêu cầu một khối code neo (anchor) hiện có để thay thế. Nếu muốn ghi đè toàn bộ file hoặc tạo file mới, hãy dùng tool "write_file".',
+        errorCode: 'INVALID_ARGS',
+        suggestedAction: 'Cung cấp đoạn code cần thay thế vào "oldText", hoặc dùng tool write_file nếu muốn tạo mới/ghi đè toàn bộ file.',
+      };
     }
 
     try {

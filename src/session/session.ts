@@ -298,22 +298,20 @@ export class Session {
     allowPendingToolCalls?: boolean;
     verifyRequestReplay?: 'all' | 'latest' | 'none';
   }): void {
-    const events = this.getEvents();
-    assertSessionRuntimeInvariants(events, options);
-    const requestEvents = events.filter((event) => event.type === 'request/header' && event.data.requestHeader);
-    const replayEvents = options?.verifyRequestReplay === 'none'
+    assertSessionRuntimeInvariants(this.eventLog, options);
+    const requestEvents = this.eventLog.filter((event) => event.type === 'request/header' && event.data.requestHeader);
+    const replayMode = options?.verifyRequestReplay ?? 'latest';
+    const replayEvents = replayMode === 'none'
       ? []
-      : options?.verifyRequestReplay === 'latest'
+      : replayMode === 'latest'
         ? requestEvents.slice(-1)
         : requestEvents;
     for (const event of replayEvents) {
       const header = event.data.requestHeader;
       if (event.type !== 'request/header' || !header) continue;
-      const historyAtBoundary = new Session(
-        `${this.id}:request-boundary`,
-        events.slice(0, header.sourceEventSeq),
-        this.createdAt,
-      ).getHistory();
+      const historyAtBoundary = Session.projectHistoryFromEvents(
+        this.eventLog.slice(0, header.sourceEventSeq),
+      );
       const { digest, ...withoutDigest } = header;
       const replayMatches = header.historyDigest
         ? computeRequestValueDigest(historyAtBoundary) === header.historyDigest
@@ -741,18 +739,18 @@ export class Session {
     this.setHistory(newHistory, reason);
   }
 
-  getHistory(): Content[] {
+  static projectHistoryFromEvents(events: SessionEvent[]): Content[] {
     let projected: Content[] = [];
     const toolCallsByAssistantSeq = new Map<number, SessionEvent[]>();
 
-    for (const event of this.eventLog) {
+    for (const event of events) {
       if (event.type !== 'tool/call' || event.data.assistantSeq === undefined) continue;
       const calls = toolCallsByAssistantSeq.get(event.data.assistantSeq) || [];
       calls.push(event);
       toolCallsByAssistantSeq.set(event.data.assistantSeq, calls);
     }
 
-    for (const event of this.eventLog) {
+    for (const event of events) {
       if (event.type === 'session/compaction') {
         projected = cloneJson(event.data.messages || []);
         continue;
@@ -790,6 +788,10 @@ export class Session {
     }
 
     return projected;
+  }
+
+  getHistory(): Content[] {
+    return Session.projectHistoryFromEvents(this.eventLog);
   }
 
   get messages(): Content[] {

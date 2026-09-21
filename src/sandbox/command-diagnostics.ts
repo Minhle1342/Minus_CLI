@@ -99,6 +99,14 @@ export function diagnoseCommandFailure(
 
   const scriptFailure = findPackageScriptFailure(command, combinedOutput);
   if (scriptFailure) {
+    if (scriptFailure.isMissingWorkspace) {
+      return {
+        success: false,
+        errorCode: 'WORKSPACE_NOT_FOUND',
+        diagnostic: `Workspace "${scriptFailure.workspaceName || 'chỉ định'}" không tồn tại trong dự án hoặc không được cấu hình trong package.json.`,
+        suggestion: 'Dự án có thể là single-package (không phải Monorepo). Hãy bỏ cờ --workspace và kiểm tra scripts trực tiếp trong package.json.',
+      };
+    }
     if (scriptFailure.isMissingPackageJson) {
       return {
         success: false,
@@ -223,10 +231,27 @@ export function findPackageDependency(output: string): string | undefined {
 export interface PackageScriptFailure {
   isMissingPackageJson: boolean;
   isMissingScript: boolean;
+  isMissingWorkspace?: boolean;
   scriptName?: string;
+  workspaceName?: string;
 }
 
 export function findPackageScriptFailure(command: string, output: string): PackageScriptFailure | undefined {
+  // 1. Nhận diện lỗi workspace không tồn tại (npm error No workspaces found hoặc code ENOENT khi có --workspace)
+  const isNoWorkspacesFound = /No workspaces found/i.test(output);
+  const cmdWsMatch = command.match(/(?:--workspace[=\s]+|-w[=\s]+|--filter[=\s]+)(['"]?)([^'"\s]+)\1/i);
+  const outputWsMatch = output.match(/--workspace=([^\s\r\n]+)/i);
+
+  if (isNoWorkspacesFound || (/(?:ENOENT|code ENOENT)/i.test(output) && cmdWsMatch)) {
+    const wsName = (cmdWsMatch?.[2] || outputWsMatch?.[1] || '').trim();
+    return {
+      isMissingPackageJson: false,
+      isMissingScript: false,
+      isMissingWorkspace: true,
+      workspaceName: wsName || undefined,
+    };
+  }
+
   const isMissingPackageJson = /ENOENT.*package\.json|no such file or directory.*package\.json/i.test(output);
   const scriptMatch = output.match(/(?:npm\s+error\s+Missing\s+script|npm\s+ERR!\s+missing\s+script|Missing\s+script):\s*["']?([^"'\r\n]+)["']?|error\s+Command\s*["']([^"'\r\n]+)["']\s*not\s+found|script\s*["']([^"'\r\n]+)["']\s*not\s+found|ERR_PNPM_NO_SCRIPT/i);
 

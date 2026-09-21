@@ -58,7 +58,7 @@ import type { ClassificationDecision, ToolControlMode } from '../control/classif
 import { ThisTurnToolGate, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
-import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
+import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
@@ -2297,7 +2297,8 @@ export class AgentLoop {
                   turn,
                   userRequest: turnUserRequest,
                   signal: options?.signal,
-                  ...(toolControlMode === 'enforce' ? {
+                  controlMode: toolControlMode,
+                  ...(toolControlMode !== 'off' ? {
                     decisionId: activeDecisionId,
                     allowedToolNames: visibleToolNames,
                     allowedToolSetHash: activeToolSetHash,
@@ -2643,7 +2644,8 @@ export class AgentLoop {
                   userRequest: turnUserRequest,
                   signal: options?.signal,
                   lastCommandExecution: this.lastCommandExecutionState,
-                  ...(toolControlMode === 'enforce' ? {
+                  controlMode: toolControlMode,
+                  ...(toolControlMode !== 'off' ? {
                     decisionId: activeDecisionId,
                     allowedToolNames: visibleToolNames,
                     allowedToolSetHash: activeToolSetHash,
@@ -3898,6 +3900,10 @@ export class AgentLoop {
     }
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    try {
+      disposeSharedTypeScriptService();
+      this.repositoryMap?.clearCache();
+    } catch { }
     this.setAgentStatus('idle', session, turn);
   }
 

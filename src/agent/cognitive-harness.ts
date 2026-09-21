@@ -11,6 +11,7 @@
 
 export interface CognitiveScaffold {
   category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective' | 'data_parser' | 'context_compression';
+  phase?: string;
   negativeGate: string[];
   premiseCheck?: string;
   falsificationCriteria: string;
@@ -61,9 +62,11 @@ export class CognitiveHarness {
       || lowerReq.includes('gấp để release')
     );
 
+    const hasCodeFileExtension = /\.(ts|js|py|json|rs|go|cs|tsx|jsx|html|css)\b/i.test(request);
     const isCodingTask = (
       phase === 'implement'
       || phase === 'verify'
+      || hasCodeFileExtension
       || lowerReq.includes('fix')
       || lowerReq.includes('implement')
       || lowerReq.includes('refactor')
@@ -73,11 +76,25 @@ export class CognitiveHarness {
       || lowerReq.includes('add')
       || lowerReq.includes('update')
       || lowerReq.includes('delete')
+      || lowerReq.includes('replace')
+      || lowerReq.includes('sửa')
+      || lowerReq.includes('sua')
+      || lowerReq.includes('lỗi')
+      || lowerReq.includes('loi')
+      || lowerReq.includes('cập nhật')
+      || lowerReq.includes('cap nhat')
+      || lowerReq.includes('thay thế')
+      || lowerReq.includes('thay the')
+      || lowerReq.includes('bổ sung')
+      || lowerReq.includes('bo sung')
+      || lowerReq.includes('thực thi')
+      || lowerReq.includes('thuc thi')
     );
 
     if (isAntiDeception) {
       return {
         category: 'anti_deception',
+        phase,
         negativeGate: [
           'NEVER bypass failing tests, disable assertions, or delete test cases to claim completion.',
           'NEVER accept user assumptions uncritically if they compromise security, reliability, or architecture.',
@@ -108,6 +125,7 @@ export class CognitiveHarness {
     if (isErrorDetective) {
       return {
         category: 'error_detective',
+        phase,
         negativeGate: [
           'NEVER patch downstream symptoms (e.g. empty null checks at crash site) without tracing to upstream root cause.',
           'NEVER guess code defects without extracting exact file, line, and column from logs or stack traces.',
@@ -146,6 +164,7 @@ export class CognitiveHarness {
     if (isContextCompression) {
       return {
         category: 'context_compression',
+        phase,
         negativeGate: [
           'NEVER dump raw uncompressed conversation history or multi-thousand-line tool output logs into the context window.',
           'NEVER omit the explicit Artifact Trail (segregating [MODIFIED], [CREATED], and [READ-ONLY] files) when summarizing session context.',
@@ -191,6 +210,7 @@ export class CognitiveHarness {
 
       return {
         category: 'data_parser',
+        phase,
         negativeGate,
         premiseCheck: 'Inspect representative inputs, expected outputs, and negative cases before choosing parsing or normalization rules.',
         falsificationCriteria: 'If the implementation misses a valid observed format or accepts a value rejected by the contract, revise the parsing hypothesis.',
@@ -205,6 +225,97 @@ export class CognitiveHarness {
     }
 
     if (isCodingTask) {
+      // 1. Phân hóa scaffold chuyên biệt theo từng Phase để triệt tiêu việc gọi nhầm tool (Tool Gating Alignment)
+      if (phase === 'plan') {
+        const negativeGate = [
+          '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text, apply_patch, write_file, write_to_file) during the PLAN phase.',
+          'NEVER fabricate mock test data inside production code.',
+          'NEVER comment out or silence compiler/LSP diagnostics.',
+          'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
+        ];
+
+        if (consecutiveFailures > 1) {
+          negativeGate.push(`Anti-Thrashing Gate: You have failed ${consecutiveFailures} times; DO NOT attempt code edits while in PLAN phase.`);
+        }
+
+        return {
+          category: 'code',
+          phase: 'plan',
+          negativeGate,
+          premiseCheck: activeTask
+            ? `Verify plan alignment for task: "${activeTask}". Ensure steps decompose root cause resolution.`
+            : 'Formulate a comprehensive plan with atomic, ordered, testable steps before unlocking implementation.',
+          falsificationCriteria: 'If the plan misses edge cases, architectural invariants, or verification steps, the plan is INCOMPLETE and must be refined with create_plan / update_plan_task.',
+          executionTopology: [
+            'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, list_files, grep_search).',
+            'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
+            'Step 3 (Plan Formalization): Use create_plan to define ordered, atomic subtasks with concrete acceptance criteria.',
+            'Step 4 (Phase Transition Readiness): Once plan is accepted and locked, transition to explore or implement phase.',
+          ],
+          actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, list_files, grep_search, create_plan, update_plan_task). Code editing tools are FORBIDDEN.',
+        };
+      }
+
+      if (phase === 'explore') {
+        const negativeGate = [
+          '🔒 [PHASE LOCK: EXPLORE] NEVER modify production files or run mutations during EXPLORATION.',
+          'NEVER assume root cause without reading the exact offending lines with read_file/view_file first.',
+          'NEVER guess code defects without extracting exact file, line, and column from logs or stack traces.',
+          'NEVER fabricate mock test data inside production code.',
+        ];
+
+        if (consecutiveFailures > 1) {
+          negativeGate.push(`Anti-Thrashing Gate: You have failed ${consecutiveFailures} times; focus on root cause localization.`);
+        }
+
+        return {
+          category: 'code',
+          phase: 'explore',
+          negativeGate,
+          premiseCheck: activeTask
+            ? `Verify active task focus: "${activeTask}". Confirm whether symptoms match underlying state.`
+            : 'Confirm whether the symptom is reproducible and isolate the defect locus before attempting any code fix.',
+          falsificationCriteria: 'If gathered facts contradict the initial diagnosis, pivot exploration immediately to alternative components.',
+          executionTopology: [
+            'Step 1 (Targeted Inspection): Read suspected files, configs, and caller chains with read_file/view_file.',
+            'Step 2 (Defect Localization): Pinpoint exact source lines causing incorrect state.',
+            'Step 3 (Reproduction Evidence): Verify behavior with safe read/run commands without mutating production code.',
+            'Step 4 (Readiness Hand-off): Once root cause is proven with empirical evidence, unlock IMPLEMENT phase.',
+          ],
+          actionBoundary: 'Gather empirical evidence and locate defect. Modifying production code is LOCKED.',
+        };
+      }
+
+      if (phase === 'verify') {
+        const negativeGate = [
+          '🔒 [PHASE LOCK: VERIFY] NEVER implement new features or refactor unrelated code during VERIFICATION.',
+          'NEVER disable, delete, or comment out failing assertions to achieve green test passes.',
+          'NEVER declare victory without running empirical verification (e.g. npm run build / test suite).',
+        ];
+
+        if (consecutiveFailures > 1) {
+          negativeGate.push(`Anti-Thrashing Gate: You have failed ${consecutiveFailures} times; inspect exact test failure output.`);
+        }
+
+        return {
+          category: 'code',
+          phase: 'verify',
+          negativeGate,
+          premiseCheck: activeTask
+            ? `Verify active task completion: "${activeTask}". Ensure verification covers all acceptance criteria.`
+            : 'Verify whether the applied changes completely satisfy original requirements without introducing regressions.',
+          falsificationCriteria: 'If verification tests, linter, or compiler fail, the fix is INVALID and must be corrected or rolled back.',
+          executionTopology: [
+            'Step 1 (Targeted Test Execution): Run unit/integration tests directly covering modified loci.',
+            'Step 2 (LSP & Build Diagnostics): Inspect compiler, build, and linter feedback.',
+            'Step 3 (Regression Sweep): Run broader test suite to ensure zero collateral breakage.',
+            'Step 4 (Completion Sign-off): Report verified outcome with concrete test pass artifacts.',
+          ],
+          actionBoundary: 'Execute verification commands (run_command, test runners). Mutations limited strictly to fixing test discrepancies.',
+        };
+      }
+
+      // Default for 'implement' phase
       const negativeGate = [
         'NEVER fabricate mock test data inside production code to force a green test.',
         'NEVER comment out or silence compiler/LSP diagnostics.',
@@ -220,6 +331,7 @@ export class CognitiveHarness {
 
       return {
         category: 'code',
+        phase: 'implement',
         negativeGate,
         premiseCheck: activeTask
           ? `Verify active task focus: "${activeTask}". Ensure current changes align with root cause, not symptoms.`
@@ -239,6 +351,7 @@ export class CognitiveHarness {
     // Default Analytical / Diagnostic Scaffold
     return {
       category: 'reasoning',
+      phase,
       negativeGate: [
         'NEVER provide generic or speculative explanations detached from the actual codebase.',
         'NEVER hallucinate file paths, function names, or dependencies without reading them.',
@@ -296,11 +409,23 @@ export class CognitiveHarness {
    * Formats scaffold for prompt injection
    */
   formatScaffoldForPrompt(scaffold: CognitiveScaffold): string {
+    const phaseTag = scaffold.phase ? ` - PHASE: ${scaffold.phase.toUpperCase()}` : '';
     const lines: string[] = [
-      `🧠 [COGNITIVE SCAFFOLD ACTIVE - ${scaffold.category.toUpperCase()}]:`,
+      `🧠 [COGNITIVE SCAFFOLD ACTIVE - ${scaffold.category.toUpperCase()}${phaseTag}]:`,
+    ];
+
+    if (scaffold.phase === 'plan') {
+      lines.push(`🔒 [PHASE GOVERNANCE]: PLAN MODE ACTIVE. Code mutation tools (replace_text, apply_patch, write_file) are DISABLED. Use create_plan / update_plan_task to outline the execution plan.`);
+    } else if (scaffold.phase === 'explore') {
+      lines.push(`🔒 [PHASE GOVERNANCE]: EXPLORE MODE ACTIVE. Code mutation tools are LOCKED. Gather empirical evidence and inspect offending lines first.`);
+    } else if (scaffold.phase === 'verify') {
+      lines.push(`🔒 [PHASE GOVERNANCE]: VERIFY MODE ACTIVE. Run tests and verify diagnostics. Do not introduce new features or unrelated changes.`);
+    }
+
+    lines.push(
       `1. [QUALITY GUARDRAILS & GUIDELINES]:`,
       ...scaffold.negativeGate.map((gate) => `   - 💡 ${gate}`),
-    ];
+    );
 
     if (scaffold.premiseCheck) {
       lines.push(`2. [PREMISE & ANTI-SYCOPHANCY CHECK]:\n   - 🔍 ${scaffold.premiseCheck}`);
@@ -320,10 +445,19 @@ export class CognitiveHarness {
    * Formats a token-efficient compact scaffold for dynamic prompt injection (~60-90 tokens)
    */
   formatScaffoldForCompactPrompt(scaffold: CognitiveScaffold): string {
+    const phaseBanner = scaffold.phase === 'plan'
+      ? `   - 🔒 [PHASE GOVERNANCE]: PLAN MODE - Tool mutations (replace_text, apply_patch, write_file) are STRICTLY FORBIDDEN. Outline tasks via create_plan.`
+      : scaffold.phase === 'explore'
+      ? `   - 🔒 [PHASE GOVERNANCE]: EXPLORE MODE - Mutations locked. Inspect & locate root cause.`
+      : scaffold.phase === 'verify'
+      ? `   - 🔒 [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
+      : '';
+
     const gates = scaffold.negativeGate.slice(0, 3).map((gate) => `   - 💡 ${gate}`).join('\n');
     const topo = scaffold.executionTopology.slice(0, 4).map((s, idx) => `${idx + 1}. ${s}`).join(' ➔ ');
     return [
-      `🧠 [COGNITIVE SCAFFOLD - ${scaffold.category.toUpperCase()}]:`,
+      `🧠 [COGNITIVE SCAFFOLD - ${scaffold.category.toUpperCase()}${scaffold.phase ? ` (${scaffold.phase.toUpperCase()})` : ''}]:`,
+      phaseBanner,
       gates,
       `   - ⚖️ Falsification: ${scaffold.falsificationCriteria}`,
       `   - 🧭 Topology: ${topo}`,
@@ -335,8 +469,12 @@ export class CognitiveHarness {
    * Formats scaffold for terminal UI display (human-visible)
    */
   formatScaffoldForUI(scaffold: CognitiveScaffold): string[] {
+    const phaseStr = scaffold.phase ? ` (${scaffold.phase.toUpperCase()})` : '';
     return [
-      `🧠 [COGNITIVE SCAFFOLD: ${scaffold.category.toUpperCase()}]`,
+      `🧠 [COGNITIVE SCAFFOLD: ${scaffold.category.toUpperCase()}${phaseStr}]`,
+      scaffold.phase === 'plan' ? `├── [Phase Governance]: PLAN MODE - Mutations locked (read/plan only)` : '',
+      scaffold.phase === 'explore' ? `├── [Phase Governance]: EXPLORE MODE - Evidence gathering active` : '',
+      scaffold.phase === 'verify' ? `├── [Phase Governance]: VERIFY MODE - Verification & testing active` : '',
       `├── [Quality Guideline]: ${scaffold.negativeGate[0]}`,
       scaffold.premiseCheck ? `├── [Premise Check]: ${scaffold.premiseCheck}` : '',
       `├── [Falsification]: ${scaffold.falsificationCriteria}`,

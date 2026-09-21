@@ -124,7 +124,7 @@ Core Architectural Invariants:
 
 5. VERIFICATION LADDER & SUBMISSION GATE:
    - After actual code changes, choose checks appropriate to their impact: diagnostics, typecheck/build, or targeted tests. Reading code does not require running tests.
-   - Verify defined scripts in project metadata or package.json before calling run_command (use workspace flags if Monorepo).
+   - Verify defined scripts in project metadata or package.json before calling run_command. Never guess non-existent scripts (e.g. running 'lint' when absent) and never use workspace flags unless confirmed Monorepo.
    - After verifying code changes, call submit_solution with proof. For analysis/proposals, answer directly; report_investigation_findings is optional.
 
 6. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
@@ -348,7 +348,7 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
 - Goal: Empirically prove that changes resolve the issue without regressions.
 - Sequence: 1. In-memory diagnostics (\`get_diagnostics\`) -> 2. Typecheck/Build (\`tsc --noEmit\` / \`npm run build\`) -> 3. Targeted test suite.
-- Test Command Discipline: Check available scripts in [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect \`package.json\` (or sub-package workspaces if Monorepo, e.g. \`--workspace=<app>\`) before running \`run_command\`. Never guess non-existent scripts.
+- Test Command Discipline: Check available scripts in [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect \`package.json\`. Never guess non-existent scripts (e.g. running 'lint' when absent) and never use workspace flags (e.g. \`--workspace=<app>\`) unless the project is confirmed to be a Monorepo.
 - Completion Gate: For code changes, submit with concrete verification proof. For read-only analysis, answer directly when the findings are supported; reporting tools and test runs are optional unless requested.
 - Anti-Pattern: Never emit pseudo-completion stubs without running verification.`;
 

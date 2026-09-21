@@ -14,8 +14,36 @@ export interface ToolDescriptor {
 }
 
 const ALL_PHASES: TaskPhase[] = ['explore', 'plan', 'implement', 'verify', 'release'];
-export const READ_TOOL_NAMES = new Set(['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'find_references', 'get_diagnostics', 'lsp_query', 'analyze_impact', 'query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology', 'read_compressed_code', 'pack_codebase', 'inspect_image', 'get_workspace_diff']);
-export const EDIT_TOOL_NAMES = new Set(['apply_patch', 'replace_text', 'write_file', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content']);
+export const READ_TOOL_NAMES = new Set([
+  'read_file',
+  'list_files',
+  'search_text',
+  'search_codebase_fast',
+  'inspect_symbol',
+  'find_references',
+  'get_diagnostics',
+  'lsp_query',
+  'analyze_impact',
+  'query_call_graph',
+  'get_route_map',
+  'get_symbol_context_360',
+  'get_architecture_topology',
+  'read_compressed_code',
+  'pack_codebase',
+  'inspect_image',
+  'get_workspace_diff',
+]);
+export const EDIT_TOOL_NAMES = new Set([
+  'apply_patch',
+  'replace_text',
+  'write_file',
+  'create_file',
+  'delete_file',
+  'move_file',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+]);
 export const TOOL_SETS = { READ: READ_TOOL_NAMES, EDIT: EDIT_TOOL_NAMES };
 const READ = READ_TOOL_NAMES;
 const EDIT = EDIT_TOOL_NAMES;
@@ -30,45 +58,365 @@ export class ToolDescriptorRegistry {
   describe(tool: ToolDefinition): ToolDescriptor {
     const name = tool.name;
     let descriptor: ToolDescriptor;
+
     if (READ.has(name)) {
-      descriptor = { name, capabilities: name === 'get_diagnostics' ? ['inspect', 'verify'] : ['inspect', 'search'], phases: ALL_PHASES, minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+      let capabilities: Capability[] = ['inspect', 'search'];
+      if (name === 'get_diagnostics') {
+        capabilities = ['inspect', 'verify'];
+      } else if (name === 'lsp_query') {
+        capabilities = ['inspect', 'search', 'verify'];
+      } else if (name === 'get_workspace_diff') {
+        capabilities = ['inspect', 'git-read', 'verify'];
+      } else if (name === 'analyze_impact') {
+        capabilities = ['inspect', 'search', 'plan'];
+      }
+      descriptor = {
+        name,
+        capabilities,
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (EDIT.has(name)) {
-      descriptor = { name, capabilities: ['edit'], phases: ['implement'], minimumRisk: 'R1', mutates: true, reversible: true, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['edit'],
+        phases: ['implement'],
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: true,
+        requiresApproval: true,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'run_command') {
-      // Invocation risk is enforced by PermissionManager; safe inspection commands must remain available at R0.
-      descriptor = { name, capabilities: ['inspect', 'search', 'execute', 'verify', 'git-read'], phases: ['explore', 'implement', 'verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: false, requiresApproval: true, deferLoading: false, schemaCost: this.cost(tool) };
+      // run_command hỗ trợ tra cứu chẩn đoán an toàn ở R0 (git log, status, inspect) và thực thi lệnh
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'search', 'execute', 'verify', 'git-read', 'git-write'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: false,
+        requiresApproval: true,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'run_node_script') {
+      // run_node_script là công cụ phẫu thuật & scratch đa năng: dùng cho explore, plan, implement và verify
+      descriptor = {
+        name,
+        capabilities: ['execute', 'edit', 'inspect', 'verify'],
+        phases: ['explore', 'plan', 'implement', 'verify'],
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: true,
+        requiresApproval: true,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'run_test_suite') {
+      descriptor = {
+        name,
+        capabilities: ['verify', 'execute', 'inspect'],
+        phases: ['explore', 'implement', 'verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'submit_solution') {
-      descriptor = { name, capabilities: ['complete'], phases: ['verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['complete'],
+        phases: ['verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'report_investigation_findings') {
-      descriptor = { name, capabilities: ['inspect', 'verify', 'complete'], phases: ['explore', 'verify', 'release'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'verify', 'complete'],
+        phases: ['explore', 'plan', 'verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'formulate_and_verify_hypothesis') {
-      descriptor = { name, capabilities: ['inspect', 'verify', 'plan'], phases: ['explore', 'plan'], minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'verify', 'plan'],
+        phases: ['explore', 'plan', 'implement', 'verify'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'discover_tools') {
-      descriptor = { name, capabilities: ['inspect', 'search'], phases: ALL_PHASES, minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: false, schemaCost: this.cost(tool) };
-    } else if (name === 'manage_task' || name === 'schedule') {
-      descriptor = { name, capabilities: ['execute'], phases: ['implement', 'verify'], minimumRisk: 'R1', mutates: true, reversible: name === 'schedule', requiresApproval: true, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'search'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'computer') {
+      descriptor = {
+        name,
+        capabilities: ['execute', 'inspect'],
+        phases: ['explore', 'implement', 'verify', 'release'],
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: false,
+        requiresApproval: true,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'manage_task' || name === 'start_background_task' || name === 'get_task_output' || name === 'stop_task' || name === 'schedule') {
+      const isOutput = name === 'get_task_output';
+      const isSched = name === 'schedule';
+      descriptor = {
+        name,
+        capabilities: isSched ? ['execute', 'plan'] : isOutput ? ['inspect', 'execute', 'verify'] : ['execute', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: isOutput ? 'R0' : 'R1',
+        mutates: !isOutput,
+        reversible: isSched || isOutput,
+        requiresApproval: !isOutput,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'brainstorm_design') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect', 'delegate'],
+        phases: ['explore', 'plan'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'verify_subagent_quality') {
+      descriptor = {
+        name,
+        capabilities: ['verify', 'delegate', 'inspect'],
+        phases: ['implement', 'verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'schedule_dag_parallel' || name === 'allocate_agent_task') {
+      descriptor = {
+        name,
+        capabilities: ['delegate', 'plan', 'execute'],
+        phases: ['plan', 'implement', 'verify'],
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: false,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'delegate_agent' || name === 'spawn_agent' || name === 'wait_agent' || name === 'get_agent_result' || name === 'stop_agent' || name === 'resume_agent') {
+      const isReadOnly = name === 'wait_agent' || name === 'get_agent_result';
+      descriptor = {
+        name,
+        capabilities: isReadOnly ? ['delegate', 'inspect', 'execute'] : ['delegate', 'execute'],
+        phases: ALL_PHASES,
+        minimumRisk: isReadOnly ? 'R0' : 'R1',
+        mutates: !isReadOnly,
+        reversible: isReadOnly,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'read_shared_context') {
-      descriptor = { name, capabilities: ['inspect', 'delegate'], phases: ALL_PHASES, minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'delegate'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'write_shared_context' || name === 'publish_agent_event') {
-      descriptor = { name, capabilities: ['delegate'], phases: ALL_PHASES, minimumRisk: 'R1', mutates: true, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['delegate', 'edit'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'request_approval') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'delegate', 'execute'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name.startsWith('compose_') || name === 'generate_spec' || name === 'lock_spec' || name === 'verify_spec_matrix') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect', 'verify', 'complete'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'run_code_review' || name === 'get_code_review_status' || name === 'request_review' || name === 'submit_review') {
+      descriptor = {
+        name,
+        capabilities: name === 'submit_review' ? ['verify', 'complete'] : ['verify', 'inspect'],
+        phases: ['implement', 'verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'list_worktrees' || name === 'create_worktree' || name === 'remove_worktree') {
+      const isRead = name === 'list_worktrees';
+      descriptor = {
+        name,
+        capabilities: isRead ? ['git-read', 'inspect'] : ['git-write', 'execute'],
+        phases: isRead ? ALL_PHASES : ['plan', 'implement', 'verify', 'release'],
+        minimumRisk: isRead ? 'R0' : 'R1',
+        mutates: !isRead,
+        reversible: isRead,
+        requiresApproval: !isRead,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (name.startsWith('git_')) {
-      const readOnly = /(?:status|diff|log|show)/.test(name);
-      descriptor = { name, capabilities: [readOnly ? 'git-read' : 'git-write'], phases: readOnly ? ALL_PHASES : ['implement', 'release'], minimumRisk: readOnly ? 'R0' : 'R2', mutates: !readOnly, reversible: name !== 'git_push', requiresApproval: !readOnly, deferLoading: true, schemaCost: this.cost(tool) };
+      const readOnly = /(?:status|diff|log|show|list_commands)/.test(name);
+      descriptor = {
+        name,
+        capabilities: [readOnly ? 'git-read' : 'git-write', 'inspect'],
+        phases: readOnly ? ALL_PHASES : ['implement', 'release'],
+        minimumRisk: readOnly ? 'R0' : 'R2',
+        mutates: !readOnly,
+        reversible: name !== 'git_push',
+        requiresApproval: !readOnly,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (/web|url/.test(name)) {
-      descriptor = { name, capabilities: ['network', 'inspect'], phases: ['explore', 'plan', 'verify'], minimumRisk: 'R1', mutates: false, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['network', 'inspect', 'search'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R1',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (/plan|task/.test(name)) {
-      descriptor = { name, capabilities: ['plan'], phases: ALL_PHASES, minimumRisk: 'R0', mutates: false, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect', 'edit'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (/memory/.test(name)) {
+      const isVerify = name === 'verify_repository_memory';
       const savesMemory = name.startsWith('save_');
-      descriptor = { name, capabilities: ['memory'], phases: savesMemory ? ['implement', 'verify'] : ALL_PHASES, minimumRisk: savesMemory ? 'R1' : 'R0', mutates: savesMemory, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: isVerify ? ['memory', 'verify', 'inspect'] : savesMemory ? ['memory', 'edit'] : ['memory', 'inspect', 'search'],
+        phases: ALL_PHASES,
+        minimumRisk: savesMemory ? 'R1' : 'R0',
+        mutates: savesMemory,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (/agent|shared_context/.test(name)) {
-      descriptor = { name, capabilities: ['delegate'], phases: ALL_PHASES, minimumRisk: 'R1', mutates: true, reversible: false, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['delegate', 'execute'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: false,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (name.startsWith('game_') || name.startsWith('unity_')) {
       const mutates = /write|create|scaffold|compose|assemble|wire|execute/.test(name);
-      descriptor = { name, capabilities: mutates ? ['edit', 'execute'] : ['inspect', 'plan'], phases: ['explore', 'plan', 'implement', 'verify'], minimumRisk: mutates ? 'R1' : 'R0', mutates, reversible: true, requiresApproval: false, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: mutates ? ['edit', 'execute'] : ['inspect', 'plan'],
+        phases: ['explore', 'plan', 'implement', 'verify'],
+        minimumRisk: mutates ? 'R1' : 'R0',
+        mutates,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else {
-      descriptor = { name, capabilities: ['execute'], phases: ['implement', 'verify'], minimumRisk: 'R2', mutates: true, reversible: false, requiresApproval: true, deferLoading: true, schemaCost: this.cost(tool) };
+      descriptor = {
+        name,
+        capabilities: ['execute', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: false,
+        requiresApproval: true,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     }
+
     return { ...descriptor, ...this.overrides.get(name), name };
   }
 

@@ -146,9 +146,12 @@ export class TypeScriptService {
 
   syncWorkspaceFiles(): void {
     try {
+      const MAX_SYNCED_ROOT_FILES = 120;
       const scanDir = (dir: string) => {
+        if (this.rootFileNames.size >= MAX_SYNCED_ROOT_FILES) return;
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
+          if (this.rootFileNames.size >= MAX_SYNCED_ROOT_FILES) break;
           if (this.workspace.isIgnoredDirectory(entry.name)) continue;
           if (entry.name.startsWith('.') && entry.name !== '.github') continue;
           if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build' || entry.name === 'coverage' || entry.name === 'deploy' || entry.name === 'scratch') continue;
@@ -167,6 +170,19 @@ export class TypeScriptService {
       };
       scanDir(this.workspace.rootDir);
     } catch {}
+  }
+
+  dispose(): void {
+    try {
+      this.services.dispose();
+    } catch {}
+    this.files.clear();
+    this.rootFileNames.clear();
+  }
+
+  clearCache(): void {
+    this.files.clear();
+    this.syncWorkspaceFiles();
   }
 
   private normalizeAndResolve(filePath: string): string {

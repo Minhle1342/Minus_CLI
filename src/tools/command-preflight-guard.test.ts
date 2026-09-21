@@ -265,3 +265,82 @@ test('Preflight Guard: Blocks non-existent local binary and discovers sibling ex
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test('Preflight Guard: Blocks non-existent workspace and missing scripts in package.json', async () => {
+  const os = await import('node:os');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-pkg-preflight-'));
+  try {
+    // Tạo package.json đơn lẻ không có workspaces và không có script 'lint'
+    await fs.writeFile(
+      path.join(tempDir, 'package.json'),
+      JSON.stringify({
+        name: 'test-single-pkg',
+        scripts: {
+          test: 'node test.js',
+          build: 'tsc',
+        },
+      }, null, 2),
+      'utf-8'
+    );
+
+    // 1. LLM đoán mò chạy với --workspace=apps/web trong single-package repo -> Bị chặn
+    const wsResult = evaluateCommandPreflight('npm run lint --workspace=apps/web', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+    assert.equal(wsResult.allowed, false, 'Phải chặn lệnh chỉ định workspace ảo');
+    assert.equal(wsResult.errorCode, 'WORKSPACE_NOT_FOUND');
+    assert.match(wsResult.reason || '', /single-package/i);
+    assert.match(wsResult.reason || '', /apps\/web/);
+
+    // 2. LLM chạy npm run lint (script không có trong package.json) -> Bị chặn
+    const scriptResult = evaluateCommandPreflight('npm run lint', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+    assert.equal(scriptResult.allowed, false, 'Phải chặn script không tồn tại trong package.json');
+    assert.equal(scriptResult.errorCode, 'PACKAGE_SCRIPT_NOT_FOUND');
+    assert.match(scriptResult.reason || '', /Script "lint" không được định nghĩa/);
+    assert.match(wsResult.suggestion || '', /--workspace/);
+
+    // 3. Chạy script hợp lệ đã định nghĩa -> ALLOWED
+    const validScript = evaluateCommandPreflight('npm run build', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+    assert.equal(validScript.allowed, true, 'Phải cho phép script hợp lệ');
+
+    // 4. Kiểm tra trong môi trường Monorepo thực sự
+    await fs.mkdir(path.join(tempDir, 'apps', 'web'), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, 'apps', 'web', 'package.json'),
+      JSON.stringify({
+        name: '@test/web',
+        scripts: {
+          lint: 'eslint .',
+        },
+      }, null, 2),
+      'utf-8'
+    );
+
+    // Cập nhật root package.json có workspaces
+    await fs.writeFile(
+      path.join(tempDir, 'package.json'),
+      JSON.stringify({
+        name: 'test-monorepo',
+        workspaces: ['apps/*'],
+        scripts: {},
+      }, null, 2),
+      'utf-8'
+    );
+
+    // Chạy lệnh vào workspace apps/web thực sự tồn tại -> ALLOWED
+    const validMonorepo = evaluateCommandPreflight('npm run lint --workspace=apps/web', {
+      mode: 'enforce',
+      workspaceRoot: tempDir,
+    });
+    assert.equal(validMonorepo.allowed, true, 'Phải cho phép lệnh khi workspace và script thực sự tồn tại');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
