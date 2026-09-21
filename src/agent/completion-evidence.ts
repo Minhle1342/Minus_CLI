@@ -1,6 +1,7 @@
 import type { Session, SessionEvent } from '../session/session.js';
 import { collectCompletionObservations, hasObservedMutation, observedMutationFiles, toolResultFailed } from './completion-observations.js';
 import { FILE_MUTATION_TOOLS } from '../tools/diff-generator.js';
+import { isCommandOutcomeBlocked } from '../tools/command-outcome.js';
 
 export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'other';
 
@@ -71,6 +72,7 @@ export function classifyToolEvidence(
   args: Record<string, any> = {},
   result: Record<string, any> = {},
 ): EvidenceKind[] {
+  if (isCommandOutcomeBlocked(result)) return [];
   if (isToolResultFailure(result)) return [];
   if (hasObservedMutation(toolName, result)) return ['mutation'];
   if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];

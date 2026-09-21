@@ -18,19 +18,21 @@ test('Integration Phase 1 & 2: Interactive command is rejected in 0ms without sp
 
   // Bare python REPL
   const res = await tool.execute({ command: 'python' }, workspace);
-  assert.equal(res.success, false);
-  assert.equal(res.errorCode, 'INTERACTIVE_COMMAND_PROHIBITED');
+  assert.equal(res.success, true);
+  assert.equal(res.commandOutcome, 'blocked_preflight');
+  assert.equal(res.processStarted, false);
+  assert.equal(res.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED');
   assert.ok(res.suggestion.includes('python <file.py>'));
 
   // Bare node REPL
   const nodeRes = await tool.execute({ command: 'node' }, workspace);
-  assert.equal(nodeRes.success, false);
-  assert.equal(nodeRes.errorCode, 'INTERACTIVE_COMMAND_PROHIBITED');
+  assert.equal(nodeRes.commandOutcome, 'blocked_preflight');
+  assert.equal(nodeRes.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED');
 
   // Interactive npm init
   const npmInitRes = await tool.execute({ command: 'npm init' }, workspace);
-  assert.equal(npmInitRes.success, false);
-  assert.equal(npmInitRes.errorCode, 'INTERACTIVE_COMMAND_PROHIBITED');
+  assert.equal(npmInitRes.commandOutcome, 'blocked_preflight');
+  assert.equal(npmInitRes.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED');
 });
 
 test('Integration Phase 1 & 2: Long-running dev server requires WaitMsBeforeAsync or is rejected', async () => {
@@ -39,8 +41,8 @@ test('Integration Phase 1 & 2: Long-running dev server requires WaitMsBeforeAsyn
 
   // Without wait parameter: rejected
   const res = await tool.execute({ command: 'npm run dev' }, workspace);
-  assert.equal(res.success, false);
-  assert.equal(res.errorCode, 'LONG_RUNNING_SERVER_REQUIRES_ASYNC');
+  assert.equal(res.commandOutcome, 'blocked_preflight');
+  assert.equal(res.preflightCode, 'LONG_RUNNING_SERVER_REQUIRES_ASYNC');
   assert.ok(res.suggestion.includes('WaitMsBeforeAsync'));
 });
 
@@ -115,9 +117,9 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
     } as any
   );
 
-  assert.equal(res.success, false);
-  assert.equal(res.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
-  assert.match(res.error, /chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa/);
+  assert.equal(res.commandOutcome, 'blocked_preflight');
+  assert.equal(res.preflightCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
+  assert.match(res.message, /chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa/);
 
   // Calling test command after 1 file was modified (ALLOWED to proceed to shell)
   const allowedRes = await tool.execute(
@@ -134,7 +136,7 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
   );
 
   // Allowed to proceed (not blocked by preflight)
-  assert.notEqual(allowedRes.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
+  assert.notEqual(allowedRes.preflightCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
 });
 
 test('Integration Phase 3: Git clone into current directory is blocked by preflight guard', async () => {
@@ -146,9 +148,9 @@ test('Integration Phase 3: Git clone into current directory is blocked by prefli
     workspace
   );
 
-  assert.equal(res.success, false);
-  assert.equal(res.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
-  assert.match(res.error, /thư mục hiện tại/);
+  assert.equal(res.commandOutcome, 'blocked_preflight');
+  assert.equal(res.preflightCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
+  assert.match(res.message, /thư mục hiện tại/);
   assert.match(res.suggestion, /DeepCode/);
 });
 

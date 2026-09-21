@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { detectExplicitGitMutationIntent, normalizeIntentText } from '../tools/git-intent.js';
 import { detectExplicitGitCommandNames } from '../tools/git-command-policy.js';
+import { toolResultFailed } from './completion-observations.js';
 
 export type FinalAnswerGuardRejectionReason =
   | 'deferred-work'
@@ -118,12 +119,7 @@ export class FinalAnswerGuard {
 
   observeToolResult(toolName: string, result: Record<string, any>): void {
     this.observedToolNames.add(toolName);
-    const isFailure = Boolean(
-      result.error
-      || result.errorCode
-      || result.success === false
-      || (typeof result.exitCode === 'number' && result.exitCode !== 0),
-    );
+    const isFailure = toolResultFailed(result);
     if (!isFailure) return;
 
     this.latestFailure = {

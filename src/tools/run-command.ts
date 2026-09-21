@@ -20,6 +20,7 @@ import {
   evaluateCommandPreflight,
   normalizeWindowsCommand,
 } from './command-preflight-guard.js';
+import { annotateCommandResult } from './command-outcome.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -201,7 +202,8 @@ export async function finalizeCommandResult(
   },
   workspace: Workspace
 ): Promise<Record<string, any>> {
-  const exitCode = typeof baseResult.exitCode === 'number' ? baseResult.exitCode : 0;
+  const classifiedResult = annotateCommandResult(baseResult.command, baseResult);
+  const exitCode = typeof classifiedResult.exitCode === 'number' ? classifiedResult.exitCode : 0;
   const cleanStdout = sanitizeTerminalOutput(baseResult.stdout || '');
   const cleanStderr = sanitizeTerminalOutput(baseResult.stderr || '');
   const distilledStdout = distillTestOutput(cleanStdout, exitCode);
@@ -228,12 +230,12 @@ export async function finalizeCommandResult(
   });
 
   return {
-    ...baseResult,
+    ...classifiedResult,
     stdout: truncatedStdout.text,
     stderr: truncatedStderr.text,
     exitCode,
     durationMs: typeof baseResult.durationMs === 'number' ? baseResult.durationMs : 0,
-    success: typeof baseResult.success === 'boolean' ? baseResult.success : (exitCode === 0),
+    success: classifiedResult.success,
     ...(logFilePath ? { logFilePath } : {}),
     ...(truncatedStdout.savedChars > 0 ? { savedTokensEstimate: truncatedStdout.savedTokensEstimate } : {}),
   };
@@ -904,11 +906,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (!preflight.allowed) {
         return {
           command: rawCommand,
-          error: preflight.reason || 'Lệnh bị chặn bởi Pre-flight Guardrail.',
-          errorCode: preflight.errorCode || 'PREFLIGHT_GUARD_REJECTED',
+          message: preflight.reason || 'Lệnh bị chặn bởi Pre-flight Guardrail.',
+          preflightCode: preflight.errorCode || 'PREFLIGHT_GUARD_REJECTED',
           suggestion: preflight.suggestion,
-          success: false,
-          exitCode: 1,
+          commandOutcome: 'blocked_preflight',
+          processStarted: false,
+          success: true,
           durationMs: 1,
         };
       }
@@ -1125,7 +1128,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           // Recover both a missing binary and shell-quoting differences when
           // the deterministic emulator can satisfy the search.
           if (emulated.success || nativeCommandMissing) {
-            return {
+            return annotateCommandResult(rawCommand, {
               command: rawCommand,
               stdout: truncateOutput(emulated.stdout),
               stderr: '',
@@ -1135,7 +1138,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               executionTarget: 'host',
               success: emulated.success,
               emulated: true,
-            };
+            });
           }
         }
 
@@ -1146,7 +1149,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             || hostResult.stderr.includes('not found')
             || hostResult.stderr.includes('not recognized');
           if (emulatedRm.success || nativeCommandMissing) {
-            return {
+            return annotateCommandResult(rawCommand, {
               command: rawCommand,
               stdout: truncateOutput(emulatedRm.stdout),
               stderr: truncateOutput(emulatedRm.stderr),
@@ -1157,7 +1160,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               success: emulatedRm.success,
               emulated: true,
               suggestion: emulatedRm.suggestion,
-            };
+            });
           }
         }
 
@@ -1218,7 +1221,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           const isRg = parseRipgrepCommand(rawCommand);
           if (isRg) {
             const emulated = await executeRipgrepEmulation(isRg, workspace);
-            return {
+            return annotateCommandResult(rawCommand, {
               command: rawCommand,
               stdout: truncateOutput(emulated.stdout),
               stderr: '',
@@ -1228,7 +1231,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               executionTarget: 'auto',
               success: emulated.success,
               emulated: true,
-            };
+            });
           }
         }
 
@@ -1314,7 +1317,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               const isRg = parseRipgrepCommand(effectiveCommand);
               if (isRg) {
                 executeRipgrepEmulation(isRg, workspace).then((emulated) => {
-                  resolve({
+                  resolve(annotateCommandResult(effectiveCommand, {
                     command: effectiveCommand,
                     stdout: truncateOutput(emulated.stdout),
                     stderr: '',
@@ -1324,7 +1327,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     sandbox: 'local',
                     success: emulated.success,
                     emulated: true,
-                  });
+                  }));
                 });
                 return;
               }

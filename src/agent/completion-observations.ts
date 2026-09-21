@@ -1,5 +1,6 @@
 import type { Session, SessionEvent } from '../session/session.js';
 import { FILE_MUTATION_TOOLS } from '../tools/diff-generator.js';
+import { isNonFailingCommandOutcome } from '../tools/command-outcome.js';
 
 export interface CompletionObservation {
   call: SessionEvent;
@@ -10,6 +11,7 @@ export interface CompletionObservation {
 }
 
 export function toolResultFailed(result: Record<string, any>): boolean {
+  if (isNonFailingCommandOutcome(result)) return false;
   return Boolean(result.error || result.errorCode || result.success === false
     || (typeof result.exitCode === 'number' && result.exitCode !== 0));
 }

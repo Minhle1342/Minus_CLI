@@ -2,6 +2,7 @@ import type { Workspace } from '../workspace/workspace.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 import { ErrorDetective, type ErrorDetectiveReport } from './error-detective.js';
+import { isCommandOutcomeBlocked, isNonFailingCommandOutcome } from '../tools/command-outcome.js';
 
 export interface ToolExecutionFeedback {
   toolName: string;
@@ -231,6 +232,14 @@ export class ReflectionEngine {
       'HOST_MEMORY_COMMIT_EXHAUSTED',
     ]);
 
+    if (toolName === 'run_command' && isCommandOutcomeBlocked(result)) {
+      return {
+        isFailure: false,
+        consecutiveFailures: this.consecutiveFailures,
+        advice: `Command was blocked before dispatch (${result.preflightCode || 'PREFLIGHT_GUARD_REJECTED'}): ${result.message || result.suggestion || 'adjust the command before retrying.'}`,
+      };
+    }
+
     // 1. Lỗi môi trường/runtime cần hướng dẫn khắc phục, không phải phân tích stack trace mã nguồn.
     if (toolName === 'run_command' && environmentFailureCodes.has(result.errorCode)) {
       isFailure = true;
@@ -246,7 +255,7 @@ export class ReflectionEngine {
       advice = `${result.errorCode}: ${details}`;
     }
     // 2. Phân tích lệnh run_command thất bại (test failed, build error, syntax error) qua Error Detective
-    else if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0) {
+    else if (toolName === 'run_command' && result.exitCode !== undefined && result.exitCode !== 0 && !isNonFailingCommandOutcome(result)) {
       const commandStr = String(feedback.args?.command || result.command || '');
       const isExploratory = isExploratoryCommand(commandStr, context);
 

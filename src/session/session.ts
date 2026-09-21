@@ -121,7 +121,7 @@ export interface SessionEventData {
     evidence?: Array<{
       toolName: string;
       kind?: EvidenceKind;
-      outcome: 'success' | 'failure';
+      outcome: 'success' | 'failure' | 'blocked';
       summary: string;
       recordedAt: string;
       seq?: number;

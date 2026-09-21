@@ -1,8 +1,9 @@
 import { Session } from '../session/session.js';
 import { classifyToolEvidence, type EvidenceKind, isToolResultFailure } from './completion-evidence.js';
+import { isCommandOutcomeBlocked } from '../tools/command-outcome.js';
 
 export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
-export type PlanEvidenceOutcome = 'success' | 'failure';
+export type PlanEvidenceOutcome = 'success' | 'failure' | 'blocked';
 
 export interface PlanEvidence {
   toolName: string;
@@ -128,6 +129,9 @@ function summarizeToolResult(result: Record<string, any>, outcome: PlanEvidenceO
   if (outcome === 'failure') {
     return String(result.errorCode || result.error || 'tool reported a failure').slice(0, 240);
   }
+  if (outcome === 'blocked') {
+    return String(result.preflightCode || result.message || 'command blocked before dispatch').slice(0, 240);
+  }
   if (typeof result.exitCode === 'number') return `exitCode=${result.exitCode}`;
   if (typeof result.success === 'boolean') return `success=${result.success}`;
   if (typeof result.message === 'string') return result.message.slice(0, 240);
@@ -212,7 +216,7 @@ export class PlanManager {
           evidence: (task.evidence || []).map((item: any) => ({
             toolName: item.toolName,
             kind: item.kind || 'other',
-            outcome: item.outcome === 'failure' ? 'failure' : 'success',
+            outcome: item.outcome === 'failure' ? 'failure' : item.outcome === 'blocked' ? 'blocked' : 'success',
             summary: item.summary,
             recordedAt: item.recordedAt,
             ...(Number.isFinite(item.seq) ? { seq: Number(item.seq) } : {}),
@@ -370,7 +374,9 @@ export class PlanManager {
     if (!activeTask) return;
 
     this.evidenceSeq += 1;
-    const outcome: PlanEvidenceOutcome = isToolResultFailure(result) ? 'failure' : 'success';
+    const outcome: PlanEvidenceOutcome = isCommandOutcomeBlocked(result)
+      ? 'blocked'
+      : isToolResultFailure(result) ? 'failure' : 'success';
     const kinds = classifyToolEvidence(toolName, args, result);
     if (kinds.includes('mutation') && outcome === 'success') {
       this.lastMutationSeq = this.evidenceSeq;

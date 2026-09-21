@@ -324,6 +324,7 @@ export class AgentLoop {
     command: string;
     success: boolean;
     exitCode?: number;
+    commandOutcome?: string;
     filesModifiedSince: number;
   };
 
@@ -2754,8 +2755,11 @@ export class AgentLoop {
             );
             this.lastCommandExecutionState = {
               command: String(toolArgs?.command || toolArgs?.CommandLine || ''),
-              success: !isToolResultFailure(executionResult.result) && (executionResult.result?.exitCode === 0 || executionResult.result?.exitCode === undefined),
+              success: executionResult.result?.commandOutcome !== 'blocked_preflight'
+                && !isToolResultFailure(executionResult.result)
+                && (executionResult.result?.exitCode === 0 || executionResult.result?.exitCode === undefined),
               exitCode: executionResult.result?.exitCode,
+              commandOutcome: executionResult.result?.commandOutcome,
               filesModifiedSince: 0,
             };
 
@@ -3050,7 +3054,8 @@ export class AgentLoop {
             || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
             || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
           if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
-            const isFailure = isToolResultFailure(executionResult.result) || executionResult.result?.exitCode !== 0;
+            const isFailure = isToolResultFailure(executionResult.result)
+              || (executionResult.result?.commandOutcome !== 'blocked_preflight' && executionResult.result?.exitCode !== 0);
             if (isFailure) {
               this.verificationPolicy.recordReproductionAttempt(cmdStr, true);
             }
