@@ -1,6 +1,8 @@
 import { ExactTokenizer } from './exact-tokenizer.js';
 
 export interface DynamicContextInputs {
+  /** P0.8: Instruction Hierarchy Recency Anchor (Strict System Invariants & Anti-Injection) */
+  instructionHierarchyAnchor?: string;
   /** P0.9: Completion command after successful verification. */
   completionDirective?: string;
   /** P1: Chỉ dẫn công cụ kế tiếp từ ToolSynergyAdvisor (CRITICAL - Bảo toàn 100%) */
@@ -124,6 +126,13 @@ export class DynamicContextArbiter {
 
     // 1. Chuẩn hóa và xếp hạng các nguồn theo thứ tự ưu tiên
     const rawSources: RankedSource[] = [
+      {
+        key: 'instructionHierarchyAnchor',
+        name: 'Instruction Hierarchy Anchor (P0.8)',
+        content: (inputs.instructionHierarchyAnchor || '').trim(),
+        priority: 0.8,
+        allowTruncation: false,
+      },
       {
         key: 'completionDirective',
         name: 'Completion Directive (P0.9)',

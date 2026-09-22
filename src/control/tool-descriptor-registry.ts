@@ -352,6 +352,18 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
+    } else if (name === 'update_plan_task') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect', 'edit', 'verify'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (/plan|task/.test(name)) {
       descriptor = {
         name,

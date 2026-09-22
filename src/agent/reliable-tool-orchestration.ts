@@ -25,6 +25,8 @@ export interface ToolRouteInput {
   evidenceSufficient?: boolean;
 }
 
+export type ReliableToolRouteDecision = ToolRouteDecision;
+
 export interface ToolRouteDecision {
   stage: RetrievalStage;
   preferredTool?: string;

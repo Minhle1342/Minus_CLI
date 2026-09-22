@@ -70,6 +70,45 @@ function extractModifiedFiles(session: Session, filesModified?: string[], turn?:
   return new Set([...getTurnCompletionState(session, turn).filesModified, ...(filesModified || [])]);
 }
 
+export type CriticRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+/** Ngưỡng score theo risk thay vì cứng 80: task ít rủi ro không cần điểm cao. */
+const CRITIC_SCORE_THRESHOLD: Record<CriticRiskLevel, number> = {
+  LOW: 60,
+  MEDIUM: 70,
+  HIGH: 80,
+  CRITICAL: 80,
+};
+
+export function resolveCriticScoreThreshold(risk?: string): { level: CriticRiskLevel; threshold: number } {
+  const r = (risk || '').trim().toUpperCase();
+  if (!r) return { level: 'HIGH', threshold: 80 }; // thiếu risk = giữ ngưỡng cũ
+  let level: CriticRiskLevel = 'LOW';
+  if (r === 'R5' || r === 'R4' || r === 'CRITICAL') level = 'CRITICAL';
+  else if (r === 'R3' || r === 'HIGH') level = 'HIGH';
+  else if (r === 'R2' || r === 'MEDIUM') level = 'MEDIUM';
+  return { level, threshold: CRITIC_SCORE_THRESHOLD[level] };
+}
+
+function normalizeDiagPath(p: string): string {
+  return (p || '').trim().replace(/\\/g, '/').toLowerCase();
+}
+
+/** Chỉ giữ lỗi diagnostics thuộc file task vừa sửa (service có thể trả lan sang file khác). */
+export function filterErrorsToModifiedFiles<T extends { file: string }>(errors: T[], modifiedFiles: Iterable<string>): T[] {
+  const targets = new Set([...modifiedFiles].map(normalizeDiagPath).filter(Boolean));
+  if (targets.size === 0) return [...errors];
+  const baseOf = (p: string) => p.split('/').pop() || p;
+  return errors.filter((e) => {
+    const ef = normalizeDiagPath(e.file);
+    if (!ef) return false;
+    for (const t of targets) {
+      if (ef === t || baseOf(ef) === baseOf(t) || ef.endsWith(`/${t}`) || t.endsWith(`/${ef}`)) return true;
+    }
+    return false;
+  });
+}
+
 /**
  * CriticGate - Cổng Phản biện Độc lập (Actor-Critic Dual-Role Architecture)
  * 
@@ -227,6 +266,7 @@ export class CriticGate {
     hasSubmittedSolution?: boolean;
     completionState?: TurnCompletionState;
     evidenceDecision?: CompletionEvidenceDecision;
+    risk?: string;
   }): CriticEvaluation {
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
@@ -280,6 +320,9 @@ export class CriticGate {
       }
     }
 
+    // Nới lỏng: LSP error chỉ block khi thuộc file task vừa sửa.
+    lspErrors = filterErrorsToModifiedFiles(lspErrors, targetFiles);
+
     if (lspErrors.length > 0) {
       score = 0; // HARD ZERO SCORE: Lỗi cú pháp hoặc NameError là vi phạm bất biến nghiêm trọng
       invariantViolations.push(`Detected ${lspErrors.length} unresolved syntax / compiler / missing import error(s).`);
@@ -322,8 +365,9 @@ export class CriticGate {
       }
     }
 
-    // Hard Gate: Không bao giờ approve nếu còn bất kỳ lỗi compiler / syntax / missing import nào
-    const approved = lspErrors.length === 0 && score >= 80 && evidenceDecision.allow;
+    // Ngưỡng score theo risk (LOW 60 / MEDIUM 70 / HIGH-CRITICAL 80), thiếu risk giữ ngưỡng cũ 80.
+    const { level: riskLevel, threshold: scoreThreshold } = resolveCriticScoreThreshold(params.risk);
+    const approved = lspErrors.length === 0 && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,
@@ -340,7 +384,7 @@ export class CriticGate {
     let critiquePrompt: string | undefined;
     if (!approved) {
       const promptParts: string[] = [
-        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
+        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100 (threshold ${scoreThreshold} for ${riskLevel} risk)]:`,
         `Task completion rejected by independent Verifier due to unsatisfied invariants:`,
       ];
 
@@ -386,6 +430,7 @@ export class CriticGate {
     hasSubmittedSolution?: boolean;
     completionState?: TurnCompletionState;
     evidenceDecision?: CompletionEvidenceDecision;
+    risk?: string;
   }): Promise<CriticEvaluation> {
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
@@ -432,6 +477,9 @@ export class CriticGate {
       } catch {}
     }
 
+    // Nới lỏng: LSP error chỉ block khi thuộc file task vừa sửa.
+    lspErrors = filterErrorsToModifiedFiles(lspErrors, targetFiles);
+
     if (lspErrors.length > 0) {
       score = 0; // HARD ZERO SCORE
       invariantViolations.push(`Detected ${lspErrors.length} unresolved syntax / compiler / missing import error(s).`);
@@ -474,8 +522,9 @@ export class CriticGate {
       }
     }
 
-    // Hard Gate: Không bao giờ approve nếu còn bất kỳ lỗi compiler / syntax / missing import nào
-    const approved = lspErrors.length === 0 && score >= 80 && evidenceDecision.allow;
+    // Ngưỡng score theo risk (LOW 60 / MEDIUM 70 / HIGH-CRITICAL 80), thiếu risk giữ ngưỡng cũ 80.
+    const { level: riskLevel, threshold: scoreThreshold } = resolveCriticScoreThreshold(params.risk);
+    const approved = lspErrors.length === 0 && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,
@@ -492,7 +541,7 @@ export class CriticGate {
     let critiquePrompt: string | undefined;
     if (!approved) {
       const promptParts: string[] = [
-        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100]:`,
+        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100 (threshold ${scoreThreshold} for ${riskLevel} risk)]:`,
         `Task completion rejected by independent Verifier due to unsatisfied invariants:`,
       ];
 

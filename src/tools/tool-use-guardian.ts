@@ -24,6 +24,9 @@ export type ToolFailureCategory =
   | 'NETWORK_FAILURE'
   | 'PRE_MUTATION_GATE_BLOCKED'
   | 'POST_SUBMISSION_TOOL_CALL_BLOCKED'
+  | 'AUTHORIZATION_DENIED'
+  | 'BUDGET_EXHAUSTED'
+  | 'SECURITY_VIOLATION'
   | 'UNKNOWN_ERROR';
 
 export interface ToolFailureDiagnosis {

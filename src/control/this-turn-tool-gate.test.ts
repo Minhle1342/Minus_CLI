@@ -125,6 +125,7 @@ test('phase-based tool scoping includes previously omitted registry tools', () =
   assert.ok(verifyDecision.allowedToolNames.includes('run_command'), 'run_command must be allowed in verify');
   assert.ok(verifyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in verify');
   assert.ok(verifyDecision.allowedToolNames.includes('get_diagnostics'), 'get_diagnostics must be allowed in verify');
+  assert.ok(verifyDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in verify');
   assert.equal(verifyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in verify');
 });
 

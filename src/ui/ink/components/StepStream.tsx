@@ -4,6 +4,36 @@ import { TuiStepItem } from '../types.js';
 
 export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/**
+ * Chấm tròn nhấp nháy trước tool calling — chỉ dùng Box/Text của Ink + React state.
+ * active=true (tool đang chạy): chớp tắt đỏ ●/space mỗi 400ms (space giữ nguyên
+ * width 1 cell nên không vỡ layout; dùng space thay vì ○ vì ○ render gần như
+ * giống hệt ● trên nhiều font terminal Windows → tưởng là không blink).
+ * active=false (đã xong): chấm xám tĩnh để giữ thẳng hàng.
+ */
+export const BlinkingDot: React.FC<{ active?: boolean }> = ({ active = true }) => {
+  const [visible, setVisible] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!active) return;
+    setVisible(true);
+    const timer = setInterval(() => {
+      setVisible((v) => !v);
+    }, 400);
+    return () => clearInterval(timer);
+  }, [active]);
+
+  if (!active) {
+    return (
+      <Text color="gray">●</Text>
+    );
+  }
+
+  return (
+    <Text color="red" bold>{visible ? '●' : ' '}</Text>
+  );
+};
+
 export const LoadingSpinner: React.FC<{ startTime?: number }> = ({ startTime }) => {
   const [frameIndex, setFrameIndex] = React.useState(0);
   const [elapsedMs, setElapsedMs] = React.useState(0);
@@ -117,12 +147,12 @@ export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
     : String(rawErr);
 
   // Nếu chuỗi chứa nhiều dòng, chuẩn hóa
-  const lines = errStr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lines = errStr.split(/\r?\n/).map((l: string) => l.trim()).filter(Boolean);
   if (lines.length === 0) return '';
 
   // 1. Xử lý [SYSTEM EVIDENCE GATE]
   if (/\[SYSTEM EVIDENCE GATE\]/i.test(errStr)) {
-    const reasonLine = lines.find((l) => /^-\s+|^•\s+|^(?:No successful|The request|The final answer)/i.test(l));
+    const reasonLine = lines.find((l: string) => /^-\s+|^•\s+|^(?:No successful|The request|The final answer)/i.test(l));
     if (reasonLine) {
       const cleanReason = reasonLine.replace(/^[-•]\s*/, '').trim();
       errStr = `[SYSTEM EVIDENCE GATE]: ${cleanReason}`;
@@ -132,7 +162,7 @@ export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
   }
   // 2. Xử lý [CRITIC GATE REJECTION]
   else if (/\[CRITIC GATE REJECTION/i.test(errStr)) {
-    const reasonLine = lines.find((l) => /^(?:❌|•|\[HARD)/i.test(l));
+    const reasonLine = lines.find((l: string) => /^(?:❌|•|\[HARD)/i.test(l));
     if (reasonLine) {
       errStr = `[CRITIC GATE]: ${reasonLine.replace(/^[❌•]\s*/, '').trim()}`;
     } else {
@@ -142,7 +172,7 @@ export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
   // 3. Xử lý các trường hợp chứa "Command failed: C:\...\node.exe ..."
   else if (/Command failed:\s*/i.test(errStr)) {
     // 1. Tìm dòng lỗi ngoại lệ thực sự (TypeError, SyntaxError, Error, v.v.)
-    const exceptionLine = lines.find((l) =>
+    const exceptionLine = lines.find((l: string) =>
       /(?:(?:[A-Z][a-zA-Z0-9_]*Error|Error|FATAL ERROR|ERR_[A-Z0-9_]+)(?:\s*\[[^\]]+\])?:\s*[^\n]+)/.test(l) &&
       !/^Command failed:\s*/i.test(l)
     );
@@ -153,7 +183,7 @@ export function formatTuiErrorDetail(rawErr: unknown, maxLen = 140): string {
       errStr = exitCodePrefix ? `${exitCodePrefix[0]} ${exceptionLine}` : exceptionLine;
     } else {
       // Tìm dòng không phải command invocation, không phải stack trace
-      const nonCmdLines = lines.filter((l) => !/^Command failed:\s*/i.test(l) && !/^at\s+/i.test(l) && !/^\^/i.test(l) && !/^Node\.js v/i.test(l));
+      const nonCmdLines = lines.filter((l: string) => !/^Command failed:\s*/i.test(l) && !/^at\s+/i.test(l) && !/^\^/i.test(l) && !/^Node\.js v/i.test(l));
       if (nonCmdLines.length > 0) {
         const exitCodePrefix = errStr.match(/^(?:Script execution failed with exit code \d+|Command failed with exit code \d+):/i);
         errStr = exitCodePrefix ? `${exitCodePrefix[0]} ${nonCmdLines[0]}` : nonCmdLines[0];
@@ -192,8 +222,6 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
   return (
     <Box flexDirection="column" marginY={0} paddingX={1}>
       {visibleSteps.map((step) => {
-        const p = step.phase;
-
         const args = (step && typeof step.args === 'object' && step.args !== null) ? step.args : {};
         const rawTarget = formatToolTargetWithLines(step.toolName, args);
         const displayTarget = rawTarget.length > 40 && (rawTarget.includes('/') || rawTarget.includes('\\') || rawTarget.includes(':'))
@@ -240,8 +268,7 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
         return (
           <Box key={step.id} flexDirection="column">
             <Box gap={1}>
-              <Text color="red" bold>[{p}]</Text>
-              <Text color="red">›</Text>
+              <BlinkingDot active={step.status === 'running'} />
               <Text bold color="white">{step.toolName}</Text>
               <Text color="gray">{targetStr}</Text>
               {statusElement}

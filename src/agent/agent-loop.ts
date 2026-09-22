@@ -20,7 +20,7 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
@@ -1294,6 +1294,14 @@ export class AgentLoop {
       // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
       if (hasSubmittedSolution) {
         activeToolDeclarations = [];
+      } else if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
+        const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
+        if (!hasUpdatePlan) {
+          const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
+          if (updatePlanDecl) {
+            activeToolDeclarations.push(updatePlanDecl);
+          }
+        }
       }
 
       const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
@@ -1751,6 +1759,7 @@ export class AgentLoop {
       // provides the footprint used by latency guidance; the final pass includes it.
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
       const arbitrationInputs = {
+        instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
         completionDirective,
         advicePrompt: effectiveAdvicePrompt,
         testVerificationEncouragement,
@@ -2439,6 +2448,8 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
             if (!this._collapsePreferences.compactSteps) {
               CLI.renderToolCall(toolName, toolArgs);
+            } else {
+              CLI.startToolDotSpinner(toolName, toolArgs);
             }
           }
 
@@ -2668,6 +2679,7 @@ export class AgentLoop {
             }
           }
 
+          CLI.stopToolDotSpinner();
           if (this._collapsePreferences.compactSteps) {
             CLI.renderCompactOneLiner({
               step,
@@ -3014,8 +3026,15 @@ export class AgentLoop {
           }
 
           // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
+          if (executionResult.result?._untrusted_context?.quarantined && executionResult.result?._untrusted_context?.warning) {
+            CLI.renderReflectionAlert(1, executionResult.result._untrusted_context.warning);
+          }
+
           const payloadToRecord = {
             ...executionResult.result,
+            ...(executionResult.result?._untrusted_context?.warning
+              ? { _system_untrusted_injection_warning: executionResult.result._untrusted_context.warning }
+              : {}),
             ...(lspPreExecutionWarning
               ? { _system_pre_execution_lsp_warning: lspPreExecutionWarning }
               : {}),
@@ -3363,6 +3382,7 @@ export class AgentLoop {
           filesModified: completionState.filesModified,
           completionState,
           evidenceDecision,
+          risk: initialTurnClassification.risk,
         });
       let ocrDecision: OcrGateDecision = {
         allow: true,

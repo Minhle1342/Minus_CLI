@@ -33,6 +33,7 @@ import {
   SECTION_PHASE_RELEASE_GUIDANCE,
   resolvePhaseDynamicGuidance,
   type PhaseGuidanceOptions,
+  SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
 } from './prompt-sections.js';
 import { PromptAssembler } from './prompt-assembler.js';
 
@@ -62,6 +63,7 @@ export {
   SECTION_PHASE_RELEASE_GUIDANCE,
   resolvePhaseDynamicGuidance,
   type PhaseGuidanceOptions,
+  SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
 };
 
 /**

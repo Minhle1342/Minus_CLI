@@ -6,7 +6,7 @@ import { assertHistoryToolPairing } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
 import { nativeCompactHistory } from '../native/index.js';
-import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
+import type { ArchivedTurnDocument, FileDeltaRecord } from '../context/turn-memory-retriever.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -390,6 +390,8 @@ export class ContextCompactor {
     const assistantThoughts: string[] = [];
     const toolsUsed: string[] = [];
     const filesTouched: string[] = [];
+    const fileDeltas: FileDeltaRecord[] = [];
+    const highSaliencyTraces: string[] = [];
     const keyDecisions: string[] = [];
 
     for (const msg of turnMessages) {
@@ -398,6 +400,13 @@ export class ContextCompactor {
           if (p.text && !p.functionResponse) {
             userPrompt += (userPrompt ? ' ' : '') + p.text;
           }
+          if (p.functionResponse && isVerificationOrFailure(p.functionResponse)) {
+            const resp = p.functionResponse.response as Record<string, any> | undefined;
+            const errSummary = resp?.error || resp?.message || (resp?.exitCode !== undefined && resp.exitCode !== 0 ? `Exit code ${resp.exitCode}` : undefined);
+            if (errSummary) {
+              highSaliencyTraces.push(`[FAILED ${p.functionResponse.name}]: ${String(errSummary).slice(0, 160)}`);
+            }
+          }
         }
       } else if (msg.role === 'model') {
         for (const p of msg.parts || []) {
@@ -405,13 +414,25 @@ export class ContextCompactor {
             assistantThoughts.push(p.text);
           }
           if (p.functionCall) {
-            if (p.functionCall.name) {
-              toolsUsed.push(p.functionCall.name);
+            const toolName = p.functionCall.name || '';
+            if (toolName) {
+              toolsUsed.push(toolName);
             }
             const args = p.functionCall.args as Record<string, any> | undefined;
             const pathArg = args?.path || args?.filePath || args?.targetFile;
             if (pathArg && typeof pathArg === 'string') {
               filesTouched.push(pathArg);
+              if (toolName.includes('create_file')) {
+                fileDeltas.push({ path: pathArg, action: 'created', summary: 'File created' });
+              } else if (toolName.includes('delete_file')) {
+                fileDeltas.push({ path: pathArg, action: 'deleted', summary: 'File deleted' });
+              } else if (toolName.includes('replace_text') || toolName.includes('apply_patch') || toolName.includes('write_file') || toolName.includes('replace_file_content')) {
+                const sym = args?.symbol ? [String(args.symbol)] : undefined;
+                fileDeltas.push({ path: pathArg, action: 'modified', modifiedSymbols: sym, summary: `Modified via ${toolName}` });
+              } else {
+                const sym = args?.symbol ? [String(args.symbol)] : undefined;
+                fileDeltas.push({ path: pathArg, action: 'read', modifiedSymbols: sym, summary: sym ? `Read symbol ${args.symbol}` : 'Read file' });
+              }
             }
           }
         }
@@ -447,6 +468,8 @@ export class ContextCompactor {
       assistantSummary: summaryText.trim(),
       toolsUsed: uniqueTools,
       filesTouched: uniqueFiles,
+      fileDeltas,
+      highSaliencyTraces: Array.from(new Set(highSaliencyTraces)).slice(0, 5),
       keyDecisions: uniqueDecisions,
       timestamp: new Date().toISOString(),
     };
@@ -516,10 +539,43 @@ export class ContextCompactor {
     const allTouched = Array.from(new Set(archivedTurns.flatMap((t) => t.filesTouched)));
     const allDecisions = Array.from(new Set(archivedTurns.flatMap((t) => t.keyDecisions))).slice(0, 10);
     const allTools = Array.from(new Set(archivedTurns.flatMap((t) => t.toolsUsed)));
+    const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
+    const allHighSaliency = Array.from(new Set(archivedTurns.flatMap((t) => t.highSaliencyTraces || []))).slice(0, 6);
 
-    const artifactLines = allTouched.length > 0
-      ? allTouched.map((f) => `- [TOUCHED] ${f}`)
-      : ['- No workspace files modified in archived turns.'];
+    const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
+    const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
+
+    const artifactLines: string[] = [];
+    if (mutatedDeltas.length > 0) {
+      const groupedMutations = new Map<string, { action: string; symbols: Set<string> }>();
+      for (const d of mutatedDeltas) {
+        if (!groupedMutations.has(d.path)) {
+          groupedMutations.set(d.path, { action: d.action, symbols: new Set() });
+        }
+        const entry = groupedMutations.get(d.path)!;
+        (d.modifiedSymbols || []).forEach((s) => entry.symbols.add(s));
+      }
+      groupedMutations.forEach((val, path) => {
+        const symbolStr = val.symbols.size > 0 ? ` (symbols: ${Array.from(val.symbols).join(', ')})` : '';
+        artifactLines.push(`- [${val.action.toUpperCase()}] ${path}${symbolStr}`);
+      });
+    }
+    if (readOnlyFiles.length > 0) {
+      readOnlyFiles.slice(0, 8).forEach((f) => {
+        artifactLines.push(`- [READ-ONLY] ${f}`);
+      });
+    }
+    if (artifactLines.length === 0) {
+      artifactLines.push('- No workspace files modified or inspected in archived turns.');
+    }
+
+    const highSaliencySection = allHighSaliency.length > 0
+      ? [
+          ``,
+          `## 3. High-Saliency Traces & Repro Proof (Preserved)`,
+          ...allHighSaliency.map((trace) => `- ${trace}`),
+        ]
+      : [];
 
     const totalArchivedTurns = priorSynopsisLines.length + oldUserTurnIndices.length;
     const turnRangeLabel = totalArchivedTurns === 1 ? 'TURN 1' : `TURNS 1 to ${totalArchivedTurns}`;
@@ -530,17 +586,18 @@ export class ContextCompactor {
       `## 1. Session Intent`,
       sessionIntent,
       ``,
-      `## 2. Artifact Trail (Files Modified / Inspected)`,
+      `## 2. Artifact Trail (Files Modified & Inspected)`,
       ...artifactLines,
+      ...highSaliencySection,
       ``,
-      `## 3. Decisions Made`,
+      `## 4. Decisions Made`,
       ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Tuân thủ quy chuẩn kỹ thuật của codebase.']),
       ``,
-      `## 4. Current State & Tools Executed`,
+      `## 5. Current State & Tools Executed`,
       `- Đã thực thi các công cụ: ${allTools.slice(0, 8).join(', ') || 'none'}`,
       `- Trạng thái: Các lượt trao đổi cũ đã được đóng gói an toàn và lưu vết bất biến.`,
       ``,
-      `## 5. Next Steps`,
+      `## 6. Next Steps`,
       `- Tiếp tục thực thi nhiệm vụ trên các tệp tin trong active sliding window.`,
       ``,
       `### Chronological Turn Index`,
@@ -687,14 +744,23 @@ export class ContextCompactor {
       ? toolResultIndices[toolResultIndices.length - effectivePreserveLastN]
       : -1;
 
-    // 3. Tiến hành Adaptive Context Pruning (Observation Masking & Superseded Deduplication)
+    // 3. Tiến hành Adaptive Context Pruning (Saliency-Aware Observation Masking & Superseded Deduplication)
     const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
       const isOldToolResult = cutoffIndex >= 0
         && msgIdx < cutoffIndex
         && !protectedToolResultIndices.has(msgIdx)
         && msg.parts?.some((p) => p.functionResponse);
 
-      if (!isOldToolResult) {
+      const isLowSaliencyEager = (options?.cognitivePhase === 'implement' || options?.cognitivePhase === 'verify')
+        && toolResultIndices.length > 1
+        && msgIdx < toolResultIndices[toolResultIndices.length - 1]
+        && !protectedToolResultIndices.has(msgIdx)
+        && msg.parts?.some((p: any) => {
+          const name = String(p.functionResponse?.name || '').toLowerCase();
+          return name.includes('list_files') || name.includes('search_') || name.includes('pack_codebase') || name.includes('read_compressed');
+        });
+
+      if (!isOldToolResult && !isLowSaliencyEager) {
         return msg;
       }
 

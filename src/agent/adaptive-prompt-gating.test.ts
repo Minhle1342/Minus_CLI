@@ -127,3 +127,15 @@ test('StepPromptPolicy recognizes initial bug report in actionableAdvice', () =>
   const decision = policy.decide(bugContext, 'enforce');
   assert.equal(decision.advicePrompt, '[5-STAGE ROOT CAUSE PROTOCOL] User reported a bug', 'Initial bug report kích hoạt actionable advice');
 });
+
+test('DynamicContextArbiter places instructionHierarchyAnchor at top priority P0.8 without truncation', () => {
+  const arbiter = new DynamicContextArbiter(2000);
+  const anchor = '🔒 [INSTRUCTION HIERARCHY ANCHOR]: Level 1 System Invariants strictly govern this turn.';
+  const result = arbiter.arbitrate({
+    instructionHierarchyAnchor: anchor,
+    advicePrompt: 'Some advice',
+  });
+  assert.ok(result.renderedContext.startsWith(anchor), 'Anchor is placed at top priority');
+  assert.ok(result.sourcesIncluded.includes('Instruction Hierarchy Anchor (P0.8)'));
+});
+

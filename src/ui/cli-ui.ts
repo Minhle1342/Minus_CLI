@@ -1100,6 +1100,71 @@ export class CLI {
     this.thinkingSpinnerVisible = false;
   }
 
+  private static toolDotTimer?: ReturnType<typeof setInterval>;
+  private static toolDotDelay?: ReturnType<typeof setTimeout>;
+  private static toolDotVisible = false;
+  private static toolDotOn = true;
+  private static toolDotStartedAt = 0;
+  private static toolDotLabel = '';
+
+  /**
+   * Dot nhấp nháy trên dòng CLI trong lúc chờ tool result (compact mode).
+   * Ghi đè cùng 1 dòng bằng \r (như thinking spinner). Hiện trễ 300ms để tool
+   * nhanh không bị chớp giật; TTY-guard nên log pipe/file không đổi.
+   */
+  static startToolDotSpinner(toolName: string, args: Record<string, any>): void {
+    this.stopToolDotSpinner();
+    if (!process.stdout.isTTY) return;
+
+    this.stopThinkingSpinner();
+    const rawTarget = (args && typeof args === 'object')
+      ? (args.path || args.filePath || args.targetFile
+        || args.command || args.query || args.statement || args.summary || '')
+      : '';
+    const targetStr = rawTarget ? ` "${truncateDisplayText(String(rawTarget), 40)}"` : '';
+    this.toolDotLabel = ` ${c.bold}${toolName}${c.reset}${c.white}${targetStr}${c.reset}`;
+
+    this.toolDotDelay = setTimeout(() => {
+      this.toolDotDelay = undefined;
+      this.toolDotVisible = true;
+      this.toolDotOn = true;
+      this.toolDotStartedAt = Date.now();
+      const render = () => {
+        const elapsed = ((Date.now() - this.toolDotStartedAt) / 1000).toFixed(1);
+        const dot = this.toolDotOn ? `${c.crimson}●${c.reset}` : ' ';
+        process.stdout.write(`\r\x1b[2K ${dot}${this.toolDotLabel} ${c.slate}(${elapsed}s)${c.reset}`);
+        this.toolDotOn = !this.toolDotOn;
+      };
+      render();
+      this.toolDotTimer = setInterval(render, 400);
+      this.toolDotTimer.unref?.();
+    }, 300);
+    this.toolDotDelay.unref?.();
+  }
+
+  static stopToolDotSpinner(): void {
+    if (this.toolDotDelay) {
+      clearTimeout(this.toolDotDelay);
+      this.toolDotDelay = undefined;
+    }
+    if (this.toolDotTimer) {
+      clearInterval(this.toolDotTimer);
+      this.toolDotTimer = undefined;
+    }
+    if (this.toolDotVisible) {
+      if (process.stdout.isTTY) {
+        process.stdout.write('\r\x1b[2K');
+      }
+      this.toolDotVisible = false;
+    }
+    this.toolDotLabel = '';
+  }
+
+  /** Dot có đang chờ hiện/đang blink không (để prompt khác nhường dòng rồi resume). */
+  static isToolDotActive(): boolean {
+    return this.toolDotDelay !== undefined || this.toolDotTimer !== undefined || this.toolDotVisible;
+  }
+
   /**
    * Header mở đầu tối giản, hiện đại (3 dòng, không chiếm diện tích terminal)
    */
@@ -1662,8 +1727,8 @@ export class CLI {
    * Đầu mỗi Step: 1 dòng phân cách mảnh, trang nhã (Zero noise)
    */
   static renderStepHeader(
-    step: number,
-    maxSteps: number,
+    _step: number,
+    _maxSteps: number,
     context?: {
       phase?: string;
       activeTask?: string;
@@ -1672,12 +1737,9 @@ export class CLI {
       isGoal?: boolean;
     },
   ): void {
-    const isUnlimited = !isFinite(maxSteps) || maxSteps >= 9999;
-    const progress = isUnlimited ? `${step}/∞` : `${step}/${maxSteps}`;
-    const tag = context?.phase ? `[${context.phase.toUpperCase()}]` : `STEP ${progress}`;
-    const taskTag = context?.activeTask ? ` ── "${truncateDisplayText(context.activeTask, 40)}"` : '';
+    const taskTag = context?.activeTask ? `─── "${truncateDisplayText(context.activeTask, 40)}" ───` : '────────────────────────────────────────';
 
-    console.log(`\n${c.slate}─── ${tag}${taskTag} ───────────────────────────────────────${c.reset}`);
+    console.log(`\n${c.slate}${taskTag}──────────────────────────────────────${c.reset}`);
   }
 
   /**
@@ -1836,22 +1898,13 @@ export class CLI {
 
   /**
    * Antigravity CLI Standard: Compact One-Liner Step Log
-   * Gộp Phase + Step + Tool + Target + Status + Duration + Telemetry thành 1 dòng duy nhất (giảm 75% I/O)
+   * Gộp Tool + Target + Status + Duration + Telemetry thành 1 dòng duy nhất (giảm 75% I/O)
    */
   static renderCompactOneLiner(opts: CompactStepOptions): void {
     const isError = isToolResultFailure(opts.result);
-    const p = (opts.phase || 'step').toUpperCase();
-    const isUnlimited = !isFinite(opts.maxSteps) || opts.maxSteps >= 9999;
-    const stepTag = isUnlimited ? `${opts.step}/∞` : `${opts.step}/${opts.maxSteps}`;
 
-    let phaseColor = c.slate;
-    if (p === 'EXPLORE') phaseColor = c.geminiCyan;
-    else if (p === 'IMPLEMENT') phaseColor = c.geminiAmber;
-    else if (p === 'VERIFY') phaseColor = c.emerald;
-    else if (p === 'RELEASE') phaseColor = c.brightMagenta;
-
-    const badge = `${phaseColor}[${p}:${stepTag}]${c.reset}`;
-    const toolPrefix = `${c.brightCyan}›${c.reset} ${c.bold}${opts.toolName}${c.reset}`;
+    const dot = `${c.crimson}●${c.reset}`;
+    const toolPrefix = `${dot} ${c.bold}${opts.toolName}${c.reset}`;
 
     const rawTarget = opts.args.path || opts.args.filePath || opts.args.targetFile
       || opts.args.command || opts.args.query || opts.args.statement || opts.args.summary || '';
@@ -1882,7 +1935,7 @@ export class CLI {
       telemetryStr = ` ${c.dim}· ${tokStr}${c.reset}`;
     }
 
-    process.stdout.write(`  ${badge} ${toolPrefix}${targetStr}${statusBadge}${duration}${telemetryStr}\n`);
+    process.stdout.write(`  ${toolPrefix}${targetStr}${statusBadge}${duration}${telemetryStr}\n`);
 
     if (isError) {
       const firstStderrLine = opts.result.stderr ? String(opts.result.stderr).trim().split('\n')[0] : '';

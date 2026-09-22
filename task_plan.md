@@ -27,7 +27,7 @@ Khắc phục các điểm yếu của hệ thống công cụ đọc/khảo sá
   - *Verification:* Chạy test suite.
 
 ### Phase 3: Smart Chunking & Progressive Disclosure cho `read_file`
-- [ ] **Task 3.1:** Thêm cơ chế tự động gợi ý dải dòng tiếp theo (`nextStartLine`) khi file vượt quá giới hạn 800 dòng.
+- [x] **Task 3.1:** Thêm cơ chế tự động gợi ý dải dòng tiếp theo (`nextStartLine`) khi file vượt quá giới hạn 800 dòng.
   - *Target Files:* `src/tools/read-file.ts` (hoặc module xử lý đọc file tương đương)
   - *Concrete Code Logic:* Thêm metadata phản hồi phân trang (`hasMore: boolean`, `nextStartLine: number`) khi file bị cắt cụt.
   - *Verification:* Chạy unit test đọc file lớn.
@@ -36,3 +36,10 @@ Khắc phục các điểm yếu của hệ thống công cụ đọc/khảo sá
 - [ ] **Task 4.1:** Thêm giới hạn số lượng node tối đa (`maxNodes: number` mặc định 50) và bộ lọc loại bỏ node lá trùng lặp trong `query_call_graph`.
   - *Target Files:* `src/tools/codebase-intelligence.ts`
   - *Verification:* Chạy kiểm tra biên độ payload và `npm run build`.
+
+### Phase 5: Instruction Prioritization & Defense-in-Depth (Hoàn thành)
+- [x] **Task 5.1:** Đánh giá học thuật và State-of-the-Art về Instruction Hierarchy (OpenAI 2024, IH-Challenge 2025/2026).
+- [x] **Task 5.2:** Tích hợp Ma trận Phân xử Xung đột Hình thức (Formal Conflict Arbitration Matrix: Rule A-D) vào `CORE_SYSTEM_PROMPT` trong `src/llm/prompt-sections.ts` với budget < 1500 tokens.
+- [x] **Task 5.3:** Giải quyết triệt để Lost-in-the-Middle bằng Recency Anchoring qua `SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR` và `DynamicContextArbiter` tại Priority 0.8.
+- [x] **Task 5.4:** Triển khai Cách ly Ngữ cảnh Bất tín & Quét Injection Cấp độ 5 (Level 5 Untrusted Context Sandboxing & Quarantine) trong `ToolRunner` (Stage 5.5) và `AgentLoop`.
+- [x] **Task 5.5:** Kiểm chứng tự động (8/8 tests pass trong `tool-runner.test.ts`, 7/7 pass trong `adaptive-prompt-gating.test.ts`, 14/14 pass trong `context-budget-manager.test.ts`).

@@ -192,6 +192,10 @@ export class ToolRetriever {
         selectedToolNames.add(anchor);
       }
     }
+    // Bảo lưu công cụ cập nhật tiến độ công việc nếu đã được cấp quyền trong activePool
+    if (activePoolMap.has('update_plan_task')) {
+      selectedToolNames.add('update_plan_task');
+    }
 
     // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph
     if (cleanedQuery.length > 0 || lastToolName) {
@@ -288,6 +292,7 @@ export class ToolRetriever {
   private hierarchyBoost(query: string, category: string, toolName: string): number {
     const q = query.toLowerCase();
     let boost = 0;
+    if (/(plan|task|milestone|roadmap|kế hoạch|giai đoạn)/i.test(q) && (category === 'planning' || /plan|task/.test(toolName))) boost += 0.25;
     if (/(error|exception|diagnostic|failed|failure)/.test(q) && /diagnostic|inspect|symbol|call_graph/.test(toolName)) boost += 0.18;
     if (/(caller|callee|dependency|impact|symbol|architecture|graph)/.test(q) && category === 'code_intelligence') boost += 0.16;
     if (/(test|verify|build|compile)/.test(q) && /run|diagnostic|test|command/.test(toolName)) boost += 0.14;
@@ -402,6 +407,9 @@ export class ToolRetriever {
     }
     if (text.includes('game') || text.includes('tilemap') || text.includes('pixel') || text.includes('sprite') || text.includes('physics') || text.includes('hitbox') || text.includes('jump') || text.includes('fsm') || text.includes('unity') || text.includes('scene') || text.includes('prefab')) {
       tags.add('game development unity editor scene prefab hierarchy component serializedobject wire reference 2d 3d pixel tilemap sprite animation atlas physics hitbox collision jump kinematic fsm state machine godot phaser canvas');
+    }
+    if (text.includes('plan') || text.includes('task') || text.includes('milestone') || text.includes('roadmap') || text.includes('kế hoạch')) {
+      tags.add('plan planning task milestone roadmap step phase progress todo dag kế hoạch công việc');
     }
 
     return Array.from(tags).join(' ');

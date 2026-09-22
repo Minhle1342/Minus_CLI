@@ -6,6 +6,13 @@ import { getNativeCore } from '../native/index.js';
 import type { MaskedObservationRecord } from '../agent/context-compactor.js';
 import { LivingPlaybookManager } from './living-playbook.js';
 
+export interface FileDeltaRecord {
+  path: string;
+  action: 'read' | 'created' | 'modified' | 'deleted';
+  modifiedSymbols?: string[];
+  summary?: string;
+}
+
 export interface ArchivedTurnDocument {
   id: string;
   turnNumber: number;
@@ -13,6 +20,8 @@ export interface ArchivedTurnDocument {
   assistantSummary: string;
   toolsUsed: string[];
   filesTouched: string[];
+  fileDeltas?: FileDeltaRecord[];
+  highSaliencyTraces?: string[];
   keyDecisions: string[];
   timestamp: string;
   vector?: number[];

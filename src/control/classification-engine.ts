@@ -90,6 +90,9 @@ export class ClassificationEngine {
     } else if (verifyIntent.test(normalizedText)) {
       taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
       capabilities = ['inspect', 'execute', 'verify', 'git-read'];
+      if (input.hasPlan) {
+        capabilities.push('plan');
+      }
       reasons.push('VERIFICATION_INTENT');
     } else if (exploreIntent.test(normalizedText)) {
       taskClass = 'exploration';

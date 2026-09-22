@@ -17,7 +17,6 @@ export const Header: React.FC<HeaderProps> = ({
   workspacePath,
   sandboxMode,
   status,
-  activePhase,
 }) => {
   const safeWorkspace = workspacePath || '';
   const shortWorkspace = safeWorkspace.length > 30 ? `…${safeWorkspace.slice(-28)}` : safeWorkspace;
@@ -53,10 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
           <Text color="gray">📁 {shortWorkspace}</Text>
         </Box>
       </Box>
-      <Box justifyContent="space-between" marginTop={0}>
-        <Box gap={1}>
-          <Text color="red" bold>[{activePhase}]</Text>
-        </Box>
+      <Box justifyContent="flex-end" marginTop={0}>
         <Box gap={1}>
           <Text color="gray">Trạng thái:</Text>
           <Text color={statusColor} bold>{statusLabel}</Text>

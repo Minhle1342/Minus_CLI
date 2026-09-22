@@ -195,8 +195,11 @@ export class CompletionEvidenceGate {
     if (!hasCertifiedSubmission && (options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
-    if (!hasCertifiedSubmission && (options.taskClass === 'bugfix' || options.taskClass === 'security') && options.hasReproduction === false && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
-      reasons.push('Bugfix resolution requires verified reproduction test evidence (fail-to-pass proof) before completion.');
+    // Nới lỏng: verification pass sau mutation cuối (test pass / get_diagnostics sạch)
+    // được tính là reproduction đủ — không bắt buộc fail-to-pass proof riêng.
+    const hasReproProof = options.hasReproduction === true || verifications.length > 0;
+    if (!hasCertifiedSubmission && (options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+      reasons.push('Bugfix resolution requires verification evidence after the fix (reproduction proof or a passing test/diagnostics run) before completion.');
     }
 
     // Collect string fragments from executed tool results so quotes/summaries of logs are not misclassified as new claims
@@ -374,8 +377,20 @@ export class CompletionEvidenceGate {
         },
       ];
 
+      // Nới lỏng "blocker honesty": báo cáo blocker CỤ THỂ (nêu rõ check không chạy
+      // được + nguyên nhân ngoài tầm kiểm soát) được chấp nhận ngay lần đầu nếu agent
+      // đã có khảo sát hoặc quan sát lỗi — không ép chạy thêm tool cho có.
+      const namesConcreteCheck =
+        /\b(?:npm\s+(?:test|run\s+\S+|exec\b)|npx\s+\S+|pytest|jest|vitest|mocha|ava|playwright|cypress|tsc\b|typecheck|lint|build|get_diagnostics|diagnostics|test\s+suite|unit\s+tests?|integration\s+tests?|e2e)\b/.test(normalized);
+      const namesConcreteCause =
+        /\b(?:missing|misses|unavailable|not\s+(?:available|installed|configured|supported|found)|no\s+(?:access|network|database|db|registry|credentials?|permission|test\s+script|tests?\s+configured)|offline|without\s+(?:access|network|database|db|credentials?|permission)|denied|forbidden|requires?\s+(?:network|database|db|docker|credentials?|access|license|paid)|timed?\s*out|out\s+of\s+memory|unsupported|incompatible|blocked\s+by|due\s+to|because|caused\s+by|thieu|khong\s+co|chua\s+co|khong\s+(?:duoc\s+)?cau\s+hinh|chua\s+(?:duoc\s+)?cau\s+hinh|chua\s+cai\s+dat|khong\s+ho\s+tro|mat\s+ket\s+noi|het\s+bo\s+nho|khong\s+co\s+quyen|yeu\s+cau\s+quyen)\b/.test(normalized);
+      const isSpecificBlockerReport = namesConcreteCheck && namesConcreteCause
+        && (hasInspections || failures.length > 0) && isSubstantialTechnicalExplanation;
+
       const specificCommandClaims = blockerChecks.filter((check) => check.claimed);
-      if (specificCommandClaims.length > 0) {
+      if (isSpecificBlockerReport) {
+        // Tin báo cáo trung thực: bỏ qua toàn bộ luật blocker, giữ các luật evidence khác.
+      } else if (specificCommandClaims.length > 0) {
         const isLegitimateAnalysis = hasInspections && isSubstantialTechnicalExplanation && isExplainingFailureCause;
         if (!isLegitimateAnalysis) {
           for (const unsupported of specificCommandClaims.filter((check) => !check.supported)) {

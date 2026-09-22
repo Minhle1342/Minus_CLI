@@ -309,6 +309,7 @@ export const readFileTool: ToolDefinition = {
         endLine,
         linesCount: selectedLines.length,
         hasMore,
+        nextStartLine: nextPage?.startLine,
         nextPage,
         paginationSuggestion,
         hasTruncatedLines: rangeTruncatedCount > 0,

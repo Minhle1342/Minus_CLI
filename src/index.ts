@@ -1081,10 +1081,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   // Đăng ký Permission Prompt Handler cho interactive CLI mode
   kernel.ctx.permissions.setPromptHandler(async (request) => {
     isPromptingPermission = true;
+    // Dot nhấp nháy của tool (ghi đè dòng bằng \r) sẽ xóa prompt y/n/a khỏi màn hình
+    // trong lúc chờ phím — dừng nó trước khi hỏi, resume sau khi có đáp án.
+    const wasDotActive = CLI.isToolDotActive();
     try {
       slashHints.clear();
       // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
       flushStdin(rl);
+      CLI.stopToolDotSpinner();
 
       CLI.renderPermissionPrompt(request);
       const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
@@ -1099,6 +1103,10 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       return 'reject';
     } finally {
       isPromptingPermission = false;
+      if (wasDotActive) {
+        const details = (request.details && typeof request.details === 'object' ? request.details : {}) as Record<string, any>;
+        CLI.startToolDotSpinner(request.toolName, details);
+      }
     }
   });
 
