@@ -84,6 +84,7 @@ import {
 } from './reliable-tool-orchestration.js';
 import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
 import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1 } from './context-budget-manager.js';
+import { buildFailureInvestigationBrief, type FailureInvestigationMutation } from './failure-investigation-mode.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   return isScratchPath(filePath);
@@ -304,6 +305,7 @@ export class AgentLoop {
   readonly repositoryMap: GraphRankedRepositoryMap;
   readonly repositoryMemory: CitationValidatedRepositoryMemory;
   private lastToolExecution?: { toolName: string; result: any; guardianDiagnosis?: any };
+  private lastMutationForInvestigation?: FailureInvestigationMutation;
   readonly classificationEngine = new ClassificationEngine();
   readonly thisTurnToolGate = new ThisTurnToolGate();
   readonly toolControlTelemetry = new ToolControlTelemetry();
@@ -830,6 +832,7 @@ export class AgentLoop {
     this.cognitiveHarness.reset();
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.lastMutationForInvestigation = undefined;
     this.editToolCallsInTurn = 0;
     this.stepDynamicSuffixes.clear();
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
@@ -2733,6 +2736,12 @@ export class AgentLoop {
               this.lastCommandExecutionState.filesModifiedSince++;
             }
             const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+            this.lastMutationForInvestigation = {
+              toolName,
+              args: { ...toolArgs },
+              result: { ...executionResult.result },
+              files: mutatedFiles,
+            };
             for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
             const mutatedPath = mutatedFiles[0] || '';
             const blast = executionResult.result?.blastRadius;
@@ -2972,6 +2981,26 @@ export class AgentLoop {
             } catch { }
           }
 
+          const commandText = String(toolArgs.command || toolArgs.CommandLine || executionResult.result?.command || '');
+          const failureInvestigation = toolName === 'run_command'
+            && isVerificationCommand(commandText)
+            && reflectionAnalysis.isFailure
+            ? buildFailureInvestigationBrief({
+                command: commandText,
+                result: executionResult.result,
+                recentMutation: this.lastMutationForInvestigation,
+              })
+            : undefined;
+          if (failureInvestigation && executionResult.result && typeof executionResult.result === 'object') {
+            try {
+              if (Object.isExtensible(executionResult.result)) {
+                executionResult.result.failureInvestigation = failureInvestigation;
+              } else {
+                executionResult.result = { ...executionResult.result, failureInvestigation };
+              }
+            } catch { }
+          }
+
           // SCAFFOLD-CEGIS & Domain Intent Drift Detection
           const domainIntentIntervention = this.domainIntentGuardian.observeToolCall({
             toolName,
@@ -3046,6 +3075,9 @@ export class AgentLoop {
               : {}),
             ...(reflectionAnalysis.reflectionPrompt
               ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
+              : {}),
+            ...(failureInvestigation
+              ? { _system_failure_investigation: failureInvestigation }
               : {}),
             ...(cognitiveBrake.active
               ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
@@ -3925,6 +3957,7 @@ export class AgentLoop {
     }
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.lastMutationForInvestigation = undefined;
     try {
       disposeSharedTypeScriptService();
       this.repositoryMap?.clearCache();
