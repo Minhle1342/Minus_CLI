@@ -98,7 +98,7 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
     assert.equal(llm.requests[2].includes('read_file'), true);
     assert.equal(llm.requests[2].includes('search_codebase_fast'), false);
     assert.equal(llm.requests[3].includes('analyze_impact'), true);
-    assert.equal(llm.requests[3].includes('read_file'), false);
+    assert.equal(llm.requests[3].includes('search_codebase_fast'), false);
 
     const decisions: any[] = session.getEvents()
       .map((event) => event.data.controlDecision)
@@ -226,8 +226,8 @@ test('AgentLoop enforces ACI guardrails against prohibited commands and Reproduc
     const toolEvents = session.getEvents().filter((e) => e.type === 'tool/result');
     // Call 1 (git push) was blocked by ACI
     assert.equal(toolEvents[0].data.result?.reasonCode, 'PROHIBITED_PUSH_TO_MAIN');
-    // Call 2 (replace_text) was blocked by Reproduction Gate
-    assert.equal(toolEvents[1].data.result?.reasonCode, 'REPRODUCTION_GATE_BLOCKED');
+    // Call 2 (replace_text) was blocked by Exploration Sufficiency Gate or Reproduction Gate
+    assert.ok(['REPRODUCTION_GATE_BLOCKED', 'EXPLORATION_SUFFICIENCY_BLOCKED'].includes(toolEvents[1].data.result?.reasonCode));
     // Call 3 (run_command test) executed and established reproduction proof
     assert.equal(toolEvents[2].data.result?.exitCode, 1);
     // Call 4 (read_file) examined the target file

@@ -208,8 +208,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     registry.register({
       name: 'slow_tool',
       description: 'Slow tool',
-      parameters: { type: 'object', properties: {} },
-      execute: async () => new Promise((resolve) => setTimeout(resolve, 500)),
+      execute: async () => new Promise<Record<string, any>>((resolve) => setTimeout(() => resolve({}), 500)),
     });
 
     const runner = new ToolRunner(registry, workspace);
