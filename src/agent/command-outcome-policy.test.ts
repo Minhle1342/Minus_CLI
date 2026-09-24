@@ -75,6 +75,19 @@ test('git_command subcommand satisfies the matching dedicated git tool', () => {
   assert.equal(guard.evaluate("I cannot commit because I don't have Git tools.", context).allow, true);
 });
 
+test('git requests stay actionable through run_command after dedicated tools are unregistered', () => {
+  const context = {
+    userRequest: 'commit và push code mới lên nhánh develop',
+    availableToolNames: ['run_command'],
+  };
+  const denial = "I'm unable to commit and push because I don't have the necessary tools or permissions.";
+  const guard = new FinalAnswerGuard();
+  assert.equal(guard.evaluate(denial, context).reason, 'unverified-capability-denial');
+  guard.observeToolResult('run_command', { success: true, exitCode: 0 }, { command: 'git commit -m "x"' });
+  guard.observeToolResult('run_command', { success: true, exitCode: 0 }, { command: 'git push origin develop' });
+  assert.equal(guard.evaluate(denial, context).allow, true);
+});
+
 test('blocked run_command does not count as attempted git work', () => {
   const context = {
     userRequest: 'commit và push code mới lên nhánh develop',

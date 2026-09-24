@@ -539,7 +539,7 @@ async function executeGitProcess(
   });
 }
 
-function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
+export function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
   const positional = args.filter((arg) => !arg.startsWith('-'));
   return positional.length >= 2
     && positional.slice(1).some((refspec) => refspec === requestedBranch || refspec.endsWith(`:${requestedBranch}`));

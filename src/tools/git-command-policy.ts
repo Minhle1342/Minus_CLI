@@ -76,6 +76,49 @@ export function classifyGitCommand(subcommand: string, args: string[] = []): Git
   return { subcommand: command, risk: 'write', reason: 'Command can change the worktree, index, refs, config, or object database.' };
 }
 
+export interface ParsedGitInvocation {
+  subcommand: string;
+  args: string[];
+}
+
+/**
+ * Tách một phân đoạn shell thành `{ subcommand, args }` của Git, giữ nguyên
+ * chữ hoa/thường của argv để kiểm tra scope (đường dẫn, URL) chính xác.
+ * Trả về `undefined` khi phân đoạn không chứa lời gọi Git.
+ */
+export function parseGitInvocation(segment: string): ParsedGitInvocation | undefined {
+  const invocation = /\bgit(?:\.exe)?\b([^;&|\n]*)/i.exec(segment || '');
+  if (!invocation) return undefined;
+  const tokens = (invocation[1].match(/"[^"]*"|'[^']*'|\S+/g) || [])
+    .map((token) => token.replace(/^["']|["']$/g, ''));
+  let subcommandIndex = -1;
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (['-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'].includes(token)) {
+      index += 2;
+      continue;
+    }
+    if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=') || token.startsWith('--namespace=')) {
+      index++;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      index++;
+      continue;
+    }
+    subcommandIndex = index;
+    break;
+  }
+  if (subcommandIndex === -1) return undefined;
+  // Giữ lại toàn bộ argv (kể cả flag global đứng trước subcommand) để
+  // validateGitCommandScope vẫn thấy --global/--git-dir/--work-tree.
+  return {
+    subcommand: tokens[subcommandIndex].toLowerCase(),
+    args: [...tokens.slice(0, subcommandIndex), ...tokens.slice(subcommandIndex + 1)],
+  };
+}
+
 export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   const normalized = normalizeIntentText(userRequest || '');
   if (!normalized) return [];

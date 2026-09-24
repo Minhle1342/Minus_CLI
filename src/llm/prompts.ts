@@ -238,7 +238,7 @@ export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT C
   * Tier 2 - Application/Logic Failure (test assertion failure, typecheck error, runtime exception): Enter the 5-Stage Error Detective Protocol.
 - 5-STAGE ERROR DETECTIVE PROTOCOL (EVIDENCE-ADAPTIVE PARETO):
   1. [Extract Coordinates]: Parse exact file, line number, column, and diagnostic code from error output or \`get_diagnostics\`.
-  2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`git_diff\` to find the origin of invalid state.
+  2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`run_command "git diff"\` to find the origin of invalid state.
   3. [Falsifiable Hypothesis & Empirical Proof (System 2 Thinking)]:
      * State a falsifiable causal hypothesis and record the evidence that supports it. Use \`formulate_and_verify_hypothesis\` when a durable hypothesis record or empirical reproduction is useful.
      * Run a reproduction before high-risk changes. For a low-risk reversible edit, direct source evidence and inspection of the exact target may be sufficient.

@@ -7,7 +7,6 @@ import { CapabilityPolicy } from '../../capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from '../../capabilities/default-capabilities.js';
 import { WorktreeManager } from '../../workspace/worktree-manager.js';
 import { createWorktreeTools } from '../../tools/worktree-tools.js';
-import { createGitTools } from '../../tools/git-tools.js';
 import { ApprovalManager } from '../../agent/approval-manager.js';
 import { createApprovalTools } from '../../tools/approval-tools.js';
 import { ReviewManager } from '../../agent/review-manager.js';
@@ -69,16 +68,15 @@ export class SuperpowersPlugin implements AgentPlugin {
       ctx.tools.register(tool);
     }
 
-    const gitTools = createGitTools(ctx.workspace);
-    for (const tool of gitTools) {
-      ctx.tools.register(tool);
-    }
+    // Dedicated git_* tools stay unregistered by design: all Git flows through
+    // run_command, which enforces the same scope/intent policy (see
+    // checkGitPolicyForShell in tools/run-command.ts). This keeps a single
+    // policy path and avoids fragmenting the model-visible tool surface.
     this.onWorkspaceChanged = () => {
       this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
       this.ocrReview?.setWorkspace(ctx.workspace.rootDir);
       (ctx as any).worktrees = this.worktreeManager;
       for (const tool of createWorktreeTools(this.worktreeManager)) ctx.tools.register(tool);
-      for (const tool of createGitTools(ctx.workspace)) ctx.tools.register(tool);
     };
     ctx.events.on('workspace:changed', this.onWorkspaceChanged);
 

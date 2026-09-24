@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { detectExplicitGitMutationIntent, normalizeIntentText } from '../tools/git-intent.js';
-import { detectExplicitGitCommandNames } from '../tools/git-command-policy.js';
+import { detectExplicitGitCommandNames, parseGitInvocation } from '../tools/git-command-policy.js';
 import { toolResultFailed } from './completion-observations.js';
 
 export type FinalAnswerGuardRejectionReason =
@@ -219,8 +219,15 @@ export class FinalAnswerGuard {
     if (requestedTools.size === 0) return undefined;
 
     const availableTools = new Set(context?.availableToolNames || []);
+    // Dedicated git_* tools are unregistered; a requested git operation stays
+    // actionable through run_command "git ...", which this guard already credits
+    // via observed shell invocations (see deriveGitEquivalentTools).
+    const GIT_RUNNABLE_VIA_SHELL = new Set(['git_add', 'git_commit', 'git_push', 'git_status', 'git_diff', 'git_command']);
+    const isAvailable = (toolName: string) =>
+      availableTools.has(toolName) ||
+      (GIT_RUNNABLE_VIA_SHELL.has(toolName) && availableTools.has('run_command'));
     const untriedTools = [...requestedTools].filter(
-      (toolName) => availableTools.has(toolName) && !this.hasTriedTool(toolName),
+      (toolName) => isAvailable(toolName) && !this.hasTriedTool(toolName),
     );
     if (untriedTools.length === 0) return undefined;
 
@@ -453,28 +460,7 @@ function extractCommandText(args: Record<string, any> | undefined, result: Recor
 }
 
 function extractGitSubcommand(command: string): string | undefined {
-  const invocation = command.match(/\bgit(?:\.exe)?\b([^;&|\n]*)/i);
-  if (!invocation) return undefined;
-  const tokens = (invocation[1].match(/"[^"]*"|'[^']*'|\S+/g) || [])
-    .map((token) => token.replace(/^["']|["']$/g, ''));
-  let index = 0;
-  while (index < tokens.length) {
-    const token = tokens[index];
-    if (['-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'].includes(token)) {
-      index += 2;
-      continue;
-    }
-    if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=') || token.startsWith('--namespace=')) {
-      index++;
-      continue;
-    }
-    if (token.startsWith('-')) {
-      index++;
-      continue;
-    }
-    return token.toLowerCase();
-  }
-  return undefined;
+  return parseGitInvocation(command)?.subcommand;
 }
 
 function mapGitSubcommandToDedicated(subcommand: string | undefined): string | undefined {

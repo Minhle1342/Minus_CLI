@@ -22,6 +22,9 @@ import {
 } from './command-preflight-guard.js';
 import { annotateCommandResult } from './command-outcome.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
+import { classifyGitCommand, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
+import { extractRequestedGitBranch } from './git-intent.js';
+import { pushArgsTargetBranch } from './git-tools.js';
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -301,6 +304,55 @@ export function isAllowedCommand(command: string): boolean {
 export function isAllowedShellCommand(command: string): boolean {
   const analysis = analyzeShellCommand(command);
   return !analysis.error && !analysis.complex && analysis.segments.every(isAllowedCommand);
+}
+
+export interface GitShellPolicyViolation {
+  error: string;
+  errorCode: string;
+  suggestion?: string;
+  requestedBranch?: string;
+}
+
+/**
+ * Chốt policy Git duy nhất cho `run_command` (thay thế các tool `git_*` chuyên dụng
+ * đã gỡ đăng ký): mọi phân đoạn chứa `git ...` đều phải qua cùng kiểm tra
+ * `validateGitCommandScope` + `isGitCommandAuthorized` + ràng buộc nhánh push.
+ * Từ chối cứng, không thể bypass bằng approval chung.
+ */
+export function checkGitPolicyForShell(
+  segments: string[],
+  workspaceRoot: string,
+  userRequest?: string,
+): GitShellPolicyViolation | undefined {
+  for (const segment of segments) {
+    const invocation = parseGitInvocation(segment);
+    if (!invocation) continue;
+    const scopeDecision = validateGitCommandScope(invocation.subcommand, invocation.args, workspaceRoot, workspaceRoot);
+    if (!scopeDecision.allowed) {
+      return { error: scopeDecision.error, errorCode: scopeDecision.errorCode };
+    }
+    const classification = classifyGitCommand(invocation.subcommand, invocation.args);
+    if (!isGitCommandAuthorized(userRequest, invocation.subcommand, classification)) {
+      return {
+        error: `Git ${invocation.subcommand} (${classification.risk}) is not authorized by the current user request.`,
+        errorCode: classification.risk === 'destructive'
+          ? 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
+          : 'GIT_OPERATION_NOT_AUTHORIZED',
+        suggestion: `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}.`,
+      };
+    }
+    if (invocation.subcommand === 'push') {
+      const requestedBranch = extractRequestedGitBranch(userRequest);
+      if (requestedBranch && !pushArgsTargetBranch(invocation.args, requestedBranch)) {
+        return {
+          error: `Push arguments do not target the user-requested branch "${requestedBranch}".`,
+          errorCode: 'GIT_BRANCH_NOT_AUTHORIZED',
+          requestedBranch,
+        };
+      }
+    }
+  }
+  return undefined;
 }
 
 /** All Git commands use argv-based Git tools so aliases/shell text cannot bypass policy. */
@@ -994,6 +1046,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
             : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
         };
+      }
+
+      // Single Git policy gate (thay thế các tool git_* đã gỡ đăng ký): mọi phân
+      // đoạn `git ...` vượt qua được các chốt trên đều phải qua thêm kiểm tra
+      // scope/intent/branch. Đặt sau PUSH_TO_MAIN_PROHIBITED và allowlist để giữ
+      // nguyên mã lỗi cũ; từ chối cứng, không bypass bằng approval chung.
+      const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, context?.userRequest);
+      if (gitPolicyViolation) {
+        return { command: rawCommand, ...gitPolicyViolation };
       }
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)

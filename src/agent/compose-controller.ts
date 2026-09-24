@@ -10,7 +10,7 @@ import type { PlanManager } from './plan-manager.js';
 import type { CriticGate } from './critic-gate.js';
 import { GrillGate } from './grill-gate.js';
 import { SpecManager } from './spec-manager.js';
-import { classifyGitCommand } from '../tools/git-command-policy.js';
+import { classifyGitCommand, parseGitInvocation } from '../tools/git-command-policy.js';
 import type {
   ComposeAdvanceResult,
   ComposeGuardDecision,
@@ -297,6 +297,12 @@ export class ComposeController {
       const command = String(args.command || '');
       if (state.worktreePath && !this.isWorktreeWorkspace(workspace)) return { allow: false, errorCode: 'COMPOSE_WORKTREE_REQUIRED', reason: 'Commands for an active Compose run must execute inside its isolated worktree.' };
       if (!state.worktreePath && !READ_ONLY_COMMAND.test(command.trim())) return { allow: false, errorCode: 'COMPOSE_READ_ONLY_PHASE', reason: 'Only read-only inspection commands are allowed before the Compose worktree exists.' };
+      // Compose owns the branch lifecycle: dedicated git_* tools are unregistered,
+      // so git writes smuggled through run_command must be blocked here as well.
+      const gitInvocation = parseGitInvocation(command);
+      if (gitInvocation && classifyGitCommand(gitInvocation.subcommand, gitInvocation.args).risk !== 'read') {
+        return { allow: false, errorCode: 'COMPOSE_GIT_MANAGED', reason: `Direct git ${gitInvocation.subcommand} is blocked while Compose owns the branch lifecycle.` };
+      }
     }
     if (toolName === 'submit_solution') {
       const acceptance = this.acceptanceDecision();

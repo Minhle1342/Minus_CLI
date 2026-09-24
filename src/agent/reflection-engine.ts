@@ -332,7 +332,7 @@ export class ReflectionEngine {
         promptParts.push(
           `👉 SELF-REFLECTION & DEBUGGING PROTOCOL:`,
           `1. [Read Stack Trace]: Identify the exact file, line number, and error message causing the failure above.`,
-          `2. [Inspect State & Diff]: Use git_diff or read_file to inspect recent changes.`,
+            `2. [Inspect State & Diff]: Use run_command "git diff" or read_file to inspect recent changes.`,
           `3. [Formulate Hypothesis]: Clearly state a root cause hypothesis before mutating code.`,
           `4. [Anti-Loop Invariant]: DO NOT repeat the exact same failing command or tool arguments!`,
         );

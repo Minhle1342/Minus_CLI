@@ -275,7 +275,9 @@ export type ToolPlaybookPromptId = keyof typeof TOOL_PLAYBOOK_PROMPTS;
 export const GIT_WORKFLOW_PROMPTS = {
   gitInspect: `[GIT WORKFLOW - BASELINE INSPECTION]
 - Check working tree status: \`run_command "git status -s"\`.
-- Inspect uncommitted changes or recent commit context: \`run_command "git diff"\` or \`git log -n 3 --oneline\`. Never overwrite active user work.`,
+- Inspect uncommitted changes or recent commit context: \`run_command "git diff"\` or \`git log -n 3 --oneline\`. Never overwrite active user work.
+- Inspect any commit in full: \`run_command "git show <hash> --stat"\` (append \`-- <path>\` to scope it to one file).
+- Map refs and authorship without mutating: \`run_command "git branch -a"\`, \`git blame -L <start>,<end> -- <file>\`, \`git rev-parse HEAD\`, \`git tag --list\`, or \`git stash list\`. Read-only inspection needs no extra approval.`,
 
   gitBranch: `[GIT WORKFLOW - BRANCH ISOLATION]
 - Check current branch: \`run_command "git branch --show-current"\`.
@@ -376,7 +378,7 @@ export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VER
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
 - Goal: Provide a clear, natural final summary matching the user's language.
-- Git: Perform git operations (git_commit, git_push) ONLY when explicitly requested by user.`;
+- Git: Perform git operations (\`run_command "git ..."\`) ONLY when explicitly requested by user.`;
 
 export interface PhaseGuidanceOptions {
   taskClass?: string;
