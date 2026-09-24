@@ -74,6 +74,15 @@ import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
+import { buildPhaseContextHandoff } from './phase-context-handoff.js';
+import { attributeCommandFailure, captureCommandBaseline } from './command-regression-evidence.js';
+import {
+  applyPhaseLifecycle,
+  invalidatePhaseOnMutation,
+  recordExploreCompleted,
+  recordImplementationCompleted,
+  recordVerificationOutcome,
+} from './phase-lifecycle.js';
 import type { OcrGateDecision, OcrReviewService } from '../review/open-code-review.js';
 import {
   ReliableToolOrchestrationTelemetry,
@@ -1136,11 +1145,20 @@ export class AgentLoop {
       });
       const inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
         && paretoEvidence.inspectedFiles.length > 0;
-      const classification = this.classificationEngine.classify({
+      const classified = this.classificationEngine.classify({
         ...classificationInput,
         hasDirectEvidence: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
         evidenceScore: paretoEvidence.score,
         evidenceThreshold: paretoEvidence.threshold,
+      });
+      const classification = applyPhaseLifecycle(classified, session, turn);
+      const exploreCompletedNow = recordExploreCompleted(session, turn, classification, {
+        score: paretoEvidence.score,
+        threshold: paretoEvidence.threshold,
+        inspectedFiles: paretoEvidence.inspectedFiles,
+        sufficient: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+        validatedHypothesis: hasValidatedHypothesis,
+        hypothesisId: validatedHypotheses.at(-1)?.id || supportedHypotheses.at(-1)?.id,
       });
       previousClassification = classification;
 
@@ -1733,6 +1751,17 @@ export class AgentLoop {
       const hypothesisContext = this.hypothesisTracker.toScratchpad();
       const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
       const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
+      // Retain the handoff across subsequent steps: a boundary compaction can mask
+      // the underlying observations in model history, while the phase event remains durable.
+      const phaseHandoff = buildPhaseContextHandoff(
+        session,
+        turn,
+        classification.phase,
+        this.hypothesisTracker.getLatestHypothesis(),
+        this.verificationPolicy.getPendingTargetedTests(),
+      );
+      const phaseJustChanged = exploreCompletedNow
+        || Boolean(priorClassification && priorClassification.phase !== classification.phase);
 
       // Khử trùng lặp chéo giữa history[0] (Warm-Start) và Dynamic Tail ở Step 1:
       const historyZeroText = session.getHistory()[0]?.parts?.[0]?.text || '';
@@ -1790,6 +1819,7 @@ export class AgentLoop {
         hypothesisGuidance,
         domainContractContext,
         phaseGuidance,
+        phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
         recalledTurnContext,
         memoryPrompt: effectiveMemoryPrompt,
@@ -1865,6 +1895,9 @@ export class AgentLoop {
         cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
         enableObservationMasking: true,
         previousState: previousCompactionState,
+        ...(phaseJustChanged && phaseHandoff && arbitration.sourcesIncluded.includes('Phase Handoff (P1.5)')
+          ? { phaseTransition: {} }
+          : {}),
       });
       const compactionStats = contextPreparation.compactionStats;
       const observationsToArchive = [
@@ -2713,6 +2746,20 @@ export class AgentLoop {
             }
           }
 
+          // Attach only verified pre-edit attribution; never infer ownership from exit code alone.
+          const commandForAttribution = String(toolArgs.command || toolArgs.CommandLine || '');
+          const mutationBeforeCommand = toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+            ? getTurnCompletionState(session, turn)
+            : undefined;
+          if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+            && mutationBeforeCommand?.hasMutations && executionResult.result?.commandOutcome === 'failed_unexpected') {
+            const regressionEvidence = await attributeCommandFailure(
+              session, turn, commandForAttribution, executionResult.result,
+              this._workspace, mutationBeforeCommand.filesModified, mutationBeforeCommand.latestMutationSeq,
+            );
+            executionResult = { ...executionResult, result: { ...executionResult.result, regressionEvidence } };
+          }
+
           CLI.stopToolDotSpinner();
           if (this._collapsePreferences.compactSteps) {
             CLI.renderCompactOneLiner({
@@ -2750,7 +2797,7 @@ export class AgentLoop {
             hasCodeMutations: hasMutationsSoFar,
             modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
           });
-          this.finalAnswerGuard.observeToolResult(toolName, executionResult.result);
+          this.finalAnswerGuard.observeToolResult(toolName, executionResult.result, toolArgs);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
             granted: executionResult.permission?.status === 'granted',
             requestId: executionResult.permission?.requestId,
@@ -2791,19 +2838,13 @@ export class AgentLoop {
             }
           }
           if (toolName === 'run_command') {
-            let differential: { hasNewFailures: boolean } | undefined;
-            if (toolControlMode === 'enforce' && isVerificationCommand(toolArgs.command)) {
-              const postDiagnostics = this.collectVerificationDiagnostics();
-              if (postDiagnostics) {
-                differential = this.verificationPolicy.getBaselineManager().evaluateDifferential(postDiagnostics);
-              }
-            }
+            const regressionEvidence = executionResult.result.regressionEvidence;
             this.verificationPolicy.recordVerification(
               String(toolArgs.command || ''),
               !isToolResultFailure(executionResult.result),
               String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
               executionResult.result.exitCode,
-              { hasNewFailures: differential?.hasNewFailures },
+              { hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined },
             );
             if (isVerificationCommand(toolArgs.command) && this.targetFilesModifiedInTurn.size > 0) {
               const isVerifOk = !isToolResultFailure(executionResult.result) && (executionResult.result.exitCode === 0 || executionResult.result.exitCode === undefined);
@@ -2872,6 +2913,18 @@ export class AgentLoop {
               detail,
               isClean ? 0 : 1,
               { tier: 'typecheck' },
+            );
+          }
+          if (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace) {
+            const passed = executionResult.result?.isPassed === true
+              && executionResult.result?.exitCode === 0
+              && !isToolResultFailure(executionResult.result);
+            this.verificationPolicy.recordVerification(
+              String(executionResult.result?.commandExecuted || toolArgs.command || 'run_test_suite'),
+              passed,
+              String(executionResult.result?.summary || '').slice(0, 240),
+              executionResult.result?.exitCode,
+              { tier: 'full_test' },
             );
           }
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
@@ -3026,6 +3079,7 @@ export class AgentLoop {
           const failureInvestigation = toolName === 'run_command'
             && isVerificationCommand(commandText)
             && reflectionAnalysis.isFailure
+            && executionResult.result?.regressionEvidence?.classification !== 'pre_existing_out_of_scope'
             ? buildFailureInvestigationBrief({
                 command: commandText,
                 result: executionResult.result,
@@ -3129,6 +3183,36 @@ export class AgentLoop {
           };
 
           session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
+          if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+            && mutationBeforeCommand && !mutationBeforeCommand.hasMutations
+            && typeof executionResult.result?.exitCode === 'number') {
+            await captureCommandBaseline(session, turn, commandForAttribution, executionResult.result, this._workspace);
+          }
+          if (hasObservedMutation(toolName, executionResult.result)) {
+            invalidatePhaseOnMutation(session, turn);
+          }
+          const verificationCommand = toolName === 'get_diagnostics'
+            ? 'get_diagnostics'
+            : String(executionResult.result?.commandExecuted || toolArgs?.command || 'run_test_suite');
+          const executedVerification = (toolName === 'run_command' && isVerificationCommand(verificationCommand)
+            && typeof executionResult.result?.exitCode === 'number'
+            && executionResult.result?.commandOutcome !== 'blocked_preflight')
+            || (toolName === 'get_diagnostics' && !executionResult.result?.errorCode)
+            || (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace
+              && typeof executionResult.result?.exitCode === 'number'
+              && !executionResult.result?.errorCode);
+          if (executedVerification && getTurnCompletionState(session, turn).hasMutations) {
+            recordImplementationCompleted(session, turn, verificationCommand);
+            recordVerificationOutcome(
+              session,
+              turn,
+              verificationCommand,
+              !isToolResultFailure(executionResult.result)
+                && (toolName !== 'get_diagnostics' || executionResult.result?.clean === true)
+                && (toolName !== 'run_test_suite' || executionResult.result?.isPassed === true),
+              this.verificationPolicy.canComplete().allowed,
+            );
+          }
           if (this.loopOptions?.enableRepositoryMemory !== false) {
             await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
           }

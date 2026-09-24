@@ -42,6 +42,11 @@ export type SessionEventType =
   | 'session/compaction'
   | 'request/header'
   | 'control/decision'
+  | 'phase/exploreCompleted'
+  | 'phase/implementationCompleted'
+  | 'phase/verificationCompleted'
+  | 'phase/verificationFailed'
+  | 'phase/invalidated'
   | 'audit/task-completion'
   | 'context/snapshot';
 
@@ -146,6 +151,17 @@ export interface SessionEventData {
   skill?: SkillActivationDecision | null;
   requestHeader?: RecordedRequestHeader;
   controlDecision?: Record<string, any>;
+  phaseTransition?: {
+    classificationId?: string;
+    hypothesisId?: string;
+    mutationSeq?: number;
+    evidenceScore?: number;
+    evidenceThreshold?: number;
+    inspectedFiles?: string[];
+    filesModified?: string[];
+    verificationCommand?: string;
+    reason: string;
+  };
   snapshotId?: string;
   contextFingerprint?: string;
   compactionState?: Record<string, unknown>;
@@ -212,6 +228,11 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'session/compaction',
     'request/header',
     'control/decision',
+    'phase/exploreCompleted',
+    'phase/implementationCompleted',
+    'phase/verificationCompleted',
+    'phase/verificationFailed',
+    'phase/invalidated',
     'audit/task-completion',
     'context/snapshot',
   ].includes(event.type)) {

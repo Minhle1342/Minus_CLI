@@ -240,6 +240,14 @@ export class ReflectionEngine {
       };
     }
 
+    if (toolName === 'run_command' && result.regressionEvidence?.classification === 'pre_existing_out_of_scope') {
+      this.consecutiveFailures = 0;
+      this.lastDetectiveReport = undefined;
+      this.lastReflectionPrompt = '[VERIFIED BASELINE FAILURE]: The identical check already failed before this task edited code. Its diagnostic source is unchanged and outside the observed write set. Do not modify that unrelated file merely to make the global check green. Verification is still blocked; report the command and baseline evidence accurately.';
+      return { isFailure: false, consecutiveFailures: 0, reflectionPrompt: this.lastReflectionPrompt,
+        advice: 'Pre-existing out-of-scope diagnostic confirmed; verification remains failed.' };
+    }
+
     // 1. Lỗi môi trường/runtime cần hướng dẫn khắc phục, không phải phân tích stack trace mã nguồn.
     if (toolName === 'run_command' && environmentFailureCodes.has(result.errorCode)) {
       isFailure = true;
@@ -275,11 +283,16 @@ export class ReflectionEngine {
       this.consecutiveFailures++;
 
       const rawCombined = `${result.stderr || ''}\n${result.stdout || ''}\n${result.error || ''}`;
+      const verifiedBaseline = (result.regressionEvidence?.preExisting || []) as Array<{ file: string; line: number; code: string; message: string }>;
+      const baselineSignatures = new Set(this.baselineErrorSignatures);
+      for (const item of verifiedBaseline) {
+        baselineSignatures.add(this.detective.computeErrorSignature({ language: 'typescript', ...item, errorCode: item.code }));
+      }
       detectiveReport = this.detective.investigate(
         rawCombined,
         workspace,
         context?.modifiedFiles || [],
-        { baselineSignatures: this.baselineErrorSignatures },
+        { baselineSignatures },
       );
       this.lastDetectiveReport = detectiveReport;
 

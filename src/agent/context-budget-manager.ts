@@ -82,6 +82,7 @@ export interface ContextPreparationResult {
   checkpointObservations?: MaskedObservationRecord[];
   state?: CompactionStateV1;
   withinBudget: boolean;
+  phaseTransitionCompacted?: boolean;
   failureReason?: "CONTEXT_BUDGET_UNSATISFIABLE";
 }
 
@@ -96,6 +97,8 @@ export interface ContextPrepareOptions extends Omit<
   "requestOverheadTokens" | "outputReserveTokens" | "modelName"
 > {
   previousState?: CompactionStateV1;
+  /** Consider an early compaction at a durable phase boundary only when savings justify losing the cache prefix. */
+  phaseTransition?: { minHistoryTokens?: number; minSavingsTokens?: number; minSavingsRatio?: number };
 }
 
 export function resolveContextManagementMode(
@@ -384,9 +387,14 @@ export class ContextBudgetManager {
       0,
       targetInputTokens - envelope.outputReserveTokens,
     );
-    const shouldCompact =
+    const budgetPressure =
       before.upperBoundTokens >
       Math.floor(targetUsableInputTokens * this.triggerRatio);
+    const phaseTransitionEligible = Boolean((this.mode === "enforce"
+      || (this.mode === "auto" && isKnownProvider(envelope.provider)))
+      && options.phaseTransition
+      && before.historyTokens >= (options.phaseTransition.minHistoryTokens ?? 4_000));
+    const shouldCompact = budgetPressure || phaseTransitionEligible;
     const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(
       envelope.history,
     );
@@ -403,7 +411,7 @@ export class ContextBudgetManager {
       };
     }
 
-    const { previousState, ...compactionOptions } = options;
+    const { previousState, phaseTransition, ...compactionOptions } = options;
     const baseOptions: CompactionOptions = {
       ...compactionOptions,
       force: true,
@@ -436,6 +444,22 @@ export class ContextBudgetManager {
     const selected = (useEnforce ? candidate! : legacy!) || candidate || legacy;
     const selectedEnvelope = { ...envelope, history: selected.messages };
     const after = await this.counter.count(selectedEnvelope);
+    const phaseSavings = before.historyTokens - after.historyTokens;
+    const minimumPhaseSavings = Math.max(
+      phaseTransition?.minSavingsTokens ?? 768,
+      Math.ceil(before.historyTokens * (phaseTransition?.minSavingsRatio ?? 0.2)),
+    );
+    if (!budgetPressure && phaseSavings < minimumPhaseSavings) {
+      return {
+        mode: this.mode,
+        history: envelope.history,
+        changed: false,
+        before,
+        after: before,
+        checkpointObservations,
+        withinBudget: before.upperBoundTokens <= usableInputTokens,
+      };
+    }
     const candidateAfter =
       this.mode === "shadow" && candidate
         ? await this.counter.count({ ...envelope, history: candidate.messages })
@@ -494,6 +518,7 @@ export class ContextBudgetManager {
         previousState,
       ),
       withinBudget,
+      phaseTransitionCompacted: phaseTransitionEligible && !budgetPressure,
       ...(effectiveMode === "enforce" && !withinBudget
         ? { failureReason: "CONTEXT_BUDGET_UNSATISFIABLE" as const }
         : {}),

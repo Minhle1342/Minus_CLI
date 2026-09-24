@@ -43,3 +43,51 @@ test('preflight rejection is blocked before dispatch instead of treated as a com
   plan.recordToolEvidence('run_command', { command: 'npm run dev' }, blocked);
   assert.equal(plan.getTasks()[0].evidence.at(-1)?.outcome, 'blocked');
 });
+
+test('git work via run_command counts like dedicated git tools in the capability guard', () => {
+  const context = {
+    userRequest: 'commit và push code mới lên nhánh develop',
+    availableToolNames: ['git_status', 'git_diff', 'git_add', 'git_commit', 'git_push'],
+  };
+  const denial = "I'm unable to commit and push because I don't have the necessary tools or permissions.";
+  const guard = new FinalAnswerGuard();
+  assert.equal(guard.evaluate(denial, context).reason, 'unverified-capability-denial');
+
+  guard.observeToolResult('run_command', { success: true, exitCode: 0 }, { command: 'git commit -m "fix"' });
+  guard.observeToolResult('run_command', { success: true, exitCode: 0 }, { command: 'git push origin develop' });
+  assert.equal(
+    guard.evaluate('Không thể push vì remote từ chối protected branch; local commit đã được tạo.', context).allow,
+    true,
+  );
+});
+
+test('git_command subcommand satisfies the matching dedicated git tool', () => {
+  const context = {
+    userRequest: 'commit code mới',
+    availableToolNames: ['git_commit'],
+  };
+  const guard = new FinalAnswerGuard();
+  assert.equal(
+    guard.evaluate("I cannot commit because I don't have Git tools.", context).reason,
+    'unverified-capability-denial',
+  );
+  guard.observeToolResult('git_command', { success: true }, { subcommand: 'commit' });
+  assert.equal(guard.evaluate("I cannot commit because I don't have Git tools.", context).allow, true);
+});
+
+test('blocked run_command does not count as attempted git work', () => {
+  const context = {
+    userRequest: 'commit và push code mới lên nhánh develop',
+    availableToolNames: ['git_commit', 'git_push'],
+  };
+  const guard = new FinalAnswerGuard();
+  guard.observeToolResult(
+    'run_command',
+    { commandOutcome: 'blocked_preflight', processStarted: false },
+    { command: 'git push origin develop' },
+  );
+  assert.equal(
+    guard.evaluate("I'm unable to commit and push because I don't have the necessary tools or permissions.", context).reason,
+    'unverified-capability-denial',
+  );
+});

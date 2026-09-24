@@ -237,6 +237,7 @@ export async function finalizeCommandResult(
     exitCode,
     durationMs: typeof baseResult.durationMs === 'number' ? baseResult.durationMs : 0,
     success: classifiedResult.success,
+    verificationOutputComplete: truncatedStdout.savedChars === 0 && truncatedStderr.savedChars === 0,
     ...(logFilePath ? { logFilePath } : {}),
     ...(truncatedStdout.savedChars > 0 ? { savedTokensEstimate: truncatedStdout.savedTokensEstimate } : {}),
   };

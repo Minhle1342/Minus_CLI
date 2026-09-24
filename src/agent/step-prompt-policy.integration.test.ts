@@ -60,6 +60,7 @@ async function runMode(
   mode: StepPromptGatingMode,
   userRequest = 'Update sample.txt from before to after and verify the change.',
   toolControlMode: ToolControlMode = 'off',
+  useTestSuite = false,
 ): Promise<{
   finalAnswer: string;
   toolSequence: string[];
@@ -69,6 +70,8 @@ async function runMode(
   promptTokensBefore: number;
   promptTokensAfter: number;
   requests: PromptCapturingScriptedLLM['requests'];
+  phaseEvents: string[];
+  classifications: string[];
 }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `minus-prompt-gating-${mode}-`));
   try {
@@ -115,12 +118,24 @@ async function runMode(
         output: '1 test passed',
       }),
     });
+    if (useTestSuite) {
+      registry.register({
+        name: 'run_test_suite',
+        description: 'Run project tests.',
+        parameters: { type: 'OBJECT', properties: { command: { type: 'STRING' } } } as any,
+        execute: async () => ({ success: true, isPassed: true, exitCode: 0, commandExecuted: 'npm test', summary: 'Tests passed' }),
+      });
+    }
 
     const llm = new PromptCapturingScriptedLLM();
+    if (useTestSuite) {
+      llm.replies[2] = { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_test_suite', args: { command: 'npm test' } }] };
+    }
     const loop = new AgentLoop(llm, registry, {
       workspace,
       maxSteps: 6,
       toolControlMode,
+      enableDynamicToolRetrieval: !useTestSuite,
       stepPromptGatingMode: mode,
       enableStepSummarization: false,
       enableGraphRepositoryMap: false,
@@ -148,6 +163,9 @@ async function runMode(
       promptTokensBefore: decisions.reduce((sum, item) => sum + Number(item.estimatedTokensBefore || 0), 0),
       promptTokensAfter: decisions.reduce((sum, item) => sum + Number(item.injectedEstimatedTokens || 0), 0),
       requests: llm.requests,
+      phaseEvents: session.getEvents().filter((event) => event.type.startsWith('phase/')).map((event) => event.type),
+      classifications: session.getEvents().filter((event) => event.type === 'control/decision'
+        && event.data.controlDecision?.classification).map((event) => event.data.controlDecision!.classification.phase),
     };
   } finally {
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -170,6 +188,27 @@ test('off and enforce preserve scripted mutation lifecycle while enforce reduces
   assert.ok(enforce.promptTokensAfter < off.promptTokensAfter, 'enforce must inject fewer gated tokens');
   assert.ok(off.requests.every((request) => request.systemPrompt.includes('12. TOOL SYNERGY PLAYBOOKS:')));
   assert.ok(enforce.requests.every((request) => !request.systemPrompt.includes('12. TOOL SYNERGY PLAYBOOKS:')));
+});
+
+test('enforced mutation flow records explore, implementation and verification completion in order', async () => {
+  const result = await runMode('enforce', 'Update sample.txt from before to after.', 'enforce');
+  assert.equal(result.fileContent, 'after');
+  assert.deepEqual(result.phaseEvents, [
+    'phase/exploreCompleted', 'phase/implementationCompleted', 'phase/verificationCompleted',
+  ]);
+  assert.ok(result.classifications.includes('verify'));
+  assert.match(result.requests[0].dynamicContext, /PHASE HANDOFF: explore → implement/);
+  assert.match(result.requests[1].dynamicContext, /PHASE HANDOFF: explore → implement/);
+  assert.match(result.requests[3].dynamicContext, /PHASE HANDOFF: implement → verify/);
+});
+
+test('run_test_suite completes the lifecycle with enforced tool scoping', async () => {
+  const result = await runMode('enforce', 'Update sample.txt from before to after.', 'enforce', true);
+  assert.equal(result.fileContent, 'after');
+  assert.deepEqual(result.phaseEvents, [
+    'phase/exploreCompleted', 'phase/implementationCompleted', 'phase/verificationCompleted',
+  ]);
+  assert.deepEqual(result.toolSequence, ['read_file', 'replace_text', 'run_test_suite', 'submit_solution']);
 });
 
 test('shadow mode does not duplicate the warm-start cognitive scaffold in its first dynamic suffix', async () => {

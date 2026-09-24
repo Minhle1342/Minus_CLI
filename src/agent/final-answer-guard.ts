@@ -111,14 +111,19 @@ const CAPABILITY_DENIAL_PATTERNS = [
 export class FinalAnswerGuard {
   private latestFailure?: ToolFailureSummary;
   private observedToolNames = new Set<string>();
+  private observedGitEquivalents = new Set<string>();
 
   reset(): void {
     this.latestFailure = undefined;
     this.observedToolNames.clear();
+    this.observedGitEquivalents.clear();
   }
 
-  observeToolResult(toolName: string, result: Record<string, any>): void {
+  observeToolResult(toolName: string, result: Record<string, any>, args?: Record<string, any>): void {
     this.observedToolNames.add(toolName);
+    for (const equivalent of deriveGitEquivalentTools(toolName, args, result)) {
+      this.observedGitEquivalents.add(equivalent);
+    }
     const isFailure = toolResultFailed(result);
     if (!isFailure) return;
 
@@ -127,6 +132,10 @@ export class FinalAnswerGuard {
       errorCode: typeof result.errorCode === 'string' ? result.errorCode : undefined,
       detail: firstNonEmptyString(result.diagnostic, result.error, result.stderr, result.stdout)?.slice(0, 400),
     };
+  }
+
+  private hasTriedTool(toolName: string): boolean {
+    return this.observedToolNames.has(toolName) || this.observedGitEquivalents.has(toolName);
   }
 
   evaluate(answer: string, context?: FinalAnswerGuardContext): FinalAnswerGuardDecision {
@@ -211,7 +220,7 @@ export class FinalAnswerGuard {
 
     const availableTools = new Set(context?.availableToolNames || []);
     const untriedTools = [...requestedTools].filter(
-      (toolName) => availableTools.has(toolName) && !this.observedToolNames.has(toolName),
+      (toolName) => availableTools.has(toolName) && !this.hasTriedTool(toolName),
     );
     if (untriedTools.length === 0) return undefined;
 
@@ -426,6 +435,80 @@ export function normalizeForMatching(value: string): string {
 
 function firstNonEmptyString(...values: unknown[]): string | undefined {
   return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
+}
+
+/**
+ * Công nhận Git qua `run_command` / `git_command` như tool chuyên dụng.
+ * Giữ đối xứng với `completion-evidence.ts`: commit/push/add/status/diff thực hiện
+ * qua `run_command "git ..."` hoặc `git_command { subcommand }` được tính là đã thử
+ * `git_commit` / `git_push` / `git_add` / `git_status` / `git_diff` tương ứng.
+ */
+function extractCommandText(args: Record<string, any> | undefined, result: Record<string, any>): string {
+  const candidates = [
+    args?.command, args?.CommandLine, args?.commandLine, args?.cmd,
+    result?.command, result?.CommandLine,
+  ];
+  const found = candidates.find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return found ? found.trim() : '';
+}
+
+function extractGitSubcommand(command: string): string | undefined {
+  const invocation = command.match(/\bgit(?:\.exe)?\b([^;&|\n]*)/i);
+  if (!invocation) return undefined;
+  const tokens = (invocation[1].match(/"[^"]*"|'[^']*'|\S+/g) || [])
+    .map((token) => token.replace(/^["']|["']$/g, ''));
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (['-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'].includes(token)) {
+      index += 2;
+      continue;
+    }
+    if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=') || token.startsWith('--namespace=')) {
+      index++;
+      continue;
+    }
+    if (token.startsWith('-')) {
+      index++;
+      continue;
+    }
+    return token.toLowerCase();
+  }
+  return undefined;
+}
+
+function mapGitSubcommandToDedicated(subcommand: string | undefined): string | undefined {
+  switch (subcommand) {
+    case 'add': return 'git_add';
+    case 'commit': return 'git_commit';
+    case 'push': return 'git_push';
+    case 'status': return 'git_status';
+    case 'diff': return 'git_diff';
+    default: return undefined;
+  }
+}
+
+function deriveGitEquivalentTools(
+  toolName: string,
+  args: Record<string, any> | undefined,
+  result: Record<string, any>,
+): string[] {
+  if (result?.commandOutcome === 'blocked_preflight' || result?.processStarted === false) return [];
+  if (toolName === 'git_command') {
+    const dedicated = mapGitSubcommandToDedicated(
+      String(args?.subcommand || result?.subcommand || '').trim().toLowerCase() || undefined,
+    );
+    return dedicated ? [dedicated] : [];
+  }
+  if (toolName === 'run_command') {
+    const subcommand = extractGitSubcommand(extractCommandText(args, result));
+    if (!subcommand) return [];
+    const dedicated = mapGitSubcommandToDedicated(subcommand);
+    // Mọi `git <subcommand>` qua shell đều tính là đã thử `git_command`,
+    // tương đương độ nới lỏng sẵn có khi dùng tool `git_command` trực tiếp.
+    return dedicated ? [dedicated, 'git_command'] : ['git_command'];
+  }
+  return [];
 }
 
 export interface AnalysisIntentResult {

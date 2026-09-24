@@ -116,6 +116,37 @@ test('within-turn checkpoints archive old observations without rewriting the KV-
   assert.deepEqual(result.checkpointObservations?.map((record) => record.id), ['read-0', 'read-1']);
 });
 
+test('phase handoff compacts early only when old observations yield material savings', async () => {
+  const manager = new ContextBudgetManager(new ContextCompactor({ preserveLastNToolResults: 2 }), {
+    mode: 'enforce', triggerRatio: 0.95,
+  });
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Implement the inspected change.' }] }];
+  for (let i = 0; i < 6; i++) {
+    history.push({ role: 'model', parts: [{ functionCall: { id: `read-${i}`, name: 'read_file', args: { path: `src/${i}.ts` } } }] });
+    history.push({ role: 'user', parts: [{ functionResponse: { id: `read-${i}`, name: 'read_file', response: {
+      path: `src/${i}.ts`, content: 'old inspection context '.repeat(160),
+    } } }] });
+  }
+  const envelope = { provider: 'gemini', model: 'gemini-test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 20_000, outputReserveTokens: 100 };
+  const normal = await manager.prepareRequest(envelope);
+  assert.equal(normal.changed, false);
+  const phase = await manager.prepareRequest(envelope, { cognitivePhase: 'implement', phaseTransition: { minHistoryTokens: 100 } });
+  assert.equal(phase.changed, true);
+  assert.equal(phase.phaseTransitionCompacted, true);
+  assert.ok(phase.after.historyTokens < normal.before.historyTokens);
+  const cachePreferred = await manager.prepareRequest(envelope, { cognitivePhase: 'implement',
+    phaseTransition: { minHistoryTokens: 100, minSavingsTokens: 100_000 } });
+  assert.equal(cachePreferred.changed, false);
+  assert.equal(cachePreferred.history, history);
+  const shadow = new ContextBudgetManager(new ContextCompactor({ preserveLastNToolResults: 2 }), {
+    mode: 'shadow', triggerRatio: 0.95,
+  });
+  const shadowResult = await shadow.prepareRequest(envelope, { cognitivePhase: 'implement',
+    phaseTransition: { minHistoryTokens: 100 } });
+  assert.equal(shadowResult.changed, false);
+});
+
 test('hard-budget stubs retain a recoverable copy of recent verification output', () => {
   const compactor = new ContextCompactor({ maxTotalHistoryTokens: 300 });
   const history: any[] = [
