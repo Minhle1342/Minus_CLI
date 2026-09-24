@@ -56,6 +56,8 @@ export interface EpistemicInvestigationInputs {
   targetFiles?: string[];
   proposedFixSummary?: string;
   workspaceRoot?: string;
+  adversaryRebuttal?: string;
+  skepticalCriticActive?: boolean;
 }
 
 export interface EpistemicInvestigationResult {
@@ -129,6 +131,14 @@ export class EpistemicInvestigationGating {
       };
     }
 
+    // 5. Pillar E4: Nếu phase là explore nhưng có cờ skepticalCriticActive (câu hỏi mớm cung / điều tra lỗi)
+    if (inputs.phase === 'explore' && inputs.skepticalCriticActive) {
+      return {
+        activate: true,
+        reason: 'Investigative exploration query requires lightweight dialectical check against sycophancy and confirmation bias.',
+      };
+    }
+
     // Mặc định: Bypass để bảo vệ hiệu năng và độ trễ
     return {
       activate: false,
@@ -168,9 +178,13 @@ export class CrossAgentDualInvestigator {
       inputs.recentError?.includes('SchemaViolation')
     );
     
-    let antithesisRebuttal = `Phản biện: Cần kiểm tra xem hành vi hiện tại có phải là thiết kế chủ ý không. ` +
-      `Sửa đổi trên [${targetFiles}] có thể gây phá vỡ tương thích ngược (regression) ` +
-      `hoặc giả định về nguyên nhân gốc rễ chưa đầy đủ.`;
+    let antithesisRebuttal = inputs.adversaryRebuttal
+      ? `Phản biện Đối lập (Skeptical Critic): ${inputs.adversaryRebuttal} | Sửa đổi trên [${targetFiles}] có thể gây phá vỡ tương thích ngược hoặc bỏ sót nguyên nhân gốc rễ.`
+      : (inputs.skepticalCriticActive || inputs.consecutiveFailures >= 2)
+      ? `Phản biện Đối lập (Skeptical Critic - Anti-Confirmation Bias): Nghi vấn triệu chứng thứ cấp tại [${targetFiles}]. Cần truy vết caller/config trước khi khẳng định lỗi logic tại đây.`
+      : `Phản biện: Cần kiểm tra xem hành vi hiện tại có phải là thiết kế chủ ý không. ` +
+        `Sửa đổi trên [${targetFiles}] có thể gây phá vỡ tương thích ngược (regression) ` +
+        `hoặc giả định về nguyên nhân gốc rễ chưa đầy đủ.`;
 
     if (hasSurfaceSymptomError) {
       antithesisRebuttal += ` Cảnh báo Null Hypothesis: Lỗi có thể bắt nguồn từ dữ liệu đầu vào sai từ caller hoặc hạ tầng/index, không phải lỗi logic tại [${targetFiles}].`;

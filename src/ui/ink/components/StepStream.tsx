@@ -30,7 +30,7 @@ export const BlinkingDot: React.FC<{ active?: boolean }> = ({ active = true }) =
   }
 
   return (
-    <Text color="red" bold>{visible ? '●' : ' '}</Text>
+    <Text color="#34A853" bold>{visible ? '●' : ' '}</Text>
   );
 };
 

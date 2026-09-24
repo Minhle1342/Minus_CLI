@@ -112,6 +112,12 @@ export class ClassificationEngine {
       reasons.push('PARALLEL_DELEGATION_ELIGIBLE');
     }
 
+    const mentionsSymbol = /\b(?:ham|function|class|method|interface|type|symbol|call graph|caller|callee|blast radius)\b/i.test(normalizedText)
+      || /\b[a-zA-Z0-9_]{3,}\.[a-zA-Z0-9_]{2,}\b/.test(normalizedText);
+    if (mentionsSymbol && (taskClass === 'exploration' || phase === 'explore')) {
+      reasons.push('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED');
+    }
+
     if (input.lastToolFailed && input.previous && input.previous.phase !== 'release') {
       const preserveMutationCapability = mutationIntent.test(normalizedText)
         && input.previous.requiredCapabilities.includes('edit')

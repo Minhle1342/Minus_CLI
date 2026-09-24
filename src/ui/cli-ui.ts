@@ -1131,7 +1131,7 @@ export class CLI {
       this.toolDotStartedAt = Date.now();
       const render = () => {
         const elapsed = ((Date.now() - this.toolDotStartedAt) / 1000).toFixed(1);
-        const dot = this.toolDotOn ? `${c.crimson}●${c.reset}` : ' ';
+        const dot = this.toolDotOn ? `${c.emerald}●${c.reset}` : ' ';
         process.stdout.write(`\r\x1b[2K ${dot}${this.toolDotLabel} ${c.slate}(${elapsed}s)${c.reset}`);
         this.toolDotOn = !this.toolDotOn;
       };
@@ -1413,6 +1413,11 @@ export class CLI {
     };
     distilledTokens?: number;
   }): void {
+    // Tắt hiển thị trên TUI theo mặc định (Cách 3). Chỉ bật khi có biến môi trường MINUS_SHOW_EPISTEMIC=true/1.
+    if (process.env.MINUS_SHOW_EPISTEMIC !== 'true' && process.env.MINUS_SHOW_EPISTEMIC !== '1') {
+      return;
+    }
+
     if (!event.dialecticalVerdict && !event.speculativeRollout) return;
 
     const hypLabel = event.hypothesisId ? ` [${event.hypothesisId}]` : '';
@@ -1903,7 +1908,7 @@ export class CLI {
   static renderCompactOneLiner(opts: CompactStepOptions): void {
     const isError = isToolResultFailure(opts.result);
 
-    const dot = `${c.crimson}●${c.reset}`;
+    const dot = `${c.emerald}●${c.reset}`;
     const toolPrefix = `${dot} ${c.bold}${opts.toolName}${c.reset}`;
 
     const rawTarget = opts.args.path || opts.args.filePath || opts.args.targetFile

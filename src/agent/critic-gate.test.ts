@@ -170,3 +170,94 @@ test('CriticGate.evaluateExplorationSufficiency blocks mutation if latest hypoth
   assert.match(decision.reasons[0] || '', /FALSIFIED/);
 });
 
+test('CriticGate.evaluateExplorationSufficiency enforces Causal Lineage Gate (>=2 files) for R2+ bugfix', () => {
+  const critic = new CriticGate();
+  // Only target.ts inspected (1 file)
+  const singleFileSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'scratch/repro.py' } } }, // scratch does not count
+    ],
+  } as any;
+
+  const blockedDecision = critic.evaluateExplorationSufficiency({
+    taskClass: 'bugfix',
+    session: singleFileSession,
+    targetFilePath: 'src/target.ts',
+    hasReproduction: true,
+    risk: 'R3',
+    gateMode: 'enforce',
+  });
+
+  assert.equal(blockedDecision.allowed, false);
+  assert.equal(blockedDecision.score, 50);
+  assert.ok(blockedDecision.reasons.some((r) => r.includes('CAUSAL_TRACE_INSUFFICIENT')));
+
+  // Now inspect caller file as well (2 files)
+  const causalChainSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/caller.ts' } } },
+    ],
+  } as any;
+
+  const approvedDecision = critic.evaluateExplorationSufficiency({
+    taskClass: 'bugfix',
+    session: causalChainSession,
+    targetFilePath: 'src/target.ts',
+    hasReproduction: true,
+    risk: 'R3',
+    gateMode: 'enforce',
+  });
+
+  assert.equal(approvedDecision.allowed, true);
+  assert.equal(approvedDecision.score, 100);
+  assert.equal(approvedDecision.reasons.length, 0);
+});
+test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on architecture/investigation queries', () => {
+  const critic = new CriticGate();
+  const emptySession = {
+    getEvents: () => [],
+  } as any;
+
+  // Architecture query with 0 inspected files
+  const archDecision = critic.evaluateExplorationExhaustion({
+    userRequest: 'Giải thích kiến trúc và luồng xử lý của hệ thống',
+    session: emptySession,
+    finalAnswer: 'Hệ thống dùng mô hình microservices.',
+  });
+  assert.equal(archDecision.allowed, false);
+  assert.equal(archDecision.scorePenalty, 40);
+  assert.ok(archDecision.reasons[0].includes('EXPLORATION_EXHAUSTED_ZERO_EVIDENCE'));
+
+  // Single-file satisficing on defect investigation
+  const singleFileSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/auth.ts' } } },
+    ],
+  } as any;
+
+  const defectDecision = critic.evaluateExplorationExhaustion({
+    userRequest: 'Tại sao hàm login lại bị lỗi timeout? Có phải do token hết hạn không?',
+    session: singleFileSession,
+    finalAnswer: 'Do token hết hạn.',
+  });
+  assert.equal(defectDecision.scorePenalty, 20);
+  assert.ok(defectDecision.reasons[0].includes('PREMATURE_SEARCH_CLOSURE'));
+
+  // Multi-file exploration passes
+  const multiFileSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/auth.ts' } } },
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/token-verifier.ts' } } },
+    ],
+  } as any;
+
+  const thoroughDecision = critic.evaluateExplorationExhaustion({
+    userRequest: 'Tại sao hàm login lại bị lỗi timeout?',
+    session: multiFileSession,
+    finalAnswer: 'Đã kiểm tra auth và token-verifier.',
+  });
+  assert.equal(thoroughDecision.allowed, true);
+  assert.equal(thoroughDecision.scorePenalty, 0);
+});

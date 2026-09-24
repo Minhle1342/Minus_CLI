@@ -65,7 +65,7 @@ import { DynamicContextCache } from './dynamic-context-cache.js';
 import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
-import { CognitiveHarness } from './cognitive-harness.js';
+import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { detectWorkspaceTestCommand } from '../testing/test-engineering-harness.js';
@@ -1692,6 +1692,12 @@ export class AgentLoop {
       const effectiveEpistemicRisk: BlastRadiusRisk = activeHypothesis?.blastRadius
         || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
 
+      const isInvestigativeExplore = (classification.phase === 'explore' || classification.phase === 'investigate') && (
+        detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery
+        || detectLeadingQuery(turnUserRequest).isLeading
+        || classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+      );
+
       const epistemicResult = this.epistemicEngine.investigate({
         hypothesis: activeHypothesis,
         phase: classification.phase === 'release' ? 'verify' : classification.phase,
@@ -1701,6 +1707,7 @@ export class AgentLoop {
         targetFiles: activeHypothesis?.targetFiles,
         proposedFixSummary: activeHypothesis?.proposedFix,
         workspaceRoot: this._workspace.rootDir,
+        skepticalCriticActive: isInvestigativeExplore,
       });
 
       if (epistemicResult.activated) {
@@ -1711,13 +1718,15 @@ export class AgentLoop {
             epistemicResult.speculativeRollout,
           );
         }
-        CLI.renderEpistemicProgress({
-          hypothesisId: activeHypothesis?.id,
-          targetFiles: activeHypothesis?.targetFiles,
-          dialecticalVerdict: epistemicResult.dialecticalVerdict,
-          speculativeRollout: epistemicResult.speculativeRollout,
-          distilledTokens: epistemicResult.dialecticalVerdict?.distilledTokens,
-        });
+        if (process.env.MINUS_SHOW_EPISTEMIC === 'true' || process.env.MINUS_SHOW_EPISTEMIC === '1') {
+          CLI.renderEpistemicProgress({
+            hypothesisId: activeHypothesis?.id,
+            targetFiles: activeHypothesis?.targetFiles,
+            dialecticalVerdict: epistemicResult.dialecticalVerdict,
+            speculativeRollout: epistemicResult.speculativeRollout,
+            distilledTokens: epistemicResult.dialecticalVerdict?.distilledTokens,
+          });
+        }
       }
       const epistemicVerdictContext = epistemicResult.activated ? epistemicResult.distilledContext : undefined;
 
@@ -1770,7 +1779,12 @@ export class AgentLoop {
         cognitiveScaffold: effectiveScaffoldText,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
         gitPlaybook: promptDecision.gitPlaybookPrompt,
-        harnessGuidance: promptDecision.harnessGuidance,
+        harnessGuidance: [
+          promptDecision.harnessGuidance,
+          classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+            : undefined,
+        ].filter(Boolean).join('\n'),
         epistemicVerdictContext,
         hypothesisContext,
         hypothesisGuidance,
@@ -2575,6 +2589,7 @@ export class AgentLoop {
                   domainGuardian: this.domainIntentGuardian,
                   userRequest: turnUserRequest,
                   gateMode: reproductionMode,
+                  risk: classification.risk,
                 })
               : { allowed: true, score: 100, reasons: [], inspectedFiles: [] };
 
@@ -2587,6 +2602,10 @@ export class AgentLoop {
                   criticApproved: explorationSufficiency.allowed,
                 })
               : { allowed: true };
+
+            const fixationCheck = isMutationTool(toolName) && !isScratch
+              ? this.cognitiveHarness.fileFixationTracker.isFrozen(targetFilePath, turn)
+              : { frozen: false };
 
             const submitGateBlocked = toolName === 'submit_solution' && (
               policyCompletion?.allowed !== true
@@ -2644,6 +2663,18 @@ export class AgentLoop {
                   success: false,
                   error: reproductionCheck.reason,
                   reasonCode: 'REPRODUCTION_GATE_BLOCKED',
+                },
+                durationMs: 1,
+              };
+            } else if (fixationCheck.frozen) {
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                result: {
+                  success: false,
+                  error: fixationCheck.reason,
+                  reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED',
+                  remediationHint: 'Target file is frozen for 1 turn after 2 consecutive failures. Inspect upstream callers, configurations, or schemas before re-attempting modification.',
                 },
                 durationMs: 1,
               };
@@ -2774,6 +2805,16 @@ export class AgentLoop {
               executionResult.result.exitCode,
               { hasNewFailures: differential?.hasNewFailures },
             );
+            if (isVerificationCommand(toolArgs.command) && this.targetFilesModifiedInTurn.size > 0) {
+              const isVerifOk = !isToolResultFailure(executionResult.result) && (executionResult.result.exitCode === 0 || executionResult.result.exitCode === undefined);
+              for (const modifiedF of this.targetFilesModifiedInTurn) {
+                if (isVerifOk) {
+                  this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedF);
+                } else {
+                  this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedF, turn, 'Verification command failed');
+                }
+              }
+            }
             this.lastCommandExecutionState = {
               command: String(toolArgs?.command || toolArgs?.CommandLine || ''),
               success: executionResult.result?.commandOutcome !== 'blocked_preflight'

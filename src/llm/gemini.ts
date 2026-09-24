@@ -255,10 +255,15 @@ export class GeminiLLM {
       const sourcePart = functionCallParts[sourceIndex];
       if (!sourcePart) return undefined;
       functionCallParts.splice(sourceIndex, 1);
-      const thoughtSignature = (sourcePart as any).thoughtSignature
+      const rawThoughtSig = (sourcePart as any).thoughtSignature
+        || (sourcePart as any).thought_signature
+        || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thoughtSignature
+        || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thought_signature;
+
+      const thoughtSignature = ensureBase64ThoughtSignature(rawThoughtSig)
         || (thoughtParts.length > 0
-          ? `gemini-thought-sig-${Buffer.from(thoughtParts.join('')).toString('base64').slice(0, 32)}`
-          : `gemini-stream-sig-${call.name}-${Date.now()}`);
+          ? Buffer.from(`thought-sig:${thoughtParts.join('').slice(0, 120)}`, 'utf-8').toString('base64')
+          : Buffer.from(`stream-sig:${call.name}:${Date.now()}`, 'utf-8').toString('base64'));
       return {
         ...sourcePart,
         thoughtSignature,
@@ -382,23 +387,32 @@ export class GeminiLLM {
       }
     }
 
-    if (!requiresThoughtSignatures(this.modelName)) return history;
-
+    const isThinkingModel = requiresThoughtSignatures(this.modelName);
     const unsignedCallIds = new Set<string>();
     const sanitized: import('@google/genai').Content[] = [];
 
     for (const content of history) {
-      const parts = (content.parts || []).filter((part: any) => {
-        if (part.functionCall && !part.thoughtSignature) {
-          if (part.functionCall.id) unsignedCallIds.add(part.functionCall.id);
-          return false;
-        }
-        if (part.functionResponse && part.functionResponse.id
-          && unsignedCallIds.has(part.functionResponse.id)) {
-          return false;
-        }
-        return true;
-      });
+      const parts = (content.parts || [])
+        .filter((part: any) => {
+          if (isThinkingModel) {
+            if (part.functionCall && !part.thoughtSignature) {
+              if (part.functionCall.id) unsignedCallIds.add(part.functionCall.id);
+              return false;
+            }
+            if (part.functionResponse && part.functionResponse.id
+              && unsignedCallIds.has(part.functionResponse.id)) {
+              return false;
+            }
+          }
+          return true;
+        })
+        .map((part: any) => {
+          if (part.thoughtSignature) {
+            const safeSig = ensureBase64ThoughtSignature(part.thoughtSignature);
+            return safeSig ? { ...part, thoughtSignature: safeSig } : part;
+          }
+          return part;
+        });
 
       const hasMeaningfulPart = parts.some((part: any) => (
         part.functionCall
@@ -445,6 +459,21 @@ export class GeminiLLM {
     this.explicitCaches.set(cacheKey, { name: created.name, expiresAt: now + ttlSeconds * 1_000 });
     return created.name;
   }
+}
+
+export function ensureBase64ThoughtSignature(signature?: string): string | undefined {
+  if (!signature || typeof signature !== 'string') return undefined;
+  const trimmed = signature.trim();
+  if (!trimmed) return undefined;
+
+  // Strict check for standard Base64 string format (multiples of 4, valid chars and padding)
+  const base64Regex = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  if (trimmed.length % 4 === 0 && base64Regex.test(trimmed)) {
+    return trimmed;
+  }
+
+  // Safely re-encode to valid Base64 string to adhere to protobuf TYPE_BYTES schema
+  return Buffer.from(trimmed, 'utf-8').toString('base64');
 }
 
 function hashToolDeclarations(tools: FunctionDeclaration[]): string {

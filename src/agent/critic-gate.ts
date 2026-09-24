@@ -10,6 +10,8 @@ import { WorkspaceStateVerifier, type CleanlinessCheckResult } from '../workspac
 import { AuditLedger, type TaskAuditRecord } from './audit-ledger.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { isScratchPath } from '../skills/verification-policy.js';
+import { detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent } from './final-answer-guard.js';
+import { detectLeadingQuery } from './cognitive-harness.js';
 
 export interface CriticEvaluation {
   approved: boolean;
@@ -37,6 +39,7 @@ export interface ExplorationSufficiencyParams {
   domainGuardian?: DomainIntentGuardian;
   userRequest?: string;
   gateMode?: 'off' | 'observe' | 'enforce';
+  risk?: string;
 }
 
 export interface ExplorationSufficiencyDecision {
@@ -119,6 +122,20 @@ export function filterErrorsToModifiedFiles<T extends { file: string }>(errors: 
  * 4. Kiểm tra trạng thái Giả thuyết (Hypothesis Validation Status).
  * 5. Thẩm định tính sạch sẽ của Workspace qua WorkspaceStateVerifier và ghi AuditLedger.
  */
+export interface ExplorationExhaustionParams {
+  userRequest?: string;
+  session: Session;
+  finalAnswer?: string;
+  gateMode?: 'off' | 'observe' | 'enforce';
+}
+
+export interface ExplorationExhaustionDecision {
+  allowed: boolean;
+  scorePenalty: number;
+  reasons: string[];
+  remediationHint?: string;
+}
+
 export class CriticGate {
   private evidenceGate: CompletionEvidenceGate;
   readonly auditLedger: AuditLedger = new AuditLedger();
@@ -142,6 +159,50 @@ export class CriticGate {
    * Dual-Agent Verifier: Đánh giá độc lập xem pha Exploration đã thu thập đủ thông tin để tiến sang Implementation chưa.
    * Rào chắn bảo vệ: Chặn sửa đổi mã nguồn nếu LLM chưa đọc file đích hoặc chưa có bằng chứng tái hiện lỗi (Reproduction Test).
    */
+  /**
+   * Pillar E2: Exploration Exhaustion Gate
+   * Prevents premature stopping and hallucinated explanations when answering codebase questions.
+   */
+  evaluateExplorationExhaustion(params: ExplorationExhaustionParams): ExplorationExhaustionDecision {
+    const { userRequest, session } = params;
+    if (!userRequest) return { allowed: true, scorePenalty: 0, reasons: [] };
+
+    const isArch = detectArchitectureAnalysisIntent(userRequest).isArchitectureQuery;
+    const isAnalysis = detectAnalysisOrInvestigationIntent(userRequest).isAnalysisQuery;
+    const isLeading = detectLeadingQuery(userRequest).isLeading;
+
+    if (!isArch && !isAnalysis && !isLeading) {
+      return { allowed: true, scorePenalty: 0, reasons: [] };
+    }
+
+    const inspectedFiles = extractInspectedFilesFromSession(session);
+    const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
+    const reasons: string[] = [];
+    let scorePenalty = 0;
+
+    // Zero-Evidence Invariant: Cannot answer architecture or root cause questions without inspecting any code file
+    if (nonScratchInspected.length === 0) {
+      scorePenalty += 40;
+      reasons.push(
+        'EXPLORATION_EXHAUSTED_ZERO_EVIDENCE: Answering an architecture or defect investigation query requires inspecting source files or call-graph context (read_file, GitNexus context/query) before drawing conclusions.',
+      );
+    } else if (nonScratchInspected.length === 1 && (isAnalysis || isLeading)) {
+      // Single-File Satisficing / Premature Closure Invariant
+      scorePenalty += 20;
+      reasons.push(
+        `PREMATURE_SEARCH_CLOSURE: Investigated only 1 file ('${nonScratchInspected[0]}'). Defect and causal queries require checking at least one caller call-site, schema, or configuration to prevent single-file confirmation bias.`,
+      );
+    }
+
+    const allowed = scorePenalty < 30;
+    return {
+      allowed,
+      scorePenalty,
+      reasons,
+      remediationHint: reasons.join('; '),
+    };
+  }
+
   evaluateExplorationSufficiency(params: ExplorationSufficiencyParams): ExplorationSufficiencyDecision {
     const {
       taskClass,
@@ -194,6 +255,19 @@ export class CriticGate {
       }
     }
 
+    // 2b. Causal Lineage Invariant (Bugfix / Security at R2+ Risk)
+    // Anti-Confirmation Bias: Prevent mutating based on local symptom alone without tracing upstream caller or related test/config
+    const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
+    const isHighOrMediumRisk = ['R2', 'R3', 'R4', 'R5', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(
+      (params.risk || '').trim().toUpperCase(),
+    );
+    if (isBugfixOrSecurity && isHighOrMediumRisk && nonScratchInspected.length < 2) {
+      score -= 50;
+      reasons.push(
+        `CAUSAL_TRACE_INSUFFICIENT: Bugfix/security task at risk level '${params.risk || 'R2+'}' requires inspecting at least 2 causal chain files (root cause locus + caller/call-site/test). Found ${nonScratchInspected.length} inspected production file(s).`,
+      );
+    }
+
     // 3. Hypothesis Falsification Invariant: Cannot mutate based on a falsified hypothesis
     if (hypothesisTracker) {
       const latestHypo = hypothesisTracker.getLatestHypothesis();
@@ -236,6 +310,7 @@ export class CriticGate {
         `1. Inspect the target file (${targetFilePath}) with read_file/view_file to understand existing logic and exact line numbers.`,
         `2. For bugfixes, write a reproduction script (e.g. scratch/reproduce_issue.py) or execute a test command to establish reproduction proof.`,
         `3. Formulate and verify the causal hypothesis before applying mutations.`,
+        `4. Trace the causal lineage: inspect upstream callers, related tests, or config files with read_file/inspect_symbol to avoid tunnel vision.`,
       ].join('\n');
 
       remediationHint = reasons.join('; ');
@@ -362,6 +437,19 @@ export class CriticGate {
       if (audit.consecutiveDriftWarnings > 1) {
         score -= 20;
         reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
+      }
+    }
+
+    // 5. Pillar E2: Exploration Exhaustion Gate for Read-Only / Architecture / Investigation queries
+    if (targetFiles.size === 0) {
+      const exhaustion = this.evaluateExplorationExhaustion({
+        userRequest,
+        session,
+        finalAnswer,
+      });
+      if (exhaustion.scorePenalty > 0) {
+        score -= exhaustion.scorePenalty;
+        reasons.push(...exhaustion.reasons);
       }
     }
 

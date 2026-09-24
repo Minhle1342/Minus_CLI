@@ -368,5 +368,22 @@ test('Evidence Gate does not trigger false positives on 0-file scripts, CommandL
   assert.equal(isVerificationCommand('python -m pytest tests/'), true);
   assert.equal(isVerificationCommand('npx playwright test'), true);
 });
+test('P4 Scratch Isolation: scratch script classified as reproduction, does not count as final repo verification', () => {
+  const gate = new CompletionEvidenceGate();
+  const session = new Session();
 
+  // Mutation to production file
+  record(session, 1, 'write_to_file', { TargetFile: 'src/calc.ts' }, { success: true });
+  // Run scratch script (reproduction proof)
+  record(session, 1, 'run_command', { CommandLine: 'python scratch/reproduce_issue.py' }, { success: true, exitCode: 0, stdout: 'reproduced' });
 
+  // Attempt completion without real repo test suite
+  const decision = gate.evaluate('I have fixed the issue and reproduced it.', session, { turn: 1, taskClass: 'bugfix' });
+  assert.equal(decision.allow, false, 'Scratch script must not count as repo verification after mutation');
+  assert.ok(decision.reasons.some((r) => r.includes('No successful test/build/lint/typecheck command was observed')));
+
+  // Now run repo test suite (e.g. npm test)
+  record(session, 1, 'run_command', { CommandLine: 'npm test' }, { success: true, exitCode: 0, stdout: '1 passed' });
+  const decisionAfterRepoTest = gate.evaluate('Fixed and verified with npm test.', session, { turn: 1, taskClass: 'bugfix' });
+  assert.equal(decisionAfterRepoTest.allow, true, 'Real repo test suite satisfies verification requirement');
+});

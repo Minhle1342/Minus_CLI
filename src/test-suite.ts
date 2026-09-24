@@ -43,7 +43,7 @@ import { SessionPersistence } from './session/session-persistence.js';
 import { SessionManager } from './session/session-manager.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { EffectLedger } from './agent/effect-ledger.js';
-import { GeminiLLM } from './llm/gemini.js';
+import { GeminiLLM, ensureBase64ThoughtSignature } from './llm/gemini.js';
 import { FallbackRouterLLM } from './llm/fallback-router.js';
 import { CheckpointManager } from './workspace/checkpoint.js';
 import {
@@ -1347,6 +1347,21 @@ async function runUnitTests() {
       (part: any) => !part.functionCall && !part.functionResponse,
     )),
     'Gemini thinking adapter loại trọn exchange cũ thiếu thought signature',
+  );
+
+  const rawTestSig = 'gemini-stream-sig-read_file-1790134387149';
+  const encodedSig = ensureBase64ThoughtSignature(rawTestSig);
+  const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  assert(
+    Boolean(encodedSig) && base64Pattern.test(encodedSig!) && encodedSig?.length! % 4 === 0,
+    'ensureBase64ThoughtSignature mã hoá chuỗi unencoded signature thành Base64 hợp lệ theo TYPE_BYTES',
+  );
+
+  const streamingGeminiHistory = (geminiThinkingAdapter as any).prepareContents(streamingSession);
+  const streamingPartsWithSig = streamingGeminiHistory.flatMap((c: any) => c.parts).filter((p: any) => p.thoughtSignature);
+  assert(
+    streamingPartsWithSig.length > 0 && streamingPartsWithSig.every((p: any) => base64Pattern.test(p.thoughtSignature)),
+    'prepareContents đảm bảo toàn bộ thoughtSignature gửi lên Gemini API tuân thủ định dạng Base64 hợp lệ',
   );
 
   streamingSession.addToolResultWithId('list_files', { path: '.', entries: [] }, 'stream-call-1');
@@ -7704,11 +7719,14 @@ Always write tests first!`;
   console.log('========================================');
 
   const specialists43 = getBenchmarkSpecialists();
-  assert(specialists43.length === 5, 'Hệ thống định nghĩa đủ 5 Benchmark Specialists');
+  assert(specialists43.length >= 6, 'Hệ thống định nghĩa đủ Benchmark Specialists bao gồm Skeptical Adversary');
 
   const registry43 = new AgentRegistry();
   const registered43 = registry43.registerBenchmarkSpecialists();
-  assert(registered43.length === 5, 'AgentRegistry đăng ký thành công 5 benchmark specialists');
+  assert(registered43.length >= 6, 'AgentRegistry đăng ký thành công benchmark specialists');
+
+  const adversary = registry43.get('subagent-skeptical-adversary');
+  assert(adversary !== undefined && adversary.metadata?.score === '96.5%', 'Skeptical Adversary ghi nhận top score 96.5%');
 
   // Kiểm tra từng LLM và Benchmark cao nhất
   const r1 = registry43.get('subagent-deepseek-r1-math');

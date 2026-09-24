@@ -3,7 +3,7 @@ import { collectCompletionObservations, hasObservedMutation, observedMutationFil
 import { FILE_MUTATION_TOOLS } from '../tools/diff-generator.js';
 import { isCommandOutcomeBlocked } from '../tools/command-outcome.js';
 
-export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'other';
+export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'reproduction' | 'other';
 
 const MUTATION_TOOLS = FILE_MUTATION_TOOLS;
 
@@ -58,6 +58,12 @@ export function isVerificationCommand(command: unknown): boolean {
   return typeof command === 'string' && VERIFICATION_COMMAND_PATTERN.test(command.trim());
 }
 
+export function isScratchCommand(command: unknown): boolean {
+  if (typeof command !== 'string') return false;
+  const cmd = command.trim();
+  return /(?:^|\s|["'])(?:\.?\/|\.?\\)?(?:\.scratch|\.temp|scratch|temp)[\\/]/i.test(cmd);
+}
+
 export function isNonExecutableFile(filePath: string): boolean {
   const normalizedPath = (filePath || '').trim().toLowerCase();
   if (!normalizedPath) return false;
@@ -78,6 +84,9 @@ export function classifyToolEvidence(
   if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];
   if (toolName === 'run_command') {
     const cmd = extractCommandString(args, result);
+    if (isScratchCommand(cmd)) {
+      return ['reproduction'];
+    }
     return isVerificationCommand(cmd) ? ['verification'] : ['other'];
   }
   if (toolName === 'get_diagnostics') {
@@ -197,7 +206,7 @@ export class CompletionEvidenceGate {
     }
     // Nới lỏng: verification pass sau mutation cuối (test pass / get_diagnostics sạch)
     // được tính là reproduction đủ — không bắt buộc fail-to-pass proof riêng.
-    const hasReproProof = options.hasReproduction === true || verifications.length > 0;
+    const hasReproProof = options.hasReproduction === true || executions.some((e) => e.kinds.includes('reproduction')) || verifications.length > 0;
     if (!hasCertifiedSubmission && (options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('Bugfix resolution requires verification evidence after the fix (reproduction proof or a passing test/diagnostics run) before completion.');
     }

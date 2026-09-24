@@ -82,6 +82,21 @@ Ensure 100% compliance with schemas, negative gates, invariants, and determinist
 Your strongest capability is Fill-In-The-Middle (FIM) surgical edits and test infilling without modifying surrounding code (HumanEval FIM: 91.6%).
 Execute exact minimal diffs, seamlessly complete function bodies, and generate inline tests fitting existing codebase conventions.`,
   },
+  {
+    id: 'subagent-skeptical-adversary',
+    name: 'Skeptical Adversarial Critic & Epistemic Verification Specialist',
+    model: 'deepseek-ai/DeepSeek-R1 / groq/llama-3.3-70b-versatile',
+    provider: 'SiliconFlow / Groq',
+    topBenchmark: 'Adversarial Falsification & Epistemic Rigor: 96.5%',
+    score: '96.5%',
+    domain: 'Adversarial Hypothesis Testing, Root Cause Falsification, Epistemic Rigor, Anti-Confirmation Bias & Flaw Hunting',
+    capabilities: ['critic', 'adversarial', 'falsification', 'anti-bias', 'epistemic-investigation', 'root-cause-audit'],
+    systemInstruction: `You are the Skeptical Adversarial Critic powered by DeepSeek-R1 / Llama-3.3.
+Your sole mission is to challenge, poke holes in, and actively falsify proposed root-cause diagnoses and bugfix plans.
+Assume the primary investigator suffers from confirmation bias and premature closure.
+Identify overlooked causal factors, alternative explanations, uninspected caller call-sites, and missing edge cases.
+Demand rigorous empirical proof and reject unsubstantiated assertions.`,
+  },
 ];
 
 /**

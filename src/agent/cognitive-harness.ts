@@ -9,6 +9,13 @@
  * 5. [Cognitive Brake / Branch Pruner]: Dynamically detects blind alleys and prunes unproductive branches.
  */
 
+export interface PremiseInversionDirective {
+  isLeading: boolean;
+  nullHypothesis: string;
+  affirmativeHypothesis: string;
+  counterfactualProbe: string;
+}
+
 export interface CognitiveScaffold {
   category: 'reasoning' | 'code' | 'anti_deception' | 'error_detective' | 'data_parser' | 'context_compression';
   phase?: string;
@@ -17,6 +24,7 @@ export interface CognitiveScaffold {
   falsificationCriteria: string;
   executionTopology: string[];
   actionBoundary: string;
+  premiseInversion?: PremiseInversionDirective;
 }
 
 export interface CognitiveBrakeDecision {
@@ -26,7 +34,93 @@ export interface CognitiveBrakeDecision {
   recommendedPivot?: string;
 }
 
+export interface FileFixationEntry {
+  consecutiveFailures: number;
+  frozenUntilTurn: number;
+  lastFailureReason?: string;
+}
+
+/**
+ * Anti-Fixation Circuit Breaker (Pillar 3)
+ * Tracks consecutive failed mutation/verification attempts on specific files.
+ * If >= 2 consecutive failures occur on the same target file, freezes mutations
+ * on that file for 1 turn to break tunnel vision and force upstream caller inspection.
+ */
+export function detectLeadingQuery(request: string): { isLeading: boolean } {
+  const normalized = (request || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const leadingPatterns = [
+    /\b(?:co phai|co dung la|co phai do|tai sao lai bi|tai sao.*lai do)\b.{0,60}\b(?:khong|phai khong|dung khong)\b/i,
+    /\b(?:is it because|is .* (?:causing|responsible for|broken by)|why does .* fail because)\b/i,
+    /\b(?:xac nhan giup toi|dung khong|phai khong|xac nhan rang)\b/i,
+    /\b(?:co phai do loi|do loi cua|do ham|do class|do file)\b/i,
+  ];
+
+  return { isLeading: leadingPatterns.some((p) => p.test(normalized)) };
+}
+
+export class FileFixationTracker {
+  private fileFailures: Map<string, FileFixationEntry> = new Map();
+
+  private normalizePath(p: string): string {
+    return (p || '').trim().replace(/\\/g, '/').toLowerCase();
+  }
+
+  recordFailure(filePath: string, currentTurn: number, reason?: string): { frozen: boolean; message?: string } {
+    const norm = this.normalizePath(filePath);
+    if (!norm) return { frozen: false };
+    const current = this.fileFailures.get(norm) || { consecutiveFailures: 0, frozenUntilTurn: 0 };
+    current.consecutiveFailures += 1;
+    current.lastFailureReason = reason;
+
+    if (current.consecutiveFailures >= 2) {
+      current.frozenUntilTurn = currentTurn + 1;
+      this.fileFailures.set(norm, current);
+      return {
+        frozen: true,
+        message: `ANTI_FIXATION_CIRCUIT_BREAKER: Target file '${filePath}' has failed verification ${current.consecutiveFailures} consecutive times. Mutations on this file are FROZEN for turn ${currentTurn} to break tunnel vision. Inspect upstream callers, configurations, or schemas before re-attempting modification.`,
+      };
+    }
+    this.fileFailures.set(norm, current);
+    return { frozen: false };
+  }
+
+  recordSuccess(filePath: string): void {
+    const norm = this.normalizePath(filePath);
+    if (norm) {
+      this.fileFailures.delete(norm);
+    }
+  }
+
+  isFrozen(filePath: string, currentTurn: number): { frozen: boolean; reason?: string } {
+    const norm = this.normalizePath(filePath);
+    if (!norm) return { frozen: false };
+    const entry = this.fileFailures.get(norm);
+    if (!entry) return { frozen: false };
+    if (currentTurn <= entry.frozenUntilTurn) {
+      return {
+        frozen: true,
+        reason: `ANTI_FIXATION_CIRCUIT_BREAKER: Target file '${filePath}' is currently FROZEN due to ${entry.consecutiveFailures} consecutive failed mutation/verification attempts. You MUST inspect upstream callers, dependencies, or schemas first before editing this file again.`,
+      };
+    }
+    return { frozen: false };
+  }
+
+  getFailures(filePath: string): number {
+    const norm = this.normalizePath(filePath);
+    return this.fileFailures.get(norm)?.consecutiveFailures || 0;
+  }
+
+  reset(): void {
+    this.fileFailures.clear();
+  }
+}
+
 export class CognitiveHarness {
+  readonly fileFixationTracker = new FileFixationTracker();
   private falsifiedHypothesesCount: number = 0;
   private lastBrakeReason?: string;
 
@@ -89,6 +183,10 @@ export class CognitiveHarness {
       || lowerReq.includes('bo sung')
       || lowerReq.includes('thực thi')
       || lowerReq.includes('thuc thi')
+      || lowerReq.includes('hàm')
+      || lowerReq.includes('function')
+      || lowerReq.includes('method')
+      || lowerReq.includes('class')
     );
 
     if (isAntiDeception) {
@@ -257,11 +355,14 @@ export class CognitiveHarness {
       }
 
       if (phase === 'explore') {
+        const leadingInfo = detectLeadingQuery(request);
         const negativeGate = [
           '🔒 [PHASE LOCK: EXPLORE] NEVER modify production files or run mutations during EXPLORATION.',
           'NEVER assume root cause without reading the exact offending lines with read_file/view_file first.',
           'NEVER guess code defects without extracting exact file, line, and column from logs or stack traces.',
           'NEVER fabricate mock test data inside production code.',
+          '🔒 [ANTI-SYCOPHANCY GATE]: Do not uncritically accept user premises or leading questions. Test the Null Hypothesis (H0) against independent code facts.',
+          '🔒 [COUNTERFACTUAL PROBE]: When locating a defect, verify whether the symptom could be triggered by caller inputs, configs, or cache rather than local code alone.',
         ];
 
         if (consecutiveFailures > 1) {
@@ -283,6 +384,12 @@ export class CognitiveHarness {
             'Step 4 (Readiness Hand-off): Once root cause is proven with empirical evidence, unlock IMPLEMENT phase.',
           ],
           actionBoundary: 'Gather empirical evidence and locate defect. Modifying production code is LOCKED.',
+          premiseInversion: leadingInfo.isLeading ? {
+            isLeading: true,
+            nullHypothesis: 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
+            affirmativeHypothesis: 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
+            counterfactualProbe: 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
+          } : undefined,
         };
       }
 
@@ -349,14 +456,22 @@ export class CognitiveHarness {
     }
 
     // Default Analytical / Diagnostic Scaffold
+    const fallbackLeadingInfo = detectLeadingQuery(request);
+    const fallbackNegativeGate = [
+      'NEVER provide generic or speculative explanations detached from the actual codebase.',
+      'NEVER hallucinate file paths, function names, or dependencies without reading them.',
+      'NEVER assume a design choice is optimal without checking alternatives and tradeoffs.',
+    ];
+
+    if (fallbackLeadingInfo.isLeading) {
+      fallbackNegativeGate.push('🔒 [ANTI-SYCOPHANCY GATE]: Do not uncritically accept user premises or leading questions. Test the Null Hypothesis (H0) against independent code facts.');
+      fallbackNegativeGate.push('🔒 [COUNTERFACTUAL PROBE]: When locating a defect, verify whether the symptom could be triggered by caller inputs, configs, or cache rather than local code alone.');
+    }
+
     return {
       category: 'reasoning',
       phase,
-      negativeGate: [
-        'NEVER provide generic or speculative explanations detached from the actual codebase.',
-        'NEVER hallucinate file paths, function names, or dependencies without reading them.',
-        'NEVER assume a design choice is optimal without checking alternatives and tradeoffs.',
-      ],
+      negativeGate: fallbackNegativeGate,
       premiseCheck: 'Check if the user question contains an unstated premise or biased framing.',
       falsificationCriteria: 'If code inspection contradicts the initial assumption, pivot immediately and cite real evidence.',
       executionTopology: [
@@ -366,6 +481,12 @@ export class CognitiveHarness {
         'Structured Synthesis: Provide clear, evidence-backed answer.',
       ],
       actionBoundary: 'Read-only ground-truth inspection before drawing conclusions.',
+      premiseInversion: fallbackLeadingInfo.isLeading ? {
+        isLeading: true,
+        nullHypothesis: 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
+        affirmativeHypothesis: 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
+        counterfactualProbe: 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
+      } : undefined,
     };
   }
 
@@ -431,6 +552,15 @@ export class CognitiveHarness {
       lines.push(`2. [PREMISE & ANTI-SYCOPHANCY CHECK]:\n   - 🔍 ${scaffold.premiseCheck}`);
     }
 
+    if (scaffold.premiseInversion?.isLeading) {
+      lines.push(
+        `2b. [PREMISE INVERSION (ANTI-CONFIRMATION BIAS)]:\n` +
+        `   - ⚖️ ${scaffold.premiseInversion.nullHypothesis}\n` +
+        `   - 🎯 ${scaffold.premiseInversion.affirmativeHypothesis}\n` +
+        `   - 🔬 ${scaffold.premiseInversion.counterfactualProbe}`
+      );
+    }
+
     lines.push(
       `3. [FALSIFICATION CRITERIA]:\n   - ⚖️ ${scaffold.falsificationCriteria}`,
       `4. [EXECUTION TOPOLOGY]:`,
@@ -483,6 +613,7 @@ export class CognitiveHarness {
   }
 
   reset(): void {
+    this.fileFixationTracker.reset();
     this.falsifiedHypothesesCount = 0;
     this.lastBrakeReason = undefined;
   }
