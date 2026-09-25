@@ -69,7 +69,7 @@ export class ClassificationEngine {
       const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor') && !hasEnoughEvidence;
       if (requiresEvidenceFirst) {
         phase = 'explore';
-        capabilities = ['inspect', 'search', 'plan', 'memory', 'verify'];
+        capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];
         reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
         phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
@@ -85,7 +85,7 @@ export class ClassificationEngine {
       }
     } else if (bugIntent.test(normalizedText)) {
       taskClass = 'bugfix'; phase = 'explore'; complexity = 'medium'; risk = 'R1';
-      capabilities = ['inspect', 'search', 'execute', 'verify', 'memory'];
+      capabilities = ['inspect', 'search', 'execute', 'verify', 'memory', 'edit', 'plan', 'git-read'];
       reasons.push('BUG_REQUIRES_DIAGNOSIS');
     } else if (verifyIntent.test(normalizedText)) {
       taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';

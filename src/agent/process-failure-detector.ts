@@ -243,11 +243,11 @@ export class ProcessFailureDetector {
 
       if (!isRelevant) {
         this.consecutiveDriftingSteps++;
-        if (this.consecutiveDriftingSteps >= 6) {
+        if (this.consecutiveDriftingSteps >= 4) {
           return {
             type: 'RELEVANCE_DRIFT',
             phase: this.currentPhase,
-            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] Hệ thống phát hiện bạn đã gọi 6 thao tác khảo sát liên tiếp trên các file nằm ngoài phạm vi cốt lõi của bài toán.`,
+            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] Hệ thống phát hiện bạn đã gọi 4 thao tác khảo sát liên tiếp trên các file nằm ngoài phạm vi cốt lõi của bài toán.`,
             suggestedAction: `Dừng việc khảo sát dàn trải. Hãy dùng GitNexus đồ thị gọi hàm (Call Graph) hoặc grep chính xác các symbols của lỗi để định vị đúng module cần can thiệp.`,
           };
         }

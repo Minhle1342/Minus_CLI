@@ -85,7 +85,7 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['edit'],
-        phases: ['implement'],
+        phases: ALL_PHASES,
         minimumRisk: 'R1',
         mutates: true,
         reversible: true,

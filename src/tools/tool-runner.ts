@@ -6,6 +6,7 @@ import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
 
 /**
@@ -155,6 +156,7 @@ function isToolAuthorized(toolName: string, allowedNames: string[]): boolean {
  */
 export class ToolRunner {
   private registry: ToolProvider;
+  private rootRegistry?: ToolProvider;
   private workspace: Workspace;
   private permissionManager?: PermissionManager;
   private executionGuard?: ToolExecutionGuard;
@@ -168,8 +170,10 @@ export class ToolRunner {
     executionGuard?: ToolExecutionGuard,
     guardian?: ToolUseGuardian,
     budgetTracker?: TurnBudgetTracker,
+    rootRegistry?: ToolProvider,
   ) {
     this.registry = registry;
+    this.rootRegistry = rootRegistry;
     this.workspace = workspace;
     this.permissionManager = permissionManager;
     this.executionGuard = executionGuard;
@@ -212,6 +216,14 @@ export class ToolRunner {
     return this.permissionManager;
   }
 
+  getTool(name: string): any {
+    return this.registry.get(name) || this.rootRegistry?.get(name);
+  }
+
+  getRootRegistry(): ToolProvider | undefined {
+    return this.rootRegistry;
+  }
+
   createScoped(provider: ToolProvider): ToolRunner {
     return new ToolRunner(
       provider,
@@ -220,6 +232,7 @@ export class ToolRunner {
       this.executionGuard,
       this.guardian,
       this.budgetTracker,
+      this.rootRegistry || this.registry,
     );
   }
 
@@ -301,7 +314,23 @@ export class ToolRunner {
           guardianDiagnosis: diagnosis,
         };
       }
-      const canGracefullyBypass = toolName === 'update_plan_task' && Boolean(this.registry.get('update_plan_task'));
+      const targetTool = this.getTool(toolName);
+      const isCoreUnifiedTool = Boolean(targetTool) && (
+        EDIT_TOOL_NAMES.has(toolName)
+        || READ_TOOL_NAMES.has(toolName)
+        || toolName === 'run_command'
+        || toolName === 'run_node_script'
+        || toolName === 'run_test_suite'
+        || toolName === 'create_plan'
+        || toolName === 'update_plan_task'
+        || toolName === 'discover_tools'
+        || toolName === 'submit_solution'
+      );
+      const isOperationalPhase = context.classificationPhase === 'implement'
+        || context.classificationPhase === 'verify'
+        || context.classificationPhase === 'plan';
+      const canGracefullyBypass = (toolName === 'update_plan_task' && Boolean(targetTool))
+        || (isCoreUnifiedTool && isOperationalPhase);
       if (!isToolAuthorized(toolName, names) && !canGracefullyBypass) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';
@@ -355,10 +384,11 @@ export class ToolRunner {
     }
 
     // Stage 1: Tool Lookup
-    const tool = this.registry.get(toolName);
+    const tool = this.getTool(toolName);
     if (!tool) {
+      const allAvailable = (this.rootRegistry || this.registry).getAll().map((t) => t.name);
       const errRes = {
-        error: `Tool "${toolName}" không tồn tại. Các tool có sẵn: ${this.registry.getAll().map(t => t.name).join(', ')}`,
+        error: `Tool "${toolName}" không tồn tại. Các tool có sẵn: ${allAvailable.join(', ')}`,
         errorCode: 'UNKNOWN_TOOL',
       };
       const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);

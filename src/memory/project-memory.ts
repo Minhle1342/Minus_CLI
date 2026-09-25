@@ -874,7 +874,8 @@ export class ProjectMemoryManager {
     const trustedInsights = this.memoryData.learnedInsights
       .map((item) => this.normalizeInsight(item))
       .filter((item) => item.category !== 'episodic' && this.isTrustedForAutomaticContext(item, 0.65))
-      .slice(-4);
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+      .slice(0, 4);
     if (trustedInsights.length > 0) {
       lines.push(`- Kinh nghiệm đã ghi nhớ:`);
       for (const item of trustedInsights) {

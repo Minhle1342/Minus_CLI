@@ -86,11 +86,10 @@ export function createGetArchitectureTopologyTool(
         ? String(args.focusLayer).trim()
         : undefined;
       const forceRefresh = Boolean(args.forceRefresh);
-      const maxLayers = Math.max(1, Number(args.maxLayers) || 0) || undefined;
-      const maxFilesPerLayer = Math.max(
-        1,
-        Number(args.maxFilesPerLayer) || 100,
-      );
+      const maxLayers = args.maxLayers !== undefined ? Math.max(1, Number(args.maxLayers) || 1) : undefined;
+      const maxFilesPerLayer = args.maxFilesPerLayer !== undefined
+        ? Math.max(1, Number(args.maxFilesPerLayer) || 100)
+        : 100;
 
       const engine = service || getIntelligenceService(workspace);
       const rawTopology = engine.getArchitectureTopology(entryDir, {

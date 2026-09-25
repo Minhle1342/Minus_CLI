@@ -101,10 +101,14 @@ export class DynamicContextArbiter {
   private defaultBudget: number;
 
   constructor(defaultBudgetTokens?: number) {
-    const envBudget = parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET || '', 10);
-    this.defaultBudget = Number.isFinite(envBudget) && envBudget > 0
-      ? envBudget
-      : (defaultBudgetTokens ?? DynamicContextArbiter.DEFAULT_MAX_BUDGET_TOKENS);
+    if (defaultBudgetTokens !== undefined && Number.isFinite(defaultBudgetTokens) && defaultBudgetTokens > 0) {
+      this.defaultBudget = defaultBudgetTokens;
+    } else {
+      const envBudget = parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET || '', 10);
+      this.defaultBudget = Number.isFinite(envBudget) && envBudget > 0
+        ? envBudget
+        : DynamicContextArbiter.DEFAULT_MAX_BUDGET_TOKENS;
+    }
   }
 
   getBudget(): number {

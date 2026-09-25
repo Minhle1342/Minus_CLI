@@ -408,6 +408,10 @@ export class ToolScope implements ToolProvider {
     this.retriever.indexTools(this.getAll());
   }
 
+  getBaseProvider(): ToolProvider {
+    return this.base;
+  }
+
   register(tool: ToolDefinition): void {
     this.localTools.set(tool.name, tool);
     this.retriever.indexTools(this.getAll());

@@ -6,21 +6,21 @@ import { StepRetrievalQueryBuilder } from '../agent/step-retrieval-query-builder
 import type { ToolDefinition } from './types.js';
 
 const mockTools: ToolDefinition[] = [
-  { name: 'read_file', description: 'Read file contents', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'list_files', description: 'List files in directory', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'search_codebase_fast', description: 'Search codebase fast', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'search_text', description: 'Search text in files', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'apply_patch', description: 'Apply diff patch to file', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'replace_text', description: 'Replace exact text chunk in file', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'run_command', description: 'Execute shell command', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'submit_solution', description: 'Submit verified solution', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'get_diagnostics', description: 'Get compiler and type diagnostics', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'get_symbol_context_360', description: 'Get 360 degree symbol context callers callees tests', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'query_call_graph', description: 'Query call graph callers callees hierarchy', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'inspect_symbol', description: 'Inspect symbol definition', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'analyze_impact', description: 'Analyze blast radius and impact of symbol', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'read_shared_context', description: 'Read shared memory state with OCC version', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
-  { name: 'write_shared_context', description: 'Write shared memory state with OCC versionHash', parameters: { type: 'object', properties: {} }, execute: async () => ({}) },
+  { name: 'read_file', description: 'Read file contents', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'list_files', description: 'List files in directory', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'search_codebase_fast', description: 'Search codebase fast', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'search_text', description: 'Search text in files', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'apply_patch', description: 'Apply diff patch to file', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'replace_text', description: 'Replace exact text chunk in file', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'run_command', description: 'Execute shell command', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'submit_solution', description: 'Submit verified solution', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'get_diagnostics', description: 'Get compiler and type diagnostics', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'get_symbol_context_360', description: 'Get 360 degree symbol context callers callees tests', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'query_call_graph', description: 'Query call graph callers callees hierarchy', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'inspect_symbol', description: 'Inspect symbol definition', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'analyze_impact', description: 'Analyze blast radius and impact of symbol', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'read_shared_context', description: 'Read shared memory state with OCC version', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
+  { name: 'write_shared_context', description: 'Write shared memory state with OCC versionHash', parameters: { type: 'object', properties: {} } as any, execute: async () => ({}) },
 ];
 
 test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior boosts', () => {

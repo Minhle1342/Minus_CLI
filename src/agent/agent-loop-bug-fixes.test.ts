@@ -117,7 +117,7 @@ describe('AgentLoop Bug Fixes Verification', () => {
           type: 'object',
           properties: { path: { type: 'string' } },
           required: ['path'],
-        },
+        } as any,
         execute: async () => {
           readFileExecuted = true;
           return { content: '{}' };
@@ -206,7 +206,7 @@ describe('AgentLoop Bug Fixes Verification', () => {
 
       const registry = new ToolRegistry();
       const loop = new AgentLoop(llm as any, registry, { workspace, maxSteps: 3 });
-      loop.toolRegistry.register({
+      (loop as any).toolRegistry.register({
         name: 'formulate_and_verify_hypothesis',
         description: 'Hypothesis tool',
         parameters: {
@@ -218,7 +218,7 @@ describe('AgentLoop Bug Fixes Verification', () => {
             evidence: { type: 'string' },
           },
           additionalProperties: true,
-        },
+        } as any,
         execute: async () => ({
           success: true,
           hypothesisId: 'H-999',

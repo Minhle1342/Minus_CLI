@@ -1798,9 +1798,10 @@ export class CLI {
       isGoal?: boolean;
     },
   ): void {
-    const taskTag = context?.activeTask ? `─── "${truncateDisplayText(context.activeTask, 40)}" ───` : '────────────────────────────────────────';
+    const stepTag = `STEP ${_step}/${_maxSteps}`;
+    const taskTag = context?.activeTask ? `─── [${stepTag}] "${truncateDisplayText(context.activeTask, 40)}" ───` : `─── [${stepTag}] ─────────────────────────`;
 
-    console.log(`\n${c.slate}${taskTag}──────────────────────────────────────${c.reset}`);
+    console.log(`\n${c.slate}${taskTag}──────────────────────────────${c.reset}`);
   }
 
   /**

@@ -19,7 +19,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
         type: 'object',
         properties: { key: { type: 'string' } },
         required: ['key'],
-      },
+      } as any,
       execute: async (args) => ({ success: true, value: args.key }),
     };
     registry.register(mockTool);
@@ -67,7 +67,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     registry.register({
       name: 'ping',
       description: 'Ping tool',
-      parameters: { type: 'object', properties: {} },
+      parameters: { type: 'object', properties: {} } as any,
       execute: async () => ({ pong: true }),
     });
 
@@ -104,13 +104,13 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
   it('3. Stage 0 cung cấp Actionable Guidance và Guardian Diagnosis khi bị từ chối quyền theo phase', async () => {
     const registry = new ToolRegistry();
     registry.register({
-      name: 'replace_text',
-      description: 'Replace text tool',
+      name: 'deploy_production',
+      description: 'Deploy to production tool',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' } },
-        required: ['path'],
-      },
+        properties: { target: { type: 'string' } },
+        required: ['target'],
+      } as any,
       execute: async () => ({ success: true }),
     });
 
@@ -126,7 +126,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
       turn: 1,
     };
 
-    const res = await runner.run('replace_text', { path: 'file.ts' }, ctx);
+    const res = await runner.run('deploy_production', { target: 'prod' }, ctx);
     assert.equal(res.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
     assert.match(res.result.error, /phase "plan"/);
     assert.match(res.result.error, /create_plan/);
@@ -143,7 +143,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
         type: 'object',
         properties: { filePath: { type: 'string' }, content: { type: 'string' } },
         required: ['filePath', 'content'],
-      },
+      } as any,
       execute: async () => ({ success: true }),
     });
 
@@ -173,11 +173,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     const strictMutationTool: ToolDefinition = {
       name: 'replace_text',
       description: 'Strict mutation tool',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string' } },
-        required: ['path'],
-      },
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } as any,
       outputSchema: {
         type: 'object',
         properties: {
@@ -186,7 +182,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
         },
         required: ['success', 'path'],
         additionalProperties: false,
-      },
+      } as any,
       execute: async (args) => ({
         success: true,
         path: args.path,
@@ -205,10 +201,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
 
   it('6. Stage 4 phản hồi lập tức khi AbortSignal bị hủy', async () => {
     const registry = new ToolRegistry();
-    registry.register({
-      name: 'slow_tool',
-      description: 'Slow tool',
-      execute: async () => new Promise<Record<string, any>>((resolve) => setTimeout(() => resolve({}), 500)),
+    registry.register({ name: 'slow_tool', description: 'Slow tool', parameters: { type: 'object', properties: {} } as any, execute: async () => new Promise<Record<string, any>>((resolve) => setTimeout(() => resolve({}), 500)),
     });
 
     const runner = new ToolRunner(registry, workspace);
@@ -224,7 +217,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     registry.register({
       name: 'unauthorized_tool',
       description: 'Tool outside allowlist',
-      parameters: { type: 'object', properties: {} },
+      parameters: { type: 'object', properties: {} } as any,
       execute: async () => ({ executed: true }),
     });
 
@@ -323,6 +316,52 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
 
     assert.equal(res.result.task?.status, 'COMPLETED');
     assert.equal(res.result.errorCode, undefined, 'Không bị ném lỗi TOOL_NOT_ALLOWED_THIS_TURN');
+  });
+
+  it('10. Scoped ToolRunner cho phép replace_text và mutation tools thực thi mượt mà qua rootRegistry fallback ngay cả khi bị lọc khỏi ToolScope allowlist', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-toolrunner-test-'));
+    try {
+      const testWorkspace = new Workspace(tempDir);
+      const registry = new ToolRegistry();
+      const testFilePath = 'desktop.css';
+      const absPath = path.join(tempDir, testFilePath);
+      fs.writeFileSync(absPath, '.button { color: red; }', 'utf8');
+
+      // Scoped provider chỉ chứa read_file và run_command (loại bỏ replace_text)
+      const allowed = ['read_file', 'run_command'];
+      const scopedProvider = registry.createScope('scoped-turn-step', allowed);
+      const rootRunner = new ToolRunner(registry, testWorkspace);
+      const scopedRunner = rootRunner.createScoped(scopedProvider);
+
+      const hash = hashAllowedToolSet(allowed);
+
+      // LLM gọi replace_text trong phase "implement"
+      const res = await scopedRunner.run(
+        'replace_text',
+        {
+          path: testFilePath,
+          oldText: '.button { color: red; }',
+          newText: '.button { color: blue; }',
+        },
+        {
+          decisionId: 'decision-implement-turn',
+          allowedToolNames: allowed,
+          allowedToolSetHash: hash,
+          classificationPhase: 'implement',
+          turn: 3,
+          controlMode: 'enforce',
+        },
+      );
+
+      assert.equal(res.result.errorCode, undefined, 'Không bị ném lỗi TOOL_NOT_ALLOWED_THIS_TURN');
+      assert.equal(res.result.success, true, 'replace_text thực thi thành công qua rootRegistry fallback');
+      const updatedContent = fs.readFileSync(absPath, 'utf8');
+      assert.match(updatedContent, /color: blue;/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

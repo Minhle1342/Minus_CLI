@@ -72,19 +72,19 @@ test('adaptive tool budget scales generously for hard tasks and large complexity
   assert.ok(decisionCrit.maxToolCalls >= 14, `Expected maxToolCalls >= 14, got ${decisionCrit.maxToolCalls}`);
 });
 
-test('phase-based tool scoping includes previously omitted registry tools', () => {
+test('phase-based tool scoping supports Unified Agentic Loop for coding tasks and guards read-only exploration', () => {
   const registry = new ToolRegistry(new PlanManager());
   registerSubmitSolutionTool(registry, new Workspace(process.cwd()));
   const gate = new ThisTurnToolGate();
 
-  // 1. Explore phase on bugfix
+  // 1. Explore phase on bugfix (Unified Agentic Loop: core tools available for coding tasks)
   const exploreClassification: any = {
     id: 'class-test-explore',
     taskClass: 'bugfix',
     phase: 'explore',
     complexity: 'medium',
     risk: 'R2',
-    requiredCapabilities: ['inspect', 'search', 'plan', 'execute'],
+    requiredCapabilities: ['inspect', 'search', 'plan', 'execute', 'edit'],
     reversibility: 'reversible',
   };
   const exploreDecision = gate.decide(exploreClassification, registry.getAll());
@@ -92,9 +92,23 @@ test('phase-based tool scoping includes previously omitted registry tools', () =
   assert.ok(exploreDecision.allowedToolNames.includes('run_node_script'), 'run_node_script must be allowed in explore');
   assert.ok(exploreDecision.allowedToolNames.includes('formulate_and_verify_hypothesis'), 'formulate_and_verify_hypothesis must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in explore');
-  assert.equal(exploreDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in explore');
+  assert.ok(exploreDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore under Unified Agentic Loop for coding tasks');
 
-  // 2. Implement phase
+  // 2. Pure read-only exploration (must NOT include editing mutations)
+  const readOnlyClassification: any = {
+    id: 'class-test-readonly',
+    taskClass: 'exploration',
+    phase: 'explore',
+    complexity: 'medium',
+    risk: 'R0',
+    requiredCapabilities: ['inspect', 'search'],
+    reversibility: 'reversible',
+  };
+  const readOnlyDecision = gate.decide(readOnlyClassification, registry.getAll());
+  assert.ok(readOnlyDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed in read-only');
+  assert.equal(readOnlyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in pure read-only exploration');
+
+  // 3. Implement phase on feature
   const implementClassification: any = {
     id: 'class-test-implement',
     taskClass: 'feature',
@@ -111,7 +125,7 @@ test('phase-based tool scoping includes previously omitted registry tools', () =
   assert.ok(implementDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in implement');
 
-  // 3. Verify phase
+  // 4. Verify phase
   const verifyClassification: any = {
     id: 'class-test-verify',
     taskClass: 'bugfix',
@@ -126,7 +140,7 @@ test('phase-based tool scoping includes previously omitted registry tools', () =
   assert.ok(verifyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in verify');
   assert.ok(verifyDecision.allowedToolNames.includes('get_diagnostics'), 'get_diagnostics must be allowed in verify');
   assert.ok(verifyDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in verify');
-  assert.equal(verifyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in verify');
+  assert.ok(verifyDecision.allowedToolNames.includes('replace_text'), 'replace_text is available in verify under Unified Agentic Loop for quick adjustments');
 });
 
 test('ClassificationEngine strictly scopes capabilities according to phase and preserves plan on failure', () => {
