@@ -5,7 +5,7 @@ import { Type } from '@google/genai';
 import { ToolDefinition, type ToolExecutionContext } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
-import { diagnoseCommandFailure } from '../sandbox/command-diagnostics.js';
+import { diagnoseCommandFailure, getDevToolSuggestion } from '../sandbox/command-diagnostics.js';
 import { LocalProcessSandbox } from '../sandbox/local-sandbox.js';
 import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
 import { TaskManager } from '../tasks/task-manager.js';
@@ -19,6 +19,7 @@ import {
 import {
   evaluateCommandPreflight,
   normalizeWindowsCommand,
+  probeMissingBinary,
 } from './command-preflight-guard.js';
 import { annotateCommandResult } from './command-outcome.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
@@ -981,6 +982,38 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(effectiveCommand);
+
+      // Pre-spawn missing-binary probe: fail fast without spawning a shell
+      // (e.g. `ruff` absent from PATH cost ~2s per attempt before this gate).
+      // Skipped when Docker isolation owns PATH, or via MINUS_BINARY_PROBE=off.
+      const probeIsolated = executionTarget !== 'host' && sandboxManager
+        ? Boolean(sandboxManager.getStatus?.()?.isIsolated)
+        : false;
+      const probeDisabled = process.env.MINUS_BINARY_PROBE?.toLowerCase() === 'off';
+      if (!probeDisabled && !probeIsolated) {
+        for (const segment of shellAnalysis.segments) {
+          const missing = probeMissingBinary(segment, { workspaceRoot: workspace.rootDir });
+          if (missing) {
+            const devSuggestion = getDevToolSuggestion(missing.name);
+            const fallback = devSuggestion?.fallback;
+            return {
+              command: rawCommand,
+              message: fallback
+                ? `Binary "${missing.name}" is not available on PATH. Run the same operation via "${fallback} ..." instead.`
+                : `Binary "${missing.name}" was not found on PATH in the execution environment.`,
+              preflightCode: 'DEV_BINARY_NOT_FOUND',
+              suggestion: devSuggestion
+                ? `Use "${fallback}"${devSuggestion.install ? ` or install it (${devSuggestion.install})` : ''}. Do not retry the bare "${missing.name}" command unchanged.`
+                : `Install "${missing.name}" or use an equivalent tool/approach. Do not retry the same command unchanged.`,
+              ...(fallback ? { fallbackCommand: fallback } : {}),
+              commandOutcome: 'blocked_preflight',
+              processStarted: false,
+              success: true,
+              durationMs: 1,
+            };
+          }
+        }
+      }
 
       // Do not silently downgrade a mutating or otherwise non-read-only command
       // from Docker to the host. An explicit host target still goes through approval.

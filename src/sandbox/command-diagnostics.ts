@@ -8,6 +8,8 @@ export interface CommandFailureDiagnostic {
   suggestion: string;
   missingExecutable?: string;
   missingDependency?: string;
+  /** Drop-in replacement command when a known dev tool binary is missing. */
+  fallbackCommand?: string;
 }
 
 export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestion: string }> = {
@@ -37,6 +39,54 @@ export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestio
   },
 };
 
+export interface DevToolSuggestion {
+  /** Drop-in replacement, e.g. 'python -m ruff' (append the original args). */
+  fallback?: string;
+  /** Install command, e.g. 'pip install ruff'. */
+  install?: string;
+  /** Extra context, e.g. toolchain requirement. */
+  note?: string;
+}
+
+/**
+ * Known dev-tool binaries mapped to actionable fallbacks. Checked
+ * case-insensitively by getDevToolSuggestion(); covers the ecosystem tools
+ * that POSIX_TO_TOOL_SUGGESTIONS does not (linters, formatters, test
+ * runners, toolchain shims). Keep entries to tools with a stable,
+ * well-known fallback or install command.
+ */
+export const DEV_TOOL_SUGGESTIONS: Record<string, DevToolSuggestion> = {
+  // Python lint/format/test (all runnable as modules of the interpreter)
+  ruff: { fallback: 'python -m ruff', install: 'pip install ruff' },
+  black: { fallback: 'python -m black', install: 'pip install black' },
+  isort: { fallback: 'python -m isort', install: 'pip install isort' },
+  flake8: { fallback: 'python -m flake8', install: 'pip install flake8' },
+  mypy: { fallback: 'python -m mypy', install: 'pip install mypy' },
+  pylint: { fallback: 'python -m pylint', install: 'pip install pylint' },
+  pytest: { fallback: 'python -m pytest', install: 'pip install pytest' },
+  bandit: { fallback: 'python -m bandit', install: 'pip install bandit' },
+  // JS/TS via npx (no global install required)
+  eslint: { fallback: 'npx eslint', install: 'npm install -D eslint' },
+  prettier: { fallback: 'npx prettier', install: 'npm install -D prettier' },
+  tsc: { fallback: 'npx tsc', install: 'npm install -D typescript' },
+  jest: { fallback: 'npx jest', install: 'npm install -D jest' },
+  vitest: { fallback: 'npx vitest', install: 'npm install -D vitest' },
+  tsx: { fallback: 'npx tsx', install: 'npm install -D tsx' },
+  // Go / Rust / .NET / JVM (toolchain components, no module fallback)
+  'golangci-lint': { fallback: 'go vet ./...', install: 'go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest', note: 'Requires the Go toolchain on PATH.' },
+  gofmt: { note: 'gofmt ships with the Go toolchain.', install: 'Install Go (https://go.dev/dl/) and ensure it is on PATH.' },
+  rustfmt: { install: 'rustup component add rustfmt', note: 'Ships with the Rust toolchain.' },
+  clippy: { fallback: 'cargo clippy', install: 'rustup component add clippy', note: 'Invoked via cargo; ships with the Rust toolchain.' },
+  gradle: { fallback: './gradlew', note: 'Prefer the project wrapper; a bare gradle install is often the wrong version.' },
+  'dotnet-ef': { install: 'dotnet tool install --global dotnet-ef' },
+};
+
+/** Case-insensitive lookup that also tolerates Windows executable suffixes. */
+export function getDevToolSuggestion(name: string): DevToolSuggestion | undefined {
+  const key = name.trim().toLowerCase().replace(/\.(exe|cmd|bat|com)$/i, '');
+  return DEV_TOOL_SUGGESTIONS[key];
+}
+
 export function diagnoseCommandFailure(
   command: string,
   result: SandboxExecutionResult,
@@ -52,6 +102,9 @@ export function diagnoseCommandFailure(
     const isWindows = process.platform === 'win32';
     const lowerExec = missingExecutable.toLowerCase();
     const posixMapping = isWindows && !status?.isIsolated ? POSIX_TO_TOOL_SUGGESTIONS[lowerExec] : undefined;
+    const environment = status?.isIsolated
+      ? `Docker sandbox image ${status.image || 'unknown'}`
+      : 'local host environment';
 
     if (posixMapping) {
       return {
@@ -63,9 +116,23 @@ export function diagnoseCommandFailure(
       };
     }
 
-    const environment = status?.isIsolated
-      ? `Docker sandbox image ${status.image || 'unknown'}`
-      : 'local host environment';
+    const devSuggestion = getDevToolSuggestion(missingExecutable);
+    if (devSuggestion) {
+      const fallbackHint = devSuggestion.fallback
+        ? ` Run the same operation via "${devSuggestion.fallback} ..." instead`
+        : '';
+      const installHint = devSuggestion.install ? `, or install it (${devSuggestion.install})` : '';
+      const noteHint = devSuggestion.note ? ` ${devSuggestion.note}` : '';
+      return {
+        success: false,
+        errorCode: 'DEV_TOOL_NOT_FOUND',
+        missingExecutable,
+        ...(devSuggestion.fallback ? { fallbackCommand: devSuggestion.fallback } : {}),
+        diagnostic: `Dev-tool binary "${missingExecutable}" is not available in the ${environment}. The requested command did not start.${noteHint}`,
+        suggestion: `Binary "${missingExecutable}" is missing.${fallbackHint}${installHint}. Do not retry the bare "${missingExecutable}" command unchanged.`,
+      };
+    }
+
     return {
       success: false,
       errorCode: 'COMMAND_NOT_FOUND',

@@ -72,6 +72,13 @@ import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../test
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { resolveEllipticalFollowUp } from './ellipsis-resolver.js';
+import {
+  diffReadSnapshots,
+  extractReadTargets,
+  formatSnapshotNudge,
+  snapshotReadTargets,
+  type ReadSnapshot,
+} from './read-batch-snapshot.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
@@ -362,6 +369,8 @@ export class AgentLoop {
   }
   readonly stepPromptPolicy = new StepPromptPolicy();
   private stepDynamicSuffixes = new Map<number, string>();
+  /** One-shot nudge when a concurrent read batch observed a mid-flight FS change. */
+  private pendingSnapshotNudge: string | undefined;
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
@@ -882,6 +891,7 @@ export class AgentLoop {
     this.lastMutationForInvestigation = undefined;
     this.editToolCallsInTurn = 0;
     this.stepDynamicSuffixes.clear();
+    this.pendingSnapshotNudge = undefined;
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const baseMaxSteps = options?.maxSteps ?? this.maxSteps;
     const initialTurnClassification = this.classificationEngine.classify({
@@ -1730,7 +1740,9 @@ export class AgentLoop {
           timestamp: new Date().toISOString(),
         }).catch(() => {});
       }
-      const reflectionContext = [rawReflection, strategicPivotGuidance].filter(Boolean).join('\n\n');
+      const snapshotNudge = this.pendingSnapshotNudge;
+      this.pendingSnapshotNudge = undefined;
+      const reflectionContext = [rawReflection, strategicPivotGuidance, snapshotNudge].filter(Boolean).join('\n\n');
 
       // Phase 4: Auto-Convergence Directive when all verification tests passed
       let completionDirective: string | undefined;
@@ -2341,6 +2353,8 @@ export class AgentLoop {
         const startedConcurrentPartitions = new Set<number>();
         const readBatchDurationMs = new Map<number, number>();
         const readBatchToolDurationMs = new Map<number, number>();
+        const readBatchSnapshotBefore = new Map<number, ReadSnapshot>();
+        const readBatchSnapshotMismatch = new Map<number, string[]>();
 
         let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
         let toolBatchCancelled = false;
@@ -2392,6 +2406,16 @@ export class AgentLoop {
               }
 
               const batchStartedAt = Date.now();
+              // Snapshot epoch: fingerprint read targets before dispatch so a
+              // mid-flight external FS change can be flagged without locking.
+              const snapshotTargets = extractReadTargets(readPartition.calls.map((scheduled) => ({
+                name: scheduled.name,
+                args: scheduled.args as Record<string, unknown>,
+              })));
+              const snapshotBefore = snapshotTargets.length > 0
+                ? await snapshotReadTargets(this._workspace.rootDir, snapshotTargets).catch(() => undefined)
+                : undefined;
+              if (snapshotBefore) readBatchSnapshotBefore.set(callIndex, snapshotBefore);
               const settled = await Promise.allSettled(readPartition.calls.map((scheduled) => (
                 stepToolRunner.run(scheduled.name, scheduled.args, {
                   sessionId: session.id,
@@ -2411,6 +2435,17 @@ export class AgentLoop {
                 })
               )));
               readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
+              const batchSnapshotBefore = readBatchSnapshotBefore.get(callIndex);
+              if (batchSnapshotBefore) {
+                const snapshotAfterEpoch = await snapshotReadTargets(
+                  this._workspace.rootDir,
+                  Object.keys(batchSnapshotBefore.entries),
+                ).catch(() => undefined);
+                if (snapshotAfterEpoch) {
+                  const changed = diffReadSnapshots(batchSnapshotBefore, snapshotAfterEpoch);
+                  if (changed.length > 0) readBatchSnapshotMismatch.set(callIndex, changed);
+                }
+              }
               settled.forEach((outcome, resultIndex) => {
                 const scheduled = readPartition.calls[resultIndex];
                 preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
@@ -3294,6 +3329,12 @@ export class AgentLoop {
               ? (readBatchDurationMs.get(partitionStartIndex) || 0)
               : (readBatchToolDurationMs.get(partitionStartIndex) || 0);
             const estimatedSerialDurationMs = readBatchToolDurationMs.get(partitionStartIndex) || measuredBatchDurationMs;
+            const snapshotChangedFiles = partitionStartIndex !== undefined
+              ? readBatchSnapshotMismatch.get(partitionStartIndex)
+              : undefined;
+            if (snapshotChangedFiles && snapshotChangedFiles.length > 0) {
+              this.pendingSnapshotNudge = formatSnapshotNudge(snapshotChangedFiles);
+            }
             const batchTelemetry = {
               mode: 'read-tool-batch',
               executionMode: readPartition.mode,
@@ -3304,6 +3345,10 @@ export class AgentLoop {
               estimatedSerialDurationMs,
               savedMs: Math.max(0, estimatedSerialDurationMs - measuredBatchDurationMs),
               persistenceWrites: deferReadPersistence ? 1 : readPartition.calls.length,
+              snapshotConsistent: !snapshotChangedFiles || snapshotChangedFiles.length === 0,
+              ...(snapshotChangedFiles && snapshotChangedFiles.length > 0
+                ? { snapshotChangedFiles }
+                : {}),
             };
             session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
             this.kernel?.ctx.events.emit('tools:batch', batchTelemetry);

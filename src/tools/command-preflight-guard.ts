@@ -570,3 +570,127 @@ export function extractPackageCommand(command: string): ExtractedPackageCommand 
     isRun,
   };
 }
+
+/**
+ * Shell builtins/internal commands that never resolve via PATH.
+ * Probing them would false-positive, so the missing-binary probe skips them.
+ */
+const SHELL_BUILTIN_COMMANDS = new Set([
+  // cmd.exe internals
+  'echo', 'cd', 'chdir', 'dir', 'del', 'erase', 'copy', 'move', 'ren', 'rename',
+  'type', 'cls', 'set', 'path', 'ver', 'vol', 'date', 'time', 'mkdir', 'md',
+  'rmdir', 'rd', 'start', 'call', 'exit', 'pushd', 'popd', 'title', 'pause', 'rem',
+  // POSIX / sh builtins
+  'pwd', 'export', 'test', 'true', 'false', 'alias', 'unalias', 'source',
+]);
+
+/** Project-local bin dirs checked before PATH (venv, node_modules). */
+const WORKSPACE_BIN_DIRS = [
+  'node_modules/.bin',
+  'node_modules\\.bin',
+  '.venv/Scripts',
+  '.venv/bin',
+  'venv/Scripts',
+  'venv/bin',
+];
+
+/**
+ * First tokens owned by built-in emulators (cat/ls/sed/rm/rg in
+ * run-command.ts) or shell internals. The probe must not block them:
+ * the emulator or the local-executable guard handles those paths.
+ */
+const EMULATED_FIRST_TOKENS = new Set([
+  'cat', 'type', 'head', 'tail', 'more', 'less',
+  'sed', 'ls', 'dir',
+  'rm', 'del', 'erase', 'rmdir', 'rd',
+  'rg', 'ripgrep', 'grep', 'findstr', 'select-string', 'sls',
+]);
+
+interface BinaryProbeCacheEntry {
+  found: boolean;
+  at: number;
+}
+
+const BINARY_PROBE_CACHE = new Map<string, BinaryProbeCacheEntry>();
+const BINARY_PROBE_CACHE_TTL_MS = 30_000;
+
+function pathextCandidates(name: string): string[] {
+  if (process.platform !== 'win32') return [name];
+  const pathext = (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((ext) => ext.trim().toLowerCase())
+    .filter(Boolean);
+  const candidates = [name];
+  for (const ext of pathext) {
+    if (name.toLowerCase().endsWith(ext)) return [name];
+    candidates.push(`${name}${ext}`);
+  }
+  return [...new Set(candidates)];
+}
+
+/** Synchronous PATH (+ workspace bin dirs) lookup; cached briefly per process. */
+export function isBareBinaryAvailable(name: string, workspaceRoot?: string): boolean {
+  const key = `${workspaceRoot || ''}\0${name.toLowerCase()}`;
+  const cached = BINARY_PROBE_CACHE.get(key);
+  if (cached && Date.now() - cached.at < BINARY_PROBE_CACHE_TTL_MS) return cached.found;
+
+  let found = false;
+  const searchDirs: string[] = [];
+  if (workspaceRoot) {
+    for (const binDir of WORKSPACE_BIN_DIRS) {
+      searchDirs.push(path.join(workspaceRoot, binDir));
+    }
+  }
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir.trim()) searchDirs.push(dir.trim());
+  }
+  outer: for (const dir of searchDirs) {
+    for (const candidate of pathextCandidates(name)) {
+      try {
+        if (fs.existsSync(path.join(dir, candidate))) {
+          found = true;
+          break outer;
+        }
+      } catch {
+        // Unreadable PATH entry: ignore and keep scanning.
+      }
+    }
+  }
+  BINARY_PROBE_CACHE.set(key, { found, at: Date.now() });
+  return found;
+}
+
+/** Clears the missing-binary probe cache (tests, or after a fresh install). */
+export function clearBinaryProbeCache(): void {
+  BINARY_PROBE_CACHE.clear();
+}
+
+export interface MissingBinaryProbe {
+  name: string;
+}
+
+/**
+ * Detects a bare binary name that resolves nowhere (PATH + project bin dirs).
+ * Returns undefined when the first token is a path (owned by the
+ * LOCAL_EXECUTABLE_NOT_FOUND guard), a shell builtin, or resolvable.
+ * Never spawns a process.
+ */
+export function probeMissingBinary(
+  command: string,
+  options?: { workspaceRoot?: string },
+): MissingBinaryProbe | undefined {
+  const trimmed = command.trim();
+  if (!trimmed) return undefined;
+  const tokenMatch = trimmed.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+  const firstToken = (tokenMatch?.slice(1).find(Boolean) || '').replace(/^["']|["']$/g, '');
+  if (!firstToken) return undefined;
+  // Local paths (./bin/app, C:\...) belong to the local-executable guard.
+  if (firstToken.includes('/') || firstToken.includes('\\')) return undefined;
+  // Env assignments and flags are not binaries.
+  if (/^[$-]/.test(firstToken) || firstToken.includes('=')) return undefined;
+  const base = firstToken.replace(/\.(exe|cmd|bat|com|ps1)$/i, '');
+  if (!base || SHELL_BUILTIN_COMMANDS.has(base.toLowerCase())) return undefined;
+  if (EMULATED_FIRST_TOKENS.has(base.toLowerCase())) return undefined;
+  if (isBareBinaryAvailable(base, options?.workspaceRoot)) return undefined;
+  return { name: base };
+}
