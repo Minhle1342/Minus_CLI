@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { SLASH_COMMANDS } from '../../cli-ui.js';
 import { Workspace } from '../../../workspace/workspace.js';
@@ -12,6 +12,7 @@ import {
   deleteToStart,
   deleteToEnd,
   moveCursor,
+  getNextGraphemeLength,
 } from './input-line-editor.js';
 
 export interface InputPromptBarProps {
@@ -54,6 +55,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   const [history, setHistory] = useState<string[]>(initialHistory);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [tempValue, setTempValue] = useState<string>('');
+  const lastPasteTimestamp = useRef<number>(0);
 
   // Khởi tạo hoặc tái sử dụng Workspace instance để quét gợi ý file
   const activeWorkspace = useMemo(() => {
@@ -123,13 +125,25 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     return { suggestions: [], suggestionType: 'none' };
   }, [value, cursorOffset, activeWorkspace]);
 
-  // Áp dụng lựa chọn gợi ý vào thanh nhập liệu chính xác tại vị trí mention
+  // Áp dụng lựa chọn gợi ý vào thanh nhập liệu chính xác tại vị trí mention/command
   const applySelectedSuggestion = (item: SuggestionItem) => {
     if (item.type === 'command') {
-      const textAfterCursor = value.slice(cursorOffset);
-      const newValue = item.valueToInsert + ' ' + textAfterCursor.trimStart();
-      setValue(newValue);
-      setCursorOffset(item.valueToInsert.length + 1);
+      const textBeforeCursor = value.slice(0, cursorOffset);
+      const slashMatch = textBeforeCursor.match(/(?:^|\s)(\/[^\s]*)$/);
+      if (slashMatch && slashMatch[1] !== undefined) {
+        const slashStart = textBeforeCursor.length - slashMatch[1].length;
+        const before = value.slice(0, slashStart);
+        const after = value.slice(cursorOffset);
+        const formattedInsert = item.valueToInsert + ' ';
+        const newValue = `${before}${formattedInsert}${after.trimStart()}`;
+        setValue(newValue);
+        setCursorOffset(before.length + formattedInsert.length);
+      } else {
+        const textAfterCursor = value.slice(cursorOffset);
+        const newValue = item.valueToInsert + ' ' + textAfterCursor.trimStart();
+        setValue(newValue);
+        setCursorOffset(item.valueToInsert.length + 1);
+      }
     } else {
       const formattedInsert = item.valueToInsert.includes(' ')
         ? `"${item.valueToInsert}"`
@@ -154,6 +168,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     }
     setSelectedIndex(0);
     setHasNavigated(false);
+    setIsDismissed(false);
   };
 
   useInput((input, key) => {
@@ -162,6 +177,39 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       if (key.escape || (key.ctrl && input === 'c')) {
         onAbort?.();
       }
+      return;
+    }
+
+    // Phát hiện sự kiện dán văn bản (Paste chunk):
+    // 1. Chứa ký tự xuống dòng (\r, \n) hoặc mã Bracketed Paste (\x1b[200~)
+    // 2. Hoặc chuỗi text dài hơn 1 ký tự và không phải phím điều hướng/phím tắt chức năng
+    const isPasteChunk =
+      Boolean(input) &&
+      (input.includes('\r') ||
+        input.includes('\n') ||
+        input.includes('\x1b[200~') ||
+        (input.length > 1 &&
+          !key.ctrl &&
+          !key.meta &&
+          !key.leftArrow &&
+          !key.rightArrow &&
+          !key.upArrow &&
+          !key.downArrow &&
+          !key.home &&
+          !key.end &&
+          !key.pageDown &&
+          !key.pageUp &&
+          !key.tab));
+
+    if (isPasteChunk) {
+      lastPasteTimestamp.current = Date.now();
+      const next = insertText({ value, cursorOffset }, input);
+      setValue(next.value);
+      setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
+      setIsDismissed(false);
+      setSelectedIndex(0);
+      setHasNavigated(false);
       return;
     }
 
@@ -265,7 +313,12 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
 
     // Phím Return / Enter
     if (key.return) {
-      if (hasActiveSuggestions && hasNavigated) {
+      // Chống tự động submit do ký tự \r\n đi kèm chuỗi dán (paste debounce guard)
+      if (Date.now() - lastPasteTimestamp.current < 80) {
+        return;
+      }
+
+      if (hasActiveSuggestions && (hasNavigated || suggestionType === 'file')) {
         const activeIdx = Math.min(Math.max(0, selectedIndex), suggestions.length - 1);
         const selected = suggestions[activeIdx];
         if (selected) {
@@ -297,12 +350,14 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     // 1. Home / Ctrl+A: Về đầu dòng
     if (key.home || (key.ctrl && input === 'a')) {
       setCursorOffset(0);
+      setIsDismissed(false);
       return;
     }
 
     // 2. End / Ctrl+E: Về cuối dòng
     if (key.end || (key.ctrl && input === 'e')) {
       setCursorOffset(value.length);
+      setIsDismissed(false);
       return;
     }
 
@@ -311,6 +366,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = deleteToStart({ value, cursorOffset });
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -322,6 +378,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = deleteToEnd({ value, cursorOffset });
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -333,6 +390,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = deleteWordBackward({ value, cursorOffset });
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -344,6 +402,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const mode = (key.ctrl || key.meta) ? 'wordLeft' : 'left';
       const next = moveCursor({ value, cursorOffset }, mode);
       setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
       return;
     }
 
@@ -352,6 +411,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const mode = (key.ctrl || key.meta) ? 'wordRight' : 'right';
       const next = moveCursor({ value, cursorOffset }, mode);
       setCursorOffset(next.cursorOffset);
+      setIsDismissed(false);
       return;
     }
 
@@ -360,6 +420,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = deleteForward({ value, cursorOffset });
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -371,6 +432,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = deleteBackward({ value, cursorOffset });
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -382,6 +444,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       const next = insertText({ value, cursorOffset }, input);
       setValue(next.value);
       setCursorOffset(next.cursorOffset);
+      setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
       setHasNavigated(false);
@@ -460,9 +523,11 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
             <Box>
               <Text color="white">{value.slice(0, cursorOffset)}</Text>
               <Text backgroundColor="white" color="black">
-                {value[cursorOffset]}
+                {value.slice(cursorOffset, cursorOffset + getNextGraphemeLength(value.slice(cursorOffset)))}
               </Text>
-              <Text color="white">{value.slice(cursorOffset + 1)}</Text>
+              <Text color="white">
+                {value.slice(cursorOffset + getNextGraphemeLength(value.slice(cursorOffset)))}
+              </Text>
             </Box>
           )}
         </Box>

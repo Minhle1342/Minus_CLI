@@ -31,6 +31,18 @@ export function renderInkApp(
     patchConsole?: boolean;
   } = {}
 ): InkAppHandle {
+  // Bật bracketed paste mode nếu đang chạy trong terminal TTY
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[?2004h');
+  }
+
+  const exitHandler = () => {
+    if (process.stdout.isTTY) {
+      process.stdout.write('\x1b[?2004l');
+    }
+  };
+  process.once('exit', exitHandler);
+
   const instance = render(
     <App store={store} onSubmitPrompt={options.onSubmitPrompt} onAbort={options.onAbort} />,
     {
@@ -40,9 +52,18 @@ export function renderInkApp(
 
   return {
     instance,
-    unmount: () => instance.unmount(),
+    unmount: () => {
+      exitHandler();
+      process.removeListener('exit', exitHandler);
+      instance.unmount();
+    },
     waitUntilExit: async () => {
-      await instance.waitUntilExit();
+      try {
+        await instance.waitUntilExit();
+      } finally {
+        exitHandler();
+        process.removeListener('exit', exitHandler);
+      }
     },
   };
 }

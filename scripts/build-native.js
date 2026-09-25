@@ -28,7 +28,19 @@ cargo.once('exit', async (code) => {
     return;
   }
   try {
-    await copyFile(source, destination);
+    try {
+      await copyFile(source, destination);
+    } catch (copyErr) {
+      if (copyErr && copyErr.code === 'EBUSY') {
+        const { rename, unlink } = await import('node:fs/promises');
+        const oldBackup = `${destination}.${Date.now()}.old`;
+        await rename(destination, oldBackup).catch(() => {});
+        await copyFile(source, destination);
+        await unlink(oldBackup).catch(() => {});
+      } else {
+        throw copyErr;
+      }
+    }
     console.log(`Native addon ready: ${destination}`);
   } catch (error) {
     console.error(`Unable to package native addon: ${error instanceof Error ? error.message : String(error)}`);

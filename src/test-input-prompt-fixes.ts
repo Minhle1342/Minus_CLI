@@ -43,6 +43,12 @@ describe('Text Input & Prompt Bug Fixes (TUI)', () => {
       const clean = sanitizeInput(dirty);
       assert.strictEqual(clean, 'foo  bar');
     });
+
+    it('should strip bracketed paste mode wrappers and trailing newlines', () => {
+      const pasted = '\x1b[200~git status --short\r\n\x1b[201~';
+      const clean = sanitizeInput(pasted);
+      assert.strictEqual(clean, 'git status --short');
+    });
   });
 
   describe('2. Text Insertion & In-place Editing', () => {
