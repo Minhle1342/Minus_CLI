@@ -3513,7 +3513,13 @@ export class AgentLoop {
         this.kernel?.ctx.events.emit('step:after', step);
         if (canRetryPlan) continue;
 
-        if (finalAnswer && finalAnswer.trim().length > 80 && !isCompletionStub(finalAnswer)) {
+        const planAllowsReconciliation = Boolean(
+          finalAnswer
+          && finalAnswer.trim().length > 80
+          && !isCompletionStub(finalAnswer)
+          && (!initialTurnClassification.requiredCapabilities.includes('edit') || hasSubmittedSolution || hasVerifiedTests)
+        );
+        if (planAllowsReconciliation) {
           this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
           CLI.renderReflectionAlert(
             consecutivePlanCompletionRejects,

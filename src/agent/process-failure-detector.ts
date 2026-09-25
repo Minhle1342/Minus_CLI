@@ -102,12 +102,24 @@ export class ProcessFailureDetector {
   public initTaskKeywords(taskDescription: string): void {
     // Tách các từ khóa có nghĩa (file names, class names, function names, error keywords)
     const matches = taskDescription.match(/[\w\-./\\]+\.[a-zA-Z0-9]+/g) || [];
-    const words = taskDescription
+    const stopwords = new Set([
+      'this', 'that', 'from', 'with', 'have', 'were', 'will', 'then', 'about', 'some', 'what', 'when',
+      'cho', 'cua', 'trong', 'bang', 'theo', 'duoc', 'nhung', 'nhu', 'cac', 'nay', 'do', 'hay', 'giup', 'toi', 'ban',
+    ]);
+    const rawWords = taskDescription
       .toLowerCase()
-      .split(/[^a-zA-Z0-9_\-]/)
-      .filter((w) => w.length >= 4 && !['this', 'that', 'from', 'with', 'have', 'were', 'will', 'then'].includes(w));
+      .split(/[^a-zA-Z0-9_\-\u00C0-\u1EF9]/)
+      .filter((w) => w.length >= 2 && !stopwords.has(w));
 
-    const combined = new Set([...matches.map((m) => m.toLowerCase()), ...words]);
+    // Thêm các biến thể không dấu tiếng Việt
+    const unaccentedWords = taskDescription
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .split(/[^a-z0-9_\-]/)
+      .filter((w) => w.length >= 2 && !stopwords.has(w));
+
+    const combined = new Set([...matches.map((m) => m.toLowerCase()), ...rawWords, ...unaccentedWords]);
     this.taskKeywords = Array.from(combined);
   }
 
@@ -226,15 +238,16 @@ export class ProcessFailureDetector {
         this.inspectedFiles.push(inspectedTarget);
       }
 
-      const isRelevant = this.taskKeywords.length === 0 || this.taskKeywords.some((kw) => inspectedTarget.includes(kw));
+      const unaccentedTarget = inspectedTarget.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const isRelevant = this.taskKeywords.length < 3 || this.taskKeywords.some((kw) => inspectedTarget.includes(kw) || unaccentedTarget.includes(kw));
 
       if (!isRelevant) {
         this.consecutiveDriftingSteps++;
-        if (this.consecutiveDriftingSteps >= 4) {
+        if (this.consecutiveDriftingSteps >= 6) {
           return {
             type: 'RELEVANCE_DRIFT',
             phase: this.currentPhase,
-            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] Hệ thống phát hiện bạn đã gọi 4 thao tác khảo sát liên tiếp trên các file nằm ngoài phạm vi cốt lõi của bài toán.`,
+            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] Hệ thống phát hiện bạn đã gọi 6 thao tác khảo sát liên tiếp trên các file nằm ngoài phạm vi cốt lõi của bài toán.`,
             suggestedAction: `Dừng việc khảo sát dàn trải. Hãy dùng GitNexus đồ thị gọi hàm (Call Graph) hoặc grep chính xác các symbols của lỗi để định vị đúng module cần can thiệp.`,
           };
         }

@@ -164,11 +164,11 @@ export class SolutionGroundingAuditor {
       || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(cleanNormalized);
 
     const hasConcreteActionVerb =
-      /\b(?:xoa|sua|cap nhat|thay doi|tao|chinh sua|khac phuc|them|trien khai|fix|delete|remove|update|change|create|implement|resolve|patch|add|replace|clean|verify|test)\b/i.test(
+      /\b(?:xoa|sua|cap nhat|thay doi|tao|chinh sua|khac phuc|them|trien khai|fix|fixed|delete|deleted|remove|removed|update|updated|change|changed|create|created|implement|implemented|resolve|resolved|patch|patched|add|added|replace|replaced|clean|cleaned|verify|verified|test|tested|refactor|refactored|optimize|optimized|debug|debugged)\b/i.test(
         cleanNormalized,
       );
 
-    const isEvasiveStub = isPurelyEvasivePhrase || (!hasConcreteActionVerb && entities.length === 0 && summary.length < 120);
+    const isEvasiveStub = isPurelyEvasivePhrase || (!hasConcreteActionVerb && entities.length === 0 && reconciledFilesModified.length === 0 && !payload.rootCause && summary.length < 120);
 
     if (isEvasiveStub && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
       return {

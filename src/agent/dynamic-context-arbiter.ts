@@ -403,20 +403,26 @@ export class DynamicContextArbiter {
       if (!content) continue;
       const originalCost = ExactTokenizer.countTokens(content, modelName);
       const tokensNeededToSave = currentTotalTokens - budgetTokens;
-      if (originalCost <= tokensNeededToSave) {
+
+      // Invariant Protection: Sources with priority <= 1.5 (P0.8 - P1.5) must never be pruned to zero.
+      const isCriticalInvariant = source.priority <= 1.5;
+      const minFloorTokens = isCriticalInvariant ? Math.min(120, originalCost) : 0;
+
+      if (!isCriticalInvariant && originalCost <= tokensNeededToSave) {
         included.delete(source.key);
         sourcesPruned.push(source.name);
       } else {
+        const allowedBudget = Math.max(minFloorTokens, originalCost - tokensNeededToSave);
         const truncated = this.truncateToTokenBudget(
           content,
-          originalCost - tokensNeededToSave,
+          allowedBudget,
           modelName,
-          0,
+          isCriticalInvariant ? 2 : 0,
         );
         if (truncated) {
           included.set(source.key, truncated);
           sourcesTruncated.push(source.name);
-        } else {
+        } else if (!isCriticalInvariant) {
           included.delete(source.key);
           sourcesPruned.push(source.name);
         }

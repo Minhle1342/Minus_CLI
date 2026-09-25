@@ -398,7 +398,12 @@ export class ContextCompactor {
       if (msg.role === 'user') {
         for (const p of msg.parts || []) {
           if (p.text && !p.functionResponse) {
-            userPrompt += (userPrompt ? ' ' : '') + p.text;
+            let textSegment = p.text;
+            if (textSegment.includes('[USER INSTRUCTION]:')) {
+              const parts = textSegment.split('[USER INSTRUCTION]:');
+              textSegment = parts[parts.length - 1].trim();
+            }
+            userPrompt += (userPrompt ? ' ' : '') + textSegment;
           }
           if (p.functionResponse && isVerificationOrFailure(p.functionResponse)) {
             const resp = p.functionResponse.response as Record<string, any> | undefined;
@@ -533,8 +538,21 @@ export class ContextCompactor {
     }
 
     // Trích xuất dữ liệu tổng hợp cho 5 phần Anchored Structured Summary (/context-compression)
-    const sessionIntent = (turn0Messages.flatMap((m) => m.parts || []).find((p) => p.text && !p.functionResponse)?.text || 'Perform requested task')
-      .trim().slice(0, 320);
+    const rawTurn0Text = (turn0Messages.flatMap((m) => m.parts || []).find((p) => p.text && !p.functionResponse)?.text || '').trim();
+    let sessionIntent = 'Perform requested task';
+    if (rawTurn0Text.includes('[USER INSTRUCTION]:')) {
+      const parts = rawTurn0Text.split('[USER INSTRUCTION]:');
+      sessionIntent = parts[parts.length - 1].trim().slice(0, 400);
+    } else if (rawTurn0Text) {
+      sessionIntent = rawTurn0Text
+        .replace(/^\[PROJECT KNOWLEDGE BASE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[SESSION \/ GOAL MEMORY[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[AUTONOMOUS GOAL MODE ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[DYNAMIC CONVERGENCE ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[COGNITIVE SCAFFOLD ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .trim()
+        .slice(0, 400) || rawTurn0Text.slice(0, 400);
+    }
 
     const allTouched = Array.from(new Set(archivedTurns.flatMap((t) => t.filesTouched)));
     const allDecisions = Array.from(new Set(archivedTurns.flatMap((t) => t.keyDecisions))).slice(0, 10);
@@ -730,13 +748,9 @@ export class ContextCompactor {
 
     // Tìm các index của tool responses gần nhất
     const toolResultIndices: number[] = [];
-    const protectedToolResultIndices = new Set<number>();
     workingMessages.forEach((msg, idx) => {
       if (msg.parts?.some((p) => p.functionResponse)) {
         toolResultIndices.push(idx);
-        if (msg.parts?.some((part: any) => part.functionResponse && isVerificationOrFailure(part.functionResponse))) {
-          protectedToolResultIndices.add(idx);
-        }
       }
     });
 
@@ -748,13 +762,11 @@ export class ContextCompactor {
     const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
       const isOldToolResult = cutoffIndex >= 0
         && msgIdx < cutoffIndex
-        && !protectedToolResultIndices.has(msgIdx)
         && msg.parts?.some((p) => p.functionResponse);
 
       const isLowSaliencyEager = (options?.cognitivePhase === 'implement' || options?.cognitivePhase === 'verify')
         && toolResultIndices.length > 1
         && msgIdx < toolResultIndices[toolResultIndices.length - 1]
-        && !protectedToolResultIndices.has(msgIdx)
         && msg.parts?.some((p: any) => {
           const name = String(p.functionResponse?.name || '').toLowerCase();
           return name.includes('list_files') || name.includes('search_') || name.includes('pack_codebase') || name.includes('read_compressed');

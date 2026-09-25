@@ -885,7 +885,7 @@ export class PlanManager {
 
     return [
       '[STEP EXECUTION PLAN]',
-      `Goal: ${requirements.goal || '(not captured)'}`,
+      `🎯 [GLOBAL GOAL ANCHOR]: "${requirements.goal || '(not captured)'}"`,
       ...lines,
     ].join('\n');
   }

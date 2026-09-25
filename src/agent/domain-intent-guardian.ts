@@ -117,9 +117,18 @@ export class DomainIntentGuardian {
       invariants.push('Nguyên tắc bất biến: Tuân thủ chính xác công thức và điều kiện miễn giảm thuế');
     }
 
-    // 4. Xác định Core Goal tóm lược
-    const firstLine = userRequest.split('\n')[0].trim();
-    const coreGoal = firstLine.length > 150 ? `${firstLine.slice(0, 147)}...` : firstLine;
+    // 4. Xác định Core Goal tóm lược (lọc bỏ lời chào hỏi và lấy ý định cốt lõi đa dòng)
+    const cleanedRequest = userRequest
+      .replace(/^(?:chào bạn|xin chào|hello|hi|hey|dear agent|bot ơi|em ơi|anh ơi)[,.:!\s]+/i, '')
+      .trim();
+    const requestLines = cleanedRequest
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !/^(?:chào bạn|xin chào|hello|hi|hey)[,.:!\s]*$/i.test(l));
+    const substantiveGoal = requestLines.slice(0, 4).join(' ').replace(/\s+/g, ' ').trim();
+    const coreGoal = substantiveGoal.length > 250
+      ? `${substantiveGoal.slice(0, 247)}...`
+      : (substantiveGoal || userRequest.trim().slice(0, 250));
 
     this.contract = {
       coreGoal,

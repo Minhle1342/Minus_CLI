@@ -53,10 +53,9 @@ export function detectLeadingQuery(request: string): { isLeading: boolean } {
     .toLowerCase();
 
   const leadingPatterns = [
-    /\b(?:co phai|co dung la|co phai do|tai sao lai bi|tai sao.*lai do)\b.{0,60}\b(?:khong|phai khong|dung khong)\b/i,
-    /\b(?:is it because|is .* (?:causing|responsible for|broken by)|why does .* fail because)\b/i,
-    /\b(?:xac nhan giup toi|dung khong|phai khong|xac nhan rang)\b/i,
-    /\b(?:co phai do loi|do loi cua|do ham|do class|do file)\b/i,
+    /\b(?:co phai|co dung la|co phai do|tai sao lai do)\b.{0,60}\b(?:khong|phai khong|dung khong)\b/i,
+    /\b(?:xac nhan giup toi|dung khong|phai khong|chi can xac nhan rang)\b/i,
+    /\b(?:is it true that|confirm for me that|prove that .* is wrong)\b/i,
   ];
 
   return { isLeading: leadingPatterns.some((p) => p.test(normalized)) };
