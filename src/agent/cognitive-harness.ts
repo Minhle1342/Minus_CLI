@@ -535,11 +535,11 @@ export class CognitiveHarness {
     ];
 
     if (scaffold.phase === 'plan') {
-      lines.push(`🔒 [PHASE GOVERNANCE]: PLAN MODE ACTIVE. Code mutation tools (replace_text, apply_patch, write_file) are DISABLED. Use create_plan / update_plan_task to outline the execution plan.`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) — prefer outlining via create_plan / update_plan_task before mutating; small obvious fixes may proceed directly.`);
     } else if (scaffold.phase === 'explore') {
-      lines.push(`🔒 [PHASE GOVERNANCE]: EXPLORE MODE ACTIVE. Code mutation tools are LOCKED. Gather empirical evidence and inspect offending lines first.`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) — inspect and gather evidence first; low-risk edits may proceed, high-risk edits still require evidence via the mutation gate.`);
     } else if (scaffold.phase === 'verify') {
-      lines.push(`🔒 [PHASE GOVERNANCE]: VERIFY MODE ACTIVE. Run tests and verify diagnostics. Do not introduce new features or unrelated changes.`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: VERIFY MODE — run tests and verify diagnostics; avoid new features or unrelated changes.`);
     }
 
     lines.push(
@@ -575,11 +575,11 @@ export class CognitiveHarness {
    */
   formatScaffoldForCompactPrompt(scaffold: CognitiveScaffold): string {
     const phaseBanner = scaffold.phase === 'plan'
-      ? `   - 🔒 [PHASE GOVERNANCE]: PLAN MODE - Tool mutations (replace_text, apply_patch, write_file) are STRICTLY FORBIDDEN. Outline tasks via create_plan.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) - Prefer outlining via create_plan; small direct fixes allowed.`
       : scaffold.phase === 'explore'
-      ? `   - 🔒 [PHASE GOVERNANCE]: EXPLORE MODE - Mutations locked. Inspect & locate root cause.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) - Inspect first; low-risk edits allowed, high-risk edits need evidence.`
       : scaffold.phase === 'verify'
-      ? `   - 🔒 [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
       : '';
 
     const gates = scaffold.negativeGate.slice(0, 3).map((gate) => `   - 💡 ${gate}`).join('\n');
@@ -601,7 +601,7 @@ export class CognitiveHarness {
     const phaseStr = scaffold.phase ? ` (${scaffold.phase.toUpperCase()})` : '';
     return [
       `🧠 [COGNITIVE SCAFFOLD: ${scaffold.category.toUpperCase()}${phaseStr}]`,
-      scaffold.phase === 'plan' ? `├── [Phase Governance]: PLAN MODE - Mutations locked (read/plan only)` : '',
+      scaffold.phase === 'plan' ? `├── [Phase Governance]: PLAN MODE - Prefer outlining before mutating` : '',
       scaffold.phase === 'explore' ? `├── [Phase Governance]: EXPLORE MODE - Evidence gathering active` : '',
       scaffold.phase === 'verify' ? `├── [Phase Governance]: VERIFY MODE - Verification & testing active` : '',
       `├── [Quality Guideline]: ${scaffold.negativeGate[0]}`,

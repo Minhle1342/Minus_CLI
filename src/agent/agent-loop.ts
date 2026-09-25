@@ -72,6 +72,7 @@ import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../test
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { resolveEllipticalFollowUp } from './ellipsis-resolver.js';
+import { isSensitivePath, resolveVerifyTier } from './verify-tier-resolver.js';
 import {
   diffReadSnapshots,
   extractReadTargets,
@@ -371,6 +372,11 @@ export class AgentLoop {
   private stepDynamicSuffixes = new Map<number, string>();
   /** One-shot nudge when a concurrent read batch observed a mid-flight FS change. */
   private pendingSnapshotNudge: string | undefined;
+  /** Latched cascade-repair freeze: set when ≥3 fails share one error signature. */
+  private cascadeFreeze: { signature: string; count: number } | undefined;
+  /** Turn-measured edit impact for the verify gate (never LLM-declared). */
+  private editTouchedCallers = false;
+  private maxEditBlastRisk: string | undefined;
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
@@ -888,10 +894,13 @@ export class AgentLoop {
     this.cognitiveHarness.reset();
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.editTouchedCallers = false;
+    this.maxEditBlastRisk = undefined;
     this.lastMutationForInvestigation = undefined;
     this.editToolCallsInTurn = 0;
     this.stepDynamicSuffixes.clear();
     this.pendingSnapshotNudge = undefined;
+    this.cascadeFreeze = undefined;
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const baseMaxSteps = options?.maxSteps ?? this.maxSteps;
     const initialTurnClassification = this.classificationEngine.classify({
@@ -1231,6 +1240,10 @@ export class AgentLoop {
         inspectedFiles: paretoEvidence.inspectedFiles,
         hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
         hasSubmittedSolution,
+        cascadeFrozen: this.cascadeFreeze !== undefined,
+        ...(this.cascadeFreeze
+          ? { cascadeReason: `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}` }
+          : {}),
         reproductionStatus: {
           hasPostFixPass: this.completionEvidenceGate.hasVerifiedPassingTest(session, turn),
           hasPreFixRepro: paretoEvidence.hasFailureEvidence || hasValidatedHypothesis,
@@ -2607,11 +2620,33 @@ export class AgentLoop {
               })
               : undefined;
             let policyCompletion = toolName === 'submit_solution'
-              ? this.verificationPolicy.canComplete()
+              ? this.verificationPolicy.canComplete([], {
+                changedFileCount: this.targetFilesModifiedInTurn.size,
+                hasCallers: this.editTouchedCallers,
+                blastRisk: this.maxEditBlastRisk,
+                sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => isSensitivePath(file)),
+              })
               : undefined;
 
             // Tool-Use Guardian: JIT Pre-Call Validation Guard cho submit_solution
+            // Harness-measured impact decides whether the cheap diagnostics sweep
+            // may open the gate: HIGH/CRITICAL always demand a real full_test pass.
+            const submitMeasured = {
+              changedFileCount: this.targetFilesModifiedInTurn.size,
+              hasCallers: this.editTouchedCallers,
+              blastRisk: this.maxEditBlastRisk,
+              classificationRisk: classification.risk,
+              sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => isSensitivePath(file)),
+            };
             if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
+              const submitTier = resolveVerifyTier(submitMeasured);
+              if (submitTier.level !== 'LOW') {
+                policyCompletion = {
+                  allowed: false,
+                  reason: `HIGH_IMPACT_VERIFICATION_REQUIRED: Thay đổi mức ${submitTier.level} (${submitTier.reasons.join('; ')}) bắt buộc automated test pass thật (full_test). JIT diagnostics-sweep không mở cổng cho mức này — hãy chạy test suite (npm test / pytest / go test ...) rồi submit lại.`,
+                  errorCode: 'HIGH_IMPACT_VERIFICATION_REQUIRED',
+                };
+              } else {
               try {
                 let errors: any[] = [];
                 if (this.targetFilesModifiedInTurn.size > 0) {
@@ -2650,6 +2685,7 @@ export class AgentLoop {
                   };
                 }
               } catch {}
+              }
             }
 
             let ocrCompletion: OcrGateDecision = {
@@ -2874,6 +2910,16 @@ export class AgentLoop {
             hasCodeMutations: hasMutationsSoFar,
             modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
           });
+          // Cascade-repair freeze: latch when ≥3 consecutive failures share one
+          // error signature; auto-clears when the signature changes or success
+          // lands (the streak tracker resets on both).
+          const failStreak = this.reflectionEngine.getSameSignatureFailStreak();
+          const freezeThreshold = Math.max(2, parseInt(process.env.MINUS_CASCADE_FREEZE_STREAK || '3', 10) || 3);
+          if (failStreak && failStreak.count >= freezeThreshold) {
+            if (!this.cascadeFreeze) this.cascadeFreeze = { ...failStreak };
+          } else if (!failStreak || failStreak.signature !== this.cascadeFreeze?.signature) {
+            this.cascadeFreeze = undefined;
+          }
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result, toolArgs);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
             granted: executionResult.permission?.status === 'granted',
@@ -2904,6 +2950,11 @@ export class AgentLoop {
               impactedTestSuites: blast?.impactedTestSuites,
               risk: blast?.risk,
             });
+            const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
+            if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
+            else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
+            const blastConsumers = blast?.directConsumers || blast?.callers || [];
+            if (Array.isArray(blastConsumers) && blastConsumers.length > 0) this.editTouchedCallers = true;
             hasSubmittedSolution = false;
             hasReportedFindings = false;
             reportedFindingsMarkdown = '';

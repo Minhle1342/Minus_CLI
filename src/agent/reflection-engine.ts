@@ -112,6 +112,7 @@ export class ReflectionEngine {
   private lastReflectionPrompt?: string;
   private lastErrorFingerprint?: string;
   private baselineErrorSignatures: Set<string> = new Set();
+  private failureSignatureStreak: { signature: string; count: number } | undefined;
 
   /**
    * Thiết lập danh sách các chữ ký lỗi có sẵn (Baseline Errors) để phân lập lỗi vi sai
@@ -243,6 +244,7 @@ export class ReflectionEngine {
     if (toolName === 'run_command' && result.regressionEvidence?.classification === 'pre_existing_out_of_scope') {
       this.consecutiveFailures = 0;
       this.lastDetectiveReport = undefined;
+      this.failureSignatureStreak = undefined;
       this.lastReflectionPrompt = '[VERIFIED BASELINE FAILURE]: The identical check already failed before this task edited code. Its diagnostic source is unchanged and outside the observed write set. Do not modify that unrelated file merely to make the global check green. Verification is still blocked; report the command and baseline evidence accurately.';
       return { isFailure: false, consecutiveFailures: 0, reflectionPrompt: this.lastReflectionPrompt,
         advice: 'Pre-existing out-of-scope diagnostic confirmed; verification remains failed.' };
@@ -252,6 +254,7 @@ export class ReflectionEngine {
     if (toolName === 'run_command' && environmentFailureCodes.has(result.errorCode)) {
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
       const details = result.diagnostic || result.stderr || result.errorCode;
       const suggestion = result.suggestion || 'Correct the execution environment before retrying.';
       reflectionPrompt = [
@@ -281,6 +284,7 @@ export class ReflectionEngine {
 
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
 
       const rawCombined = `${result.stderr || ''}\n${result.stdout || ''}\n${result.error || ''}`;
       const verifiedBaseline = (result.regressionEvidence?.preExisting || []) as Array<{ file: string; line: number; code: string; message: string }>;
@@ -349,6 +353,7 @@ export class ReflectionEngine {
     else if (toolName === 'apply_patch' && (result.error || result.errorCode)) {
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
 
       const details = result.diagnostic || result.error || result.errorCode;
       const failedHunkMsg = result.failedHunkNumber ? ` (Hunk #${result.failedHunkNumber})` : '';
@@ -373,6 +378,7 @@ export class ReflectionEngine {
     else if (toolName === 'replace_text' && result.error) {
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
 
       const suggestedRead = result.suggestedRead
         ? `Call read_file with parameters: ${JSON.stringify(result.suggestedRead)}.`
@@ -393,6 +399,7 @@ export class ReflectionEngine {
     else if (toolName === 'update_plan_task' && (result.error || result.errorCode)) {
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
 
       reflectionPrompt = [
         `\n⚠️ [PLAN MANAGEMENT ERROR - UPDATE TASK FAILED]`,
@@ -412,6 +419,7 @@ export class ReflectionEngine {
     else if (result.error || result.errorCode) {
       isFailure = true;
       this.consecutiveFailures++;
+      this.trackFailureSignature(toolName, result);
 
       reflectionPrompt = [
         `\n⚠️ [TOOL EXECUTION ERROR]`,
@@ -430,6 +438,7 @@ export class ReflectionEngine {
         // Chỉ reset consecutiveFailures khi lệnh verification hoặc command đã chạy thành công
         this.consecutiveFailures = 0;
         this.lastErrorFingerprint = undefined;
+        this.failureSignatureStreak = undefined;
       } else if (
         toolName === 'update_plan_task' &&
         feedback.args?.status === 'COMPLETED' &&
@@ -438,6 +447,7 @@ export class ReflectionEngine {
         // Reset khi task được đánh dấu hoàn thành
         this.consecutiveFailures = 0;
         this.lastErrorFingerprint = undefined;
+        this.failureSignatureStreak = undefined;
       } else if (
         !PASSIVE_INSPECTION_TOOLS.has(toolName) &&
         !['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file'].includes(toolName)
@@ -508,10 +518,32 @@ export class ReflectionEngine {
     return this.consecutiveFailures;
   }
 
+  /**
+   * Tracks consecutive failures sharing one normalized error signature
+   * (`tool:errorCode:first-error-line`). Used by the cascade-repair freeze:
+   * repeated failures on the SAME error mean flailing, while varied errors
+   * mean exploration. Any success or signature change resets the streak.
+   */
+  private trackFailureSignature(toolName: string, result: Record<string, any>): number {
+    const firstLine = String(
+      result.error || result.stderr || result.stdout || result.errorCode || '',
+    ).split(/\r?\n/)[0].trim().slice(0, 160);
+    const signature = `${toolName}:${result.errorCode || result.exitCode || 'error'}:${firstLine}`;
+    const previous = this.failureSignatureStreak;
+    const count = previous && previous.signature === signature ? previous.count + 1 : 1;
+    this.failureSignatureStreak = { signature, count };
+    return count;
+  }
+
+  getSameSignatureFailStreak(): { signature: string; count: number } | undefined {
+    return this.failureSignatureStreak ? { ...this.failureSignatureStreak } : undefined;
+  }
+
   reset(): void {
     this.consecutiveFailures = 0;
     this.lastDetectiveReport = undefined;
     this.lastReflectionPrompt = undefined;
     this.lastErrorFingerprint = undefined;
+    this.failureSignatureStreak = undefined;
   }
 }

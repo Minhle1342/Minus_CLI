@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeForMatching } from '../agent/final-answer-guard.js';
+import { detectLazyOmission, resolveFullRewriteWarnLines } from '../agent/aci-guardrails.js';
 
 export type ToolFailureCategory =
   | 'TRUNCATED_JSON'
@@ -73,6 +74,8 @@ export interface PreMutationGateContext {
   supportedHypothesisCount?: number;
   hasEmpiricalEvidence?: boolean;
   hasSubmittedSolution?: boolean;
+  cascadeFrozen?: boolean;
+  cascadeReason?: string;
   reproductionStatus?: {
     isVerified?: boolean;
     hasPreFixRepro?: boolean;
@@ -536,6 +539,46 @@ export class ToolUseGuardian {
       'run_node_script',
     ].includes(toolName);
 
+    // 2c(i). Lazy-omission sensor: block LLM placeholders that would silently
+    // delete code ("# ... rest of code unchanged"). Content-bearing writes only;
+    // apply_patch hunks and deletions carry no free-form content to scan.
+    let hugeRewriteWarning: string | undefined;
+    if (['write_file', 'write_to_file', 'replace_text', 'replace_file_content', 'create_file'].includes(toolName)) {
+      const fullContent = String(
+        args?.content ?? args?.CodeContent ?? args?.codeContent
+        ?? args?.newText ?? args?.new_text
+        ?? args?.ReplacementContent ?? args?.replacementContent ?? '',
+      );
+      if (fullContent) {
+        const targetForScan = String(
+          args?.path || args?.filePath || args?.file_path
+          || args?.targetFile || args?.TargetFile || args?.file || '',
+        );
+        const omissions = detectLazyOmission(fullContent, targetForScan);
+        if (omissions.length > 0) {
+          const shown = omissions.slice(0, 3)
+            .map((finding) => `dòng ${finding.line}: "${finding.marker}"`)
+            .join('; ');
+          const errorMsg = `[LAZY_OMISSION_BLOCKED]: "${toolName}" chứa marker lười biếng (${shown}) — dấu hiệu LLM viết lại mà bỏ sót code. Hãy chia nhỏ thành các "replace_text" với khối oldText neo cụ thể, hoặc viết đầy đủ nội dung, tuyệt đối không dùng placeholder.`;
+          return {
+            valid: false,
+            allowed: false,
+            coercedArgs: args,
+            wasCoerced: false,
+            coercedKeys: [],
+            error: errorMsg,
+            errorCode: 'LAZY_OMISSION_BLOCKED',
+            reason: errorMsg,
+            suggestedAlternative: 'replace_text',
+          };
+        }
+        if ((toolName === 'write_file' || toolName === 'write_to_file')
+          && fullContent.split(/\r?\n/).length > resolveFullRewriteWarnLines()) {
+          hugeRewriteWarning = `Cảnh báo rewrite toàn file dài (${fullContent.split(/\r?\n/).length} dòng): ưu tiên nhiều "replace_text" từng khối nhỏ để giảm nguy cơ sót code thay vì một lần ghi đè toàn bộ.`;
+        }
+      }
+    }
+
     const isEvidenceControlledTask = Boolean(
       gateContext?.isBugfixTask ||
       gateContext?.taskIntent === 'bugfix' ||
@@ -612,6 +655,26 @@ export class ToolUseGuardian {
       || isTrivialFastPath
       || (targetInspected && evidenceScore >= evidenceThreshold && (!isHighRisk || hasEmpiricalEvidence));
 
+    // 2c(iii). Cascade-repair freeze: ≥3 consecutive failures on ONE error
+    // signature means flailing, not exploration. Mutations stay locked until
+    // the agent pivots (new signature, verified success, re-plan). Read and
+    // verification tools remain available to gather a new signal.
+    if (isMutationTool && gateContext?.cascadeFrozen) {
+      const detail = gateContext.cascadeReason ? ` ${gateContext.cascadeReason}.` : '';
+      const errorMsg = `[CASCADE_REPAIR_FROZEN]: Mutation tools are locked because repeated fixes keep failing on the same error.${detail} Stop editing blindly: revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to obtain a genuinely different signal before mutating again.`;
+      return {
+        valid: false,
+        allowed: false,
+        coercedArgs: args,
+        wasCoerced: false,
+        coercedKeys: [],
+        error: errorMsg,
+        errorCode: 'CASCADE_REPAIR_FROZEN',
+        reason: errorMsg,
+        suggestedAlternative: 'update_plan_task',
+      };
+    }
+
     if (isMutationTool && isEvidenceControlledTask && !isTestOrReproFile && !evidenceSufficient) {
       const missing = !targetInspected && !targetEmpiricallyValidated
         ? `đọc chính target "${targetPath || '(unknown)'}" trước khi sửa`
@@ -646,9 +709,12 @@ export class ToolUseGuardian {
       coercedKeys,
       isUnreliable: stats.isUnreliable,
       suggestedAlternative,
-      warning: stats.isUnreliable
-        ? `[GUARDIAN ADVISORY] Tool "${toolName}" has failed ${stats.consecutiveFailures} consecutive times (${stats.lastFailureCategory}). Consider alternative: "${suggestedAlternative}".`
-        : undefined,
+      warning: [
+        hugeRewriteWarning,
+        stats.isUnreliable
+          ? `[GUARDIAN ADVISORY] Tool "${toolName}" has failed ${stats.consecutiveFailures} consecutive times (${stats.lastFailureCategory}). Consider alternative: "${suggestedAlternative}".`
+          : undefined,
+      ].filter(Boolean).join('\n') || undefined,
     };
   }
 

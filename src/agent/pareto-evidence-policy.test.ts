@@ -112,9 +112,20 @@ test('classification explores under uncertainty and acts when evidence reaches t
     evidenceThreshold: 3,
   };
   const uncertain = engine.classify(base);
-  assert.equal(uncertain.phase, 'explore');
-  assert.equal(uncertain.requiredCapabilities.includes('edit'), false);
-  assert.equal(uncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), true);
+  assert.equal(uncertain.phase, 'implement');
+  assert.equal(uncertain.requiredCapabilities.includes('edit'), true);
+  assert.equal(uncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), false);
+
+  const largeUncertain = engine.classify({
+    ...base,
+    request: 'Fix the parser bug across the entire system architecture',
+  });
+  assert.equal(largeUncertain.risk, 'R3');
+  assert.equal(largeUncertain.phase, 'explore');
+  // NOTE: the explore capability list still carries 'edit' (the historic lock
+  // was prompt-level only); the hard gate lives in ToolUseGuardian.
+  assert.equal(largeUncertain.requiredCapabilities.includes('edit'), true);
+  assert.equal(largeUncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), true);
 
   const supported = engine.classify({
     ...base,

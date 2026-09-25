@@ -1,4 +1,5 @@
 import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
+import { isSensitivePath, resolveVerifyTier } from '../agent/verify-tier-resolver.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
 import type { ControlRisk } from '../control/classification-types.js';
 
@@ -184,7 +185,22 @@ export class VerificationPolicy {
     this.verificationHistory.push(this.lastVerification);
 
     if (effectiveSuccess) {
-      if (this.pendingTargetedTests.size > 0) {
+      // Measured-impact rule (single source: verify-tier-resolver): a weaker
+      // tier than full_test must not clear the pending flag for HIGH/CRITICAL
+      // edits — otherwise the tier check in canComplete() never runs.
+      const measuredDecision = resolveVerifyTier({
+        changedFileCount: this.modifiedFiles.size,
+        hasCallers: false,
+        classificationRisk: this.requiredRisk,
+        sensitivePathTouched: Array.from(this.modifiedFiles).some((file) => isSensitivePath(file)),
+      });
+      const recordedTier = options?.tier || this.inferTier(command);
+      const clearsPending = measuredDecision.minTier === 'full_test'
+        ? recordedTier === 'full_test' || recordedTier === 'build'
+        : true;
+      if (!clearsPending) {
+        // Keep hasUnverifiedModifications: a real full_test pass is still due.
+      } else if (this.pendingTargetedTests.size > 0) {
         const tier = options?.tier || this.inferTier(command);
         if (tier === 'full_test' || tier === 'build') {
           this.pendingTargetedTests.clear();
@@ -206,9 +222,15 @@ export class VerificationPolicy {
   }
 
   /**
-   * Kiểm tra xem Agent có được phép kết thúc nhiệm vụ (Final Answer) hay chưa
+   * Kiểm tra xem Agent có được phép kết thúc nhiệm vụ (Final Answer) hay chưa.
+   * `measured` carries harness-measured impact (never LLM claims); when it
+   * resolves to HIGH/CRITICAL the required tier is upgraded to a real
+   * full_test pass regardless of the classification risk.
    */
-  canComplete(activeSkillIds: string[] = []): { allowed: boolean; reason?: string; errorCode?: string } {
+  canComplete(
+    activeSkillIds: string[] = [],
+    measured?: { changedFileCount?: number; hasCallers?: boolean; blastRisk?: string; sensitivePathTouched?: boolean },
+  ): { allowed: boolean; reason?: string; errorCode?: string } {
     // Miễn trừ kiểm thử bắt buộc nếu toàn bộ các file đã can thiệp là file phi thực thi (docs/markdown/configs)
     const hasOnlyNonExecutableModifications =
       this.modifiedFiles.size > 0 &&
@@ -241,10 +263,21 @@ export class VerificationPolicy {
 
     if (mandatesVerification && this.lastVerification) {
       const tierRank: VerificationLadderTier[] = ['structural', 'diff', 'diagnostics', 'typecheck', 'targeted_test', 'full_test', 'build'];
-      const minimum = this.requiredRisk === 'R0' ? 'structural'
+      let minimum: VerificationLadderTier = this.requiredRisk === 'R0' ? 'structural'
         : this.requiredRisk === 'R1' ? 'diagnostics'
           : this.requiredRisk === 'R2' ? 'typecheck'
             : 'full_test';
+      const measuredDecision = resolveVerifyTier({
+        changedFileCount: measured?.changedFileCount ?? this.modifiedFiles.size,
+        hasCallers: measured?.hasCallers ?? false,
+        classificationRisk: this.requiredRisk,
+        blastRisk: measured?.blastRisk,
+        sensitivePathTouched: measured?.sensitivePathTouched
+          ?? Array.from(this.modifiedFiles).some((file) => isSensitivePath(file)),
+      });
+      if (measuredDecision.level !== 'LOW') {
+        minimum = 'full_test';
+      }
       if (tierRank.indexOf(this.lastVerification.tier || 'structural') < tierRank.indexOf(minimum)) {
         return {
           allowed: false,

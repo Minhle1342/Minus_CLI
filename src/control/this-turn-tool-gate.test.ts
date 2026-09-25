@@ -259,9 +259,9 @@ test('CognitiveHarness synchronizes scaffolding instructions strictly by phase t
   assert.ok(planScaffold.actionBoundary.includes('FORBIDDEN'));
 
   const planPrompt = harness.formatScaffoldForPrompt(planScaffold);
-  assert.ok(planPrompt.includes('PHASE GOVERNANCE]: PLAN MODE ACTIVE'));
+  assert.ok(planPrompt.includes('PHASE GOVERNANCE]: PLAN MODE (advisory)'));
   const planCompact = harness.formatScaffoldForCompactPrompt(planScaffold);
-  assert.ok(planCompact.includes('PLAN MODE - Tool mutations (replace_text, apply_patch, write_file) are STRICTLY FORBIDDEN'));
+  assert.ok(planCompact.includes('PLAN MODE (advisory)'));
 
   // 2. In EXPLORE phase: mutations locked, guides empirical inspection
   const exploreScaffold = harness.createScaffold({
@@ -272,7 +272,7 @@ test('CognitiveHarness synchronizes scaffolding instructions strictly by phase t
   assert.ok(exploreScaffold.negativeGate.some(g => g.includes('PHASE LOCK: EXPLORE')));
   assert.equal(exploreScaffold.executionTopology.some(s => s.includes('replace_text')), false);
   const exploreCompact = harness.formatScaffoldForCompactPrompt(exploreScaffold);
-  assert.ok(exploreCompact.includes('EXPLORE MODE - Mutations locked'));
+  assert.ok(exploreCompact.includes('EXPLORE MODE (advisory)'));
 
   // 3. In VERIFY phase: lock new features, test execution active
   const verifyScaffold = harness.createScaffold({
@@ -291,6 +291,21 @@ test('CognitiveHarness synchronizes scaffolding instructions strictly by phase t
   });
   assert.equal(implementScaffold.phase, 'implement');
   assert.ok(implementScaffold.executionTopology.some(s => s.includes('replace_text')));
+});
+
+test('Phase governance banners are advisory: no lock/disable/forbid claims', () => {
+  const harness = new CognitiveHarness();
+  for (const phase of ['plan', 'explore', 'verify'] as const) {
+    const scaffold = harness.createScaffold({ request: 'fix error in token validation', phase });
+    const full = harness.formatScaffoldForPrompt(scaffold);
+    const compact = harness.formatScaffoldForCompactPrompt(scaffold);
+    for (const text of [full, compact]) {
+      assert.ok(!text.includes('STRICTLY FORBIDDEN'), phase);
+      assert.ok(!text.includes('Mutations locked'), phase);
+      assert.ok(!text.includes('are DISABLED'), phase);
+      assert.ok(!text.includes('are LOCKED'), phase);
+    }
+  }
 });
 
 

@@ -1,6 +1,7 @@
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, observedMutationFiles } from './completion-observations.js';
 import { normalizeForMatching } from './final-answer-guard.js';
+import { verifyHighMinFiles } from './verify-tier-resolver.js';
 
 export type ResolutionType =
   | 'code_fix'
@@ -154,6 +155,35 @@ export class SolutionGroundingAuditor {
     const reconciledFilesModified = Array.from(
       new Set([...declaredFiles, ...sessionMutatedFiles]),
     );
+
+    // 4b. Đối chiếu phương pháp verify với mức ảnh hưởng đã đo (chặn "lời hứa
+    // verify"): thay đổi từ ngưỡng HIGH trở lên không được nộp bằng kiểm tra
+    // bằng mắt hoặc tuyên bố suông — bắt buộc automated test pass.
+    const weakMethods: Array<string | undefined> = [
+      undefined,
+      'diff_visual_inspection',
+      'direct_validation',
+      'not_applicable',
+    ];
+    if (
+      reconciledFilesModified.length >= verifyHighMinFiles()
+      && payload.resolutionType !== 'investigation_only'
+      && weakMethods.includes(payload.verificationMethod)
+    ) {
+      return {
+        allowed: false,
+        score: 40,
+        reconciledFilesModified,
+        reasons: [
+          `submit_solution bị từ chối: ${reconciledFilesModified.length} file đã đổi (ngưỡng HIGH) nhưng verificationMethod khai báo là "${payload.verificationMethod || '(trống)'}". Thay đổi mức này bắt buộc automated test pass thật, không chấp nhận kiểm tra bằng mắt hay tuyên bố suông.`,
+        ],
+        errorCode: 'VERIFICATION_TIER_MISMATCH',
+        suggestion:
+          'Hãy chạy test suite thật (npm test / pytest / go test ...) và khai báo verificationMethod là "automated_test_pass" kèm lệnh đã chạy trong verificationEvidence.',
+        informationDensity: density,
+        extractedEntities: entities,
+      };
+    }
 
     // 5. Kiểm tra phát hiện câu văn mẫu né tránh (Evasive Boilerplate Detection)
     const cleanNormalized = normalizeForMatching(summary).replace(/[.!?,;:]+$/g, '').trim();

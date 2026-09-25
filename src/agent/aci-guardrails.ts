@@ -35,6 +35,71 @@ export function resolveAciGuardrailMode(value = process.env.MINUS_ACI_GUARDRAILS
   return 'observe';
 }
 
+export interface LazyOmissionFinding {
+  line: number;
+  marker: string;
+}
+
+/** Warn (not block) when a single full-content write exceeds this many lines. */
+export function resolveFullRewriteWarnLines(value = process.env.MINUS_FULL_REWRITE_WARN_LINES): number {
+  const parsed = parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 300;
+}
+
+const LAZY_PHRASES: RegExp[] = [
+  /rest of (the )?(code|file|function|method|class|implementation)/i,
+  /(code|file|content) (is |was )?(unchanged|omitted|left unchanged)/i,
+  /omitted for brevity/i,
+  /same as (before|above)/i,
+  /existing code (here|unchanged|omitted|as-?is)/i,
+  /your code here|insert code here|add (your )?code here|code here/i,
+  /phần còn lại/i,
+  /giữ nguyên/i,
+  /(không thay đổi|không đổi)/i,
+  /\.\.\.\s*rest\b/i,
+  /\brest\s*[\.\u2026]+/i,
+];
+
+function isProsePath(filePath?: string): boolean {
+  return /\.(md|markdown|txt|rst|tex)$/i.test(filePath || '');
+}
+
+/**
+ * Detects lazy-omission placeholders in LLM-generated file content
+ * ("# ... rest of code unchanged", "// ...", "phần còn lại giữ nguyên").
+ * Line-based to avoid matching spread operators (`...args`) or prose:
+ * - bare `...`/`…` lines and comment-only ellipsis always match;
+ * - omission phrases match in code files, or in prose files only when
+ *   the line itself is a comment.
+ */
+export function detectLazyOmission(text: string, filePath?: string): LazyOmissionFinding[] {
+  const findings: LazyOmissionFinding[] = [];
+  if (!text) return findings;
+  const prose = isProsePath(filePath);
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const trimmed = lines[index].trim();
+    if (!trimmed) continue;
+    if (/^(?:\.\.\.|…)$/.test(trimmed)) {
+      findings.push({ line: index + 1, marker: trimmed });
+      continue;
+    }
+    if (/^(?:\/\/|#|--|;|%|\*)\s*(?:\.\.\.|…)\s*$/.test(trimmed)
+      || /^<!--\s*(?:\.\.\.|…).*?-->\s*$/.test(trimmed)
+      || /^\/\*\s*(?:\.\.\.|…).*?\*\/$/.test(trimmed)) {
+      findings.push({ line: index + 1, marker: trimmed });
+      continue;
+    }
+    const isCommentLine = /^(?:\/\/|#|--|;|%|\*|<!--|\/\*)/.test(trimmed);
+    if (prose && !isCommentLine) continue;
+    const phrase = LAZY_PHRASES.find((pattern) => pattern.test(trimmed));
+    if (phrase) {
+      findings.push({ line: index + 1, marker: trimmed.slice(0, 120) });
+    }
+  }
+  return findings;
+}
+
 export class AciGuardrails {
   private totalValidations = 0;
   private blockedCalls = 0;

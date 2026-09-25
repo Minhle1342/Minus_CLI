@@ -66,7 +66,9 @@ export class ClassificationEngine {
         || input.hasDirectEvidence
         || (input.evidenceScore || 0) >= evidenceThreshold
       );
-      const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor') && !hasEnoughEvidence;
+      const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor')
+        && ['R3', 'R4', 'R5'].includes(risk)
+        && !hasEnoughEvidence;
       if (requiresEvidenceFirst) {
         phase = 'explore';
         capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];

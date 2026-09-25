@@ -12,6 +12,7 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { isScratchPath } from '../skills/verification-policy.js';
 import { detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent } from './final-answer-guard.js';
 import { detectLeadingQuery } from './cognitive-harness.js';
+import { isSensitivePath, resolveVerifyTier } from './verify-tier-resolver.js';
 
 export interface CriticEvaluation {
   approved: boolean;
@@ -412,6 +413,22 @@ export class CriticGate {
           turn,
           hasSubmittedSolution,
         });
+
+    // 2b. Đồng bộ với verify-tier-resolver (single source of truth): thay đổi
+    // mức HIGH/CRITICAL cần test pass thật trong session sau mutation cuối,
+    // không chỉ evidence allow.
+    const measuredTier = resolveVerifyTier({
+      changedFileCount: targetFiles.size,
+      hasCallers: false,
+      classificationRisk: params.risk,
+      sensitivePathTouched: Array.from(targetFiles).some((file) => isSensitivePath(file)),
+    });
+    if (measuredTier.level !== 'LOW' && targetFiles.size > 0
+      && !hasSubmittedSolution
+      && !this.evidenceGate.hasVerifiedPassingTest(session, turn)) {
+      score -= 40;
+      reasons.push(`[MEASURED HIGH-IMPACT VERIFICATION REQUIRED]: ${measuredTier.reasons.join('; ')}. No passing automated test observed in-session after the last mutation — run the test suite before completing.`);
+    }
 
     if (!evidenceDecision.allow) {
       score -= 50;
