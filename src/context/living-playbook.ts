@@ -55,6 +55,8 @@ export class LivingPlaybookManager {
 
   private bulletsMap: Map<string, PlaybookBullet> = new Map();
   private initialized = false;
+  private initPromise: Promise<void> | undefined;
+  private playbookVersion = 0;
   private nextIdIndex = 1;
 
   constructor(workspaceDir?: string) {
@@ -65,8 +67,16 @@ export class LivingPlaybookManager {
 
   public async init(): Promise<void> {
     if (this.initialized) return;
-    this.initialized = true;
+    if (!this.initPromise) {
+      this.initPromise = this.loadPersistedState().then(
+        () => { this.initialized = true; },
+        (error) => { this.initPromise = undefined; throw error; },
+      );
+    }
+    return this.initPromise;
+  }
 
+  private async loadPersistedState(): Promise<void> {
     try {
       await fs.mkdir(this.storageDir, { recursive: true });
       const raw = await fs.readFile(this.storageFilePath, 'utf8');
@@ -93,9 +103,15 @@ export class LivingPlaybookManager {
       await fs.mkdir(this.storageDir, { recursive: true });
       const all = Array.from(this.bulletsMap.values());
       await fs.writeFile(this.storageFilePath, JSON.stringify(all, null, 2), 'utf8');
+      // Mọi lần persist thành công đều đổi version để memo phía retriever hết hiệu lực.
+      this.playbookVersion++;
     } catch {
       // Bỏ qua lỗi ghi đĩa trong môi trường test bị hạn chế quyền
     }
+  }
+
+  public getVersion(): number {
+    return this.playbookVersion;
   }
 
   public getBulletCount(): number {

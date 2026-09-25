@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
@@ -1112,6 +1113,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
   const switchComposeWorkspace = async (targetPath: string, saveCurrent = true): Promise<void> => {
     const resolvedPath = path.resolve(targetPath);
+    try {
+      process.chdir(resolvedPath);
+    } catch {}
     const oldPath = workspace.rootDir;
     if (saveCurrent) await sessionPersistence.save(activeSession!).catch(() => {});
     workspace = new Workspace(resolvedPath);
@@ -1655,8 +1659,71 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         continue;
       }
 
-      // Xử lý lệnh /resume hoặc /continue: Tự động tiếp tục thông minh (Unified Smart Resume)
+      // /resume opens a session picker, restores that session's event-backed
+      // conversation context, then continues any in-flight work for that session.
       if (trimmed === '/resume' || trimmed.startsWith('/resume ') || trimmed === '/continue') {
+        const requestedSessionId = trimmed.startsWith('/resume ')
+          ? trimmed.slice('/resume'.length).trim()
+          : '';
+        const persistedSessionIds = await kernel.ctx.sessions.list();
+        const selectableSessionIds = [
+          activeSession.id,
+          ...persistedSessionIds.filter((id) => id !== activeSession.id).reverse(),
+        ];
+
+        if (selectableSessionIds.length === 0) {
+          console.log(`\n${c.yellow}Không có session đã lưu để resume.${c.reset}\n`);
+          continue;
+        }
+
+        let selectedSessionId = requestedSessionId;
+        if (!selectedSessionId) {
+          console.log(`\n${c.brightCyan}${c.bold}Chọn session cần khôi phục context:${c.reset}`);
+          selectableSessionIds.forEach((id, index) => {
+            const activeMarker = id === activeSession.id ? `${c.green}▶ đang hoạt động${c.reset}` : '';
+            console.log(`  ${c.brightYellow}[${index + 1}]${c.reset} ${id} ${activeMarker}`);
+          });
+          const answer = (await rl.question(`  Chọn số hoặc session ID (Enter/0 để hủy): `)).trim();
+          if (!answer || answer === '0' || answer.toLowerCase() === 'q') {
+            console.log(`${c.gray}Đã hủy resume; session hiện tại không thay đổi.${c.reset}\n`);
+            continue;
+          }
+          const index = Number(answer);
+          selectedSessionId = Number.isInteger(index) && index >= 1 && index <= selectableSessionIds.length
+            ? selectableSessionIds[index - 1]
+            : answer;
+        }
+
+        if (!selectableSessionIds.includes(selectedSessionId)) {
+          console.log(`\n${c.yellow}Không tìm thấy session:${c.reset} ${selectedSessionId}\n`);
+          continue;
+        }
+
+        let selectedSession: Session | undefined;
+        try {
+          // Flush the current event log before changing the active TUI session.
+          await sessionPersistence.save(activeSession);
+          selectedSession = selectedSessionId === activeSession.id
+            ? activeSession
+            : await kernel.ctx.sessions.load(selectedSessionId);
+          if (!selectedSession) {
+            console.log(`\n${c.yellow}Không thể tải session:${c.reset} ${selectedSessionId}\n`);
+            continue;
+          }
+          // Ensure the selected event log is durable too. Rendering below reads
+          // its history projection and never rewrites or compacts that history.
+          await kernel.ctx.sessions.save(selectedSession);
+        } catch (err: any) {
+          console.error(`\n${c.red}Không thể lưu/khôi phục session:${c.reset} ${err.message}\n`);
+          continue;
+        }
+
+        activeSession = selectedSession;
+        agentLoop.bindSession(activeSession);
+        saveSession({ activeSessionId: activeSession.id }, workspace.rootDir);
+        saveSession({ activeSessionId: activeSession.id });
+        CLI.renderSessionTranscript(activeSession.id, activeSession.getHistory());
+
         // 1. Nếu có Compose feature đang active
         if (kernel.ctx.compose && kernel.ctx.compose.isActive()) {
           console.log(`\n${c.magenta}${c.bold}▶ [RESUMING COMPOSE FEATURE]${c.reset} ${c.dim}Tiếp tục Compose pipeline...${c.reset}\n`);
@@ -2120,18 +2187,35 @@ ${planPrompt}`;
         trimmed.startsWith('/cd ')
       ) {
         const parts = trimmed.split(' ');
-        const targetPath = parts.slice(1).join(' ').trim();
+        const rawTarget = parts.slice(1).join(' ').trim();
 
         // Nếu không truyền tham số -> Hiển thị workspace hiện tại
-        if (!targetPath) {
+        if (!rawTarget) {
           CLI.renderWorkspaceInfo(workspace.rootDir);
           continue;
+        }
+
+        // Bỏ bọc dấu ngoặc kép hoặc đơn nếu người dùng truyền "path with spaces"
+        let targetPath = rawTarget.replace(/^["']|["']$/g, '').trim();
+
+        // Tilde expansion (~ -> user homedir)
+        if (targetPath === '~' || targetPath.startsWith('~/') || targetPath.startsWith('~\\')) {
+          targetPath = path.join(os.homedir(), targetPath.slice(1));
+        } else if (/^[a-zA-Z]:$/.test(targetPath)) {
+          // Xử lý bare drive letter trên Windows (vd: "D:" -> "D:\\")
+          targetPath += path.sep;
         }
 
         // Xử lý đường dẫn tương đối hoặc tuyệt đối
         const resolvedPath = path.isAbsolute(targetPath)
           ? path.resolve(targetPath)
           : path.resolve(workspace.rootDir, targetPath);
+
+        // Guard: Nếu chuyển đến cùng workspace hiện tại, chỉ render info mà không reload session
+        if (path.resolve(resolvedPath) === path.resolve(workspace.rootDir)) {
+          CLI.renderWorkspaceInfo(workspace.rootDir);
+          continue;
+        }
 
         if (!fs.existsSync(resolvedPath)) {
           console.error(`\n${c.red}✖ Lỗi: Đường dẫn không tồn tại:${c.reset} ${resolvedPath}\n`);
@@ -2144,6 +2228,10 @@ ${planPrompt}`;
             console.error(`\n${c.red}✖ Lỗi: Đường dẫn không phải là thư mục:${c.reset} ${resolvedPath}\n`);
             continue;
           }
+
+          try {
+            process.chdir(resolvedPath);
+          } catch {}
 
           const oldPath = workspace.rootDir;
           await sessionPersistence.save(activeSession);

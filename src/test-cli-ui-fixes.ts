@@ -147,6 +147,89 @@ describe('Antigravity CLI UI & Input Bug Fixes', () => {
       }
       assert.ok(lines.length > 4, 'Should wrap long text into multiple sublines');
     });
+
+    it('should leave pipe-like rows inside backtick and tilde code fences untouched', () => {
+      const markdown = [
+        '```text',
+        '| name | value |',
+        '|---|---|',
+        '```',
+        '',
+        '~~~sql',
+        'SELECT a | b FROM items;',
+        '~~~',
+      ].join('\n');
+
+      const formatted = formatMarkdownTerminal(markdown);
+      assert.ok(formatted.includes('| name | value |'));
+      assert.ok(formatted.includes('|---|---|'));
+      assert.ok(formatted.includes('SELECT a | b FROM items;'));
+      assert.ok(!formatted.includes('┌'), 'Code examples must not be rendered as tables');
+    });
+
+    it('should parse optional outer pipes, escaped pipes, and pipes inside inline code spans', () => {
+      const markdown = [
+        'Name | Example | Notes',
+        ':--- | ---: | :---:',
+        'Pipe \\| factory | \\|left \\| right\\| | code `a | b` stays together | parsed',
+      ].join('\n');
+
+      const formatted = formatMarkdownTerminal(markdown);
+      assert.ok(formatted.includes('left | right'), 'Escaped pipes should remain cell content');
+      assert.ok(formatted.includes('a | b'), 'Pipes inside code spans should not split a cell');
+      assert.ok(formatted.includes('┌'), 'A valid pipe table should be rendered');
+    });
+
+    it('should use a stacked layout when a table has more columns than the terminal can fit', () => {
+      const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+      Object.defineProperty(process.stdout, 'columns', { configurable: true, value: 60 });
+      try {
+        const headers = Array.from({ length: 18 }, (_, index) => `Column ${index + 1}`);
+        const markdown = [
+          headers.join(' | '),
+          headers.map(() => '---').join(' | '),
+          headers.map((_, index) => `value ${index + 1}`).join(' | '),
+        ].join('\n');
+
+        const formatted = formatMarkdownTerminal(markdown);
+        assert.ok(!formatted.includes('┌'), 'A table that cannot fit should use the stacked representation');
+        for (const line of formatted.split('\n')) {
+          assert.ok(getVisibleWidth(line) <= 60, `Line exceeds terminal width: ${line}`);
+        }
+      } finally {
+        if (originalColumns) Object.defineProperty(process.stdout, 'columns', originalColumns);
+        else Reflect.deleteProperty(process.stdout, 'columns');
+      }
+    });
+
+    it('should redraw only visible user/assistant transcript content without mutating stored history', () => {
+      const messages = [
+        { role: 'user', parts: [{ text: 'Question from selected session' }] },
+        { role: 'user', parts: [{ functionResponse: { name: 'read_file', response: { text: 'tool output' } } }] },
+        { role: 'model', parts: [{ text: 'private reasoning', thought: true }, { text: 'Answer from selected session' }] },
+      ];
+      const before = JSON.stringify(messages);
+      const output: string[] = [];
+      const originalClear = console.clear;
+      const originalLog = console.log;
+      let cleared = false;
+      console.clear = () => { cleared = true; };
+      console.log = (...args: any[]) => { output.push(args.map(String).join(' ')); };
+      try {
+        CLI.renderSessionTranscript('resume-test', messages);
+      } finally {
+        console.clear = originalClear;
+        console.log = originalLog;
+      }
+
+      const rendered = output.join('\n');
+      assert.equal(cleared, true, 'The existing TUI screen should be cleared before redrawing');
+      assert.ok(rendered.includes('Question from selected session'));
+      assert.ok(rendered.includes('Answer from selected session'));
+      assert.ok(!rendered.includes('tool output'), 'Tool response payloads should not appear as chat messages');
+      assert.ok(!rendered.includes('private reasoning'), 'Private reasoning parts should not be displayed');
+      assert.equal(JSON.stringify(messages), before, 'Rendering must not mutate the session history projection');
+    });
   });
 
   describe('4. RealtimeSlashCommandHints Cursor & Prompt Calculation', () => {

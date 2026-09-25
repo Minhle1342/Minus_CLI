@@ -22,7 +22,7 @@ import {
 } from './command-preflight-guard.js';
 import { annotateCommandResult } from './command-outcome.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
-import { classifyGitCommand, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
+import { classifyGitCommand, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
 
@@ -332,7 +332,14 @@ export function checkGitPolicyForShell(
       return { error: scopeDecision.error, errorCode: scopeDecision.errorCode };
     }
     const classification = classifyGitCommand(invocation.subcommand, invocation.args);
-    if (!isGitCommandAuthorized(userRequest, invocation.subcommand, classification)) {
+    if (invocation.subcommand === 'add' && !isExplicitGitAddPathList(invocation.args)) {
+      return {
+        error: 'Broad Git staging is blocked. Use `git add -- <explicit workspace-relative file paths>`; -A/--all, ., wildcard, and pathspec staging are never authorized by a commit request.',
+        errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+        suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
+      };
+    }
+    if (!isGitCommandAuthorized(userRequest, invocation.subcommand, classification, invocation.args)) {
       return {
         error: `Git ${invocation.subcommand} (${classification.risk}) is not authorized by the current user request.`,
         errorCode: classification.risk === 'destructive'
@@ -901,13 +908,13 @@ export async function executeRmEmulation(
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Hỗ trợ tham số WaitMsBeforeAsync để tự động chuyển lệnh chạy lâu sang background task. LƯU Ý QUAN TRỌNG: Để đọc hoặc kiểm tra mã nguồn, BẮT BUỘC dùng tool "read_file" (hỗ trợ trích xuất toàn bộ hàm qua "symbol" trong 1-shot hoặc dải dòng 150-300 dòng). Để xóa file hoặc thư mục, BẮT BUỘC dùng tool "delete_file" (an toàn hash, cross-platform). Để di chuyển hoặc đổi tên file, dùng "move_file". KHÔNG dùng run_command với sed/cat để đọc file, hoặc rm/del để xóa file.',
+    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Với chuỗi lệnh phụ thuộc ngắn, dùng `&&` để lệnh sau chỉ chạy khi lệnh trước thành công; dùng `||` chỉ cho fallback có chủ đích và `|` cho pipeline giới hạn output. Tránh gộp tác vụ không liên quan, shell grouping/subshell hoặc command substitution; cấu trúc shell phức tạp và lệnh ngoài allowlist có thể cần approval. Lệnh hữu hạn chạy lâu (build/test) dùng `timeout_ms` phù hợp; server/watch/daemon dùng `WaitMsBeforeAsync` để chạy nền rồi theo dõi bằng `manage_task`. Thao tác nhạy cảm như Git mutation phải khớp yêu cầu trực tiếp; push main/master cần approval rõ ràng. Lệnh phá hoại hệ thống bị cấm kể cả khi được duyệt. Không đọc/ghi/xóa file qua shell và không đưa secrets/token vào command. Dùng `read_file` để đọc, `delete_file` để xóa và `move_file` để di chuyển file.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần thực thi (ví dụ: "npm test", "npm run dev", "rg \'my_function\' src/", "ls -la", "node -v"). Khi chạy dev server / web app hoặc tiến trình dài hạn, BẮT BUỘC đặt WaitMsBeforeAsync=5000 để chạy nền tự động thay vì in hướng dẫn text suông.',
+          description: 'Terminal command for builds, tests, scripts, and Git. Prefer dedicated tools for workspace browsing, source search, and file reading (`list_files`, `search_text`, `search_codebase_fast`, `read_file`). Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded `|` pipelines when useful. Avoid unrelated chains, subshell/grouping, and `$()`; complex shell or commands outside the allowlist may require approval. Use `timeout_ms` for finite long-running commands, and `WaitMsBeforeAsync` plus `manage_task` for servers/watchers. Git writes require direct user intent; staging is limited to explicit paths, pushing main/master requires approval, and system-destructive commands are prohibited. Do not read, write, or delete files through shell.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -915,11 +922,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Số milliseconds chờ đợi sau khi bắt đầu lệnh trước khi gửi xuống chạy nền (background task). Tối đa 10000ms. Đối với lệnh chạy dev server/web app dài hạn (npm run dev, npm start, vite, uvicorn, python web server...), BẮT BUỘC đặt WaitMsBeforeAsync=5000 để chạy nền tự động.',
+          description: 'Thời gian chờ trước khi chuyển lệnh sang background task (tối đa 10000ms). Bắt buộc dùng giá trị >0 (thường 5000) cho server/watch/daemon chạy lâu; sau đó dùng `manage_task` để xem log hoặc dừng task. Không dùng tham số này thay cho timeout của build/test hữu hạn.',
         },
         timeout_ms: {
           type: Type.NUMBER,
-          description: 'Timeout theo mili-giây (mặc định 120000, tối thiểu 1000, tối đa 300000). Tăng cho restore/build/test lớn.',
+          description: 'Timeout của lệnh đồng bộ theo milliseconds (mặc định 120000; tối thiểu 1000, tối đa 300000). Tăng cho dependency restore/build/test hữu hạn; server chạy liên tục phải dùng WaitMsBeforeAsync thay vì tăng timeout.',
         },
         execution_target: {
           type: Type.STRING,

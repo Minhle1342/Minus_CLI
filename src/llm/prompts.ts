@@ -136,10 +136,11 @@ export const SECTION_TERMINAL_SANDBOX_FULL = `6. TERMINAL-FIRST EXPLORATION & SA
 
 export const SECTION_VERIFICATION_LADDER_FULL = `7. VERIFICATION LADDER & DIFFERENTIAL EVIDENCE GATE (CODEX CLI STANDARD):
    - Before executing test/build commands, verify defined scripts from [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect package.json. NEVER guess non-existent scripts (e.g. running "lint" when not defined in scripts) and NEVER use workspace flags (e.g. --workspace=apps/web) unless the project is confirmed to have a "workspaces" field in package.json. For single-package repos, run scripts directly.
+   - CUSTOM BUILD & SCRIPT DISCIPLINE: If the project has a specific or custom build command (not the default "npm run build" or "tsc", e.g. custom bundlers, monorepo build targets, or specialized compile scripts), you MUST inspect package.json (scripts section) or run \`get_diagnostics\` first before attempting to execute a full test suite. Never jump straight to heavy full test suites without confirming the project's build and verification mechanisms.
    - After modifying code, ALWAYS execute the Verification Ladder step-by-step:
      1. In-memory diagnostics (\`get_diagnostics\`) - instant in-memory syntax/type inspection.
-     2. Static type-checking (\`run_command\` with "npm run build" or "npx tsc --noEmit") - fast build check (<5s) without running heavy suites.
-     3. Targeted verification (do NOT run the monolithic full test suite for minor changes; use targeted commands or "npm run build" to avoid 120s timeout bottlenecks).
+     2. Static type-checking / build (\`run_command\` with defined build script from package.json, "npm run build", or "npx tsc --noEmit") - fast build check (<5s) without running heavy suites.
+     3. Targeted verification (do NOT run the monolithic full test suite for minor changes; use targeted commands or defined build checks to avoid 120s timeout bottlenecks).
      4. Full regression test suite (\`npm test\`) ONLY when completing complex multi-module workflows or when explicitly requested.
    - DIFFERENTIAL VERIFICATION: If pre-existing tests were failing before your turn, ensure you resolve the targeted problem without introducing any new failures.
    - EXPLICIT TASK SUBMISSION & FINAL ANSWER PROTOCOL:

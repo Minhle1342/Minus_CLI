@@ -114,7 +114,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/queue', usage: '/queue [list|cancel <id>|clear|add <text>]', description: 'Quản lý hàng đợi tin nhắn Queued Messages (Antigravity-style)', category: 'Execution', aliases: ['/q'] },
   { command: '/steer', usage: '/steer <yêu cầu điều chỉnh>', description: 'Đưa tin nhắn vào hàng đợi để bẻ lái Agent ngay trong bước kế tiếp', category: 'Execution' },
   { command: '/cancel', usage: '/cancel [all|goal|tasks|subagents]', description: 'Hủy tác vụ/goal/subagent đang chạy (hoặc bấm Ctrl+C / Esc trong khi thực thi)', category: 'Execution', aliases: ['/stop', '/abort'] },
-  { command: '/resume', description: 'Tiếp tục thông minh tác vụ/kế hoạch/goal bị gián đoạn (One-Click Resume)', category: 'Execution', aliases: ['/continue'] },
+  { command: '/resume', usage: '/resume [session-id]', description: 'Chọn session, vẽ lại transcript trên TUI và tiếp tục tác vụ còn dang dở', category: 'Execution', aliases: ['/continue'] },
   { command: '/plan', usage: '/plan [resume|<yêu cầu tác vụ>]', description: 'Xem, lập kế hoạch chi tiết hoặc tiếp tục kế hoạch bị gián đoạn', category: 'Planning' },
   { command: '/brainstorm', usage: '/brainstorm <yêu cầu thiết kế>', description: 'Thẩm định thiết kế đa tác tử tuần tự (Structured Peer-Review) với 5 Persona & Decision Log', category: 'Planning', aliases: ['/review-design'] },
   { command: '/memory', description: 'Xem bộ nhớ dự án', category: 'Memory' },
@@ -1049,6 +1049,62 @@ export interface CompactStepOptions {
   result: Record<string, any>;
   tokens?: number;
   cachedTokens?: number;
+}
+
+function getMarkdownFence(line: string): { marker: '`' | '~'; length: number } | undefined {
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return undefined;
+  if (match[1][0] === '`' && match[2].includes('`')) return undefined;
+  return { marker: match[1][0] as '`' | '~', length: match[1].length };
+}
+
+function splitMarkdownTableRow(line: string): string[] | undefined {
+  const cells: string[] = [];
+  let cell = '';
+  let codeSpanTicks = 0;
+  let sawPipe = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '\\') {
+      const next = line[i + 1];
+      if (next === '|' || next === '\\') {
+        cell += next;
+        i++;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '`') {
+      let runLength = 1;
+      while (line[i + runLength] === '`') runLength++;
+      if (codeSpanTicks === 0) codeSpanTicks = runLength;
+      else if (codeSpanTicks === runLength) codeSpanTicks = 0;
+      cell += '`'.repeat(runLength);
+      i += runLength - 1;
+      continue;
+    }
+
+    if (char === '|' && codeSpanTicks === 0) {
+      sawPipe = true;
+      cells.push(cell.trim());
+      cell = '';
+      continue;
+    }
+    cell += char;
+  }
+
+  if (!sawPipe) return undefined;
+  cells.push(cell.trim());
+  if (cells[0] === '') cells.shift();
+  if (cells.at(-1) === '') cells.pop();
+  return cells;
+}
+
+function isMarkdownTableSeparator(cells: string[] | undefined): cells is string[] {
+  return Boolean(cells?.length && cells.every((cell) => /^:?-{3,}:?$/.test(cell)));
 }
 
 /**
@@ -2025,95 +2081,101 @@ export class CLI {
 
     while (i < lines.length) {
       const line = lines[i];
-      if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
-        const tableLines: string[] = [];
-        while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
-          tableLines.push(lines[i].trim());
-          i++;
-        }
-
-        if (tableLines.length >= 2) {
-          const rows = tableLines.map(tLine => 
-            tLine.slice(1, -1).split('|').map(cell => cell.trim())
-          );
-
-          const isSeparator = rows[1]?.every(cell => /^:?-+:?$/.test(cell));
-          const header = rows[0];
-          const dataRows = isSeparator ? rows.slice(2) : rows.slice(1);
-          const allRows = [header, ...dataRows];
-
-          if (header && header.length > 0) {
-            const colCount = Math.max(...allRows.map(r => r.length));
-            
-            // 1. Tính toán độ rộng tự nhiên (Natural Visible Width) của từng cột dựa trên Unicode & Emojis
-            const naturalWidths: number[] = new Array(colCount).fill(3);
-            for (const row of allRows) {
-              for (let c = 0; c < colCount; c++) {
-                const cellVal = row[c] || '';
-                naturalWidths[c] = Math.max(naturalWidths[c], getVisibleWidth(cellVal));
-              }
-            }
-
-            // 2. Cân đối với độ rộng màn hình terminal (Responsive Budget Allocation)
-            const termWidth = getTerminalWidth(95, 60, 130);
-            const borderOverhead = colCount * 3 + 1; // '│ cell │'
-            const maxContentWidth = Math.max(colCount * 4, termWidth - borderOverhead);
-            const totalNatural = naturalWidths.reduce((sum, w) => sum + w, 0);
-
-            let colWidths: number[];
-            if (totalNatural <= maxContentWidth) {
-              colWidths = [...naturalWidths];
-            } else {
-              // Phân bổ co giãn thông minh: giữ nguyên cột hẹp (STT, Status), co nhỏ các cột dài (Mô tả, Tệp)
-              const minWidths = naturalWidths.map(w => Math.min(w, Math.max(3, Math.min(10, w))));
-              const minSum = minWidths.reduce((sum, w) => sum + w, 0);
-              const availableExtra = Math.max(0, maxContentWidth - minSum);
-              const extraDemands = naturalWidths.map((w, idx) => Math.max(0, w - minWidths[idx]));
-              const totalDemand = extraDemands.reduce((sum, d) => sum + d, 0);
-
-              colWidths = naturalWidths.map((w, idx) => {
-                if (totalDemand <= 0) return minWidths[idx];
-                const share = Math.floor(availableExtra * (extraDemands[idx] / totalDemand));
-                return Math.max(3, minWidths[idx] + share);
-              });
-            }
-
-            // 3. Xây dựng khung viền chuẩn Unicode Box-Drawing
-            const topBorder = '┌' + colWidths.map(w => '─'.repeat(w + 2)).join('┬') + '┐';
-            const midBorder = '├' + colWidths.map(w => '─'.repeat(w + 2)).join('┼') + '┤';
-            const botBorder = '└' + colWidths.map(w => '─'.repeat(w + 2)).join('┴') + '┘';
-
-            const formattedLines: string[] = [topBorder];
-
-            // 4. Render hàng tiêu đề (Header) với hỗ trợ Wrap nhiều dòng
-            const headerColLines = header.map((cell, c) => wrapVisibleText(cell || '', colWidths[c]));
-            const headerHeight = Math.max(...headerColLines.map(cl => cl.length), 1);
-            for (let h = 0; h < headerHeight; h++) {
-              const rowCells = colWidths.map((w, c) => ` ${padRightVisible(headerColLines[c]?.[h] || '', w)} `);
-              formattedLines.push(`│${rowCells.join('│')}│`);
-            }
-            formattedLines.push(midBorder);
-
-            // 5. Render các hàng dữ liệu (Data Rows) với hỗ trợ Wrap từng ô không làm vỡ khung
-            for (const row of dataRows) {
-              const rowColLines = colWidths.map((w, c) => wrapVisibleText(row[c] || '', w));
-              const rowHeight = Math.max(...rowColLines.map(cl => cl.length), 1);
-              for (let h = 0; h < rowHeight; h++) {
-                const rowCells = colWidths.map((w, c) => ` ${padRightVisible(rowColLines[c]?.[h] || '', w)} `);
-                formattedLines.push(`│${rowCells.join('│')}│`);
-              }
-            }
-
-            formattedLines.push(botBorder);
-            result.push(formattedLines.join('\n'));
-            continue;
-          }
-        }
-        result.push(...tableLines);
-      } else {
+      const openingFence = getMarkdownFence(line);
+      if (openingFence) {
         result.push(line);
         i++;
+        while (i < lines.length) {
+          const codeLine = lines[i++];
+          result.push(codeLine);
+          const closingFence = getMarkdownFence(codeLine);
+          if (closingFence?.marker === openingFence.marker && closingFence.length >= openingFence.length && !codeLine.trim().slice(closingFence.length).trim()) {
+            break;
+          }
+        }
+        continue;
       }
+
+      const header = splitMarkdownTableRow(line);
+      const separator = i + 1 < lines.length ? splitMarkdownTableRow(lines[i + 1]) : undefined;
+      if (!header || !isMarkdownTableSeparator(separator) || header.length !== separator.length) {
+        result.push(line);
+        i++;
+        continue;
+      }
+
+      const colCount = header.length;
+      const dataRows: string[][] = [];
+      i += 2;
+      while (i < lines.length) {
+        const row = splitMarkdownTableRow(lines[i]);
+        if (!row) break;
+        dataRows.push(Array.from({ length: colCount }, (_, column) => row[column] || ''));
+        i++;
+      }
+      const normalizedHeader = Array.from({ length: colCount }, (_, column) => header[column] || '');
+      const allRows = [normalizedHeader, ...dataRows];
+      const naturalWidths = normalizedHeader.map((_, column) => allRows.reduce(
+        (width, row) => Math.max(width, getVisibleWidth(row[column] || '')),
+        1,
+      ));
+      const termWidth = getTerminalWidth(95, 60, 130);
+      const contentBudget = termWidth - (colCount * 3 + 1);
+
+      // If even one character per column cannot fit, switch to a stacked layout
+      // instead of emitting a table wider than the terminal.
+      if (contentBudget < colCount) {
+        const rowWidth = Math.max(1, termWidth - 4);
+        const stacked: string[] = [];
+        for (let rowIndex = 0; rowIndex < dataRows.length; rowIndex++) {
+          if (stacked.length > 0) stacked.push('');
+          stacked.push(`• ${rowIndex + 1}`);
+          for (let column = 0; column < colCount; column++) {
+            const label = `${normalizedHeader[column] || `Column ${column + 1}`}: `;
+            const wrapped = wrapVisibleText(`${label}${dataRows[rowIndex][column]}`, rowWidth);
+            stacked.push(...wrapped.map((wrappedLine, lineIndex) => lineIndex === 0 ? `  ${wrappedLine}` : `    ${wrappedLine}`));
+          }
+        }
+        result.push(stacked.join('\n'));
+        continue;
+      }
+
+      const totalNaturalWidth = naturalWidths.reduce((sum, width) => sum + width, 0);
+      let colWidths = naturalWidths;
+      if (totalNaturalWidth > contentBudget) {
+        const demands = naturalWidths.map((width) => Math.max(0, width - 1));
+        const totalDemand = demands.reduce((sum, demand) => sum + demand, 0);
+        const extraBudget = contentBudget - colCount;
+        const exactShares = demands.map((demand) => totalDemand > 0 ? extraBudget * demand / totalDemand : 0);
+        colWidths = exactShares.map((share) => 1 + Math.floor(share));
+        let remaining = contentBudget - colWidths.reduce((sum, width) => sum + width, 0);
+        const remainderOrder = exactShares
+          .map((share, column) => ({ column, remainder: share - Math.floor(share) }))
+          .sort((a, b) => b.remainder - a.remainder);
+        for (let n = 0; n < remainderOrder.length && remaining > 0; n++, remaining--) {
+          colWidths[remainderOrder[n].column]++;
+        }
+      }
+
+      const topBorder = '┌' + colWidths.map(width => '─'.repeat(width + 2)).join('┬') + '┐';
+      const midBorder = '├' + colWidths.map(width => '─'.repeat(width + 2)).join('┼') + '┤';
+      const botBorder = '└' + colWidths.map(width => '─'.repeat(width + 2)).join('┴') + '┘';
+      const formattedLines: string[] = [topBorder];
+
+      const renderRow = (row: string[]) => {
+        const wrappedCells = colWidths.map((width, column) => wrapVisibleText(row[column] || '', width));
+        const rowHeight = Math.max(...wrappedCells.map(cellLines => cellLines.length), 1);
+        for (let lineIndex = 0; lineIndex < rowHeight; lineIndex++) {
+          const rowCells = colWidths.map((width, column) => ` ${padRightVisible(wrappedCells[column]?.[lineIndex] || '', width)} `);
+          formattedLines.push(`│${rowCells.join('│')}│`);
+        }
+      };
+
+      renderRow(normalizedHeader);
+      formattedLines.push(midBorder);
+      for (const row of dataRows) renderRow(row);
+      formattedLines.push(botBorder);
+      result.push(formattedLines.join('\n'));
     }
 
     return result.join('\n');
@@ -2121,20 +2183,7 @@ export class CLI {
 
   static formatMarkdownTerminal(text: string): string {
     const tableProcessed = CLI.formatMarkdownTables(text);
-    const parts = tableProcessed.split(/(```[\s\S]*?```)/g);
-    return parts
-      .map((part) => {
-        if (part.startsWith('```') && part.endsWith('```')) {
-          const lines = part.split('\n');
-          const lang = lines[0].slice(3).trim();
-          const codeLines = lines.slice(1, -1);
-          const langTag = lang ? ` ${c.slate}[${lang}]${c.reset}` : '';
-          return `\n  ${c.slate}── Code${langTag} ──${c.reset}\n` +
-            codeLines.map((l) => `  ${c.brightCyan}${l}${c.reset}`).join('\n') +
-            `\n  ${c.slate}──────────────${c.reset}\n`;
-        }
-
-        return part
+    const renderProse = (part: string) => part
           .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
           .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}$1${c.reset}`)
           .replace(/^# (.*$)/gm, `\n${c.brightCyan}${c.bold}=== $1 ===${c.reset}`)
@@ -2148,8 +2197,86 @@ export class CLI {
           .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
           .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
           .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
-      })
-      .join('');
+    const lines = tableProcessed.split('\n');
+    const output: string[] = [];
+    let prose: string[] = [];
+    let i = 0;
+
+    const flushProse = () => {
+      if (prose.length > 0) {
+        output.push(renderProse(prose.join('\n')));
+        prose = [];
+      }
+    };
+
+    while (i < lines.length) {
+      const openingFence = getMarkdownFence(lines[i]);
+      if (!openingFence) {
+        prose.push(lines[i++]);
+        continue;
+      }
+
+      flushProse();
+      const openingLine = lines[i++];
+      const openingMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(openingLine);
+      const lang = openingMatch?.[2].trim() || '';
+      const codeLines: string[] = [];
+      while (i < lines.length) {
+        const codeLine = lines[i++];
+        const closingFence = getMarkdownFence(codeLine);
+        if (closingFence?.marker === openingFence.marker
+          && closingFence.length >= openingFence.length
+          && !codeLine.trim().slice(closingFence.length).trim()) {
+          break;
+        }
+        codeLines.push(codeLine);
+      }
+      const langTag = lang ? ` ${c.slate}[${lang}]${c.reset}` : '';
+      output.push(`\n  ${c.slate}── Code${langTag} ──${c.reset}\n`
+        + codeLines.map((codeLine) => `  ${c.brightCyan}${codeLine}${c.reset}`).join('\n')
+        + `\n  ${c.slate}──────────────${c.reset}\n`);
+    }
+
+    flushProse();
+    return output.join('');
+  }
+
+  /** Redraw the visible terminal transcript from a session's read-only history projection. */
+  static renderSessionTranscript(
+    sessionId: string,
+    messages: Array<{
+      role?: string;
+      parts?: Array<{ text?: string; thought?: boolean; functionCall?: unknown; functionResponse?: unknown }>;
+    }>,
+  ): void {
+    console.clear();
+    console.log(`\n${c.brightCyan}${c.bold}Session ${sessionId} · lịch sử hội thoại${c.reset}\n`);
+
+    let renderedMessages = 0;
+    for (const message of messages) {
+      if (message.parts?.some((part) => part.functionResponse)) continue;
+      const isAssistant = message.role === 'model' || message.role === 'assistant';
+      if (!isAssistant && message.role !== 'user') continue;
+
+      const text = (message.parts || [])
+        .filter((part) => !part.thought && !part.functionCall && typeof part.text === 'string')
+        .map((part) => part.text!.trim())
+        .filter(Boolean)
+        .join('\n');
+      if (!text) continue;
+
+      const label = isAssistant ? 'ASSISTANT' : 'USER';
+      const labelColor = isAssistant ? c.geminiGreen : c.geminiAmber;
+      console.log(`${labelColor}${c.bold}${label}${c.reset}`);
+      console.log(CLI.formatMarkdownTerminal(text));
+      console.log('');
+      renderedMessages++;
+    }
+
+    if (renderedMessages === 0) {
+      console.log(`${c.gray}(Session chưa có nội dung hội thoại để hiển thị.)${c.reset}\n`);
+    }
+    console.log(`${c.gray}Transcript chỉ được vẽ lại trên TUI; history/context đã lưu của session được giữ nguyên.${c.reset}\n`);
   }
 
   /**

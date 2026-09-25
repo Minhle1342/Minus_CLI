@@ -281,6 +281,13 @@ export class AgentKernel {
         if (oldTasks) {
           void oldTasks.dispose().catch(() => {});
         }
+        if (this.ctx.schedules) {
+          this.ctx.schedules.dispose();
+        }
+        if (this.ctx.permissions) {
+          this.ctx.permissions.clearSessionApprovals();
+          this.ctx.permissions.setWorkspaceRoot(newWs.rootDir);
+        }
         const newTasks = new TaskManager(newWs.rootDir);
         (this.ctx as any).tasks = newTasks;
         this.ctx.tools.attachTaskManager(newTasks);

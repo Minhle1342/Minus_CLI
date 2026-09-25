@@ -303,7 +303,7 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
     reversible: true,
     requiresApproval: false,
     retryable: false,
-    description: 'Stage selected or all workspace changes after an explicit user request to stage or commit.',
+    description: 'Stage only explicitly selected workspace-relative file paths when staging or committing is requested; never stage all files.',
   },
   {
     name: 'git.commit',

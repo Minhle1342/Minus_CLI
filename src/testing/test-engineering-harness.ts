@@ -71,6 +71,13 @@ export class TestEngineeringHarness {
   }
 
   /**
+   * Tự động phát hiện lệnh build phù hợp nhất cho Repository đa ngôn ngữ và đa package manager.
+   */
+  async detectBuildCommand(): Promise<string | undefined> {
+    return detectWorkspaceBuildCommand(this.workspaceRoot);
+  }
+
+  /**
    * Thực thi bộ kiểm thử (Test Suite) với phân tích dữ liệu có cấu trúc và liên kết bằng chứng
    */
   async runTests(options: TestHarnessOptions = {}): Promise<StructuredTestReport> {
@@ -372,6 +379,123 @@ export interface RankedPatchReport {
   evaluatedCount: number;
   bestCandidate?: RankedPatchEvaluation;
   rankings: RankedPatchEvaluation[];
+}
+
+/**
+ * Tự động phát hiện lệnh build phù hợp nhất cho bất kỳ thư mục dự án nào (đa package manager & đa ngôn ngữ).
+ * Nhận diện cả lệnh build tiêu chuẩn và các lệnh build đặc thù được cấu hình trong package.json hoặc toolchain.
+ * Trả về undefined nếu không tìm thấy cấu hình build nào trong workspace.
+ */
+export async function detectWorkspaceBuildCommand(workspaceRoot: string): Promise<string | undefined> {
+  // 0. Biến môi trường ghi đè cao nhất
+  if (process.env.MINUS_BUILD_COMMAND?.trim()) {
+    return process.env.MINUS_BUILD_COMMAND.trim();
+  }
+
+  const root = path.resolve(workspaceRoot);
+
+  // 1. Kiểm tra Node.js (pnpm, yarn, bun, npm) & Monorepo
+  try {
+    let pm = 'npm';
+    const [hasPnpmLock, hasYarnLock, hasBunLock] = await Promise.all([
+      fs.stat(path.join(root, 'pnpm-lock.yaml')).catch(() => null),
+      fs.stat(path.join(root, 'yarn.lock')).catch(() => null),
+      fs.stat(path.join(root, 'bun.lockb')).catch(() => null) || fs.stat(path.join(root, 'bun.lock')).catch(() => null),
+    ]);
+
+    if (hasPnpmLock) pm = 'pnpm';
+    else if (hasBunLock) pm = 'bun';
+    else if (hasYarnLock) pm = 'yarn';
+
+    const pkgPath = path.join(root, 'package.json');
+    const pkgContent = await fs.readFile(pkgPath, 'utf-8').catch(() => null);
+    if (pkgContent) {
+      let pkg: any = {};
+      try { pkg = JSON.parse(pkgContent); } catch {}
+
+      if (typeof pkg.packageManager === 'string') {
+        if (pkg.packageManager.startsWith('pnpm')) pm = 'pnpm';
+        else if (pkg.packageManager.startsWith('yarn')) pm = 'yarn';
+        else if (pkg.packageManager.startsWith('bun')) pm = 'bun';
+      }
+
+      // Root scripts: kiểm tra các lệnh build đặc thù và tiêu chuẩn
+      if (pkg.scripts) {
+        if (pkg.scripts.build) {
+          return pm === 'bun' ? 'bun run build' : `${pm} run build`;
+        }
+        if (pkg.scripts.compile) {
+          return pm === 'bun' ? 'bun run compile' : `${pm} run compile`;
+        }
+        // Nhận diện script build tùy chỉnh/đặc thù (ví dụ: build:prod, build:all, build:tsc)
+        const customBuildScript = Object.keys(pkg.scripts).find((key) => /^build[:_-]/i.test(key));
+        if (customBuildScript) {
+          return pm === 'bun' ? `bun run ${customBuildScript}` : `${pm} run ${customBuildScript}`;
+        }
+      }
+    }
+
+    // Nếu không có script build cụ thể nhưng có tsconfig.json -> tsc check
+    const hasTsConfig = await fs.stat(path.join(root, 'tsconfig.json')).catch(() => null);
+    if (hasTsConfig) {
+      return 'npx tsc --noEmit';
+    }
+  } catch {}
+
+  // 2. Kiểm tra .NET
+  try {
+    const rootFiles = await fs.readdir(root).catch(() => []);
+    const hasCsproj = rootFiles.some((f) => f.endsWith('.csproj') || f.endsWith('.fsproj'));
+    const hasSln = rootFiles.some((f) => f.endsWith('.sln'));
+    if (hasCsproj || hasSln) {
+      return 'dotnet build';
+    }
+  } catch {}
+
+  // 3. Kiểm tra Rust
+  try {
+    const hasCargo = await fs.stat(path.join(root, 'Cargo.toml')).catch(() => null);
+    if (hasCargo) {
+      return 'cargo build';
+    }
+  } catch {}
+
+  // 4. Kiểm tra Go
+  try {
+    const hasGo = await fs.stat(path.join(root, 'go.mod')).catch(() => null);
+    if (hasGo) {
+      return 'go build ./...';
+    }
+  } catch {}
+
+  // 5. Kiểm tra Java / Kotlin (Maven / Gradle)
+  try {
+    const hasPom = await fs.stat(path.join(root, 'pom.xml')).catch(() => null);
+    if (hasPom) {
+      return 'mvn compile';
+    }
+    const hasGradle = await fs.stat(path.join(root, 'build.gradle')).catch(() => null)
+      || await fs.stat(path.join(root, 'build.gradle.kts')).catch(() => null);
+    if (hasGradle) {
+      const hasGradlew = await fs.stat(path.join(root, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew')).catch(() => null);
+      return hasGradlew ? './gradlew build' : 'gradle build';
+    }
+  } catch {}
+
+  // 6. Kiểm tra C / C++ (CMake / Make)
+  try {
+    const hasCmake = await fs.stat(path.join(root, 'CMakeLists.txt')).catch(() => null);
+    if (hasCmake) {
+      return 'cmake --build .';
+    }
+    const makefilePath = path.join(root, 'Makefile');
+    const hasMakefile = await fs.readFile(makefilePath, 'utf-8').catch(() => null);
+    if (hasMakefile && /^\s*build\s*:/m.test(hasMakefile)) {
+      return 'make build';
+    }
+  } catch {}
+
+  return undefined;
 }
 
 /**

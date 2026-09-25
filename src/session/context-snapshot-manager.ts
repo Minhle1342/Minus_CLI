@@ -175,6 +175,9 @@ export class ContextSnapshotManager {
     granularity?: 'minimal' | 'standard' | 'comprehensive';
     distilledLearnings?: string[];
     tags?: string[];
+  }, options?: {
+    /** Giữ tối đa bao nhiêu snapshot gần nhất (mặc định 30). */
+    maxSnapshots?: number;
   }): Promise<TaskContextSnapshot> {
     await this.init();
 
@@ -234,7 +237,37 @@ export class ContextSnapshotManager {
       verificationStatus: params.verificationStatus,
     });
 
+    // 4. Tỉa snapshot cũ nhất để thư mục snapshots không phình vô hạn theo tuổi workspace.
+    await this.pruneSnapshots(options?.maxSnapshots ?? ContextSnapshotManager.DEFAULT_MAX_SNAPSHOTS);
+
     return snapshot;
+  }
+
+  static readonly DEFAULT_MAX_SNAPSHOTS = 30;
+
+  /**
+   * Xóa các snapshot cũ nhất khi vượt trần, giữ nguyên snapshot mới nhất để
+   * getLatestSnapshot() và handoff digest không bao giờ mất mốc hiện tại.
+   */
+  async pruneSnapshots(maxSnapshots: number = ContextSnapshotManager.DEFAULT_MAX_SNAPSHOTS): Promise<{ removed: string[] }> {
+    const list = await this.listSnapshots();
+    if (list.length <= maxSnapshots) return { removed: [] };
+    const victims = list.slice(0, list.length - maxSnapshots);
+    const removed: string[] = [];
+    for (const victim of victims) {
+      try {
+        await fs.unlink(path.join(this.snapshotsDir, `${victim.snapshotId}.json`));
+        await fs.unlink(path.join(this.snapshotsDir, `${victim.snapshotId}.md`));
+        removed.push(victim.snapshotId);
+      } catch {
+        // Best-effort: file thiếu thì bỏ qua, index vẫn được đồng bộ bên dưới.
+      }
+    }
+    if (removed.length > 0) {
+      const remaining = (await this.listSnapshots()).filter((item) => !removed.includes(item.snapshotId));
+      await fs.writeFile(this.indexPath, JSON.stringify(remaining, null, 2), 'utf8');
+    }
+    return { removed };
   }
 
   /**

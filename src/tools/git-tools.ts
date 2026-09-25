@@ -10,7 +10,7 @@ import {
   isGitMutationAuthorized,
   GitMutationOperation,
 } from './git-intent.js';
-import { classifyGitCommand, isGitCommandAuthorized, validateGitCommandScope } from './git-command-policy.js';
+import { classifyGitCommand, isExplicitGitAddPathList, isGitCommandAuthorized, validateGitCommandScope } from './git-command-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -136,7 +136,14 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
         if (!scopeDecision.allowed) return scopeDecision;
 
         const classification = classifyGitCommand(subcommand, commandArgs);
-        if (!isGitCommandAuthorized(context?.userRequest, subcommand, classification)) {
+        if (subcommand === 'add' && !isExplicitGitAddPathList(commandArgs)) {
+          return {
+            error: 'Broad Git staging is blocked. Provide explicit workspace-relative file paths; -A/--all, ., wildcard, and pathspec staging are not permitted.',
+            errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+            suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
+          };
+        }
+        if (!isGitCommandAuthorized(context?.userRequest, subcommand, classification, commandArgs)) {
           return {
             error: `Git ${subcommand} (${classification.risk}) is not authorized by the current user request.`,
             errorCode: classification.risk === 'destructive'
@@ -247,31 +254,31 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
 
   const gitAddTool: ToolDefinition = {
     name: 'git_add',
-    description: 'Stage workspace changes for a commit. Available only when the current user explicitly requests staging or committing.',
+    description: 'Stage only explicit workspace-relative file paths. Broad staging (-A/--all, ., globs, and pathspecs) is blocked, including during a commit request.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         all: {
           type: Type.BOOLEAN,
-          description: 'Stage all tracked, untracked, and deleted workspace files. Defaults to true when paths are omitted.',
+          description: 'Unsupported. Broad staging is blocked; provide explicit paths instead.',
         },
         paths: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Optional workspace-relative paths to stage selectively.',
+          description: 'Required list of literal workspace-relative file paths to stage selectively.',
         },
         files: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Alias for paths: workspace-relative files to stage.',
+          description: 'Alias for paths: literal workspace-relative file paths to stage.',
         },
         file: {
           type: Type.STRING,
-          description: 'Alias for single workspace-relative file to stage.',
+          description: 'Alias for one literal workspace-relative file path to stage.',
         },
         path: {
           type: Type.STRING,
-          description: 'Alias for single workspace-relative path to stage.',
+          description: 'Alias for one literal workspace-relative path to stage.',
         },
       },
     },
@@ -291,16 +298,18 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           .map((item: string) => item.trim())
           .filter((item: string) => item.length > 0);
 
-        const cmdArgs = ['add'];
-        if (args.all === true || requestedPaths.length === 0) {
-          cmdArgs.push('--all');
-        } else {
-          const safePaths = requestedPaths.map((item: string) => {
-            const safePath = workspace.resolveSafePath(item);
-            return path.relative(workspace.rootDir, safePath);
-          });
-          cmdArgs.push('--', ...safePaths);
+        if (args.all === true || !isExplicitGitAddPathList(requestedPaths)) {
+          return {
+            error: 'Broad Git staging is blocked. Provide explicit workspace-relative file paths; `all: true`, ., wildcard, and pathspec staging are not permitted.',
+            errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+            suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
+          };
         }
+        const safePaths = requestedPaths.map((item: string) => {
+          const safePath = workspace.resolveSafePath(item);
+          return path.relative(workspace.rootDir, safePath);
+        });
+        const cmdArgs = ['add', '--', ...safePaths];
         await runGit(cmdArgs);
         const { stdout } = await runGit(['status', '--short']);
         return { success: true, staged: stdout.trim().split('\n').filter(Boolean) };

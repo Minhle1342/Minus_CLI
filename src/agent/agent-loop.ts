@@ -68,9 +68,10 @@ import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
-import { detectWorkspaceTestCommand } from '../testing/test-engineering-harness.js';
+import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
+import { resolveEllipticalFollowUp } from './ellipsis-resolver.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
@@ -557,6 +558,9 @@ export class AgentLoop {
     }
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
+      (this as any).checkpointManager = this.kernel.ctx.checkpoints;
+      (this as any).memoryManager = this.kernel.ctx.memory;
+      (this as any).repositoryMemory = this.kernel.ctx.repositoryMemory;
       if (this.toolProvider === this.toolRegistry) {
         this.toolRunner = this.kernel.ctx.toolRunner;
       } else {
@@ -571,6 +575,18 @@ export class AgentLoop {
       this.memoryManager.init(workspace).catch(() => { });
       this.repositoryMemory.init().catch(() => { });
     }
+    (this as any).speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
+    (this as any).workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
+    (this as any).rollbackOrchestrator = new HypothesisRollbackOrchestrator(this.checkpointManager, this.speculativeManager);
+    (this as any).contextSnapshotManager = new ContextSnapshotManager(this._workspace.rootDir);
+    this.contextSnapshotManager.init().catch(() => { });
+    (this as any).contextGuardian = new ContextGuardian(this._workspace.rootDir);
+    (this as any).contextAgent = new ContextAgent(this._workspace.rootDir);
+    (this as any).turnMemoryRetriever = new TurnMemoryRetriever(this._workspace.rootDir);
+    this.turnMemoryRetriever.init().catch(() => { });
+    this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
+    registerSubmitSolutionTool(this.toolRegistry, this._workspace);
+    registerReportFindingsTool(this.toolRegistry, this._workspace);
   }
 
   setLLM(llm: any, modelName?: string) {
@@ -824,6 +840,28 @@ export class AgentLoop {
       ?.map((part: any) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
       .join('\n') || (options?.isRecoveryResume ? '[RESUME INTERRUPTED SESSION]' : '');
+    // Explicit ellipsis resolution: short follow-ups ("còn trang B thì sao")
+    // inherit the previous turn's topic for classification/retrieval only.
+    // The original wording stays untouched for plan goals, prompts, snapshots.
+    const previousUserPrompts = [...session.getEvents()]
+      .filter((event) => event.type === 'user/message' && event.data.source !== 'system')
+      .map((event) => event.data.content?.parts
+        ?.map((part: any) => typeof part?.text === 'string' ? part.text : '')
+        .filter(Boolean)
+        .join('\n') || '')
+      .map((text) => text.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    if (previousUserPrompts.at(-1) === turnUserRequest.replace(/\s+/g, ' ').trim()) {
+      previousUserPrompts.pop();
+    }
+    const ellipsisResolution = resolveEllipticalFollowUp({
+      current: turnUserRequest,
+      previousUserPrompts: previousUserPrompts.slice(-3),
+      archivedTurns: this.turnMemoryRetriever.getRecentArchivedTurns(3),
+    });
+    const retrievalUserRequest = ellipsisResolution.applied
+      ? ellipsisResolution.expandedQuery
+      : turnUserRequest;
     this.planManager.bindSession(session);
     this.goalManager.bindSession(session);
     this.memoryManager.bindSession(session);
@@ -833,7 +871,7 @@ export class AgentLoop {
     this.reflectionEngine.reset();
     this.progressGuard.reset();
     this.processFailureDetector.reset();
-    this.processFailureDetector.initTaskKeywords(turnUserRequest);
+    this.processFailureDetector.initTaskKeywords(retrievalUserRequest);
     this.domainIntentGuardian.reset();
     this.domainIntentGuardian.extractAndFreezeContract(turnUserRequest);
     this.finalAnswerGuard.reset();
@@ -847,10 +885,10 @@ export class AgentLoop {
     const isGoal = options?.isGoalMode ?? this._isGoalMode;
     const baseMaxSteps = options?.maxSteps ?? this.maxSteps;
     const initialTurnClassification = this.classificationEngine.classify({
-      request: turnUserRequest,
+      request: retrievalUserRequest,
       hasPlan: this.planManager.hasPlan(),
     });
-    const taskComplexity = calculateTaskComplexity(turnUserRequest, initialTurnClassification.taskClass);
+    const taskComplexity = calculateTaskComplexity(retrievalUserRequest, initialTurnClassification.taskClass);
     const effectiveMaxSteps = Number.isFinite(baseMaxSteps)
       ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor))
       : baseMaxSteps;
@@ -1122,7 +1160,7 @@ export class AgentLoop {
       ]);
       const priorClassification = previousClassification;
       const classificationInput = {
-        request: turnUserRequest,
+        request: retrievalUserRequest,
         activeTask: activeTask?.title,
         activeAcceptance: activeTask?.acceptanceCriteria,
         hasPlan: this.planManager.hasPlan(),
@@ -1254,7 +1292,7 @@ export class AgentLoop {
         || this.hypothesisTracker.getSupportedHypotheses().slice(-1)[0]
         || this.hypothesisTracker.getValidatedHypotheses().slice(-1)[0];
       const retrievalState = this.stepRetrievalQueryBuilder.build({
-        userRequest: turnUserRequest,
+        userRequest: retrievalUserRequest,
         activeTask,
         phase: classification.phase,
         taskClass: classification.taskClass,
@@ -1710,7 +1748,7 @@ export class AgentLoop {
       const effectiveEpistemicRisk: BlastRadiusRisk = activeHypothesis?.blastRadius
         || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
 
-      const isInvestigativeExplore = (classification.phase === 'explore' || classification.phase === 'investigate') && (
+      const isInvestigativeExplore = (classification.phase === 'explore' || (classification.phase as string) === 'investigate') && (
         detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery
         || detectLeadingQuery(turnUserRequest).isLeading
         || classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
@@ -1791,9 +1829,13 @@ export class AgentLoop {
       // (khi LLM gọi các công cụ Edit chỉ 1 đến 2 lần thì không truyền khối prompt này)
       let testVerificationEncouragement: string | undefined;
       if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0) {
-        const detectedCmd = await detectWorkspaceTestCommand(this._workspace.rootDir);
+        const [detectedCmd, detectedBuildCmd] = await Promise.all([
+          detectWorkspaceTestCommand(this._workspace.rootDir),
+          detectWorkspaceBuildCommand(this._workspace.rootDir),
+        ]);
         const cmdHint = detectedCmd ? ` (ví dụ: \`${detectedCmd}\`)` : '';
-        testVerificationEncouragement = `💡 [TEST VERIFICATION RECOMMENDED]: Bạn đã thực hiện ${this.editToolCallsInTurn} lượt sửa đổi mã nguồn. Khuyến khích bạn chạy lệnh kiểm thử của dự án thông qua công cụ "run_command"${cmdHint} để kiểm chứng thực nghiệm các thay đổi và đảm bảo không phát sinh hồi quy trước khi kết thúc tác vụ hoặc gọi "submit_solution".`;
+        const buildHint = detectedBuildCmd ? ` (ví dụ: \`${detectedBuildCmd}\`)` : '';
+        testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: Bạn đã thực hiện ${this.editToolCallsInTurn} lượt sửa đổi mã nguồn. Theo quy trình Verification Ladder: nếu dự án có lệnh build đặc thù (không phải "npm run build" hay "tsc"), hãy kiểm tra \`package.json\` (mục scripts) hoặc chạy \`get_diagnostics\` trước khi chạy full test suite. Khuyến khích bạn chạy static type-checking/build${buildHint} hoặc kiểm thử của dự án thông qua công cụ "run_command"${cmdHint} để kiểm chứng thực nghiệm các thay đổi và đảm bảo không phát sinh hồi quy trước khi kết thúc tác vụ hoặc gọi "submit_solution".`;
       }
 
       // Every model-visible dynamic block enters one arbiter. A preliminary pass

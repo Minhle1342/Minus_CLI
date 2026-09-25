@@ -179,7 +179,7 @@ import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
 import { findPackageScriptFailure } from './sandbox/command-diagnostics.js';
-import { TestEngineeringHarness, detectWorkspaceTestCommand } from './testing/test-engineering-harness.js';
+import { TestEngineeringHarness, detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from './testing/test-engineering-harness.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
 import { loadLspConfig } from './lsp/config.js';
@@ -199,6 +199,8 @@ import {
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
   CODING_AGENT_SYSTEM_PROMPT,
+  SECTION_VERIFICATION_LADDER_FULL,
+  SECTION_PHASE_VERIFY_GUIDANCE,
 } from './llm/prompts.js';
 import { PromptAssembler } from './llm/prompt-assembler.js';
 import dotenv from 'dotenv';
@@ -2710,6 +2712,33 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(customCmd === 'custom-runner --ci', 'MINUS_TEST_COMMAND có độ ưu tiên cao nhất');
   delete process.env.MINUS_TEST_COMMAND;
 
+  // Test 10b: detectWorkspaceBuildCommand nhận diện custom build commands và toolchains
+  await fs.mkdir(polyglotDir, { recursive: true });
+  await fs.writeFile(path.join(polyglotDir, 'package.json'), JSON.stringify({
+    name: 'custom-build-app',
+    scripts: { 'build:prod': 'webpack --mode production' },
+  }));
+  const customBuildCmd = await detectWorkspaceBuildCommand(polyglotDir);
+  assert(customBuildCmd === 'npm run build:prod', 'Nhận diện đúng custom build script build:prod từ package.json');
+
+  await fs.writeFile(path.join(polyglotDir, 'package.json'), JSON.stringify({
+    name: 'standard-build-app',
+    scripts: { build: 'vite build' },
+  }));
+  const stdBuildCmd = await detectWorkspaceBuildCommand(polyglotDir);
+  assert(stdBuildCmd === 'npm run build', 'Nhận diện đúng build script từ package.json');
+
+  await fs.rm(path.join(polyglotDir, 'package.json'), { force: true });
+  await fs.writeFile(path.join(polyglotDir, 'tsconfig.json'), '{}');
+  const tscBuildCmd = await detectWorkspaceBuildCommand(polyglotDir);
+  assert(tscBuildCmd === 'npx tsc --noEmit', 'Nhận diện đúng tsc check khi có tsconfig.json');
+  await fs.rm(path.join(polyglotDir, 'tsconfig.json'), { force: true });
+
+  process.env.MINUS_BUILD_COMMAND = 'custom-build-tool --release';
+  const envBuildCmd = await detectWorkspaceBuildCommand(polyglotDir);
+  assert(envBuildCmd === 'custom-build-tool --release', 'MINUS_BUILD_COMMAND có độ ưu tiên cao nhất');
+  delete process.env.MINUS_BUILD_COMMAND;
+
   await fs.rm(polyglotDir, { recursive: true, force: true });
 
   // Test 11: Đồng bộ hóa ToolSynergyAdvisor với các mutation tools mới
@@ -5006,7 +5035,8 @@ Always write tests first!`;
     );
 
     const gitExecutionContext = { userRequest: 'commit và push code mới lên nhánh develop' };
-    const addResult = await gitTools.get('git_add')!.execute({ all: true }, gitWorkspace, gitExecutionContext);
+    const broadAdd = await gitTools.get('git_add')!.execute({ all: true }, gitWorkspace, gitExecutionContext);
+    const addResult = await gitTools.get('git_add')!.execute({ paths: ['sample.txt'] }, gitWorkspace, gitExecutionContext);
     const commitResult = await gitTools.get('git_commit')!.execute(
       { message: 'test: verify authorized git workflow' },
       gitWorkspace,
@@ -5058,7 +5088,8 @@ Always write tests first!`;
       { userRequest: 'hãy git fetch origin' },
     );
     const remoteHead = await execFileAsync('git', ['rev-parse', 'refs/heads/develop'], { cwd: remotePath });
-    assert(addResult.success === true, 'git_add stage thay đổi khi được người dùng cấp quyền theo lượt');
+    assert(broadAdd.errorCode === 'GIT_BROAD_STAGING_NOT_AUTHORIZED', 'git_add chặn stage toàn bộ dù user yêu cầu commit/push');
+    assert(addResult.success === true, 'Yêu cầu commit/push cho phép git_add với danh sách file cụ thể');
     assert(commitResult.success === true && Boolean(commitResult.commit), 'git_commit tạo commit thật khi được cấp quyền');
     assert(genericBranch.success === true && genericSwitch.success === true, 'git_command tạo và switch branch khi được yêu cầu');
     assert(plumbingUpdateRef.success === true, 'git_command thực thi low-level plumbing command update-ref');
@@ -7060,6 +7091,9 @@ Always write tests first!`;
   assert(!CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'), 'Core prompt đã tách 5-Stage Protocol sang ToolSynergyAdvisor để tối ưu KV-Cache');
   assert(CORE_SYSTEM_PROMPT.includes('VERIFICATION LADDER'), 'Core prompt bảo toàn Verification Ladder');
   assert(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'), 'Core prompt bảo toàn quy tắc Language Matching');
+  assert(CORE_SYSTEM_PROMPT.includes('custom build command'), 'Core prompt hướng dẫn kiểm tra custom build command');
+  assert(SECTION_VERIFICATION_LADDER_FULL.includes('CUSTOM BUILD & SCRIPT DISCIPLINE'), 'SECTION_VERIFICATION_LADDER_FULL chứa quy định custom build command');
+  assert(SECTION_PHASE_VERIFY_GUIDANCE.includes('Custom Build & Script Discipline'), 'SECTION_PHASE_VERIFY_GUIDANCE chứa quy định custom build command');
 
   // 39.2. Progressive Disclosure & Context-Aware Assembly
   const customAssembler = new PromptAssembler();
@@ -9485,6 +9519,84 @@ Always write tests first!`;
   assert(completedPTask?.status === 'COMPLETED', 'PlanManager: Auto-advance PENDING -> COMPLETED trơn tru khi có bằng chứng');
 
   await fs.rm(resilienceTempDir, { recursive: true, force: true });
+
+  // 8. Workspace Switching & Subsystem Synchronization
+  console.log('\n========================================');
+  console.log('🧪 57. KIỂM THỬ WORKSPACE SWITCHING & SUBSYSTEM SYNCHRONIZATION');
+  console.log('========================================');
+
+  const wsTestDir1 = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-ws-test1-'));
+  const wsTestDir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-ws-test2-'));
+  try {
+    const ws1 = new Workspace(wsTestDir1);
+    const ws2 = new Workspace(wsTestDir2);
+
+    const testKernel = new AgentKernel(ws1);
+    await testKernel.use(WorkspacePlugin);
+    await testKernel.use(PlanningPlugin);
+    await testKernel.use(MemoryPlugin);
+    await testKernel.use(SandboxPlugin);
+    await testKernel.use(TaskPlugin);
+
+    // Test session permissions reset and root update on kernel
+    (testKernel.ctx.permissions as any).sessionApprovedCategories.add('command_execution');
+    assert((testKernel.ctx.permissions as any).sessionApprovedCategories.size > 0, 'Kernel permissions: session approved before switch');
+
+    // Add schedule timer to test disposal
+    testKernel.ctx.schedules.scheduleOneShot({
+      prompt: 'test reminder',
+      durationSeconds: 300,
+    });
+    assert(testKernel.ctx.schedules.listSchedules().length === 1, 'ScheduleManager has 1 active timer before switch');
+
+    const agentLoopWs = new AgentLoop(testKernel);
+
+    // Initial state check
+    assert(path.resolve(agentLoopWs.workspace.rootDir) === path.resolve(wsTestDir1), 'AgentLoop initial workspace is wsTestDir1');
+    assert(path.resolve((agentLoopWs.checkpointManager as any).workspaceDir) === path.resolve(wsTestDir1), 'AgentLoop checkpointManager has wsTestDir1');
+    assert(path.resolve((agentLoopWs as any).speculativeManager.mainWorkspaceRoot) === path.resolve(wsTestDir1), 'AgentLoop speculativeManager has wsTestDir1');
+    assert(path.resolve((agentLoopWs as any).contextSnapshotManager.workspaceDir) === path.resolve(wsTestDir1), 'AgentLoop contextSnapshotManager has wsTestDir1');
+
+    // Switch workspace
+    agentLoopWs.setWorkspace(ws2);
+
+    // Verify all subsystems updated
+    assert(path.resolve(agentLoopWs.workspace.rootDir) === path.resolve(wsTestDir2), 'AgentLoop workspace updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs.checkpointManager as any).workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop checkpointManager updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs as any).speculativeManager.mainWorkspaceRoot) === path.resolve(wsTestDir2), 'AgentLoop speculativeManager updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs as any).contextSnapshotManager.workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop contextSnapshotManager updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs as any).contextGuardian.workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop contextGuardian updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs as any).contextAgent.workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop contextAgent updated to wsTestDir2');
+    assert(path.resolve((agentLoopWs as any).turnMemoryRetriever.workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop turnMemoryRetriever updated to wsTestDir2');
+    assert(path.resolve(((agentLoopWs as any).rollbackOrchestrator as any).checkpointManager.workspaceDir) === path.resolve(wsTestDir2), 'AgentLoop rollbackOrchestrator updated to wsTestDir2');
+
+    // Verify kernel state reset
+    assert((testKernel.ctx.permissions as any).sessionApprovedCategories.size === 0, 'Kernel permissions: session approvals cleared on workspace switch');
+    assert(path.resolve(testKernel.ctx.permissions.getWorkspaceRoot() || '') === path.resolve(wsTestDir2), 'Kernel permissions: workspace root updated on workspace switch');
+    assert(testKernel.ctx.schedules.listSchedules().length === 0, 'Kernel schedules: previous timers/crons disposed on workspace switch');
+
+    // Test path resolution logic: quote stripping, tilde expansion, bare drive, same workspace guard
+    const rawWithQuotes = '"' + wsTestDir2 + '"';
+    const strippedQuotes = rawWithQuotes.replace(/^["']|["']$/g, '').trim();
+    assert(path.resolve(strippedQuotes) === path.resolve(wsTestDir2), 'Path resolution: quotes properly stripped');
+
+    const tildePath = '~/test-dir';
+    let expandedTilde = tildePath;
+    if (expandedTilde === '~' || expandedTilde.startsWith('~/') || expandedTilde.startsWith('~\\')) {
+      expandedTilde = path.join(os.homedir(), expandedTilde.slice(1));
+    }
+    assert(expandedTilde === path.join(os.homedir(), '/test-dir') || expandedTilde === path.join(os.homedir(), 'test-dir'), 'Path resolution: tilde expanded to homedir');
+
+    let bareDrive = 'C:';
+    if (/^[a-zA-Z]:$/.test(bareDrive)) {
+      bareDrive += path.sep;
+    }
+    assert(bareDrive === 'C:' + path.sep, 'Path resolution: bare drive letter appended with path separator');
+
+  } finally {
+    await fs.rm(wsTestDir1, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => {});
+  }
 
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);

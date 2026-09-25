@@ -38,7 +38,15 @@ export interface TurnMemoryOptions {
   minScore?: number;
   maxTokens?: number;
   activeFiles?: string[];
+  /** Vector embedding của query đã tính trước để các tầng retrieval dùng chung. */
+  queryVector?: number[];
 }
+
+/** Trần bộ nhớ để chi phí cuối mỗi turn không tăng theo tuổi workspace. */
+export const MAX_ARCHIVED_TURNS = 200;
+export const MAX_EPISODIC_EXPERIENCES = 100;
+export const MAX_SEMANTIC_INVARIANTS = 100;
+const MAX_SNIPPET_MEMO_ENTRIES = 5;
 
 interface NativeVectorScorer {
   rsCosineSimilarity?(query: number[], candidate: number[]): number;
@@ -180,6 +188,10 @@ export class TurnMemoryRetriever {
   private episodicMap: Map<string, EpisodicExperienceRecord> = new Map();
   private semanticMap: Map<string, SemanticInvariantRecord> = new Map();
   private initialized = false;
+  private initPromise: Promise<void> | undefined;
+  private memoryVersion = 0;
+  private snippetMemo = new Map<string, string>();
+  private readonly snippetCacheStats = { hits: 0, misses: 0 };
 
   constructor(workspaceDir?: string) {
     this.workspaceDir = workspaceDir ? path.resolve(workspaceDir) : process.cwd();
@@ -273,8 +285,21 @@ export class TurnMemoryRetriever {
 
   async init(): Promise<void> {
     if (this.initialized) return;
-    this.initialized = true;
+    if (!this.initPromise) {
+      this.initPromise = this.loadPersistedState().then(
+        () => { this.initialized = true; },
+        (error) => { this.initPromise = undefined; throw error; },
+      );
+    }
+    return this.initPromise;
+  }
 
+  /**
+   * Nạp toàn bộ state từ đĩa. Luôn chạy đúng một lần nhờ init-promise: mọi
+   * caller đồng thời đều await cùng một promise, nên không còn cửa sổ "đã khởi
+   * tạo nhưng map vẫn rỗng" khiến persist() ghi đè mất dữ liệu đĩa.
+   */
+  private async loadPersistedState(): Promise<void> {
     try {
       await fs.mkdir(this.storageDir, { recursive: true });
       const raw = await fs.readFile(this.storageFilePath, 'utf8');
@@ -376,8 +401,12 @@ export class TurnMemoryRetriever {
       newDocs.push(enrichedTurn);
     }
 
+    const { evictedTurns } = this.enforceMemoryCaps();
     if (newDocs.length > 0) {
+      this.bumpMemoryVersion();
       this.miniSearch.addAll(newDocs);
+      await this.persist();
+    } else if (evictedTurns > 0) {
       await this.persist();
     }
   }
@@ -426,6 +455,7 @@ export class TurnMemoryRetriever {
     }
 
     if (hasNew) {
+      this.bumpMemoryVersion();
       await this.persistMaskedObservations();
     }
   }
@@ -557,11 +587,19 @@ export class TurnMemoryRetriever {
       scoreMap.set(hit.id, { bm25Score: normalizedScore, vectorScore: 0 });
     }
 
-    // 2. Tìm kiếm Dense Vector Cosine Similarity (nếu Rust Native khả dụng)
+    // 2. Tìm kiếm Dense Vector Cosine Similarity (dùng vector đã tính trước nếu có
+    // để retrieveContextSnippet chỉ sinh embedding một lần cho mọi tầng).
     const native = getNativeCore();
-    if (native && typeof native.rsGenerateSubwordEmbedding === 'function' && typeof native.rsCosineSimilarity === 'function') {
+    let queryVector = options?.queryVector;
+    if (!queryVector && native && typeof native.rsGenerateSubwordEmbedding === 'function') {
       try {
-        const queryVector = native.rsGenerateSubwordEmbedding(query);
+        queryVector = native.rsGenerateSubwordEmbedding(query);
+      } catch {
+        queryVector = undefined;
+      }
+    }
+    if (queryVector && native && typeof native.rsCosineSimilarity === 'function') {
+      try {
         const vectorScores = scoreVectorBatch(native, queryVector, Array.from(this.turnsMap.entries(), ([id, doc]) => [id, doc.vector]));
         for (const [id, doc] of this.turnsMap.entries()) {
           if (doc.vector && doc.vector.length > 0) {
@@ -696,6 +734,7 @@ export class TurnMemoryRetriever {
         this.antiPatternsMap.delete(k);
       }
     }
+    this.bumpMemoryVersion();
 
     try {
       const all = Array.from(this.antiPatternsMap.values());
@@ -760,20 +799,47 @@ export class TurnMemoryRetriever {
    */
   async retrieveContextSnippet(query: string, options?: TurnMemoryOptions): Promise<string> {
     await this.init();
+    // Memo theo query trong cùng một turn: các step liên tiếp thường hỏi giống nhau,
+    // mọi ghi vào kho đều đã xóa memo qua bumpMemoryVersion().
+    const memoKey = JSON.stringify({
+      q: query,
+      topK: options?.topK ?? 2,
+      minScore: options?.minScore ?? 0.60,
+      files: [...(options?.activeFiles || [])].sort(),
+      pv: this.livingPlaybook.getVersion(),
+    });
+    const memoized = this.snippetMemo.get(memoKey);
+    if (memoized !== undefined) {
+      this.snippetCacheStats.hits++;
+      return memoized;
+    }
+    this.snippetCacheStats.misses++;
     const snippets: string[] = [];
+
+    // Sinh embedding một lần, dùng chung cho cả hai tầng retrieval.
+    const native = getNativeCore();
+    let sharedQueryVector: number[] | undefined;
+    if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
+      try {
+        sharedQueryVector = native.rsGenerateSubwordEmbedding(query);
+      } catch {
+        sharedQueryVector = undefined;
+      }
+    }
 
     // 0. Dual-Memory Stream (ExpeRepair & CTIM-Rover)
     const dualMem = await this.retrieveDualMemory(query, {
       topK: options?.topK ?? 2,
       minScore: options?.minScore ?? 0.60,
       activeFiles: options?.activeFiles,
+      queryVector: sharedQueryVector,
     });
     if (dualMem.rendered) {
       snippets.push(dualMem.rendered);
     }
 
     // 1. Episodic past turns
-    const results = await this.retrieveRelevantTurns(query, options);
+    const results = await this.retrieveRelevantTurns(query, { ...options, queryVector: sharedQueryVector });
     if (results.length > 0) {
       snippets.push(this.formatForContextInjection(results));
     }
@@ -805,7 +871,13 @@ export class TurnMemoryRetriever {
       // Bỏ qua nếu lỗi đọc playbook
     }
 
-    return snippets.join('\n\n');
+    const snippet = snippets.join('\n\n');
+    if (this.snippetMemo.size >= MAX_SNIPPET_MEMO_ENTRIES) {
+      const oldest = this.snippetMemo.keys().next();
+      if (!oldest.done) this.snippetMemo.delete(oldest.value);
+    }
+    this.snippetMemo.set(memoKey, snippet);
+    return snippet;
   }
 
   /**
@@ -852,9 +924,15 @@ export class TurnMemoryRetriever {
       vector,
     };
 
+    const isUpdate = this.episodicMap.has(id);
     this.episodicMap.set(id, fullRecord);
-    this.episodicMiniSearch.removeAll();
-    this.episodicMiniSearch.addAll(Array.from(this.episodicMap.values()));
+    // Index tăng dần thay vì removeAll+addAll toàn bộ mỗi lần ghi.
+    if (isUpdate) {
+      try { this.episodicMiniSearch.discard(id); } catch { /* best-effort */ }
+    }
+    this.episodicMiniSearch.add(fullRecord);
+    this.enforceMemoryCaps();
+    this.bumpMemoryVersion();
     await this.persistEpisodic();
     return fullRecord;
   }
@@ -880,8 +958,12 @@ export class TurnMemoryRetriever {
       });
     }
 
-    this.semanticMiniSearch.removeAll();
-    this.semanticMiniSearch.addAll(Array.from(this.semanticMap.values()));
+    // Index tăng dần thay vì removeAll+addAll toàn bộ mỗi lần ghi.
+    try { this.semanticMiniSearch.discard(record.id); } catch { /* best-effort */ }
+    const stored = this.semanticMap.get(record.id);
+    if (stored) this.semanticMiniSearch.add(stored);
+    this.enforceMemoryCaps();
+    this.bumpMemoryVersion();
     await this.persistSemantic();
   }
 
@@ -942,7 +1024,7 @@ export class TurnMemoryRetriever {
    */
   async retrieveDualMemory(
     query: string,
-    options?: { topK?: number; minScore?: number; activeFiles?: string[] }
+    options?: { topK?: number; minScore?: number; activeFiles?: string[]; queryVector?: number[] }
   ): Promise<DualMemoryRetrievalResult> {
     await this.init();
     const topK = options?.topK ?? 2;
@@ -952,10 +1034,13 @@ export class TurnMemoryRetriever {
     if (!query || query.trim().length === 0) {
       return { episodicExemplars: [], semanticInvariants: [], rendered: '' };
     }
+    if (this.episodicMap.size === 0 && this.semanticMap.size === 0) {
+      return { episodicExemplars: [], semanticInvariants: [], rendered: '' };
+    }
 
     const native = getNativeCore();
-    let queryVector: number[] | undefined;
-    if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
+    let queryVector = options?.queryVector;
+    if (!queryVector && native && typeof native.rsGenerateSubwordEmbedding === 'function') {
       try {
         queryVector = native.rsGenerateSubwordEmbedding(query);
       } catch {}
@@ -1201,8 +1286,72 @@ export class TurnMemoryRetriever {
     return this.livingPlaybook;
   }
 
+  getSnippetCacheStats(): { hits: number; misses: number } {
+    return { ...this.snippetCacheStats };
+  }
+
+  /** Mọi ghi vào kho đều bump version để vô hiệu memo snippet cùng turn. */
+  private bumpMemoryVersion(): void {
+    this.memoryVersion++;
+    if (this.snippetMemo.size > 0) this.snippetMemo.clear();
+  }
+
+  /** Cắt các map vượt trần theo thứ tự chèn (cũ nhất trước), đồng bộ index. */
+  private enforceMemoryCaps(): { evictedTurns: number; evictedEpisodic: number; evictedSemantic: number } {
+    let evictedTurns = 0;
+    let evictedEpisodic = 0;
+    let evictedSemantic = 0;
+    if (this.turnsMap.size > MAX_ARCHIVED_TURNS) {
+      for (const id of Array.from(this.turnsMap.keys()).slice(0, this.turnsMap.size - MAX_ARCHIVED_TURNS)) {
+        this.turnsMap.delete(id);
+        try { this.miniSearch.discard(id); } catch { /* best-effort */ }
+        evictedTurns++;
+      }
+    }
+    if (this.episodicMap.size > MAX_EPISODIC_EXPERIENCES) {
+      for (const id of Array.from(this.episodicMap.keys()).slice(0, this.episodicMap.size - MAX_EPISODIC_EXPERIENCES)) {
+        this.episodicMap.delete(id);
+        try { this.episodicMiniSearch.discard(id); } catch { /* best-effort */ }
+        evictedEpisodic++;
+      }
+    }
+    if (this.semanticMap.size > MAX_SEMANTIC_INVARIANTS) {
+      for (const id of Array.from(this.semanticMap.keys()).slice(0, this.semanticMap.size - MAX_SEMANTIC_INVARIANTS)) {
+        this.semanticMap.delete(id);
+        try { this.semanticMiniSearch.discard(id); } catch { /* best-effort */ }
+        evictedSemantic++;
+      }
+    }
+    return { evictedTurns, evictedEpisodic, evictedSemantic };
+  }
+
   getArchivedTurnCount(): number {
     return this.turnsMap.size;
+  }
+
+  /**
+   * Newest-first lightweight view of archived turns for ellipsis resolution.
+   * Sync over the in-memory map so turn start stays latency-free; returns
+   * whatever is loaded (possibly empty before init).
+   */
+  getRecentArchivedTurns(limit = 3): Array<{
+    userPrompt: string;
+    assistantSummary: string;
+    keyDecisions: string[];
+    turnNumber: number;
+  }> {
+    const docs = Array.from(this.turnsMap.values()).sort(
+      (a, b) => (a.turnNumber ?? 0) - (b.turnNumber ?? 0),
+    );
+    return docs
+      .slice(-Math.max(1, limit))
+      .reverse()
+      .map((doc) => ({
+        userPrompt: doc.userPrompt || '',
+        assistantSummary: doc.assistantSummary || '',
+        keyDecisions: [...(doc.keyDecisions || [])],
+        turnNumber: doc.turnNumber ?? 0,
+      }));
   }
 
   getMaskedObservationCount(): number {

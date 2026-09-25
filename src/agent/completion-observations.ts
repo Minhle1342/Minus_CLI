@@ -16,8 +16,20 @@ export function toolResultFailed(result: Record<string, any>): boolean {
     || (typeof result.exitCode === 'number' && result.exitCode !== 0));
 }
 
+/**
+ * Cache theo (session, seq, turn): event log chỉ append nên cùng một seq cho
+ * cùng một kết quả. Các caller chỉ filter/map, không mutate mảng trả về.
+ */
+const observationCache = new WeakMap<Session, Map<string | number, { seq: number; observations: CompletionObservation[] }>>();
+const MAX_CACHED_TURNS_PER_SESSION = 4;
+
 /** Pair observations once, with explicit turn boundaries and consumable call IDs. */
 export function collectCompletionObservations(session: Session, turn?: number): CompletionObservation[] {
+  const cacheKey = turn ?? 'all';
+  let perSession = observationCache.get(session);
+  const cached = perSession?.get(cacheKey);
+  if (cached && cached.seq === session.seq) return cached.observations;
+
   const calls = new Map<string, SessionEvent>();
   const unkeyed: SessionEvent[] = [];
   const observations: CompletionObservation[] = [];
@@ -49,6 +61,15 @@ export function collectCompletionObservations(session: Session, turn?: number): 
     observations.push({ call, result: event, toolName: call.data.toolName || event.data.toolName || 'unknown_tool',
       args: call.data.args || {}, payload: event.data.result || {} });
   }
+  if (!perSession) {
+    perSession = new Map();
+    observationCache.set(session, perSession);
+  }
+  if (!perSession.has(cacheKey) && perSession.size >= MAX_CACHED_TURNS_PER_SESSION) {
+    const oldest = perSession.keys().next();
+    if (!oldest.done) perSession.delete(oldest.value);
+  }
+  perSession.set(cacheKey, { seq: session.seq, observations });
   return observations;
 }
 

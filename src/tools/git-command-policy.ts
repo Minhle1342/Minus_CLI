@@ -145,18 +145,42 @@ export function isGitCommandAuthorized(
   userRequest: string | undefined,
   subcommand: string,
   classification: GitCommandClassification,
+  args: string[] = [],
 ): boolean {
   if (classification.risk === 'read') return true;
   const command = subcommand.toLowerCase();
+  if (command === 'add' && !isExplicitGitAddPathList(args)) return false;
+  const commitWorkflowStagesExplicitPaths = command === 'add'
+    && detectExplicitGitMutationIntent(userRequest).commit
+    && isExplicitGitAddPathList(args);
   const names = new Set(detectExplicitGitCommandNames(userRequest));
   const equivalentNames: Record<string, string[]> = {
     checkout: ['checkout', 'switch', 'restore'],
     switch: ['switch', 'checkout', 'branch'],
     restore: ['restore', 'checkout'],
   };
-  const requested = names.has(command) || equivalentNames[command]?.some((name) => names.has(name));
+  const requested = names.has(command)
+    || commitWorkflowStagesExplicitPaths
+    || equivalentNames[command]?.some((name) => names.has(name));
   if (!requested) return false;
   return classification.risk !== 'destructive' || hasExplicitDestructiveIntent(userRequest, command);
+}
+
+/**
+ * `git add` is only allowed to stage literal, workspace-relative paths.
+ * Broad selectors/options (`-A`, `--all`, `.`, globs, pathspec magic) remain
+ * blocked even when the user authorized a commit.
+ */
+export function isExplicitGitAddPathList(args: string[]): boolean {
+  const paths = args[0] === '--' ? args.slice(1) : args;
+  if (paths.length === 0) return false;
+  return paths.every((candidate) => {
+    const value = candidate.trim();
+    if (!value || value !== candidate || value.startsWith('-') || value.startsWith(':')) return false;
+    if (path.isAbsolute(value) || /[*?!\[\]]/.test(value)) return false;
+    const segments = value.split(/[\\/]+/);
+    return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+  });
 }
 
 export function validateGitCommandScope(

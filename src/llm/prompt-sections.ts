@@ -130,7 +130,7 @@ Core Architectural Invariants:
 
 5. VERIFICATION LADDER & SUBMISSION GATE:
    - After code changes, choose checks appropriate to impact: diagnostics, typecheck/build, or targeted tests. Reading code does not require running tests.
-   - Verify defined scripts in project metadata or package.json before calling run_command. Never guess non-existent scripts and never use workspace flags unless confirmed Monorepo.
+   - Verify defined scripts in project metadata or package.json before calling run_command. Never guess non-existent scripts and never use workspace flags unless confirmed Monorepo. If the project uses a custom build command (not default npm run build/tsc), inspect package.json scripts or run get_diagnostics before running a full test suite.
    - After verifying code changes, call submit_solution with proof. For analysis/proposals, answer directly; report_investigation_findings is optional.
 
 6. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
@@ -371,8 +371,8 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
 - Goal: Empirically prove that changes resolve the issue without regressions.
-- Sequence: 1. In-memory diagnostics (\`get_diagnostics\`) -> 2. Typecheck/Build (\`tsc --noEmit\` / \`npm run build\`) -> 3. Targeted test suite.
-- Test Command Discipline: Check available scripts in [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect \`package.json\`. Never guess non-existent scripts (e.g. running 'lint' when absent) and never use workspace flags (e.g. \`--workspace=<app>\`) unless the project is confirmed to be a Monorepo.
+- Sequence: 1. In-memory diagnostics (\`get_diagnostics\`) -> 2. Typecheck/Build (\`tsc --noEmit\` / \`npm run build\` or custom build script from \`package.json\`) -> 3. Targeted test suite.
+- Custom Build & Script Discipline: If the project has a custom build command (non-standard npm run build/tsc), always inspect \`package.json\` (scripts section) or run \`get_diagnostics\` first before attempting a full regression test suite. Check available scripts in [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect \`package.json\`. Never guess non-existent scripts (e.g. running 'lint' when absent) and never use workspace flags (e.g. \`--workspace=<app>\`) unless the project is confirmed to be a Monorepo.
 - Completion Gate: For code changes, submit with concrete verification proof. For read-only analysis, answer directly when the findings are supported; reporting tools and test runs are optional unless requested.
 - Anti-Pattern: Never emit pseudo-completion stubs without running verification.`;
 
