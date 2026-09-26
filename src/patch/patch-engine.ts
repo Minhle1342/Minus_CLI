@@ -432,11 +432,64 @@ export class PatchEngine {
     // Đọc file nguồn hiện tại
     let originalContent = '';
     let isCRLF = false;
+    let fileNotFound = false;
     try {
       const safePath = workspace.resolveSafePath(relPath);
       originalContent = await fs.readFile(safePath, 'utf-8');
       isCRLF = originalContent.includes('\r\n');
     } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        fileNotFound = true;
+      } else {
+        return {
+          path: relPath,
+          type: filePatch.type,
+          success: false,
+          hunksTotal: filePatch.hunks.length,
+          hunksApplied: 0,
+          fuzzLevelUsed: 0,
+          hunkResults: [],
+          error: `Không thể đọc file "${relPath}": ${err.message}`,
+        };
+      }
+    }
+
+    // Kiểm tra xem toàn bộ các hunks có phải chỉ là additions (+) không (File initialization / creation)
+    const allHunksAreAdditions = filePatch.hunks.length > 0 && filePatch.hunks.every((hunk) => {
+      const deletions = hunk.lines.filter((l) => l.startsWith('-'));
+      const contexts = hunk.lines.filter((l) => l.startsWith(' '));
+      // Không có dòng bị xóa và context rỗng hoặc chỉ có additions
+      return deletions.length === 0 && (contexts.length === 0 || contexts.every((c) => c.trim() === ''));
+    });
+
+    if (fileNotFound) {
+      if (allHunksAreAdditions) {
+        // Tự động chuyển đổi thành file creation nếu patch chỉ chứa các dòng thêm mới (+)
+        const createdLines: string[] = [];
+        for (const hunk of filePatch.hunks) {
+          for (const line of hunk.lines) {
+            if (line.startsWith('+') || line.startsWith(' ')) {
+              createdLines.push(line.slice(1));
+            }
+          }
+        }
+        return {
+          path: relPath,
+          type: 'create',
+          success: true,
+          hunksTotal: filePatch.hunks.length,
+          hunksApplied: filePatch.hunks.length,
+          fuzzLevelUsed: 0,
+          hunkResults: filePatch.hunks.map((_, i) => ({ hunkIndex: i, applied: true, fuzzLevelUsed: 0 })),
+          newContent: createdLines.join('\n'),
+        };
+      }
+
+      // Tìm kiếm file tương tự trong workspace nếu đường dẫn bị lệch thư mục (ví dụ index.html <-> src/index.html)
+      const similarFiles = await workspace.findSimilarWorkspaceFiles(relPath, 3);
+      const hint = similarFiles.length > 0
+        ? ` Tìm thấy file tương tự trong workspace: ${JSON.stringify(similarFiles)}. Hãy kiểm tra lại đường dẫn file.`
+        : '';
       return {
         path: relPath,
         type: filePatch.type,
@@ -445,7 +498,29 @@ export class PatchEngine {
         hunksApplied: 0,
         fuzzLevelUsed: 0,
         hunkResults: [],
-        error: `Không thể đọc file "${relPath}": ${err.message}`,
+        error: `Không thể đọc file "${relPath}" (ENOENT: no such file or directory).${hint}`,
+      };
+    }
+
+    // Xử lý khi file tồn tại nhưng rỗng (0 bytes / whitespace only) và patch thêm nội dung
+    if (originalContent.trim() === '' && allHunksAreAdditions) {
+      const createdLines: string[] = [];
+      for (const hunk of filePatch.hunks) {
+        for (const line of hunk.lines) {
+          if (line.startsWith('+') || line.startsWith(' ')) {
+            createdLines.push(line.slice(1));
+          }
+        }
+      }
+      return {
+        path: relPath,
+        type: 'modify',
+        success: true,
+        hunksTotal: filePatch.hunks.length,
+        hunksApplied: filePatch.hunks.length,
+        fuzzLevelUsed: 0,
+        hunkResults: filePatch.hunks.map((_, i) => ({ hunkIndex: i, applied: true, fuzzLevelUsed: 0 })),
+        newContent: createdLines.join('\n'),
       };
     }
 
@@ -783,25 +858,41 @@ export class PatchEngine {
     }
 
     // ==============================================================
-    // Cấp độ 3: Fuzzy Similarity Match (Levenshtein >= 0.82)
+    // Cấp độ 3: Fuzzy Similarity Match (Similarity >= 0.82)
     // ==============================================================
     let bestScore = 0;
     let bestIdx = -1;
     const candidates: Array<{ lineIndex: number; similarity: number; preview: string }> = [];
 
-    for (let i = 0; i <= targetLines.length - expLen; i++) {
-      const score = this.computeBlockSimilarity(targetLines.slice(i, i + expLen), expectedOldLines);
-      if (score >= 0.7) {
-        candidates.push({
-          lineIndex: i + 1,
-          similarity: Number(score.toFixed(3)),
-          preview: targetLines[i]?.trim().slice(0, 60) || '',
-        });
+    // Tối ưu hóa cửa sổ tìm kiếm: Quét vùng lân cận targetOldStart (±40 dòng) trước để tránh O(N) không cần thiết
+    const windowRadius = 40;
+    const searchRanges: Array<{ start: number; end: number }> = [];
+    if (targetLines.length <= windowRadius * 2) {
+      searchRanges.push({ start: 0, end: targetLines.length - expLen });
+    } else {
+      const localStart = Math.max(0, targetOldStart - windowRadius);
+      const localEnd = Math.min(targetLines.length - expLen, targetOldStart + windowRadius);
+      searchRanges.push({ start: localStart, end: localEnd });
+      if (localStart > 0) searchRanges.push({ start: 0, end: localStart - 1 });
+      if (localEnd < targetLines.length - expLen) searchRanges.push({ start: localEnd + 1, end: targetLines.length - expLen });
+    }
+
+    for (const range of searchRanges) {
+      for (let i = range.start; i <= range.end; i++) {
+        const score = this.computeBlockSimilarity(targetLines.slice(i, i + expLen), expectedOldLines);
+        if (score >= 0.7) {
+          candidates.push({
+            lineIndex: i + 1,
+            similarity: Number(score.toFixed(3)),
+            preview: targetLines[i]?.trim().slice(0, 60) || '',
+          });
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
       }
-      if (score > bestScore) {
-        bestScore = score;
-        bestIdx = i;
-      }
+      if (bestScore >= 0.82) break; // Đã tìm thấy khớp chất lượng cao ở vùng lân cận
     }
 
     candidates.sort((a, b) => b.similarity - a.similarity);
@@ -841,6 +932,9 @@ export class PatchEngine {
     return (line || '')
       .replace(/\t/g, '  ')
       .replace(/\s+/g, ' ')
+      .replace(/\s*=\s*/g, '=')
+      .replace(/['"`]/g, '"')
+      .replace(/\s*\/?>/g, '>')
       .trim();
   }
 
@@ -879,7 +973,12 @@ export class PatchEngine {
     if (targetBlock.length !== expBlock.length || targetBlock.length === 0) return 0;
     let totalScore = 0;
     for (let i = 0; i < targetBlock.length; i++) {
-      totalScore += lineSimilarity(this.normalizeLine(targetBlock[i]), this.normalizeLine(expBlock[i]));
+      const s1 = this.normalizeLine(targetBlock[i]);
+      const s2 = this.normalizeLine(expBlock[i]);
+      const lineScore = lineSimilarity(s1, s2);
+      // Cắt tỉa sớm: Nếu dòng đầu tiên hoàn toàn không tương đồng, khối mã không thể đạt ngưỡng 0.82
+      if (i === 0 && lineScore < 0.3 && targetBlock.length > 2) return 0;
+      totalScore += lineScore;
     }
     return totalScore / targetBlock.length;
   }
@@ -896,44 +995,49 @@ function sanitizeDiffPath(raw: string): string {
 }
 
 /**
- * Tính độ tương đồng giữa 2 dòng ký tự (0 -> 1)
+ * Tính độ tương đồng nhanh giữa 2 dòng ký tự O(N) qua Bigram Sørensen-Dice Coefficient
  */
 function lineSimilarity(s1: string, s2: string): number {
-  if (s1 === s2) return 1;
-  if (!s1 || !s2) return 0;
+  if (s1 === s2) return 1.0;
+  if (!s1 || !s2) return 0.0;
 
-  const longer = s1.length > s2.length ? s1 : s2;
-  const shorter = s1.length > s2.length ? s2 : s1;
+  const l1 = s1.length;
+  const l2 = s2.length;
+  const maxLen = Math.max(l1, l2);
+  const minLen = Math.min(l1, l2);
 
-  if (longer.length === 0) return 1.0;
+  if (s1.includes(s2) || s2.includes(s1)) {
+    return minLen / maxLen;
+  }
 
-  const editDistance = levenshtein(longer, shorter);
-  return (longer.length - editDistance) / longer.length;
+  // Cắt tỉa sớm nếu độ chênh lệch chiều dài > 50%
+  if (minLen / maxLen < 0.50) return 0.0;
+
+  return diceSimilarityFast(s1, s2);
 }
 
-function levenshtein(a: string, b: string): number {
-  const an = a ? a.length : 0;
-  const bn = b ? b.length : 0;
-  if (an === 0) return bn;
-  if (bn === 0) return an;
-  const matrix = Array.from({ length: bn + 1 }, (_, i) => [i]);
-  for (let j = 0; j <= an; j++) {
-    matrix[0][j] = j;
+function diceSimilarityFast(s1: string, s2: string): number {
+  const l1 = s1.length;
+  const l2 = s2.length;
+  if (l1 === 0 || l2 === 0) return 0;
+  if (l1 === 1 && l2 === 1) return s1 === s2 ? 1 : 0;
+  if (l1 < 2 || l2 < 2) return s1 === s2 ? 1 : (s1.includes(s2) || s2.includes(s1) ? 0.5 : 0);
+
+  const s1Pairs = new Map<string, number>();
+  for (let i = 0; i < l1 - 1; i++) {
+    const pair = s1.slice(i, i + 2);
+    s1Pairs.set(pair, (s1Pairs.get(pair) || 0) + 1);
   }
-  for (let i = 1; i <= bn; i++) {
-    for (let j = 1; j <= an; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1, // substitution
-          Math.min(
-            matrix[i][j - 1] + 1, // insertion
-            matrix[i - 1][j] + 1 // deletion
-          )
-        );
-      }
+
+  let intersection = 0;
+  for (let i = 0; i < l2 - 1; i++) {
+    const pair = s2.slice(i, i + 2);
+    const count = s1Pairs.get(pair);
+    if (count && count > 0) {
+      s1Pairs.set(pair, count - 1);
+      intersection++;
     }
   }
-  return matrix[bn][an];
+
+  return (2 * intersection) / (l1 + l2 - 2);
 }

@@ -40,6 +40,7 @@ export interface KernelEvents {
   'step:after': (step: number) => void;
   'router:decision': (decision: import('../agent/reliable-tool-orchestration.js').ReliableToolRouteDecision) => void;
   'gate:exploration_sufficiency': (decision: import('../agent/critic-gate.js').ExplorationSufficiencyDecision) => void;
+  'gate:reproduction_advisory': (info: { turn: number; toolName: string; targetFilePath: string; advisory: string }) => void;
   'tool:before': (toolName: string, args: Record<string, any>) => void;
   'tool:after': (
     toolName: string,

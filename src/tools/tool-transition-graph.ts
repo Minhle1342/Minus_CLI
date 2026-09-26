@@ -23,6 +23,7 @@ export type ToolOutcomeState =
   | 'EXPLORATION_SUFFICIENCY_BLOCKED'
   | 'REPRODUCTION_GATE_BLOCKED'
   | 'GRAPH_CONTEXT_ACQUIRED'
+  | 'PHASE_TRANSITION_ACCEPTED'
   | 'GENERAL_SUCCESS'
   | 'GENERAL_ERROR';
 
@@ -39,6 +40,12 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondarySuccessors: ['inspect_symbol', 'list_files'],
     primaryBoost: 0.15,
     secondaryBoost: 0.08,
+  },
+  PHASE_TRANSITION_ACCEPTED: {
+    primarySuccessors: ['create_file', 'write_file', 'replace_text', 'apply_patch'],
+    secondarySuccessors: ['read_file', 'run_command', 'run_node_script'],
+    primaryBoost: 0.35,
+    secondaryBoost: 0.15,
   },
   SUCCESS_MUTATION: {
     primarySuccessors: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
@@ -222,6 +229,11 @@ export class ToolTransitionGraph {
     // 7. Kiểm tra Discovery Tools
     if (DISCOVERY_TOOLS.has(lastToolName)) {
       return hasError ? 'GENERAL_ERROR' : 'DISCOVERY_HIT';
+    }
+
+    // 8. Kiểm tra Phase Transition Tools
+    if (lastToolName === 'request_phase_transition') {
+      return (res?.accepted || res?.success) ? 'PHASE_TRANSITION_ACCEPTED' : 'GENERAL_ERROR';
     }
 
     return hasError ? 'GENERAL_ERROR' : 'GENERAL_SUCCESS';

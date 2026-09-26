@@ -326,14 +326,16 @@ export const readFileTool: ToolDefinition = {
       };
     } catch (err: any) {
       if (err.code === 'ENOENT' || String(err.message).includes('ENOENT')) {
-        const suggestions = await findSimilarFiles(rawPath, workspace);
+        const nearbySuggestions = await findSimilarFiles(rawPath, workspace);
+        const workspaceSuggestions = await workspace.findSimilarWorkspaceFiles(rawPath, 5);
+        const suggestions = Array.from(new Set([...nearbySuggestions, ...workspaceSuggestions]));
         return {
           path: rawPath,
           error: `File "${rawPath}" was not found. (ENOENT: no such file or directory)`,
           errorCode: 'FILE_NOT_FOUND',
           suggestions: suggestions.length > 0 ? suggestions : undefined,
           suggestionText: suggestions.length > 0
-            ? `File does not exist. Available files in nearby directory: ${suggestions.join(', ')}`
+            ? `File does not exist. Available files in workspace: ${suggestions.join(', ')}`
             : 'File does not exist. Use search_codebase_fast or list_files to locate the correct path.',
         };
       }

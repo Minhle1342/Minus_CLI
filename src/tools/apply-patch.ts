@@ -102,6 +102,7 @@ export const applyPatchTool: ToolDefinition = {
         const failedHunkNumber = failedHunk ? failedHunk.hunkIndex + 1 : undefined;
 
         let suggestedRead: { path: string; startLine: number; endLine: number } | undefined;
+        let similarFiles: string[] = [];
         if (failedFile && failedFile.path && failedFile.path !== 'unknown') {
           const hunkData = parsed.files.find((f) => (f.newPath || f.oldPath || defaultPath) === failedFile.path)?.hunks[failedHunk?.hunkIndex ?? 0];
           const approxLine = hunkData?.oldStart || 1;
@@ -110,6 +111,20 @@ export const applyPatchTool: ToolDefinition = {
             startLine: Math.max(1, approxLine - 10),
             endLine: approxLine + Math.max(20, hunkData?.oldLines || 10) + 10,
           };
+          if (failedFile.error && (failedFile.error.includes('ENOENT') || failedFile.error.includes('Không thể đọc file'))) {
+            try {
+              similarFiles = await workspace.findSimilarWorkspaceFiles(failedFile.path, 3);
+            } catch {}
+          }
+        }
+
+        let suggestion = 'Use read_file to inspect latest content or switch to replace_text with exact strings.';
+        if (result.error?.includes('PRE_COMMIT_SYNTAX_ERROR')) {
+          suggestion = 'Kiểm tra và sửa lại lỗi cú pháp trong bản vá trước khi thử lại.';
+        } else if (similarFiles.length > 0) {
+          suggestion = `File "${failedFile?.path}" không tồn tại. Tìm thấy file tương tự: ${JSON.stringify(similarFiles)}. Hãy gọi lại apply_patch hoặc replace_text với đường dẫn đúng "${similarFiles[0]}".`;
+        } else if (suggestedRead) {
+          suggestion = `Use read_file with path: "${suggestedRead.path}", startLine: ${suggestedRead.startLine}, endLine: ${suggestedRead.endLine} to inspect exact line context, or switch to replace_text.`;
         }
 
         return {
@@ -125,12 +140,9 @@ export const applyPatchTool: ToolDefinition = {
           failedFile: failedFile?.path,
           failedHunkNumber,
           suggestedRead,
+          similarFiles: similarFiles.length > 0 ? similarFiles : undefined,
           recommendedFallback: 'replace_text',
-          suggestion: result.error?.includes('PRE_COMMIT_SYNTAX_ERROR')
-            ? 'Kiểm tra và sửa lại lỗi cú pháp trong bản vá trước khi thử lại.'
-            : suggestedRead
-            ? `Use read_file with path: "${suggestedRead.path}", startLine: ${suggestedRead.startLine}, endLine: ${suggestedRead.endLine} to inspect exact line context, or switch to replace_text.`
-            : 'Use read_file to inspect latest content or switch to replace_text with exact strings.',
+          suggestion,
           fileResults: result.fileResults,
         };
       }

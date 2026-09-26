@@ -51,6 +51,7 @@ import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
 import { createGitTools } from './git-tools.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
+import { requestPhaseTransitionTool } from './request-phase-transition.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
 
 
@@ -143,6 +144,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(createPackCodebaseTool());
     this.register(createReportFindingsTool());
     this.register(createHypothesisTool());
+    this.register(requestPhaseTransitionTool);
 
     // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
     this.register(createDiscoverToolsTool(this));
@@ -427,6 +429,8 @@ export class ToolScope implements ToolProvider {
         : name === 'read_url_content' ? 'web_fetch'
         : name === 'web_fetch' ? 'read_url_content'
         : name === 'search_text' ? 'search_codebase_fast'
+        : name === 'write_to_file' ? 'write_file'
+        : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
         : undefined;
       if (!alias || !this.allowed.has(alias)) return undefined;
     }

@@ -21,7 +21,10 @@ class PromptCapturingScriptedLLM {
   readonly requests: Array<{ systemPrompt: string; dynamicContext: string; tools: string[] }> = [];
   private index = 0;
 
-  readonly replies = [
+  readonly replies: any[];
+
+  constructor(replies?: any[]) {
+    this.replies = replies || [
     { finishReason: 'tool_calls', toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'sample.txt' } }] },
     { finishReason: 'tool_calls', toolCalls: [{ id: 'edit-1', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } }] },
     { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_command', args: { command: 'npm test' } }] },
@@ -37,7 +40,8 @@ class PromptCapturingScriptedLLM {
         },
       }],
     },
-  ];
+    ];
+  }
 
   readonly modelName = 'scripted-flash';
   getTokenConfig(): Record<string, number> {
@@ -61,6 +65,8 @@ async function runMode(
   userRequest = 'Update sample.txt from before to after and verify the change.',
   toolControlMode: ToolControlMode = 'off',
   useTestSuite = false,
+  scriptedReplies?: any[],
+  enableDynamicToolRetrieval = !useTestSuite,
 ): Promise<{
   finalAnswer: string;
   toolSequence: string[];
@@ -127,7 +133,7 @@ async function runMode(
       });
     }
 
-    const llm = new PromptCapturingScriptedLLM();
+    const llm = new PromptCapturingScriptedLLM(scriptedReplies);
     if (useTestSuite) {
       llm.replies[2] = { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_test_suite', args: { command: 'npm test' } }] };
     }
@@ -135,7 +141,7 @@ async function runMode(
       workspace,
       maxSteps: 6,
       toolControlMode,
-      enableDynamicToolRetrieval: !useTestSuite,
+      enableDynamicToolRetrieval,
       stepPromptGatingMode: mode,
       enableStepSummarization: false,
       enableGraphRepositoryMap: false,
@@ -194,11 +200,11 @@ test('enforced mutation flow records explore, implementation and verification co
   const result = await runMode('enforce', 'Update sample.txt from before to after.', 'enforce');
   assert.equal(result.fileContent, 'after');
   assert.deepEqual(result.phaseEvents, [
-    'phase/exploreCompleted', 'phase/implementationCompleted', 'phase/verificationCompleted',
+    'phase/implementationCompleted', 'phase/verificationCompleted',
   ]);
   assert.ok(result.classifications.includes('verify'));
-  assert.match(result.requests[0].dynamicContext, /PHASE HANDOFF: explore → implement/);
-  assert.match(result.requests[1].dynamicContext, /PHASE HANDOFF: explore → implement/);
+  assert.match(result.requests[0].dynamicContext, /PHASE: IMPLEMENT/);
+  assert.match(result.requests[1].dynamicContext, /PHASE: IMPLEMENT/);
   assert.match(result.requests[3].dynamicContext, /PHASE HANDOFF: implement → verify/);
 });
 
@@ -206,7 +212,7 @@ test('run_test_suite completes the lifecycle with enforced tool scoping', async 
   const result = await runMode('enforce', 'Update sample.txt from before to after.', 'enforce', true);
   assert.equal(result.fileContent, 'after');
   assert.deepEqual(result.phaseEvents, [
-    'phase/exploreCompleted', 'phase/implementationCompleted', 'phase/verificationCompleted',
+    'phase/implementationCompleted', 'phase/verificationCompleted',
   ]);
   assert.deepEqual(result.toolSequence, ['read_file', 'replace_text', 'run_test_suite', 'submit_solution']);
 });
@@ -230,6 +236,55 @@ test('low-risk bugfix unlocks a small target-inspected edit without a mandatory 
   assert.deepEqual(result.toolSequence, ['read_file', 'replace_text', 'run_command', 'submit_solution']);
   assert.equal(result.fileContent, 'after');
   assert.equal(result.failedToolResults, 0);
-  assert.equal(result.requests[0].tools.includes('replace_text'), false, 'first uncertain step stays read-only');
+  assert.equal(result.requests[0].tools.includes('replace_text'), true, 'an explicit low-risk edit request starts in implement');
   assert.equal(result.requests[1].tools.includes('replace_text'), true, 'reading the exact target exposes the bounded edit fast path');
+});
+
+test('accepted phase transition blocks sibling calls and refreshes the model tool set', async () => {
+  const replies = [
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'sample.txt' } }] },
+    {
+      finishReason: 'tool_calls',
+      toolCalls: [
+        {
+          id: 'transition-1', name: 'request_phase_transition', args: {
+            targetPhase: 'implement',
+            rationale: 'The exact target content has been inspected and the bounded replacement is known.',
+            evidenceRefs: ['sample.txt', 'tool-result:read-1'],
+          },
+        },
+        { id: 'stale-edit', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } },
+      ],
+    },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'edit-1', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_command', args: { command: 'npm test' } }] },
+    {
+      finishReason: 'tool_calls',
+      toolCalls: [{
+        id: 'submit-1', name: 'submit_solution', args: {
+          summary: finalSummary,
+          filesModified: ['sample.txt'],
+          verificationEvidence: 'npm test completed with exit code 0',
+        },
+      }],
+    },
+  ];
+  const result = await runMode(
+    'enforce',
+    'The test fails with an error in sample.txt.',
+    'enforce',
+    false,
+    replies,
+    false,
+  );
+
+  assert.equal(result.fileContent, 'after');
+  assert.deepEqual(result.toolSequence, [
+    'read_file', 'request_phase_transition', 'replace_text', 'replace_text', 'run_command', 'submit_solution',
+  ]);
+  assert.equal(result.failedToolResults, 1, 'the sibling edit must be recorded as blocked, not executed');
+  assert.ok(result.requests[1].tools.includes('request_phase_transition'));
+  assert.equal(result.requests[1].tools.includes('replace_text'), false, 'explore must not expose edit tools');
+  assert.ok(result.requests[2].tools.includes('replace_text'), 'the fresh implement turn exposes edit tools');
+  assert.ok(result.phaseEvents.includes('phase/transitionAccepted'));
 });

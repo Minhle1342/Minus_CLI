@@ -10,7 +10,7 @@ import {
   invalidateTopologyCache,
 } from './mutation-blast-radius.js';
 
-type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode';
+type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode' | 'normalized_whitespace' | 'empty_file_initialization';
 
 interface TextMatch {
   start: number;
@@ -109,7 +109,31 @@ export const replaceTextTool: ToolDefinition = {
         };
       }
 
-      const stat = await fs.stat(safePath);
+      let stat;
+      try {
+        stat = await fs.stat(safePath);
+      } catch (statErr: any) {
+        if (statErr.code === 'ENOENT') {
+          let similarFiles: string[] = [];
+          try {
+            similarFiles = await workspace.findSimilarWorkspaceFiles(rawPath, 3);
+          } catch {}
+          const similarMsg = similarFiles.length > 0
+            ? ` Tìm thấy file tương tự trong workspace: ${JSON.stringify(similarFiles)}. Hãy gọi replace_text với đường dẫn đúng "${similarFiles[0]}", hoặc dùng "write_file" nếu muốn tạo mới.`
+            : ' Hãy dùng "write_file" nếu bạn muốn tạo file mới.';
+          return {
+            success: false,
+            path: rawPath,
+            error: `File "${rawPath}" không tồn tại (ENOENT).${similarMsg}`,
+            errorCode: 'FILE_NOT_FOUND',
+            similarFiles: similarFiles.length > 0 ? similarFiles : undefined,
+            suggestion: similarFiles.length > 0
+              ? `Chuyển sang sửa file "${similarFiles[0]}" hoặc tạo mới "${rawPath}" qua write_file.`
+              : `Tạo mới file "${rawPath}" qua tool write_file.`,
+          };
+        }
+        throw statErr;
+      }
 
       if (!stat.isFile()) {
         return { success: false, path: rawPath, error: `"${rawPath}" không phải là file.`, errorCode: 'NOT_A_FILE' };
@@ -126,6 +150,33 @@ export const replaceTextTool: ToolDefinition = {
           expectedFileHash,
           observedFileHash,
           suggestion: `Gọi lại replace_text với expectedFileHash="${observedFileHash}" (hoặc bỏ qua expectedFileHash nếu oldText là duy nhất trong file).`,
+        };
+      }
+
+      // Xử lý tự động khởi tạo khi file rỗng (0 bytes / whitespace only)
+      if (content.trim() === '') {
+        const preCheckSyntaxErrors = CodeSyntaxValidator.validateContentSyntax(rawPath, newText);
+        if (preCheckSyntaxErrors.length > 0) {
+          return {
+            success: false,
+            path: rawPath,
+            error: `Sửa đổi bị chặn bởi In-Memory Syntax Guardrail: Phát hiện ${preCheckSyntaxErrors.length} lỗi cú pháp trong nội dung mới.`,
+            errorCode: 'SYNTAX_ERROR_PREVENTED',
+            syntaxErrors: preCheckSyntaxErrors,
+            diagnostic: `Cú pháp mới bị gãy tại dòng ${preCheckSyntaxErrors[0].line}: ${preCheckSyntaxErrors[0].message}`,
+            suggestion: `Sửa lại cú pháp trong newText trước khi gọi lại replace_text: ${preCheckSyntaxErrors[0].message}.`,
+          };
+        }
+        await fs.writeFile(safePath, newText, 'utf-8');
+        invalidateTopologyCache();
+        return {
+          path: rawPath,
+          success: true,
+          matchStrategy: 'empty_file_initialization',
+          line: 1,
+          previousContentHash: observedFileHash,
+          contentHash: hashContent(newText),
+          message: `Đã khởi tạo nội dung cho file rỗng "${rawPath}".`,
         };
       }
 
@@ -305,7 +356,57 @@ function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact
   });
   if (eolEquivalent.length > 0) return eolEquivalent;
 
-  return findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
+  const indentMatches = findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
+  if (indentMatches.length > 0) return indentMatches;
+
+  return findWhitespaceEquivalentMatches(content, normalizedContent, normalizedOldText);
+}
+
+function findWhitespaceEquivalentMatches(
+  originalContent: string,
+  normalizedContent: NormalizedText,
+  normalizedOldText: string,
+): TextMatch[] {
+  const oldHasTrailingEol = normalizedOldText.endsWith('\n');
+  const oldLines = normalizedOldText.split('\n');
+  if (oldHasTrailingEol) oldLines.pop();
+  if (oldLines.length === 0) return [];
+
+  const cleanMarkup = (line: string) =>
+    (line || '')
+      .replace(/\t/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*=\s*/g, '=')
+      .replace(/['"`]/g, '"')
+      .replace(/\s*\/?>/g, '>')
+      .trim();
+
+  const cleanedOld = oldLines.map(cleanMarkup).join('\n');
+  if (!cleanedOld) return [];
+
+  const contentLines = splitLines(normalizedContent.text);
+  const matches: TextMatch[] = [];
+
+  for (let index = 0; index + oldLines.length <= contentLines.length; index++) {
+    const window = contentLines.slice(index, index + oldLines.length);
+    const cleanedWindow = window.map((line) => cleanMarkup(line.text)).join('\n');
+    if (cleanedWindow !== cleanedOld) continue;
+
+    const first = window[0];
+    const last = window[window.length - 1];
+    const normalizedEnd = oldHasTrailingEol && last.hasEol ? last.end + 1 : last.end;
+    const targetIndent = (first.text || '').match(/^(\s*)/)?.[1] || '';
+
+    matches.push({
+      start: normalizedContent.boundaries[first.start],
+      end: normalizedContent.boundaries[normalizedEnd],
+      line: index + 1,
+      strategy: 'normalized_whitespace',
+      indentation: targetIndent,
+    });
+  }
+
+  return matches.filter((match) => match.start <= match.end && match.end <= originalContent.length);
 }
 
 function findIndentationEquivalentMatches(
@@ -342,7 +443,7 @@ function findIndentationEquivalentMatches(
 function prepareReplacement(newText: string, content: string, match: TextMatch): string {
   const eol = detectLocalEol(content.slice(match.start, match.end)) || detectDominantEol(content);
   let normalized = normalizeLineEndingsWithBoundaries(newText).text;
-  if (match.strategy === 'normalized_indentation') {
+  if (match.strategy === 'normalized_indentation' || match.strategy === 'normalized_whitespace') {
     const hasTrailingEol = normalized.endsWith('\n');
     const lines = normalized.split('\n');
     if (hasTrailingEol) lines.pop();

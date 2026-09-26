@@ -86,11 +86,12 @@ import { assessParetoEvidence } from './pareto-evidence-policy.js';
 import { buildPhaseContextHandoff } from './phase-context-handoff.js';
 import { attributeCommandFailure, captureCommandBaseline } from './command-regression-evidence.js';
 import {
+  applyPhaseAuthority,
   applyPhaseLifecycle,
   invalidatePhaseOnMutation,
-  recordExploreCompleted,
   recordImplementationCompleted,
   recordVerificationOutcome,
+  requestPhaseTransition,
 } from './phase-lifecycle.js';
 import type { OcrGateDecision, OcrReviewService } from '../review/open-code-review.js';
 import {
@@ -909,7 +910,7 @@ export class AgentLoop {
     });
     const taskComplexity = calculateTaskComplexity(retrievalUserRequest, initialTurnClassification.taskClass);
     const effectiveMaxSteps = Number.isFinite(baseMaxSteps)
-      ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor))
+      ? (baseMaxSteps > 5 ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor)) : baseMaxSteps)
       : baseMaxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
     const isContinuationOrGoal = isGoal
@@ -1208,15 +1209,9 @@ export class AgentLoop {
         evidenceScore: paretoEvidence.score,
         evidenceThreshold: paretoEvidence.threshold,
       });
-      const classification = applyPhaseLifecycle(classified, session, turn);
-      const exploreCompletedNow = recordExploreCompleted(session, turn, classification, {
-        score: paretoEvidence.score,
-        threshold: paretoEvidence.threshold,
-        inspectedFiles: paretoEvidence.inspectedFiles,
-        sufficient: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
-        validatedHypothesis: hasValidatedHypothesis,
-        hypothesisId: validatedHypotheses.at(-1)?.id || supportedHypotheses.at(-1)?.id,
-      });
+      const lifecycleClassification = applyPhaseLifecycle(classified, session, turn);
+      const classification = applyPhaseAuthority(lifecycleClassification, session, turn);
+      const exploreCompletedNow = false;
       previousClassification = classification;
 
       // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng & Reproduction Verification cho ToolUseGuardian
@@ -1362,16 +1357,23 @@ export class AgentLoop {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
 
-      // Pre-Call Predictive Guardrails (Phase 1/4):
-      // Khi đã có verification thành công sau mutation, ẩn toàn bộ tool chỉnh sửa code để triệt tiêu vi phạm và đột biến thừa
+      // A transition request is a control primitive, not a retrieved task tool.
+      // Keep it visible whenever the current coding phase can accept one so the
+      // model never has to guess an unauthorized edit to advance its workflow.
+      if (
+        ['explore', 'plan'].includes(classification.phase)
+        && candidateProvider.get('request_phase_transition')
+        && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
+      ) {
+        const transitionDeclaration = candidateProvider.getFunctionDeclarations()
+          .find((tool: any) => tool.name === 'request_phase_transition');
+        if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
+      }
+
+      // Verification State tracking:
       const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
         && stepCompletionState.hasMutations
         && !hasSubmittedSolution;
-      if (hasVerifiedTests) {
-        activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-          !isMutationTool(tool.name)
-        );
-      }
 
       // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
       if (hasSubmittedSolution) {
@@ -1407,12 +1409,11 @@ export class AgentLoop {
       const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;
         if (isPureInvestigation && name === 'submit_solution') return false;
-        if (hasVerifiedTests && isMutationTool(name)) return false;
         return true;
       });
       this.contextQualityEvaluator.recordToolRetrieval(visibleToolNames, expectedToolNames);
       const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
-      const activeDecisionId = `${recommendedToolDecision.id}-${activeToolSetHash.slice(0, 8)}`;
+      const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
       const hasRuntimeToolScope = toolControlMode === 'enforce'
         || (reliableToolOrchestrationMode === 'enforce' && reliableRouteDecision.constrainSafe && !reliableRouteDecision.failOpen);
       const stepToolProvider = hasRuntimeToolScope
@@ -1432,6 +1433,7 @@ export class AgentLoop {
             toolDecision: {
               ...recommendedToolDecision,
               id: activeDecisionId,
+              phaseVersion: classification.phaseVersion,
               visibleToolNames,
               allowedToolSetHash: activeToolSetHash,
             },
@@ -2371,6 +2373,7 @@ export class AgentLoop {
 
         let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
         let toolBatchCancelled = false;
+        let phaseTransitionAcceptedInResponse = false;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
         for (const [callIndex, call] of normalizedToolCalls.entries()) {
@@ -2442,6 +2445,7 @@ export class AgentLoop {
                     allowedToolNames: visibleToolNames,
                     allowedToolSetHash: activeToolSetHash,
                     classificationPhase: classification.phase,
+                    phaseVersion: classification.phaseVersion,
                     classificationRisk: classification.risk,
                     maxToolCalls: recommendedToolDecision.maxToolCalls,
                   } : {}),
@@ -2546,6 +2550,19 @@ export class AgentLoop {
             continue;
           }
 
+          if (phaseTransitionAcceptedInResponse) {
+            const blockedResult = {
+              success: false,
+              errorCode: 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN',
+              error: 'A phase transition was accepted earlier in this response. Re-issue this tool call after the Harness provides the new phase and tool set.',
+              retryable: true,
+            };
+            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'phase-transition-requires-fresh-turn');
+            await this.persistSession(session);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            continue;
+          }
+
 
           const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
             write_file: { reversible: true, checkpoint: true },
@@ -2606,6 +2623,28 @@ export class AgentLoop {
               message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
+          } else if (toolName === 'request_phase_transition') {
+            const transition = requestPhaseTransition(session, turn, classification, {
+              targetPhase: toolArgs.targetPhase,
+              rationale: toolArgs.rationale,
+              evidenceRefs: toolArgs.evidenceRefs,
+            }, {
+              hasPlan: this.planManager.hasPlan(),
+              evidenceSufficient: hasValidatedHypothesis || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+            });
+            executionResult = {
+              toolName,
+              args: toolArgs,
+              durationMs: 0,
+              result: {
+                success: transition.accepted,
+                phase: transition.phase,
+                phaseVersion: transition.phaseVersion,
+                reason: transition.reason,
+                ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
+              },
+            };
+            phaseTransitionAcceptedInResponse = transition.accepted;
           } else if (preexecutedReadResult) {
             executionResult = preexecutedReadResult;
           } else {
@@ -2741,13 +2780,22 @@ export class AgentLoop {
 
             this.kernel?.ctx.events.emit('gate:exploration_sufficiency', explorationSufficiency);
 
-            const reproductionCheck = isMutationTool(toolName)
+            const reproductionCheck: { allowed: boolean; reason?: string; advisory?: string } = isMutationTool(toolName)
               ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode, {
                   targetFilePath,
                   isScratchFile: isScratch,
                   criticApproved: explorationSufficiency.allowed,
+                  riskLevel: classification.risk,
                 })
               : { allowed: true };
+            if (reproductionCheck.allowed && reproductionCheck.advisory) {
+              this.kernel?.ctx.events.emit('gate:reproduction_advisory', {
+                turn,
+                toolName,
+                targetFilePath,
+                advisory: reproductionCheck.advisory,
+              });
+            }
 
             const fixationCheck = isMutationTool(toolName) && !isScratch
               ? this.cognitiveHarness.fileFixationTracker.isFrozen(targetFilePath, turn)
@@ -2842,6 +2890,7 @@ export class AgentLoop {
                     allowedToolNames: visibleToolNames,
                     allowedToolSetHash: activeToolSetHash,
                     classificationPhase: classification.phase,
+                    phaseVersion: classification.phaseVersion,
                     classificationRisk: classification.risk,
                     maxToolCalls: recommendedToolDecision.maxToolCalls,
                   } : {}),
@@ -2920,6 +2969,11 @@ export class AgentLoop {
           } else if (!failStreak || failStreak.signature !== this.cascadeFreeze?.signature) {
             this.cascadeFreeze = undefined;
           }
+          // Signature-novelty repair budget: only same-signature repeats consume
+          // budget; novel failures and successes reset it (feeds LATS backtracking).
+          this.verificationPolicy.recordRepairAttempt(
+            reflectionAnalysis.isFailure ? (failStreak?.count ?? 0) : 0,
+          );
           this.finalAnswerGuard.observeToolResult(toolName, executionResult.result, toolArgs);
           this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
             granted: executionResult.permission?.status === 'granted',

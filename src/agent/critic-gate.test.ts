@@ -170,9 +170,12 @@ test('CriticGate.evaluateExplorationSufficiency blocks mutation if latest hypoth
   assert.match(decision.reasons[0] || '', /FALSIFIED/);
 });
 
-test('CriticGate.evaluateExplorationSufficiency enforces Causal Lineage Gate (>=2 files) for R2+ bugfix', () => {
+test('CriticGate.evaluateExplorationSufficiency advises (not blocks) single-file inspection without call-graph evidence', () => {
   const critic = new CriticGate();
-  // Only target.ts inspected (1 file)
+  const supportedHypo = {
+    getLatestHypothesis: () => ({ id: 'hypo-1', statement: 'Off-by-one', status: 'supported' }),
+  } as any;
+  // Only target.ts inspected (1 file), no call-graph tool ran
   const singleFileSession = {
     getEvents: () => [
       { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
@@ -180,18 +183,19 @@ test('CriticGate.evaluateExplorationSufficiency enforces Causal Lineage Gate (>=
     ],
   } as any;
 
-  const blockedDecision = critic.evaluateExplorationSufficiency({
+  const advisoryDecision = critic.evaluateExplorationSufficiency({
     taskClass: 'bugfix',
     session: singleFileSession,
     targetFilePath: 'src/target.ts',
-    hasReproduction: true,
+    hasReproduction: false,
+    hypothesisTracker: supportedHypo,
     risk: 'R3',
     gateMode: 'enforce',
   });
 
-  assert.equal(blockedDecision.allowed, false);
-  assert.equal(blockedDecision.score, 50);
-  assert.ok(blockedDecision.reasons.some((r) => r.includes('CAUSAL_TRACE_INSUFFICIENT')));
+  assert.equal(advisoryDecision.allowed, true);
+  assert.equal(advisoryDecision.score, 100);
+  assert.ok(advisoryDecision.reasons.some((r) => r.includes('CAUSAL_TRACE_UNVERIFIED')));
 
   // Now inspect caller file as well (2 files)
   const causalChainSession = {
@@ -205,7 +209,8 @@ test('CriticGate.evaluateExplorationSufficiency enforces Causal Lineage Gate (>=
     taskClass: 'bugfix',
     session: causalChainSession,
     targetFilePath: 'src/target.ts',
-    hasReproduction: true,
+    hasReproduction: false,
+    hypothesisTracker: supportedHypo,
     risk: 'R3',
     gateMode: 'enforce',
   });
@@ -213,6 +218,62 @@ test('CriticGate.evaluateExplorationSufficiency enforces Causal Lineage Gate (>=
   assert.equal(approvedDecision.allowed, true);
   assert.equal(approvedDecision.score, 100);
   assert.equal(approvedDecision.reasons.length, 0);
+});
+
+test('CriticGate passes measured single-locus fixes with zero callers', () => {
+  const critic = new CriticGate();
+  const supportedHypo = {
+    getLatestHypothesis: () => ({ id: 'hypo-1', statement: 'Off-by-one', status: 'supported' }),
+  } as any;
+  const measuredSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      { type: 'tool/call', data: { toolName: 'analyze_impact', args: { target: 'src/target.ts' } } },
+      { type: 'tool/result', data: { toolName: 'analyze_impact', result: { callers: 0, risk: 'LOW' } } },
+    ],
+  } as any;
+
+  const decision = critic.evaluateExplorationSufficiency({
+    taskClass: 'bugfix',
+    session: measuredSession,
+    targetFilePath: 'src/target.ts',
+    hasReproduction: false,
+    hypothesisTracker: supportedHypo,
+    risk: 'R3',
+    gateMode: 'enforce',
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.equal(decision.score, 100);
+  assert.ok(decision.reasons.some((r) => r.includes('single-locus')));
+});
+
+test('CriticGate still blocks when measured callers exist but are uninspected', () => {
+  const critic = new CriticGate();
+  const supportedHypo = {
+    getLatestHypothesis: () => ({ id: 'hypo-1', statement: 'Off-by-one', status: 'supported' }),
+  } as any;
+  const gapSession = {
+    getEvents: () => [
+      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      { type: 'tool/call', data: { toolName: 'analyze_impact', args: { target: 'src/target.ts' } } },
+      { type: 'tool/result', data: { toolName: 'analyze_impact', result: { callers: 3, risk: 'MEDIUM' } } },
+    ],
+  } as any;
+
+  const decision = critic.evaluateExplorationSufficiency({
+    taskClass: 'bugfix',
+    session: gapSession,
+    targetFilePath: 'src/target.ts',
+    hasReproduction: false,
+    hypothesisTracker: supportedHypo,
+    risk: 'R3',
+    gateMode: 'enforce',
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.score, 50);
+  assert.ok(decision.reasons.some((r) => r.includes('CAUSAL_TRACE_INSUFFICIENT')));
 });
 test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on architecture/investigation queries', () => {
   const critic = new CriticGate();

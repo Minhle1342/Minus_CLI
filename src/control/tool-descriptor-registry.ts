@@ -85,7 +85,7 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['edit'],
-        phases: ALL_PHASES,
+        phases: ['implement', 'verify'],
         minimumRisk: 'R1',
         mutates: true,
         reversible: true,
@@ -111,7 +111,7 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['execute', 'edit', 'inspect', 'verify'],
-        phases: ['explore', 'plan', 'implement', 'verify'],
+        phases: ['implement', 'verify'],
         minimumRisk: 'R1',
         mutates: true,
         reversible: true,
@@ -135,7 +135,19 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['complete'],
-        phases: ['verify', 'release'],
+        phases: ['implement', 'verify', 'release'],
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'request_phase_transition') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect'],
+        phases: ['explore', 'plan'],
         minimumRisk: 'R0',
         mutates: false,
         reversible: true,
@@ -147,7 +159,7 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['inspect', 'verify', 'complete'],
-        phases: ['explore', 'plan', 'verify', 'release'],
+        phases: ALL_PHASES,
         minimumRisk: 'R0',
         mutates: false,
         reversible: true,

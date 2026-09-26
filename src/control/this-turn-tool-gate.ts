@@ -95,32 +95,22 @@ export class ThisTurnToolGate {
     const denied: string[] = [];
     const riskRank = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 } as const;
 
-    const isExplicitReadOnly = classification.phase === 'explore'
-      && (classification.taskClass === 'exploration' || classification.reversibility === 'read-only');
-
     for (const tool of tools) {
       const descriptor = this.descriptors.describe(tool);
       // Tool đọc an toàn luôn được phép ở mọi phase vì quan sát là quyền năng cốt lõi của Agent
       const isAlwaysAllowedRead = READ_TOOL_NAMES.has(tool.name) && !descriptor.mutates;
-      // Chuẩn Unified Agentic Loop: Các tác vụ coding cho phép toàn bộ bộ công cụ cốt lõi (Đọc, Sửa, Lệnh, Kế hoạch)
-      const isUnifiedCoreTool = !isExplicitReadOnly && (
-        EDIT_TOOL_NAMES.has(tool.name)
-        || READ_TOOL_NAMES.has(tool.name)
-        || tool.name === 'run_command'
-        || tool.name === 'run_node_script'
-        || tool.name === 'run_test_suite'
-        || tool.name === 'create_plan'
-        || tool.name === 'update_plan_task'
-        || tool.name === 'discover_tools'
-      );
+      // The model may ask the Harness to advance phase, but cannot expand its current tool authority.
+      const isPhaseTransitionRequest = tool.name === 'request_phase_transition'
+        && ['explore', 'plan'].includes(classification.phase);
+      const isVerificationRepairTool = classification.phase === 'verify'
+        && EDIT_TOOL_NAMES.has(tool.name);
       const capabilityMatch = descriptor.capabilities.some((capability) => required.has(capability))
         || isAlwaysAllowedRead
-        || isUnifiedCoreTool;
+        || isPhaseTransitionRequest
+        || isVerificationRepairTool;
       const phaseMatch = descriptor.phases.includes(classification.phase)
-        || isAlwaysAllowedRead
-        || isUnifiedCoreTool;
+        || isAlwaysAllowedRead;
       const riskMatch = riskRank[classification.risk] >= riskRank[descriptor.minimumRisk]
-        || isUnifiedCoreTool
         || (classification.risk !== 'R0' || !descriptor.mutates);
 
       if (capabilityMatch && phaseMatch && riskMatch) {

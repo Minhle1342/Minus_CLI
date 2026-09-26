@@ -69,6 +69,16 @@ export class VerificationPolicy {
     return this.repairCycles;
   }
 
+  /**
+   * Signature-novelty repair budget (replaces blind counting): only failures
+   * repeating the SAME error signature consume budget; a novel failure or a
+   * success resets it. Never call this with LLM-declared values — the count
+   * must come from ReflectionEngine.getSameSignatureFailStreak().
+   */
+  recordRepairAttempt(sameSignatureCount: number): void {
+    this.repairCycles = sameSignatureCount >= 2 ? sameSignatureCount : 0;
+  }
+
   private pendingTargetedTests: Set<string> = new Set();
   private hasReproductionProof: boolean = false;
   private reproductionProofCommand?: string;
@@ -100,8 +110,10 @@ export class VerificationPolicy {
       targetFilePath?: string;
       isScratchFile?: boolean;
       criticApproved?: boolean;
+      /** Classification risk (R0..R5 / LOW..CRITICAL). Missing = conservative enforce. */
+      riskLevel?: string;
     },
-  ): { allowed: boolean; reason?: string } {
+  ): { allowed: boolean; reason?: string; advisory?: string } {
     if (gateMode === 'off') return { allowed: true };
 
     // Scratch files and reproduction test scripts are ALWAYS permitted for writing reproduction cases
@@ -112,9 +124,20 @@ export class VerificationPolicy {
     if (gateMode === 'enforce') {
       const isBugfixOrSecurity = taskClass === 'bugfix' || taskClass === 'security';
       if (isBugfixOrSecurity && !this.hasReproductionProof && !options?.criticApproved) {
+        // Risk-tiered reproduction gate: a hand-written repro script is Verifier
+        // Tax for low-risk fixes — downgrade to advisory and rely on the
+        // existing test suite. Keep enforcing for HIGH/CRITICAL (or unknown risk).
+        const risk = (options?.riskLevel || '').trim().toUpperCase();
+        const highOrCritical = ['R3', 'R4', 'R5', 'HIGH', 'CRITICAL'].includes(risk);
+        if (!options?.riskLevel || highOrCritical) {
+          return {
+            allowed: false,
+            reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix/security task requires a failing reproduction test execution (e.g. scratch/reproduce_*.py or failing unit test) or a Dual-Agent Verifier approved exploration analysis before modifying production code.',
+          };
+        }
         return {
-          allowed: false,
-          reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix/security task requires a failing reproduction test execution (e.g. scratch/reproduce_*.py or failing unit test) or a Dual-Agent Verifier approved exploration analysis before modifying production code.',
+          allowed: true,
+          advisory: 'REPRODUCTION_GATE_ADVISORY: No dedicated reproduction script observed; proceeding is allowed at this risk tier, but run the existing test suite after the fix instead of writing a throwaway repro.',
         };
       }
     }

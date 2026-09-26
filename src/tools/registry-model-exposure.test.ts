@@ -33,8 +33,13 @@ test('ToolRetriever keeps a workflow-complete core and prunes unrelated network 
     'search_text',
     'apply_patch',
     'replace_text',
+    'create_file',
+    'write_file',
     'run_command',
+    'run_node_script',
     'submit_solution',
+    'get_symbol_context_360',
+    'get_diagnostics',
   ]);
 
   const codingTools = registry.getRelevantTools('fix the failing parser unit test');
@@ -44,7 +49,7 @@ test('ToolRetriever keeps a workflow-complete core and prunes unrelated network 
   assert.equal(codingNames.has('read_memory'), false);
   assert.equal(codingNames.has('apply_patch'), true);
   assert.equal(codingNames.has('replace_text'), true);
-  assert.ok(codingTools.length <= 14, `expected at most 14 schemas, received ${codingTools.length}`);
+  assert.ok(codingTools.length <= 18, `expected at most 18 schemas, received ${codingTools.length}`);
 
   const webNames = new Set(registry.getRelevantTools('research the latest Node.js documentation online').map((tool) => tool.name));
   assert.equal(webNames.has('web_search'), true);

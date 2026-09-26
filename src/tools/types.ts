@@ -19,6 +19,8 @@ export interface ToolExecutionContext {
   allowedToolNames?: string[];
   allowedToolSetHash?: string;
   classificationPhase?: string;
+  /** Monotonic Harness phase epoch; a new decision is required after it changes. */
+  phaseVersion?: number;
   classificationRisk?: string;
   /** Set only by the orchestrator after checking session-backed evidence. */
   completionEvidenceVerified?: boolean;

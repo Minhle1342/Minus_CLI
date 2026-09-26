@@ -37,9 +37,25 @@ test('VerificationPolicy allows scratch and test reproduction file mutations unc
   const scratchCheck2 = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'temp/repro_test.ts', isScratchFile: true });
   assert.equal(scratchCheck2.allowed, true);
 
-  // Production files remain blocked without reproduction proof
+  // Production files remain blocked without reproduction proof (unknown risk = conservative)
   const prodCheck = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'src/auth/service.ts' });
   assert.equal(prodCheck.allowed, false);
+
+  // Low/medium risk downgrades to advisory: allowed, with guidance attached
+  const lowRiskCheck = policy.canMutate('bugfix', 'enforce', {
+    targetFilePath: 'src/auth/service.ts',
+    riskLevel: 'R2',
+  });
+  assert.equal(lowRiskCheck.allowed, true);
+  assert.ok(lowRiskCheck.advisory?.includes('REPRODUCTION_GATE_ADVISORY'));
+
+  // HIGH/CRITICAL stays enforced
+  const highRiskCheck = policy.canMutate('bugfix', 'enforce', {
+    targetFilePath: 'src/auth/service.ts',
+    riskLevel: 'R4',
+  });
+  assert.equal(highRiskCheck.allowed, false);
+  assert.match(highRiskCheck.reason || '', /REPRODUCTION_GATE_BLOCKED/);
 
   // But allowed if criticApproved is true
   const criticApprovedCheck = policy.canMutate('bugfix', 'enforce', {
@@ -57,4 +73,22 @@ test('VerificationPolicy reset clears reproduction proof', () => {
   policy.reset();
   assert.equal(policy.hasReproduction(), false);
   assert.equal(policy.getReproductionCommand(), undefined);
+});
+
+test('Repair budget counts only same-signature repeats, resets on novelty', () => {
+  const policy = new VerificationPolicy();
+  assert.equal(policy.isRepairExhausted(), false);
+  policy.recordRepairAttempt(1);
+  assert.equal(policy.isRepairExhausted(), false);
+  policy.recordRepairAttempt(2);
+  assert.equal(policy.isRepairExhausted(), false);
+  assert.equal(policy.getRepairCycles(), 2);
+  // Novel failure signature resets the budget instead of consuming it
+  policy.recordRepairAttempt(1);
+  assert.equal(policy.isRepairExhausted(), false);
+  assert.equal(policy.getRepairCycles(), 0);
+  // Third consecutive identical failure exhausts the budget (LATS backtracking)
+  policy.recordRepairAttempt(2);
+  policy.recordRepairAttempt(3);
+  assert.equal(policy.isRepairExhausted(), true);
 });

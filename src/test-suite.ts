@@ -9598,6 +9598,125 @@ Always write tests first!`;
     await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => {});
   }
 
+  // ==============================================================
+  // 58. KIỂM THỬ SỬA FILE SIÊU TỐC & KHẮC PHỤC TRIỆT ĐỂ LỖI MUTATION (apply_patch & replace_text Resiliency)
+  // ==============================================================
+  console.log('\n========================================');
+  console.log('🧪 58. KIỂM THỬ SỬA FILE SIÊU TỐC & KHẮC PHỤC TRIỆT ĐỂ LỖI MUTATION (apply_patch & replace_text Resiliency)');
+  console.log('========================================');
+
+  const mutationTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-mutation-resilience-'));
+  const mutationWs = new Workspace(mutationTempDir);
+
+  try {
+    // 1. Hiệu năng PatchEngine: Xử lý file lớn với Fuzz Level 3 trong < 100ms (loại bỏ đóng băng CPU 42s)
+    const largeLines: string[] = [];
+    for (let i = 1; i <= 300; i++) {
+      largeLines.push(`  const variable_${i} = ${i} * 2 + 10; // comment line ${i}`);
+    }
+    const largeFilePath = path.join(mutationTempDir, 'large-file.ts');
+    await fs.writeFile(largeFilePath, largeLines.join('\n'), 'utf-8');
+
+    const t0 = Date.now();
+    const fuzz3Patch = `--- large-file.ts\n+++ large-file.ts\n@@ -150,3 +150,3 @@\n   const variable_150 = 150 * 2 + 10; // comment line 150\n-  const variable_151 = 151 * 2 + 10; // comment typo 151\n+  const variable_151 = 9999;\n   const variable_152 = 152 * 2 + 10; // comment line 152\n`;
+    const fuzz3Res = await applyPatchTool.execute({ patch: fuzz3Patch, fuzzLevel: 3 }, mutationWs);
+    const durationFuzz3 = Date.now() - t0;
+
+    assert(durationFuzz3 < 500, `PatchEngine: Fuzz Level 3 thực thi siêu tốc (<500ms), thực tế: ${durationFuzz3}ms`);
+    assert(fuzz3Res.success === false && fuzz3Res.errorCode === 'FUZZY_CANDIDATE_FOUND', 'PatchEngine: Fuzz Level 3 trả về advisory candidate mà không làm treo CPU');
+
+    // 2. apply_patch: Tự động khởi tạo file rỗng (0 bytes) khi patch chỉ chứa additions
+    const emptyHtmlPath = path.join(mutationTempDir, 'empty.html');
+    await fs.writeFile(emptyHtmlPath, '', 'utf-8');
+    const initHtmlPatch = `--- empty.html\n+++ empty.html\n@@ -0,0 +1,5 @@\n+<!DOCTYPE html>\n+<html>\n+<head><title>Test</title></head>\n+<body><h1>Hello</h1></body>\n+</html>\n`;
+    const initPatchRes = await applyPatchTool.execute({ patch: initHtmlPatch }, mutationWs);
+    assert(initPatchRes.success === true, 'apply_patch: Tự động ghi nội dung cho file rỗng khi patch là additions');
+    const readInitHtml = await fs.readFile(emptyHtmlPath, 'utf-8');
+    assert(readInitHtml.includes('<!DOCTYPE html>') && readInitHtml.includes('<h1>Hello</h1>'), 'apply_patch: Nội dung file rỗng được ghi đúng');
+
+    // 3. apply_patch: Tự động tạo mới file chưa tồn tại khi patch chỉ chứa additions
+    const autoCreatePatch = `--- non_existent.html\n+++ non_existent.html\n@@ -0,0 +1,3 @@\n+<div class="card">\n+  <p>Auto Created</p>\n+</div>\n`;
+    const autoCreateRes = await applyPatchTool.execute({ patch: autoCreatePatch }, mutationWs);
+    assert(autoCreateRes.success === true, 'apply_patch: Tự động tạo file chưa tồn tại khi patch chỉ chứa additions');
+    const autoCreatedContent = await fs.readFile(path.join(mutationTempDir, 'non_existent.html'), 'utf-8');
+    assert(autoCreatedContent.includes('Auto Created'), 'apply_patch: File tự động tạo có nội dung chính xác');
+
+    // 4. apply_patch: Phát hiện file tương tự trong subdirectories khi ENOENT
+    await fs.mkdir(path.join(mutationTempDir, 'nested'), { recursive: true });
+    await fs.writeFile(path.join(mutationTempDir, 'nested', 'widget.html'), '<html><body>Widget</body></html>', 'utf-8');
+    const wrongPathPatch = `--- widget.html\n+++ widget.html\n@@ -1,1 +1,1 @@\n-<html><body>Widget</body></html>\n+<html><body>Widget Updated</body></html>\n`;
+    const wrongPathRes = await applyPatchTool.execute({ patch: wrongPathPatch }, mutationWs);
+    assert(wrongPathRes.success === false, 'apply_patch: Thất bại khi file ở gốc không tồn tại');
+    assert(Boolean(wrongPathRes.similarFiles && wrongPathRes.similarFiles.includes('nested/widget.html')), 'apply_patch: Tự động tìm thấy file tương tự nested/widget.html khi ENOENT');
+    assert(Boolean(wrongPathRes.suggestion && wrongPathRes.suggestion.includes('nested/widget.html')), 'apply_patch: Cung cấp suggestion đường dẫn đúng');
+
+    // 5. replace_text: Tự động khởi tạo file rỗng (0 bytes)
+    const emptyJsPath = path.join(mutationTempDir, 'empty.js');
+    await fs.writeFile(emptyJsPath, '', 'utf-8');
+    const replaceEmptyRes = await replaceTextTool.execute({
+      path: 'empty.js',
+      oldText: 'placeholder',
+      newText: 'console.log("Initialized");',
+    }, mutationWs);
+    assert(replaceEmptyRes.success === true, 'replace_text: Tự động khởi tạo file rỗng mà không báo lỗi TEXT_NOT_FOUND');
+    assert(replaceEmptyRes.matchStrategy === 'empty_file_initialization', 'replace_text: Chiến lược là empty_file_initialization');
+    const readEmptyJs = await fs.readFile(emptyJsPath, 'utf-8');
+    assert(readEmptyJs === 'console.log("Initialized");', 'replace_text: Nội dung file rỗng được ghi đúng newText');
+
+    // 6. replace_text: Khớp HTML markup với sai khác dấu nháy và self-closing tags (normalized_whitespace)
+    const markupPath = path.join(mutationTempDir, 'index.html');
+    await fs.writeFile(markupPath, '<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8" />\n  <link rel="stylesheet" href="./style.css" />\n</head>\n<body>\n  <div class="container">\n    <h1>Title</h1>\n  </div>\n</body>\n</html>\n', 'utf-8');
+
+    // Thử thay thế thẻ meta với dấu nháy đơn và không có self-closing slash
+    const replaceMetaRes = await replaceTextTool.execute({
+      path: 'index.html',
+      oldText: "<meta charset='utf-8'>",
+      newText: '<meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+    }, mutationWs);
+    assert(replaceMetaRes.success === true, 'replace_text: Khớp thành công HTML tag với sai khác quotes và self-closing slash (normalized_whitespace)');
+    assert(replaceMetaRes.matchStrategy === 'normalized_whitespace', 'replace_text: Chiến lược là normalized_whitespace');
+
+    // 7. replace_text: Khớp block HTML nhiều dòng có khoảng trắng dư thừa
+    const replaceBlockRes = await replaceTextTool.execute({
+      path: 'index.html',
+      oldText: '<div  class="container" >\n    <h1>Title</h1>\n  </div>',
+      newText: '<div class="container">\n    <h1>Updated Title</h1>\n    <p>Subtitle</p>\n  </div>',
+    }, mutationWs);
+    assert(replaceBlockRes.success === true, 'replace_text: Khớp block HTML nhiều dòng có khoảng trắng dư thừa');
+
+    // 8. replace_text: Báo lỗi ENOENT kèm danh sách similarFiles
+    const replaceWrongPathRes = await replaceTextTool.execute({
+      path: 'widget.html',
+      oldText: '<h1>Title</h1>',
+      newText: '<h1>New</h1>',
+    }, mutationWs);
+    assert(replaceWrongPathRes.success === false && replaceWrongPathRes.errorCode === 'FILE_NOT_FOUND', 'replace_text: Trả về FILE_NOT_FOUND khi file không tồn tại');
+    assert(Boolean(replaceWrongPathRes.similarFiles && replaceWrongPathRes.similarFiles.includes('nested/widget.html')), 'replace_text: Gợi ý đúng file tương tự trong subfolder');
+
+    // 9. ReflectionEngine: Đính kèm discovered similar files vào reflection prompt
+    const reflEngine = new ReflectionEngine();
+    const reflPatch = reflEngine.analyze({
+      toolName: 'apply_patch',
+      args: { patch: wrongPathPatch },
+      result: wrongPathRes,
+      durationMs: 10,
+    }, mutationWs);
+    assert(reflPatch.isFailure === true, 'ReflectionEngine: Ghi nhận failure cho apply_patch thất bại');
+    assert(Boolean(reflPatch.reflectionPrompt && reflPatch.reflectionPrompt.includes('nested/widget.html')), 'ReflectionEngine: Prompt tự vấn chứa đường dẫn file tương tự gợi ý');
+
+    const reflReplace = reflEngine.analyze({
+      toolName: 'replace_text',
+      args: { path: 'widget.html' },
+      result: replaceWrongPathRes,
+      durationMs: 5,
+    }, mutationWs);
+    assert(reflReplace.isFailure === true, 'ReflectionEngine: Ghi nhận failure cho replace_text thất bại');
+    assert(Boolean(reflReplace.reflectionPrompt && reflReplace.reflectionPrompt.includes('nested/widget.html')), 'ReflectionEngine: Prompt tự vấn chứa đường dẫn file tương tự gợi ý cho replace_text');
+
+  } finally {
+    await fs.rm(mutationTempDir, { recursive: true, force: true }).catch(() => {});
+  }
+
   console.log(`\n========================================`);
   console.log(`KẾT QUẢ: ${passed} Passed, ${failed} Failed`);
   console.log('========================================\n');

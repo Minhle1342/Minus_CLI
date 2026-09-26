@@ -74,6 +74,61 @@ function extractModifiedFiles(session: Session, filesModified?: string[], turn?:
   return new Set([...getTurnCompletionState(session, turn).filesModified, ...(filesModified || [])]);
 }
 
+export interface CallerEvidence {
+  /** True when session holds at least one successful call-graph observation. */
+  checked: boolean;
+  hasCallers: boolean;
+  callerCount: number;
+  sources: string[];
+}
+
+/**
+ * Measured upstream-caller evidence from session tool results (single source
+ * for the Causal Lineage check). Defensive about result shapes: counts the
+ * best available caller signal per tool, skipping failed calls.
+ */
+export function extractCallerEvidenceFromSession(session: Session): CallerEvidence {
+  let count = 0;
+  const sources = new Set<string>();
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : -1);
+  try {
+    const events = (session as any).getEvents ? (session as any).getEvents() : [];
+    for (const event of events) {
+      if (event.type !== 'tool/result') continue;
+      const toolName = event.data?.toolName;
+      const r = event.data?.result;
+      if (!r || r.error || r.errorCode) continue;
+      if (toolName === 'analyze_impact' && num(r.callers) >= 0) {
+        sources.add('analyze_impact');
+        count = Math.max(count, r.callers);
+      } else if (toolName === 'find_references') {
+        // references[] includes the definition itself — exclude it like the
+        // blast-radius engine does; fall back to totalReferences minus one.
+        const refs = Array.isArray(r.references)
+          ? r.references.filter((x: any) => !x?.isDefinition).length
+          : (num(r.totalReferences) > 0 ? num(r.totalReferences) - 1 : 0);
+        sources.add('find_references');
+        count = Math.max(count, Math.max(0, refs));
+      } else if (toolName === 'query_call_graph') {
+        const cg = r.callGraph ?? r;
+        const arr = Array.isArray(cg?.callers) ? cg.callers : (Array.isArray(cg?.nodes) ? cg.nodes : undefined);
+        if (arr) {
+          sources.add('query_call_graph');
+          count = Math.max(count, arr.length);
+        }
+      } else if (toolName === 'get_symbol_context_360') {
+        const arr = Array.isArray(r.callers) ? r.callers : undefined;
+        const n = arr ? arr.length : num(r.callerCount ?? r.totalCallers);
+        if (arr || n >= 0) {
+          sources.add('get_symbol_context_360');
+          count = Math.max(count, arr ? arr.length : n);
+        }
+      }
+    }
+  } catch {}
+  return { checked: sources.size > 0, hasCallers: count > 0, callerCount: count, sources: [...sources] };
+}
+
 export type CriticRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 /** Ngưỡng score theo risk thay vì cứng 80: task ít rủi ro không cần điểm cao. */
@@ -256,17 +311,34 @@ export class CriticGate {
       }
     }
 
-    // 2b. Causal Lineage Invariant (Bugfix / Security at R2+ Risk)
-    // Anti-Confirmation Bias: Prevent mutating based on local symptom alone without tracing upstream caller or related test/config
+    // 2b. Causal Lineage Check (Bugfix / Security at R2+ Risk), measured instead
+    // of a blind file count: Anti-Confirmation Bias needs upstream caller
+    // context — but a measured single-locus fix (call-graph evidence showing
+    // zero callers) passes without a forced second file read.
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
     const isHighOrMediumRisk = ['R2', 'R3', 'R4', 'R5', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(
       (params.risk || '').trim().toUpperCase(),
     );
-    if (isBugfixOrSecurity && isHighOrMediumRisk && nonScratchInspected.length < 2) {
-      score -= 50;
-      reasons.push(
-        `CAUSAL_TRACE_INSUFFICIENT: Bugfix/security task at risk level '${params.risk || 'R2+'}' requires inspecting at least 2 causal chain files (root cause locus + caller/call-site/test). Found ${nonScratchInspected.length} inspected production file(s).`,
-      );
+    const callerEvidence = extractCallerEvidenceFromSession(session);
+    if (isBugfixOrSecurity && isHighOrMediumRisk && !hasReproduction) {
+      if (nonScratchInspected.length >= 2) {
+        // Inspected chain preserved — no penalty (unchanged behavior).
+      } else if (callerEvidence.checked && !callerEvidence.hasCallers) {
+        reasons.push(
+          `Measured single-locus fix: call-graph evidence (${callerEvidence.sources.join(', ')}) shows no upstream callers; single-file inspection accepted without a forced second read.`,
+        );
+      } else if (callerEvidence.checked && callerEvidence.hasCallers) {
+        score -= 50;
+        reasons.push(
+          `CAUSAL_TRACE_INSUFFICIENT: call-graph evidence shows ${callerEvidence.callerCount} upstream caller(s) (${callerEvidence.sources.join(', ')}) that were not inspected. Inspect the caller/test side before mutating.`,
+        );
+      } else {
+        // Advisory only — no score deduction: the model is told to run one
+        // cheap call-graph check instead of being forced into a second read.
+        reasons.push(
+          `CAUSAL_TRACE_UNVERIFIED: no call-graph evidence in session — run analyze_impact, find_references, or query_call_graph (one cheap call) instead of a forced second file read. Single-file inspection accepted for now; confirm upstream impact before mutating high-risk code.`,
+        );
+      }
     }
 
     // 3. Hypothesis Falsification Invariant: Cannot mutate based on a falsified hypothesis
@@ -311,7 +383,7 @@ export class CriticGate {
         `1. Inspect the target file (${targetFilePath}) with read_file/view_file to understand existing logic and exact line numbers.`,
         `2. For bugfixes, write a reproduction script (e.g. scratch/reproduce_issue.py) or execute a test command to establish reproduction proof.`,
         `3. Formulate and verify the causal hypothesis before applying mutations.`,
-        `4. Trace the causal lineage: inspect upstream callers, related tests, or config files with read_file/inspect_symbol to avoid tunnel vision.`,
+        `4. Trace the causal lineage: run analyze_impact (one cheap call) or inspect upstream callers, related tests, or config files with read_file/inspect_symbol to avoid tunnel vision.`,
       ].join('\n');
 
       remediationHint = reasons.join('; ');
@@ -415,18 +487,19 @@ export class CriticGate {
         });
 
     // 2b. Đồng bộ với verify-tier-resolver (single source of truth): thay đổi
-    // mức HIGH/CRITICAL cần test pass thật trong session sau mutation cuối,
-    // không chỉ evidence allow.
+    // mức HIGH/CRITICAL cần test pass thật trong session sau mutation cuối.
+    // Đây là binary invariant (không phải trừ điểm): thiếu test là reject cứng.
     const measuredTier = resolveVerifyTier({
       changedFileCount: targetFiles.size,
       hasCallers: false,
       classificationRisk: params.risk,
       sensitivePathTouched: Array.from(targetFiles).some((file) => isSensitivePath(file)),
     });
+    let highImpactUnverified = false;
     if (measuredTier.level !== 'LOW' && targetFiles.size > 0
       && !hasSubmittedSolution
       && !this.evidenceGate.hasVerifiedPassingTest(session, turn)) {
-      score -= 40;
+      highImpactUnverified = true;
       reasons.push(`[MEASURED HIGH-IMPACT VERIFICATION REQUIRED]: ${measuredTier.reasons.join('; ')}. No passing automated test observed in-session after the last mutation — run the test suite before completing.`);
     }
 
@@ -470,9 +543,11 @@ export class CriticGate {
       }
     }
 
-    // Ngưỡng score theo risk (LOW 60 / MEDIUM 70 / HIGH-CRITICAL 80), thiếu risk giữ ngưỡng cũ 80.
-    const { level: riskLevel, threshold: scoreThreshold } = resolveCriticScoreThreshold(params.risk);
-    const approved = lspErrors.length === 0 && score >= scoreThreshold && evidenceDecision.allow;
+    // Ngưỡng phẳng duy nhất 60 cho mọi risk: thang 60/70/80 theo risk đã nghỉ
+    // hưu — risk HIGH/CRITICAL được thực thi bằng binary invariants
+    // (LSP hard-zero, measured-tier hard reject) thay vì cộng trừ điểm.
+    const scoreThreshold = 60;
+    const approved = lspErrors.length === 0 && !highImpactUnverified && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,
@@ -489,7 +564,7 @@ export class CriticGate {
     let critiquePrompt: string | undefined;
     if (!approved) {
       const promptParts: string[] = [
-        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100 (threshold ${scoreThreshold} for ${riskLevel} risk)]:`,
+        `\n🛑 [CRITIC GATE REJECTION - CRITIQUE SCORE: ${score}/100 (flat bar ${scoreThreshold}; HIGH/CRITICAL enforced by hard invariants)]:`,
         `Task completion rejected by independent Verifier due to unsatisfied invariants:`,
       ];
 
@@ -586,7 +661,7 @@ export class CriticGate {
     lspErrors = filterErrorsToModifiedFiles(lspErrors, targetFiles);
 
     if (lspErrors.length > 0) {
-      score = 0; // HARD ZERO SCORE
+      score = 0; // HARD ZERO SCORE: Lỗi cú pháp hoặc NameError là vi phạm bất biến nghiêm trọng
       invariantViolations.push(`Detected ${lspErrors.length} unresolved syntax / compiler / missing import error(s).`);
       reasons.push(
         `[HARD CRITIC INVARIANT VIOLATION]: Detected ${lspErrors.length} unresolved syntax / compiler / missing import error(s) (e.g. NameError, undefined symbol) in the workspace.`,
@@ -624,6 +699,19 @@ export class CriticGate {
       if (audit.consecutiveDriftWarnings > 1) {
         score -= 20;
         reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
+      }
+    }
+
+    // 5. Pillar E2: Exploration Exhaustion Gate for Read-Only / Architecture / Investigation queries
+    if (targetFiles.size === 0) {
+      const exhaustion = this.evaluateExplorationExhaustion({
+        userRequest,
+        session,
+        finalAnswer,
+      });
+      if (exhaustion.scorePenalty > 0) {
+        score -= exhaustion.scorePenalty;
+        reasons.push(...exhaustion.reasons);
       }
     }
 

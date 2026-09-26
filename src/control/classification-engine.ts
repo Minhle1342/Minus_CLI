@@ -20,7 +20,7 @@ export interface ClassificationInput {
   minimumRisk?: ControlRisk;
 }
 
-const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung)\b/i;
+const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
 const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
 const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
 const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
@@ -100,7 +100,11 @@ export class ClassificationEngine {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLORATION');
     } else {
-      reasons.push('CONSERVATIVE_READ_ONLY_DEFAULT');
+      taskClass = 'feature';
+      phase = 'explore';
+      risk = 'R1';
+      capabilities = ['inspect', 'search', 'plan', 'memory'];
+      reasons.push('LANGUAGE_AGNOSTIC_ACTION_DEFAULT');
     }
 
     const needsNetwork = /\b(?:web|internet|online|latest|documentation|docs|website|truc tuyen|moi nhat)\b/i.test(normalizedText);

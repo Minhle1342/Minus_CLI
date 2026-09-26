@@ -43,6 +43,9 @@ export type SessionEventType =
   | 'request/header'
   | 'control/decision'
   | 'phase/exploreCompleted'
+  | 'phase/transitionRequested'
+  | 'phase/transitionAccepted'
+  | 'phase/transitionRejected'
   | 'phase/implementationCompleted'
   | 'phase/verificationCompleted'
   | 'phase/verificationFailed'
@@ -153,6 +156,10 @@ export interface SessionEventData {
   controlDecision?: Record<string, any>;
   phaseTransition?: {
     classificationId?: string;
+    fromPhase?: string;
+    targetPhase?: string;
+    phaseVersion?: number;
+    evidenceRefs?: string[];
     hypothesisId?: string;
     mutationSeq?: number;
     evidenceScore?: number;
@@ -229,6 +236,9 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'request/header',
     'control/decision',
     'phase/exploreCompleted',
+    'phase/transitionRequested',
+    'phase/transitionAccepted',
+    'phase/transitionRejected',
     'phase/implementationCompleted',
     'phase/verificationCompleted',
     'phase/verificationFailed',

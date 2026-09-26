@@ -282,4 +282,53 @@ export class Workspace {
   removeProtectedFile(fileName: string): void {
     this.protectedFiles = this.protectedFiles.filter((f) => f !== fileName);
   }
+
+  /**
+   * Tìm kiếm các file tương đồng trong workspace khi xảy ra lỗi ENOENT / FILE_NOT_FOUND.
+   * Quét đệ quy (độ sâu tối đa 3, bỏ qua ignoredDirectories) để tìm kiếm các tệp có tên tương tự hoặc cùng basename.
+   */
+  async findSimilarWorkspaceFiles(targetPath: string, maxResults = 5): Promise<string[]> {
+    const rawTarget = targetPath.replace(/\\/g, '/').replace(/^\/+/, '');
+    const baseName = path.basename(rawTarget).toLowerCase();
+    const cleanBaseName = baseName.replace(/\.[^.]+$/, '');
+    const ext = path.extname(rawTarget).toLowerCase();
+    const candidates: Array<{ relPath: string; score: number }> = [];
+
+    const scanDir = async (dir: string, depth = 0) => {
+      if (depth > 3) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (!this.isIgnoredDirectory(entry.name) && !entry.name.startsWith('.')) {
+            await scanDir(path.join(dir, entry.name), depth + 1);
+          }
+        } else if (entry.isFile()) {
+          const entryRel = this.toRelativePath(path.join(dir, entry.name));
+          const entryBase = entry.name.toLowerCase();
+          const entryClean = entryBase.replace(/\.[^.]+$/, '');
+          const entryExt = path.extname(entry.name).toLowerCase();
+
+          // Khớp chính xác tên file (ví dụ: "index.html" -> "src/index.html")
+          if (entryBase === baseName) {
+            candidates.push({ relPath: entryRel, score: 100 });
+          } else if (cleanBaseName && entryClean === cleanBaseName) {
+            candidates.push({ relPath: entryRel, score: 80 });
+          } else if (cleanBaseName && (entryClean.includes(cleanBaseName) || cleanBaseName.includes(entryClean))) {
+            candidates.push({ relPath: entryRel, score: 50 });
+          } else if (ext && entryExt === ext && depth <= 1) {
+            candidates.push({ relPath: entryRel, score: 20 });
+          }
+        }
+      }
+    };
+
+    await scanDir(this.rootDir);
+    candidates.sort((a, b) => b.score - a.score || a.relPath.localeCompare(b.relPath));
+    return candidates.slice(0, maxResults).map((c) => c.relPath);
+  }
 }

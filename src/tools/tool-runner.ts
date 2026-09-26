@@ -6,7 +6,7 @@ import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
-import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
+import { READ_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
 
 /**
@@ -315,22 +315,7 @@ export class ToolRunner {
         };
       }
       const targetTool = this.getTool(toolName);
-      const isCoreUnifiedTool = Boolean(targetTool) && (
-        EDIT_TOOL_NAMES.has(toolName)
-        || READ_TOOL_NAMES.has(toolName)
-        || toolName === 'run_command'
-        || toolName === 'run_node_script'
-        || toolName === 'run_test_suite'
-        || toolName === 'create_plan'
-        || toolName === 'update_plan_task'
-        || toolName === 'discover_tools'
-        || toolName === 'submit_solution'
-      );
-      const isOperationalPhase = context.classificationPhase === 'implement'
-        || context.classificationPhase === 'verify'
-        || context.classificationPhase === 'plan';
-      const canGracefullyBypass = (toolName === 'update_plan_task' && Boolean(targetTool))
-        || (isCoreUnifiedTool && isOperationalPhase);
+      const canGracefullyBypass = toolName === 'update_plan_task' && Boolean(targetTool);
       if (!isToolAuthorized(toolName, names) && !canGracefullyBypass) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';

@@ -9,6 +9,8 @@ import { ToolRunner } from '../tools/tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { PermissionManager } from '../security/permission-manager.js';
 import { CognitiveHarness } from '../agent/cognitive-harness.js';
+import { Session } from '../session/session.js';
+import { applyPhaseAuthority, requestPhaseTransition } from '../agent/phase-lifecycle.js';
 
 test('read-only exploration can inspect Git history through guarded run_command', async () => {
   const workspace = new Workspace(process.cwd());
@@ -77,7 +79,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   registerSubmitSolutionTool(registry, new Workspace(process.cwd()));
   const gate = new ThisTurnToolGate();
 
-  // 1. Explore phase on bugfix (Unified Agentic Loop: core tools available for coding tasks)
+  // 1. Explore phase on a coding task is read-only; the model must request implementation.
   const exploreClassification: any = {
     id: 'class-test-explore',
     taskClass: 'bugfix',
@@ -89,10 +91,11 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   };
   const exploreDecision = gate.decide(exploreClassification, registry.getAll());
   assert.ok(exploreDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed');
-  assert.ok(exploreDecision.allowedToolNames.includes('run_node_script'), 'run_node_script must be allowed in explore');
   assert.ok(exploreDecision.allowedToolNames.includes('formulate_and_verify_hypothesis'), 'formulate_and_verify_hypothesis must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in explore');
-  assert.ok(exploreDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore under Unified Agentic Loop for coding tasks');
+  assert.equal(exploreDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must not be exposed in explore');
+  assert.equal(exploreDecision.allowedToolNames.includes('submit_solution'), false, 'submit_solution must not be exposed in explore');
+  assert.ok(exploreDecision.allowedToolNames.includes('request_phase_transition'), 'coding exploration can request a Harness-owned transition');
 
   // 2. Pure read-only exploration (must NOT include editing mutations)
   const readOnlyClassification: any = {
@@ -107,6 +110,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   const readOnlyDecision = gate.decide(readOnlyClassification, registry.getAll());
   assert.ok(readOnlyDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed in read-only');
   assert.equal(readOnlyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in pure read-only exploration');
+  assert.equal(readOnlyDecision.allowedToolNames.includes('submit_solution'), false, 'submit_solution must NOT be allowed in pure read-only exploration');
 
   // 3. Implement phase on feature
   const implementClassification: any = {
@@ -115,7 +119,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
     phase: 'implement',
     complexity: 'medium',
     risk: 'R2',
-    requiredCapabilities: ['edit', 'inspect', 'execute', 'plan'],
+    requiredCapabilities: ['edit', 'inspect', 'execute', 'plan', 'complete'],
     reversibility: 'reversible',
   };
   const implementDecision = gate.decide(implementClassification, registry.getAll());
@@ -123,6 +127,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(implementDecision.allowedToolNames.includes('apply_patch'), 'apply_patch must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('run_node_script'), 'run_node_script must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in implement');
+  assert.ok(implementDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in implement');
 
   // 4. Verify phase
@@ -307,5 +312,151 @@ test('Phase governance banners are advisory: no lock/disable/forbid claims', () 
     }
   }
 });
+
+test('create_file and edit tools are blocked in plan/explore but fully authorized in implement after phase authority elevation', () => {
+  const registry = new ToolRegistry(new PlanManager());
+  const gate = new ThisTurnToolGate();
+  const engine = new ClassificationEngine();
+
+  // 1. Task classified with R0 in plan phase
+  const planClassification: any = {
+    id: 'class-test-plan-r0',
+    taskClass: 'feature',
+    phase: 'plan',
+    complexity: 'large',
+    risk: 'R0',
+    requiredCapabilities: ['inspect', 'search', 'plan', 'memory'],
+    reversibility: 'read-only',
+  };
+
+  const planDecision = gate.decide(planClassification, registry.getAll());
+  assert.equal(planDecision.allowedToolNames.includes('create_file'), false, 'create_file must NOT be allowed in plan phase');
+  assert.equal(planDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in plan phase');
+  assert.equal(planDecision.allowedToolNames.includes('write_file'), false, 'write_file must NOT be allowed in plan phase');
+  assert.ok(planDecision.allowedToolNames.includes('request_phase_transition'), 'request_phase_transition must be allowed in plan phase');
+
+  // 2. Transition accepted to implement
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+  session.append('control/decision', { turn: 1, controlDecision: { classification: planClassification } });
+
+  const transition = requestPhaseTransition(session, 1, planClassification, {
+    targetPhase: 'implement',
+    rationale: 'planning complete, ready to scaffold files',
+    evidenceRefs: ['index.html'],
+  }, { hasPlan: true, evidenceSufficient: true });
+  assert.equal(transition.accepted, true);
+
+  const implementClassification = applyPhaseAuthority(planClassification, session, 1);
+  assert.equal(implementClassification.phase, 'implement');
+  assert.equal(implementClassification.risk, 'R1');
+  assert.equal(implementClassification.reversibility, 'reversible');
+
+  const implementDecision = gate.decide(implementClassification, registry.getAll());
+  assert.ok(implementDecision.allowedToolNames.includes('create_file'), 'create_file MUST be authorized in implement phase');
+  assert.ok(implementDecision.allowedToolNames.includes('write_file'), 'write_file MUST be authorized in implement phase');
+  assert.ok(implementDecision.allowedToolNames.includes('replace_text'), 'replace_text MUST be authorized in implement phase');
+  assert.ok(implementDecision.allowedToolNames.includes('apply_patch'), 'apply_patch MUST be authorized in implement phase');
+
+  // 3. Vietnamese coding prompts classified into feature/implement
+  const vietPrompt1 = engine.classify({ request: 'Viết code cho index.html' });
+  assert.equal(vietPrompt1.taskClass, 'feature');
+  assert.ok(vietPrompt1.requiredCapabilities.includes('edit'));
+
+  const vietPrompt2 = engine.classify({ request: 'Hãy lập trình ứng dụng calculator' });
+  assert.equal(vietPrompt2.taskClass, 'feature');
+  assert.ok(vietPrompt2.requiredCapabilities.includes('edit'));
+});
+
+test('Hybrid Multilingual Architecture: Supports English, Vietnamese, French, Japanese, Spanish across the complete transition lifecycle', () => {
+  const registry = new ToolRegistry(new PlanManager());
+  const gate = new ThisTurnToolGate();
+  const engine = new ClassificationEngine();
+
+  const multilingualPrompts = [
+    { lang: 'English', prompt: 'Create a new database connector in src/db.ts' },
+    { lang: 'Vietnamese', prompt: 'Tạo tệp cấu hình server trong config/app.json' },
+    { lang: 'French', prompt: 'Créer un fichier de routage pour les utilisateurs' },
+    { lang: 'Japanese', prompt: 'src/index.htmlを作成して初期コードを記述してください' },
+    { lang: 'Spanish', prompt: 'Crear una función para procesar pagos en checkout.ts' },
+    { lang: 'German', prompt: 'Erstelle eine neue Komponente für das Benutzerprofil' },
+  ];
+
+  for (const { lang, prompt } of multilingualPrompts) {
+    // 1. Initial classification is a valid coding task
+    const classification = engine.classify({ request: prompt });
+    assert.ok(
+      classification.taskClass === 'feature' || classification.taskClass === 'bugfix',
+      `[${lang}] must be recognized as coding taskClass, got: ${classification.taskClass}`
+    );
+
+    const initialDecision = gate.decide(classification, registry.getAll());
+    assert.ok(initialDecision.allowedToolNames.includes('read_file'), `[${lang}] must allow read_file`);
+    assert.ok(initialDecision.allowedToolNames.includes('search_text'), `[${lang}] must allow search_text`);
+    
+    // If in explore/plan, edit tools are guarded and transition is available
+    if (classification.phase === 'explore' || classification.phase === 'plan') {
+      assert.ok(initialDecision.allowedToolNames.includes('request_phase_transition'), `[${lang}] must expose request_phase_transition`);
+      assert.equal(initialDecision.allowedToolNames.includes('create_file'), false, `[${lang}] must not expose create_file in ${classification.phase}`);
+      assert.equal(initialDecision.allowedToolNames.includes('replace_text'), false, `[${lang}] must not expose replace_text in ${classification.phase}`);
+
+      // 2. Perform phase transition to implement with evidence
+      const session = new Session();
+      session.append('turn/start', { turn: 1 });
+      session.append('control/decision', { turn: 1, controlDecision: { classification } });
+
+      const transition = requestPhaseTransition(session, 1, classification, {
+        targetPhase: 'implement',
+        rationale: `Gathered workspace context for ${lang} prompt, ready to scaffold`,
+        evidenceRefs: ['workspace-root', 'tool-result:read-1'],
+      }, { hasPlan: true, evidenceSufficient: true });
+
+      assert.equal(transition.accepted, true, `[${lang}] phase transition to implement must be accepted`);
+
+      // 3. Authority is elevated to implement
+      const implementClassification = applyPhaseAuthority(classification, session, 1);
+      assert.equal(implementClassification.phase, 'implement');
+      assert.ok(implementClassification.risk !== 'R0', `[${lang}] risk floor must be elevated to R1+`);
+
+      const implementDecision = gate.decide(implementClassification, registry.getAll());
+      assert.ok(implementDecision.allowedToolNames.includes('create_file'), `[${lang}] MUST authorize create_file in implement`);
+      assert.ok(implementDecision.allowedToolNames.includes('write_file'), `[${lang}] MUST authorize write_file in implement`);
+      assert.ok(implementDecision.allowedToolNames.includes('replace_text'), `[${lang}] MUST authorize replace_text in implement`);
+    } else {
+      // Direct fastPath implement
+      assert.ok(initialDecision.allowedToolNames.includes('create_file'), `[${lang}] fast-path MUST authorize create_file`);
+    }
+  }
+});
+
+test('replace_text and edit tools remain authorized in implement phase across multi-step mutations', () => {
+  const gate = new ThisTurnToolGate();
+  const registry = new ToolRegistry();
+  registerSubmitSolutionTool(registry, new Workspace());
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+
+  const initialClassification: any = {
+    id: 'class-test-multi-edit',
+    taskClass: 'feature',
+    phase: 'implement',
+    complexity: 'medium',
+    risk: 'R2',
+    requiredCapabilities: ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'],
+    reversibility: 'reversible',
+  };
+  session.append('control/decision', { turn: 1, controlDecision: { classification: initialClassification } });
+
+  const authority = applyPhaseAuthority(initialClassification, session, 1);
+  const decision = gate.decide(authority, registry.getAll());
+
+  assert.equal(authority.phase, 'implement');
+  assert.ok(decision.allowedToolNames.includes('replace_text'), 'replace_text must be authorized in implement');
+  assert.ok(decision.allowedToolNames.includes('create_file'), 'create_file must be authorized in implement');
+  assert.ok(decision.allowedToolNames.includes('write_file'), 'write_file must be authorized in implement');
+  assert.ok(decision.allowedToolNames.includes('submit_solution'), 'submit_solution must be authorized in implement');
+});
+
+
 
 

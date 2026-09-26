@@ -535,9 +535,9 @@ export class CognitiveHarness {
     ];
 
     if (scaffold.phase === 'plan') {
-      lines.push(`⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) — prefer outlining via create_plan / update_plan_task before mutating; small obvious fixes may proceed directly.`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) — Outline execution via create_plan / update_plan_task. When ready to implement, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'explore') {
-      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) — inspect and gather evidence first; low-risk edits may proceed, high-risk edits still require evidence via the mutation gate.`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) — Inspect files and gather evidence first. When ready to create or edit files, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'verify') {
       lines.push(`⚠️ [PHASE GOVERNANCE]: VERIFY MODE — run tests and verify diagnostics; avoid new features or unrelated changes.`);
     }
@@ -575,9 +575,9 @@ export class CognitiveHarness {
    */
   formatScaffoldForCompactPrompt(scaffold: CognitiveScaffold): string {
     const phaseBanner = scaffold.phase === 'plan'
-      ? `   - ⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) - Prefer outlining via create_plan; small direct fixes allowed.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) - Outline via create_plan; call request_phase_transition('implement') to begin coding.`
       : scaffold.phase === 'explore'
-      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) - Inspect first; low-risk edits allowed, high-risk edits need evidence.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) - Inspect first; call request_phase_transition('implement') to unlock editing.`
       : scaffold.phase === 'verify'
       ? `   - ⚠️ [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
       : '';

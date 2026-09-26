@@ -358,6 +358,9 @@ export class ReflectionEngine {
       const details = result.diagnostic || result.error || result.errorCode;
       const failedHunkMsg = result.failedHunkNumber ? ` (Hunk #${result.failedHunkNumber})` : '';
       const targetFileMsg = result.failedFile ? ` for file "${result.failedFile}"` : '';
+      const similarFilesMsg = result.similarFiles?.length
+        ? `📍 DISCOVERED SIMILAR FILES IN WORKSPACE: ${JSON.stringify(result.similarFiles)}. Retrying with "${result.similarFiles[0]}" may fix path mismatches.`
+        : '';
       const suggestedReadMsg = result.suggestedRead
         ? `Call read_file with parameters: ${JSON.stringify(result.suggestedRead)}.`
         : 'Use read_file to inspect the exact current lines and context in the target file.';
@@ -366,11 +369,12 @@ export class ReflectionEngine {
         `\n⚠️ [SELF-REFLECTION - PATCH APPLICATION FAILED${failedHunkMsg}${targetFileMsg}]`,
         `Error code: ${result.errorCode || 'PATCH_APPLY_FAILED'}`,
         `Details: ${details}`,
+        similarFilesMsg,
         `💡 CODEX CLI HUNK RECOVERY PROTOCOL:`,
         `1. ${suggestedReadMsg}`,
         `2. Recommended Fallback: Use "replace_text" with exact oldText from read_file for 100% deterministic mutation.`,
         `3. If creating a new patch: Narrow context lines in @@ hunks to 1 unique line to eliminate drift.`,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
       advice = `apply_patch failed${failedHunkMsg} (${result.errorCode || 'unknown'}). Read exact file region before retrying.`;
     }
@@ -380,6 +384,9 @@ export class ReflectionEngine {
       this.consecutiveFailures++;
       this.trackFailureSignature(toolName, result);
 
+      const similarFilesMsg = result.similarFiles?.length
+        ? `📍 DISCOVERED SIMILAR FILES IN WORKSPACE: ${JSON.stringify(result.similarFiles)}. Retrying with "${result.similarFiles[0]}" may fix path mismatches.`
+        : '';
       const suggestedRead = result.suggestedRead
         ? `Call read_file with parameters: ${JSON.stringify(result.suggestedRead)}.`
         : 'Call read_file over a narrow line range with includeLineNumbers=false.';
@@ -388,6 +395,7 @@ export class ReflectionEngine {
         `\n⚠️ [SELF-REFLECTION - TEXT REPLACEMENT FAILED]`,
         `Error code: ${result.errorCode || 'REPLACE_TEXT_FAILED'}`,
         `Reason: ${result.error}`,
+        similarFilesMsg,
         result.candidateDiffHint ? `💡 Candidate Diff Hint: ${result.candidateDiffHint}` : '',
         `💡 ${suggestedRead}`,
         `Use raw content without line numbers as oldText, pass contentHash as expectedFileHash, and do not repeat identical failing parameters.`,
