@@ -32,7 +32,7 @@ export const applyPatchTool: ToolDefinition = {
       },
       expectedFileHashes: {
         type: Type.OBJECT,
-        description: 'Bản đồ đường dẫn file -> contentHash (lấy từ read_file) để ngăn ngừa ghi đè nội dung cũ (optimistic locking).',
+        description: 'Bản đồ đường dẫn file -> contentHash MỚI NHẤT từ lần read_file gần nhất để ngăn ngừa ghi đè nội dung cũ (optimistic locking). Mỗi lần sửa file xong, hash cũ hết hiệu lực: lần patch kế tiếp phải read_file lại lấy hash mới. Không bao giờ tái dùng hash qua 2 lần sửa, không bỏ trường này để lách conflict.',
         additionalProperties: {
           type: Type.STRING,
         },
@@ -83,7 +83,7 @@ export const applyPatchTool: ToolDefinition = {
                 `Content conflict (Stale File Hash) for "${targetPath}". On-disk hash (${currentHash}) does not match expected hash (${expectedHash}).`,
                 'STALE_FILE_HASH',
                 { path: targetPath, expectedHash, currentHash },
-                'Use read_file to inspect latest content and recreate the patch.',
+                'Do NOT retry with the same patch or merely swap in the returned hash: the file changed since your last read (possibly by your own earlier edit). Re-read the current content with read_file, rebuild the patch against that version, and retry with its new contentHash. Never omit expectedFileHashes to bypass a conflict.',
               );
             }
           }
