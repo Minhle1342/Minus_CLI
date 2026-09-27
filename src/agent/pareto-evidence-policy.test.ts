@@ -48,10 +48,9 @@ test('Pareto evidence thresholds scale with risk and observed feedback', () => {
     turn: 1,
     taskClass: 'bugfix',
     risk: 'R2',
-    hasPlan: true,
   });
-  assert.equal(planned.score, 1);
-  assert.equal(planned.hasSufficientEvidence, false, 'a plan is context, not causal proof');
+  assert.equal(planned.score, 0, 'a plan is context, not causal proof, so it carries no score');
+  assert.equal(planned.hasSufficientEvidence, false);
 
   const failingTest = assessParetoEvidence({
     session: sessionWithObservations([{
@@ -66,6 +65,20 @@ test('Pareto evidence thresholds scale with risk and observed feedback', () => {
   assert.equal(failingTest.hasFailureEvidence, true);
   assert.equal(failingTest.hasEmpiricalEvidence, true);
   assert.equal(failingTest.hasSufficientEvidence, true);
+
+  const passingTest = assessParetoEvidence({
+    session: sessionWithObservations([{
+      toolName: 'run_command',
+      args: { command: 'npm test -- parser' },
+      result: { success: true, exitCode: 0 },
+    }]),
+    turn: 1,
+    taskClass: 'bugfix',
+    risk: 'R2',
+  });
+  assert.equal(passingTest.hasEmpiricalEvidence, true);
+  assert.equal(passingTest.score, failingTest.score, 'a green suite is evidence too: fixing a bug must not lower the score');
+  assert.equal(passingTest.hasSufficientEvidence, true);
 
   const testDidNotStart = assessParetoEvidence({
     session: sessionWithObservations([{
@@ -85,10 +98,9 @@ test('Pareto evidence thresholds scale with risk and observed feedback', () => {
     turn: 1,
     taskClass: 'bugfix',
     risk: 'R3',
-    hasPlan: true,
     supportedHypothesisCount: 1,
   });
-  assert.equal(supportedHighRisk.score, 3);
+  assert.equal(supportedHighRisk.score, 2);
   assert.equal(supportedHighRisk.threshold, 5);
   assert.equal(supportedHighRisk.hasSufficientEvidence, false);
 
@@ -114,6 +126,27 @@ test('ordinary file reads and code searches contribute one capped weak-evidence 
   });
   assert.equal(inspected.score, 1, 'multiple inspections remain weak evidence rather than stacking without limit');
   assert.ok(inspected.reasons.includes('WEAK_INSPECTION_EVIDENCE'));
+});
+
+test('blocked or unstarted tests are not empirical evidence; both executed test tools are', () => {
+  const snapshot = (toolName: string, result: Record<string, any>) => assessParetoEvidence({
+    session: sessionWithObservations([{ toolName, args: { command: 'npm test' }, result }]),
+    turn: 1, taskClass: 'bugfix', risk: 'R2',
+  });
+  for (const result of [
+    { success: true, commandOutcome: 'blocked_preflight', processStarted: false },
+    { success: true, exitCode: 0, processStarted: false },
+    { success: true },
+    { errorCode: 'PERMISSION_DENIED' },
+  ]) {
+    assert.equal(snapshot('run_command', result).hasEmpiricalEvidence, false);
+    assert.equal(snapshot('run_command', result).score, 0);
+  }
+  assert.equal(snapshot('run_command', { success: true, exitCode: 0 }).score, 3);
+  assert.equal(snapshot('run_command', { success: false, exitCode: 1 }).hasFailureEvidence, true);
+  assert.equal(snapshot('run_test_suite', { success: true, exitCode: 0, isPassed: true }).score, 3);
+  assert.equal(snapshot('run_test_suite', { success: true, exitCode: 1, isPassed: false }).hasFailureEvidence, true);
+  assert.equal(snapshot('run_test_suite', { errorCode: 'TEST_HARNESS_FAILURE' }).hasEmpiricalEvidence, false);
 });
 
 test('classification explores under uncertainty and acts when evidence reaches the threshold', () => {
@@ -249,6 +282,38 @@ test('guardian allows an inspected R3 target with a plan, but keeps the same edi
     evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
   });
   assert.equal(guardian.preCallValidate('write_file', args, schema).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
+});
+
+test('patch evidence is checked for every parsed target, not the optional path', () => {
+  const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
+  guardian.setPreMutationGateContext({
+    taskClass: 'bugfix', hasValidatedHypothesis: false, risk: 'R2',
+    evidenceScore: 1, evidenceThreshold: 3, inspectedFiles: ['src/parser.ts'],
+  });
+  const filePatch = (file: string) => `--- a/${file}\n+++ b/${file}\n@@ -1,1 +1,1 @@\n-old\n+new`;
+  assert.equal(guardian.preCallValidate('apply_patch', { patch: filePatch('src/parser.ts') }).valid, true);
+  const mixed = guardian.preCallValidate('apply_patch', {
+    path: 'src/parser.ts', patch: `${filePatch('src/parser.ts')}\n${filePatch('src/other.ts')}`,
+  });
+  assert.equal(mixed.errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
+  assert.match(mixed.error || '', /src\/other\.ts/);
+  assert.equal(guardian.preCallValidate('apply_patch', {
+    patch: `${filePatch('tests/parser.test.ts')}\n${filePatch('src/parser.ts')}`,
+  }).valid, true);
+  assert.equal(guardian.preCallValidate('apply_patch', {
+    path: 'src/parser.ts', patch: '@@ -1,1 +1,1 @@\n-old\n+new',
+  }).valid, true);
+});
+
+test('a plan alone cannot bypass R3 reproduction for bugfixes', () => {
+  const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
+  guardian.setPreMutationGateContext({
+    taskClass: 'bugfix', hasValidatedHypothesis: false, hasPlan: true, risk: 'R3',
+    evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
+  });
+  assert.equal(guardian.preCallValidate('write_file', {
+    path: 'src/parser.ts', content: 'replacement',
+  }).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
 });
 
 test('hypothesis tool distinguishes static support from empirical validation', async () => {

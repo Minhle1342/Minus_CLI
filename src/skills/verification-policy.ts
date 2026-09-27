@@ -152,8 +152,10 @@ export class VerificationPolicy {
       this.modifiedFiles.add(filePath);
     }
     const isNonExec = filePath ? isNonExecutableFile(filePath) : false;
-    if (!filePath || !isNonExec) {
+    if (!filePath || !isNonExec || isSensitivePath(filePath) || ['R3', 'R4', 'R5'].includes(this.requiredRisk)) {
       this.hasUnverifiedModifications = true;
+      this.lastVerification = undefined;
+      this.verificationHistory = [];
     }
     if (options?.impactedTestSuites) {
       for (const t of options.impactedTestSuites) {
@@ -257,9 +259,11 @@ export class VerificationPolicy {
     // Miễn trừ kiểm thử bắt buộc nếu toàn bộ các file đã can thiệp là file phi thực thi (docs/markdown/configs)
     const hasOnlyNonExecutableModifications =
       this.modifiedFiles.size > 0 &&
-      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f));
+      ['R0', 'R1', 'R2'].includes(this.requiredRisk) &&
+      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f) && !isSensitivePath(f));
 
-    const mandatesVerification = (!hasOnlyNonExecutableModifications && this.hasUnverifiedModifications)
+    const mandatesVerification = (this.modifiedFiles.size > 0 && !hasOnlyNonExecutableModifications)
+      || this.hasUnverifiedModifications
       || this.pendingTargetedTests.size > 0
       || activeSkillIds.some((id) => this.requiredSkills.has(id));
 

@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CriticGate } from './critic-gate.js';
 
+// ponytail: inspection requires a successful read result, so mocks pair each
+// read_file call with its result (unkeyed pairing matches by tool name).
+function readEvents(path: string, extraResults: Array<{ toolName: string; result: Record<string, any> }> = []) {
+  const callId = `read-${path}`;
+  return [
+    { type: 'tool/call', data: { toolName: 'read_file', toolCallId: callId, args: { path } } },
+    { type: 'tool/result', data: { toolName: 'read_file', toolCallId: callId, result: { success: true, path, content: 'export {}' } } },
+    ...extraResults.flatMap((item, index) => [
+      { type: 'tool/call', data: { toolName: item.toolName, toolCallId: `${item.toolName}-${index}`, args: {} } },
+      { type: 'tool/result', data: { toolName: item.toolName, toolCallId: `${item.toolName}-${index}`, result: item.result } },
+    ]),
+  ];
+}
+
 test('CriticGate.evaluateExplorationSufficiency approves scratch files unconditionally', () => {
   const critic = new CriticGate();
   const mockSession = {
@@ -24,7 +38,7 @@ test('CriticGate.evaluateExplorationSufficiency rejects uninspected production f
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/other.ts' } } },
+      ...readEvents('src/other.ts'),
     ],
   } as any;
 
@@ -46,7 +60,7 @@ test('CriticGate.evaluateExplorationSufficiency approves inspected target with r
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      ...readEvents('src/target.ts'),
     ],
   } as any;
 
@@ -67,7 +81,7 @@ test('CriticGate penalizes score when DomainIntentGuardian records test tamperin
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      ...readEvents('src/target.ts'),
     ],
   } as any;
 
@@ -92,7 +106,7 @@ test('CriticGate.evaluateExplorationSufficiency rejects bugfix without reproduct
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      ...readEvents('src/target.ts'),
     ],
   } as any;
 
@@ -113,7 +127,7 @@ test('CriticGate.evaluateExplorationSufficiency approves bugfix without reproduc
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      ...readEvents('src/target.ts'),
     ],
   } as any;
 
@@ -143,7 +157,7 @@ test('CriticGate.evaluateExplorationSufficiency blocks mutation if latest hypoth
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
+      ...readEvents('src/target.ts'),
     ],
   } as any;
 
@@ -178,8 +192,8 @@ test('CriticGate.evaluateExplorationSufficiency advises (not blocks) single-file
   // Only target.ts inspected (1 file), no call-graph tool ran
   const singleFileSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'scratch/repro.py' } } }, // scratch does not count
+      ...readEvents('src/target.ts'),
+      ...readEvents('scratch/repro.py'), // scratch does not count
     ],
   } as any;
 
@@ -200,8 +214,8 @@ test('CriticGate.evaluateExplorationSufficiency advises (not blocks) single-file
   // Now inspect caller file as well (2 files)
   const causalChainSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/caller.ts' } } },
+      ...readEvents('src/target.ts'),
+      ...readEvents('src/caller.ts'),
     ],
   } as any;
 
@@ -227,9 +241,7 @@ test('CriticGate passes measured single-locus fixes with zero callers', () => {
   } as any;
   const measuredSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
-      { type: 'tool/call', data: { toolName: 'analyze_impact', args: { target: 'src/target.ts' } } },
-      { type: 'tool/result', data: { toolName: 'analyze_impact', result: { callers: 0, risk: 'LOW' } } },
+      ...readEvents('src/target.ts', [{ toolName: 'analyze_impact', result: { callers: 0, risk: 'LOW' } }]),
     ],
   } as any;
 
@@ -255,9 +267,7 @@ test('CriticGate still blocks when measured callers exist but are uninspected', 
   } as any;
   const gapSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/target.ts' } } },
-      { type: 'tool/call', data: { toolName: 'analyze_impact', args: { target: 'src/target.ts' } } },
-      { type: 'tool/result', data: { toolName: 'analyze_impact', result: { callers: 3, risk: 'MEDIUM' } } },
+      ...readEvents('src/target.ts', [{ toolName: 'analyze_impact', result: { callers: 3, risk: 'MEDIUM' } }]),
     ],
   } as any;
 
@@ -294,7 +304,7 @@ test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on 
   // Single-file satisficing on defect investigation
   const singleFileSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/auth.ts' } } },
+      ...readEvents('src/auth.ts'),
     ],
   } as any;
 
@@ -309,8 +319,8 @@ test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on 
   // Multi-file exploration passes
   const multiFileSession = {
     getEvents: () => [
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/auth.ts' } } },
-      { type: 'tool/call', data: { toolName: 'read_file', args: { path: 'src/token-verifier.ts' } } },
+      ...readEvents('src/auth.ts'),
+      ...readEvents('src/token-verifier.ts'),
     ],
   } as any;
 

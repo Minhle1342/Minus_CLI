@@ -354,17 +354,17 @@ export const DEFAULT_PROMPT_SECTIONS = [
 export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-ADAPTIVE INVESTIGATION)]:
 - Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
 - Primary Tools: get_symbol_context_360, inspect_symbol, query_call_graph, read_file, get_diagnostics.
-- Pareto Rule: Investigate more when uncertainty or blast radius is high. Act early on a small reversible edit when the target has been inspected and direct evidence is sufficient.
-- Evidence Rule: Static evidence may support a low-risk change; high-risk changes require empirical reproduction or an equivalent observed check.`;
+- Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, request_phase_transition to implement; wait for the next model response and tool set before editing.
+- Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
 
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
 - Goal: Break down complex, multi-file changes into 2-5 atomic milestones using \`create_plan\`.
 - Sequence: Inspect -> Surgical Fix -> Verification Ladder.
-- Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.`;
+ - Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks. Request the implement phase before editing.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
-- Primary Tools: \`apply_patch\` (Unified Diff) or \`replace_file_content\` / \`replace_text\` (with expectedFileHash).
+ - Primary Tools: \`apply_patch\` (Unified Diff, each target must be inspected) or \`replace_file_content\` / \`replace_text\` (with expectedFileHash).
 - Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.`;
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
@@ -399,9 +399,9 @@ export function resolvePhaseDynamicGuidance(
       let extra = '';
       if (options?.taskClass === 'bugfix' || options?.taskClass === 'refactor') {
         extra = options.hasValidatedHypothesis
-          ? '\n✔ Causal hypothesis is empirically validated. You may proceed to plan or implement.'
+          ? '\n✔ Causal hypothesis is empirically validated. Request the implement phase before editing.'
           : options?.evidenceSufficient
-            ? `\n✔ Evidence threshold reached (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). A bounded, reversible implementation may proceed.`
+            ? `\n✔ Evidence threshold reached (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). Request the implement phase; wait for the next model response before editing.`
             : options?.hasSupportedHypothesis
               ? `\n⚠️ Static evidence supports the hypothesis, but uncertainty remains above the current threshold (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). Inspect the target or run a discriminating check.`
               : `\n⚠️ Evidence gate active (${options?.evidenceScore ?? 0}/${options?.evidenceThreshold ?? '?'}). Gather the smallest discriminating evidence before editing product files.`;
@@ -425,4 +425,3 @@ export function resolvePhaseDynamicGuidance(
       return '';
   }
 }
-

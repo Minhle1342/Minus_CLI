@@ -288,3 +288,45 @@ test('accepted phase transition blocks sibling calls and refreshes the model too
   assert.ok(result.requests[2].tools.includes('replace_text'), 'the fresh implement turn exposes edit tools');
   assert.ok(result.phaseEvents.includes('phase/transitionAccepted'));
 });
+
+test('a completed read refreshes evidence before a sibling transition, but editing waits for the new phase', async () => {
+  const result = await runMode('enforce', 'The test fails with an error in sample.txt.', 'enforce', false, [
+    { finishReason: 'tool_calls', toolCalls: [
+      { id: 'read-1', name: 'read_file', args: { path: 'sample.txt' } },
+      { id: 'transition-1', name: 'request_phase_transition', args: {
+        targetPhase: 'implement', rationale: 'Read the exact target and identified the bounded fix.',
+        evidenceRefs: ['sample.txt', 'tool-result:read-1'],
+      } },
+      { id: 'stale-edit', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } },
+    ] },
+    { finishReason: 'tool_calls', toolCalls: [
+      { id: 'edit-1', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } },
+    ] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_command', args: { command: 'npm test' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'submit-1', name: 'submit_solution', args: {
+      summary: finalSummary, filesModified: ['sample.txt'], verificationEvidence: 'npm test passed',
+    } }] },
+  ], false);
+
+  assert.equal(result.fileContent, 'after');
+  assert.equal(result.failedToolResults, 1, 'only the stale sibling edit is rejected');
+  assert.ok(result.phaseEvents.includes('phase/transitionAccepted'));
+  assert.ok(result.requests[1].tools.includes('replace_text'));
+  assert.match(result.requests[0].dynamicContext, /request_phase_transition/);
+  assert.match(result.requests[1].dynamicContext, /PRE-MUTATION GATE/);
+});
+
+test('a completed read authorizes a sibling edit in an existing implement phase', async () => {
+  const result = await runMode('enforce', 'Fix the bug in sample.txt by changing before to after.', 'enforce', false, [
+    { finishReason: 'tool_calls', toolCalls: [
+      { id: 'read-1', name: 'read_file', args: { path: 'sample.txt' } },
+      { id: 'edit-1', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } },
+    ] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_command', args: { command: 'npm test' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'submit-1', name: 'submit_solution', args: {
+      summary: finalSummary, filesModified: ['sample.txt'], verificationEvidence: 'npm test passed',
+    } }] },
+  ]);
+  assert.equal(result.fileContent, 'after');
+  assert.equal(result.failedToolResults, 0);
+});

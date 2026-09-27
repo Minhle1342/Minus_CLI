@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeForMatching } from '../agent/final-answer-guard.js';
 import { detectLazyOmission, resolveFullRewriteWarnLines } from '../agent/aci-guardrails.js';
+import { PatchEngine } from '../patch/patch-engine.js';
 
 export type ToolFailureCategory =
   | 'TRUNCATED_JSON'
@@ -588,7 +589,6 @@ export class ToolUseGuardian {
       gateContext?.taskClass === 'security'
     );
 
-    // Trích xuất đường dẫn file mục tiêu từ các tham số phổ biến
     const targetPath = String(
       args?.path ||
       args?.filePath ||
@@ -597,66 +597,12 @@ export class ToolUseGuardian {
       args?.file ||
       ''
     ).trim();
-
-    // 1. TDD Fast-Pass: Cho phép tạo/sửa file kiểm thử, spec, reproduction script hoặc scratch file tự do
-    const isTestOrReproFile = Boolean(
-      targetPath &&
-      (
-        /([._-](?:test|spec)\.[a-zA-Z0-9]+$)|([\\/](?:tests?|__tests__|scratch|\.scratch)[\\/])/i.test(targetPath) ||
-        targetPath.startsWith('scratch/') ||
-        targetPath.startsWith('scratch\\') ||
-        targetPath.startsWith('.scratch/') ||
-        targetPath.startsWith('.scratch\\') ||
-        targetPath.startsWith('tests/') ||
-        targetPath.startsWith('tests\\') ||
-        targetPath.startsWith('test/') ||
-        targetPath.startsWith('test\\') ||
-        /(?:^|[\\/])(?:scratch|throwaway)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(targetPath)
-      )
-    );
-
-    // A plan describes intended work; it is supporting evidence, not proof that
-    // the causal mechanism is understood.
-    const hasValidated = Boolean(gateContext?.hasValidatedHypothesis);
-
-    const normalizeTarget = (value: string): string => {
-      if (!value) return '';
-      const absolute = path.isAbsolute(value) ? value : path.resolve(this.workspaceDir, value);
-      return path.relative(this.workspaceDir, absolute).replace(/\\/g, '/').toLowerCase();
-    };
-    const normalizedTarget = normalizeTarget(targetPath);
-    const targetInspected = Boolean(
-      normalizedTarget
-      && gateContext?.inspectedFiles?.some((file) => normalizeTarget(file) === normalizedTarget)
-    );
-    const targetEmpiricallyValidated = Boolean(
-      normalizedTarget
-      && hasValidated
-      && gateContext?.validatedTargetFiles?.some((file) => normalizeTarget(file) === normalizedTarget)
-    );
-    const risk = gateContext?.risk || 'R2';
-    const isHighRisk = gateContext?.taskClass === 'security' || ['R3', 'R4', 'R5'].includes(risk);
-    const evidenceThreshold = Math.max(1, gateContext?.evidenceThreshold || (isHighRisk ? 5 : risk === 'R2' ? 3 : 2));
-    const evidenceScore = (gateContext?.evidenceScore || 0) + (targetInspected ? 2 : 0);
-    const hasEmpiricalEvidence = Boolean(
-      hasValidated
-      || gateContext?.hasEmpiricalEvidence
-      || gateContext?.reproductionStatus?.hasPreFixRepro
-    );
-    const oldText = String(args?.oldText || args?.old_text || args?.TargetContent || args?.targetContent || args?.searchContent || args?.searchText || '');
-    const newText = String(args?.newText || args?.new_text || args?.ReplacementContent || args?.replacementContent || args?.replaceWith || '');
-    const changedLineCount = Math.max(oldText.split(/\r?\n/).length, newText.split(/\r?\n/).length);
-    const isSmallInspectedEdit = toolName === 'replace_text'
-      && targetInspected
-      && Math.max(oldText.length, newText.length) <= 800
-      && changedLineCount <= 8
-      && !isHighRisk;
-    const isTrivialFastPath = !isHighRisk && Boolean(gateContext?.isTrivialEdit || isSmallInspectedEdit);
-    const plannedR3FastPath = risk === 'R3' && gateContext?.hasPlan === true && targetInspected;
-    const evidenceSufficient = targetEmpiricallyValidated
-      || isTrivialFastPath
-      || plannedR3FastPath
-      || (targetInspected && evidenceScore >= evidenceThreshold && (!isHighRisk || hasEmpiricalEvidence));
+    const patchFiles = toolName === 'apply_patch'
+      ? PatchEngine.parsePatch(String(args?.patch || ''), targetPath || undefined).files
+      : [];
+    const targetPaths = patchFiles.length
+      ? patchFiles.map((file) => file.newPath || file.oldPath || '')
+      : [targetPath];
     let evidenceGateWarning: string | undefined;
 
     // 2c(iii). Cascade-repair freeze: ≥3 consecutive failures on ONE error
@@ -679,9 +625,45 @@ export class ToolUseGuardian {
       };
     }
 
-    if (isMutationTool && isEvidenceControlledTask && !isTestOrReproFile && !evidenceSufficient) {
+    for (const filePath of targetPaths) {
+      // Test/reproduction files may be created before the production target is inspected.
+      const isTestOrReproFile = Boolean(filePath && (
+        /([._-](?:test|spec)\.[a-zA-Z0-9]+$)|([\\/](?:tests?|__tests__|scratch|\.scratch)[\\/])/i.test(filePath)
+        || /^(?:\.?scratch|tests?)[\\/]/i.test(filePath)
+        || /(?:^|[\\/])(?:scratch|throwaway)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(filePath)
+      ));
+      if (!isMutationTool || !isEvidenceControlledTask || isTestOrReproFile) continue;
+
+      const normalizeTarget = (value: string): string => {
+        if (!value) return '';
+        const absolute = path.isAbsolute(value) ? value : path.resolve(this.workspaceDir, value);
+        return path.relative(this.workspaceDir, absolute).replace(/\\/g, '/').toLowerCase();
+      };
+      const normalizedTarget = normalizeTarget(filePath);
+      const targetInspected = Boolean(normalizedTarget
+        && gateContext?.inspectedFiles?.some((file) => normalizeTarget(file) === normalizedTarget));
+      const targetEmpiricallyValidated = Boolean(normalizedTarget && gateContext?.hasValidatedHypothesis
+        && gateContext?.validatedTargetFiles?.some((file) => normalizeTarget(file) === normalizedTarget));
+      const risk = gateContext?.risk || 'R2';
+      const isHighRisk = gateContext?.taskClass === 'security' || ['R3', 'R4', 'R5'].includes(risk);
+      const evidenceThreshold = Math.max(1, gateContext?.evidenceThreshold || (isHighRisk ? 5 : risk === 'R2' ? 3 : 2));
+      const evidenceScore = (gateContext?.evidenceScore || 0) + (targetInspected ? 2 : 0);
+      const hasEmpiricalEvidence = Boolean(gateContext?.hasValidatedHypothesis
+        || gateContext?.hasEmpiricalEvidence || gateContext?.reproductionStatus?.hasPreFixRepro);
+      const oldText = String(args?.oldText || args?.old_text || args?.TargetContent || args?.targetContent || args?.searchContent || args?.searchText || '');
+      const newText = String(args?.newText || args?.new_text || args?.ReplacementContent || args?.replacementContent || args?.replaceWith || '');
+      const changedLineCount = Math.max(oldText.split(/\r?\n/).length, newText.split(/\r?\n/).length);
+      const isSmallInspectedEdit = toolName === 'replace_text' && targetInspected
+        && Math.max(oldText.length, newText.length) <= 800 && changedLineCount <= 8 && !isHighRisk;
+      const isTrivialFastPath = !isHighRisk && Boolean(gateContext?.isTrivialEdit || isSmallInspectedEdit);
+      const plannedR3FastPath = risk === 'R3' && gateContext?.taskClass === 'refactor'
+        && gateContext?.hasPlan === true && targetInspected;
+      const evidenceSufficient = targetEmpiricallyValidated || isTrivialFastPath || plannedR3FastPath
+        || (targetInspected && evidenceScore >= evidenceThreshold && (!isHighRisk || hasEmpiricalEvidence));
+      if (evidenceSufficient) continue;
+
       const missing = !targetInspected && !targetEmpiricallyValidated
-        ? `đọc chính target "${targetPath || '(unknown)'}" trước khi sửa`
+        ? `đọc chính target "${filePath || '(unknown)'}" trước khi sửa`
         : isHighRisk && !hasEmpiricalEvidence
           ? 'chạy một reproduction/test có kết quả quan sát được cho thay đổi rủi ro cao'
           : `bổ sung bằng chứng đến ngưỡng ${evidenceThreshold}`;
@@ -691,19 +673,19 @@ export class ToolUseGuardian {
       const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto thích ứng chặn "${toolName}" vì uncertainty vẫn cao so với chi phí sai (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần ${missing}.${reasons}`;
       if (gateContext?.evidenceGateMode === 'observe') {
         evidenceGateWarning = `[EVIDENCE_GATE_OBSERVE]: ${errorMsg}`;
-      } else {
-        return {
-          valid: false,
-          allowed: false,
-          coercedArgs: args,
-          wasCoerced: false,
-          coercedKeys: [],
-          error: errorMsg,
-          errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
-          reason: errorMsg,
-          suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
-        };
+        break;
       }
+      return {
+        valid: false,
+        allowed: false,
+        coercedArgs: args,
+        wasCoerced: false,
+        coercedKeys: [],
+        error: errorMsg,
+        errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
+        reason: errorMsg,
+        suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+      };
     }
 
     // 3. Tự động ép kiểu (Auto-coercion) cho schema không khớp phổ biến

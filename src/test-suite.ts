@@ -5959,8 +5959,8 @@ Always write tests first!`;
   assert(diagGateDecision.allow === true, 'CompletionEvidenceGate chấp thuận khi get_diagnostics chạy sạch sau mutation');
 
   const evidenceGateWithSubmit = new CompletionEvidenceGate();
-  const evidenceDecisionWithSubmit = evidenceGateWithSubmit.evaluate('Tôi sẽ tóm tắt kết quả', evalSession, { hasSubmittedSolution: true });
-  assert(evidenceDecisionWithSubmit.allow === true, 'CompletionEvidenceGate chấp thuận khi hasSubmittedSolution = true');
+  const evidenceDecisionWithSubmit = evidenceGateWithSubmit.evaluate('Tôi sẽ tóm tắt kết quả', evalSession, {});
+  assert(evidenceDecisionWithSubmit.allow === true, 'CompletionEvidenceGate chấp thuận câu trả lời không claim khi session trống');
 
   const finalGuardWithSubmit = new FinalAnswerGuard();
   const finalDecisionWithSubmit = finalGuardWithSubmit.evaluate('Bây giờ tôi sẽ tổng kết kết quả cho bạn', { hasSubmittedSolution: true });

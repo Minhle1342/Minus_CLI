@@ -18,7 +18,6 @@ export interface ParetoEvidenceInput {
   turn: number;
   taskClass?: string;
   risk?: ControlRisk | string;
-  hasPlan?: boolean;
   validatedHypothesisCount?: number;
   supportedHypothesisCount?: number;
 }
@@ -57,6 +56,7 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
   const inspectedFiles = new Set<string>();
   const reasons = new Set<string>();
   let hasFailureEvidence = false;
+  let hasPassingVerification = false;
   let hasDiagnosticEvidence = false;
   let hasEmpiricalEvidence = false;
   let hasWeakInspectionEvidence = false;
@@ -98,16 +98,21 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
       hasDiagnosticEvidence = true;
       reasons.add('DIAGNOSTIC_EVIDENCE');
     }
-    if (toolName === 'run_command' && /(?:test|pytest|jest|vitest|mocha|cargo test|go test|gradle test|mvn test)/i.test(String(args.command || ''))) {
-      if (NON_EMPIRICAL_EXECUTION_ERRORS.has(String(result.errorCode || ''))) {
+    if (toolName === 'run_test_suite'
+      || (toolName === 'run_command' && /(?:test|pytest|jest|vitest|mocha|cargo test|go test|gradle test|mvn test)/i.test(String(args.command || '')))) {
+      if (result.commandOutcome === 'blocked_preflight' || result.processStarted === false
+        || typeof result.exitCode !== 'number'
+        || NON_EMPIRICAL_EXECUTION_ERRORS.has(String(result.errorCode || ''))
+        || (toolName === 'run_test_suite' && (result.errorCode || result.error))) {
         reasons.add('EXECUTION_ENVIRONMENT_FAILURE');
         continue;
       }
       hasEmpiricalEvidence = true;
-      if (failed) {
+      if (failed || (toolName === 'run_test_suite' && result.isPassed !== true)) {
         hasFailureEvidence = true;
         reasons.add('FAILING_REPRODUCTION');
       } else {
+        hasPassingVerification = true;
         reasons.add('PASSING_VERIFICATION');
       }
     }
@@ -118,10 +123,6 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
   }
 
   let score = 0;
-  if (input.hasPlan) {
-    score += 1;
-    reasons.add('ACTIVE_PLAN');
-  }
   if ((input.supportedHypothesisCount || 0) > 0) {
     score += 2;
     reasons.add('SUPPORTED_HYPOTHESIS');
@@ -132,6 +133,7 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
     reasons.add('EMPIRICALLY_VALIDATED_HYPOTHESIS');
   }
   if (hasFailureEvidence) score += 3;
+  if (hasPassingVerification) score += 3;
   if (hasDiagnosticEvidence) score += 2;
   if (reasons.has('STRUCTURAL_EVIDENCE')) score += 1;
   if (hasWeakInspectionEvidence) {
