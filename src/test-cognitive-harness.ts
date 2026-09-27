@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { CognitiveHarness } from './agent/cognitive-harness.js';
+import { CognitiveHarness, detectLeadingQuery } from './agent/cognitive-harness.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { Session } from './session/session.js';
 import { ToolRegistry } from './tools/registry.js';
@@ -63,6 +63,29 @@ async function runCognitiveHarnessTests(): Promise<void> {
   assert(compressionScaffold.negativeGate.some(g => g.includes('Artifact Trail')), 'Negative gate bắt buộc Artifact Trail tường minh');
   assert(compressionScaffold.executionTopology.some(s => s.includes('Anchored 5-Section Synthesis')), 'Yêu cầu cấu trúc Anchored 5 phần');
   console.log('  ✅ PASS: CognitiveHarness kích hoạt context_compression scaffold theo chuẩn /context-compression');
+
+  // 1.6 Kiểm thử Multi-Signal Composite Scorer (detectLeadingQuery)
+  const vnLeading = detectLeadingQuery('Có phải do timeout ở Redis không?');
+  assert.strictEqual(vnLeading.isLeading, true, 'Nhận diện leading query tiếng Việt có giả thiết và câu hỏi xác nhận');
+  assert(vnLeading.confidence >= 0.75, 'Confidence score >= 0.75');
+  assert(Boolean(vnLeading.suspectedPremise), 'Trích xuất được suspectedPremise');
+
+  const sycophancyLeading = detectLeadingQuery('Xác nhận giúp tôi rằng config này bị sai');
+  assert.strictEqual(sycophancyLeading.isLeading, true, 'Nhận diện sycophancy trap');
+  assert.strictEqual(sycophancyLeading.biasType, 'sycophancy_trap', 'Phân loại đúng sycophancy_trap');
+
+  const enLeading = detectLeadingQuery('Is it true that the memory leak is in worker.ts?');
+  assert.strictEqual(enLeading.isLeading, true, 'Nhận diện leading query tiếng Anh');
+  assert.strictEqual(enLeading.biasType, 'confirmation_bias', 'Phân loại đúng confirmation_bias');
+
+  const neutralTask = detectLeadingQuery('Sửa lỗi type error ở src/index.ts và chạy npm test');
+  assert.strictEqual(neutralTask.isLeading, false, 'Không bắt nhầm tác vụ sửa code thông thường');
+  assert.strictEqual(neutralTask.confidence, 0, 'Confidence = 0 cho câu lệnh trung tính');
+
+  const neutralQuestion = detectLeadingQuery('Hệ thống hoạt động như thế nào?');
+  assert.strictEqual(neutralQuestion.isLeading, false, 'Không bắt nhầm câu hỏi khám phá kiến trúc');
+
+  console.log('  ✅ PASS: Multi-Signal Composite Scorer (detectLeadingQuery) phân tích chính xác thiên kiến & bóc tách giả thiết');
 
   // 2. Kiểm thử Cognitive Brake (Tự ngắt nhánh suy luận sai / Branch Pruning)
   const normalBrake = harness.evaluateCognitiveBrake({

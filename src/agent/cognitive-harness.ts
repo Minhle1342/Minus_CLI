@@ -46,19 +46,128 @@ export interface FileFixationEntry {
  * If >= 2 consecutive failures occur on the same target file, freezes mutations
  * on that file for 1 turn to break tunnel vision and force upstream caller inspection.
  */
-export function detectLeadingQuery(request: string): { isLeading: boolean } {
-  const normalized = (request || '')
+export interface LeadingQueryAnalysis {
+  isLeading: boolean;
+  confidence: number;
+  biasType?: 'confirmation_bias' | 'causal_presumption' | 'sycophancy_trap';
+  suspectedPremise?: string;
+  matchedSignals?: string[];
+}
+
+/**
+ * Multi-Signal Composite Scorer (Pillar 3 & Anti-Sycophancy Gate)
+ * Replaces rigid single-regex with a weighted composite analysis of linguistic primitives:
+ * 1. Hypothesis / Speculation markers (User framing an unproven premise)
+ * 2. Confirmation-seeking tags (User pressing for affirmative validation)
+ * 3. Pressure / Sycophancy prompts (User demanding to prove/confirm a bias)
+ * 4. Causal attribution markers (User pre-determining root cause location)
+ *
+ * Also semantically isolates `suspectedPremise` for targeted Null Hypothesis (H0) generation.
+ */
+export function detectLeadingQuery(request: string): LeadingQueryAnalysis {
+  if (!request || typeof request !== 'string') {
+    return { isLeading: false, confidence: 0 };
+  }
+
+  const normalized = request
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+    .toLowerCase()
+    .trim();
 
-  const leadingPatterns = [
+  if (!normalized) {
+    return { isLeading: false, confidence: 0 };
+  }
+
+  const matchedSignals: string[] = [];
+
+  // Signal 1: Hypothesis / Speculative Framing (Weight: 0.35)
+  const hypothesisPattern =
+    /\b(?:co phai|co dung la|co phai do|nghi la|chac la|chac do|lieu co|lieu rang|tuong la|cho rang|is it true that|could it be that|could this be|is it because|suspect that|wonder if|i think that|might it be)\b/i;
+  const hasHypothesis = hypothesisPattern.test(normalized);
+  if (hasHypothesis) matchedSignals.push('HYPOTHESIS_FRAMING');
+
+  // Signal 2: Confirmation-Seeking Question Tags (Weight: 0.40)
+  const confirmationPattern =
+    /\b(?:phai khong|dung khong|dung chu|co dung khong|chuan chua|phai cha|right\?|isn't it\?|is that correct\?|correct\?|aren't they\?|doesn't it\?|wouldn't it\?)\b/i;
+  const hasConfirmationTag = confirmationPattern.test(normalized);
+  if (hasConfirmationTag) matchedSignals.push('CONFIRMATION_TAG');
+
+  // Signal 3: Sycophancy / Pressure Assertion (Weight: 0.50)
+  const pressurePattern =
+    /\b(?:xac nhan giup toi|xac nhan giup|xac nhan rang|chi can xac nhan|chung minh rang|chung minh giup|khang dinh giup|confirm for me that|confirm that|just confirm|prove that .* is wrong|prove that|verify for me that)\b/i;
+  const hasPressure = pressurePattern.test(normalized);
+  if (hasPressure) matchedSignals.push('PRESSURE_ASSERTION');
+
+  // Signal 4: Causal Attribution Presumption (Weight: 0.30)
+  const causalPattern =
+    /\b(?:tai sao lai do|nguyen nhan do|do loi|la do|tai vi|do ham|do file|do service|do server|do api|caused by|due to|because of|the cause is|the culprit is|the fault of)\b/i;
+  const hasCausal = causalPattern.test(normalized);
+  if (hasCausal) matchedSignals.push('CAUSAL_ATTRIBUTION');
+
+  // Baseline safeguard: Preserve original regex patterns to guarantee zero regression
+  const legacyFallback = [
     /\b(?:co phai|co dung la|co phai do|tai sao lai do)\b.{0,60}\b(?:khong|phai khong|dung khong)\b/i,
     /\b(?:xac nhan giup toi|dung khong|phai khong|chi can xac nhan rang)\b/i,
     /\b(?:is it true that|confirm for me that|prove that .* is wrong)\b/i,
-  ];
+  ].some((p) => p.test(normalized));
 
-  return { isLeading: leadingPatterns.some((p) => p.test(normalized)) };
+  // Determine Bias Type & Confidence Score
+  let confidence = 0;
+  let biasType: LeadingQueryAnalysis['biasType'] = undefined;
+
+  if (hasPressure) {
+    confidence = 0.90;
+    biasType = 'sycophancy_trap';
+  } else if (hasHypothesis && hasConfirmationTag) {
+    confidence = 0.85;
+    biasType = 'confirmation_bias';
+  } else if (hasCausal && (hasConfirmationTag || hasHypothesis)) {
+    confidence = 0.80;
+    biasType = 'causal_presumption';
+  } else if (legacyFallback) {
+    confidence = 0.75;
+    biasType = 'confirmation_bias';
+  } else {
+    // Weighted scoring for composite signals
+    let score = 0;
+    if (hasHypothesis) score += 0.35;
+    if (hasConfirmationTag) score += 0.40;
+    if (hasCausal) score += 0.30;
+    if (hasPressure) score += 0.50;
+
+    if (score >= 0.65) {
+      confidence = Math.min(score, 0.95);
+      biasType = hasCausal ? 'causal_presumption' : 'confirmation_bias';
+    }
+  }
+
+  const isLeading = confidence >= 0.70;
+
+  // Semantic Premise Extraction:
+  // Isolate the core claim between the hypothesis marker and confirmation tag
+  let suspectedPremise: string | undefined = undefined;
+  if (isLeading) {
+    const rawClean = request.trim();
+    const premiseMatch = rawClean.match(
+      /(?:có phải|có đúng là|nghi là|chắc do|chắc là|liệu có|liệu rằng|is it true that|could it be that|suspect that|confirm for me that|xác nhận giúp(?: tôi)?(?: rằng)?)\s+(.+?)(?:\s*(?:phải không|đúng không|đúng chứ|chuẩn chưa|không|right\?|isn't it\?|[?！!.]|$))/i,
+    );
+
+    if (premiseMatch && premiseMatch[1]) {
+      const extracted = premiseMatch[1].trim();
+      if (extracted.length >= 3 && extracted.length <= 150) {
+        suspectedPremise = extracted;
+      }
+    }
+  }
+
+  return {
+    isLeading,
+    confidence,
+    biasType,
+    suspectedPremise,
+    matchedSignals,
+  };
 }
 
 export class FileFixationTracker {
@@ -385,9 +494,15 @@ export class CognitiveHarness {
           actionBoundary: 'Gather empirical evidence and locate defect. Modifying production code is LOCKED.',
           premiseInversion: leadingInfo.isLeading ? {
             isLeading: true,
-            nullHypothesis: 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
-            affirmativeHypothesis: 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
-            counterfactualProbe: 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
+            nullHypothesis: leadingInfo.suspectedPremise
+              ? `H0 (Null Hypothesis): The user's suspected cause "${leadingInfo.suspectedPremise}" is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.`
+              : 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
+            affirmativeHypothesis: leadingInfo.suspectedPremise
+              ? `H1 (Affirmative Hypothesis): "${leadingInfo.suspectedPremise}" is the true root cause.`
+              : 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
+            counterfactualProbe: leadingInfo.suspectedPremise
+              ? `Inspect upstream callers, configurations, and related modules before confirming "${leadingInfo.suspectedPremise}".`
+              : 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
           } : undefined,
         };
       }
@@ -482,9 +597,15 @@ export class CognitiveHarness {
       actionBoundary: 'Read-only ground-truth inspection before drawing conclusions.',
       premiseInversion: fallbackLeadingInfo.isLeading ? {
         isLeading: true,
-        nullHypothesis: 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
-        affirmativeHypothesis: 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
-        counterfactualProbe: 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
+        nullHypothesis: fallbackLeadingInfo.suspectedPremise
+          ? `H0 (Null Hypothesis): The user's suspected cause "${fallbackLeadingInfo.suspectedPremise}" is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.`
+          : 'H0 (Null Hypothesis): The user\'s suspected cause is secondary or incorrect; the defect locus lies elsewhere or behavior is intentional.',
+        affirmativeHypothesis: fallbackLeadingInfo.suspectedPremise
+          ? `H1 (Affirmative Hypothesis): "${fallbackLeadingInfo.suspectedPremise}" is the true root cause.`
+          : 'H1 (Affirmative Hypothesis): The user\'s suspected cause is the true root cause.',
+        counterfactualProbe: fallbackLeadingInfo.suspectedPremise
+          ? `Inspect upstream callers, configurations, and related modules before confirming "${fallbackLeadingInfo.suspectedPremise}".`
+          : 'Inspect upstream callers, configurations, and related modules before confirming user hypothesis.',
       } : undefined,
     };
   }
