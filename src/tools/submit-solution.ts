@@ -42,7 +42,7 @@ export interface SubmitSolutionResult {
 export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
   return {
     name: 'submit_solution',
-    description: 'Explicitly submit the finalized solution and empirical verification proof for the current task or goal. Call this tool when all required code changes, diagnostics, and test verification commands have executed successfully.',
+    description: 'Explicitly submit the finalized solution and empirical verification proof for the current task or goal. PRECONDITION: after your last code edit you must have run a real verification command (test suite such as npm test / pytest / jest, build, lint, typecheck, or get_diagnostics) and seen it pass — running the script you just created (e.g. "python regex.py") does NOT count as verification and the call will be rejected with VERIFICATION_FAILED. Call this tool only when that verification has executed successfully.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -63,11 +63,11 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         verificationMethod: {
           type: 'STRING',
           enum: ['automated_test_pass', 'static_diagnostics_clean', 'diff_visual_inspection', 'direct_validation', 'not_applicable'],
-          description: 'Optional. Verification strategy employed (e.g. automated_test_pass, static_diagnostics_clean, diff_visual_inspection).',
+          description: 'Optional, but must match reality: use automated_test_pass only if a test suite actually passed, static_diagnostics_clean only if get_diagnostics/typecheck ran clean. Just running the file you created is direct_validation at best and never satisfies the pre-call verification gate.',
         },
         verificationEvidence: {
           type: 'STRING',
-          description: 'Optional. The verification command executed (e.g. "npm test", "pytest") or rationale if automated tests were not executed.',
+          description: 'Required in practice. The exact verification command you executed AFTER your last edit (e.g. "npm test", "pytest test_regex.py", "get_diagnostics"). The gate checks the session for this command — a command you never ran, or merely running the script you created, will be rejected.',
         },
         rootCause: {
           type: 'STRING',
