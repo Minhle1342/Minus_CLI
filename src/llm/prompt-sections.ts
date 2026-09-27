@@ -307,7 +307,7 @@ export const SECTION_COMPUTER_USE = `13. COMPUTER USE AGENT PROTOCOL:
    - Loop: 1.[Perception]: computer(action: "screenshot") -> 2.[Reasoning]: Locate UI elements [x, y] -> 3.[Action]: left_click, right_click, double_click, drag, type, key, scroll -> 4.[Verification]: computer(action: "screenshot").`;
 
 export const SECTION_UNITY_GAME_DEV = `14. PROFESSIONAL UNITY GAME DEVELOPER PROTOCOL:
-   - Phase 1 (Assets/Prefabs): game-asset-mcp, game_tilemap_studio, game_pixel_sprite_studio, unity_gameplay_studio(assemble_prefab).
+   - Phase 1 (Assets/Prefabs): game_tilemap_studio, game_pixel_sprite_studio, unity_gameplay_studio(assemble_prefab). No image/mesh generator tool exists - emit asset specs plus AI prompts, never invent tool names.
    - Phase 2 (Architecture/DOTS): Clean Singletons, ScriptableObjects, Object Pooling, Unity DOTS (Entities, IComponentData, Burst).
    - Phase 3 (60-FPS Budget): unity_gameplay_studio(inspect_and_validate), zero GC in Update/LateUpdate, fixed timestep 0.02f.`;
 

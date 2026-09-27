@@ -109,6 +109,11 @@ export function isScratchFilePath(filePath: string): boolean {
   return isScratchPath(filePath);
 }
 
+function configuredEvidenceGateMode(): 'observe' | 'enforce' | undefined {
+  const mode = process.env.MINUS_EVIDENCE_GATE_MODE?.trim().toLowerCase();
+  return mode === 'observe' || mode === 'enforce' ? mode : undefined;
+}
+
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
   if (!value) return defaultValue;
@@ -1221,6 +1226,7 @@ export class AgentLoop {
         taskClass: classification.taskClass,
         phase: classification.phase,
         hasPlan: this.planManager.hasPlan(),
+        evidenceGateMode: configuredEvidenceGateMode() || 'enforce',
         hasValidatedHypothesis,
         supportedHypothesisCount,
         targetFiles: [
@@ -2762,7 +2768,8 @@ export class AgentLoop {
             // Phase 3 Dual-Agent Exploration Sufficiency & Reproduction Gate (Agentless & AutoCodeRover & Dual-Agent Verifier)
             const targetFilePath = String(toolArgs?.path || toolArgs?.filePath || toolArgs?.file || toolArgs?.targetFile || toolArgs?.AbsolutePath || '');
             const isScratch = isScratchFilePath(targetFilePath);
-            const reproductionMode = process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe';
+            const reproductionMode = configuredEvidenceGateMode()
+              || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
 
             const explorationSufficiency: ExplorationSufficiencyDecision = isMutationTool(toolName) && !isScratch
               ? this.criticGate.evaluateExplorationSufficiency({

@@ -661,7 +661,50 @@ go 1.22
     });
   });
 
-  describe('13. Docker Desktop Toggle & Auto-Start Configuration', () => {
+  describe('13. Command failure output diagnostics', () => {
+    it('should display the actionable stdout error instead of the generic exit-code message', () => {
+      const output: string[] = [];
+      const originalLog = console.log;
+      const originalWrite = process.stdout.write;
+      const result = {
+        success: false,
+        exitCode: 1,
+        diagnostic: 'The command completed with exit code 1.',
+        stdout: 'Build FAILED.\nMSBUILD : error MSB1003: Specify a project or solution file.',
+        stderr: '',
+      };
+
+      console.log = (...args: any[]) => output.push(args.map(String).join(' '));
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        output.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+        return true;
+      }) as typeof process.stdout.write;
+
+      try {
+        CLI.renderToolResult('run_command', 10, result);
+        CLI.renderCompactOneLiner({
+          step: 1,
+          maxSteps: 1,
+          toolName: 'run_command',
+          args: { command: 'dotnet build' },
+          durationMs: 10,
+          result,
+        });
+      } finally {
+        console.log = originalLog;
+        process.stdout.write = originalWrite;
+      }
+
+      const rendered = output.join('\n');
+      assert.match(rendered, /MSBUILD : error MSB1003/);
+      assert.doesNotMatch(rendered, /Process exited with code 1/);
+      assert.match(rendered, /failed/);
+      assert.equal(result.exitCode, 1, 'Rendering must not alter the subprocess exit code');
+      assert.equal(result.success, false, 'Rendering must not alter the subprocess failure state');
+    });
+  });
+
+  describe('14. Docker Desktop Toggle & Auto-Start Configuration', () => {
     it('should include /docker in SLASH_COMMANDS with alias /docker-desktop', () => {
       const dockerCmd = SLASH_COMMANDS.find((cmd) => cmd.command === '/docker');
       assert.ok(dockerCmd, 'SLASH_COMMANDS should have /docker');
@@ -710,5 +753,3 @@ go 1.22
     });
   });
 });
-
-

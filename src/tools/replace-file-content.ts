@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createPatch } from 'diff';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -239,12 +240,19 @@ export const replaceFileContentTool: ToolDefinition = {
         }
       } catch {}
 
+      let unifiedDiff: string | undefined;
+      try {
+        const patch = createPatch(rawPath, originalRawContent, finalContent, 'before', 'after');
+        unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
+      } catch {}
+
       return toolSuccess({
         path: workspace.toRelativePath(safePath),
         TargetFile: workspace.toRelativePath(safePath),
         occurrencesReplaced,
         contentHash,
         message: `Đã thay thế thành công ${occurrencesReplaced} vị trí trong file "${rawPath}".${note ? ` (${note})` : ''}`,
+        ...(unifiedDiff ? { unifiedDiff } : {}),
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });

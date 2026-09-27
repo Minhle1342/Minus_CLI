@@ -63,8 +63,8 @@ export const UNITY_AI_GAME_CREATOR_PLAYBOOK = `### UNITY AI GAME CREATOR & ASSET
 
 4. **Professional 3-Phase Tool Execution Pipeline:**
    - **Phase 1: Prototyping & Asset Synthesis:**
-     * Generate visual assets via \`game-asset-mcp\` (\`generate_2d_asset\` for sprites/textures, \`generate_3d_asset\` for OBJ/GLB meshes).
-     * Synthesize level grids via \`game_tilemap_studio\` and sprite sheets via \`game_pixel_sprite_studio\`.
+     * Synthesize level grids via \`game_tilemap_studio\` and sprite sheets/atlases via \`game_pixel_sprite_studio\`.
+     * There is no image or mesh generator tool: emit asset specs (dimensions, palette, colliders, material values) as project files and hand ready-to-paste AI prompts for sprites/models to the user. Never invent tool names.
      * Package raw assets into Prefabs using \`unity_gameplay_studio(action: 'assemble_prefab')\` with colliders and rigidbodies.
    - **Phase 2: Gameplay Programming & DOTS Integration:**
      * Implement C# behaviors and high-density DOTS systems (\`IComponentData\`, \`ISystem\`, Burst & Job System) for swarm AI / bullet hell.

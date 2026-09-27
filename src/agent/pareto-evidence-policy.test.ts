@@ -103,6 +103,19 @@ test('Pareto evidence thresholds scale with risk and observed feedback', () => {
   assert.equal(validatedHighRisk.hasEmpiricalEvidence, true);
 });
 
+test('ordinary file reads and code searches contribute one capped weak-evidence point', () => {
+  const inspected = assessParetoEvidence({
+    session: sessionWithObservations([
+      { toolName: 'read_file', args: { path: 'src/auth.ts' }, result: { success: true, content: 'export {}' } },
+      { toolName: 'search_codebase_fast', args: { query: 'auth' }, result: { success: true, results: ['src/auth.ts'] } },
+    ]),
+    turn: 1,
+    risk: 'R3',
+  });
+  assert.equal(inspected.score, 1, 'multiple inspections remain weak evidence rather than stacking without limit');
+  assert.ok(inspected.reasons.includes('WEAK_INSPECTION_EVIDENCE'));
+});
+
 test('classification explores under uncertainty and acts when evidence reaches the threshold', () => {
   const engine = new ClassificationEngine();
   const base = {
@@ -119,13 +132,12 @@ test('classification explores under uncertainty and acts when evidence reaches t
   const largeUncertain = engine.classify({
     ...base,
     request: 'Fix the parser bug across the entire system architecture',
+    hasPlan: false,
   });
   assert.equal(largeUncertain.risk, 'R3');
-  assert.equal(largeUncertain.phase, 'explore');
-  // NOTE: the explore capability list still carries 'edit' (the historic lock
-  // was prompt-level only); the hard gate lives in ToolUseGuardian.
-  assert.equal(largeUncertain.requiredCapabilities.includes('edit'), true);
-  assert.equal(largeUncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), true);
+  assert.equal(largeUncertain.phase, 'plan');
+  assert.equal(largeUncertain.requiredCapabilities.includes('edit'), false);
+  assert.equal(largeUncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), false);
 
   const supported = engine.classify({
     ...base,
@@ -219,6 +231,24 @@ test('guardian allows a small inspected edit but requires empirical evidence at 
     content: 'replacement',
   });
   assert.equal(unrelatedTarget.valid, false, 'empirical evidence for one target cannot authorize another file');
+});
+
+test('guardian allows an inspected R3 target with a plan, but keeps the same edit blocked without it', () => {
+  const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
+  const args = { path: 'src/parser.ts', content: 'replacement' };
+  const schema = { type: 'OBJECT', properties: { path: { type: 'STRING' }, content: { type: 'STRING' } } };
+
+  guardian.setPreMutationGateContext({
+    taskClass: 'refactor', hasValidatedHypothesis: false, hasPlan: true, risk: 'R3',
+    evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
+  });
+  assert.equal(guardian.preCallValidate('write_file', args, schema).valid, true);
+
+  guardian.setPreMutationGateContext({
+    taskClass: 'refactor', hasValidatedHypothesis: false, hasPlan: false, risk: 'R3',
+    evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
+  });
+  assert.equal(guardian.preCallValidate('write_file', args, schema).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
 });
 
 test('hypothesis tool distinguishes static support from empirical validation', async () => {

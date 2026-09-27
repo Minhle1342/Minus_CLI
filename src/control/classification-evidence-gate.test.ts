@@ -10,11 +10,30 @@ test('R2 bugfix skips the evidence gate and goes straight to implement', () => {
   assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
 });
 
-test('R3 bugfix without evidence stays in explore with the gate reason', () => {
+test('R3 bugfix without evidence goes to plan instead of forcing explore', () => {
   const engine = new ClassificationEngine();
   const decision = engine.classify({ request: 'Refactor the authentication system architecture across all modules' });
   assert.equal(decision.taskClass, 'refactor');
   assert.equal(decision.risk, 'R3');
+  assert.equal(decision.phase, 'plan');
+  assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
+});
+
+test('R3 large refactor fast-paths to implement with an accepted plan', () => {
+  const decision = new ClassificationEngine().classify({
+    request: 'Refactor the authentication system architecture across all modules',
+    hasPlan: true,
+  });
+  assert.equal(decision.risk, 'R3');
+  assert.equal(decision.phase, 'implement');
+});
+
+test('R4 bugfix still requires evidence before implementation', () => {
+  const decision = new ClassificationEngine().classify({
+    request: 'Refactor the authentication system architecture across all modules',
+    minimumRisk: 'R4',
+  });
+  assert.equal(decision.risk, 'R4');
   assert.equal(decision.phase, 'explore');
   assert.ok(decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
 });
@@ -24,7 +43,6 @@ test('R3 bugfix with validated hypothesis takes the fast path', () => {
   const decision = engine.classify({
     request: 'Refactor the authentication system architecture across all modules',
     hasValidatedHypothesis: true,
-    hasPlan: true,
   });
   assert.equal(decision.phase, 'implement');
   assert.ok(decision.reasonCodes.includes('PARETO_EVIDENCE_FAST_PATH'));

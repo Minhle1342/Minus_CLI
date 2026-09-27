@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { createPatch } from 'diff';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -33,7 +34,7 @@ interface NormalizedText {
  */
 export const replaceTextTool: ToolDefinition = {
   name: 'replace_text',
-  description: 'Replace one oldText block in a file. Auto mode safely handles LF/CRLF, Unicode (NFC/NFD), and indentation differences in multi-line blocks without fuzzy semantic matching. Prefer a concise, unique 3–15-line anchor; avoid sending blocks larger than 50 lines. Pass expectedFileHash from read_file to prevent editing stale content.',
+  description: 'Replace one oldText block in a file. Auto mode safely handles LF/CRLF, Unicode (NFC/NFD), and indentation differences in multi-line blocks without fuzzy semantic matching. Prefer a concise, unique 3–15-line anchor copied from the current file contents; avoid sending blocks larger than 50 lines. Pass the latest contentHash from read_file as expectedFileHash. If the tool returns FILE_CONTENT_CHANGED, do not retry with the old text or merely swap in the returned hash: re-read the current file, review its changes, rebuild oldText/newText against that version, and retry with its new contentHash. Do not omit the hash to bypass a conflict.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -43,7 +44,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       oldText: {
         type: Type.STRING,
-        description: 'Original text or code to replace. A unique 3–15-line anchor is recommended; LF/CRLF and Unicode composed/decomposed differences are handled automatically.',
+        description: 'Original text or code copied from the latest read_file content (not a stale earlier read or truncated preview). Use a unique 3–15-line anchor; LF/CRLF and Unicode composed/decomposed differences are handled automatically.',
       },
       newText: {
         type: Type.STRING,
@@ -56,7 +57,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       expectedFileHash: {
         type: Type.STRING,
-        description: 'Optional contentHash returned by read_file. The tool refuses to write if the file changed after it was read.',
+        description: 'Latest contentHash returned by read_file. Always pass it for edits. If it mismatches, re-read and re-evaluate the edit against the current contents; never blindly retry with the new hash or omit this guard.',
       },
       expectedOccurrences: {
         type: Type.INTEGER,
@@ -149,7 +150,7 @@ export const replaceTextTool: ToolDefinition = {
           errorCode: 'FILE_CONTENT_CHANGED',
           expectedFileHash,
           observedFileHash,
-          suggestion: `Gọi lại replace_text với expectedFileHash="${observedFileHash}" (hoặc bỏ qua expectedFileHash nếu oldText là duy nhất trong file).`,
+          suggestion: `Đọc lại nội dung mới nhất của "${rawPath}" bằng read_file, xem xét thay đổi, dựng lại oldText/newText theo nội dung hiện tại rồi gọi replace_text với expectedFileHash mới. Không dùng lại oldText cũ, không chỉ thay hash theo gợi ý và không bỏ expectedFileHash.`,
         };
       }
 
@@ -302,6 +303,12 @@ export const replaceTextTool: ToolDefinition = {
         }
       } catch {}
 
+      let unifiedDiff: string | undefined;
+      try {
+        const patch = createPatch(rawPath, content, updatedContent, 'before', 'after');
+        unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
+      } catch {}
+
       return {
         path: rawPath,
         success: true,
@@ -310,6 +317,7 @@ export const replaceTextTool: ToolDefinition = {
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
         message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        ...(unifiedDiff ? { unifiedDiff } : {}),
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };

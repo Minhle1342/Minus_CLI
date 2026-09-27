@@ -315,7 +315,8 @@ export class ToolRunner {
         };
       }
       const targetTool = this.getTool(toolName);
-      const canGracefullyBypass = toolName === 'update_plan_task' && Boolean(targetTool);
+      const isMutationInImplement = context.classificationPhase === 'implement' && Boolean(this.rootRegistry?.get(toolName));
+      const canGracefullyBypass = (toolName === 'update_plan_task' || isMutationInImplement) && Boolean(targetTool);
       if (!isToolAuthorized(toolName, names) && !canGracefullyBypass) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';
@@ -555,6 +556,11 @@ export class ToolRunner {
       }
     }
 
+    executionContext = {
+      ...executionContext,
+      preMutationGateContext: this.guardian.getPreMutationGateContext(),
+    };
+
     // Stage 4: Safe Execution with Guardian Auto-Retry for transient failures
     let rawResult: any;
     let attempt = 0;
@@ -669,6 +675,12 @@ export class ToolRunner {
     }
 
     // Attach runtime mutation feedback (LSP & blast radius analysis)
+    if (guardianPreCheck.warning) {
+      normalizedResult._guardian_warnings = [
+        ...(Array.isArray(normalizedResult._guardian_warnings) ? normalizedResult._guardian_warnings : []),
+        guardianPreCheck.warning,
+      ];
+    }
     normalizedResult = await enrichMutationResultWithLsp(toolName, executionArgs, normalizedResult, this.workspace);
     if (!normalizedResult.blastRadius) {
       normalizedResult = await enrichMutationResultWithBlastRadius(toolName, executionArgs, normalizedResult, this.workspace);

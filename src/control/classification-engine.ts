@@ -20,6 +20,8 @@ export interface ClassificationInput {
   minimumRisk?: ControlRisk;
 }
 
+const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
+
 const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
 const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
 const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
@@ -59,6 +61,10 @@ export class ClassificationEngine {
       taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
       complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
       risk = complexity === 'large' ? 'R3' : 'R2';
+      if (input.minimumRisk && riskRank[input.minimumRisk] > riskRank[risk]) {
+        risk = input.minimumRisk;
+        reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');
+      }
 
       const evidenceThreshold = Math.max(1, input.evidenceThreshold || 1);
       const hasEnoughEvidence = Boolean(
@@ -67,14 +73,14 @@ export class ClassificationEngine {
         || (input.evidenceScore || 0) >= evidenceThreshold
       );
       const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor')
-        && ['R3', 'R4', 'R5'].includes(risk)
+        && ['R4', 'R5'].includes(risk)
         && !hasEnoughEvidence;
       if (requiresEvidenceFirst) {
         phase = 'explore';
         capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];
         reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
-        phase = input.hasPlan || complexity !== 'large' ? 'implement' : 'plan';
+        phase = input.hasPlan || (risk === 'R3' && input.hasValidatedHypothesis) || complexity !== 'large' ? 'implement' : 'plan';
         if (phase === 'plan') {
           capabilities = ['inspect', 'search', 'plan', 'memory'];
         } else {
@@ -165,7 +171,6 @@ export class ClassificationEngine {
     }
 
     if (input.minimumRisk) {
-      const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
       if (riskRank[input.minimumRisk] > riskRank[risk]) {
         risk = input.minimumRisk;
         reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');

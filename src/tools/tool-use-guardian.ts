@@ -66,6 +66,7 @@ export interface PreMutationGateContext {
   targetFiles?: string[];
   validatedTargetFiles?: string[];
   isTrivialEdit?: boolean;
+  evidenceGateMode?: 'observe' | 'enforce';
   risk?: string;
   evidenceScore?: number;
   evidenceThreshold?: number;
@@ -651,9 +652,12 @@ export class ToolUseGuardian {
       && changedLineCount <= 8
       && !isHighRisk;
     const isTrivialFastPath = !isHighRisk && Boolean(gateContext?.isTrivialEdit || isSmallInspectedEdit);
+    const plannedR3FastPath = risk === 'R3' && gateContext?.hasPlan === true && targetInspected;
     const evidenceSufficient = targetEmpiricallyValidated
       || isTrivialFastPath
+      || plannedR3FastPath
       || (targetInspected && evidenceScore >= evidenceThreshold && (!isHighRisk || hasEmpiricalEvidence));
+    let evidenceGateWarning: string | undefined;
 
     // 2c(iii). Cascade-repair freeze: ≥3 consecutive failures on ONE error
     // signature means flailing, not exploration. Mutations stay locked until
@@ -685,17 +689,21 @@ export class ToolUseGuardian {
         ? ` Bằng chứng hiện có: ${gateContext.evidenceReasons.join(', ')}.`
         : '';
       const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto thích ứng chặn "${toolName}" vì uncertainty vẫn cao so với chi phí sai (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần ${missing}.${reasons}`;
-      return {
-        valid: false,
-        allowed: false,
-        coercedArgs: args,
-        wasCoerced: false,
-        coercedKeys: [],
-        error: errorMsg,
-        errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
-        reason: errorMsg,
-        suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
-      };
+      if (gateContext?.evidenceGateMode === 'observe') {
+        evidenceGateWarning = `[EVIDENCE_GATE_OBSERVE]: ${errorMsg}`;
+      } else {
+        return {
+          valid: false,
+          allowed: false,
+          coercedArgs: args,
+          wasCoerced: false,
+          coercedKeys: [],
+          error: errorMsg,
+          errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
+          reason: errorMsg,
+          suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+        };
+      }
     }
 
     // 3. Tự động ép kiểu (Auto-coercion) cho schema không khớp phổ biến
@@ -711,6 +719,7 @@ export class ToolUseGuardian {
       suggestedAlternative,
       warning: [
         hugeRewriteWarning,
+        evidenceGateWarning,
         stats.isUnreliable
           ? `[GUARDIAN ADVISORY] Tool "${toolName}" has failed ${stats.consecutiveFailures} consecutive times (${stats.lastFailureCategory}). Consider alternative: "${suggestedAlternative}".`
           : undefined,

@@ -403,6 +403,33 @@ export function isToolResultFailure(result: Record<string, any>): boolean {
   );
 }
 
+function getToolFailureDetail(result: Record<string, any>): string {
+  const exitDetail = typeof result.exitCode === 'number' && result.exitCode !== 0
+    ? `Process exited with code ${result.exitCode}`
+    : '';
+  const isGenericFailureText = (value: string) =>
+    /^(?:the command completed with exit code \d+\.?|process exited with code \d+|command failed(?: with exit code \d+)?\.?|unknown error)$/i.test(value.trim());
+
+  for (const value of [result.error, result.message, result.diagnostic]) {
+    if (typeof value === 'string' && value.trim() && !isGenericFailureText(value)) return value.trim();
+  }
+
+  const outputLines = [result.stderr, result.stdout]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .flatMap((value) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  const diagnosticCodeLine = outputLines.find((line) => /\b(?:MSB|NETSDK|NU|CS)\d{3,}\b/i.test(line));
+  if (diagnosticCodeLine) return diagnosticCodeLine;
+
+  const causeLine = outputLines.find((line) =>
+    /\b(?:error|failed|failure|exception|fatal|not found|not recognized)\b/i.test(line)
+      && !/^build failed!?$/i.test(line),
+  ) || outputLines.find((line) => /\b(?:error|failed|failure|exception|fatal|not found|not recognized)\b/i.test(line));
+  if (causeLine) return causeLine;
+  if (outputLines.length > 0) return outputLines[0];
+
+  return exitDetail || 'Unknown error';
+}
+
 export function formatToolArgumentPreview(value: unknown, maxLength = 180): string {
   const serialized = JSON.stringify(value);
   const printable = serialized ?? String(value);
@@ -1919,10 +1946,7 @@ export class CLI {
     const duration = durationMs > 0 ? ` ${c.slate}(${durationMs}ms)${c.reset}` : '';
 
     if (isError) {
-      const firstStderrLine = result.stderr ? String(result.stderr).trim().split('\n')[0] : '';
-      const exitDetail = typeof result.exitCode === 'number' && result.exitCode !== 0 ? `Process exited with code ${result.exitCode}` : '';
-      const errDetail = result.error || result.message || firstStderrLine || exitDetail || 'Unknown error';
-      const cleanErr = formatTuiErrorDetail(errDetail, 120);
+      const cleanErr = formatTuiErrorDetail(getToolFailureDetail(result), 120);
       console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${cleanErr}`);
       return;
     }
@@ -2000,10 +2024,7 @@ export class CLI {
     process.stdout.write(`  ${toolPrefix}${targetStr}${statusBadge}${duration}${telemetryStr}\n`);
 
     if (isError) {
-      const firstStderrLine = opts.result.stderr ? String(opts.result.stderr).trim().split('\n')[0] : '';
-      const exitDetail = typeof opts.result.exitCode === 'number' && opts.result.exitCode !== 0 ? `Process exited with code ${opts.result.exitCode}` : '';
-      const errDetail = opts.result.error || opts.result.message || firstStderrLine || exitDetail || 'Unknown error';
-      const cleanErr = formatTuiErrorDetail(errDetail, 120);
+      const cleanErr = formatTuiErrorDetail(getToolFailureDetail(opts.result), 120);
       process.stdout.write(`    ${c.crimson}└─ ${cleanErr}${c.reset}\n`);
     }
   }
@@ -2097,21 +2118,22 @@ export class CLI {
         continue;
       }
 
-      const header = splitMarkdownTableRow(line);
+      const rawHeader = splitMarkdownTableRow(line);
       const separator = i + 1 < lines.length ? splitMarkdownTableRow(lines[i + 1]) : undefined;
-      if (!header || !isMarkdownTableSeparator(separator) || header.length !== separator.length) {
+      if (!rawHeader || !isMarkdownTableSeparator(separator) || rawHeader.length !== separator.length) {
         result.push(line);
         i++;
         continue;
       }
 
+      const header = rawHeader.map((cell) => CLI.formatLatexArrows(cell));
       const colCount = header.length;
       const dataRows: string[][] = [];
       i += 2;
       while (i < lines.length) {
         const row = splitMarkdownTableRow(lines[i]);
         if (!row) break;
-        dataRows.push(Array.from({ length: colCount }, (_, column) => row[column] || ''));
+        dataRows.push(Array.from({ length: colCount }, (_, column) => CLI.formatLatexArrows(row[column] || '')));
         i++;
       }
       const normalizedHeader = Array.from({ length: colCount }, (_, column) => header[column] || '');
@@ -2182,9 +2204,84 @@ export class CLI {
     return result.join('\n');
   }
 
+  static formatLatexArrows(text: string): string {
+    if (!text) return text;
+
+    const arrowMap: Record<string, string> = {
+      // Right arrows
+      rightarrow: '→',
+      righttarrow: '→',
+      to: '→',
+      longrightarrow: '⟶',
+      Rightarrow: '⇒',
+      Longrightarrow: '⟹',
+
+      // Left arrows
+      leftarrow: '←',
+      lefttarrow: '←',
+      gets: '←',
+      longleftarrow: '⟵',
+      Leftarrow: '⇐',
+      Longleftarrow: '⟸',
+
+      // Up arrows
+      uparrow: '↑',
+      toptarrow: '↑',
+      toparrow: '↑',
+      Uparrow: '⇑',
+
+      // Down arrows
+      downarrow: '↓',
+      bottomtarrow: '↓',
+      bottomarrow: '↓',
+      Downarrow: '⇓',
+
+      // Bidirectional
+      leftrightarrow: '↔',
+      longleftrightarrow: '⟷',
+      Leftrightarrow: '⇔',
+      Longleftrightarrow: '⟺',
+      updownarrow: '↕',
+      Updownarrow: '⇕',
+
+      // Mapping & Diagonal
+      mapsto: '↦',
+      longmapsto: '⟼',
+      nearrow: '↗',
+      nwarrow: '↖',
+      searrow: '↘',
+      swarrow: '↙',
+    };
+
+    // 1. Khớp các trường hợp bọc trong $...$, $$...$$, \(...\) chứa lệnh arrow
+    // VD: $\rightarrow$, $$\lefttarrow$$, \( \bottomtarrow \)
+    let formatted = text.replace(/(?:\$\$?|\\\()\s*\\([a-zA-Z]+)\s*(?:\$\$?|\\\))/g, (match, cmd) => {
+      const symbol = arrowMap[cmd];
+      return symbol !== undefined ? symbol : match;
+    });
+
+    // 2. Khớp các lệnh arrow đứng trần hoặc bên trong biểu thức phức tạp hơn
+    formatted = formatted.replace(/\\([a-zA-Z]+)/g, (match, cmd) => {
+      const symbol = arrowMap[cmd];
+      return symbol !== undefined ? symbol : match;
+    });
+
+    // 3. Nếu còn cặp $ bao quanh một ký tự mũi tên đơn lẻ do bước 2 để lại, làm sạch dấu $
+    formatted = formatted.replace(/\$(\s*[→←↑↓⇒⇐⇑⇓↔⟷⇔⟺↕⇕↦⟼↗↖↘↙⟶⟵]\s*)\$/g, '$1');
+
+    return formatted;
+  }
+
   static formatMarkdownTerminal(text: string): string {
     const tableProcessed = CLI.formatMarkdownTables(text);
-    const renderProse = (part: string) => part
+    const renderProse = (part: string) => {
+      const segments = part.split(/(`[^`\n]+`)/g);
+      const processed = segments.map((seg, idx) => {
+        if (idx % 2 === 1) return seg;
+        return CLI.formatLatexArrows(seg);
+      }).join('');
+
+      return processed
           .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
           .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}$1${c.reset}`)
           .replace(/^# (.*$)/gm, `\n${c.brightCyan}${c.bold}=== $1 ===${c.reset}`)
@@ -2198,6 +2295,7 @@ export class CLI {
           .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
           .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
           .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
+    };
     const lines = tableProcessed.split('\n');
     const output: string[] = [];
     let prose: string[] = [];
@@ -2522,6 +2620,7 @@ export class CLI {
 }
 
 export const formatMarkdownTerminal = CLI.formatMarkdownTerminal;
+export const formatLatexArrows = CLI.formatLatexArrows;
 export const renderTaskCancelledToast = CLI.renderTaskCancelledToast.bind(CLI);
 export const renderPromptInputNotice = CLI.renderPromptInputNotice.bind(CLI);
 export const renderDockerStatus = CLI.renderDockerStatus.bind(CLI);

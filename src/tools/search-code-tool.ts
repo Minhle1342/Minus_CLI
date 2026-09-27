@@ -1,6 +1,7 @@
 import { Type } from '@google/genai';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { minimatch } from 'minimatch';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CodeSearchEngine } from '../search/code-search-engine.js';
@@ -76,6 +77,10 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
           type: Type.BOOLEAN,
           description: 'Cho phép khớp gần đúng khi gõ sai nhẹ (mặc định true).',
         },
+        filePattern: {
+          type: Type.STRING,
+          description: 'Mẫu glob tùy chọn để lọc tệp kết quả (ví dụ: "*.ts", "src/**/*.ts", "*.test.ts").',
+        },
         mode: {
           type: Type.STRING,
           enum: ['auto', 'lexical', 'hybrid', 'semantic'],
@@ -117,6 +122,10 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
         };
       }
 
+      const filePattern = typeof args.filePattern === 'string' && args.filePattern.trim()
+        ? args.filePattern.trim()
+        : undefined;
+
       const requestedMode = ['auto', 'lexical', 'hybrid', 'semantic'].includes(String(args.mode))
         ? String(args.mode) as RetrievalMode
         : 'auto';
@@ -155,11 +164,23 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
           }).catch(() => {});
         }
 
+        const filteredLexicalHits = filePattern
+          ? lexicalHits.filter((hit) =>
+              minimatch(hit.path.replace(/\\/g, '/'), filePattern, { matchBase: true, dot: true })
+            )
+          : lexicalHits;
+
+        const filteredSemanticHits = filePattern && semanticHits.length > 0
+          ? semanticHits.filter((hit) =>
+              minimatch(hit.chunk.path.replace(/\\/g, '/'), filePattern, { matchBase: true, dot: true })
+            )
+          : semanticHits;
+
         const effectiveMode = wantsSemantic && semanticFeature === 'on' && !semanticError
           ? decision.mode
           : 'lexical';
         const hits = effectiveMode === 'lexical'
-          ? lexicalHits.slice(0, limit).map((hit) => ({
+          ? filteredLexicalHits.slice(0, limit).map((hit) => ({
               id: `file:${hit.path}`,
               path: hit.path,
               score: hit.score,
@@ -168,7 +189,7 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
               snippet: hit.snippet,
               lines: hit.lineMatches,
             }))
-          : fuseSearchResults(query, decision.mode === 'semantic' ? [] : lexicalHits, semanticHits, limit).map((hit) => ({
+          : fuseSearchResults(query, decision.mode === 'semantic' ? [] : filteredLexicalHits, filteredSemanticHits, limit).map((hit) => ({
               ...hit,
               lines: hit.startLine ? [{ line: hit.startLine, text: hit.snippet.split('\n')[0] || '' }] : [],
             }));
@@ -178,6 +199,7 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
           requestedMode,
           selectedMode: decision.mode,
           effectiveMode,
+          ...(filePattern ? { filePattern } : {}),
           reason: decision.reason,
           selectiveContextFeature,
           ...(selectiveContextFeature === 'shadow' ? { shadowSelectedMode: proposedDecision.mode } : {}),

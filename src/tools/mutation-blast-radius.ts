@@ -1,4 +1,5 @@
 import ts from 'typescript';
+import { Project, SyntaxKind } from 'ts-morph';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { Workspace } from '../workspace/workspace.js';
@@ -317,6 +318,58 @@ export function isTestFile(file: string): boolean {
 }
 
 /**
+ * Tăng cường truy vết callers từ directConsumers bằng ts-morph AST
+ */
+function enrichCallersWithTsMorph(
+  workspace: Workspace,
+  directConsumers: string[],
+  targetSymbols: string[],
+  normTarget: string,
+  callers: Array<{ name: string; file: string; line: number }>,
+  impactedTestSuitesSet: Set<string>,
+): void {
+  if (directConsumers.length === 0 || targetSymbols.length === 0) return;
+
+  try {
+    const project = new Project({
+      compilerOptions: { allowJs: true, skipLibCheck: true, noEmit: true },
+    });
+
+    for (const consumerRel of directConsumers.slice(0, 10)) {
+      if (consumerRel === normTarget) continue;
+      const fullPath = workspace.resolveSafePath(consumerRel);
+      if (!fs.existsSync(fullPath)) continue;
+
+      try {
+        const sourceFile = project.addSourceFileAtPath(fullPath);
+        for (const sym of targetSymbols) {
+          const identifiers = sourceFile.getDescendantsOfKind(SyntaxKind.Identifier)
+            .filter((id) => id.getText() === sym);
+
+          for (const id of identifiers) {
+            const parent = id.getParent();
+            const isImportSpecifier = parent?.getKind() === SyntaxKind.ImportSpecifier;
+            if (!isImportSpecifier) {
+              const line = id.getStartLineNumber();
+              if (!callers.some((c) => c.file === consumerRel && c.line === line)) {
+                callers.push({
+                  name: sym,
+                  file: consumerRel,
+                  line,
+                });
+              }
+              if (isTestFile(consumerRel)) {
+                impactedTestSuitesSet.add(consumerRel);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+/**
  * 3. Tính toán toàn diện Blast Radius đa tầng (Multi-hop Reverse Dependency BFS)
  */
 export function calculateComprehensiveBlastRadius(params: {
@@ -424,6 +477,11 @@ export function calculateComprehensiveBlastRadius(params: {
         }
       }
     } catch {}
+  }
+
+  // 3d. Bổ sung truy vết callers bằng ts-morph cho các file directConsumers
+  if (targetSymbols.length > 0 && directConsumers.length > 0) {
+    enrichCallersWithTsMorph(workspace, directConsumers, targetSymbols, normTarget, callers, impactedTestSuitesSet);
   }
 
   // 4. Đánh giá Mức độ Rủi ro (Risk Level)

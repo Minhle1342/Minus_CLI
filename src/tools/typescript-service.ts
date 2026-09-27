@@ -1,6 +1,7 @@
 import ts from 'typescript';
 import fs from 'node:fs';
 import path from 'node:path';
+import JSON5 from 'json5';
 import type { Workspace } from '../workspace/workspace.js';
 
 export interface SymbolDefinitionResult {
@@ -113,16 +114,30 @@ export class TypeScriptService {
     let loadedOptions: ts.CompilerOptions = {};
     if (fs.existsSync(configPath)) {
       try {
-        const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-        if (configFile.config) {
+        const rawContent = fs.readFileSync(configPath, 'utf-8');
+        const parsedJson = JSON5.parse(rawContent);
+        if (parsedJson) {
           const parsed = ts.parseJsonConfigFileContent(
-            configFile.config,
+            parsedJson,
             ts.sys,
             this.workspace.rootDir,
           );
           loadedOptions = parsed.options || {};
         }
-      } catch {}
+      } catch {
+        // Fallback to standard ts.readConfigFile if JSON5 parse fails
+        try {
+          const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+          if (configFile.config) {
+            const parsed = ts.parseJsonConfigFileContent(
+              configFile.config,
+              ts.sys,
+              this.workspace.rootDir,
+            );
+            loadedOptions = parsed.options || {};
+          }
+        } catch {}
+      }
     }
 
     // Industrial-Grade Tool-Use Guardian:

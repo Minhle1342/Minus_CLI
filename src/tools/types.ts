@@ -1,6 +1,7 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolControlMode } from '../control/classification-types.js';
+import type { PreMutationGateContext } from './tool-use-guardian.js';
 
 export interface ToolExecutionContext {
   sessionId?: string;
@@ -22,6 +23,7 @@ export interface ToolExecutionContext {
   /** Monotonic Harness phase epoch; a new decision is required after it changes. */
   phaseVersion?: number;
   classificationRisk?: string;
+  preMutationGateContext?: PreMutationGateContext;
   /** Set only by the orchestrator after checking session-backed evidence. */
   completionEvidenceVerified?: boolean;
   completionEvidenceReason?: string;

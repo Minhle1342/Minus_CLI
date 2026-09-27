@@ -4,8 +4,62 @@ import path from 'node:path';
 import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { Type } from '@google/genai';
 import { ToolDefinition, ToolExecutionContext } from './types.js';
+
+/**
+ * Tìm kiếm thư mục node_modules của chính CodingAgent để liên kết vào scratch directory
+ */
+function getAgentNodeModulesPath(): string | null {
+  try {
+    let dir = path.dirname(fileURLToPath(import.meta.url));
+    while (dir && dir !== path.dirname(dir)) {
+      const candidate = path.join(dir, 'node_modules');
+      if (fsSync.existsSync(candidate)) {
+        return candidate;
+      }
+      dir = path.dirname(dir);
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+}
+
+/**
+ * Đảm bảo .codingagent/scratch/node_modules liên kết tới node_modules của agent
+ * Giúp cho mọi script chạy qua run_node_script có thể resolve các gói tiện ích (fast-xml-parser, adm-zip, fs-extra, v.v.)
+ * bất kể workspace hiện tại có cài đặt các gói này hay không.
+ */
+function ensureScratchNodeModules(scratchDir: string): void {
+  const scratchModules = path.resolve(scratchDir, 'node_modules');
+  const agentModules = getAgentNodeModulesPath();
+  if (!agentModules) return;
+
+  try {
+    const stat = fsSync.lstatSync(scratchModules);
+    if (stat.isSymbolicLink()) {
+      try {
+        fsSync.statSync(scratchModules);
+        return;
+      } catch {
+        fsSync.unlinkSync(scratchModules);
+      }
+    } else {
+      return;
+    }
+  } catch {
+    // Chưa tồn tại -> tiếp tục tạo
+  }
+
+  try {
+    const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
+    fsSync.symlinkSync(agentModules, scratchModules, symlinkType);
+  } catch {
+    // Bỏ qua nếu có xung đột tạo song song hoặc quyền hạn
+  }
+}
 import { Workspace } from '../workspace/workspace.js';
 import {
   calculateComprehensiveBlastRadius,
@@ -318,7 +372,7 @@ export const runNodeScriptTool: ToolDefinition = {
         inspectedFiles.includes(t.replace(/\\/g, '/').toLowerCase())
       );
 
-      if (!hasValidated && evidenceScore < evidenceThreshold && !allTargetsInspected) {
+      if (gateContext.evidenceGateMode !== 'observe' && !hasValidated && evidenceScore < evidenceThreshold && !allTargetsInspected) {
         const diag: ToolFailureDiagnosis = {
           category: 'PRE_MUTATION_GATE_BLOCKED',
           message: `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto chặn "run_node_script" vì mức độ chắc chắn chưa đạt ngưỡng (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần khảo sát code và hình thành giả thuyết được kiểm chứng trước khi thực thi script sửa mã nguồn.`,
@@ -347,6 +401,7 @@ export const runNodeScriptTool: ToolDefinition = {
     // =========================================================================
     const scratchDir = path.resolve(workspace.rootDir, '.codingagent', 'scratch');
     await fs.mkdir(scratchDir, { recursive: true });
+    ensureScratchNodeModules(scratchDir);
 
     const scriptFileName = `batch-script-${Date.now()}-${randomUUID().slice(0, 8)}${selectScriptExtension(scriptContent)}`;
     const tempScriptPath = path.resolve(scratchDir, scriptFileName);

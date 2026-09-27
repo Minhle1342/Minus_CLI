@@ -101,6 +101,17 @@ test('tool-use-guardian: pre-call validation coerces old_text and new_text alias
   assert.equal('filePath' in validation.coercedArgs, false);
 });
 
+test('tool-use-guardian: observe mode allows low-evidence mutations with a session-visible warning', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    taskClass: 'bugfix', hasValidatedHypothesis: false, risk: 'R3',
+    evidenceGateMode: 'observe', evidenceScore: 0, evidenceThreshold: 5,
+  });
+  const result = guardian.preCallValidate('write_file', { path: 'src/fix.ts', content: 'change' });
+  assert.equal(result.valid, true);
+  assert.match(result.warning || '', /EVIDENCE_GATE_OBSERVE/);
+});
+
 test('tool-use-guardian: pre-call validation coerces TargetContent/ReplacementContent aliases on replace_text', () => {
   const guardian = new ToolUseGuardian();
   const schema = {

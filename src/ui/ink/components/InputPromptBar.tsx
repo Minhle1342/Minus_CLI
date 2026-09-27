@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useWindowSize } from 'ink';
 import { SLASH_COMMANDS } from '../../cli-ui.js';
 import { Workspace } from '../../../workspace/workspace.js';
 import { FileMentionEngine } from '../../../workspace/file-attachment.js';
@@ -12,7 +12,6 @@ import {
   deleteToStart,
   deleteToEnd,
   moveCursor,
-  getNextGraphemeLength,
 } from './input-line-editor.js';
 
 export interface InputPromptBarProps {
@@ -45,17 +44,21 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   initialHistory = [],
   maxHistory = 100,
 }) => {
+  const { columns } = useWindowSize();
   const [value, setValue] = useState('');
   const [cursorOffset, setCursorOffset] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isDismissed, setIsDismissed] = useState(false);
-  const [hasNavigated, setHasNavigated] = useState(false);
 
   // Command History
   const [history, setHistory] = useState<string[]>(initialHistory);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [tempValue, setTempValue] = useState<string>('');
   const lastPasteTimestamp = useRef<number>(0);
+  const graphemes = useMemo(
+    () => Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)),
+    [value],
+  );
 
   // Khởi tạo hoặc tái sử dụng Workspace instance để quét gợi ý file
   const activeWorkspace = useMemo(() => {
@@ -167,7 +170,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       }
     }
     setSelectedIndex(0);
-    setHasNavigated(false);
     setIsDismissed(false);
   };
 
@@ -209,7 +211,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -228,7 +229,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
         setTempValue('');
         setIsDismissed(false);
         setSelectedIndex(0);
-        setHasNavigated(false);
       } else {
         onAbort?.();
       }
@@ -241,7 +241,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     if (key.escape) {
       if (hasActiveSuggestions) {
         setIsDismissed(true);
-        setHasNavigated(false);
       } else if (value.length > 0) {
         setValue('');
         setCursorOffset(0);
@@ -257,7 +256,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     if (key.downArrow) {
       if (hasActiveSuggestions) {
         setSelectedIndex((prev) => (prev + 1) % suggestions.length);
-        setHasNavigated(true);
       } else if (historyIndex !== -1) {
         // Duyệt History về phía gần nhất
         if (historyIndex < history.length - 1) {
@@ -280,7 +278,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     if (key.upArrow) {
       if (hasActiveSuggestions) {
         setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
-        setHasNavigated(true);
       } else if (history.length > 0) {
         // Duyệt History về phía cũ hơn
         if (historyIndex === -1) {
@@ -318,7 +315,7 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
         return;
       }
 
-      if (hasActiveSuggestions && (hasNavigated || suggestionType === 'file')) {
+      if (hasActiveSuggestions) {
         const activeIdx = Math.min(Math.max(0, selectedIndex), suggestions.length - 1);
         const selected = suggestions[activeIdx];
         if (selected) {
@@ -340,7 +337,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
         setValue('');
         setCursorOffset(0);
         setSelectedIndex(0);
-        setHasNavigated(false);
         setIsDismissed(false);
         onSubmit(trimmed);
       }
@@ -369,7 +365,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -381,7 +376,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -393,7 +387,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -423,7 +416,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -435,7 +427,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
       return;
     }
 
@@ -447,7 +438,6 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
       setHistoryIndex(-1);
       setIsDismissed(false);
       setSelectedIndex(0);
-      setHasNavigated(false);
     }
   });
 
@@ -455,6 +445,20 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   const safeSelectedIndex = suggestions.length > 0
     ? Math.min(Math.max(0, selectedIndex), suggestions.length - 1)
     : 0;
+  // ponytail: grapheme count can overflow on wide glyphs; use terminal-cell width measurement if that matters.
+  const visibleCount = Math.max(1, columns - 5);
+  const cursorGraphemeIndex = graphemes.findIndex(({ index }) => index >= cursorOffset);
+  const viewportStart = Math.min(
+    Math.max(0, graphemes.length - visibleCount),
+    Math.max(0, (cursorGraphemeIndex < 0 ? graphemes.length : cursorGraphemeIndex) - visibleCount + 1),
+  );
+  const visibleGraphemes = graphemes.slice(viewportStart, viewportStart + visibleCount);
+  const visibleBeforeCursor = visibleGraphemes.filter(({ index }) => index < cursorOffset).map(({ segment }) => segment).join('');
+  const cursorGrapheme = visibleGraphemes.find(({ index }) => index === cursorOffset)?.segment;
+  const visibleAfterCursor = visibleGraphemes
+    .filter(({ index }) => index > cursorOffset)
+    .map(({ segment }) => segment)
+    .join('');
 
   return (
     <Box flexDirection="column" paddingX={1} marginY={0}>
@@ -505,32 +509,33 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
 
       {/* Dòng nhập lệnh chính với cursor rendering chân thực */}
       {disabled ? (
-        <Box gap={1} marginTop={0}>
+        <Box gap={1} width={Math.max(1, columns - 2)} backgroundColor="gray" marginTop={0}>
           <Text color="red" bold>❯</Text>
           <Text color="gray" dimColor>[Đang thực thi nhiệm vụ... Nhấn Esc hoặc Ctrl+C để hủy yêu cầu]</Text>
         </Box>
       ) : (
-        <Box gap={1} marginTop={0}>
+        <Box gap={1} width={Math.max(1, columns - 2)} backgroundColor="gray" marginTop={0}>
           <Text color="red" bold>❯</Text>
           {value.length === 0 ? (
             <Text color="red">█</Text>
-          ) : cursorOffset >= value.length ? (
+          ) : !cursorGrapheme ? (
             <Box>
-              <Text color="white">{value}</Text>
+              <Text color="white">{visibleGraphemes.map(({ segment }) => segment).join('')}</Text>
               <Text color="red">█</Text>
             </Box>
           ) : (
             <Box>
-              <Text color="white">{value.slice(0, cursorOffset)}</Text>
+              <Text color="white">{visibleBeforeCursor}</Text>
               <Text backgroundColor="white" color="black">
-                {value.slice(cursorOffset, cursorOffset + getNextGraphemeLength(value.slice(cursorOffset)))}
+                {cursorGrapheme}
               </Text>
-              <Text color="white">
-                {value.slice(cursorOffset + getNextGraphemeLength(value.slice(cursorOffset)))}
-              </Text>
+              <Text color="white">{visibleAfterCursor}</Text>
             </Box>
           )}
         </Box>
+      )}
+      {!disabled && value.length === 0 && (
+        <Text color="gray" dimColor>Enter gửi · ↑/↓ lịch sử · Ctrl+O reasoning · Esc xóa/hủy</Text>
       )}
     </Box>
   );

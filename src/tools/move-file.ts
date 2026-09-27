@@ -14,17 +14,17 @@ import { toolError, toolSuccess } from './tool-result.js';
  */
 export const moveFileTool: ToolDefinition = {
   name: 'move_file',
-  description: 'Move or rename a file in the workspace. Creates destination directories as needed and prevents overwriting an existing destination file.',
+  description: 'Move or rename a workspace file with this tool, not a shell command such as `mv`, `move`, or `Move-Item` (those are platform/shell dependent). Call with exactly `sourcePath` for the current path and `targetPath` for the new destination path; `targetPath` is required. Do not use `destinationPath` or `to`. Creates destination directories as needed and prevents overwriting an existing destination file.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       sourcePath: {
         type: Type.STRING,
-        description: 'Current source-file path (for example, "src/old-name.ts").',
+        description: 'Required current source-file path, workspace-relative (for example, "src/old-name.ts").',
       },
       targetPath: {
         type: Type.STRING,
-        description: 'New destination-file path (for example, "src/new-name.ts").',
+        description: 'Required new destination-file path, workspace-relative (for example, "src/new-name.ts"). Use this exact parameter name; do not send destinationPath or to.',
       },
       expectedSourceHash: {
         type: Type.STRING,

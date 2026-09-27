@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import fg from "fast-glob";
 import { Type } from "@google/genai";
 import { ToolDefinition } from "./types.js";
 import { Workspace } from "../workspace/workspace.js";
@@ -7,12 +8,12 @@ import { Workspace } from "../workspace/workspace.js";
 /**
  * Tool 2: list_files
  * Liệt kê danh sách các file và thư mục bên trong một đường dẫn, tự động lọc các thư mục nội bộ.
- * Hỗ trợ pagination để bảo vệ context window trên workspace lớn.
+ * Hỗ trợ pattern (glob), pagination để bảo vệ context window trên workspace lớn.
  */
 export const listFilesTool: ToolDefinition = {
   name: "list_files",
   description:
-    "Liệt kê danh sách các tệp tin và thư mục con trong một thư mục thuộc workspace. Hỗ trợ pagination (limit/offset) và continuation token để duyệt an toàn trên workspace lớn.",
+    "Liệt kê danh sách các tệp tin và thư mục con trong một thư mục thuộc workspace. Hỗ trợ pattern glob (ví dụ: '**/*.ts'), pagination (limit/offset) và continuation token để duyệt an toàn trên workspace lớn.",
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -24,6 +25,11 @@ export const listFilesTool: ToolDefinition = {
       dirPath: {
         type: Type.STRING,
         description: "Alias cho path: thư mục cần liệt kê.",
+      },
+      pattern: {
+        type: Type.STRING,
+        description:
+          'Biểu thức glob tùy chọn để lọc hoặc tìm kiếm tệp tin đệ quy (ví dụ: "**/*.ts", "*.json", "src/**/*.js"). Nếu cung cấp, sẽ sử dụng fast-glob duyệt từ path.',
       },
       limit: {
         type: Type.INTEGER,
@@ -81,20 +87,44 @@ export const listFilesTool: ToolDefinition = {
         };
       }
 
-      const entries = await fs.readdir(safePath, { withFileTypes: true });
-
-      const filteredEntries: Array<{
+      const rawPattern = typeof args.pattern === "string" ? args.pattern.trim() : "";
+      let filteredEntries: Array<{
         name: string;
         type: "file" | "directory";
       }> = [];
 
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          if (!workspace.isIgnoredDirectory(entry.name)) {
-            filteredEntries.push({ name: entry.name, type: "directory" });
+      if (rawPattern) {
+        const globEntries = await fg(rawPattern, {
+          cwd: safePath,
+          dot: false,
+          onlyFiles: false,
+          ignore: [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/dist/**",
+            "**/.codingagent/**",
+            "**/.gemini/**",
+            "**/build/**",
+            "**/coverage/**",
+          ],
+          stats: true,
+        });
+
+        filteredEntries = globEntries.map((e) => ({
+          name: e.path.replace(/\\/g, "/"),
+          type: e.stats?.isDirectory() ? "directory" : "file",
+        }));
+      } else {
+        const entries = await fs.readdir(safePath, { withFileTypes: true });
+
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            if (!workspace.isIgnoredDirectory(entry.name)) {
+              filteredEntries.push({ name: entry.name, type: "directory" });
+            }
+          } else if (entry.isFile()) {
+            filteredEntries.push({ name: entry.name, type: "file" });
           }
-        } else if (entry.isFile()) {
-          filteredEntries.push({ name: entry.name, type: "file" });
         }
       }
 
@@ -109,6 +139,7 @@ export const listFilesTool: ToolDefinition = {
 
       return {
         path: rawPath,
+        ...(rawPattern ? { pattern: rawPattern } : {}),
         entries: paginatedEntries,
         total,
         returned,

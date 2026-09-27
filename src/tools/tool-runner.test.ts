@@ -101,6 +101,29 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     assert.equal(res2.result.pong, true, 'Turn 2 được reset ngân sách và thực thi thành công');
   });
 
+  it('observe-mode evidence warning is stored with the successful tool result', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'write_file',
+      description: 'Write a test file',
+      parameters: {
+        type: 'OBJECT',
+        properties: { path: { type: 'STRING' }, content: { type: 'STRING' } },
+        required: ['path', 'content'],
+      } as any,
+      execute: async () => ({ success: true }),
+    });
+    const runner = new ToolRunner(registry, workspace);
+    runner.guardian.setPreMutationGateContext({
+      taskClass: 'bugfix', hasValidatedHypothesis: false, risk: 'R3',
+      evidenceGateMode: 'observe', evidenceScore: 0, evidenceThreshold: 5,
+    });
+
+    const result = await runner.run('write_file', { path: 'src/observed.ts', content: 'export {};' });
+    assert.equal(result.result.success, true);
+    assert.match(result.result._guardian_warnings?.[0] || '', /EVIDENCE_GATE_OBSERVE/);
+  });
+
   it('3. Stage 0 cung cấp Actionable Guidance và Guardian Diagnosis khi bị từ chối quyền theo phase', async () => {
     const registry = new ToolRegistry();
     registry.register({
@@ -364,4 +387,3 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     }
   });
 });
-

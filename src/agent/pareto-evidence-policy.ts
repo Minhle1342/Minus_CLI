@@ -59,6 +59,7 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
   let hasFailureEvidence = false;
   let hasDiagnosticEvidence = false;
   let hasEmpiricalEvidence = false;
+  let hasWeakInspectionEvidence = false;
   let currentTurn: number | undefined;
 
   for (const event of input.session.getEvents()) {
@@ -85,6 +86,10 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
     if (['read_file', 'read_compressed_code'].includes(toolName) && !failed) {
       const target = normalizePath(args.path || args.filePath || result.path);
       if (target) inspectedFiles.add(target);
+      hasWeakInspectionEvidence = true;
+    }
+    if (toolName === 'search_codebase_fast' && !failed) {
+      hasWeakInspectionEvidence = true;
     }
     if (['inspect_symbol', 'get_symbol_context_360', 'query_call_graph', 'analyze_symbol_flow'].includes(toolName) && !failed) {
       reasons.add('STRUCTURAL_EVIDENCE');
@@ -129,6 +134,10 @@ export function assessParetoEvidence(input: ParetoEvidenceInput): ParetoEvidence
   if (hasFailureEvidence) score += 3;
   if (hasDiagnosticEvidence) score += 2;
   if (reasons.has('STRUCTURAL_EVIDENCE')) score += 1;
+  if (hasWeakInspectionEvidence) {
+    score += 1;
+    reasons.add('WEAK_INSPECTION_EVIDENCE');
+  }
 
   const threshold = getParetoEvidenceThreshold(input.taskClass, input.risk);
   const ratio = score / Math.max(1, threshold);
