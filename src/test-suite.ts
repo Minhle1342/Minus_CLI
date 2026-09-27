@@ -6150,6 +6150,10 @@ Always write tests first!`;
   assert(serverErr.kind === 'SERVER_ERROR', 'Nhận diện đúng SERVER_ERROR (503)');
   assert(serverErr.retryable === true, 'Server error đánh dấu retryable = true');
 
+  const streamFragmentErr = classifyLLMError(new Error('Incomplete JSON segment at the end'));
+  assert(streamFragmentErr.kind === 'SERVER_ERROR', 'Nhận diện Incomplete JSON segment at the end là SERVER_ERROR');
+  assert(streamFragmentErr.retryable === true, 'Đánh dấu stream fragmentation là retryable = true');
+
   // 2. Kiểm thử retryWithExponentialBackoff
   let attemptCount = 0;
   const mockTransientFn = async () => {

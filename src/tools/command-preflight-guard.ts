@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 
 export interface PreflightGuardResult {
   allowed: boolean;
@@ -644,6 +645,19 @@ export function isBareBinaryAvailable(name: string, workspaceRoot?: string): boo
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
     if (dir.trim()) searchDirs.push(dir.trim());
   }
+
+  // Include installed toolchains directory if recipe exists
+  const recipe = findRecipeForBinary(name);
+  if (recipe) {
+    const installRoot = process.env.MINUS_TOOLCHAINS_DIR
+      || (process.platform === 'win32'
+        ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs')
+        : path.join(os.homedir(), '.minus', 'toolchains'));
+    const targetDir = path.join(installRoot, recipe.targetDirName);
+    const binDir = recipe.binSubDir ? path.join(targetDir, recipe.binSubDir) : targetDir;
+    searchDirs.push(binDir);
+  }
+
   outer: for (const dir of searchDirs) {
     for (const candidate of pathextCandidates(name)) {
       try {
@@ -665,8 +679,11 @@ export function clearBinaryProbeCache(): void {
   BINARY_PROBE_CACHE.clear();
 }
 
+import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
+
 export interface MissingBinaryProbe {
   name: string;
+  canAutoProvision?: boolean;
 }
 
 /**
@@ -692,5 +709,6 @@ export function probeMissingBinary(
   if (!base || SHELL_BUILTIN_COMMANDS.has(base.toLowerCase())) return undefined;
   if (EMULATED_FIRST_TOKENS.has(base.toLowerCase())) return undefined;
   if (isBareBinaryAvailable(base, options?.workspaceRoot)) return undefined;
-  return { name: base };
+  const canAutoProvision = Boolean(findRecipeForBinary(base));
+  return { name: base, ...(canAutoProvision ? { canAutoProvision: true } : {}) };
 }

@@ -155,21 +155,138 @@ export class GeminiLLM {
       };
     }
 
-    if (request?.signal?.aborted) {
-      return {
-        text: '',
-        toolCalls: [],
-        finishReason: 'aborted',
-        rawFinishReason: 'aborted',
-      };
-    }
+    return await retryWithExponentialBackoff(
+      async () => {
+        if (request?.signal?.aborted) {
+          return {
+            text: '',
+            toolCalls: [],
+            finishReason: 'aborted',
+            rawFinishReason: 'aborted',
+          };
+        }
 
-    const responseStream = await retryWithExponentialBackoff(
-      () => this.client.models.generateContentStream({
-        model: this.modelName,
-        contents,
-        config: generateConfig,
-      }),
+        const responseStream = await this.client.models.generateContentStream({
+          model: this.modelName,
+          contents,
+          config: generateConfig,
+        });
+
+        const thoughtParts: string[] = [];
+        const regularTextParts: string[] = [];
+        const toolCalls: FunctionCall[] = [];
+        const streamedParts: any[] = [];
+        let rawFinishReason: string | undefined;
+
+        let lastUsage: LLMUsage | undefined;
+
+        for await (const chunk of responseStream) {
+          if (request?.signal?.aborted) {
+            rawFinishReason = 'aborted';
+            break;
+          }
+          if ((chunk as any).usageMetadata) {
+            const meta = (chunk as any).usageMetadata;
+            const promptTokens = meta.promptTokenCount ?? 0;
+            const completionTokens = meta.candidatesTokenCount ?? 0;
+            const totalTokens = meta.totalTokenCount ?? (promptTokens + completionTokens);
+            const cachedTokens = meta.cachedContentTokenCount ?? 0;
+            const cacheHitRate = promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0;
+            lastUsage = {
+              promptTokens,
+              completionTokens,
+              totalTokens,
+              cachedTokens,
+              cacheReadInputTokens: cachedTokens,
+              cacheHitRate,
+            };
+          }
+
+          const candidate = chunk.candidates?.[0];
+          if (candidate?.finishReason !== undefined && candidate.finishReason !== null) {
+            rawFinishReason = String(candidate.finishReason);
+          }
+          if (candidate?.content?.parts) {
+            streamedParts.push(...candidate.content.parts.map((part: any) => cloneJson(part)));
+          }
+
+          if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+            toolCalls.push(...chunk.functionCalls);
+            if (callbacks?.onToolCallEarly) {
+              for (const fc of chunk.functionCalls) {
+                callbacks.onToolCallEarly({
+                  id: (fc as any).id,
+                  name: fc.name || '',
+                  args: (fc.args as Record<string, any>) || {},
+                });
+              }
+            }
+          }
+
+          if (candidate?.content?.parts) {
+            for (const part of candidate.content.parts) {
+              if ('text' in part && typeof (part as any).text === 'string') {
+                const token = (part as any).text;
+                if ((part as any).thought) {
+                  thoughtParts.push(token);
+                  callbacks?.onThoughtToken?.(token);
+                } else {
+                  regularTextParts.push(token);
+                  callbacks?.onContentToken?.(token);
+                }
+              }
+            }
+          }
+        }
+
+        const functionCallParts = streamedParts.filter((part) => part.functionCall);
+        const nonFunctionCallParts = streamedParts.filter((part) => !part.functionCall);
+        const normalizedFunctionCallParts = toolCalls.map((call, index) => {
+          const matchingIndex = functionCallParts.findIndex(
+            (part) => part.functionCall?.name === call.name,
+          );
+          const sourceIndex = matchingIndex >= 0 ? matchingIndex : 0;
+          const sourcePart = functionCallParts[sourceIndex];
+          if (!sourcePart) return undefined;
+          functionCallParts.splice(sourceIndex, 1);
+          const rawThoughtSig = (sourcePart as any).thoughtSignature
+            || (sourcePart as any).thought_signature
+            || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thoughtSignature
+            || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thought_signature;
+
+          const thoughtSignature = ensureBase64ThoughtSignature(rawThoughtSig)
+            || (thoughtParts.length > 0
+              ? Buffer.from(`thought-sig:${thoughtParts.join('').slice(0, 120)}`, 'utf-8').toString('base64')
+              : Buffer.from(`stream-sig:${call.name}:${Date.now()}`, 'utf-8').toString('base64'));
+          return {
+            ...sourcePart,
+            thoughtSignature,
+            functionCall: {
+              ...sourcePart.functionCall,
+              name: call.name,
+              args: call.args || sourcePart.functionCall?.args || {},
+            },
+          };
+        }).filter(Boolean);
+
+        if (toolCalls.length > 0 && normalizedFunctionCallParts.length !== toolCalls.length) {
+          throw new Error('Gemini streaming response contained tool calls without their original functionCall parts. Refusing to persist a call without thought signatures.');
+        }
+
+        const rawContent = streamedParts.length > 0
+          ? { role: 'model' as const, parts: [...nonFunctionCallParts, ...normalizedFunctionCallParts] }
+          : undefined;
+
+        return {
+          text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
+          reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
+          toolCalls,
+          rawContent,
+          finishReason: normalizeGeminiFinishReason(rawFinishReason, toolCalls.length > 0),
+          rawFinishReason,
+          usage: lastUsage,
+        };
+      },
       {
         maxRetries: 3,
         baseDelayMs: 1500,
@@ -177,121 +294,6 @@ export class GeminiLLM {
         jitterMs: 500,
       },
     );
-
-    const thoughtParts: string[] = [];
-    const regularTextParts: string[] = [];
-    const toolCalls: FunctionCall[] = [];
-    const streamedParts: any[] = [];
-    let rawFinishReason: string | undefined;
-
-    let lastUsage: LLMUsage | undefined;
-
-    for await (const chunk of responseStream) {
-      if (request?.signal?.aborted) {
-        rawFinishReason = 'aborted';
-        break;
-      }
-      if ((chunk as any).usageMetadata) {
-        const meta = (chunk as any).usageMetadata;
-        const promptTokens = meta.promptTokenCount ?? 0;
-        const completionTokens = meta.candidatesTokenCount ?? 0;
-        const totalTokens = meta.totalTokenCount ?? (promptTokens + completionTokens);
-        const cachedTokens = meta.cachedContentTokenCount ?? 0;
-        const cacheHitRate = promptTokens > 0 ? Number(((cachedTokens / promptTokens) * 100).toFixed(1)) : 0;
-        lastUsage = {
-          promptTokens,
-          completionTokens,
-          totalTokens,
-          cachedTokens,
-          cacheReadInputTokens: cachedTokens,
-          cacheHitRate,
-        };
-      }
-
-      const candidate = chunk.candidates?.[0];
-      if (candidate?.finishReason !== undefined && candidate.finishReason !== null) {
-        rawFinishReason = String(candidate.finishReason);
-      }
-      if (candidate?.content?.parts) {
-        streamedParts.push(...candidate.content.parts.map((part: any) => cloneJson(part)));
-      }
-
-      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-        toolCalls.push(...chunk.functionCalls);
-        if (callbacks?.onToolCallEarly) {
-          for (const fc of chunk.functionCalls) {
-            callbacks.onToolCallEarly({
-              id: (fc as any).id,
-              name: fc.name || '',
-              args: (fc.args as Record<string, any>) || {},
-            });
-          }
-        }
-      }
-
-      if (candidate?.content?.parts) {
-        for (const part of candidate.content.parts) {
-          if ('text' in part && typeof (part as any).text === 'string') {
-            const token = (part as any).text;
-            if ((part as any).thought) {
-              thoughtParts.push(token);
-              callbacks?.onThoughtToken?.(token);
-            } else {
-              regularTextParts.push(token);
-              callbacks?.onContentToken?.(token);
-            }
-          }
-        }
-      }
-    }
-
-    const functionCallParts = streamedParts.filter((part) => part.functionCall);
-    const nonFunctionCallParts = streamedParts.filter((part) => !part.functionCall);
-    const normalizedFunctionCallParts = toolCalls.map((call, index) => {
-      const matchingIndex = functionCallParts.findIndex(
-        (part) => part.functionCall?.name === call.name,
-      );
-      const sourceIndex = matchingIndex >= 0 ? matchingIndex : 0;
-      const sourcePart = functionCallParts[sourceIndex];
-      if (!sourcePart) return undefined;
-      functionCallParts.splice(sourceIndex, 1);
-      const rawThoughtSig = (sourcePart as any).thoughtSignature
-        || (sourcePart as any).thought_signature
-        || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thoughtSignature
-        || streamedParts.find((p: any) => p.thoughtSignature || p.thought_signature)?.thought_signature;
-
-      const thoughtSignature = ensureBase64ThoughtSignature(rawThoughtSig)
-        || (thoughtParts.length > 0
-          ? Buffer.from(`thought-sig:${thoughtParts.join('').slice(0, 120)}`, 'utf-8').toString('base64')
-          : Buffer.from(`stream-sig:${call.name}:${Date.now()}`, 'utf-8').toString('base64'));
-      return {
-        ...sourcePart,
-        thoughtSignature,
-        functionCall: {
-          ...sourcePart.functionCall,
-          name: call.name,
-          args: call.args || sourcePart.functionCall?.args || {},
-        },
-      };
-    }).filter(Boolean);
-
-    if (toolCalls.length > 0 && normalizedFunctionCallParts.length !== toolCalls.length) {
-      throw new Error('Gemini streaming response contained tool calls without their original functionCall parts. Refusing to persist a call without thought signatures.');
-    }
-
-    const rawContent = streamedParts.length > 0
-      ? { role: 'model' as const, parts: [...nonFunctionCallParts, ...normalizedFunctionCallParts] }
-      : undefined;
-
-    return {
-      text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
-      reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
-      toolCalls,
-      rawContent,
-      finishReason: normalizeGeminiFinishReason(rawFinishReason, toolCalls.length > 0),
-      rawFinishReason,
-      usage: lastUsage,
-    };
   }
 
   /**

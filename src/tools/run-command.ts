@@ -20,8 +20,12 @@ import {
   evaluateCommandPreflight,
   normalizeWindowsCommand,
   probeMissingBinary,
+  clearBinaryProbeCache,
 } from './command-preflight-guard.js';
 import { annotateCommandResult } from './command-outcome.js';
+import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
+import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
+import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { extractRequestedGitBranch } from './git-intent.js';
@@ -73,11 +77,13 @@ const ALLOWED_COMMAND_PREFIXES = [
   'sed ',
   'awk ',
   // Build, Test & Package Management
+  'npm ',
   'npm test',
   'npm run ',
   'npm start',
   'npm --version',
   'npm list',
+  'npx ',
   'npx tsx',
   'npx tsc',
   'npx eslint',
@@ -87,6 +93,10 @@ const ALLOWED_COMMAND_PREFIXES = [
   'node ',
   'node -v',
   'node --version',
+  'uv ',
+  'uv',
+  'uvx ',
+  'uvx',
   'dotnet ',
   'dotnet',
   'python ',
@@ -1042,20 +1052,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           suggestion: 'Yêu cầu người dùng phê duyệt quyền (Permission Approval) nếu thực sự có chủ đích push lên main.',
         };
       }
-      if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
-        const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
-        const misuse = detectFileCommandMisuse(rawCommand);
-        return {
-          command: rawCommand,
-          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) từ người dùng. Các phân đoạn ngoài allowlist: ${deniedSegments.join(', ')}`,
-          errorCode: 'COMMAND_NOT_ALLOWED',
-          deniedSegments,
-          suggestion: misuse
-            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
-            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
-        };
-      }
-
       // Pre-spawn missing-binary probe: fail fast without spawning a shell
       // (e.g. `ruff` absent from PATH cost ~2s per attempt before this gate).
       // Skipped when Docker isolation owns PATH, or via MINUS_BINARY_PROBE=off.
@@ -1067,6 +1063,16 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         for (const segment of shellAnalysis.segments) {
           const missing = probeMissingBinary(segment, { workspaceRoot: workspace.rootDir });
           if (missing) {
+            // Auto-provision hook: nếu binary này có recipe và MINUS_AUTO_PROVISION !== 'off'
+            const autoProvisionEnabled = process.env.MINUS_AUTO_PROVISION?.toLowerCase() !== 'off';
+            if (autoProvisionEnabled && (missing as any).canAutoProvision) {
+              const provisionRes = await ToolchainProvisioner.ensureToolchain(missing.name);
+              if (provisionRes?.success) {
+                clearBinaryProbeCache();
+                continue;
+              }
+            }
+
             const devSuggestion = getDevToolSuggestion(missing.name);
             const fallback = devSuggestion?.fallback;
             return {
@@ -1086,6 +1092,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             };
           }
         }
+      }
+
+      if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
+        const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
+        const misuse = detectFileCommandMisuse(rawCommand);
+        return {
+          command: rawCommand,
+          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) từ người dùng. Các phân đoạn ngoài allowlist: ${deniedSegments.join(', ')}`,
+          errorCode: 'COMMAND_NOT_ALLOWED',
+          deniedSegments,
+          suggestion: misuse
+            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
+            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+        };
       }
 
       // Single Git policy gate (thay thế các tool git_* đã gỡ đăng ký): mọi phân
@@ -1244,12 +1264,53 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
-        const hostResult = await hostSandbox.exec(effectiveCommand, {
+        let hostResult = await hostSandbox.exec(effectiveCommand, {
           cwd: workspace.rootDir,
           timeoutMs,
           signal: context?.signal,
           env: preflight.extractedEnv,
         });
+
+        // Tự động Auto-Provision nếu native command thất bại do thiếu binary
+        const autoProvisionEnabled = process.env.MINUS_AUTO_PROVISION?.toLowerCase() !== 'off';
+        const isMissingOnHost = hostResult.exitCode === 127
+          || hostResult.stderr.includes('not found')
+          || hostResult.stderr.includes('not recognized');
+
+        if (autoProvisionEnabled && isMissingOnHost) {
+          const missingExec = findMissingExecutable(`${hostResult.stderr}\n${hostResult.stdout}`, hostResult.exitCode);
+          if (missingExec && findRecipeForBinary(missingExec)) {
+            const provisionRes = await ToolchainProvisioner.ensureToolchain(missingExec);
+            if (provisionRes?.success) {
+              clearBinaryProbeCache();
+              // Thử lại lệnh sau khi nạp PATH
+              const retryResult = await hostSandbox.exec(effectiveCommand, {
+                cwd: workspace.rootDir,
+                timeoutMs,
+                signal: context?.signal,
+                env: {
+                  ...preflight.extractedEnv,
+                  ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+                },
+              });
+              if (retryResult.exitCode === 0 || retryResult.success) {
+                return annotateCommandResult(rawCommand, {
+                  command: rawCommand,
+                  ...retryResult,
+                  autoProvisioned: {
+                    toolchain: provisionRes.toolchain,
+                    binDir: provisionRes.binDir,
+                    version: provisionRes.version,
+                  },
+                  message: `[Auto-Provision]: Đã tự động tải và cấu hình "${provisionRes.toolchain}" (${provisionRes.version || 'ready'}), lệnh đã được thực thi lại thành công.`,
+                  sandbox: 'local',
+                  executionTarget: 'host',
+                });
+              }
+              hostResult = retryResult;
+            }
+          }
+        }
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu binary không có sẵn trên Host
         const parsedSearch = parseRipgrepCommand(rawCommand);
@@ -1444,6 +1505,57 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               sandboxType: 'local' as const,
               success: exitCode === 0,
             };
+
+            // Tự động Auto-Provision nếu gặp lỗi 127 hoặc not recognized
+            const isMissingInFallback = exitCode === 127 || stderr.includes('not found') || stderr.includes('not recognized');
+            const autoProvOn = process.env.MINUS_AUTO_PROVISION?.toLowerCase() !== 'off';
+            if (autoProvOn && isMissingInFallback) {
+              const missingExec = findMissingExecutable(`${stderr}\n${stdout}`, exitCode);
+              if (missingExec && findRecipeForBinary(missingExec)) {
+                ToolchainProvisioner.ensureToolchain(missingExec).then((provRes) => {
+                  if (provRes?.success) {
+                    clearBinaryProbeCache();
+                    exec(
+                      effectiveCommand,
+                      {
+                        cwd: workspace.rootDir,
+                        timeout: timeoutMs,
+                        signal: context?.signal,
+                        maxBuffer: 1024 * 1024,
+                        env: { ...process.env, ...(preflight.extractedEnv || {}) },
+                      },
+                      (retryErr, retryStdout, retryStderr) => {
+                        const retryExit = retryErr ? (retryErr.code ?? 1) : 0;
+                        const retryRes = {
+                          command: effectiveCommand,
+                          exitCode: retryExit,
+                          stdout: retryStdout,
+                          stderr: retryStderr,
+                          timedOut: Boolean(retryErr?.killed),
+                          durationMs: 0,
+                          sandboxType: 'local' as const,
+                          success: retryExit === 0,
+                          autoProvisioned: {
+                            toolchain: provRes.toolchain,
+                            binDir: provRes.binDir,
+                            version: provRes.version,
+                          },
+                        };
+                        finalizeCommandResult(retryRes, workspace).then(resolve).catch(() => resolve(retryRes));
+                      }
+                    );
+                    return;
+                  }
+                  // Nếu provision fail, tiếp tục quy trình chuẩn đoán bình thường
+                  const diagnosed = {
+                    ...rawResult,
+                    ...diagnoseCommandFailure(effectiveCommand, rawResult),
+                  };
+                  finalizeCommandResult(diagnosed, workspace).then(resolve).catch(() => resolve(diagnosed));
+                });
+                return;
+              }
+            }
 
             // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu gặp lỗi 127
             if (exitCode === 127 || stderr.includes('not found') || stderr.includes('not recognized')) {

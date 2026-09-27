@@ -120,7 +120,7 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     };
   }
 
-  // 4. Kiểm tra Server Error (500, 502, 503, 504, 529, UNAVAILABLE, Overloaded, High Demand)
+  // 4. Kiểm tra Server Error (500, 502, 503, 504, 529, UNAVAILABLE, Overloaded, High Demand, Stream Fragmentation)
   const isServerError =
     (statusCode && statusCode >= 500 && statusCode < 600)
     || rawMessage.includes('unavailable')
@@ -131,6 +131,13 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     || rawMessage.includes('bad gateway')
     || rawMessage.includes('gateway timeout')
     || rawMessage.includes('internal server error')
+    || rawMessage.includes('incomplete json')
+    || rawMessage.includes('json segment')
+    || rawMessage.includes('unexpected end of json')
+    || rawMessage.includes('unterminated string')
+    || rawMessage.includes('premature end of stream')
+    || rawMessage.includes('stream ended prematurely')
+    || rawMessage.includes('econnreset')
     || (typeof error?.status === 'string' && error.status.toUpperCase() === 'UNAVAILABLE');
 
   if (isServerError) {
