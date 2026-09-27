@@ -1,7 +1,7 @@
 import type { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
-import { getTurnCompletionState, type TurnCompletionState } from './completion-observations.js';
-import { CompletionEvidenceGate, type CompletionEvidenceDecision } from './completion-evidence.js';
+import { collectCompletionObservations, getTurnCompletionState, type TurnCompletionState } from './completion-observations.js';
+import { CompletionEvidenceGate, isNonExecutableFile, isToolResultFailure, type CompletionEvidenceDecision } from './completion-evidence.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 import type { HypothesisTracker } from './hypothesis-tracker.js';
@@ -34,6 +34,7 @@ export interface ComposeAcceptanceContract {
 export interface ExplorationSufficiencyParams {
   taskClass?: string;
   session: Session;
+  turn?: number;
   targetFilePath?: string;
   hasReproduction?: boolean;
   hypothesisTracker?: HypothesisTracker;
@@ -52,21 +53,16 @@ export interface ExplorationSufficiencyDecision {
   remediationHint?: string;
 }
 
-function extractInspectedFilesFromSession(session: Session): Set<string> {
+function extractInspectedFilesFromSession(session: Session, turn?: number): Set<string> {
   const inspected = new Set<string>();
-  try {
-    const events = (session as any).getEvents ? (session as any).getEvents() : [];
-    for (const event of events) {
-      if (event.type === 'tool/call') {
-        const toolName = event.data?.toolName;
-        const args = event.data?.args || {};
-        const p = args.path || args.filePath || args.targetFile || args.AbsolutePath || args.file || args.SearchPath || '';
-        if (typeof p === 'string' && p.trim()) {
-          inspected.add(p.trim().replace(/\\/g, '/').toLowerCase());
-        }
-      }
+  for (const observation of collectCompletionObservations(session, turn)) {
+    if (!['read_file', 'view_file', 'read_compressed_code'].includes(observation.toolName)
+      || isToolResultFailure(observation.payload)) continue;
+    const p = observation.args.path || observation.args.filePath || observation.payload.path;
+    if (typeof p === 'string' && p.trim()) {
+      inspected.add(p.trim().replace(/\\/g, '/').toLowerCase());
     }
-  } catch {}
+  }
   return inspected;
 }
 
@@ -87,17 +83,15 @@ export interface CallerEvidence {
  * for the Causal Lineage check). Defensive about result shapes: counts the
  * best available caller signal per tool, skipping failed calls.
  */
-export function extractCallerEvidenceFromSession(session: Session): CallerEvidence {
+export function extractCallerEvidenceFromSession(session: Session, turn?: number): CallerEvidence {
   let count = 0;
   const sources = new Set<string>();
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : -1);
   try {
-    const events = (session as any).getEvents ? (session as any).getEvents() : [];
-    for (const event of events) {
-      if (event.type !== 'tool/result') continue;
-      const toolName = event.data?.toolName;
-      const r = event.data?.result;
-      if (!r || r.error || r.errorCode) continue;
+    for (const observation of collectCompletionObservations(session, turn)) {
+      const toolName = observation.toolName;
+      const r = observation.payload;
+      if (!r || isToolResultFailure(r)) continue;
       if (toolName === 'analyze_impact' && num(r.callers) >= 0) {
         sources.add('analyze_impact');
         count = Math.max(count, r.callers);
@@ -181,6 +175,7 @@ export function filterErrorsToModifiedFiles<T extends { file: string }>(errors: 
 export interface ExplorationExhaustionParams {
   userRequest?: string;
   session: Session;
+  turn?: number;
   finalAnswer?: string;
   gateMode?: 'off' | 'observe' | 'enforce';
 }
@@ -231,18 +226,21 @@ export class CriticGate {
       return { allowed: true, scorePenalty: 0, reasons: [] };
     }
 
-    const inspectedFiles = extractInspectedFilesFromSession(session);
+    const inspectedFiles = extractInspectedFilesFromSession(session, params.turn);
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
+    const hasStructuralEvidence = collectCompletionObservations(session, params.turn).some((item) =>
+      ['analyze_impact', 'query_call_graph', 'get_symbol_context_360', 'inspect_symbol'].includes(item.toolName)
+      && !isToolResultFailure(item.payload));
     const reasons: string[] = [];
     let scorePenalty = 0;
 
     // Zero-Evidence Invariant: Cannot answer architecture or root cause questions without inspecting any code file
-    if (nonScratchInspected.length === 0) {
+    if (nonScratchInspected.length === 0 && !hasStructuralEvidence) {
       scorePenalty += 40;
       reasons.push(
         'EXPLORATION_EXHAUSTED_ZERO_EVIDENCE: Answering an architecture or defect investigation query requires inspecting source files or call-graph context (read_file, GitNexus context/query) before drawing conclusions.',
       );
-    } else if (nonScratchInspected.length === 1 && (isAnalysis || isLeading)) {
+    } else if (nonScratchInspected.length === 1 && !hasStructuralEvidence && (isAnalysis || isLeading)) {
       // Single-File Satisficing / Premature Closure Invariant
       scorePenalty += 20;
       reasons.push(
@@ -285,7 +283,7 @@ export class CriticGate {
       };
     }
 
-    const inspectedFiles = extractInspectedFilesFromSession(session);
+    const inspectedFiles = extractInspectedFilesFromSession(session, params.turn);
     const hasInspectedTarget = Array.from(inspectedFiles).some((f) =>
       normalizedTarget.endsWith(f) || f.endsWith(normalizedTarget) || normalizedTarget.includes(f) || f.includes(normalizedTarget)
     );
@@ -319,7 +317,7 @@ export class CriticGate {
     const isHighOrMediumRisk = ['R2', 'R3', 'R4', 'R5', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(
       (params.risk || '').trim().toUpperCase(),
     );
-    const callerEvidence = extractCallerEvidenceFromSession(session);
+    const callerEvidence = extractCallerEvidenceFromSession(session, params.turn);
     if (isBugfixOrSecurity && isHighOrMediumRisk && !hasReproduction) {
       if (nonScratchInspected.length >= 2) {
         // Inspected chain preserved — no penalty (unchanged behavior).
@@ -483,7 +481,6 @@ export class CriticGate {
     const evidenceDecision = params.evidenceDecision ?? this.evidenceGate.evaluate(finalAnswer, session, {
           userRequest,
           turn,
-          hasSubmittedSolution,
         });
 
     // 2b. Đồng bộ với verify-tier-resolver (single source of truth): thay đổi
@@ -496,7 +493,11 @@ export class CriticGate {
       sensitivePathTouched: Array.from(targetFiles).some((file) => isSensitivePath(file)),
     });
     let highImpactUnverified = false;
-    if (measuredTier.level !== 'LOW' && targetFiles.size > 0
+    // ponytail: docs-only edits share VerificationPolicy's test exemption;
+    // automated tests prove nothing about markdown/config.
+    const allDocsOnly = targetFiles.size > 0
+      && Array.from(targetFiles).every((file) => isNonExecutableFile(file) && !isSensitivePath(file));
+    if (measuredTier.level !== 'LOW' && targetFiles.size > 0 && !allDocsOnly
       && !hasSubmittedSolution
       && !this.evidenceGate.hasVerifiedPassingTest(session, turn)) {
       highImpactUnverified = true;
@@ -531,23 +532,32 @@ export class CriticGate {
     }
 
     // 5. Pillar E2: Exploration Exhaustion Gate for Read-Only / Architecture / Investigation queries
+    // Zero inspection is a hard reject, not just a penalty: 100 - 40 = 60
+    // would otherwise still pass the flat bar. Only when the turn shows tool
+    // use: with no tool calls at all (e.g. no inspection tools registered),
+    // blocking would loop forever with no way to recover.
+    let exhaustionBlocked = false;
     if (targetFiles.size === 0) {
       const exhaustion = this.evaluateExplorationExhaustion({
         userRequest,
         session,
+        turn,
         finalAnswer,
       });
       if (exhaustion.scorePenalty > 0) {
         score -= exhaustion.scorePenalty;
         reasons.push(...exhaustion.reasons);
       }
+      const turnHasToolCalls = session.getEvents().some((event) =>
+        event.type === 'tool/call' && (turn === undefined || (event.data.turn ?? turn) === turn));
+      exhaustionBlocked = !exhaustion.allowed && turnHasToolCalls;
     }
 
     // Ngưỡng phẳng duy nhất 60 cho mọi risk: thang 60/70/80 theo risk đã nghỉ
     // hưu — risk HIGH/CRITICAL được thực thi bằng binary invariants
     // (LSP hard-zero, measured-tier hard reject) thay vì cộng trừ điểm.
     const scoreThreshold = 60;
-    const approved = lspErrors.length === 0 && !highImpactUnverified && score >= scoreThreshold && evidenceDecision.allow;
+    const approved = lspErrors.length === 0 && !highImpactUnverified && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,
@@ -672,7 +682,6 @@ export class CriticGate {
     const evidenceDecision = params.evidenceDecision ?? this.evidenceGate.evaluate(finalAnswer, session, {
           userRequest,
           turn,
-          hasSubmittedSolution,
         });
 
     if (!evidenceDecision.allow) {
@@ -703,21 +712,28 @@ export class CriticGate {
     }
 
     // 5. Pillar E2: Exploration Exhaustion Gate for Read-Only / Architecture / Investigation queries
+    // Zero inspection is a hard reject, not just a penalty — but only when
+    // the turn shows tool use (see sync evaluate() above).
+    let exhaustionBlocked = false;
     if (targetFiles.size === 0) {
       const exhaustion = this.evaluateExplorationExhaustion({
         userRequest,
         session,
+        turn,
         finalAnswer,
       });
       if (exhaustion.scorePenalty > 0) {
         score -= exhaustion.scorePenalty;
         reasons.push(...exhaustion.reasons);
       }
+      const turnHasToolCalls = session.getEvents().some((event) =>
+        event.type === 'tool/call' && (turn === undefined || (event.data.turn ?? turn) === turn));
+      exhaustionBlocked = !exhaustion.allowed && turnHasToolCalls;
     }
 
     // Ngưỡng score theo risk (LOW 60 / MEDIUM 70 / HIGH-CRITICAL 80), thiếu risk giữ ngưỡng cũ 80.
     const { level: riskLevel, threshold: scoreThreshold } = resolveCriticScoreThreshold(params.risk);
-    const approved = lspErrors.length === 0 && score >= scoreThreshold && evidenceDecision.allow;
+    const approved = lspErrors.length === 0 && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,

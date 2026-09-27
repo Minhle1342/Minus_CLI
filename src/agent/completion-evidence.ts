@@ -81,8 +81,11 @@ export function classifyToolEvidence(
   if (isCommandOutcomeBlocked(result)) return [];
   if (isToolResultFailure(result)) return [];
   if (hasObservedMutation(toolName, result)) return ['mutation'];
-  if (toolName === 'submit_solution' || toolName === 'run_test_suite') return ['verification'];
+  if (toolName === 'submit_solution') return ['other'];
+  if (toolName === 'run_test_suite') return result.exitCode === 0 && result.isPassed === true && !args.useScratchWorkspace
+    ? ['verification'] : [];
   if (toolName === 'run_command') {
+    if (result.processStarted === false || result.exitCode !== 0) return [];
     const cmd = extractCommandString(args, result);
     if (isScratchCommand(cmd)) {
       return ['reproduction'];
@@ -135,8 +138,6 @@ export interface CompletionEvidenceOptions {
   userRequest?: string;
   expectedWorkspaceDigest?: string;
   expectedDiffHash?: string;
-  hasSubmittedSolution?: boolean;
-  isPreCallSubmissionCheck?: boolean;
   hasReproduction?: boolean;
   taskClass?: string;
 }
@@ -173,18 +174,14 @@ export class CompletionEvidenceGate {
   ): CompletionEvidenceDecision {
     const executions = this.executionsForTurn(session, options.turn);
     const successful = executions.filter((item) => !isToolResultFailure(item.payload));
-    const failures = executions.filter((item) => isToolResultFailure(item.payload));
+    const failures = executions.filter((item) => isToolResultFailure(item.payload)
+      || isCommandOutcomeBlocked(item.payload)
+      || (item.toolName === 'run_test_suite' && item.payload.isPassed === false));
     const mutations = successful.filter((item) => item.kinds.includes('mutation'));
     const latestMutationSeq = mutations.at(-1)?.result.seq ?? -1;
-    const hasSubmitSolutionTool = successful.some((item) => item.toolName === 'submit_solution' && item.result.seq > latestMutationSeq);
     const verifications = successful.filter(
-      (item) => (item.kinds.includes('verification') || item.toolName === 'submit_solution') && item.result.seq > latestMutationSeq,
+      (item) => item.kinds.includes('verification') && item.result.seq > latestMutationSeq,
     );
-
-    // A fresh submission certifies completion requirements, never unrelated Git or execution claims.
-    const hasCertifiedSubmission = hasSubmitSolutionTool
-      || options.hasSubmittedSolution === true
-      || options.isPreCallSubmissionCheck === true;
 
     const reasons: string[] = [];
 
@@ -198,16 +195,16 @@ export class CompletionEvidenceGate {
       )
     );
 
-    if (!hasCertifiedSubmission && options.codeChangeRequired && mutations.length === 0) {
+    if (options.codeChangeRequired && mutations.length === 0) {
       reasons.push('The request requires a code change, but no successful mutation result exists in this turn.');
     }
-    if (!hasCertifiedSubmission && (options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+    if ((options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
     // Nới lỏng: verification pass sau mutation cuối (test pass / get_diagnostics sạch)
     // được tính là reproduction đủ — không bắt buộc fail-to-pass proof riêng.
     const hasReproProof = options.hasReproduction === true || executions.some((e) => e.kinds.includes('reproduction')) || verifications.length > 0;
-    if (!hasCertifiedSubmission && (options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+    if ((options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('Bugfix resolution requires verification evidence after the fix (reproduction proof or a passing test/diagnostics run) before completion.');
     }
 
@@ -315,7 +312,7 @@ export class CompletionEvidenceGate {
       return isDirect && !isPassiveOrHistorical;
     });
 
-    if (isFirstPersonMutationClaim && mutations.length === 0 && !hasCertifiedSubmission) {
+    if (isFirstPersonMutationClaim && mutations.length === 0) {
       reasons.push('The final answer claims workspace changes without a successful mutation tool result.');
     }
 

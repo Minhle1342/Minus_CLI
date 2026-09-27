@@ -674,15 +674,20 @@ Trong các bước tiếp theo, tôi sẽ hỗ trợ bạn triển khai tính n�
       assert.strictEqual(decision.allow, true, 'Editing non-executable HTML file must not demand automated test runner');
     });
 
-    it('CompletionEvidenceGate: should permit submit_solution pre-call check when isPreCallSubmissionCheck is true', () => {
+    it('CompletionEvidenceGate: pre-call check requires post-mutation verification, no self-certification', () => {
       const gate = new CompletionEvidenceGate();
       const session = new Session();
       session.append('turn/start', { turn: 1 });
       session.append('tool/call', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', args: { targetFile: 'src/App.tsx' } });
       session.append('tool/result', { turn: 1, toolCallId: 'c1', toolName: 'replace_file_content', result: { success: true, filesModified: ['src/App.tsx'] } });
 
-      const preCallDecision = gate.evaluate('', session, { turn: 1, codeChangeRequired: true, isPreCallSubmissionCheck: true });
-      assert.strictEqual(preCallDecision.allow, true, 'isPreCallSubmissionCheck must allow submit_solution tool invocation');
+      const preCallDecision = gate.evaluate('', session, { turn: 1, codeChangeRequired: true });
+      assert.strictEqual(preCallDecision.allow, false, 'mutation without post-mutation verification must block submit');
+
+      session.append('tool/call', { turn: 1, toolCallId: 'c2', toolName: 'run_command', args: { command: 'npm test' } });
+      session.append('tool/result', { turn: 1, toolCallId: 'c2', toolName: 'run_command', result: { success: true, exitCode: 0 } });
+      const verifiedDecision = gate.evaluate('', session, { turn: 1, codeChangeRequired: true });
+      assert.strictEqual(verifiedDecision.allow, true, 'post-mutation test pass must open the submit gate');
     });
   });
 

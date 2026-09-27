@@ -97,3 +97,60 @@ test('critic clears the measured penalty after a passing test', () => {
   });
   assert.ok(!decision.reasons.some((reason) => reason.includes('MEASURED HIGH-IMPACT')), decision.reasons.join('\n'));
 });
+
+test('critic hard-rejects a zero-inspection architecture answer instead of passing on score', () => {
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+  // Tools were available and used, yet nothing was inspected.
+  record(session, 1, 'get_diagnostics', {}, { success: true, clean: true, totalErrors: 0 });
+  const critic = new CriticGate();
+  const decision = critic.evaluate({
+    finalAnswer: 'The parser transforms input into nodes.',
+    session,
+    workspace: {} as any,
+    userRequest: 'Explain the parser architecture',
+    turn: 1,
+  });
+  assert.equal(decision.approved, false);
+  assert.ok(decision.reasons.some((reason) => reason.includes('EXPLORATION_EXHAUSTED_ZERO_EVIDENCE')), decision.reasons.join('\n'));
+});
+
+test('docs-only edits share the test exemption across critic and auditor', () => {
+  const session = new Session();
+  record(session, 1, 'write_file', { path: 'docs/a.md' }, { success: true, path: 'docs/a.md' });
+  record(session, 1, 'write_file', { path: 'docs/b.md' }, { success: true, path: 'docs/b.md' });
+  record(session, 1, 'write_file', { path: 'docs/c.md' }, { success: true, path: 'docs/c.md' });
+  const critic = new CriticGate();
+  const decision = critic.evaluate({
+    finalAnswer: 'Updated all three docs pages.',
+    session,
+    workspace: {} as any,
+    userRequest: 'Update the docs',
+    turn: 1,
+    risk: 'R2',
+  });
+  assert.ok(!decision.reasons.some((reason) => reason.includes('MEASURED HIGH-IMPACT')), decision.reasons.join('\n'));
+
+  const audit = SolutionGroundingAuditor.audit({
+    summary: 'Updated docs/a.md, docs/b.md and docs/c.md.',
+    filesModified: ['docs/a.md', 'docs/b.md', 'docs/c.md'],
+    resolutionType: 'text_or_asset_edit',
+    verificationMethod: 'not_applicable',
+  }, { session, turn: 1 });
+  assert.equal(audit.allowed, true, audit.reasons.join('\n'));
+});
+
+test('auditor accepts a missing optional verificationMethod when the session proves a test pass', () => {
+  const session = new Session();
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['a.ts'] });
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['b.ts'] });
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['c.ts'] });
+  record(session, 1, 'run_command', { command: 'npm test' }, { exitCode: 0, stdout: '3 passed', stderr: '' });
+  const audit = SolutionGroundingAuditor.audit({
+    summary: 'Fixed a.ts, b.ts and c.ts; npm test passed.',
+    filesModified: ['a.ts', 'b.ts', 'c.ts'],
+    verificationEvidence: 'npm test',
+    resolutionType: 'code_fix',
+  }, { session, turn: 1 });
+  assert.equal(audit.allowed, true, audit.reasons.join('\n'));
+});

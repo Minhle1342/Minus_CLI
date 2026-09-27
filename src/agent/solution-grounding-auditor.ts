@@ -1,7 +1,8 @@
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, observedMutationFiles } from './completion-observations.js';
 import { normalizeForMatching } from './final-answer-guard.js';
-import { verifyHighMinFiles } from './verify-tier-resolver.js';
+import { isSensitivePath, verifyHighMinFiles } from './verify-tier-resolver.js';
+import { CompletionEvidenceGate, isNonExecutableFile } from './completion-evidence.js';
 
 export type ResolutionType =
   | 'code_fix'
@@ -165,10 +166,20 @@ export class SolutionGroundingAuditor {
       'direct_validation',
       'not_applicable',
     ];
+    // ponytail: docs-only edits and sessions with a real post-mutation test
+    // pass share the completion gates' exemption; the optional
+    // verificationMethod field must not reject verified work.
+    const allDocsOnly = reconciledFilesModified.length > 0
+      && reconciledFilesModified.every((file) => isNonExecutableFile(file) && !isSensitivePath(file));
+    const sessionVerified = options.session
+      ? new CompletionEvidenceGate().hasVerifiedPassingTest(options.session, options.turn)
+      : false;
     if (
       reconciledFilesModified.length >= verifyHighMinFiles()
       && payload.resolutionType !== 'investigation_only'
       && weakMethods.includes(payload.verificationMethod)
+      && !allDocsOnly
+      && !sessionVerified
     ) {
       return {
         allowed: false,

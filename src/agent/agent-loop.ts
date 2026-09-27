@@ -33,7 +33,7 @@ import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-r
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
-import { CompletionEvidenceGate, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
+import { CompletionEvidenceGate, extractCommandString, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
@@ -72,7 +72,7 @@ import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../test
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { resolveEllipticalFollowUp } from './ellipsis-resolver.js';
-import { isSensitivePath, resolveVerifyTier } from './verify-tier-resolver.js';
+import { isSensitivePath } from './verify-tier-resolver.js';
 import {
   diffReadSnapshots,
   extractReadTargets,
@@ -1197,16 +1197,15 @@ export class AgentLoop {
         minimumRisk: minimumHypothesisRisk,
       };
       const provisionalClassification = this.classificationEngine.classify(classificationInput);
-      const paretoEvidence = assessParetoEvidence({
+      let paretoEvidence = assessParetoEvidence({
         session,
         turn,
         taskClass: provisionalClassification.taskClass,
         risk: provisionalClassification.risk,
-        hasPlan: this.planManager.hasPlan(),
         validatedHypothesisCount: validatedHypotheses.length,
         supportedHypothesisCount,
       });
-      const inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
+      let inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
         && paretoEvidence.inspectedFiles.length > 0;
       const classified = this.classificationEngine.classify({
         ...classificationInput,
@@ -1893,6 +1892,9 @@ export class AgentLoop {
         hypothesisContext,
         hypothesisGuidance,
         domainContractContext,
+        paretoGateReminder: ['bugfix', 'refactor', 'security'].includes(classification.taskClass)
+          ? `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch). In explore/plan, request_phase_transition before editing and wait for the next model response. R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`
+          : undefined,
         phaseGuidance,
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
@@ -2618,6 +2620,32 @@ export class AgentLoop {
 
           // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
           // Chặn toàn bộ các tool call dư thừa (kể cả read_file, run_command) nếu nhiệm vụ đã được submit_solution hoàn tất
+          if (callIndex > 0 && (toolName === 'request_phase_transition' || isMutationTool(toolName))) {
+            const validatedNow = this.hypothesisTracker.getValidatedHypotheses();
+            paretoEvidence = assessParetoEvidence({
+              session, turn, taskClass: classification.taskClass, risk: classification.risk,
+              validatedHypothesisCount: validatedNow.length,
+              supportedHypothesisCount: this.hypothesisTracker.getSupportedHypotheses().length,
+            });
+            inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(classification.risk)
+              && paretoEvidence.inspectedFiles.length > 0;
+            const previousGate = this.toolRunner.guardian.getPreMutationGateContext();
+            this.toolRunner.guardian.setPreMutationGateContext({
+              ...previousGate!,
+              hasPlan: this.planManager.hasPlan(),
+              hasValidatedHypothesis: validatedNow.length > 0,
+              validatedTargetFiles: validatedNow.flatMap((hypothesis) => hypothesis.targetFiles || []),
+              evidenceScore: paretoEvidence.score,
+              evidenceThreshold: paretoEvidence.threshold,
+              evidenceReasons: paretoEvidence.reasons,
+              inspectedFiles: paretoEvidence.inspectedFiles,
+              hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
+              reproductionStatus: {
+                ...previousGate?.reproductionStatus,
+                hasPreFixRepro: paretoEvidence.hasFailureEvidence || validatedNow.length > 0,
+              },
+            });
+          }
           let executionResult: ToolExecutionResult;
           if (hasSubmittedSolution) {
             const redundantPayload = {
@@ -2636,7 +2664,8 @@ export class AgentLoop {
               evidenceRefs: toolArgs.evidenceRefs,
             }, {
               hasPlan: this.planManager.hasPlan(),
-              evidenceSufficient: hasValidatedHypothesis || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+              evidenceSufficient: this.hypothesisTracker.getValidatedHypotheses().length > 0
+                || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
             });
             executionResult = {
               toolName,
@@ -2655,13 +2684,18 @@ export class AgentLoop {
             executionResult = preexecutedReadResult;
           } else {
             // Chạy tool qua pipeline an toàn
-            const originalCodeChangeRequired = this.verificationPolicy.hasPendingModifications()
+            const originalCodeChangeRequired = initialTurnClassification.requiredCapabilities.includes('edit')
+              || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
+              || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
+              || getTurnCompletionState(session, turn).hasMutations
+              || this.verificationPolicy.hasPendingModifications()
               || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0));
             let completionEvidence = toolName === 'submit_solution'
               ? this.completionEvidenceGate.evaluate('', session, {
                 turn,
                 codeChangeRequired: originalCodeChangeRequired,
-                isPreCallSubmissionCheck: true,
+                userRequest: turnUserRequest,
+                taskClass: classification.taskClass,
               })
               : undefined;
             let policyCompletion = toolName === 'submit_solution'
@@ -2672,66 +2706,6 @@ export class AgentLoop {
                 sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => isSensitivePath(file)),
               })
               : undefined;
-
-            // Tool-Use Guardian: JIT Pre-Call Validation Guard cho submit_solution
-            // Harness-measured impact decides whether the cheap diagnostics sweep
-            // may open the gate: HIGH/CRITICAL always demand a real full_test pass.
-            const submitMeasured = {
-              changedFileCount: this.targetFilesModifiedInTurn.size,
-              hasCallers: this.editTouchedCallers,
-              blastRisk: this.maxEditBlastRisk,
-              classificationRisk: classification.risk,
-              sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => isSensitivePath(file)),
-            };
-            if (toolName === 'submit_solution' && (policyCompletion?.allowed !== true || completionEvidence?.allow !== true)) {
-              const submitTier = resolveVerifyTier(submitMeasured);
-              if (submitTier.level !== 'LOW') {
-                policyCompletion = {
-                  allowed: false,
-                  reason: `HIGH_IMPACT_VERIFICATION_REQUIRED: Thay đổi mức ${submitTier.level} (${submitTier.reasons.join('; ')}) bắt buộc automated test pass thật (full_test). JIT diagnostics-sweep không mở cổng cho mức này — hãy chạy test suite (npm test / pytest / go test ...) rồi submit lại.`,
-                  errorCode: 'HIGH_IMPACT_VERIFICATION_REQUIRED',
-                };
-              } else {
-              try {
-                let errors: any[] = [];
-                if (this.targetFilesModifiedInTurn.size > 0) {
-                  const tsService = getOrCreateTypeScriptService(this._workspace);
-                  for (const modFile of this.targetFilesModifiedInTurn) {
-                    if (/\.[cm]?[jt]sx?$/i.test(modFile)) {
-                      try {
-                        errors.push(...tsService.getDiagnostics(modFile).filter((d: any) => d.category === 'error'));
-                      } catch {}
-                    }
-                  }
-                } else {
-                  // Pure read-only / investigation: 0 errors
-                  errors = [];
-                }
-                if (errors.length === 0) {
-                  this.verificationPolicy.recordVerification(
-                    'jit_diagnostics_sweep',
-                    true,
-                    'JIT in-memory diagnostics clean (0 errors)',
-                    0,
-                    { tier: 'typecheck' },
-                  );
-                  policyCompletion = this.verificationPolicy.canComplete();
-                  completionEvidence = this.completionEvidenceGate.evaluate('', session, {
-                    turn,
-                    codeChangeRequired: originalCodeChangeRequired,
-                    isPreCallSubmissionCheck: true,
-                    hasSubmittedSolution: true,
-                  });
-                } else {
-                  policyCompletion = {
-                    allowed: false,
-                    reason: `Phát hiện ${errors.length} lỗi TypeScript chưa được sửa: ${errors.slice(0, 2).map((e: any) => `${e.file}:${e.line} - ${e.message}`).join('; ')}`,
-                    errorCode: 'DIAGNOSTICS_FAILED',
-                  };
-                }
-              } catch {}
-              }
-            }
 
             let ocrCompletion: OcrGateDecision = {
               allow: true,
@@ -2916,7 +2890,7 @@ export class AgentLoop {
           }
 
           // Attach only verified pre-edit attribution; never infer ownership from exit code alone.
-          const commandForAttribution = String(toolArgs.command || toolArgs.CommandLine || '');
+          const commandForAttribution = extractCommandString(toolArgs, executionResult.result);
           const mutationBeforeCommand = toolName === 'run_command' && isVerificationCommand(commandForAttribution)
             ? getTurnCompletionState(session, turn)
             : undefined;
@@ -3028,15 +3002,20 @@ export class AgentLoop {
           }
           if (toolName === 'run_command') {
             const regressionEvidence = executionResult.result.regressionEvidence;
-            this.verificationPolicy.recordVerification(
-              String(toolArgs.command || ''),
-              !isToolResultFailure(executionResult.result),
-              String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
-              executionResult.result.exitCode,
-              { hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined },
-            );
-            if (isVerificationCommand(toolArgs.command) && this.targetFilesModifiedInTurn.size > 0) {
-              const isVerifOk = !isToolResultFailure(executionResult.result) && (executionResult.result.exitCode === 0 || executionResult.result.exitCode === undefined);
+            const commandExecuted = executionResult.result?.processStarted !== false
+              && executionResult.result?.commandOutcome !== 'blocked_preflight'
+              && typeof executionResult.result?.exitCode === 'number';
+            if (commandExecuted) {
+              this.verificationPolicy.recordVerification(
+                commandForAttribution,
+                !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0,
+                String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
+                executionResult.result.exitCode,
+                { hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined },
+              );
+            }
+            if (commandExecuted && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
+              const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
               for (const modifiedF of this.targetFilesModifiedInTurn) {
                 if (isVerifOk) {
                   this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedF);
@@ -3046,18 +3025,17 @@ export class AgentLoop {
               }
             }
             this.lastCommandExecutionState = {
-              command: String(toolArgs?.command || toolArgs?.CommandLine || ''),
-              success: executionResult.result?.commandOutcome !== 'blocked_preflight'
-                && !isToolResultFailure(executionResult.result)
-                && (executionResult.result?.exitCode === 0 || executionResult.result?.exitCode === undefined),
+              command: commandForAttribution,
+              success: commandExecuted && !isToolResultFailure(executionResult.result)
+                && executionResult.result?.exitCode === 0,
               exitCode: executionResult.result?.exitCode,
               commandOutcome: executionResult.result?.commandOutcome,
               filesModifiedSince: 0,
             };
 
             // AUTO-CLEANUP: Tự động xóa các file scratch tạm ngay khi lệnh kiểm thử chạy thành công mà không tốn thêm step xóa
-            if (!isToolResultFailure(executionResult.result) && (executionResult.result.exitCode === 0 || executionResult.result.exitCode === undefined)) {
-              const cmd = String(toolArgs.command || '');
+            if (commandExecuted && !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0) {
+              const cmd = commandForAttribution;
               const cleanedFiles: string[] = [];
               for (const scratchFile of Array.from(this.ephemeralScratchFiles)) {
                 const baseName = path.basename(scratchFile);
@@ -3138,12 +3116,6 @@ export class AgentLoop {
             }
             submittedSolutionSummary = richSummaryParts.length > 0 ? richSummaryParts.join('\n') : summaryText;
 
-            this.verificationPolicy.recordVerification(
-              String(toolArgs.verificationEvidence || 'submit_solution'),
-              true,
-              summaryText.slice(0, 240),
-              0,
-            );
           }
           if (toolName === 'report_investigation_findings' && !isToolResultFailure(executionResult.result)) {
             hasReportedFindings = true;
@@ -3188,7 +3160,7 @@ export class AgentLoop {
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
           } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
             this.reflectionEngine.reset();
-            if (isVerificationCommand(toolArgs.command)) {
+            if (isVerificationCommand(commandForAttribution)) {
               const lastCp = this.checkpointManager.getLastCheckpoint();
               if (lastCp) {
                 this.rollbackOrchestrator.markGreenCheckpoint(lastCp);
@@ -3264,7 +3236,7 @@ export class AgentLoop {
             } catch { }
           }
 
-          const commandText = String(toolArgs.command || toolArgs.CommandLine || executionResult.result?.command || '');
+          const commandText = commandForAttribution;
           const failureInvestigation = toolName === 'run_command'
             && isVerificationCommand(commandText)
             && reflectionAnalysis.isFailure
@@ -3305,7 +3277,7 @@ export class AgentLoop {
           }
 
           const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
-            || (toolName === 'run_command' && isVerificationCommand(toolArgs.command));
+            || (toolName === 'run_command' && isVerificationCommand(commandForAttribution));
           let lspPreExecutionWarning: string | undefined;
           if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
             const mutFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
@@ -3382,9 +3354,10 @@ export class AgentLoop {
           }
           const verificationCommand = toolName === 'get_diagnostics'
             ? 'get_diagnostics'
-            : String(executionResult.result?.commandExecuted || toolArgs?.command || 'run_test_suite');
+            : String(executionResult.result?.commandExecuted || commandForAttribution || 'run_test_suite');
           const executedVerification = (toolName === 'run_command' && isVerificationCommand(verificationCommand)
             && typeof executionResult.result?.exitCode === 'number'
+            && executionResult.result?.processStarted !== false
             && executionResult.result?.commandOutcome !== 'blocked_preflight')
             || (toolName === 'get_diagnostics' && !executionResult.result?.errorCode)
             || (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace
@@ -3397,6 +3370,7 @@ export class AgentLoop {
               turn,
               verificationCommand,
               !isToolResultFailure(executionResult.result)
+                && (toolName === 'get_diagnostics' || executionResult.result.exitCode === 0)
                 && (toolName !== 'get_diagnostics' || executionResult.result?.clean === true)
                 && (toolName !== 'run_test_suite' || executionResult.result?.isPassed === true),
               this.verificationPolicy.canComplete().allowed,
@@ -3414,13 +3388,18 @@ export class AgentLoop {
           });
           if (this.trajectorySteps.length > 20) this.trajectorySteps.shift();
 
-          const cmdStr = String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
+          const cmdStr = toolName === 'run_command'
+            ? commandForAttribution
+            : String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
           const isVerifOrReproCommand = isVerificationCommand(cmdStr)
             || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
             || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
           if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
-            const isFailure = isToolResultFailure(executionResult.result)
-              || (executionResult.result?.commandOutcome !== 'blocked_preflight' && executionResult.result?.exitCode !== 0);
+            const isFailure = typeof executionResult.result?.exitCode === 'number'
+              && executionResult.result.exitCode !== 0
+              && executionResult.result?.processStarted !== false
+              && executionResult.result?.commandOutcome !== 'blocked_preflight'
+              && !['COMMAND_NOT_FOUND', 'COMMAND_TIMEOUT', 'COMMAND_RESOURCE_LIMIT', 'PERMISSION_DENIED', 'COMMAND_NOT_ALLOWED'].includes(String(executionResult.result?.errorCode || ''));
             if (isFailure) {
               this.verificationPolicy.recordReproductionAttempt(cmdStr, true);
             }
@@ -3719,7 +3698,6 @@ export class AgentLoop {
           turn,
           codeChangeRequired,
           userRequest: turnUserRequest,
-          hasSubmittedSolution,
           taskClass: initialTurnClassification.taskClass,
           hasReproduction: this.verificationPolicy.hasReproduction(),
         });
