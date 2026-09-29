@@ -27,7 +27,7 @@ export interface ToolSynergyContext {
 }
 
 export interface ToolAdvice {
-  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'POST_SUBMISSION' | 'GENERAL';
+  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'H_BROWSER' | 'POST_SUBMISSION' | 'GENERAL';
   guidance: string;
   suggestedTools: string[];
 }
@@ -100,6 +100,24 @@ export class ToolSynergyAdvisor {
         guidance: 'Background task is active. Use "schedule" (with TimerCondition) to wait reactively without polling, or "manage_task(send_input)" if interactive prompt is waiting.',
         suggestedTools: ['schedule', 'manage_task'],
       };
+    }
+
+    // 2a. Browser automation flow (Playbook H: Playwright MCP)
+    if (lastToolName && lastToolName.startsWith('browser_')) {
+      if (lastToolName === 'browser_navigate' || lastToolName === 'browser_click' || lastToolName === 'browser_type' || lastToolName === 'browser_wait') {
+        return {
+          playbook: 'H_BROWSER',
+          guidance: 'Browser action done. Call "browser_snapshot" to get fresh refs before next click/type. Sequence: navigate -> snapshot -> click/type -> wait -> snapshot. Call "browser_close" when done.',
+          suggestedTools: ['browser_snapshot', 'browser_click', 'browser_type', 'browser_wait', 'browser_close'],
+        };
+      }
+      if (lastToolName === 'browser_snapshot' || lastToolName === 'browser_screenshot') {
+        return {
+          playbook: 'H_BROWSER',
+          guidance: 'Snapshot captured. Use refs (e.g. e12) with "browser_click"/"browser_type" for SPA/login/form interaction.',
+          suggestedTools: ['browser_click', 'browser_type', 'browser_wait', 'browser_close'],
+        };
+      }
     }
 
     // 2.5. Sự cố apply_patch (Lỗi format patch hoặc FUZZY_CANDIDATE_FOUND)

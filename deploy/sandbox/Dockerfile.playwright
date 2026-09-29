@@ -1,0 +1,12 @@
+# Playwright browser sandbox (isolated, headless).
+# Build: docker build -t minus-playwright:latest -f deploy/sandbox/Dockerfile.playwright .
+# Run: MCP server runs inside this image; workspace mounted read-write at /workspace,
+# browser profile is ephemeral (use --isolated).
+FROM mcr.microsoft.com/playwright:v1.49.0-noble
+
+WORKDIR /workspace
+RUN npm i -g @playwright/mcp@0.0.25
+ENV PLAYWRIGHT_MCP_HEADLESS=1 \
+    PLAYWRIGHT_MCP_ISOLATED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENTRYPOINT ["npx", "@playwright/mcp"]

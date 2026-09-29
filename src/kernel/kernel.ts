@@ -27,6 +27,7 @@ import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
 import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { DreamManager } from '../dream/dream-manager.js';
+import { McpManager } from '../mcp/mcp-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
@@ -165,6 +166,7 @@ export interface KernelContext {
   sandbox: SandboxManager;
   tasks: TaskManager;
   schedules: ScheduleManager;
+  browserMcp: McpManager;
   sharedContext: SharedContextService;
   agentEvents: AgentEventBus;
   orchestrator: AgentOrchestrator;
@@ -236,6 +238,8 @@ export class AgentKernel {
     tools.attachAgentEventBus(agentEvents);
     tools.attachAgentOrchestrator(orchestrator);
     tools.attachGitTools(workspace);
+    const browserMcp = new McpManager();
+    tools.attachBrowserManager(browserMcp);
     const permissions = new PermissionManager();
     tools.attachPermissionManager(permissions);
     const toolRunner = new ToolRunner(tools, workspace, permissions, compose);
@@ -265,6 +269,7 @@ export class AgentKernel {
       sandbox,
       tasks,
       schedules,
+      browserMcp,
       sharedContext,
       agentEvents,
       orchestrator,

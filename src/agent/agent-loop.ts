@@ -2691,11 +2691,12 @@ export class AgentLoop {
               || this.verificationPolicy.hasPendingModifications()
               || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0));
             let completionEvidence = toolName === 'submit_solution'
-              ? this.completionEvidenceGate.evaluate('', session, {
+              ? this.completionEvidenceGate.evaluate(String(toolArgs.summary || ''), session, {
                 turn,
                 codeChangeRequired: originalCodeChangeRequired,
                 userRequest: turnUserRequest,
                 taskClass: classification.taskClass,
+                resolutionType: typeof toolArgs.resolutionType === 'string' ? toolArgs.resolutionType : undefined,
               })
               : undefined;
             let policyCompletion = toolName === 'submit_solution'

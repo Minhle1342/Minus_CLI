@@ -140,6 +140,7 @@ export interface CompletionEvidenceOptions {
   expectedDiffHash?: string;
   hasReproduction?: boolean;
   taskClass?: string;
+  resolutionType?: string;
 }
 
 function stripQuotedAndToolOutputs(answer: string, toolOutputs: string[] = []): string {
@@ -185,6 +186,12 @@ export class CompletionEvidenceGate {
 
     const reasons: string[] = [];
 
+    // Ngoại lệ blocker ngoài tầm kiểm soát: investigation_only kèm quan sát
+    // tool thất bại (vd: git clone 404) thì không đòi mutation. Vẫn giữ các
+    // luật chống ảo giác verify/commit/push bên dưới.
+    const isBlockedInvestigation = options.resolutionType === 'investigation_only' && failures.length > 0;
+    const effectiveCodeChangeRequired = isBlockedInvestigation ? false : options.codeChangeRequired;
+
     // Thu thập đường dẫn các file đã được chỉnh sửa
     const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));
     const allMutationsAreNonExecutable = mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile) && mutations.every((m) => observedMutationFiles(m.toolName, m.args, m.payload).length > 0);
@@ -195,10 +202,10 @@ export class CompletionEvidenceGate {
       )
     );
 
-    if (options.codeChangeRequired && mutations.length === 0) {
+    if (effectiveCodeChangeRequired && mutations.length === 0) {
       reasons.push('The request requires a code change, but no successful mutation result exists in this turn.');
     }
-    if ((options.codeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
+    if ((effectiveCodeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
     // Nới lỏng: verification pass sau mutation cuối (test pass / get_diagnostics sạch)
@@ -287,7 +294,7 @@ export class CompletionEvidenceGate {
       return isCurrentRunAssertion;
     });
 
-    if (verifications.length === 0 && (claimsFirstPersonVerification || (claimsCurrentTurnVerification && (options.codeChangeRequired || mutations.length > 0)))) {
+    if (verifications.length === 0 && (claimsFirstPersonVerification || (claimsCurrentTurnVerification && (effectiveCodeChangeRequired || mutations.length > 0)))) {
       reasons.push('The final answer claims successful verification without matching run_command evidence.');
     }
     const isFirstPersonMutationClaim = sentences.some((sentence) => {
@@ -410,7 +417,7 @@ export class CompletionEvidenceGate {
     }
 
     if (reasons.length === 0) return { allow: true, reasons: [] };
-    const missingMutation = Boolean(options.codeChangeRequired && mutations.length === 0);
+    const missingMutation = Boolean(effectiveCodeChangeRequired && mutations.length === 0);
     const missingVerification = mutations.length > 0 && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting;
     const recovery = missingMutation ? 'execute-task' : missingVerification ? 'verify-changes' : 'revise-answer';
     return {

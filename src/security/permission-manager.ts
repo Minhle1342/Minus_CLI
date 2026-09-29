@@ -419,6 +419,21 @@ export class PermissionManager {
       };
     }
 
+    if (toolName.startsWith('browser_')) {
+      const navTarget = String(args.url || args.selector || args.ref || toolName);
+      const isWrite = toolName === 'browser_click' || toolName === 'browser_type';
+      return {
+        id,
+        toolName,
+        category: 'general',
+        target: navTarget.slice(0, 300),
+        summary: isWrite ? `Tương tác browser ngoài codebase (${toolName})` : `Đọc web qua browser tự hành (${toolName})`,
+        riskLevel: isWrite ? 'HIGH' : 'MEDIUM',
+        details: args,
+        timestamp,
+      };
+    }
+
     if (toolName.startsWith('git_')) {
       const isPushOrReset = toolName === 'git_push' || toolName === 'git_reset' || String(args.subcommand || '').includes('push') || String(args.subcommand || '').includes('reset');
       return {

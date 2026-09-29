@@ -173,6 +173,7 @@ export class ToolRetriever {
     const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
     const isMultiAgentQuery = /\b(subagent|delegate|swarm|dag|shared_context|event_bus|orchestrat|blackboard|state|occ|lock)\b/i.test(lowerQ);
     const isNetworkQuery = /\b(web|internet|online|browse|research|latest|current|news|url|website|citation|external|documentation)\b/i.test(lowerQ);
+    const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
     const isVisionQuery = /\b(image|screenshot|photo|picture|vision|diagram|pixel)\b/i.test(lowerQ);
 
@@ -183,6 +184,7 @@ export class ToolRetriever {
       if (tool.name === 'schedule' && !isScheduleQuery) return false;
       if (cat === 'multi_agent' && !isMultiAgentQuery) return false;
       if (cat === 'network' && !isNetworkQuery) return false;
+      if (cat === 'browser' && !isNetworkQuery && !isBrowserQuery) return false;
       if (cat === 'memory' && !isMemoryQuery) return false;
       if (tool.name === 'inspect_image' && !isVisionQuery) return false;
       return true;
@@ -302,6 +304,7 @@ export class ToolRetriever {
     if (/(caller|callee|dependency|impact|symbol|architecture|graph)/.test(q) && category === 'code_intelligence') boost += 0.16;
     if (/(test|verify|build|compile)/.test(q) && /run|diagnostic|test|command/.test(toolName)) boost += 0.14;
     if (/(web|research|paper|documentation|internet)/.test(q) && category === 'network') boost += 0.16;
+    if (/(browser|playwright|spa|login|form|e2e|snapshot|navigate)/.test(q) && category === 'browser') boost += 0.22;
     if (/(edit|patch|fix|modify|implement)/.test(q) && category === 'filesystem_mutation') boost += 0.10;
     return boost;
   }
@@ -332,6 +335,7 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
+    if (name.startsWith('browser_')) return 'browser';
     if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
     if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
     if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
@@ -382,6 +386,9 @@ export class ToolRetriever {
     }
     if (text.includes('web') || text.includes('fetch') || text.includes('url') || text.includes('scrape') || text.includes('searxng') || text.includes('online')) {
       tags.add('web fetch url browse search online internet research documentation issue');
+    }
+    if (text.includes('browser') || text.includes('playwright') || text.includes('snapshot') || text.includes('navigate')) {
+      tags.add('browser playwright automation spa login form navigate snapshot click type e2e dynamic render');
     }
     if (text.includes('read') || text.includes('view') || text.includes('inspect') || text.includes('list')) {
       tags.add('read inspect explore view list');

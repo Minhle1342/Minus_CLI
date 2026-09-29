@@ -53,6 +53,8 @@ import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompac
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { requestPhaseTransitionTool } from './request-phase-transition.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
+import type { McpManager } from '../mcp/mcp-manager.js';
+import { createBrowserTools } from './browser-tools.js';
 
 
 export interface ToolProvider {
@@ -190,6 +192,12 @@ export class ToolRegistry implements ToolProvider {
   attachComputerController(controller: ComputerController): void {
     this.computerController = controller;
     this.register(createComputerTool(this.computerController));
+  }
+
+  attachBrowserManager(manager: McpManager): void {
+    for (const tool of createBrowserTools(manager)) {
+      if (!this.tools.has(tool.name)) this.register(tool);
+    }
   }
 
   getComputerController(): ComputerController {
