@@ -306,6 +306,7 @@ export class ToolRetriever {
     if (/(web|research|paper|documentation|internet)/.test(q) && category === 'network') boost += 0.16;
     if (/(browser|playwright|spa|login|form|e2e|snapshot|navigate)/.test(q) && category === 'browser') boost += 0.22;
     if (/(edit|patch|fix|modify|implement)/.test(q) && category === 'filesystem_mutation') boost += 0.10;
+    if (/(verify|dry.run|check.*match|validate.*edit|pre.check)/.test(q) && category === 'filesystem_verification') boost += 0.20;
     return boost;
   }
 
@@ -335,6 +336,7 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
+    if (name === 'verify_edit') return 'filesystem_verification';
     if (name.startsWith('browser_')) return 'browser';
     if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
     if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';

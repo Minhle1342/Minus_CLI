@@ -2381,6 +2381,7 @@ export class AgentLoop {
 
         let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
         let toolBatchCancelled = false;
+        let userDeniedPermission: { toolName: string; detail: string } | undefined;
         let phaseTransitionAcceptedInResponse = false;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
@@ -3456,6 +3457,19 @@ export class AgentLoop {
           if (progressDecision.shouldStop) {
             strategyChangeRequired = { toolName, repetitionCount: progressDecision.repetitionCount };
           }
+
+          // Explicit user denial ([n]/Esc/Ctrl+C at the permission prompt):
+          // stop dispatching further tools this step; the turn ends below
+          // instead of letting the model route around the denial.
+          if (executionResult.result?.deniedByUser === true) {
+            userDeniedPermission = {
+              toolName,
+              detail: String(
+                executionResult.result?.error || executionResult.result?.summary || executionResult.result?.errorCode || 'permission denied',
+              ).slice(0, 240),
+            };
+            break;
+          }
         }
 
         const stepReason = toolBatchCancelled
@@ -3491,6 +3505,14 @@ export class AgentLoop {
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
           this.goalManager.disarm();
           return cancellationMessage;
+        }
+
+        if (userDeniedPermission) {
+          const denialMessage = `Agent stopped: you denied permission for ${userDeniedPermission.toolName} (${userDeniedPermission.detail}). The turn has ended and no further tools were executed — tell me how to proceed (adjust the approach, approve a narrower action, or stop).`;
+          await CLI.renderExecutionStopped(denialMessage, 'PERMISSION_DENIED_BY_USER');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'permission-denied-by-user');
+          this.goalManager.disarm();
+          return denialMessage;
         }
 
         // submit_solution already contains a comprehensive, evidence-backed

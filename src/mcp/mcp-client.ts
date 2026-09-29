@@ -34,7 +34,8 @@ export class McpStdioClient {
         this.proc = spawn(this.config.command, this.config.args, {
           env: { ...process.env, ...this.config.env },
           stdio: ['pipe', 'pipe', 'pipe'],
-          shell: false,
+          shell: this.config.shell ?? false,
+          windowsHide: true,
         });
       } catch (err: any) {
         this.lastError = err?.message || String(err);
@@ -47,7 +48,10 @@ export class McpStdioClient {
         this.lastError = String(d).slice(0, 500);
       });
       p.on('error', (err) => {
-        this.lastError = (err as any)?.message || String(err);
+        const code = (err as any)?.code;
+        this.lastError = code
+          ? `spawn ${this.config.command} failed (${code}): ${(err as any)?.message || err}`
+          : ((err as any)?.message || String(err));
         reject(err);
       });
       p.on('exit', () => {

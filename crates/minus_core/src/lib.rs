@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod search;
 pub mod security;
 pub mod symbols;
+pub mod toolchain;
 pub mod vector;
 pub mod workspace;
 
@@ -23,6 +24,7 @@ pub use runtime::{
 pub use search::{batch_read_files_native, search_codebase_native, RsBatchFileReadResult, RsSearchMatch, RsSearchResult};
 pub use security::{parse_shell_command, resolve_safe_path_internal, RsPathResult, RsShellAnalysis};
 pub use symbols::{extract_file_symbols_native, find_symbol_in_file_native, RsSymbolDefinition};
+pub use toolchain::{extract_archive_native, scan_path_for_binaries_native, RsExtractResult};
 pub use vector::{batch_cosine_similarity_simd, cosine_similarity_simd, generate_subword_embedding_native};
 pub use workspace::{
     vfs_commit_to_disk_native, vfs_create_session_native, vfs_delete_file_native,
@@ -325,7 +327,6 @@ pub fn rs_compact_history(
 pub fn rs_extract_file_symbols(file_path: String, content: Option<String>) -> Vec<RsSymbolDefinition> {
     extract_file_symbols_native(&file_path, content.as_deref())
 }
-
 #[napi]
 pub fn rs_find_symbol_in_file(
     file_path: String,
@@ -333,4 +334,21 @@ pub fn rs_find_symbol_in_file(
     content: Option<String>,
 ) -> RsSymbolDefinition {
     find_symbol_in_file_native(&file_path, &symbol_name, content.as_deref())
+}
+
+/// Extract a .zip/.tar.gz/.tgz archive straight into dest_dir (single pass,
+/// no temp dir, no external tar/unzip process). Throws on error.
+#[napi]
+pub fn rs_extract_archive(
+    archive_path: String,
+    dest_dir: String,
+    strip_top_level: bool,
+) -> napi::Result<RsExtractResult> {
+    extract_archive_native(&archive_path, &dest_dir, strip_top_level).map_err(napi::Error::from_reason)
+}
+
+/// Bulk PATH probe: return absolute paths of exact file-name hits across dirs.
+#[napi]
+pub fn rs_scan_path_for_binaries(dirs: Vec<String>, file_names: Vec<String>) -> Vec<String> {
+    scan_path_for_binaries_native(&dirs, &file_names)
 }

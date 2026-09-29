@@ -36,9 +36,18 @@ PLAYWRIGHT_MCP_MOCK=1  # chỉ cho unit test, không spawn npx
 ## Test
 
 ```bash
-node --import tsx --test src/tools/browser-tools.test.ts
+node --import tsx --test src/tools/browser-tools.test.ts src/mcp/mcp-launch.test.ts
 PLAYWRIGHT_MCP_MOCK=1 node --import tsx --test src/tools/browser-tools.test.ts
 ```
+
+## Khắc phục spawn EINVAL
+
+Thứ tự launch (`resolveServerLaunch` trong `src/mcp/mcp-manager.ts`):
+
+1. `PLAYWRIGHT_MCP_COMMAND` (override; trỏ npx cũng được — code tự ghép spec pinned) → 2. local `node_modules/@playwright/mcp` qua `node` (không shell, không npx, offline) → 3. npx fallback với spec pinned `@playwright/mcp@0.0.25` (`shell:true` trên win32 vì Node ném EINVAL khi spawn `.cmd` với `shell:false`).
+2. Điều kiện tiên quyết: `npm install` + `npx playwright install chromium` (chromium đã có trong `%USERPROFILE%\AppData\Local\ms-playwright`).
+3. Lưu ý bản pinned `0.0.25` (khác README upstream mới nhất): không có flag `--timeout-action/--timeout-navigation` (timeout nằm ở client), viewport dạng `width,height` (`1280,720`), method là `browser_wait_for` / `browser_take_screenshot` (tool chuẩn `browser_wait`/`browser_screenshot` tự ánh xạ). Không thêm flag mới nếu chưa bump spec pinned.
+4. Lưu ý sandbox: MCP server spawn trên host Node, không phải trong Docker sandbox; image `minus-playwright` chỉ dùng khi chạy agent trong container có sẵn browser.
 
 ## An toàn
 

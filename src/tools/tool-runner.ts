@@ -518,6 +518,9 @@ export class ToolRunner {
           error: permCheck.reason || 'Thao tác bị từ chối do chưa được người dùng cấp quyền.',
           errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
         };
+        if (permCheck.deniedByUser) {
+          errorResult.deniedByUser = true;
+        }
         if (permCheck.recommendedTool) {
           errorResult.recommendedTool = permCheck.recommendedTool;
         }

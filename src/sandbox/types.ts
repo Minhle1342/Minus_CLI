@@ -21,6 +21,7 @@ export interface SandboxExecutionResult {
 export interface SandboxOptions {
   cwd?: string;
   env?: Record<string, string>;
+  /** Sync timeout in ms. 0 disables the timeout (abort signal still applies). */
   timeoutMs?: number;
   memoryLimitMb?: number;
   cpuLimit?: number;

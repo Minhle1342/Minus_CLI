@@ -204,8 +204,8 @@ export class ToolSynergyAdvisor {
       const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Diagnostics detected ${errCount} compiler/type error(s). Never monkey-patch crash sites or weaken assertions! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace callers] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Use "replace_text" or "apply_patch" to resolve errors before submitting.`,
-        suggestedTools: ['replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
+        guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Diagnostics detected ${errCount} compiler/type error(s). Never monkey-patch crash sites or weaken assertions! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace callers] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Verify the anchor with "verify_edit" first, then use "replace_text" or "apply_patch" to resolve errors before submitting.`,
+        suggestedTools: ['verify_edit', 'replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
       };
     }
 
@@ -245,7 +245,7 @@ export class ToolSynergyAdvisor {
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace via get_symbol_context_360 or query_call_graph(direction='callers')] -> 3.[Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verification].${graphTrace} Use the newest feedback to pivot after repeated equivalent failure.`,
-        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'inspect_symbol', 'replace_text'],
+        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'inspect_symbol', 'verify_edit', 'replace_text'],
       };
     }
 

@@ -11,6 +11,32 @@ import { PermissionManager } from '../security/permission-manager.js';
 import { CognitiveHarness } from '../agent/cognitive-harness.js';
 import { Session } from '../session/session.js';
 import { applyPhaseAuthority, requestPhaseTransition } from '../agent/phase-lifecycle.js';
+import { createBrowserTools, BROWSER_TOOL_NAMES } from '../tools/browser-tools.js';
+
+test('Playwright browser tools are authorized in every phase (explore included)', () => {
+  const gate = new ThisTurnToolGate();
+  const tools = createBrowserTools({} as any);
+  for (const phase of ['explore', 'plan', 'implement', 'verify', 'release'] as const) {
+    const decision = gate.decide({
+      id: `class-browser-${phase}`,
+      version: 1,
+      taskClass: 'exploration',
+      phase,
+      complexity: 'small',
+      externality: 'local',
+      reversibility: 'read-only',
+      risk: 'R0',
+      requiredCapabilities: ['inspect', 'search', 'memory'],
+      confidence: 0.9,
+      fastPath: true,
+      reasonCodes: [],
+      createdAt: new Date().toISOString(),
+    } as any, tools);
+    for (const name of BROWSER_TOOL_NAMES) {
+      assert.ok(decision.allowedToolNames.includes(name), `${name} must be allowed in ${phase}`);
+    }
+  }
+});
 
 test('read-only exploration can inspect Git history through guarded run_command', async () => {
   const workspace = new Workspace(process.cwd());

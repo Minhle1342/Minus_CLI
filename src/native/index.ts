@@ -98,6 +98,12 @@ export interface NativeSymbolDefinition {
   docComment?: string | null;
 }
 
+export interface NativeExtractResult {
+  filesExtracted: number;
+  bytesWritten: number;
+  topLevelStripped: boolean;
+}
+
 interface NativeCoreModule {
   rsVersion(): string;
   rsAnalyzeShellCommand(command: string): NativeShellAnalysis;
@@ -145,6 +151,8 @@ interface NativeCoreModule {
   rsCompactHistory?(messagesJson: string, maxTokens: number, preserveLastN: number, maxCharsPerTool: number): NativeCompactionResult;
   rsExtractFileSymbols?(filePath: string, content?: string | null): NativeSymbolDefinition[];
   rsFindSymbolInFile?(filePath: string, symbolName: string, content?: string | null): NativeSymbolDefinition;
+  rsExtractArchive?(archivePath: string, destDir: string, stripTopLevel: boolean): NativeExtractResult;
+  rsScanPathForBinaries?(dirs: string[], fileNames: string[]): string[];
 }
 
 let nativeCore: NativeCoreModule | null = null;
@@ -714,6 +722,46 @@ export function nativeFindSymbolInFile(
       if (res && res.found) {
         return res;
       }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Giải nén archive (.zip/.tar.gz/.tgz) thẳng vào dest trong 1 pass Rust
+ * (không temp dir, không spawn tar/unzip). Trả null khi native vắng mặt
+ * hoặc lỗi — caller dùng fallback TS.
+ */
+export function nativeExtractArchive(
+  archivePath: string,
+  destDir: string,
+  stripTopLevel = true,
+): NativeExtractResult | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsExtractArchive === 'function') {
+    try {
+      return core.rsExtractArchive(archivePath, destDir, stripTopLevel);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Quét bulk các thư mục tìm tên file chính xác trong 1 lần gọi Rust.
+ * Trả null khi native vắng mặt — caller dùng vòng lặp TS.
+ */
+export function nativeScanPathForBinaries(
+  dirs: string[],
+  fileNames: string[],
+): string[] | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsScanPathForBinaries === 'function') {
+    try {
+      return core.rsScanPathForBinaries(dirs, fileNames);
     } catch {
       return null;
     }

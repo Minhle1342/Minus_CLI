@@ -109,7 +109,8 @@ export function createBrowserWaitTool(manager: McpManager): ToolDefinition {
     },
     async execute(args: Record<string, any>, _ws: Workspace) {
       const ms = Math.min(10000, Math.max(0, Number(args.ms) || 0));
-      const res = await manager.callTool('browser_wait', { text: args.text, selector: args.selector, time: ms || undefined });
+      // Pinned @playwright/mcp@0.0.25 names it browser_wait_for (canonical tool stays browser_wait).
+      const res = await manager.callTool('browser_wait_for', { text: args.text, selector: args.selector, time: ms || undefined });
       if (!res.success) return toolError(res.error || 'browser_wait failed', 'EXECUTION_ERROR' as any);
       return toolSuccess({ snapshot: res.text || '', raw: res.content });
     },
@@ -122,7 +123,8 @@ export function createBrowserScreenshotTool(manager: McpManager): ToolDefinition
     description: 'Take screenshot only when visual layout needed (vision opt-in). Prefer browser_snapshot otherwise to save tokens.',
     parameters: { type: Type.OBJECT, properties: { fullPage: { type: Type.BOOLEAN, description: 'Capture full page.' } } },
     async execute(args: Record<string, any>, _ws: Workspace) {
-      const res = await manager.callTool('browser_screenshot', { fullPage: Boolean(args.fullPage) });
+      // Pinned @playwright/mcp@0.0.25 names it browser_take_screenshot (canonical tool stays browser_screenshot).
+      const res = await manager.callTool('browser_take_screenshot', { fullPage: Boolean(args.fullPage) });
       if (!res.success) return toolError(res.error || 'browser_screenshot failed', 'EXECUTION_ERROR' as any);
       return toolSuccess({ snapshot: res.text || '', raw: res.content });
     },

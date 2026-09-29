@@ -10,7 +10,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tar \
     gzip \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Bun (pinned to BUN_VERSION; keep in sync with src/toolchains/toolchain-recipes.ts)
+ARG BUN_VERSION=bun-v1.2.4
+RUN curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/bun-linux-x64.zip" \
+    && unzip -q /tmp/bun.zip -d /tmp \
+    && mv /tmp/bun-linux-x64/bun /usr/local/bin/bun \
+    && chmod +x /usr/local/bin/bun \
+    && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
+    && bun --version
 
 # Thiết lập thư mục làm việc mặc định
 WORKDIR /workspace

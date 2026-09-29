@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { nativeScanPathForBinaries } from '../native/index.js';
 
 export interface PreflightGuardResult {
   allowed: boolean;
@@ -658,20 +659,67 @@ export function isBareBinaryAvailable(name: string, workspaceRoot?: string): boo
     searchDirs.push(binDir);
   }
 
-  outer: for (const dir of searchDirs) {
-    for (const candidate of pathextCandidates(name)) {
-      try {
-        if (fs.existsSync(path.join(dir, candidate))) {
-          found = true;
-          break outer;
+  // Fast path: one native readdir pass over all dirs instead of N×M existsSync calls.
+  const candidates = pathextCandidates(name);
+  const nativeHits = nativeScanDirsForBinary(searchDirs, candidates);
+  if (nativeHits) {
+    found = nativeHits.length > 0;
+  } else {
+    outer: for (const dir of searchDirs) {
+      for (const candidate of candidates) {
+        try {
+          if (fs.existsSync(path.join(dir, candidate))) {
+            found = true;
+            break outer;
+          }
+        } catch {
+          // Unreadable PATH entry: ignore and keep scanning.
         }
-      } catch {
-        // Unreadable PATH entry: ignore and keep scanning.
       }
     }
   }
   BINARY_PROBE_CACHE.set(key, { found, at: Date.now() });
   return found;
+}
+
+/**
+ * Fast path used by provision flows: resolve a bare binary name across
+ * workspace bin dirs + PATH (+ installed toolchains dir) in one native call.
+ * Returns the first absolute hit, or undefined. Falls back to
+ * isBareBinaryAvailable when native is unavailable.
+ */
+export function findBinaryOnPath(name: string, workspaceRoot?: string): string | undefined {
+  const searchDirs: string[] = [];
+  if (workspaceRoot) {
+    for (const binDir of WORKSPACE_BIN_DIRS) {
+      searchDirs.push(path.join(workspaceRoot, binDir));
+    }
+  }
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir.trim()) searchDirs.push(dir.trim());
+  }
+  const recipe = findRecipeForBinary(name);
+  if (recipe) {
+    const installRoot = process.env.MINUS_TOOLCHAINS_DIR
+      || (process.platform === 'win32'
+        ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Programs')
+        : path.join(os.homedir(), '.minus', 'toolchains'));
+    const targetDir = path.join(installRoot, recipe.targetDirName);
+    searchDirs.push(recipe.binSubDir ? path.join(targetDir, recipe.binSubDir) : targetDir);
+  }
+  const candidates = pathextCandidates(name);
+  const hits = nativeScanDirsForBinary(searchDirs, candidates);
+  if (hits && hits.length > 0) return hits[0];
+  return isBareBinaryAvailable(name, workspaceRoot) ? name : undefined;
+}
+
+/** Bulk native variant: one Rust readdir pass over all dirs. Null when native unavailable. */
+export function nativeScanDirsForBinary(searchDirs: string[], candidates: string[]): string[] | null {
+  try {
+    return nativeScanPathForBinaries(searchDirs, candidates);
+  } catch {
+    return null;
+  }
 }
 
 /** Clears the missing-binary probe cache (tests, or after a fresh install). */

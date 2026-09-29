@@ -32,6 +32,8 @@ export interface PermissionCheckResult {
   recommendedArgs?: Record<string, any>;
   permissionGranted?: boolean;
   permissionRequestId?: string;
+  /** True when a human explicitly denied via the prompt ([n]/Esc/Ctrl+C). */
+  deniedByUser?: boolean;
 }
 
 /**
@@ -179,6 +181,7 @@ export class PermissionManager {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
           permissionRequestId: request.id,
+          deniedByUser: true,
           reason: `Người dùng đã từ chối thực thi lệnh shell "${request.target}". Vui lòng chuyển sang sử dụng tool chuyên dụng được khuyến nghị: "${misuse.tool}" (${misuse.reason}).`,
           recommendedTool: misuse.tool,
           recommendedArgs: misuse.suggestedArgs,
@@ -189,6 +192,7 @@ export class PermissionManager {
         allowed: false,
         errorCode: 'PERMISSION_DENIED',
         permissionRequestId: request.id,
+        deniedByUser: true,
         reason: `Người dùng đã từ chối thao tác "${request.summary}" (${request.toolName}: ${request.target}).`,
       };
     } catch (err: any) {

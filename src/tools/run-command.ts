@@ -90,6 +90,10 @@ const ALLOWED_COMMAND_PREFIXES = [
   'npx prettier',
   'npx jest',
   'npx vitest',
+  'bun ',
+  'bun',
+  'bunx ',
+  'bunx',
   'node ',
   'node -v',
   'node --version',
@@ -1071,6 +1075,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi hoặc chưa được cấp quyền (PERMISSION APPROVAL).`,
             errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
             permissionRequestId: permCheck.permissionRequestId,
+            ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
           };
         }
       }
@@ -1294,6 +1299,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
                 errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
                 permissionRequestId: permCheck.permissionRequestId,
+                ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
               };
             }
           }
@@ -1434,6 +1440,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
                 errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
                 permissionRequestId: permCheck.permissionRequestId,
+                ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
               };
             }
           }
@@ -1512,6 +1519,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi.`,
               errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
               permissionRequestId: permCheck.permissionRequestId,
+              ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
             };
           }
         }

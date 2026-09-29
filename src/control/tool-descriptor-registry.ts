@@ -427,6 +427,21 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
+    } else if (name.startsWith('browser_')) {
+      // Playwright MCP browser tools: callable in every phase (explore included).
+      // They touch only external browser state, never the workspace/codebase,
+      // so they are non-mutating for gating; sensitive actions still need approval.
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'execute', 'network'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: true,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else {
       descriptor = {
         name,

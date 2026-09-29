@@ -40,6 +40,8 @@ const EXECUTABLE_RUNTIMES: Record<string, SandboxRuntime> = {
   npx: 'node',
   pnpm: 'node',
   yarn: 'node',
+  bun: 'node',
+  bunx: 'node',
   corepack: 'node',
   dotnet: 'dotnet',
   python: 'python',

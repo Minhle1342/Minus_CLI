@@ -8,8 +8,15 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { ToolchainRecipe, ProvisionResult, ProvisionOptions } from './types.js';
 import { findRecipeForBinary, TOOLCHAIN_RECIPES } from './toolchain-recipes.js';
+import { nativeExtractArchive } from '../native/index.js';
 
 const execFileAsync = promisify(execFile);
+
+/** Native archive path on unless explicitly disabled; TS fallback otherwise. */
+function isNativeArchiveEnabled(): boolean {
+  const flag = String(process.env.MINUS_NATIVE_ARCHIVE || '').toLowerCase();
+  return flag !== '0' && flag !== 'off' && flag !== 'false' && flag !== 'no';
+}
 
 /**
  * ToolchainProvisioner: Tự động tải, giải nén, và cấu hình các công nghệ lập trình (toolchains/runtimes)
@@ -143,32 +150,19 @@ export class ToolchainProvisioner {
     await fsp.mkdir(tempExtract, { recursive: true });
 
     try {
-      if (process.platform === 'win32') {
-        let extractedWithTar = false;
-        const tarExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
-        if (fs.existsSync(tarExe)) {
-          try {
-            await execFileAsync(tarExe, ['-xf', archivePath, '-C', tempExtract]);
-            extractedWithTar = true;
-          } catch {
-            extractedWithTar = false;
-          }
-        }
-
-        if (!extractedWithTar) {
-          // Fallback sang PowerShell Expand-Archive
-          const psCommand = `Expand-Archive -Path "${archivePath.replace(/"/g, '`"')}" -DestinationPath "${tempExtract.replace(/"/g, '`"')}" -Force`;
-          await execFileAsync('powershell', ['-NoProfile', '-Command', psCommand]);
+      // Fast path: single-pass native extract (no temp copy, no tar/unzip spawn).
+      if (isNativeArchiveEnabled()) {
+        const nativeRes = nativeExtractArchive(archivePath, tempExtract, true);
+        if (nativeRes && nativeRes.filesExtracted > 0) {
+          options?.onProgress?.(`Đã giải nén ${nativeRes.filesExtracted} file bằng Rust native.`);
+        } else if (nativeRes) {
+          throw new Error(`Native extract wrote 0 files from ${archivePath}.`);
+        } else {
+          await this.extractArchiveShell(archivePath, tempExtract);
         }
       } else {
-        // Linux / macOS
-        if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
-          await execFileAsync('tar', ['-xzf', archivePath, '-C', tempExtract]);
-        } else if (archivePath.endsWith('.zip')) {
-          await execFileAsync('unzip', ['-q', archivePath, '-d', tempExtract]);
-        }
+        await this.extractArchiveShell(archivePath, tempExtract);
       }
-
       // Kiểm tra nếu giải nén ra 1 thư mục lồng duy nhất (ví dụ node-v22.14.0-win-x64/...)
       const entries = await fsp.readdir(tempExtract, { withFileTypes: true });
       let sourceDir = tempExtract;
@@ -180,6 +174,38 @@ export class ToolchainProvisioner {
       await this.copyDirectory(sourceDir, targetDir);
     } finally {
       await fsp.rm(tempExtract, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Fallback TS: giải nén bằng tiến trình ngoài (tar.exe / Expand-Archive / tar / unzip).
+   * Dùng khi native vắng mặt, bị tắt qua MINUS_NATIVE_ARCHIVE=0, hoặc native lỗi.
+   */
+  private static async extractArchiveShell(archivePath: string, tempExtract: string): Promise<void> {
+    if (process.platform === 'win32') {
+      let extractedWithTar = false;
+      const tarExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+      if (fs.existsSync(tarExe)) {
+        try {
+          await execFileAsync(tarExe, ['-xf', archivePath, '-C', tempExtract]);
+          extractedWithTar = true;
+        } catch {
+          extractedWithTar = false;
+        }
+      }
+
+      if (!extractedWithTar) {
+        // Fallback sang PowerShell Expand-Archive
+        const psCommand = `Expand-Archive -Path "${archivePath.replace(/"/g, '`"')}" -DestinationPath "${tempExtract.replace(/"/g, '`"')}" -Force`;
+        await execFileAsync('powershell', ['-NoProfile', '-Command', psCommand]);
+      }
+    } else {
+      // Linux / macOS
+      if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
+        await execFileAsync('tar', ['-xzf', archivePath, '-C', tempExtract]);
+      } else if (archivePath.endsWith('.zip')) {
+        await execFileAsync('unzip', ['-q', archivePath, '-d', tempExtract]);
+      }
     }
   }
 

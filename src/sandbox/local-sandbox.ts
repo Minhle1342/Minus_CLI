@@ -28,7 +28,12 @@ export class LocalProcessSandbox implements ISandboxProvider {
 
   async exec(command: string, options?: SandboxOptions): Promise<SandboxExecutionResult> {
     const startTime = Date.now();
-    const timeout = options?.timeoutMs ?? 30000;
+    const requestedTimeout = options?.timeoutMs ?? 30000;
+    // Convention: timeoutMs === 0 disables the timeout. Node exec treats 0 as
+    // disabled, but the Rust core takes u32 milliseconds, so map disabled to
+    // u32::MAX (~49.7 days — effectively unlimited) to keep tree-kill intact.
+    const timeout = requestedTimeout === 0 ? 0 : requestedTimeout;
+    const nativeTimeout = requestedTimeout === 0 ? 0xffffffff : requestedTimeout;
     const cwd = options?.cwd ?? this.defaultCwd;
 
     // Lọc và làm sạch biến môi trường (loại trừ các secret nhạy cảm nếu có)
@@ -71,7 +76,7 @@ export class LocalProcessSandbox implements ISandboxProvider {
     const sandboxedRes = await nativeExecuteSandboxed(
       command,
       cwd,
-      timeout,
+      nativeTimeout,
       5 * 1024 * 1024,
       options?.memoryLimitMb ?? 2048,
       options?.signal,

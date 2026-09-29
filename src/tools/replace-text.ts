@@ -13,7 +13,7 @@ import {
 
 type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode' | 'normalized_whitespace' | 'empty_file_initialization';
 
-interface TextMatch {
+export interface TextMatch {
   start: number;
   end: number;
   line: number;
@@ -332,7 +332,7 @@ export const replaceTextTool: ToolDefinition = {
   },
 };
 
-function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact'): TextMatch[] {
+export function findTextMatches(content: string, oldText: string, mode: 'auto' | 'exact'): TextMatch[] {
   const exact = findAllRanges(content, oldText).map(({ start, end }) => ({
     start,
     end,

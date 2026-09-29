@@ -10,6 +10,11 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  /**
+   * Required on Windows when command is a .cmd/.bat shim (e.g. npx.cmd):
+   * Node throws EINVAL when spawning batch files with shell:false.
+   */
+  shell?: boolean;
 }
 
 export interface McpToolDescriptor {

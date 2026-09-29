@@ -1,8 +1,77 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { McpStdioClient } from './mcp-client.js';
 import type { McpCallResult, McpToolDescriptor } from './types.js';
+
+/** Pinned to package.json + deploy/sandbox/Dockerfile.playwright. Never @latest in production. */
+export const PLAYWRIGHT_MCP_PINNED_SPEC = '@playwright/mcp@0.0.25';
+
+export type ServerLaunchSource = 'explicit' | 'local-package' | 'npx';
+
+export interface ServerLaunch {
+  command: string;
+  args: string[];
+  shell: boolean;
+  source: ServerLaunchSource;
+}
+
+export interface LaunchDeps {
+  platform?: string;
+  execPath?: string;
+  pathExists?: (p: string) => boolean;
+  resolveLocalEntry?: () => string | undefined;
+}
+
+function defaultResolveLocalEntry(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJson = require.resolve('@playwright/mcp/package.json');
+    const dir = path.dirname(pkgJson);
+    for (const candidate of ['cli.js', 'index.js', 'lib/cli.js', 'dist/cli.js']) {
+      const full = path.join(dir, candidate);
+      if (fs.existsSync(full)) return full;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve how to launch the playwright-mcp server without shell-quoting traps:
+ * 1. explicit `command` (PLAYWRIGHT_MCP_COMMAND) — operator override;
+ * 2. local `@playwright/mcp` entry via `node` — no shell, no npx, works offline;
+ * 3. npx fallback (pinned spec) — needs network/npm cache; shell:true on win32
+ *    because Node throws EINVAL spawning .cmd shims with shell:false.
+ */
+export function resolveServerLaunch(
+  mcpArgs: string[],
+  opts: { command?: string } = {},
+  deps: LaunchDeps = {},
+): ServerLaunch {
+  const platform = deps.platform ?? os.platform();
+  const isWin = platform === 'win32';
+  if (opts.command) {
+    const cmd = opts.command;
+    const base = cmd.split(/[\\/]/).pop() || cmd;
+    // Operator pointed at npx itself: complete it into a pinned npx launch
+    // (otherwise npx would receive only MCP flags and fail).
+    if (/^npx(\.cmd)?$/i.test(base)) {
+      return { command: cmd, args: ['-y', PLAYWRIGHT_MCP_PINNED_SPEC, ...mcpArgs], shell: isWin, source: 'npx' };
+    }
+    return { command: cmd, args: mcpArgs, shell: isWin && /\.cmd$/i.test(cmd), source: 'explicit' };
+  }
+  const resolveEntry = deps.resolveLocalEntry ?? defaultResolveLocalEntry;
+  const exists = deps.pathExists ?? ((p: string) => fs.existsSync(p));
+  const entry = resolveEntry();
+  if (entry && exists(entry)) {
+    return { command: deps.execPath ?? process.execPath, args: [entry, ...mcpArgs], shell: false, source: 'local-package' };
+  }
+  const npx = isWin ? 'npx.cmd' : 'npx';
+  return { command: npx, args: ['-y', PLAYWRIGHT_MCP_PINNED_SPEC, ...mcpArgs], shell: isWin, source: 'npx' };
+}
 
 export interface PlaywrightMcpOptions {
   /** Set PLAYWRIGHT_MCP_MOCK=1 in tests to avoid spawning npx. */
@@ -45,7 +114,7 @@ export class McpManager {
       outputDir,
       allowedOrigins: opts.allowedOrigins || process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS || '',
       blockedOrigins: opts.blockedOrigins || process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS || '',
-      viewport: opts.viewport || process.env.PLAYWRIGHT_MCP_VIEWPORT || '1280x720',
+      viewport: opts.viewport || process.env.PLAYWRIGHT_MCP_VIEWPORT || '1280,720',
       command: opts.command,
       serverArgs: opts.serverArgs,
     };
@@ -88,15 +157,17 @@ export class McpManager {
     return { allowed: true };
   }
 
-  buildServerArgs(): string[] {
+  /** MCP flags only (no launcher prefix — see resolveServerLaunch). */
+  buildMcpArgs(): string[] {
     if (this.options.serverArgs) return this.options.serverArgs;
-    const args = ['-y', '@playwright/mcp@latest'];
+    const args: string[] = [];
     if (this.options.headless) args.push('--headless');
     if (this.options.isolated) args.push('--isolated');
     if (this.options.browser && this.options.browser !== 'chromium') args.push('--browser', this.options.browser);
     args.push('--viewport-size', this.options.viewport);
-    args.push('--timeout-action', String(this.options.timeoutActionMs));
-    args.push('--timeout-navigation', String(this.options.timeoutNavigationMs));
+    // NOTE: @playwright/mcp@0.0.25 (pinned) has no --timeout-action/--timeout-navigation
+    // flags (they exist only in newer releases). Transport timeouts stay client-side
+    // via McpServerConfig.timeoutMs. Do not re-add without bumping the pinned spec.
     args.push('--output-dir', this.options.outputDir);
     if (this.options.allowedOrigins) args.push('--allowed-origins', this.options.allowedOrigins);
     if (this.options.blockedOrigins) args.push('--blocked-origins', this.options.blockedOrigins);
@@ -111,14 +182,24 @@ export class McpManager {
       try {
         fs.mkdirSync(this.options.outputDir, { recursive: true });
       } catch { /* noop */ }
-      const command = this.options.command || (os.platform() === 'win32' ? 'npx.cmd' : 'npx');
+      const explicit = this.options.command || process.env.PLAYWRIGHT_MCP_COMMAND || undefined;
+      const launch = resolveServerLaunch(this.buildMcpArgs(), { command: explicit });
       this.client = new McpStdioClient({
         name: 'playwright',
-        command,
-        args: this.buildServerArgs(),
+        command: launch.command,
+        args: launch.args,
+        shell: launch.shell,
         timeoutMs: this.options.timeoutNavigationMs + 10000,
       });
-      await this.client.start();
+      try {
+        await this.client.start();
+      } catch (err: any) {
+        throw new Error(
+          `Playwright MCP server failed to start via ${launch.source} (${launch.command}): ${err?.message || err}. ` +
+          `Fix: npm install (for local @playwright/mcp), then npx playwright install chromium; ` +
+          `or set PLAYWRIGHT_MCP_COMMAND to a working launcher.`,
+        );
+      }
       this.armIdleTimeout();
     })();
     try {

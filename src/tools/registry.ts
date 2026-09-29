@@ -49,6 +49,7 @@ import { createReportFindingsTool } from './report-findings.js';
 import { createHypothesisTool } from './hypothesis-tool.js';
 import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
 import { createGitTools } from './git-tools.js';
+import { verifyEditTool } from './verify-edit.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
 import { createDiscoverToolsTool } from './tool-discovery.js';
 import { requestPhaseTransitionTool } from './request-phase-transition.js';
@@ -118,6 +119,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(searchTextTool);
     this.register(applyPatchTool);
     this.register(replaceTextTool);
+    this.register(verifyEditTool);
     this.register(writeFileTool);
     this.register(writeToFileTool);
     this.register(replaceFileContentTool);
