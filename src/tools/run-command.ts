@@ -338,6 +338,20 @@ export function checkGitPolicyForShell(
   for (const segment of segments) {
     const invocation = parseGitInvocation(segment);
     if (!invocation) continue;
+    if (['clone', 'fetch', 'pull', 'ls-remote'].includes(invocation.subcommand)) {
+      for (const arg of invocation.args) {
+        if (!/^https?:\/\//i.test(arg)) continue;
+        let remote: URL;
+        try { remote = new URL(arg); } catch { continue; }
+        if (remote.hostname.toLowerCase() === 'github.com' && (remote.username || remote.password || remote.search || remote.hash)) {
+          return {
+            error: 'GitHub remote URLs must not contain credentials, query parameters, or fragments.',
+            errorCode: 'GIT_CREDENTIAL_IN_URL',
+            suggestion: 'Use a clean HTTPS GitHub URL and sign in to Git Credential Manager on the host.',
+          };
+        }
+      }
+    }
     const scopeDecision = validateGitCommandScope(invocation.subcommand, invocation.args, workspaceRoot, workspaceRoot);
     if (!scopeDecision.allowed) {
       return { error: scopeDecision.error, errorCode: scopeDecision.errorCode };
@@ -914,18 +928,34 @@ export async function executeRmEmulation(
 }
 
 /**
+ * Resolve the effective synchronous timeout for run_command.
+ * Convention: timeout_ms === 0 disables the timeout entirely (long Playwright/
+ * browser/E2E scripts); any other finite value is clamped to [1000, 300000].
+ * The abort signal and output truncation still apply when disabled.
+ */
+export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefaultMs: unknown): number {
+  const requested = Number(requestedMs);
+  if (requested === 0) return 0;
+  const configured = Number(configuredDefaultMs);
+  const defaultTimeout = Number.isFinite(configured) && configured > 0 ? configured : 120000;
+  return Math.min(
+    300000,
+    Math.max(1000, Number.isFinite(requested) && requested > 0 ? requested : defaultTimeout),
+  );
+}
+/**
  * Tạo Tool run_command có tích hợp SandboxManager và TaskManager (Chuẩn Antigravity CLI Unified Command Execution)
  */
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Thực thi lệnh terminal (build, test, lint, script, git) trong Sandbox cô lập hoặc Host. Với chuỗi lệnh phụ thuộc ngắn, dùng `&&` để lệnh sau chỉ chạy khi lệnh trước thành công; dùng `||` chỉ cho fallback có chủ đích và `|` cho pipeline giới hạn output. Tránh gộp tác vụ không liên quan, shell grouping/subshell hoặc command substitution; cấu trúc shell phức tạp và lệnh ngoài allowlist có thể cần approval. Lệnh hữu hạn chạy lâu (build/test) dùng `timeout_ms` phù hợp; server/watch/daemon dùng `WaitMsBeforeAsync` để chạy nền rồi theo dõi bằng `manage_task`. Thao tác nhạy cảm như Git mutation phải khớp yêu cầu trực tiếp; push main/master cần approval rõ ràng. Lệnh phá hoại hệ thống bị cấm kể cả khi được duyệt. Không đọc/ghi/xóa/di chuyển/đổi tên file workspace qua shell. Đặc biệt không gọi `mv`, `move`, `Move-Item` hoặc `rmdir` để quản lý file; chúng phụ thuộc shell/nền tảng và có thể không tồn tại. Dùng `move_file` với `sourcePath` và `targetPath` để di chuyển/đổi tên, `delete_file` để xóa, `read_file` để đọc. Không đưa secrets/token vào command.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Start ordinary build/test/lint/script work with auto. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines. Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task`. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Terminal command for builds, tests, scripts, and Git. Prefer dedicated tools for workspace browsing, source search, and file reading (`list_files`, `search_text`, `search_codebase_fast`, `read_file`). Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded `|` pipelines when useful. Avoid unrelated chains, subshell/grouping, and `$()`; complex shell or commands outside the allowlist may require approval. Use `timeout_ms` for finite long-running commands, and `WaitMsBeforeAsync` plus `manage_task` for servers/watchers. Git writes require direct user intent; staging is limited to explicit paths, pushing main/master requires approval, and system-destructive commands are prohibited. Do not read, write, delete, move, or rename workspace files through shell. For file moves/renames use `move_file` with `sourcePath` and `targetPath`; never use shell `mv`, `move`, `Move-Item`, or `rmdir` for workspace file management because shell syntax and availability differ by platform.',
+          description: 'Use for build, test, lint, script, and Git commands. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist; this schema does not enumerate it. Commands outside the allowlist may require approval and can still be rejected by policy. Prefer dedicated tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`) to browse, search, and read files; do not use the shell to read, write, delete, move, or rename workspace files. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines. Avoid unrelated chains, subshells/grouping, and `$()`; complex commands may require approval. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with `manage_task` for servers/watchers. Git mutations require direct user intent; stage only explicit paths; pushes to main/master require approval; system-destructive commands are prohibited.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -937,11 +967,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         timeout_ms: {
           type: Type.NUMBER,
-          description: 'Timeout của lệnh đồng bộ theo milliseconds (mặc định 120000; tối thiểu 1000, tối đa 300000). Tăng cho dependency restore/build/test hữu hạn; server chạy liên tục phải dùng WaitMsBeforeAsync thay vì tăng timeout.',
+          description: 'Timeout của lệnh đồng bộ theo milliseconds (mặc định 120000; tối thiểu 1000, tối đa 300000). Đặt timeout_ms=0 để TẮT timeout cho lệnh cần nhiều thời gian (Playwright/E2E dài); abort signal và cắt ngắn output vẫn áp dụng. Server chạy liên tục phải dùng WaitMsBeforeAsync thay vì tắt timeout.',
         },
         execution_target: {
           type: Type.STRING,
-          description: 'Nơi thực thi: "auto" (mặc định, ưu tiên sandbox) hoặc "host" (host OS, chỉ dành cho lệnh allowlist khi dependency native không tương thích container).',
+          description: 'Execution target: "auto" (default; prefers the isolated Internal/sandbox environment when available, but does not guarantee the sandbox is available; guardrails may reject commands requiring isolation instead of silently running them on the Host) or "host" (External; the host operating system). Choose "host" only when a host-native toolchain/dependency is needed or the sandbox is incompatible. Host policy always applies: allowlisted commands may run without approval, commands outside the allowlist may require approval, and approval does not override policy prohibitions.',
         },
       },
       required: [],
@@ -951,16 +981,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       let hasExplicitPermission = context?.permissionGranted === true;
       const effectivePermissionManager = context?.permissionManager || permissionManager;
       const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
-      const configuredTimeout = Number(process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
-      const requestedTimeout = Number(args.timeout_ms);
-      const defaultTimeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 120000;
-      const timeoutMs = Math.min(
-        300000,
-        Math.max(1000, Number.isFinite(requestedTimeout) && requestedTimeout > 0 ? requestedTimeout : defaultTimeout),
-      );
+      const timeoutMs = resolveRunCommandTimeout(args.timeout_ms, process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
 
       if (!rawCommand) {
         return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
+      }
+
+      // Reject credential-bearing GitHub URLs before any guard can echo the command to logs/results.
+      for (const match of rawCommand.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
+        try {
+          const url = new URL(match[0]);
+          if (url.hostname.toLowerCase() === 'github.com' && (url.username || url.password || url.search || url.hash)) {
+            return { error: 'GitHub URLs in commands must not include credentials or query parameters.', errorCode: 'GIT_CREDENTIAL_IN_URL' };
+          }
+        } catch { /* Other URL errors remain the responsibility of the command preflight. */ }
       }
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
@@ -992,6 +1026,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(effectiveCommand);
+      const networkGitCommand = shellAnalysis.segments.some((segment) => {
+        const invocation = parseGitInvocation(segment);
+        return Boolean(invocation && classifyGitCommand(invocation.subcommand, invocation.args).risk === 'network');
+      });
 
       // Do not silently downgrade a mutating or otherwise non-read-only command
       // from Docker to the host. An explicit host target still goes through approval.
@@ -1114,11 +1152,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // nguyên mã lỗi cũ; từ chối cứng, không bypass bằng approval chung.
       const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, context?.userRequest);
       if (gitPolicyViolation) {
-        return { command: rawCommand, ...gitPolicyViolation };
+        return {
+          ...(gitPolicyViolation.errorCode === 'GIT_CREDENTIAL_IN_URL' ? {} : { command: rawCommand }),
+          ...gitPolicyViolation,
+        };
       }
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
       if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
+        if (networkGitCommand) {
+          return {
+            error: 'Network Git commands cannot run as background tasks because they bypass the selected execution target.',
+            errorCode: 'BACKGROUND_GIT_NETWORK_UNSUPPORTED',
+          };
+        }
         const bgTask = taskManager.startTask(effectiveCommand, workspace.rootDir, preflight.extractedEnv);
         const startTime = Date.now();
         const deadline = startTime + waitMsBeforeAsync;
@@ -1268,7 +1315,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           cwd: workspace.rootDir,
           timeoutMs,
           signal: context?.signal,
-          env: preflight.extractedEnv,
+          env: { ...preflight.extractedEnv, ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}) },
         });
 
         // Tự động Auto-Provision nếu native command thất bại do thiếu binary
@@ -1290,6 +1337,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 signal: context?.signal,
                 env: {
                   ...preflight.extractedEnv,
+                  ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
                   ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
                 },
               });

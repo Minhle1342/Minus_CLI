@@ -215,7 +215,7 @@ export const searchTextTool: ToolDefinition = {
         count = lines.reduce((acc, l) => {
           const parts = l.split(":");
           const last = parseInt(parts[parts.length - 1], 10);
-          return acc + (isNaN(last) ? 0 : last);
+          return acc + (Number.isFinite(last) ? last : 0);
         }, 0);
       }
       return {
@@ -253,10 +253,14 @@ export const searchTextTool: ToolDefinition = {
 
       if (firstColon !== -1 && secondColon !== -1) {
         const file = line.slice(0, firstColon).replace(/\\/g, "/");
-        const lineNum = parseInt(line.slice(firstColon + 1, secondColon), 10);
+        const lineNumStr = line.slice(firstColon + 1, secondColon);
+        const lineNum = parseInt(lineNumStr, 10);
         const text = line.slice(secondColon + 1);
 
-        matches.push({ file, line: lineNum, text });
+        // Guard against NaN/Infinity from malformed line numbers
+        const safeLine = Number.isFinite(lineNum) ? lineNum : 1;
+
+        matches.push({ file, line: safeLine, text });
         fileSummaryMap.set(file, (fileSummaryMap.get(file) || 0) + 1);
       } else {
         // Fallback nếu định dạng chỉ có file:text hoặc đơn dòng

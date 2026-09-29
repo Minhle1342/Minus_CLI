@@ -22,12 +22,49 @@ test('parseGitInvocation keeps global flags in argv for scope checks', () => {
 test('run_command schema explains chaining, long-running work, and sensitive-command boundaries', () => {
   const tool = createRunCommandTool();
   const properties = (tool.parameters as any).properties;
-  assert.match(tool.description, /thao tác nhạy cảm/i);
-  assert.match(tool.description, /secrets\/token/i);
+  assert.match(tool.description, /sensitive operations/i);
+  assert.match(tool.description, /secrets or tokens/i);
   assert.match(properties.command.description, /&&/);
   assert.match(properties.command.description, /approval/i);
+  assert.match(properties.command.description, /Internal\/sandbox/i);
+  assert.match(properties.command.description, /External/i);
+  assert.match(properties.execution_target.description, /allowlist/i);
+  assert.match(properties.command.description, /Git Credential Manager/);
   assert.match(properties.WaitMsBeforeAsync.description, /manage_task/);
   assert.match(properties.timeout_ms.description, /300000/);
+});
+
+test('network GitHub remotes never accept embedded credentials even after approval', async () => {
+  const tool = createRunCommandTool();
+  const result = await tool.execute(
+    { command: 'git clone https://user:secret-test-token@github.com/acme/private.git private', execution_target: 'host' },
+    new Workspace(),
+    { permissionGranted: true, userRequest: 'Please git clone the private repository' } as any,
+  );
+  assert.equal(result.errorCode, 'GIT_CREDENTIAL_IN_URL');
+  assert.doesNotMatch(JSON.stringify(result), /secret-test-token/);
+});
+
+test('Git policy blocks query-bearing GitHub clone URLs without returning their contents', () => {
+  const result = checkGitPolicyForShell(
+    ['git clone https://github.com/acme/private.git?token=secret-test-token private'],
+    '/repo',
+    'Please git clone the private repository',
+  );
+  assert.equal(result?.errorCode, 'GIT_CREDENTIAL_IN_URL');
+  assert.doesNotMatch(JSON.stringify(result), /secret-test-token/);
+});
+
+test('network Git cannot use the background path that bypasses execution_target', async () => {
+  let started = false;
+  const tool = createRunCommandTool(undefined, { startTask: () => { started = true; throw Error('must not start'); } } as any);
+  const result = await tool.execute(
+    { command: 'git fetch origin', WaitMsBeforeAsync: 100, execution_target: 'host' },
+    new Workspace(),
+    { permissionGranted: true, userRequest: 'Please git fetch origin' } as any,
+  );
+  assert.equal(result.errorCode, 'BACKGROUND_GIT_NETWORK_UNSUPPORTED');
+  assert.equal(started, false);
 });
 
 test('read-only git passes without an explicit user request', () => {

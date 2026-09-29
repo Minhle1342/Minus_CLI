@@ -3055,15 +3055,15 @@ export class AgentLoop {
               }
               if (cleanedFiles.length > 0) {
                 const cleanupNotice = `\n[AUTO-CLEANUP]: Đã tự động dọn dẹp file kiểm thử tạm (${cleanedFiles.join(', ')}) sau khi kiểm thử thành công. Bạn không cần thực hiện thêm bước xóa file.`;
-                if (typeof executionResult.result.stdout === 'string') {
-                  executionResult.result.stdout += cleanupNotice;
-                } else if (typeof executionResult.result.output === 'string') {
-                  executionResult.result.output += cleanupNotice;
-                }
-                if (typeof executionResult.result === 'object' && executionResult.result !== null) {
-                  executionResult.result.autoCleanedFiles = cleanedFiles;
-                  executionResult.result.cleanupNotice = cleanupNotice.trim();
-                }
+                const currentResult = executionResult.result;
+                const mergedResult = {
+                  ...currentResult,
+                  stdout: typeof currentResult.stdout === 'string' ? currentResult.stdout + cleanupNotice : currentResult.stdout,
+                  output: typeof currentResult.output === 'string' ? currentResult.output + cleanupNotice : currentResult.output,
+                  autoCleanedFiles: cleanedFiles,
+                  cleanupNotice: cleanupNotice.trim(),
+                };
+                executionResult.result = mergedResult;
               }
             }
           }

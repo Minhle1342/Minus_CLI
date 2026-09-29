@@ -1,5 +1,6 @@
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
+import { getGitHubCredential } from './github-credential.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_LENGTH = 4_000;
@@ -10,6 +11,50 @@ export interface WebFetchToolOptions {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   cacheTtlMs?: number;
+  githubCredentialProvider?: () => Promise<string | undefined>;
+}
+
+/** GCM credentials are only sent to the GitHub REST API, never to a browser URL or redirect. */
+function githubApiUrl(input: URL): URL | undefined {
+  if (input.protocol !== 'https:' || input.port || input.username || input.password || input.hash) return undefined;
+  if ([...input.searchParams.keys()].some((key) => /token|secret|password|api[_-]?key|auth/i.test(key))) return undefined;
+  if (input.hostname === 'api.github.com' && /^\/repos\/[^/]+\/[^/]+(?:\/|$)/.test(input.pathname)) return input;
+  if (input.hostname !== 'github.com' || input.search) return undefined;
+  const segments = input.pathname.split('/').filter(Boolean);
+  if (segments.length < 2) return undefined;
+  const [owner, repo, type, ref, ...rest] = segments;
+  if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo)) return undefined;
+  if (!type && !ref) return new URL(`https://api.github.com/repos/${owner}/${repo}/contents`);
+  if ((type === 'blob' || type === 'tree') && ref && (type === 'tree' || rest.length)) {
+    const suffix = rest.length ? `/${rest.map(encodeURIComponent).join('/')}` : '';
+    return new URL(`https://api.github.com/repos/${owner}/${repo}/contents${suffix}?ref=${encodeURIComponent(ref)}`);
+  }
+  if ((type === 'issues' || type === 'pull') && /^\d+$/.test(ref) && rest.length === 0) {
+    return new URL(`https://api.github.com/repos/${owner}/${repo}/${type === 'pull' ? 'pulls' : 'issues'}/${ref}`);
+  }
+  return undefined;
+}
+
+async function readBoundedBody(response: Response, maxBytes: number): Promise<string | undefined> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const decoder = new TextDecoder();
+  let text = '';
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        return undefined;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 interface CachedPage {
@@ -186,11 +231,12 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const githubCredentialProvider = options.githubCredentialProvider ?? getGitHubCredential;
 
   return {
     name: 'web_fetch',
     description:
-      'Fetch, parse, and deeply inspect the full contents of a specific public webpage, documentation, GitHub issue/PR, API reference, or article. Converts raw HTML into clean structured Markdown, extracts code blocks, strips ads/scripts, protects against prompt injection, and supports character windowing/pagination. Use this after web_search returns promising URLs when exact code examples, complete API signatures, or in-depth documentation are required.',
+      'Fetch public webpages and GitHub URLs. For private GitHub repositories (root/tree/blob), issues, PRs, or REST API endpoints, set github_auth="gcm" after the user has signed in to Git Credential Manager on the host. Credentials remain in the harness; never put tokens in a URL or command. Authenticated tree/blob URLs support a single-segment ref; they do not follow redirects or use shared caches.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -223,6 +269,11 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
           type: Type.BOOLEAN,
           description: 'Set to true to force a fresh fetch from the network and bypass in-memory cache.',
         },
+        github_auth: {
+          type: Type.STRING,
+          description: '"none" (default) for public URLs, or "gcm" to use the host Git Credential Manager for an authenticated GitHub REST API request. Never supply a token.',
+          enum: ['none', 'gcm'],
+        },
       },
       required: [],
     },
@@ -238,10 +289,21 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
         if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
           return { error: 'Only HTTP and HTTPS URLs are supported.', errorCode: 'INVALID_PROTOCOL' };
         }
-      } catch (err: any) {
-        return { error: `Invalid URL format: ${err.message}`, errorCode: 'MALFORMED_URL' };
+        if (parsedUrl.username || parsedUrl.password) {
+          return { error: 'Credentials must not be included in a URL.', errorCode: 'CREDENTIAL_IN_URL' };
+        }
+      } catch {
+        return { error: 'Invalid URL format.', errorCode: 'MALFORMED_URL' };
       }
 
+      const githubAuth = args.github_auth === 'gcm';
+      if (args.github_auth !== undefined && !['none', 'gcm'].includes(args.github_auth)) {
+        return { error: 'Unsupported github_auth option.', errorCode: 'INVALID_GITHUB_AUTH' };
+      }
+      const apiUrl = githubAuth ? githubApiUrl(parsedUrl) : undefined;
+      if (githubAuth && !apiUrl) {
+        return { error: 'GCM authentication is only supported for HTTPS GitHub repository/tree/blob/issue/PR URLs or api.github.com/repos endpoints.', errorCode: 'UNSUPPORTED_GITHUB_AUTH_URL' };
+      }
       const canonicalUrl = parsedUrl.toString();
       const extractMode = args.extract_mode || 'markdown';
       const offset = Math.max(0, Number(args.offset) || 0);
@@ -249,33 +311,49 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
       const bypassCache = Boolean(args.bypass_cache);
 
       const now = Date.now();
-      let cached = memoryCache.get(canonicalUrl);
+      let cached = githubAuth ? undefined : memoryCache.get(canonicalUrl);
 
       if (!cached || bypassCache || (now - cached.fetchedAt > cacheTtlMs)) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-          const response = await fetchImpl(canonicalUrl, {
+          const token = githubAuth ? await githubCredentialProvider() : undefined;
+          if (githubAuth && !token) {
+            return { error: 'No GitHub credential is available in Git Credential Manager. Sign in on the host first.', errorCode: 'GITHUB_CREDENTIAL_UNAVAILABLE' };
+          }
+          const response = await fetchImpl(githubAuth ? apiUrl!.toString() : canonicalUrl, {
             method: 'GET',
             headers: {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CodingAgent-DeepInvestigator/2.0',
-              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.5',
+              Accept: githubAuth ? 'application/vnd.github.raw+json' : 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.5',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
             signal: controller.signal,
+            ...(githubAuth ? { redirect: 'manual' as const } : {}),
           });
+
+          if (githubAuth && response.status >= 300 && response.status < 400) {
+            return { error: 'Authenticated GitHub redirects are not followed.', errorCode: 'GITHUB_REDIRECT_BLOCKED' };
+          }
 
           if (!response.ok) {
             return {
-              error: `HTTP request failed with status ${response.status} ${response.statusText}`,
-              errorCode: 'HTTP_FETCH_ERROR',
+              error: githubAuth ? `GitHub API returned HTTP ${response.status}.` : `HTTP request failed with status ${response.status} ${response.statusText}`,
+              errorCode: githubAuth && [401, 403, 404].includes(response.status) ? 'GITHUB_ACCESS_DENIED' : 'HTTP_FETCH_ERROR',
               statusCode: response.status,
               url: canonicalUrl,
             };
           }
 
           const contentType = response.headers.get('content-type') || 'text/html';
-          const rawBody = await response.text();
+          if (githubAuth && Number(response.headers.get('content-length')) > 1_000_000) {
+            return { error: 'GitHub response exceeds the 1 MB authenticated fetch limit.', errorCode: 'GITHUB_RESPONSE_TOO_LARGE' };
+          }
+          const rawBody = githubAuth ? await readBoundedBody(response, 1_000_000) : await response.text();
+          if (rawBody === undefined) {
+            return { error: 'GitHub response exceeds the 1 MB authenticated fetch limit.', errorCode: 'GITHUB_RESPONSE_TOO_LARGE' };
+          }
 
           let markdownResult: { markdown: string; title: string };
           let codeBlocks: string[] = [];
@@ -306,11 +384,11 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
             statusCode: response.status,
             fetchedAt: now,
           };
-          memoryCache.set(canonicalUrl, cached);
+          if (!githubAuth) memoryCache.set(canonicalUrl, cached);
         } catch (fetchErr: any) {
           const timedOut = fetchErr?.name === 'AbortError' || controller.signal.aborted;
           return {
-            error: timedOut ? `Fetching ${canonicalUrl} timed out after ${timeoutMs}ms.` : `Failed to fetch ${canonicalUrl}: ${fetchErr?.message || String(fetchErr)}`,
+            error: timedOut ? `Fetching ${canonicalUrl} timed out after ${timeoutMs}ms.` : githubAuth ? 'Authenticated GitHub request failed.' : `Failed to fetch ${canonicalUrl}: ${fetchErr?.message || String(fetchErr)}`,
             errorCode: timedOut ? 'FETCH_TIMEOUT' : 'FETCH_FAILED',
             url: canonicalUrl,
           };
