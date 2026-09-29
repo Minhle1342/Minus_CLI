@@ -31,6 +31,8 @@ import { classifyGitCommand, isExplicitGitAddPathList, isGitCommandAuthorized, p
 import { extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
 
+const MAX_COMMAND_BUFFER_BYTES = 5 * 1024 * 1024;
+
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
   // Khám phá Codebase & Điều tra tệp tin (Terminal-First)
@@ -990,6 +992,13 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (!rawCommand) {
         return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
       }
+      if (!['auto', 'host'].includes(executionTarget)) {
+        return {
+          command: rawCommand,
+          error: 'execution_target chỉ chấp nhận "auto" hoặc "host".',
+          errorCode: 'INVALID_EXECUTION_TARGET',
+        };
+      }
 
       // Reject credential-bearing GitHub URLs before any guard can echo the command to logs/results.
       for (const match of rawCommand.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
@@ -1028,6 +1037,23 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       const effectiveCommand = preflight.normalizedCommand || rawCommand;
 
+      // Enforce non-bypassable host system-risk policy before emulation or any
+      // other dispatch route, not only immediately before native host spawn.
+      const hostPolicy = executionTarget === 'host'
+        ? evaluateHostCommandPolicy(effectiveCommand)
+        : { allowed: true as const };
+      if (!hostPolicy.allowed) {
+        return {
+          command: effectiveCommand,
+          message: hostPolicy.reason,
+          preflightCode: hostPolicy.errorCode,
+          commandOutcome: 'blocked_preflight',
+          processStarted: false,
+          success: true,
+          durationMs: 1,
+        };
+      }
+
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(effectiveCommand);
       const networkGitCommand = shellAnalysis.segments.some((segment) => {
@@ -1059,6 +1085,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
         || shellAnalysis.complex
+        || shellAnalysis.operators.some((operator) => operator !== '&&')
         || blockedPushToMain
         || !shellAnalysis.segments.every(isAllowedCommand);
 
@@ -1165,6 +1192,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
       if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
+        // BackgroundTask uses host `spawn(shell: true)`, not SandboxManager.
+        // Never let auto silently bypass an available Docker isolation boundary.
+        if (executionTarget === 'auto' && sandboxManager?.getStatus?.()?.isIsolated) {
+          return {
+            command: effectiveCommand,
+            message: 'Background execution currently uses the host process manager and cannot preserve the selected Docker isolation boundary.',
+            preflightCode: 'BACKGROUND_ISOLATION_UNSUPPORTED',
+            suggestion: 'Run this finite command synchronously in the sandbox, or explicitly choose execution_target="host" if host execution is intended.',
+            commandOutcome: 'blocked_preflight',
+            processStarted: false,
+            success: true,
+            durationMs: 1,
+          };
+        }
         if (networkGitCommand) {
           return {
             error: 'Network Git commands cannot run as background tasks because they bypass the selected execution target.',
@@ -1181,13 +1222,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
 
         if (bgTask.status !== 'running') {
+          const passed = bgTask.status === 'stopped' && bgTask.exitCode === 0 && !bgTask.stopRequested;
+          const terminalStatus = passed ? 'completed' : bgTask.stopRequested ? 'cancelled' : 'failed';
+          const commandOutcome = passed ? 'succeeded' : 'failed_unexpected';
           return {
             command: rawCommand,
             exitCode: bgTask.exitCode ?? (bgTask.status === 'stopped' ? 0 : 1),
             stdout: truncateOutput(bgTask.logs.join('\n')),
             stderr: '',
             durationMs: Date.now() - startTime,
-            success: bgTask.exitCode === 0 || bgTask.status === 'stopped',
+            success: passed,
+            processStarted: true,
+            commandOutcome,
+            commandCompletion: {
+              taskId: bgTask.id,
+              command: effectiveCommand,
+              completed: true,
+              terminalStatus,
+              commandOutcome,
+              ...(typeof bgTask.exitCode === 'number' ? { exitCode: bgTask.exitCode } : {}),
+            },
             sandboxType: 'local',
           };
         }
@@ -1203,14 +1257,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           instruction: `Sử dụng tool manage_task với TaskId="${bgTask.id}" để xem status, gửi stdin (send_input), hoặc kill.`,
         };
       }
-      if (!['auto', 'host'].includes(executionTarget)) {
-        return {
-          command: effectiveCommand,
-          error: 'execution_target chỉ chấp nhận "auto" hoặc "host".',
-          errorCode: 'INVALID_EXECUTION_TARGET',
-        };
-      }
-
       // Tự động tối ưu hoá lệnh cat/type/head/tail đọc file bằng Node.js I/O (<2ms)
       const parsedCat = parseCatCommand(effectiveCommand);
       if (parsedCat) {
@@ -1274,18 +1320,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       if (executionTarget === 'host') {
-        const hostPolicy = evaluateHostCommandPolicy(effectiveCommand);
-        if (!hostPolicy.allowed) {
-          return {
-            command: effectiveCommand,
-            message: hostPolicy.reason,
-            preflightCode: hostPolicy.errorCode,
-            commandOutcome: 'blocked_preflight',
-            processStarted: false,
-            success: true,
-            durationMs: 1,
-          };
-        }
         const isAllowedOnHost = isAllowedShellCommand(effectiveCommand) || isAllowedShellCommand(rawCommand);
         if (!isAllowedOnHost && !hasExplicitPermission) {
           if (effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
@@ -1544,7 +1578,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             cwd: workspace.rootDir,
             timeout: timeoutMs,
             signal: context?.signal,
-            maxBuffer: 1024 * 1024,
+            maxBuffer: MAX_COMMAND_BUFFER_BYTES,
             env: preflight.extractedEnv ? { ...process.env, ...preflight.extractedEnv } : process.env,
           },
           (error, stdout, stderr) => {
@@ -1577,7 +1611,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                         cwd: workspace.rootDir,
                         timeout: timeoutMs,
                         signal: context?.signal,
-                        maxBuffer: 1024 * 1024,
+                        maxBuffer: MAX_COMMAND_BUFFER_BYTES,
                         env: { ...process.env, ...(preflight.extractedEnv || {}) },
                       },
                       (retryErr, retryStdout, retryStderr) => {

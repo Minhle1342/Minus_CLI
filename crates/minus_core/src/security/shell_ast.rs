@@ -33,7 +33,17 @@ pub fn parse_shell_command(command: &str) -> RsShellAnalysis {
             continue;
         }
 
-        if b == b'`' || (b == b'\\' && quote != Some(b'\'')) {
+        if b == b'`' && quote != Some(b'\'') {
+            // Backticks are command substitution in POSIX shells and escaping
+            // syntax in PowerShell; either interpretation needs explicit review.
+            complex = true;
+            current.push(b as char);
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if b == b'\\' && quote != Some(b'\'') {
             current.push(b as char);
             escaped = true;
             i += 1;
@@ -97,6 +107,12 @@ pub fn parse_shell_command(command: &str) -> RsShellAnalysis {
                 i += 2;
                 continue;
             }
+        }
+
+        // Single ampersands background/chain commands. Redirections can hide
+        // mutations or mask the exit status used by verification evidence.
+        if b == b'&' || b == b'<' || b == b'>' {
+            complex = true;
         }
 
         // Kiểm tra toán tử 1 ký tự: |, ;, newline
@@ -196,5 +212,24 @@ mod tests {
         let res = parse_shell_command("git commit -m \"unfinished");
         assert!(res.error.is_some());
         assert!(res.complex);
+    }
+
+    #[test]
+    fn single_ampersand_and_redirects_are_complex() {
+        for command in ["npm test & echo done", "npm test > test.log", "npm test 2>&1", "echo `whoami`"] {
+            assert!(parse_shell_command(command).complex, "{}", command);
+        }
+    }
+
+    #[test]
+    fn quoted_operators_and_and_chain_keep_expected_shape() {
+        let chain = parse_shell_command("npm run build && npm test");
+        assert!(!chain.complex);
+        assert_eq!(chain.operators, vec!["&&"]);
+        assert_eq!(chain.segments, vec!["npm run build", "npm test"]);
+
+        let quoted = parse_shell_command("node -e \"console.log('a&b > c')\"");
+        assert!(!quoted.complex);
+        assert!(quoted.operators.is_empty());
     }
 }

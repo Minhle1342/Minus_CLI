@@ -40,7 +40,8 @@ export function analyzeShellCommand(command: string): ShellAnalysis {
   for (let i = 0; i < command.length; i++) {
     const char = command[i];
     if (escaped) { current += char; escaped = false; continue; }
-    if (char === '`' || (char === '\\' && quote !== "'")) { current += char; escaped = true; continue; }
+    if (char === '`' && quote !== "'") { complex = true; current += char; escaped = true; continue; }
+    if (char === '\\' && quote !== "'") { current += char; escaped = true; continue; }
     if (quote) { current += char; if (char === quote) quote = undefined; continue; }
     if (char === "'" || char === '"') { quote = char; current += char; continue; }
     if ((char === '$' && command[i + 1] === '(') || char === '(' || char === ')') complex = true;
@@ -49,6 +50,10 @@ export function analyzeShellCommand(command: string): ShellAnalysis {
       if (!push()) return { segments, operators, complex: true, error: 'Empty shell command segment.' };
       operators.push(two); i++; continue;
     }
+    // Single ampersands are background/command-chain operators on POSIX/cmd;
+    // redirects can hide mutations or make a test's exit status ambiguous.
+    // Treat them as complex so the command cannot pass the ordinary allowlist.
+    if (char === '&' || char === '<' || char === '>') complex = true;
     if (char === '|' || char === ';' || char === '\n' || char === '\r') {
       if (!push()) {
         if (char === '\r' && command[i + 1] === '\n') continue;

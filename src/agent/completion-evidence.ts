@@ -2,6 +2,7 @@ import type { Session, SessionEvent } from '../session/session.js';
 import { collectCompletionObservations, hasObservedMutation, observedMutationFiles, toolResultFailed } from './completion-observations.js';
 import { FILE_MUTATION_TOOLS } from '../tools/diff-generator.js';
 import { isCommandOutcomeBlocked } from '../tools/command-outcome.js';
+import { analyzeShellCommand } from '../security/shell-segmenter.js';
 
 export type EvidenceKind = 'inspection' | 'mutation' | 'verification' | 'git' | 'external' | 'reproduction' | 'other';
 
@@ -43,7 +44,27 @@ const INSPECTION_TOOLS = new Set([
 ]);
 
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
-const VERIFICATION_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test\b|run\s+(?:[a-z0-9_-]*test[a-z0-9_-]*|build|lint|typecheck|check|verify)\b)|\b(?:pytest|py\.test|cargo\s+test|go\s+test|dotnet\s+(?:test|build)|mvn\s+(?:test|verify)|gradle\s+(?:test|check)|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)|ctest|make\s+(?:test|check)|composer\s+test|bundle\s+exec\s+rspec|phpunit|tsc(?:\s|$))\b|\b(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|(?:--[a-z0-9_-]+\s+)*(?:test|tests)[\\/]|(?:[^\s]*[\\/])*(?:test|tests)\.[cm]?[jt]sx?\b)|\b(?:npx\s+(?:playwright\s+test|cypress\s+run|vitest|jest|mocha|ava)\b)|\bnode\s+--test\b|\bpython(?:3)?(?:\.exe)?\s+(?:-m\s+(?:unittest|pytest)\b|(?:[^\s]*[\\/])*(?:test_[^\s]+\.py|[^\s]+_test\.py|tests?\.py)\b)/i;
+const VERIFY_SCRIPT_NAME = /(?:^|[-_:])(?:test|tests|spec|e2e|unit|integration|build|lint|typecheck|type-check|check-types|check|verify)(?:$|[-_:])/i;
+
+function isVerificationSegment(command: string): boolean {
+  const normalized = command.trim();
+  const script = normalized.match(/^(?:npm|pnpm|yarn|bun)\s+run\s+([^\s]+)/i);
+  if (script) return VERIFY_SCRIPT_NAME.test(script[1]);
+
+  const directScript = normalized.match(/^(?:pnpm|yarn|bun)\s+([^\s]+)/i);
+  if (directScript && !/^(?:exec|dlx|x|install|add|remove|run|test)$/i.test(directScript[1])) {
+    return VERIFY_SCRIPT_NAME.test(directScript[1]);
+  }
+
+  if (/^(?:npm|pnpm|yarn|bun)\s+test\b/i.test(normalized)) return true;
+  if (/^(?:npm|pnpm|yarn|bun)\s+exec\s+(?:--\s+)?(?:vitest|jest|mocha|ava|playwright|cypress|tsc|eslint)\b/i.test(normalized)) return true;
+  if (/^npx\s+(?:--yes\s+)?(?:playwright\s+test|cypress\s+run|vitest|jest|mocha|ava|tsc|eslint)\b/i.test(normalized)) return true;
+  if (/^(?:vitest|jest|mocha|ava|playwright)\s+(?:run|test)\b/i.test(normalized)) return true;
+  if (/^(?:cargo\s+test\b|cargo\s+nextest\s+run\b|go\s+test\b|dotnet\s+(?:test|build)\b|mvn\s+(?:test|verify)\b|gradle\s+(?:test|check)\b|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)\b|ctest\b|make\s+(?:test|check)\b|composer\s+test\b|bundle\s+exec\s+rspec\b|phpunit\b|pytest\b|py\.test\b|tsc(?:\s|$))/i.test(normalized)) return true;
+  if (/^python(?:3)?(?:\.exe)?\s+(?:-m\s+(?:unittest|pytest)\b|(?:[^\s]*[\\/])*(?:test_[^\s]+\.py|[^\s]+_test\.py|tests?\.py)\b)/i.test(normalized)) return true;
+  if (/^(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|(?:--[a-z0-9_-]+\s+)*(?:test|tests)[\\/]|(?:[^\s]*[\\/])*(?:test|tests)\.[cm]?[jt]sx?\b)/i.test(normalized)) return true;
+  return false;
+}
 
 export function extractCommandString(args: Record<string, any> = {}, result: Record<string, any> = {}): string {
   const candidate = args.command ?? args.CommandLine ?? args.commandLine ?? args.cmd ?? result.command ?? result.CommandLine ?? '';
@@ -55,7 +76,13 @@ export function isToolResultFailure(result: Record<string, any>): boolean {
 }
 
 export function isVerificationCommand(command: unknown): boolean {
-  return typeof command === 'string' && VERIFICATION_COMMAND_PATTERN.test(command.trim());
+  if (typeof command !== 'string') return false;
+  const analysis = analyzeShellCommand(command.trim());
+  if (analysis.error || analysis.complex || analysis.segments.length === 0) return false;
+  // Only && preserves the success of every command in the chain. Pipes, `;`
+  // and `||` can hide a failed test behind a later successful process.
+  if (analysis.operators.some((operator) => operator !== '&&')) return false;
+  return analysis.segments.some(isVerificationSegment);
 }
 
 export function isScratchCommand(command: unknown): boolean {
@@ -85,12 +112,19 @@ export function classifyToolEvidence(
   if (toolName === 'run_test_suite') return result.exitCode === 0 && result.isPassed === true && !args.useScratchWorkspace
     ? ['verification'] : [];
   if (toolName === 'run_command') {
-    if (result.processStarted === false || result.exitCode !== 0) return [];
+    if (result.processStarted === false || result.exitCode !== 0
+      || (result.commandOutcome !== undefined && result.commandOutcome !== 'succeeded')) return [];
     const cmd = extractCommandString(args, result);
     if (isScratchCommand(cmd)) {
       return ['reproduction'];
     }
     return isVerificationCommand(cmd) ? ['verification'] : ['other'];
+  }
+  if (toolName === 'manage_task') {
+    const completion = result.commandCompletion;
+    if (result.action !== 'status' || !completion?.completed || completion.terminalStatus !== 'completed'
+      || completion.commandOutcome !== 'succeeded' || completion.exitCode !== 0) return [];
+    return isVerificationCommand(completion.command) ? ['verification'] : ['other'];
   }
   if (toolName === 'get_diagnostics') {
     if (result.clean === true && (!result.totalErrors || result.totalErrors === 0)) {

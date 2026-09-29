@@ -66,7 +66,20 @@ Actions:
             return { error: `Không tìm thấy task với ID: ${taskId}` };
           }
           const logs = taskManager.getTaskLogs(taskId, 30);
+          const isTerminal = task.status !== 'running';
+          const terminalStatus = !isTerminal
+            ? undefined
+            : task.stopRequested
+              ? 'cancelled'
+              : task.exitCode === undefined || task.exitCode === null
+                ? 'spawn_error'
+                : task.exitCode === 0
+                  ? 'completed'
+                  : 'failed';
+          const commandOutcome = terminalStatus === 'completed' ? 'succeeded'
+            : isTerminal ? 'failed_unexpected' : undefined;
           return {
+            action: 'status',
             taskId: task.id,
             command: task.command,
             status: task.status,
@@ -74,6 +87,17 @@ Actions:
             startedAt: task.startedAt,
             exitCode: task.exitCode,
             logTail: logs,
+            ...(commandOutcome ? { commandOutcome, processStarted: true, success: commandOutcome === 'succeeded' } : {}),
+            ...(isTerminal ? {
+              commandCompletion: {
+                taskId: task.id,
+                command: task.command,
+                completed: true,
+                terminalStatus,
+                commandOutcome,
+                ...(typeof task.exitCode === 'number' ? { exitCode: task.exitCode } : {}),
+              },
+            } : {}),
           };
         }
 

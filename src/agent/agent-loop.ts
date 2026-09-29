@@ -3068,6 +3068,35 @@ export class AgentLoop {
               }
             }
           }
+          if (toolName === 'manage_task' && String(toolArgs.Action || toolArgs.action || '').toLowerCase() === 'status') {
+            const completion = executionResult.result?.commandCompletion;
+            const completedCommand = typeof completion?.command === 'string' ? completion.command : '';
+            if (completion?.completed === true && isVerificationCommand(completedCommand)) {
+              const passed = completion.terminalStatus === 'completed'
+                && completion.commandOutcome === 'succeeded'
+                && completion.exitCode === 0
+                && !isToolResultFailure(executionResult.result);
+              this.verificationPolicy.recordVerification(
+                completedCommand,
+                passed,
+                String(executionResult.result?.logTail || '').slice(0, 240),
+                typeof completion.exitCode === 'number' ? completion.exitCode : undefined,
+              );
+              if (this.targetFilesModifiedInTurn.size > 0) {
+                for (const modifiedFile of this.targetFilesModifiedInTurn) {
+                  if (passed) this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedFile);
+                  else this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedFile, turn, 'Background verification command failed');
+                }
+              }
+              this.lastCommandExecutionState = {
+                command: completedCommand,
+                success: passed,
+                exitCode: completion.exitCode,
+                commandOutcome: completion.commandOutcome,
+                filesModifiedSince: 0,
+              };
+            }
+          }
           if (toolName === 'get_diagnostics') {
             const isClean = !isToolResultFailure(executionResult.result)
               && executionResult.result?.clean === true
