@@ -1855,6 +1855,15 @@ export class CLI {
     }
   }
 
+  static renderRequestAnalysis(analysisText: string, maxLines = 30): void {
+    if (!analysisText || !analysisText.trim()) return;
+    const lines = analysisText.trim().split('\n').slice(0, maxLines);
+    console.log(`  ${c.cyan}🔍 Request Analysis:${c.reset}`);
+    for (const line of lines) {
+      console.log(`    ${c.white}${line}${c.reset}`);
+    }
+  }
+
   static renderCognitiveScaffold(scaffoldLines: string[]): void {
     // Scaffold được nạp ngầm vào prompt cho LLM, chỉ in 1 dòng biểu thị nhẹ nếu cần
     if (!scaffoldLines || scaffoldLines.length === 0) return;
@@ -1910,8 +1919,7 @@ export class CLI {
     console.log('');
   }
 
-  static renderReasoningInspection(data: { thought: string; timestamp?: string; step?: number; turn?: number }): void {
-    console.log(`\n${c.brightCyan}${c.bold}❯ REASONING TRACE${c.reset}`);
+  static renderReasoningInspection(data: { thought: string; timestamp?: string; step?: number; turn?: number }): void {    console.log(`\n${c.brightCyan}${c.bold}❯ REASONING TRACE${c.reset}`);
     console.log(data.thought || 'No trace recorded.');
     console.log('');
   }

@@ -148,6 +148,19 @@ function isComprehensiveSubmissionSummary(value: string): boolean {
   return /[-*•\d]\.\s|###|\*\*|(?:\n\n)/.test(trimmed);
 }
 
+/**
+ * Extract the [REQUEST ANALYSIS] block the model opens its reasoning with
+ * (goal, scope, ambiguities — see CORE_SYSTEM_PROMPT §3). Returns undefined
+ * when the model did not include one.
+ */
+export function extractRequestAnalysis(reasoning: string | undefined | null): string | undefined {
+  if (!reasoning) return undefined;
+  const match = /\[REQUEST ANALYSIS\]([\s\S]*?)(?:\[\/REQUEST ANALYSIS\]|$)/i.exec(reasoning);
+  if (!match) return undefined;
+  const block = match[1].trim();
+  return block ? block : undefined;
+}
+
 export interface RuntimeHarnessProfile {
   profileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
   /** @deprecated Kept for profile API compatibility; evidence policy decides whether reproduction is required. */
@@ -2244,7 +2257,12 @@ export class AgentLoop {
           step,
           turn: (session as any).turnsCount || 1,
         };
-        if (!this._collapsePreferences.compactSteps) {
+        // The [REQUEST ANALYSIS] block is short, high-signal, and explicitly
+        // user-facing: always display it, even when step output is compacted.
+        const requestAnalysis = extractRequestAnalysis(response.reasoningContent);
+        if (requestAnalysis) {
+          CLI.renderRequestAnalysis(requestAnalysis);
+        } else if (!this._collapsePreferences.compactSteps) {
           CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
         }
         // Streaming providers already emitted each thought chunk. Emit the
@@ -2383,6 +2401,7 @@ export class AgentLoop {
         let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
         let toolBatchCancelled = false;
         let userDeniedPermission: { toolName: string; detail: string } | undefined;
+        let postSubmissionBlocked = false;
         let phaseTransitionAcceptedInResponse = false;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
@@ -3500,6 +3519,13 @@ export class AgentLoop {
             };
             break;
           }
+          // Post-submit lock: further calls are blocked by design. Finalize
+          // from the submitted summary below instead of burning another
+          // model round trip on calls that can never execute.
+          if (executionResult.result?.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED' && submittedSolutionSummary) {
+            postSubmissionBlocked = true;
+            break;
+          }
         }
 
         const stepReason = toolBatchCancelled
@@ -3551,11 +3577,12 @@ export class AgentLoop {
         const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
         const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
         const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
-          ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', false);
+          ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
         if (
           !isArchQuery
           && hasSubmittedSolution
-          && isSummarySufficient
+          && submittedSolutionSummary
+          && (isSummarySufficient || postSubmissionBlocked)
           && enableSubmitAutoFinalization
         ) {
           const finalAnswer = submittedSolutionSummary!;
