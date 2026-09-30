@@ -134,8 +134,8 @@ export class ToolDescriptorRegistry {
     } else if (name === 'submit_solution') {
       descriptor = {
         name,
-        capabilities: ['complete'],
-        phases: ['implement', 'verify', 'release'],
+        capabilities: ['complete', 'inspect'],
+        phases: ['explore', 'implement', 'verify', 'release'],
         minimumRisk: 'R0',
         mutates: false,
         reversible: true,

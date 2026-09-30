@@ -103,7 +103,7 @@ test('Agent loop ends the turn (no workaround attempts) after explicit user deni
     session.addUserMessage('Clean up the temp directory.');
     const result = await loop.run(session);
 
-    assert.match(String(result), /denied permission/i);
+    assert.match(String(result), /turn ended, awaiting your direction/i);
     assert.equal(llm.calls, 1, 'LLM must not be re-prompted after explicit denial');
     const toolResults = session.getEvents().filter((e: any) => e.type === 'tool/result');
     assert.ok(

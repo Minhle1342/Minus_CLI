@@ -224,7 +224,7 @@ export class CompletionEvidenceGate {
     // tool thất bại (vd: git clone 404) thì không đòi mutation. Vẫn giữ các
     // luật chống ảo giác verify/commit/push bên dưới.
     const isBlockedInvestigation = options.resolutionType === 'investigation_only' && failures.length > 0;
-    const effectiveCodeChangeRequired = isBlockedInvestigation ? false : options.codeChangeRequired;
+    const effectiveCodeChangeRequired = (options.resolutionType === 'investigation_only' || isBlockedInvestigation) ? false : options.codeChangeRequired;
 
     // Thu thập đường dẫn các file đã được chỉnh sửa
     const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));

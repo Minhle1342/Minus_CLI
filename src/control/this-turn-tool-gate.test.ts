@@ -120,7 +120,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(exploreDecision.allowedToolNames.includes('formulate_and_verify_hypothesis'), 'formulate_and_verify_hypothesis must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in explore');
   assert.equal(exploreDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must not be exposed in explore');
-  assert.equal(exploreDecision.allowedToolNames.includes('submit_solution'), false, 'submit_solution must not be exposed in explore');
+  assert.ok(exploreDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be exposed in explore');
   assert.ok(exploreDecision.allowedToolNames.includes('request_phase_transition'), 'coding exploration can request a Harness-owned transition');
 
   // 2. Pure read-only exploration (must NOT include editing mutations)
@@ -136,7 +136,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   const readOnlyDecision = gate.decide(readOnlyClassification, registry.getAll());
   assert.ok(readOnlyDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed in read-only');
   assert.equal(readOnlyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in pure read-only exploration');
-  assert.equal(readOnlyDecision.allowedToolNames.includes('submit_solution'), false, 'submit_solution must NOT be allowed in pure read-only exploration');
+  assert.ok(readOnlyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in pure read-only exploration');
 
   // 3. Implement phase on feature
   const implementClassification: any = {

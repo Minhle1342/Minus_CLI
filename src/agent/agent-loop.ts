@@ -1357,7 +1357,8 @@ export class AgentLoop {
       const stepCompletionState = getTurnCompletionState(session, turn);
       const isPureInvestigation = !stepCompletionState.hasMutations
         && !classification.requiredCapabilities.includes('edit')
-        && ['question', 'exploration'].includes(classification.taskClass);
+        && ['question', 'exploration'].includes(classification.taskClass)
+        && classification.phase !== 'explore';
       if (isPureInvestigation) {
         activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
       }
@@ -2685,7 +2686,7 @@ export class AgentLoop {
             executionResult = preexecutedReadResult;
           } else {
             // Chạy tool qua pipeline an toàn
-            const originalCodeChangeRequired = initialTurnClassification.requiredCapabilities.includes('edit')
+            const originalCodeChangeRequired = (initialTurnClassification.phase !== 'explore' && initialTurnClassification.requiredCapabilities.includes('edit'))
               || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
               || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
               || getTurnCompletionState(session, turn).hasMutations
@@ -3537,7 +3538,7 @@ export class AgentLoop {
         }
 
         if (userDeniedPermission) {
-          const denialMessage = `Agent stopped: you denied permission for ${userDeniedPermission.toolName} (${userDeniedPermission.detail}). The turn has ended and no further tools were executed — tell me how to proceed (adjust the approach, approve a narrower action, or stop).`;
+          const denialMessage = `Denied: ${userDeniedPermission.toolName} — turn ended, awaiting your direction.`;
           await CLI.renderExecutionStopped(denialMessage, 'PERMISSION_DENIED_BY_USER');
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'permission-denied-by-user');
           this.goalManager.disarm();

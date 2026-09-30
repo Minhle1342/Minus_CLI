@@ -104,10 +104,13 @@ export class ThisTurnToolGate {
         && ['explore', 'plan'].includes(classification.phase);
       const isVerificationRepairTool = classification.phase === 'verify'
         && EDIT_TOOL_NAMES.has(tool.name);
+      const isCompletionTool = tool.name === 'submit_solution'
+        && descriptor.phases.includes(classification.phase);
       const capabilityMatch = descriptor.capabilities.some((capability) => required.has(capability))
         || isAlwaysAllowedRead
         || isPhaseTransitionRequest
-        || isVerificationRepairTool;
+        || isVerificationRepairTool
+        || isCompletionTool;
       const phaseMatch = descriptor.phases.includes(classification.phase)
         || isAlwaysAllowedRead;
       const riskMatch = riskRank[classification.risk] >= riskRank[descriptor.minimumRisk]
