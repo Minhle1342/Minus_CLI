@@ -99,6 +99,8 @@ export class ThisTurnToolGate {
       const descriptor = this.descriptors.describe(tool);
       // Tool đọc an toàn luôn được phép ở mọi phase vì quan sát là quyền năng cốt lõi của Agent
       const isAlwaysAllowedRead = READ_TOOL_NAMES.has(tool.name) && !descriptor.mutates;
+      // Tool edit hoặc create luôn được phép ở tất cả các phase và control mode
+      const isAlwaysAllowedEdit = EDIT_TOOL_NAMES.has(tool.name);
       // The model may ask the Harness to advance phase, but cannot expand its current tool authority.
       const isPhaseTransitionRequest = tool.name === 'request_phase_transition'
         && ['explore', 'plan'].includes(classification.phase);
@@ -108,13 +110,16 @@ export class ThisTurnToolGate {
         && descriptor.phases.includes(classification.phase);
       const capabilityMatch = descriptor.capabilities.some((capability) => required.has(capability))
         || isAlwaysAllowedRead
+        || isAlwaysAllowedEdit
         || isPhaseTransitionRequest
         || isVerificationRepairTool
         || isCompletionTool;
       const phaseMatch = descriptor.phases.includes(classification.phase)
-        || isAlwaysAllowedRead;
+        || isAlwaysAllowedRead
+        || isAlwaysAllowedEdit;
       const riskMatch = riskRank[classification.risk] >= riskRank[descriptor.minimumRisk]
-        || (classification.risk !== 'R0' || !descriptor.mutates);
+        || (classification.risk !== 'R0' || !descriptor.mutates)
+        || isAlwaysAllowedEdit;
 
       if (capabilityMatch && phaseMatch && riskMatch) {
         allowed.push(tool);

@@ -91,12 +91,24 @@ export class ToolDescriptorRegistry {
     } else if (EDIT.has(name)) {
       descriptor = {
         name,
-        capabilities: ['edit'],
-        phases: ['implement', 'verify'],
-        minimumRisk: 'R1',
+        capabilities: ['edit', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
         mutates: true,
         reversible: true,
         requiresApproval: true,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'verify_edit') {
+      descriptor = {
+        name,
+        capabilities: ['verify', 'edit', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
@@ -118,8 +130,8 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['execute', 'edit', 'inspect', 'verify'],
-        phases: ['implement', 'verify'],
-        minimumRisk: 'R1',
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
         mutates: true,
         reversible: true,
         requiresApproval: true,

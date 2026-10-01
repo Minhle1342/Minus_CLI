@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeForMatching } from '../agent/final-answer-guard.js';
+import { extractTechnicalEntities, CONCRETE_ACTION_VERBS_REGEX, isPurelyEvasiveText } from '../agent/solution-grounding-auditor.js';
 import { detectLazyOmission, resolveFullRewriteWarnLines } from '../agent/aci-guardrails.js';
 import { PatchEngine } from '../patch/patch-engine.js';
 
@@ -78,6 +79,8 @@ export interface PreMutationGateContext {
   hasSubmittedSolution?: boolean;
   cascadeFrozen?: boolean;
   cascadeReason?: string;
+  allMutationsAreNonExecutable?: boolean;
+  userExplicitlyExemptsTesting?: boolean;
   reproductionStatus?: {
     isVerified?: boolean;
     hasPreFixRepro?: boolean;
@@ -491,8 +494,18 @@ export class ToolUseGuardian {
     if (toolName === 'submit_solution' && typeof args.summary === 'string') {
       const summary = args.summary.trim();
       const normalizedSummary = normalizeForMatching(summary);
-      const isPseudoClaim = /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(normalizedSummary)
-        || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(normalizedSummary);
+      const isEvasivePhrase = isPurelyEvasiveText(normalizedSummary);
+      const hasActionVerb = CONCRETE_ACTION_VERBS_REGEX.test(normalizedSummary);
+      const entities = extractTechnicalEntities(summary);
+      const declaredFiles = Array.isArray(args.filesModified)
+        ? args.filesModified.filter((f: any) => typeof f === 'string' && f.trim().length > 0)
+        : [];
+      const hasSubstance =
+        entities.length > 0 ||
+        declaredFiles.length > 0 ||
+        Boolean(args.rootCause && String(args.rootCause).trim().length > 0);
+
+      const isPseudoClaim = !hasSubstance && (isEvasivePhrase || (!hasActionVerb && summary.length < 140));
       if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
         const errorMsg = 'Tool "submit_solution" bị Tool-Use Guardian từ chối: trường "summary" chỉ chứa câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...") mà không có nội dung phân tích nguyên nhân, vị trí mã nguồn hoặc giải pháp thực tế. Hãy đưa toàn bộ phát hiện kỹ thuật vào summary hoặc trả lời chi tiết cho người dùng.';
         return {
@@ -508,9 +521,26 @@ export class ToolUseGuardian {
       }
 
       // SWE-Reasoner Execution-Verified Gating (Phase 1):
+      const declaredAllNonExecutable = declaredFiles.length > 0
+        && declaredFiles.every((f: string) => {
+          const lower = f.trim().toLowerCase();
+          return /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|json|ya?ml|toml|ini|xml|css|scss|sass|less|lock)$/i.test(lower);
+        });
+
+      const isNonCodeTask = args.resolutionType === 'investigation_only'
+        || args.resolutionType === 'text_or_asset_edit'
+        || (args.resolutionType === 'configuration_change' && declaredAllNonExecutable)
+        || gateContext?.allMutationsAreNonExecutable === true
+        || declaredAllNonExecutable;
+      const userExempted = gateContext?.userExplicitlyExemptsTesting === true;
+      const isBugfix = gateContext?.isBugfixTask !== false;
+
       if (
+        isBugfix &&
         gateContext?.reproductionStatus?.enforceReproductionPass &&
-        !gateContext.reproductionStatus.hasPostFixPass
+        !gateContext.reproductionStatus.hasPostFixPass &&
+        !isNonCodeTask &&
+        !userExempted
       ) {
         const errorMsg = 'Tool "submit_solution" bị Chặn bởi Reproduction Verification Gate (SWE-Reasoner): Tác vụ sửa lỗi yêu cầu xác minh thực thi rằng bài test tái hiện lỗi đã vượt qua thành công sau khi sửa (post-fix PASS). Hãy thực thi bài test kiểm chứng trước khi nộp giải pháp.';
         return {
@@ -522,7 +552,7 @@ export class ToolUseGuardian {
           error: errorMsg,
           errorCode: 'REPRODUCTION_VERIFICATION_REQUIRED',
           reason: errorMsg,
-          suggestedAlternative: 'run_tests',
+          suggestedAlternative: 'run_command',
         };
       }
     }

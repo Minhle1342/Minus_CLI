@@ -772,6 +772,40 @@ Trong các bước tiếp theo, tôi sẽ hỗ trợ bạn triển khai tính n�
       assert.strictEqual(audit.allowed, true);
       assert.deepStrictEqual(audit.reconciledFilesModified, ['src/config.json'], 'Mutations from session ledger must be auto-reconciled');
     });
+
+    it('SolutionGroundingAuditor: should exempt 3+ sensitive-named doc files from High-Tier verification', () => {
+      const audit = SolutionGroundingAuditor.audit({
+        summary: 'Cập nhật tài liệu hướng dẫn auth và payment trong dự án.',
+        filesModified: ['docs/auth-guide.md', 'docs/payment.md', 'docs/security.md'],
+        verificationMethod: 'direct_validation',
+      });
+
+      assert.strictEqual(audit.allowed, true);
+      assert.strictEqual(audit.errorCode, undefined);
+    });
+
+    it('SolutionGroundingAuditor: should respect userRequest test exemption on 3+ code files', () => {
+      const audit = SolutionGroundingAuditor.audit({
+        summary: 'Refactor cấu trúc file giao diện trong hệ thống.',
+        filesModified: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+        verificationMethod: 'direct_validation',
+      }, {
+        userRequest: 'Cập nhật 3 file này giúp tôi, không cần chạy test.',
+      });
+
+      assert.strictEqual(audit.allowed, true);
+    });
+
+    it('SolutionGroundingAuditor: should reject 3+ code files with weak verification method', () => {
+      const audit = SolutionGroundingAuditor.audit({
+        summary: 'Sửa lỗi logic trong các module xử lý dữ liệu người dùng.',
+        filesModified: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+        verificationMethod: 'direct_validation',
+      });
+
+      assert.strictEqual(audit.allowed, false);
+      assert.strictEqual(audit.errorCode, 'VERIFICATION_TIER_MISMATCH');
+    });
   });
 });
 

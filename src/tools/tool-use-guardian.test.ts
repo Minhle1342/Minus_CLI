@@ -141,3 +141,122 @@ test('tool-use-guardian: pre-call validation coerces TargetContent/ReplacementCo
   assert.equal('TargetContent' in validation.coercedArgs, false);
   assert.equal('ReplacementContent' in validation.coercedArgs, false);
 });
+
+test('tool-use-guardian: Reproduction Gate blocks submit_solution on unverified bugfix when enforceReproductionPass is active', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    hasValidatedHypothesis: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: false,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Fixed null pointer exception in UserService.ts after patch.',
+    filesModified: ['src/services/UserService.ts'],
+  });
+
+  assert.equal(res.valid, false);
+  assert.equal(res.errorCode, 'REPRODUCTION_VERIFICATION_REQUIRED');
+  assert.equal(res.suggestedAlternative, 'run_command');
+});
+
+test('tool-use-guardian: Reproduction Gate allows submit_solution when hasPostFixPass is true', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    hasValidatedHypothesis: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: true,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Fixed null pointer exception in UserService.ts after patch.',
+    filesModified: ['src/services/UserService.ts'],
+  });
+
+  assert.equal(res.valid, true);
+});
+
+test('tool-use-guardian: Reproduction Gate exempts investigation_only tasks', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    hasValidatedHypothesis: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: false,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Determined behavior is working as designed; no code modification required.',
+    resolutionType: 'investigation_only',
+    rootCause: 'User passed invalid credentials',
+  });
+
+  assert.equal(res.valid, true);
+});
+
+test('tool-use-guardian: Reproduction Gate exempts non-executable mutations (e.g. docs, CSS, configs)', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    hasValidatedHypothesis: true,
+    allMutationsAreNonExecutable: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: false,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Corrected broken link in README.md documentation.',
+    filesModified: ['README.md'],
+  });
+
+  assert.equal(res.valid, true);
+});
+
+test('tool-use-guardian: Reproduction Gate exempts tasks where user explicitly exempts testing', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: true,
+    hasValidatedHypothesis: true,
+    userExplicitlyExemptsTesting: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: false,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Fixed logic calculation in fee-calculator.ts per user request skipping tests.',
+    filesModified: ['src/fee-calculator.ts'],
+  });
+
+  assert.equal(res.valid, true);
+});
+
+test('tool-use-guardian: Reproduction Gate does not enforce on non-bugfix tasks (e.g. features)', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    isBugfixTask: false,
+    hasValidatedHypothesis: true,
+    reproductionStatus: {
+      enforceReproductionPass: true,
+      hasPostFixPass: false,
+    },
+  });
+
+  const res = guardian.preCallValidate('submit_solution', {
+    summary: 'Implemented new export format in ReportGenerator.ts.',
+    filesModified: ['src/ReportGenerator.ts'],
+  });
+
+  assert.equal(res.valid, true);
+});

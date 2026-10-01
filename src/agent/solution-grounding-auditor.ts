@@ -1,8 +1,12 @@
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, observedMutationFiles } from './completion-observations.js';
 import { normalizeForMatching } from './final-answer-guard.js';
-import { isSensitivePath, verifyHighMinFiles } from './verify-tier-resolver.js';
-import { CompletionEvidenceGate, isNonExecutableFile } from './completion-evidence.js';
+import { verifyHighMinFiles } from './verify-tier-resolver.js';
+import {
+  CompletionEvidenceGate,
+  isNonExecutableFile,
+  isUserExplicitlyExemptingTests,
+} from './completion-evidence.js';
 
 export type ResolutionType =
   | 'code_fix'
@@ -104,6 +108,25 @@ export function computeInformationDensity(text: string, entities: string[]): num
 }
 
 /**
+ * Danh sách mở rộng các động từ hành động kỹ thuật cụ thể (Anh + Việt)
+ */
+export const CONCRETE_ACTION_VERBS_REGEX =
+  /\b(?:xoa|sua|cap nhat|thay doi|tao|chinh sua|khac phuc|them|trien khai|toi uu|nang cap|cau hinh|chuyen doi|dieu chinh|khoi tao|chuan hoa|bo sung|viet lai|ghi|doc|dong bo|lap trinh|fix|fixed|delete|deleted|remove|removed|update|updated|change|changed|create|created|implement|implemented|resolve|resolved|patch|patched|add|added|replace|replaced|clean|cleaned|verify|verified|test|tested|refactor|refactored|optimize|optimized|debug|debugged|configure|configured|upgrade|upgraded|migrate|migrated|adjust|adjusted|validate|validated|revert|reverted|restore|restored|simplify|simplified|isolate|isolated|enable|enabled|disable|disabled|extract|extracted)\b/i;
+
+/**
+ * Mẫu phát hiện câu văn né tránh / hứa hẹn suông không có hành động thực nghiệm
+ */
+export const PURELY_EVASIVE_PHRASE_REGEX =
+  /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i;
+
+export const FUTURE_EVASIVE_PHRASE_REGEX =
+  /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap|report|explain|present|provide)\s+(?:cau tra loi\s+)?(?:chi tiet|day du|details?|answers?)/i;
+
+export function isPurelyEvasiveText(text: string): boolean {
+  return PURELY_EVASIVE_PHRASE_REGEX.test(text) || FUTURE_EVASIVE_PHRASE_REGEX.test(text);
+}
+
+/**
  * SolutionGroundingAuditor - Bộ thẩm định Grounding thực nghiệm cho submit_solution.
  * Thay thế hoàn toàn Regex Heuristics cứng nhắc bằng cơ chế:
  * 1. Semantic Action-Entity Grounding (Thực thể kỹ thuật + Hành động cụ thể)
@@ -113,7 +136,12 @@ export function computeInformationDensity(text: string, entities: string[]): num
 export class SolutionGroundingAuditor {
   static audit(
     payload: SubmitSolutionPayload,
-    options: { session?: Session; turn?: number; workspaceRoot?: string } = {},
+    options: {
+      session?: Session;
+      turn?: number;
+      workspaceRoot?: string;
+      userRequest?: string;
+    } = {},
   ): GroundingAuditResult {
     const summary = (payload.summary || '').trim();
     const reasons: string[] = [];
@@ -157,28 +185,50 @@ export class SolutionGroundingAuditor {
       new Set([...declaredFiles, ...sessionMutatedFiles]),
     );
 
-    // 4b. Đối chiếu phương pháp verify với mức ảnh hưởng đã đo (chặn "lời hứa
-    // verify"): thay đổi từ ngưỡng HIGH trở lên không được nộp bằng kiểm tra
-    // bằng mắt hoặc tuyên bố suông — bắt buộc automated test pass.
+    // 4b. Đối chiếu phương pháp verify với mức ảnh hưởng đã đo:
+    // Thay đổi từ ngưỡng HIGH (>= 3 file code) trở lên không được nộp bằng kiểm tra
+    // bằng mắt hoặc tuyên bố suông — bắt buộc automated test pass hoặc diagnostics clean.
+    // Miễn trừ nếu:
+    // - Toàn bộ file thay đổi là tài liệu/asset/cấu hình tĩnh (isNonExecutableFile)
+    // - Nhiệm vụ thuần văn bản/tài liệu (text_or_asset_edit, configuration_change, investigation_only)
+    // - Người dùng chỉ định rõ ràng miễn trừ kiểm thử (userExplicitlyExemptsTesting)
+    // - Đã có kiểm chứng thực tế trong session (automated test pass, scratch repro pass exit 0, hoặc diagnostics clean)
     const weakMethods: Array<string | undefined> = [
       undefined,
       'diff_visual_inspection',
       'direct_validation',
       'not_applicable',
     ];
-    // ponytail: docs-only edits and sessions with a real post-mutation test
-    // pass share the completion gates' exemption; the optional
-    // verificationMethod field must not reject verified work.
-    const allDocsOnly = reconciledFilesModified.length > 0
-      && reconciledFilesModified.every((file) => isNonExecutableFile(file) && !isSensitivePath(file));
+
+    const allDocsOrNonExecutable = (
+      reconciledFilesModified.length > 0
+      && reconciledFilesModified.every((file) => isNonExecutableFile(file))
+    ) || (
+      options.session
+        ? new CompletionEvidenceGate().hasOnlyNonExecutableMutations(options.session, options.turn)
+        : false
+    );
+
+    const isExemptResolution =
+      payload.resolutionType === 'investigation_only'
+      || payload.resolutionType === 'text_or_asset_edit'
+      || payload.resolutionType === 'configuration_change';
+
+    const userExempted = isUserExplicitlyExemptingTests(options.userRequest);
+
     const sessionVerified = options.session
-      ? new CompletionEvidenceGate().hasVerifiedPassingTest(options.session, options.turn)
+      ? (
+          new CompletionEvidenceGate().hasPostFixReproductionPass(options.session, options.turn)
+          || new CompletionEvidenceGate().hasVerifiedPassingTest(options.session, options.turn)
+        )
       : false;
+
     if (
       reconciledFilesModified.length >= verifyHighMinFiles()
-      && payload.resolutionType !== 'investigation_only'
+      && !isExemptResolution
+      && !userExempted
       && weakMethods.includes(payload.verificationMethod)
-      && !allDocsOnly
+      && !allDocsOrNonExecutable
       && !sessionVerified
     ) {
       return {
@@ -199,17 +249,18 @@ export class SolutionGroundingAuditor {
     // 5. Kiểm tra phát hiện câu văn mẫu né tránh (Evasive Boilerplate Detection)
     const cleanNormalized = normalizeForMatching(summary).replace(/[.!?,;:]+$/g, '').trim();
     
-    // Câu văn mẫu né tránh: chỉ chứa cụm từ hứa hẹn/báo cáo suông mà không có bất kỳ hành động hay thực thể kỹ thuật nào
-    const isPurelyEvasivePhrase =
-      /\b(?:da|vua)?\s*(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)/i.test(cleanNormalized)
-      || /\b(?:se|will)\s+(?:bao cao|trinh bay|giai thich|cung cap)\s+(?:chi tiet|day du)/i.test(cleanNormalized);
+    const isEvasivePhrase = isPurelyEvasiveText(cleanNormalized);
+    const hasConcreteActionVerb = CONCRETE_ACTION_VERBS_REGEX.test(cleanNormalized);
 
-    const hasConcreteActionVerb =
-      /\b(?:xoa|sua|cap nhat|thay doi|tao|chinh sua|khac phuc|them|trien khai|fix|fixed|delete|deleted|remove|removed|update|updated|change|changed|create|created|implement|implemented|resolve|resolved|patch|patched|add|added|replace|replaced|clean|cleaned|verify|verified|test|tested|refactor|refactored|optimize|optimized|debug|debugged)\b/i.test(
-        cleanNormalized,
-      );
+    // Quyền phủ quyết (Veto Rule): Nếu có thực thể kỹ thuật, có file thay đổi, hoặc có rootCause rõ ràng thì KHÔNG PHẢI là stub né tránh
+    const hasEvidenceOfSubstance =
+      entities.length > 0 ||
+      reconciledFilesModified.length > 0 ||
+      Boolean(payload.rootCause && String(payload.rootCause).trim().length > 0);
 
-    const isEvasiveStub = isPurelyEvasivePhrase || (!hasConcreteActionVerb && entities.length === 0 && reconciledFilesModified.length === 0 && !payload.rootCause && summary.length < 120);
+    const isEvasiveStub =
+      !hasEvidenceOfSubstance &&
+      (isEvasivePhrase || (!hasConcreteActionVerb && summary.length < 140));
 
     if (isEvasiveStub && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
       return {
