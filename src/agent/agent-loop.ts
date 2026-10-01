@@ -71,6 +71,7 @@ import { isMutationTool } from '../tools/diff-generator.js';
 import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
+import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
 import { resolveEllipticalFollowUp } from './ellipsis-resolver.js';
 import { isSensitivePath } from './verify-tier-resolver.js';
 import {
@@ -1356,6 +1357,7 @@ export class AgentLoop {
               lexicalQuery: retrievalState.lexicalQuery,
               lastToolName: this.lastToolExecution?.toolName,
               lastToolResult: this.lastToolExecution?.result,
+              codegraphIndexed: hasCodeGraphIndexSync(this._workspace.rootDir),
             })
           : candidateProvider.getFunctionDeclarations();
         this.cachedTurnNumber = turn;

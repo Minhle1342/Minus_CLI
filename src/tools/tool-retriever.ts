@@ -41,7 +41,32 @@ export type ToolRetrievalQueryInput =
       lexicalQuery?: string;
       lastToolName?: string;
       lastToolResult?: unknown;
+      /**
+       * True khi workspace có `.codegraph/` index. Khi true + query là
+       * structural/flow, các tool code-intel trùng lắp bị prune khỏi
+       * activePool để `codegraph_explore` làm primary (1 tool mạnh thay
+       * menu nhiều tool). Mặc định false = không prune (an toàn khi chưa init).
+       */
+      codegraphIndexed?: boolean;
     };
+
+/**
+ * Tool code-intelligence nội bộ bị `codegraph_explore` thay thế trực tiếp
+ * trên query structural/flow (đã có index): cùng trả callers/callees/flow/
+ * impact nhưng qua grep/AST loop nhiều call hơn. Giữ lại search_codebase_fast
+ * (lexical fallback), read_file (staleness banner + file ngoài index) và
+ * get_diagnostics (verify, codegraph không làm).
+ */
+export const CODEGRAPH_PRUNED_OVERLAP = new Set([
+  'inspect_symbol',
+  'find_references',
+  'lsp_query',
+  'query_call_graph',
+  'get_route_map',
+  'get_symbol_context_360',
+  'get_architecture_topology',
+  'analyze_impact',
+]);
 
 /**
  * ToolRetriever - Dynamic Tool Retrieval (RATS) Engine
@@ -69,6 +94,7 @@ export class ToolRetriever {
         'list_files',
         'search_codebase_fast',
         'search_text',
+        'codegraph_explore',
         'apply_patch',
         'replace_text',
         'create_file',
@@ -176,6 +202,12 @@ export class ToolRetriever {
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
     const isVisionQuery = /\b(image|screenshot|photo|picture|vision|diagram|pixel)\b/i.test(lowerQ);
+    // Structural/flow query (EN + VI): câu hỏi về cấu trúc, luồng gọi, callers/callees, impact.
+    const isStructuralQuery = /(how does|how do|call graph|call path|callers|callees|blast radius|impact\b|architect|trace|tracing|reach(es)?\b|dependenc|flow\b|where\b.*(called|used|defined)|luồng|luong|đồ thị gọi|do thi goi|ai gọi|ai goi|ảnh hưởng|anh huong|phụ thuộc|phu thuoc|kiến trúc|kien truc|truy vết|truy vet|khảo sát|khao sat|cấu trúc|cau truc)/i.test(lowerQ);
+    // Chỉ prune khi graph thật sự sẵn sàng: pool có codegraph_explore VÀ workspace đã init
+    // (flag từ agent-loop). Nếu chưa init, giữ nguyên menu để tool fallback hoạt động.
+    const codegraphReady = (typeof queryInput === 'object' && queryInput.codegraphIndexed === true)
+      && poolMap.has('codegraph_explore');
 
     // Adaptive Schema Pruning: Loại trừ các tool chuyên biệt nặng nếu query không chứa tín hiệu liên quan
     const activePool = pool.filter((tool) => {
@@ -187,6 +219,9 @@ export class ToolRetriever {
       if (cat === 'browser' && !isNetworkQuery && !isBrowserQuery) return false;
       if (cat === 'memory' && !isMemoryQuery) return false;
       if (tool.name === 'inspect_image' && !isVisionQuery) return false;
+      // Single-strong-tool steering: query structural/flow + graph sẵn sàng →
+      // codegraph_explore làm primary, prune tool code-intel trùng lắp.
+      if (isStructuralQuery && codegraphReady && CODEGRAPH_PRUNED_OVERLAP.has(tool.name)) return false;
       return true;
     });
     const activePoolMap = new Map(activePool.map((tool) => [tool.name, tool]));
@@ -339,7 +374,7 @@ export class ToolRetriever {
     if (name === 'verify_edit') return 'filesystem_verification';
     if (name.startsWith('browser_')) return 'browser';
     if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
-    if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic')) return 'code_intelligence';
+    if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic') || name.includes('codegraph') || name.includes('caller') || name.includes('callee')) return 'code_intelligence';
     if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
     if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
     if (name.includes('web') || name.includes('fetch') || name.includes('url')) return 'network';

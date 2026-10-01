@@ -31,6 +31,7 @@ test('ToolRetriever keeps a workflow-complete core and prunes unrelated network 
     'list_files',
     'search_codebase_fast',
     'search_text',
+    'codegraph_explore',
     'apply_patch',
     'replace_text',
     'create_file',

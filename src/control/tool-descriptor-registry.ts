@@ -32,6 +32,13 @@ export const READ_TOOL_NAMES = new Set([
   'pack_codebase',
   'inspect_image',
   'get_workspace_diff',
+  'codegraph_explore',
+  'codegraph_node',
+  'codegraph_search',
+  'codegraph_callers',
+  'codegraph_callees',
+  'codegraph_impact',
+  'codegraph_status',
 ]);
 export const EDIT_TOOL_NAMES = new Set([
   'apply_patch',
@@ -67,7 +74,7 @@ export class ToolDescriptorRegistry {
         capabilities = ['inspect', 'search', 'verify'];
       } else if (name === 'get_workspace_diff') {
         capabilities = ['inspect', 'git-read', 'verify'];
-      } else if (name === 'analyze_impact') {
+      } else if (name === 'analyze_impact' || name === 'codegraph_impact') {
         capabilities = ['inspect', 'search', 'plan'];
       }
       descriptor = {
