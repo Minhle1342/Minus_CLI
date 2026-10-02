@@ -15,38 +15,38 @@ function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceServi
 export function createQueryCallGraphTool(service?: CodebaseIntelligenceService): ToolDefinition {
   return {
     name: 'query_call_graph',
-    description: 'Truy vấn đồ thị gọi hàm (Call Graph & Call Hierarchy) 2 chiều (Callers: hàm nào gọi nó, Callees: nó gọi những hàm nào) theo độ sâu tùy chỉnh. Giúp LLM nắm bắt luồng thực thi trong 1 bước.',
+    description: 'Query the 2-way function call graph (Call Graph & Call Hierarchy) — Callers: which functions call it, Callees: which functions it calls — at a custom depth. Helps the LLM grasp the execution flow in 1 step.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         symbolName: {
           type: Type.STRING,
-          description: 'Tên hàm, method, hoặc class cần truy vết luồng gọi (ví dụ: "submitSolution", "Tower"). Có thể dùng alias "symbol".',
+          description: 'Name of the function, method, or class whose call flow should be traced (e.g. "submitSolution", "Tower"). Alias "symbol" may be used.',
         },
         symbol: {
           type: Type.STRING,
-          description: 'Alias cho "symbolName": Tên hàm, method, hoặc class cần truy vết luồng gọi.',
+          description: 'Alias for "symbolName": name of the function, method, or class whose call flow should be traced.',
         },
         filePath: {
           type: Type.STRING,
-          description: 'Đường dẫn file định nghĩa symbol (ví dụ: "Assets/_Project/Scripts/Combat/Tower.cs"). Có thể dùng alias "path".',
+          description: 'Path of the file defining the symbol (e.g. "Assets/_Project/Scripts/Combat/Tower.cs"). Alias "path" may be used.',
         },
         path: {
           type: Type.STRING,
-          description: 'Alias cho "filePath": Đường dẫn file định nghĩa symbol.',
+          description: 'Alias for "filePath": path of the file defining the symbol.',
         },
         direction: {
           type: Type.STRING,
           enum: ['callers', 'callees', 'both'],
-          description: 'Chiều phân tích: "callers" (hàm cha gọi nó), "callees" (hàm con nó gọi), hoặc "both" (mặc định "both").',
+          description: 'Analysis direction: "callers" (parent functions calling it), "callees" (child functions it calls), or "both" (default "both").',
         },
         depth: {
           type: Type.INTEGER,
-          description: 'Độ sâu cây phân cấp gọi hàm cần mở rộng (mặc định 2, tối đa 5).',
+          description: 'Depth of the call-hierarchy tree to expand (default 2, max 5).',
         },
         pruneNoise: {
           type: Type.BOOLEAN,
-          description: 'Cắt tỉa các hàm tiện ích đại trà (log, toString, v.v.) theo chuẩn CoSIL để giảm nhiễu (mặc định true).',
+          description: 'Prune ubiquitous utility functions (log, toString, etc.) per the CoSIL standard to reduce noise (default true).',
         },
       },
       required: [],
@@ -65,9 +65,9 @@ export function createQueryCallGraphTool(service?: CodebaseIntelligenceService):
 
       if (!symbolName) {
         return {
-          error: 'Tham số "symbolName" hoặc "symbol" là bắt buộc.',
+          error: 'The "symbolName" or "symbol" parameter is required.',
           errorCode: 'INVALID_ARGS',
-          suggestion: 'Hãy cung cấp tên hàm, class hoặc đường dẫn file định nghĩa symbol (ví dụ: { symbol: "Tower", path: "Assets/_Project/Scripts/Combat/Tower.cs" }).',
+          suggestion: 'Provide a function/class name or the file path defining the symbol (e.g. { symbol: "Tower", path: "Assets/_Project/Scripts/Combat/Tower.cs" }).',
         };
       }
 

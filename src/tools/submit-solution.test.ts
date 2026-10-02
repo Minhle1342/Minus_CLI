@@ -236,7 +236,7 @@ test('submit_solution: rejects 3+ executable code files with weak verification m
   assert.equal(res.success, false);
   assert.equal(res.submitted, false);
   assert.equal(res.errorCode, 'VERIFICATION_TIER_MISMATCH');
-  assert.ok(res.error?.includes('VERIFICATION_TIER_MISMATCH') || res.error?.includes('ngưỡng HIGH'));
+  assert.ok(res.error?.includes('VERIFICATION_TIER_MISMATCH') || res.error?.includes('HIGH threshold'));
 });
 
 test('submit_solution: accepts 3+ executable code files when verificationMethod is automated_test_pass', async () => {

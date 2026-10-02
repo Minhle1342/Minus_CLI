@@ -9,21 +9,21 @@ import { AgentEventBus } from '../agent/agent-event-bus.js';
 export function createPublishAgentEventTool(eventBus: AgentEventBus): ToolDefinition {
   return {
     name: 'publish_agent_event',
-    description: 'Phát một sự kiện (broadcast event) theo Topic đến các Subagents khác đang lắng nghe trong hệ thống Multi-Agent.',
+    description: 'Broadcast an event (topic-based) to other listening subagents in the Multi-Agent system.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         topic: {
           type: Type.STRING,
-          description: 'Tên topic cần phát (ví dụ: "schema:updated", "build:success", "test:failed").',
+          description: 'Name of the topic to publish (e.g. "schema:updated", "build:success", "test:failed").',
         },
         payload: {
           type: Type.OBJECT,
-          description: 'Dữ liệu đính kèm sự kiện (JSON object).',
+          description: 'Event payload data (JSON object).',
         },
         senderId: {
           type: Type.STRING,
-          description: 'Định danh của Agent phát sự kiện (mặc định: "agent").',
+          description: 'ID of the publishing agent (default: "agent").',
         },
       },
       required: ['topic', 'payload'],
@@ -34,14 +34,14 @@ export function createPublishAgentEventTool(eventBus: AgentEventBus): ToolDefini
       const senderId = String(args.senderId || 'agent').trim();
 
       if (!topic) {
-        return { error: 'Tham số "topic" là bắt buộc.' };
+        return { error: 'The "topic" parameter is required.' };
       }
 
       await eventBus.publish(senderId, topic, payload);
 
       return {
         success: true,
-        message: `Đã phát sự kiện topic '${topic}' thành công.`,
+        message: `Successfully published event on topic '${topic}'.`,
         event: {
           senderId,
           topic,

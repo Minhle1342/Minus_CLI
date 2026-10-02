@@ -45,29 +45,29 @@ export interface ImpactAnalysisResult {
  */
 export const analyzeImpactTool: ToolDefinition = {
   name: 'analyze_impact',
-  description: 'Phân tích toàn diện phạm vi ảnh hưởng (Blast Radius đa tầng): tìm chính xác các file phụ thuộc trực tiếp và gián tiếp (transitive consumers), bài kiểm thử liên quan, callers thực tế, và đánh giá mức độ rủi ro (LOW/MEDIUM/HIGH/CRITICAL) để dẫn hướng kiểm thử.',
+  description: 'Comprehensive blast-radius (multi-hop) impact analysis: find exact direct and transitive consumer files, related tests, real callers, and assess risk level (LOW/MEDIUM/HIGH/CRITICAL) to guide testing.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Đường dẫn file cần phân tích (ví dụ: "src/tools/registry.ts"). Alias: "filePath".',
+        description: 'Path of the file to analyze (e.g. "src/tools/registry.ts"). Alias: "filePath".',
       },
       filePath: {
         type: Type.STRING,
-        description: 'Alias cho "path": Đường dẫn file cần phân tích.',
+        description: 'Alias for "path": the file path to analyze.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Tùy chọn: Tên symbol cụ thể (hàm, interface, class, method) cần phân tích tác động. Alias: "symbolName".',
+        description: 'Optional: name of a specific symbol (function, interface, class, method) to analyze. Alias: "symbolName".',
       },
       symbolName: {
         type: Type.STRING,
-        description: 'Alias cho "symbol": Tên symbol cụ thể cần phân tích.',
+        description: 'Alias for "symbol": name of the specific symbol to analyze.',
       },
       depth: {
         type: Type.INTEGER,
-        description: 'Độ sâu phân tích chuỗi phụ thuộc gián tiếp (mặc định: 2, tối đa: 5).',
+        description: 'Depth for transitive dependency-chain analysis (default: 2, max: 5).',
       },
     },
     required: [],
@@ -87,7 +87,7 @@ export const analyzeImpactTool: ToolDefinition = {
     }
 
     if (!rawPath) {
-      return toolError('Tham số "path" (hoặc "filePath") là bắt buộc.', 'INVALID_ARGS');
+      return toolError('The "path" (or "filePath") parameter is required.', 'INVALID_ARGS');
     }
 
     try {
@@ -125,7 +125,7 @@ export const analyzeImpactTool: ToolDefinition = {
         // Quét diagnostics trước đó của file
         const allDiag = tsService.getDiagnostics(rawPath);
         if (allDiag.length > 0) {
-          blast.warnings.push(`File "${rawPath}" hiện có ${allDiag.length} cảnh báo/lỗi diagnostics từ trước.`);
+          blast.warnings.push(`File "${rawPath}" already has ${allDiag.length} pre-existing diagnostic warning(s)/error(s).`);
         }
       }
 
@@ -155,7 +155,7 @@ export const analyzeImpactTool: ToolDefinition = {
 
       return toolSuccess(result);
     } catch (err: any) {
-      return toolError(`Lỗi khi phân tích blast radius: ${err.message}`, 'EXECUTION_ERROR');
+      return toolError(`Failed to analyze blast radius: ${err.message}`, 'EXECUTION_ERROR');
     }
   },
 };

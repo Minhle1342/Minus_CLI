@@ -385,7 +385,7 @@ export class ToolRegistry implements ToolProvider {
     const tool = this.get(resolvedName);
     if (!tool) {
       return {
-        error: `Tool "${name}" không tồn tại trong ToolRegistry. Các tool hiện có: ${Array.from(this.tools.keys()).join(', ')}`,
+        error: `Tool "${name}" does not exist in ToolRegistry. Available tools: ${Array.from(this.tools.keys()).join(', ')}`,
         errorCode: 'UNKNOWN_TOOL',
       };
     }
@@ -394,7 +394,7 @@ export class ToolRegistry implements ToolProvider {
       return await tool.execute(resolvedArgs, workspace);
     } catch (err: any) {
       return {
-        error: `Lỗi khi thực thi tool "${name}": ${err.message}`,
+        error: `Failed to execute tool "${name}": ${err.message}`,
         errorCode: 'EXECUTION_ERROR',
       };
     }

@@ -34,38 +34,38 @@ const INTERACTIVE_COMMAND_PATTERNS: Array<{
 }> = [
   {
     pattern: /^(?:python|python3|py)(?:\.exe)?\s*$/i,
-    reason: 'Lệnh "python" không có tham số sẽ mở trình thông dịch tương tác (REPL) và làm treo tiến trình.',
-    suggestion: 'Chạy script bằng "python <file.py>" hoặc thực thi code 1-shot bằng "python -c \"<code>\"".',
+    reason: 'The "python" command without arguments opens an interactive interpreter (REPL) and hangs the process.',
+    suggestion: 'Run a script with "python <file.py>" or execute 1-shot code with "python -c \"<code>\"".',
   },
   {
     pattern: /^(?:node|nodejs)(?:\.exe)?\s*$/i,
-    reason: 'Lệnh "node" không có tham số sẽ mở Node.js REPL và làm treo tiến trình.',
-    suggestion: 'Chạy script bằng "node <file.js>" hoặc thực thi 1-shot bằng "node -e \"<code>\"".',
+    reason: 'The "node" command without arguments opens the Node.js REPL and hangs the process.',
+    suggestion: 'Run a script with "node <file.js>" or execute 1-shot with "node -e \"<code>\"".',
   },
   {
     pattern: /^(?:powershell|powershell\.exe|pwsh|cmd|cmd\.exe)\s*$/i,
-    reason: 'Khởi chạy sub-shell mà không truyền lệnh sẽ làm treo tiến trình chờ stdin.',
-    suggestion: 'Truyền lệnh cụ thể vào shell, ví dụ: "powershell -Command <command>" hoặc "cmd /c <command>".',
+    reason: 'Launching a sub-shell without a command hangs the process waiting for stdin.',
+    suggestion: 'Pass a concrete command to the shell, e.g. "powershell -Command <command>" or "cmd /c <command>".',
   },
   {
     pattern: /^(?:npm|pnpm|yarn|bun)\s+init\s*$/i,
-    reason: 'Lệnh "npm init" tương tác sẽ chờ người dùng nhập package name và options qua stdin.',
-    suggestion: 'Sử dụng cờ tự động phê duyệt: "npm init -y" hoặc "pnpm init".',
+    reason: 'Interactive "npm init" waits for the user to enter a package name and options via stdin.',
+    suggestion: 'Use the auto-approve flag: "npm init -y" or "pnpm init".',
   },
   {
     pattern: /^(?:git\s+commit)\s*$/i,
-    reason: 'Lệnh "git commit" không có thông điệp sẽ mở trình soạn thảo văn bản và làm treo tiến trình.',
-    suggestion: 'Truyền thông điệp commit trực tiếp bằng "git commit -m \"thông điệp\"".',
+    reason: 'The "git commit" command without a message opens a text editor and hangs the process.',
+    suggestion: 'Pass the commit message directly with "git commit -m \"<message>\"".',
   },
   {
     pattern: /^(?:vim|vi|nano|pico|emacs|less|more|man)\b/i,
-    reason: 'Trình biên tập văn bản hoặc phân trang (pager) đòi hỏi giao diện tương tác TTY.',
-    suggestion: 'Sử dụng tool chuyên dụng "read_file" để đọc file hoặc "replace_text" để sửa file.',
+    reason: 'Text editors or pagers require an interactive TTY.',
+    suggestion: 'Use the dedicated "read_file" tool to read files or "replace_text" to edit files.',
   },
   {
     pattern: /^(?:ssh|telnet|ftp|sftp)\b/i,
-    reason: 'Giao thức tương tác từ xa yêu cầu xác thực hoặc phiên tương tác TTY.',
-    suggestion: 'Sử dụng API hoặc công cụ tự động hóa không tương tác với key cấu hình sẵn.',
+    reason: 'Remote interactive protocols require authentication or an interactive TTY session.',
+    suggestion: 'Use a non-interactive API or automation tool with a preconfigured key.',
   },
 ];
 
@@ -239,7 +239,7 @@ export function evaluateCommandPreflight(
           allowed: true,
           normalizedCommand,
           extractedEnv,
-          reason: `[OBSERVE] Phát hiện lệnh tương tác: ${item.reason}`,
+          reason: `[OBSERVE] Detected interactive command: ${item.reason}`,
         };
       }
       return {
@@ -260,14 +260,14 @@ export function evaluateCommandPreflight(
         allowed: true,
         normalizedCommand,
         extractedEnv,
-        reason: '[OBSERVE] Phát hiện lệnh dev server dài hạn.',
+        reason: '[OBSERVE] Detected long-running dev server command.',
       };
     }
     return {
       allowed: false,
       errorCode: 'LONG_RUNNING_SERVER_REQUIRES_ASYNC',
-      reason: `Lệnh "${normalizedCommand}" khởi động máy chủ hoặc tiến trình theo dõi liên tục, sẽ làm treo agent nếu chạy đồng bộ.`,
-      suggestion: 'Thêm tham số WaitMsBeforeAsync (ví dụ 3000ms) để tự động chuyển lệnh sang Background Task.',
+      reason: `Command "${normalizedCommand}" starts a server or continuous watch process that hangs the agent if run synchronously.`,
+      suggestion: 'Add the WaitMsBeforeAsync parameter (e.g. 3000ms) to automatically move the command to a Background Task.',
     };
   }
 
@@ -284,14 +284,14 @@ export function evaluateCommandPreflight(
           allowed: true,
           normalizedCommand,
           extractedEnv,
-          reason: '[OBSERVE] Phát hiện chạy lại test trùng lặp khi chưa có sửa đổi mã nguồn.',
+          reason: '[OBSERVE] Detected duplicate test re-run with no source modifications.',
         };
       }
       return {
         allowed: false,
         errorCode: 'IDEMPOTENT_TEST_EXECUTION_BLOCKED',
-        reason: `Lệnh kiểm thử "${normalizedCommand}" vừa thất bại ở bước trước và chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa kể từ đó.`,
-        suggestion: 'Hãy phân tích nguyên nhân lỗi, đọc mã nguồn bằng "read_file" và thực hiện sửa lỗi bằng "replace_text" trước khi chạy lại test.',
+        reason: `Test command "${normalizedCommand}" just failed in the previous step and no source files have been modified since.`,
+        suggestion: 'Analyze the failure cause, read the source with "read_file" and fix the bug with "replace_text" before re-running tests.',
       };
     }
   }
@@ -307,14 +307,14 @@ export function evaluateCommandPreflight(
         allowed: true,
         normalizedCommand,
         extractedEnv,
-        reason: '[OBSERVE] Phát hiện lệnh git clone trực tiếp vào thư mục gốc workspace.',
+        reason: '[OBSERVE] Detected git clone directly into the workspace root directory.',
       };
     }
     return {
       allowed: false,
       errorCode: 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN',
-      reason: `Lệnh "git clone" trực tiếp vào thư mục hiện tại (".") bị chặn vì workspace hiện tại chứa mã nguồn dự án và Git sẽ báo lỗi "fatal: destination path '.' already exists and is not an empty directory".`,
-      suggestion: `Hãy chỉ định một thư mục con riêng biệt để clone, ví dụ: "git clone ${repoUrl} ${repoName}" hoặc tạo thư mục tạm trong "scratch/${repoName}".`,
+      reason: `Cloning with "git clone" directly into the current directory (".") is blocked because the current workspace contains project source and Git reports "fatal: destination path '.' already exists and is not an empty directory".`,
+      suggestion: `Specify a separate subdirectory to clone into, e.g. "git clone ${repoUrl} ${repoName}" or create a temp directory under "scratch/${repoName}".`,
     };
   }
 
@@ -346,7 +346,7 @@ export function evaluateCommandPreflight(
               }
             }
             if (found.length > 0) {
-              siblingSuggestion = ` Tìm thấy các tệp thực thi tồn tại trong thư mục đầu ra: ${found.join(', ')}.`;
+              siblingSuggestion = ` Found existing executables in the output directory: ${found.join(', ')}.`;
             }
           }
         } catch {}
@@ -356,17 +356,17 @@ export function evaluateCommandPreflight(
             allowed: true,
             normalizedCommand,
             extractedEnv,
-            reason: `[OBSERVE] Tệp thực thi "${candidatePath}" không tồn tại trên đĩa.`,
+            reason: `[OBSERVE] Executable "${candidatePath}" does not exist on disk.`,
           };
         }
 
         return {
           allowed: false,
           errorCode: 'LOCAL_EXECUTABLE_NOT_FOUND',
-          reason: `Tệp thực thi "${candidatePath}" không tồn tại trên đĩa trong thư mục workspace.${siblingSuggestion}`,
+          reason: `Executable "${candidatePath}" does not exist on disk in the workspace directory.${siblingSuggestion}`,
           suggestion: siblingSuggestion
-            ? `Hãy kiểm tra lại tệp thực thi thực tế hoặc cấu hình build (ví dụ: chạy bản Debug thay vì Release hoặc build lại trước khi chạy). Dùng tool "list_files" để kiểm tra thư mục đầu ra.`
-            : `Tệp nhị phân hoặc script "${candidatePath}" chưa được biên dịch hoặc không tồn tại. Hãy build dự án trước hoặc dùng "list_files" để xác minh đường dẫn chính xác.`,
+            ? `Check the actual executable or build configuration (e.g. run the Debug build instead of Release, or rebuild before running). Use the "list_files" tool to inspect the output directory.`
+            : `Binary or script "${candidatePath}" has not been built or does not exist. Build the project first or use "list_files" to verify the exact path.`,
         };
       }
     }
@@ -430,18 +430,18 @@ export function evaluateCommandPreflight(
               allowed: true,
               normalizedCommand,
               extractedEnv,
-              reason: `[OBSERVE] Workspace "${wsName}" không tồn tại trên đĩa hoặc trong cấu hình package.json.`,
+              reason: `[OBSERVE] Workspace "${wsName}" does not exist on disk or in the package.json configuration.`,
             };
           }
           return {
             allowed: false,
             errorCode: 'WORKSPACE_NOT_FOUND',
             reason: hasWorkspacesConfig
-              ? `Workspace "${wsName}" không tồn tại trong cấu hình Monorepo và không tìm thấy thư mục package tương ứng trên đĩa.`
-              : `Dự án hiện tại là single-package (package.json không cấu hình "workspaces") và không tồn tại thư mục "${wsName}".`,
+              ? `Workspace "${wsName}" does not exist in the Monorepo configuration and no matching package directory was found on disk.`
+              : `The current project is single-package (package.json has no "workspaces" config) and no "${wsName}" directory exists.`,
             suggestion: hasWorkspacesConfig
-              ? `Dùng tool "list_files" để kiểm tra thư mục monorepo (ví dụ: apps/ hoặc packages/) để xác định đúng tên workspace.`
-              : `Hãy loại bỏ cờ --workspace và chạy trực tiếp lệnh (ví dụ: "${pkgCmd.manager} ${pkgCmd.isRun ? 'run ' : ''}${pkgCmd.scriptName || 'test'}").`,
+              ? `Use the "list_files" tool to inspect the monorepo directories (e.g. apps/ or packages/) to find the correct workspace name.`
+              : `Drop the --workspace flag and run the command directly (e.g. "${pkgCmd.manager} ${pkgCmd.isRun ? 'run ' : ''}${pkgCmd.scriptName || 'test'}").`,
           };
         }
       }
@@ -464,16 +464,16 @@ export function evaluateCommandPreflight(
               allowed: true,
               normalizedCommand,
               extractedEnv,
-              reason: `[OBSERVE] Script "${pkgCmd.scriptName}" không có trong package.json.`,
+              reason: `[OBSERVE] Script "${pkgCmd.scriptName}" is missing from package.json.`,
             };
           }
           return {
             allowed: false,
             errorCode: 'PACKAGE_SCRIPT_NOT_FOUND',
-            reason: `Script "${pkgCmd.scriptName}" không được định nghĩa trong ${pkgCmd.workspaceName ? `workspace "${pkgCmd.workspaceName}" ` : ''}package.json.`,
+            reason: `Script "${pkgCmd.scriptName}" is not defined in ${pkgCmd.workspaceName ? `workspace "${pkgCmd.workspaceName}" ` : ''}package.json.`,
             suggestion: available.length > 0
-              ? `Các scripts khả dụng trong package.json: ${available.slice(0, 10).join(', ')}. Hãy chọn script phù hợp hoặc kiểm tra lại package.json.`
-              : `Tệp package.json không có scripts nào được định nghĩa. Hãy kiểm tra lại tệp package.json.`,
+              ? `Available scripts in package.json: ${available.slice(0, 10).join(', ')}. Pick a suitable script or check package.json again.`
+              : `package.json defines no scripts. Check package.json again.`,
           };
         }
       }

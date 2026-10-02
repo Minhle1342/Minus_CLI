@@ -45,34 +45,34 @@ export function createReadCompressedCodeTool(): ToolDefinition {
   return {
     name: 'read_compressed_code',
     description:
-      'Đọc cấu trúc và nội dung mã nguồn được nén bằng Tree-sitter qua Repomix. ' +
-      'Tự động giữ lại các định nghĩa quan trọng (functions, classes, types, interfaces, exports) ' +
-      'và lược bỏ thân hàm chi tiết. Giúp tiết kiệm 70% - 85% Token LLM khi khảo sát mã nguồn.',
+      'Read Tree-sitter-compressed source structure and content via Repomix. ' +
+      'Automatically keep important definitions (functions, classes, types, interfaces, exports) ' +
+      'and drop detailed function bodies. Saves 70% - 85% LLM tokens when surveying source code.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         paths: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Danh sách các đường dẫn tệp tương đối hoặc tuyệt đối cần đọc ở dạng nén (vd: ["src/agent/agent-loop.ts", "src/llm/gemini.ts"]).',
+          description: 'List of relative or absolute file paths to read in compressed form (e.g. ["src/agent/agent-loop.ts", "src/llm/gemini.ts"]).',
         },
         path: {
           type: Type.STRING,
-          description: 'Alias cho paths khi chỉ đọc 1 file đơn lẻ (vd: "src/agent/agent-loop.ts").',
+          description: 'Alias for paths when reading a single file (e.g. "src/agent/agent-loop.ts").',
         },
         compress: {
           type: Type.BOOLEAN,
-          description: 'Có bật chế độ nén Tree-sitter hay không (mặc định: true).',
+          description: 'Whether to enable Tree-sitter compression (default: true).',
         },
         fidelity: {
           type: Type.STRING,
           enum: ['compressed', 'adaptive', 'full'],
-          description: 'Mức chi tiết: compressed, adaptive đa độ phân giải, hoặc full. Mặc định giữ hành vi compress cũ.',
+          description: 'Detail level: compressed, multi-resolution adaptive, or full. Default keeps the legacy compress behavior.',
         },
         focusSymbols: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Các symbol cần trả đầy đủ thân hàm/lớp trong chế độ adaptive.',
+          description: 'Symbols needing full function/class bodies in adaptive mode.',
         },
         focusRanges: {
           type: Type.ARRAY,
@@ -85,23 +85,23 @@ export function createReadCompressedCodeTool(): ToolDefinition {
             },
             required: ['path', 'start', 'end'],
           },
-          description: 'Các khoảng dòng cần trả nguyên văn trong chế độ adaptive.',
+          description: 'Line ranges to return verbatim in adaptive mode.',
         },
         previewLines: {
           type: Type.INTEGER,
           minimum: 4,
           maximum: 200,
-          description: 'Số dòng preview quanh symbol lân cận (mặc định 24).',
+          description: 'Number of preview lines around nearby symbols (default 24).',
         },
         maxTokens: {
           type: Type.INTEGER,
           minimum: 64,
           maximum: 100000,
-          description: 'Ngân sách token cứng cho các segment adaptive (mặc định 8000).',
+          description: 'Hard token budget for adaptive segments (default 8000).',
         },
         includeDirectoryStructure: {
           type: Type.BOOLEAN,
-          description: 'Kèm cây đường dẫn của các file đã chọn (mặc định true).',
+          description: 'Include the path tree of selected files (default true).',
         },
       },
       required: [],
@@ -124,7 +124,7 @@ export function createReadCompressedCodeTool(): ToolDefinition {
       const shouldCompress = fidelity === 'full' ? false : (fidelity === 'adaptive' ? true : args.compress !== false);
 
       if (!filePaths || filePaths.length === 0) {
-        return { error: 'Tham số "paths" (hoặc "path") là bắt buộc và phải chứa ít nhất 1 đường dẫn file.' };
+        return { error: 'The "paths" (or "path") parameter is required and must contain at least 1 file path.' };
       }
 
       // Chuẩn hóa đường dẫn tương đối theo workspace root
@@ -182,7 +182,7 @@ export function createReadCompressedCodeTool(): ToolDefinition {
             compressionEnabled: true,
             fidelity: 'adaptive',
             ...bundle,
-            message: `Đã đọc ${result.totalFiles} tệp trong một bundle đa độ phân giải với ~${bundle.estimatedTokens} tokens.`,
+            message: `Read ${result.totalFiles} file(s) in a multi-resolution bundle with ~${bundle.estimatedTokens} tokens.`,
           };
         }
 
@@ -221,7 +221,7 @@ export function createReadCompressedCodeTool(): ToolDefinition {
             observationMasked: true,
             offloadFilePath: offloadRelativePath,
             files: maskedFiles,
-            message: `[OBSERVATION MASKED]: Nội dung chi tiết ${result.totalFiles} tệp (~${result.totalTokens} tokens) đã được offload ra tệp "${offloadRelativePath}" để chống tràn ngữ cảnh. Trả về preview 15 dòng đầu mỗi tệp. Dùng tool "read_file" với startLine/maxLines để đọc chi tiết vị trí cần sửa.`,
+            message: `[OBSERVATION MASKED]: Detailed content of ${result.totalFiles} file(s) (~${result.totalTokens} tokens) was offloaded to "${offloadRelativePath}" to prevent context overflow. Returning a 15-line preview per file. Use the "read_file" tool with startLine/maxLines to read the exact locations to edit.`,
           };
         }
 
@@ -231,11 +231,11 @@ export function createReadCompressedCodeTool(): ToolDefinition {
           compressionEnabled: shouldCompress,
           fidelity: fidelity || (shouldCompress ? 'compressed' : 'full'),
           files,
-          message: `Đã nén và đọc thành công ${result.totalFiles} tệp với tổng số ước tính ~${result.totalTokens} tokens (Tiết kiệm đáng kể dung lượng context).`,
+          message: `Compressed and read ${result.totalFiles} file(s) successfully with an estimated total of ~${result.totalTokens} tokens (significant context savings).`,
         };
       } catch (err: any) {
         return {
-          error: `Lỗi khi thực thi repomix read_compressed_code: ${err.message}`,
+          error: `Failed to run repomix read_compressed_code: ${err.message}`,
           errorCode: 'REPOMIX_COMPRESS_ERROR',
         };
       }
@@ -251,18 +251,18 @@ export function createPackCodebaseTool(): ToolDefinition {
   return {
     name: 'pack_codebase',
     description:
-      'Đóng gói toàn bộ hoặc một nhóm thư mục/tệp của repository thành bản tóm tắt có nén cấu trúc Tree-sitter để AI nắm bắt toàn cảnh dự án.',
+      'Pack the whole repository or a group of directories/files into a Tree-sitter structure-compressed summary so the AI grasps the project overview.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         include: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Danh sách glob patterns cần bao gồm (vd: ["src/**/*.ts"]). Nếu để trống sẽ quét toàn bộ repo.',
+          description: 'List of glob patterns to include (e.g. ["src/**/*.ts"]). Leave empty to scan the whole repo.',
         },
         compress: {
           type: Type.BOOLEAN,
-          description: 'Bật nén cấu trúc Tree-sitter để tiết kiệm Token (mặc định: true).',
+          description: 'Enable Tree-sitter structure compression to save tokens (default: true).',
         },
       },
     },
@@ -294,11 +294,11 @@ export function createPackCodebaseTool(): ToolDefinition {
             path: f.path,
             tokens: result.fileTokenCounts?.[f.path] ?? null,
           })),
-          summary: `Đã đóng gói ${result.totalFiles} tệp (~${result.totalTokens} tokens). Bạn có thể dùng tool "read_compressed_code" để đọc chi tiết các file cụ thể.`,
+          summary: `Packed ${result.totalFiles} file(s) (~${result.totalTokens} tokens). You can use the "read_compressed_code" tool to read specific files in detail.`,
         };
       } catch (err: any) {
         return {
-          error: `Lỗi khi đóng gói codebase: ${err.message}`,
+          error: `Failed to pack codebase: ${err.message}`,
           errorCode: 'REPOMIX_PACK_ERROR',
         };
       }

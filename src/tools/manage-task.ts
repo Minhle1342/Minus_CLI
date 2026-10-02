@@ -59,11 +59,11 @@ Actions:
 
         case 'status': {
           if (!taskId) {
-            return { error: "Tham số 'TaskId' là bắt buộc đối với action 'status'." };
+            return { error: "The 'TaskId' parameter is required for action 'status'." };
           }
           const task = taskManager.getTask(taskId);
           if (!task) {
-            return { error: `Không tìm thấy task với ID: ${taskId}` };
+            return { error: `No task found with ID: ${taskId}` };
           }
           const logs = taskManager.getTaskLogs(taskId, 30);
           const isTerminal = task.status !== 'running';
@@ -103,7 +103,7 @@ Actions:
 
         case 'kill': {
           if (!taskId) {
-            return { error: "Tham số 'TaskId' là bắt buộc đối với action 'kill'." };
+            return { error: "The 'TaskId' parameter is required for action 'kill'." };
           }
           const stopped = await taskManager.stopTask(taskId);
           return {
@@ -111,17 +111,17 @@ Actions:
             action: 'kill',
             success: stopped,
             message: stopped
-              ? `Đã dừng background task ${taskId} thành công.`
-              : `Không thể dừng task ${taskId} (có thể task không tồn tại hoặc đã kết thúc).`,
+              ? `Stopped background task ${taskId} successfully.`
+              : `Failed to stop task ${taskId} (task may not exist or already finished).`,
           };
         }
 
         case 'send_input': {
           if (!taskId) {
-            return { error: "Tham số 'TaskId' là bắt buộc đối với action 'send_input'." };
+            return { error: "The 'TaskId' parameter is required for action 'send_input'." };
           }
           if (input === undefined) {
-            return { error: "Tham số 'Input' là bắt buộc đối với action 'send_input'." };
+            return { error: "The 'Input' parameter is required for action 'send_input'." };
           }
           const sent = taskManager.sendInput(taskId, input);
           return {
@@ -129,14 +129,14 @@ Actions:
             action: 'send_input',
             success: sent,
             message: sent
-              ? `Đã gửi input vào stdin của task ${taskId} thành công.`
-              : `Gửi input thất bại (task ${taskId} có thể không hoạt động hoặc stdin đã đóng).`,
+              ? `Sent input to stdin of task ${taskId} successfully.`
+              : `Failed to send input (task ${taskId} may be inactive or stdin is closed).`,
           };
         }
 
         default:
           return {
-            error: `Action không hợp lệ: "${action}". Các action được hỗ trợ: 'list', 'status', 'kill', 'send_input'.`,
+            error: `Invalid action: "${action}". Supported actions: 'list', 'status', 'kill', 'send_input'.`,
           };
       }
     },

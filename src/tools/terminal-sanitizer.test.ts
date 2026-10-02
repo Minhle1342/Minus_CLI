@@ -55,7 +55,7 @@ test('Terminal Sanitizer: distillTestOutput filters repetitive PASS lines on tes
   const fullLog = [...passLines, ...failLines].join('\n');
 
   const distilled = distillTestOutput(fullLog, 1);
-  assert.match(distilled, /\[INFO: Đã rút gọn 100 dòng PASS thành công của test suites\]/);
+  assert.match(distilled, /\[INFO: Condensed 100 successful PASS line\(s\) of test suites\]/);
   assert.match(distilled, /FAIL src\/service\/order\.test\.ts/);
   assert.match(distilled, /AssertionError: expected true but received false/);
   // PASS lines should be stripped
@@ -91,7 +91,7 @@ test('Terminal Sanitizer: truncateTerminalOutput truncates large output and comp
   assert.ok(result.savedTokensEstimate > 3500);
   assert.match(result.text, /Line 1: Build step/);
   assert.match(result.text, /Line 300: Build step/);
-  assert.match(result.text, /\[💡 TOÀN BỘ LOG ĐẦY ĐỦ ĐÃ ĐƯỢC LƯU TẠI TỆP: \.minus\/logs\/test\.log/);
+  assert.match(result.text, /\[💡 FULL LOG SAVED TO FILE: \.minus\/logs\/test\.log/);
 });
 
 test('Terminal Sanitizer: offloadLargeLogToDisk saves log file and returns relative path', async () => {

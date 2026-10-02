@@ -376,7 +376,7 @@ export class ToolRunner {
     if (!tool) {
       const allAvailable = (this.rootRegistry || this.registry).getAll().map((t) => t.name);
       const errRes = {
-        error: `Tool "${toolName}" không tồn tại. Các tool có sẵn: ${allAvailable.join(', ')}`,
+        error: `Tool "${toolName}" does not exist. Available tools: ${allAvailable.join(', ')}`,
         errorCode: 'UNKNOWN_TOOL',
       };
       const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
@@ -480,7 +480,7 @@ export class ToolRunner {
       ) {
         const errRes = {
           success: false,
-          error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          error: `Security: editing or overwriting sensitive configuration file "${rawPath}" is not allowed.`,
           errorCode: 'SECURITY_VIOLATION',
         };
         const diagnosis = classifyToolFailure(toolName, errRes.error, errRes);
@@ -517,7 +517,7 @@ export class ToolRunner {
       const permCheck = await this.permissionManager.checkPermission(toolName, executionArgs, context);
       if (!permCheck.allowed) {
         const errorResult: Record<string, any> = {
-          error: permCheck.reason || 'Thao tác bị từ chối do chưa được người dùng cấp quyền.',
+          error: permCheck.reason || 'Operation rejected: the user has not granted permission.',
           errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
         };
         if (permCheck.deniedByUser) {
@@ -622,7 +622,7 @@ export class ToolRunner {
           }
         }
         const errRes = {
-          error: `Lỗi khi thực thi tool "${toolName}": ${err.message}`,
+          error: `Failed to execute tool "${toolName}": ${err.message}`,
           errorCode: 'EXECUTION_ERROR',
         };
         const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);

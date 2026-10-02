@@ -87,14 +87,14 @@ export const replaceTextTool: ToolDefinition = {
       : String(args.expectedFileHash).trim();
 
     if (!rawPath) {
-      return { success: false, error: 'Tham số "path" là bắt buộc.', errorCode: 'INVALID_ARGS' };
+      return { success: false, error: 'The "path" parameter is required.', errorCode: 'INVALID_ARGS' };
     }
     if (!oldText) {
       return {
         success: false,
-        error: 'Tham số "oldText" không được để trống. replace_text yêu cầu một khối code neo (anchor) hiện có để thay thế. Nếu muốn ghi đè toàn bộ file hoặc tạo file mới, hãy dùng tool "write_file".',
+        error: 'The "oldText" parameter must not be empty. replace_text requires an existing anchor code block to replace. To overwrite an entire file or create a new file, use the "write_file" tool.',
         errorCode: 'INVALID_ARGS',
-        suggestedAction: 'Cung cấp đoạn code cần thay thế vào "oldText", hoặc dùng tool write_file nếu muốn tạo mới/ghi đè toàn bộ file.',
+        suggestedAction: 'Provide the code to replace in "oldText", or use the write_file tool to create/overwrite an entire file.',
       };
     }
 
@@ -105,7 +105,7 @@ export const replaceTextTool: ToolDefinition = {
         return {
           success: false,
           path: rawPath,
-          error: `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          error: `Security: editing or overwriting sensitive configuration file "${rawPath}" is not allowed.`,
           errorCode: 'SECURITY_VIOLATION',
         };
       }
@@ -120,24 +120,24 @@ export const replaceTextTool: ToolDefinition = {
             similarFiles = await workspace.findSimilarWorkspaceFiles(rawPath, 3);
           } catch {}
           const similarMsg = similarFiles.length > 0
-            ? ` Tìm thấy file tương tự trong workspace: ${JSON.stringify(similarFiles)}. Hãy gọi replace_text với đường dẫn đúng "${similarFiles[0]}", hoặc dùng "write_file" nếu muốn tạo mới.`
-            : ' Hãy dùng "write_file" nếu bạn muốn tạo file mới.';
+            ? ` Found similar file(s) in the workspace: ${JSON.stringify(similarFiles)}. Call replace_text with the correct path "${similarFiles[0]}", or use "write_file" to create a new file.`
+            : ' Use "write_file" if you want to create a new file.';
           return {
             success: false,
             path: rawPath,
-            error: `File "${rawPath}" không tồn tại (ENOENT).${similarMsg}`,
+            error: `File "${rawPath}" does not exist (ENOENT).${similarMsg}`,
             errorCode: 'FILE_NOT_FOUND',
             similarFiles: similarFiles.length > 0 ? similarFiles : undefined,
             suggestion: similarFiles.length > 0
-              ? `Chuyển sang sửa file "${similarFiles[0]}" hoặc tạo mới "${rawPath}" qua write_file.`
-              : `Tạo mới file "${rawPath}" qua tool write_file.`,
+              ? `Switch to editing file "${similarFiles[0]}" or create "${rawPath}" via write_file.`
+              : `Create file "${rawPath}" via the write_file tool.`,
           };
         }
         throw statErr;
       }
 
       if (!stat.isFile()) {
-        return { success: false, path: rawPath, error: `"${rawPath}" không phải là file.`, errorCode: 'NOT_A_FILE' };
+        return { success: false, path: rawPath, error: `"${rawPath}" is not a file.`, errorCode: 'NOT_A_FILE' };
       }
 
       const content = await fs.readFile(safePath, 'utf-8');
@@ -146,11 +146,11 @@ export const replaceTextTool: ToolDefinition = {
         return {
           success: false,
           path: rawPath,
-          error: `File "${rawPath}" có contentHash không khớp với expectedFileHash; thao tác thay thế đã bị chặn để tránh ghi đè nội dung mới.`,
+          error: `File "${rawPath}" contentHash does not match expectedFileHash; the replacement was blocked to avoid overwriting new content.`,
           errorCode: 'FILE_CONTENT_CHANGED',
           expectedFileHash,
           observedFileHash,
-          suggestion: `Đọc lại nội dung mới nhất của "${rawPath}" bằng read_file, xem xét thay đổi, dựng lại oldText/newText theo nội dung hiện tại rồi gọi replace_text với expectedFileHash mới. Không dùng lại oldText cũ, không chỉ thay hash theo gợi ý và không bỏ expectedFileHash.`,
+          suggestion: `Re-read the latest content of "${rawPath}" with read_file, review the changes, rebuild oldText/newText against the current content, then call replace_text with the new expectedFileHash. Do not reuse the old oldText, do not just swap the hash per the hint, and do not drop expectedFileHash.`,
         };
       }
 
@@ -161,11 +161,11 @@ export const replaceTextTool: ToolDefinition = {
           return {
             success: false,
             path: rawPath,
-            error: `Sửa đổi bị chặn bởi In-Memory Syntax Guardrail: Phát hiện ${preCheckSyntaxErrors.length} lỗi cú pháp trong nội dung mới.`,
+            error: `Edit blocked by In-Memory Syntax Guardrail: detected ${preCheckSyntaxErrors.length} syntax error(s) in the new content.`,
             errorCode: 'SYNTAX_ERROR_PREVENTED',
             syntaxErrors: preCheckSyntaxErrors,
-            diagnostic: `Cú pháp mới bị gãy tại dòng ${preCheckSyntaxErrors[0].line}: ${preCheckSyntaxErrors[0].message}`,
-            suggestion: `Sửa lại cú pháp trong newText trước khi gọi lại replace_text: ${preCheckSyntaxErrors[0].message}.`,
+            diagnostic: `New syntax breaks at line ${preCheckSyntaxErrors[0].line}: ${preCheckSyntaxErrors[0].message}`,
+            suggestion: `Fix the syntax in newText before calling replace_text again: ${preCheckSyntaxErrors[0].message}.`,
           };
         }
         await fs.writeFile(safePath, newText, 'utf-8');
@@ -177,7 +177,7 @@ export const replaceTextTool: ToolDefinition = {
           line: 1,
           previousContentHash: observedFileHash,
           contentHash: hashContent(newText),
-          message: `Đã khởi tạo nội dung cho file rỗng "${rawPath}".`,
+          message: `Initialized content for empty file "${rawPath}".`,
         };
       }
 
@@ -187,15 +187,15 @@ export const replaceTextTool: ToolDefinition = {
         const suggestedRead = candidates[0]
           ? { path: rawPath, startLine: Math.max(1, candidates[0].line - 3), endLine: candidates[0].line + 6, includeLineNumbers: false }
           : { path: rawPath, includeLineNumbers: false };
-        let diagnostic = 'oldText khác nội dung hiện tại; preview có dấu "..." trên CLI chỉ là phần hiển thị bị rút gọn và không nên được sao chép làm source.';
+        let diagnostic = 'oldText differs from the current content; the "..." preview on the CLI is only a truncated display and must not be copied as source.';
         if (oldText.length > 1000) {
-          diagnostic += ` Cảnh báo: oldText quá dài (${oldText.length} ký tự). Hãy thu hẹp oldText xuống 3-15 dòng mỏ neo duy nhất để tránh trượt ký tự.`;
+          diagnostic += ` Warning: oldText is too long (${oldText.length} chars). Narrow oldText to a unique 3-15 line anchor to avoid character drift.`;
         }
         const candidateDiffHint = candidates[0] ? analyzeCandidateDiff(oldText, candidates[0].preview) : undefined;
         return {
           success: false,
           path: rawPath,
-          error: `Không tìm thấy oldText trong "${rawPath}" sau khi kiểm tra exact, LF/CRLF, Unicode và indentation an toàn.`,
+          error: `oldText not found in "${rawPath}" after exact, LF/CRLF, Unicode and safe-indentation checks.`,
           errorCode: 'TEXT_NOT_FOUND',
           diagnostic,
           candidateDiffHint,
@@ -204,8 +204,8 @@ export const replaceTextTool: ToolDefinition = {
           candidates,
           suggestedRead,
           suggestion: candidateDiffHint
-            ? `Phát hiện: ${candidateDiffHint} Hãy điều chỉnh oldText hoặc đọc lại qua read_file.`
-            : `Gọi read_file với ${JSON.stringify(suggestedRead)}, lấy content nguyên bản (không có số dòng), rồi gọi lại replace_text với contentHash mới.`,
+            ? `Detected: ${candidateDiffHint} Adjust oldText or re-read via read_file.`
+            : `Call read_file with ${JSON.stringify(suggestedRead)}, get the raw content (without line numbers), then call replace_text again with the new contentHash.`,
         };
       }
 
@@ -213,14 +213,14 @@ export const replaceTextTool: ToolDefinition = {
         return {
           success: false,
           path: rawPath,
-          error: `oldText khớp ${matches.length} vị trí trong "${rawPath}" (kỳ vọng: ${expectedOccurrences}); thao tác đã bị chặn để tránh sửa nhầm.`,
+          error: `oldText matches ${matches.length} location(s) in "${rawPath}" (expected: ${expectedOccurrences}); the operation was blocked to avoid wrong edits.`,
           errorCode: 'TEXT_NOT_UNIQUE',
           occurrences: matches.length,
           actualOccurrences: matches.length,
           expectedOccurrences,
           candidateLines: matches.slice(0, 10).map((match) => match.line),
           observedFileHash,
-          suggestion: 'Đọc lại một khoảng dòng hẹp và thêm ngữ cảnh duy nhất vào oldText.',
+          suggestion: 'Re-read a narrow line range and add a unique context to oldText.',
         };
       }
 
@@ -240,11 +240,11 @@ export const replaceTextTool: ToolDefinition = {
           return {
             success: false,
             path: rawPath,
-            error: `Sửa đổi bị chặn bởi In-Memory Syntax Guardrail: Phát hiện ${newSyntaxErrors.length} lỗi cú pháp mới trong nội dung trước khi ghi đĩa.`,
+            error: `Edit blocked by In-Memory Syntax Guardrail: detected ${newSyntaxErrors.length} new syntax error(s) in the content before writing to disk.`,
             errorCode: 'SYNTAX_ERROR_PREVENTED',
             syntaxErrors: newSyntaxErrors,
-            diagnostic: `Cú pháp mới bị gãy tại dòng ${newSyntaxErrors[0].line}: ${newSyntaxErrors[0].message}`,
-            suggestion: `Sửa lại cú pháp trong newText trước khi gọi lại replace_text: ${newSyntaxErrors[0].message}. File trên đĩa không bị thay đổi.`,
+            diagnostic: `New syntax breaks at line ${newSyntaxErrors[0].line}: ${newSyntaxErrors[0].message}`,
+            suggestion: `Fix the syntax in newText before calling replace_text again: ${newSyntaxErrors[0].message}. The on-disk file was not changed.`,
           };
         }
       }
@@ -255,11 +255,11 @@ export const replaceTextTool: ToolDefinition = {
         return {
           success: false,
           path: rawPath,
-          error: `File "${rawPath}" thay đổi trong lúc replace_text đang xử lý; không có dữ liệu nào bị ghi đè.`,
+          error: `File "${rawPath}" changed while replace_text was processing; no data was overwritten.`,
           errorCode: 'FILE_CHANGED_DURING_EDIT',
           expectedFileHash: observedFileHash,
           observedFileHash: hashContent(latestContent),
-          suggestion: `Đọc lại "${rawPath}" rồi áp dụng thay đổi trên phiên bản mới nhất.`,
+          suggestion: `Re-read "${rawPath}" then apply the change on the latest version.`,
         };
       }
 
@@ -316,7 +316,7 @@ export const replaceTextTool: ToolDefinition = {
         line: match.line,
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
-        message: `Đã thay thế thành công 1 vị trí trong "${rawPath}".`,
+        message: `Successfully replaced 1 location in "${rawPath}".`,
         ...(unifiedDiff ? { unifiedDiff } : {}),
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
@@ -325,7 +325,7 @@ export const replaceTextTool: ToolDefinition = {
       return {
         success: false,
         path: rawPath,
-        error: `Không thể thay thế nội dung file: ${err.message}`,
+        error: `Failed to replace file content: ${err.message}`,
         errorCode: 'EXECUTION_ERROR',
       };
     }
@@ -539,13 +539,13 @@ function analyzeCandidateDiff(targetText: string, candidatePreview: string): str
 
   const hints: string[] = [];
   if (t.replace(/['"`]/g, "'") === c.replace(/['"`]/g, "'")) {
-    hints.push('Sai khác do kiểu dấu nháy (quotes \' vs " vs `).');
+    hints.push('Mismatch due to quote style (quotes \' vs " vs `).');
   }
   if (t.replace(/\s+/g, ' ') === c.replace(/\s+/g, ' ')) {
-    hints.push('Sai khác do khoảng trắng hoặc thụt đầu dòng (indentation/spaces).');
+    hints.push('Mismatch due to whitespace or leading indentation (indentation/spaces).');
   }
   if (t.replace(/[;,.\s]/g, '') === c.replace(/[;,.\s]/g, '')) {
-    hints.push('Sai khác do dấu chấm phẩy (;) hoặc dấu câu cuối dòng.');
+    hints.push('Mismatch due to semicolons (;) or trailing punctuation.');
   }
   return hints.length > 0 ? hints.join(' ') : undefined;
 }

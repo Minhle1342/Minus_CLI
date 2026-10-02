@@ -92,13 +92,13 @@ export const replaceFileContentTool: ToolDefinition = {
     const endLine = typeof args.EndLine === 'number' ? args.EndLine : typeof args.endLine === 'number' ? args.endLine : Infinity;
 
     if (!rawPath) {
-      return toolError('Tham số "TargetFile" là bắt buộc.', 'INVALID_ARGS');
+      return toolError('The "TargetFile" parameter is required.', 'INVALID_ARGS');
     }
     if (targetContent === '') {
       return toolError(
-        'Tham số "TargetContent" không được để trống. replace_file_content yêu cầu nội dung cần thay thế. Nếu muốn tạo mới hoặc ghi đè toàn bộ file, hãy dùng "write_to_file".',
+        'The "TargetContent" parameter must not be empty. replace_file_content requires content to replace. To create a new file or overwrite an entire file, use "write_to_file".',
         'INVALID_ARGS',
-        { suggestedAction: 'Cung cấp đoạn code cần thay thế vào "TargetContent", hoặc dùng write_to_file để tạo mới/ghi đè toàn bộ file.' }
+        { suggestedAction: 'Provide the code to replace in "TargetContent", or use write_to_file to create/overwrite an entire file.' }
       );
     }
 
@@ -107,7 +107,7 @@ export const replaceFileContentTool: ToolDefinition = {
 
       if (workspace.isProtectedFile(safePath)) {
         return toolError(
-          `Bảo mật: Không được phép chỉnh sửa file cấu hình nhạy cảm "${rawPath}".`,
+          `Security: editing sensitive configuration file "${rawPath}" is not allowed.`,
           'SECURITY_VIOLATION',
         );
       }
@@ -116,11 +116,11 @@ export const replaceFileContentTool: ToolDefinition = {
       try {
         stat = await fs.stat(safePath);
       } catch {
-        return toolError(`File "${rawPath}" không tồn tại trên đĩa.`, 'FILE_NOT_FOUND', { TargetFile: rawPath });
+        return toolError(`File "${rawPath}" does not exist on disk.`, 'FILE_NOT_FOUND', { TargetFile: rawPath });
       }
 
       if (!stat.isFile()) {
-        return toolError(`"${rawPath}" không phải là file hợp lệ.`, 'INVALID_ARGS', { TargetFile: rawPath });
+        return toolError(`"${rawPath}" is not a valid file.`, 'INVALID_ARGS', { TargetFile: rawPath });
       }
 
       const originalRawContent = await fs.readFile(safePath, 'utf-8');
@@ -148,7 +148,7 @@ export const replaceFileContentTool: ToolDefinition = {
         const occurrences = rangeText.split(normalizedTarget).length - 1;
         if (occurrences > 1 && !allowMultiple) {
           return toolError(
-            `TargetContent xuất hiện ${occurrences} lần trong phạm vi dòng [${startLine}, ${endLine}] và AllowMultiple=false. Hãy thu hẹp phạm vi dòng hoặc đặt AllowMultiple=true.`,
+            `TargetContent occurs ${occurrences} times in line range [${startLine}, ${endLine}] and AllowMultiple=false. Narrow the line range or set AllowMultiple=true.`,
             'AMBIGUOUS_REPLACEMENT',
             { TargetFile: rawPath, occurrences },
           );
@@ -173,7 +173,7 @@ export const replaceFileContentTool: ToolDefinition = {
         const totalOccurrences = normalizedOriginal.split(normalizedTarget).length - 1;
         if (totalOccurrences > 1 && !allowMultiple) {
           return toolError(
-            `Không tìm thấy TargetContent trong dòng [${startLine}, ${endLine}], nhưng tìm thấy ${totalOccurrences} lần trong toàn file. Vì AllowMultiple=false nên không thể tự động thay thế. Hãy chỉ định lại phạm vi dòng chính xác.`,
+            `TargetContent not found in lines [${startLine}, ${endLine}], but found ${totalOccurrences} time(s) in the whole file. Since AllowMultiple=false it cannot be replaced automatically. Specify the line range precisely.`,
             'AMBIGUOUS_REPLACEMENT',
             { TargetFile: rawPath, totalOccurrences },
           );
@@ -184,14 +184,14 @@ export const replaceFileContentTool: ToolDefinition = {
           : normalizedOriginal.replace(normalizedTarget, normalizedReplacement);
 
         occurrencesReplaced = totalOccurrences;
-        note = 'Lưu ý: TargetContent không nằm đúng phạm vi dòng chỉ định nhưng đã được tìm thấy và thay thế duy nhất trong file.';
+        note = 'Note: TargetContent was outside the specified line range but was found and replaced uniquely in the file.';
       } else {
         // Không tìm thấy bất kỳ đâu trong file
         return toolError(
-          `Không tìm thấy TargetContent trong file "${rawPath}" (phạm vi dòng [${startLine}, ${endLine}]). Hãy kiểm tra lại khoảng trắng đầu dòng hoặc đọc lại file để lấy nội dung mới nhất.`,
+          `TargetContent not found in file "${rawPath}" (line range [${startLine}, ${endLine}]). Check the leading whitespace or re-read the file for the latest content.`,
           'PATCH_ERROR',
           { TargetFile: rawPath, startLine, endLine },
-          'Đọc lại file bằng view_file hoặc read_file để lấy đúng nội dung trước khi thay thế.',
+          'Re-read the file with view_file or read_file to get the exact content before replacing.',
         );
       }
 
@@ -251,13 +251,13 @@ export const replaceFileContentTool: ToolDefinition = {
         TargetFile: workspace.toRelativePath(safePath),
         occurrencesReplaced,
         contentHash,
-        message: `Đã thay thế thành công ${occurrencesReplaced} vị trí trong file "${rawPath}".${note ? ` (${note})` : ''}`,
+        message: `Successfully replaced ${occurrencesReplaced} occurrence(s) in file "${rawPath}".${note ? ` (${note})` : ''}`,
         ...(unifiedDiff ? { unifiedDiff } : {}),
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {
-      return toolError(`Lỗi khi thay thế nội dung file: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
+      return toolError(`Failed to replace file content: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
     }
   },
 };

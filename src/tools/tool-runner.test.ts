@@ -187,7 +187,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
       content: '{}',
     });
     assert.equal(protectedRes.result.errorCode, 'SECURITY_VIOLATION');
-    assert.match(protectedRes.result.error, /cấu hình nhạy cảm/);
+    assert.match(protectedRes.result.error, /sensitive configuration/);
   });
 
   it('5. Stage 5 bảo toàn Tool Output Schema chặt chẽ khi có Runtime Metadata Enrichment', async () => {

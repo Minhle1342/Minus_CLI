@@ -10,13 +10,13 @@ import { Workspace } from '../workspace/workspace.js';
 export function createStartBackgroundTaskTool(taskManager: TaskManager): ToolDefinition {
   return {
     name: 'start_background_task',
-    description: 'Khởi chạy một lệnh shell bất đồng bộ chạy nền (background task) như server dev, test watcher mà không chặn Agent Loop.',
+    description: 'Launch an async background shell command (background task) such as a dev server or test watcher without blocking the Agent Loop.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Lệnh terminal cần chạy nền (ví dụ: "npm run dev", "node server.js")',
+          description: 'Terminal command to run in the background (e.g. "npm run dev", "node server.js")',
         },
       },
       required: ['command'],
@@ -24,13 +24,13 @@ export function createStartBackgroundTaskTool(taskManager: TaskManager): ToolDef
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
       const command = String(args.command || '').trim();
       if (!command) {
-        return { error: 'Tham số "command" là bắt buộc.' };
+        return { error: 'The "command" parameter is required.' };
       }
 
       const task = taskManager.startTask(command, workspace.rootDir);
       return {
         success: true,
-        message: `Đã khởi chạy background task thành công.`,
+        message: `Successfully started background task.`,
         task: {
           id: task.id,
           command: task.command,
@@ -50,17 +50,17 @@ export function createStartBackgroundTaskTool(taskManager: TaskManager): ToolDef
 export function createGetTaskOutputTool(taskManager: TaskManager): ToolDefinition {
   return {
     name: 'get_task_output',
-    description: 'Lấy các dòng log mới nhất từ một background task đang chạy nền.',
+    description: 'Fetch the latest log lines from a running background task.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         taskId: {
           type: Type.STRING,
-          description: 'ID của background task (ví dụ: "task_1")',
+          description: 'ID of the background task (e.g. "task_1")',
         },
         lines: {
           type: Type.INTEGER,
-          description: 'Số dòng log gần nhất cần lấy (mặc định: 30 dòng)',
+          description: 'Number of recent log lines to fetch (default: 30 lines)',
         },
       },
       required: ['taskId'],
@@ -68,7 +68,7 @@ export function createGetTaskOutputTool(taskManager: TaskManager): ToolDefinitio
     async execute(args: Record<string, any>): Promise<Record<string, any>> {
       const taskId = String(args.taskId || '').trim();
       if (!taskId) {
-        return { error: 'Tham số "taskId" là bắt buộc.' };
+        return { error: 'The "taskId" parameter is required.' };
       }
 
       const lines = typeof args.lines === 'number' ? args.lines : 30;
@@ -89,13 +89,13 @@ export function createGetTaskOutputTool(taskManager: TaskManager): ToolDefinitio
 export function createStopTaskTool(taskManager: TaskManager): ToolDefinition {
   return {
     name: 'stop_task',
-    description: 'Dừng một background task đang chạy nền.',
+    description: 'Stop a running background task.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         taskId: {
           type: Type.STRING,
-          description: 'ID của background task cần dừng (ví dụ: "task_1")',
+          description: 'ID of the background task to stop (e.g. "task_1")',
         },
       },
       required: ['taskId'],
@@ -103,14 +103,14 @@ export function createStopTaskTool(taskManager: TaskManager): ToolDefinition {
     async execute(args: Record<string, any>): Promise<Record<string, any>> {
       const taskId = String(args.taskId || '').trim();
       if (!taskId) {
-        return { error: 'Tham số "taskId" là bắt buộc.' };
+        return { error: 'The "taskId" parameter is required.' };
       }
 
       const stopped = await taskManager.stopTask(taskId);
       return {
         taskId,
         success: stopped,
-        message: stopped ? `Đã dừng task ${taskId} thành công.` : `Không thể dừng task ${taskId} (task không tồn tại hoặc đã dừng).`,
+        message: stopped ? `Stopped task ${taskId} successfully.` : `Failed to stop task ${taskId} (task does not exist or already stopped).`,
       };
     },
   };

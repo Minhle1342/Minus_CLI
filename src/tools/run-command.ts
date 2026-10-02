@@ -437,7 +437,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const filePath = sedSliceMatch[3].replace(/^["']|["']$/g, '');
     return {
       tool: 'read_file',
-      reason: 'Đọc file theo khoảng dòng chính xác (không tốn lượt cấp quyền, cung cấp contentHash) thay vì chia nhỏ bằng sed',
+      reason: 'Read a file by exact line range (no permission round-trip, provides contentHash) instead of slicing with sed',
       suggestedArgs: { path: filePath, startLine, endLine },
     };
   }
@@ -448,7 +448,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const filePath = readMatch[1].replace(/^["']|["']$/g, '');
     return {
       tool: 'read_file',
-      reason: 'Đọc nội dung file với hashing và an toàn token',
+      reason: 'Read file content with hashing and token safety',
       suggestedArgs: { path: filePath },
     };
   }
@@ -459,7 +459,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const filePath = awkMatch[1].replace(/^["']|["']$/g, '');
     return {
       tool: 'read_file',
-      reason: 'Đọc nội dung file hoặc trích xuất symbol với read_file (symbol) / inspect_symbol',
+      reason: 'Read file content or extract symbols with read_file (symbol) / inspect_symbol',
       suggestedArgs: { path: filePath },
     };
   }
@@ -471,7 +471,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const dirPath = rawTarget && !rawTarget.startsWith('-') && !rawTarget.startsWith('/') ? rawTarget : undefined;
     return {
       tool: 'list_files',
-      reason: 'Liệt kê cấu trúc thư mục với bộ lọc tự động bỏ qua node_modules/.git',
+      reason: 'List directory structure with automatic node_modules/.git filtering',
       suggestedArgs: dirPath ? { dirPath } : {},
     };
   }
@@ -482,7 +482,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const query = grepMatch[1];
     return {
       tool: 'search_codebase_fast',
-      reason: 'Tìm kiếm BM25 nhanh trên toàn bộ codebase không tốn token',
+      reason: 'Fast BM25 search across the whole codebase at no token cost',
       suggestedArgs: { query },
     };
   }
@@ -493,8 +493,8 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const targetPath = parsed?.targetPaths?.[0];
     return {
       tool: 'delete_file',
-      reason: 'Xóa file/thư mục an toàn qua Node.js I/O (kiểm tra hash, isProtectedFile, cross-platform) thay vì dùng lệnh shell không tồn tại trên Windows hoặc tốn quyền',
-      suggestedArgs: targetPath ? { path: targetPath, reason: 'Dọn dẹp tệp tin qua tool chuyên dụng' } : undefined,
+      reason: 'Delete files/directories safely via Node.js I/O (hash checks, isProtectedFile, cross-platform) instead of shell commands missing on Windows or costing approval',
+      suggestedArgs: targetPath ? { path: targetPath, reason: 'Clean up files with the dedicated tool' } : undefined,
     };
   }
 
@@ -505,7 +505,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const targetPath = mvMatch[2].replace(/^["']|["']$/g, '');
     return {
       tool: 'move_file',
-      reason: 'Di chuyển hoặc đổi tên file an toàn trong workspace (chống ghi đè vô ý)',
+      reason: 'Move or rename files safely in the workspace (prevents accidental overwrites)',
       suggestedArgs: { sourcePath, targetPath },
     };
   }
@@ -516,7 +516,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const filePath = touchMatch[1].replace(/^["']|["']$/g, '');
     return {
       tool: 'create_file',
-      reason: 'Tạo file mới an toàn trong workspace không cần phụ thuộc POSIX shell binary',
+      reason: 'Create new files safely in the workspace without depending on POSIX shell binaries',
       suggestedArgs: { path: filePath, content: '' },
     };
   }
@@ -592,7 +592,7 @@ export async function executeCatEmulation(
       durationMs: Date.now() - startTime,
       exitCode: 0,
       emulated: true,
-      suggestion: 'Mẹo: Để tối ưu tốc độ và token, hãy dùng trực tiếp tool read_file với path, startLine, endLine hoặc symbol.',
+      suggestion: 'Tip: for speed and token efficiency, use the read_file tool directly with path, startLine, endLine or symbol.',
     };
   } catch (err: any) {
     return {
@@ -602,7 +602,7 @@ export async function executeCatEmulation(
       durationMs: Date.now() - startTime,
       exitCode: 1,
       emulated: true,
-      suggestion: 'Kiểm tra lại đường dẫn file hoặc sử dụng tool chuyên dụng "read_file".',
+      suggestion: 'Check the file path again or use the dedicated "read_file" tool.',
     };
   }
 }
@@ -675,7 +675,7 @@ export async function executeLsEmulation(
         durationMs: Date.now() - startTime,
         exitCode: 1,
         emulated: true,
-        suggestion: 'Đường dẫn chỉ định là tệp tin, không phải thư mục.',
+        suggestion: 'The specified path is a file, not a directory.',
       };
     }
 
@@ -719,7 +719,7 @@ export async function executeLsEmulation(
     const displayLines = isCapped ? lines.slice(0, MAX_LS_ITEMS) : lines;
     if (isCapped) {
       displayLines.push(
-        `... [Đã lược bớt ${totalCount - MAX_LS_ITEMS} mục để bảo vệ context window. Dùng tool "list_files" để duyệt cây thư mục có bộ lọc và tiết kiệm token]`,
+        `... [Trimmed ${totalCount - MAX_LS_ITEMS} entries to protect the context window. Use the "list_files" tool to browse the filtered directory tree and save tokens]`,
       );
     }
 
@@ -734,8 +734,8 @@ export async function executeLsEmulation(
       exitCode: 0,
       emulated: true,
       suggestion: isCapped
-        ? 'Thư mục có nhiều mục. Để tối ưu token và quản lý cấu trúc chuẩn, hãy dùng tool "list_files".'
-        : 'Mẹo: Để tối ưu token và quản lý cấu trúc cây thư mục chuẩn, hãy dùng tool chuyên dụng "list_files".',
+        ? 'Directory has many entries. For token efficiency and standard structure management, use the "list_files" tool.'
+        : 'Tip: for token efficiency and standard directory-tree management, use the dedicated "list_files" tool.',
     };
   } catch (err: any) {
     return {
@@ -745,7 +745,7 @@ export async function executeLsEmulation(
       durationMs: Date.now() - startTime,
       exitCode: 1,
       emulated: true,
-      suggestion: 'Kiểm tra lại đường dẫn thư mục hoặc sử dụng tool "list_files".',
+      suggestion: 'Check the directory path again or use the "list_files" tool.',
     };
   }
 }
@@ -881,12 +881,12 @@ export async function executeRmEmulation(
       const safePath = workspace.resolveSafePath(targetPath);
       if (workspace.isProtectedFile(safePath)) {
         return {
-          stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
-          stderr: `Security violation: Không được phép xóa file cấu hình nhạy cảm hoặc file được bảo vệ "${targetPath}".`,
+          stdout: deletedPaths.length > 0 ? `Deleted: ${deletedPaths.join(', ')}` : '',
+          stderr: `Security violation: deleting sensitive configuration or protected files "${targetPath}" is not allowed.`,
           success: false,
           durationMs: Date.now() - startTime,
           exitCode: 1,
-          suggestion: 'File này thuộc danh sách bảo vệ hệ thống của workspace và không thể xóa.',
+          suggestion: 'This file is in the workspace system-protection list and cannot be deleted.',
         };
       }
 
@@ -895,12 +895,12 @@ export async function executeRmEmulation(
       } catch {
         if (!parsed.force) {
           return {
-            stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
+            stdout: deletedPaths.length > 0 ? `Deleted: ${deletedPaths.join(', ')}` : '',
             stderr: `rm: cannot remove '${targetPath}': No such file or directory`,
             success: false,
             durationMs: Date.now() - startTime,
             exitCode: 1,
-            suggestion: 'Kiểm tra lại đường dẫn tệp tin hoặc sử dụng tool chuyên dụng "delete_file".',
+            suggestion: 'Check the file path again or use the dedicated "delete_file" tool.',
           };
         }
         continue;
@@ -913,17 +913,17 @@ export async function executeRmEmulation(
     const count = deletedPaths.length;
     return {
       stdout: count > 0
-        ? `Đã xóa ${count} mục (${deletedPaths.join(', ')}) an toàn qua RmEmulation (${Date.now() - startTime}ms).`
+        ? `Deleted ${count} item(s) (${deletedPaths.join(', ')}) safely via RmEmulation (${Date.now() - startTime}ms).`
         : '',
       stderr: '',
       success: true,
       durationMs: Date.now() - startTime,
       exitCode: 0,
-      suggestion: 'Mẹo: Hãy dùng trực tiếp tool chuyên dụng "delete_file" (cross-platform, an toàn hash, <2ms) để tối ưu hóa.',
+      suggestion: 'Tip: use the dedicated "delete_file" tool directly (cross-platform, hash-safe, <2ms) for optimization.',
     };
   } catch (err: any) {
     return {
-      stdout: deletedPaths.length > 0 ? `Đã xóa: ${deletedPaths.join(', ')}` : '',
+      stdout: deletedPaths.length > 0 ? `Deleted: ${deletedPaths.join(', ')}` : '',
       stderr: `rm: failed to remove: ${err.message}`,
       success: false,
       durationMs: Date.now() - startTime,
@@ -964,15 +964,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         CommandLine: {
           type: Type.STRING,
-          description: 'Bí danh chuẩn Antigravity của lệnh terminal cần thực thi.',
+          description: 'Standard Antigravity alias for the terminal command to execute.',
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Thời gian chờ trước khi chuyển lệnh sang background task (tối đa 10000ms). Bắt buộc dùng giá trị >0 (thường 5000) cho server/watch/daemon chạy lâu; sau đó dùng `manage_task` để xem log hoặc dừng task. Không dùng tham số này thay cho timeout của build/test hữu hạn.',
+          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. Do not use this parameter as a timeout substitute for finite builds/tests.',
         },
         timeout_ms: {
           type: Type.NUMBER,
-          description: 'Timeout của lệnh đồng bộ theo milliseconds (mặc định 120000; tối thiểu 1000, tối đa 300000). Đặt timeout_ms=0 để TẮT timeout cho lệnh cần nhiều thời gian (Playwright/E2E dài); abort signal và cắt ngắn output vẫn áp dụng. Server chạy liên tục phải dùng WaitMsBeforeAsync thay vì tắt timeout.',
+          description: 'Timeout for synchronous commands in milliseconds (default 120000; min 1000, max 300000). Set timeout_ms=0 to DISABLE the timeout for commands needing more time (long Playwright/E2E); abort signal and output truncation still apply. Continuously running servers must use WaitMsBeforeAsync instead of disabling the timeout.',
         },
         execution_target: {
           type: Type.STRING,
@@ -989,12 +989,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const timeoutMs = resolveRunCommandTimeout(args.timeout_ms, process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
 
       if (!rawCommand) {
-        return { error: 'Tham số "command" hoặc "CommandLine" là bắt buộc.' };
+        return { error: 'The "command" or "CommandLine" parameter is required.' };
       }
       if (!['auto', 'host'].includes(executionTarget)) {
         return {
           command: rawCommand,
-          error: 'execution_target chỉ chấp nhận "auto" hoặc "host".',
+          error: 'execution_target only accepts "auto" or "host".',
           errorCode: 'INVALID_EXECUTION_TARGET',
         };
       }
@@ -1024,7 +1024,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (!preflight.allowed) {
         return {
           command: rawCommand,
-          message: preflight.reason || 'Lệnh bị chặn bởi Pre-flight Guardrail.',
+          message: preflight.reason || 'Command blocked by the Pre-flight Guardrail.',
           preflightCode: preflight.errorCode || 'PREFLIGHT_GUARD_REJECTED',
           suggestion: preflight.suggestion,
           commandOutcome: 'blocked_preflight',
@@ -1098,7 +1098,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         } else {
           return {
             command: rawCommand,
-            error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi hoặc chưa được cấp quyền (PERMISSION APPROVAL).`,
+            error: permCheck.reason || `Command "${rawCommand}" was rejected or has not been granted execution permission (PERMISSION APPROVAL).`,
             errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
             permissionRequestId: permCheck.permissionRequestId,
             ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
@@ -1116,9 +1116,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (blockedPushToMain && !hasExplicitPermission) {
         return {
           command: rawCommand,
-          error: 'THAO TÁC BỊ CHẶN (User Rule 2): Tuyệt đối không tự động thực hiện git push lên nhánh main/master để tránh kích hoạt hệ thống CI/CD Railway tự động. Cần có yêu cầu trực tiếp từ người dùng.',
+          error: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master to avoid triggering the automatic Railway CI/CD system. Requires a direct user request.',
           errorCode: 'PUSH_TO_MAIN_PROHIBITED',
-          suggestion: 'Yêu cầu người dùng phê duyệt quyền (Permission Approval) nếu thực sự có chủ đích push lên main.',
+          suggestion: 'Ask the user to approve permission (Permission Approval) if pushing to main is truly intended.',
         };
       }
       // Pre-spawn missing-binary probe: fail fast without spawning a shell
@@ -1168,12 +1168,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const misuse = detectFileCommandMisuse(rawCommand);
         return {
           command: rawCommand,
-          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) từ người dùng. Các phân đoạn ngoài allowlist: ${deniedSegments.join(', ')}`,
+          error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) from the user. Non-allowlist segments: ${deniedSegments.join(', ')}`,
           errorCode: 'COMMAND_NOT_ALLOWED',
           deniedSegments,
           suggestion: misuse
-            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
-            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+            ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
+            : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
         };
       }
 
@@ -1253,7 +1253,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           status: 'running',
           message: `Tool is running as a background task with task id: ${bgTask.id}`,
           recentLogs: bgTask.logs.slice(-10),
-          instruction: `Sử dụng tool manage_task với TaskId="${bgTask.id}" để xem status, gửi stdin (send_input), hoặc kill.`,
+          instruction: `Use the manage_task tool with TaskId="${bgTask.id}" to view status, send stdin (send_input), or kill.`,
         };
       }
       // Tự động tối ưu hoá lệnh cat/type/head/tail đọc file bằng Node.js I/O (<2ms)
@@ -1283,7 +1283,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             executionTarget,
             success: true,
             emulated: true,
-            suggestion: 'Mẹo: Để tối ưu tốc độ và token, hãy dùng trực tiếp tool read_file với path, startLine, endLine hoặc symbol.',
+            suggestion: 'Tip: for speed and token efficiency, use the read_file tool directly with path, startLine, endLine or symbol.',
           };
         }
       }
@@ -1329,7 +1329,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             } else {
               return {
                 command: rawCommand,
-                error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
+                error: permCheck.reason || `Command "${rawCommand}" was rejected for execution on Host.`,
                 errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
                 permissionRequestId: permCheck.permissionRequestId,
                 ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
@@ -1341,11 +1341,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
-            error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host.`,
+            error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) to run on Host.`,
             errorCode: 'COMMAND_NOT_ALLOWED',
             suggestion: misuse
-              ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
-              : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+              ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
+              : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
           };
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
@@ -1389,7 +1389,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     binDir: provisionRes.binDir,
                     version: provisionRes.version,
                   },
-                  message: `[Auto-Provision]: Đã tự động tải và cấu hình "${provisionRes.toolchain}" (${provisionRes.version || 'ready'}), lệnh đã được thực thi lại thành công.`,
+                  message: `[Auto-Provision]: Automatically downloaded and configured "${provisionRes.toolchain}" (${provisionRes.version || 'ready'}); the command was re-executed successfully.`,
                   sandbox: 'local',
                   executionTarget: 'host',
                 });
@@ -1470,7 +1470,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             } else {
               return {
                 command: rawCommand,
-                error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi trên Host.`,
+                error: permCheck.reason || `Command "${rawCommand}" was rejected for execution on Host.`,
                 errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
                 permissionRequestId: permCheck.permissionRequestId,
                 ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
@@ -1483,11 +1483,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           const misuse = detectFileCommandMisuse(rawCommand);
           return {
             command: rawCommand,
-            error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) để thực thi trên Host. (Hoặc bật Docker Sandbox để chạy lệnh không giới hạn).`,
+            error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) to run on Host. (Or enable the Docker Sandbox to run commands without limits).`,
             errorCode: 'COMMAND_NOT_ALLOWED',
             suggestion: misuse
-              ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
-              : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+              ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
+              : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
           };
         }
 
@@ -1549,7 +1549,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           } else {
             return {
               command: rawCommand,
-              error: permCheck.reason || `Lệnh "${rawCommand}" đã bị từ chối thực thi.`,
+              error: permCheck.reason || `Command "${rawCommand}" was rejected for execution.`,
               errorCode: permCheck.errorCode || 'PERMISSION_DENIED',
               permissionRequestId: permCheck.permissionRequestId,
               ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
@@ -1562,11 +1562,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const misuse = detectFileCommandMisuse(rawCommand);
         return {
           command: rawCommand,
-          error: `Lệnh "${rawCommand}" cần XÁC NHẬN CẤP QUYỀN THỰC THI (PERMISSION APPROVAL) trước khi thực thi.`,
+          error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) before execution.`,
           errorCode: 'COMMAND_NOT_ALLOWED',
           suggestion: misuse
-            ? `Khuyến nghị chuyển sang tool chuyên dụng "${misuse.tool}": ${misuse.reason}`
-            : 'Yêu cầu người dùng duyệt quyền (Permission Approval) hoặc chuyển sang tool chuyên dụng.',
+            ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
+            : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
         };
       }
 

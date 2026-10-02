@@ -54,20 +54,20 @@ Modes:
         : (typeof args.max_iterations === 'number' ? args.max_iterations : undefined);
 
       if (!prompt) {
-        return { error: "Tham số 'Prompt' là bắt buộc đối với tool schedule." };
+        return { error: "The 'Prompt' parameter is required for the schedule tool." };
       }
 
       if (durationSeconds === undefined && !cronExpression) {
-        return { error: "Phải cung cấp chính xác một trong hai tham số: 'DurationSeconds' hoặc 'CronExpression'." };
+        return { error: "Exactly one of 'DurationSeconds' or 'CronExpression' must be provided." };
       }
 
       if (durationSeconds !== undefined && cronExpression) {
-        return { error: "'DurationSeconds' và 'CronExpression' là hai chế độ loại trừ lẫn nhau (mutually exclusive)." };
+        return { error: "'DurationSeconds' and 'CronExpression' are mutually exclusive modes." };
       }
 
       if (durationSeconds !== undefined) {
         if (durationSeconds <= 0) {
-          return { error: "'DurationSeconds' phải là số dương lớn hơn 0." };
+          return { error: "'DurationSeconds' must be a positive number greater than 0." };
         }
 
         const scheduled = scheduleManager.scheduleOneShot({
@@ -83,7 +83,7 @@ Modes:
           durationSeconds,
           timerCondition,
           prompt,
-          message: `Đã thiết lập timer ${durationSeconds}s thành công. Task ID: ${scheduled.id}. Bạn có thể dừng gọi tool để chuyển giao diện sang chế độ chờ reactive.`,
+          message: `Timer set for ${durationSeconds}s successfully. Task ID: ${scheduled.id}. You can stop calling the tool to hand the UI over to reactive-wait mode.`,
         };
       }
 
@@ -101,11 +101,11 @@ Modes:
           cronExpression,
           maxIterations,
           prompt,
-          message: `Đã thiết lập cron '${cronExpression}' thành công. Task ID: ${scheduled.id}.`,
+          message: `Cron '${cronExpression}' set successfully. Task ID: ${scheduled.id}.`,
         };
       }
 
-      return { error: 'Tham số không hợp lệ.' };
+      return { error: 'Invalid parameters.' };
     },
   };
 }

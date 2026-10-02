@@ -39,7 +39,7 @@ export const moveFileTool: ToolDefinition = {
     const expectedSourceHash = args.expectedSourceHash ? String(args.expectedSourceHash).trim() : undefined;
 
     if (!rawSource || !rawTarget) {
-      return toolError('Cả "sourcePath" và "targetPath" đều là bắt buộc.', 'INVALID_ARGS');
+      return toolError('Both "sourcePath" and "targetPath" are required.', 'INVALID_ARGS');
     }
 
     try {
@@ -48,19 +48,19 @@ export const moveFileTool: ToolDefinition = {
 
       if (workspace.isProtectedFile(safeSource) || workspace.isProtectedFile(safeTarget)) {
         return toolError(
-          'Bảo mật: Không được phép di chuyển hoặc đổi tên file cấu hình nhạy cảm.',
+          'Security: moving or renaming sensitive configuration files is not allowed.',
           'SECURITY_VIOLATION',
         );
       }
 
       const sourceHash = await computeFileHash(safeSource);
       if (sourceHash === 'sha256:absent') {
-        return toolError(`File nguồn "${rawSource}" không tồn tại.`, 'FILE_NOT_FOUND', { path: rawSource });
+        return toolError(`Source file "${rawSource}" does not exist.`, 'FILE_NOT_FOUND', { path: rawSource });
       }
 
       if (expectedSourceHash && expectedSourceHash !== sourceHash) {
         return toolError(
-          `Xung đột nội dung khi di chuyển "${rawSource}". Hash thực tế (${sourceHash}) khác với expectedSourceHash (${expectedSourceHash}).`,
+          `Content conflict when moving "${rawSource}". On-disk hash (${sourceHash}) does not match expectedSourceHash (${expectedSourceHash}).`,
           'STALE_FILE_HASH',
           { path: rawSource, expectedHash: expectedSourceHash, currentHash: sourceHash },
         );
@@ -69,7 +69,7 @@ export const moveFileTool: ToolDefinition = {
       const targetHash = await computeFileHash(safeTarget);
       if (targetHash !== 'sha256:absent') {
         return toolError(
-          `File đích "${rawTarget}" đã tồn tại. move_file không cho phép ghi đè.`,
+          `Target file "${rawTarget}" already exists. move_file does not allow overwriting.`,
           'FILE_ALREADY_EXISTS',
           { path: rawTarget },
         );
@@ -83,10 +83,10 @@ export const moveFileTool: ToolDefinition = {
         sourcePath: workspace.toRelativePath(safeSource),
         targetPath: workspace.toRelativePath(safeTarget),
         contentHash: sourceHash,
-        message: `Đã di chuyển thành công từ "${rawSource}" sang "${rawTarget}".`,
+        message: `Successfully moved from "${rawSource}" to "${rawTarget}".`,
       });
     } catch (err: any) {
-      return toolError(`Không thể di chuyển file: ${err.message}`, 'EXECUTION_ERROR', { sourcePath: rawSource, targetPath: rawTarget });
+      return toolError(`Failed to move file: ${err.message}`, 'EXECUTION_ERROR', { sourcePath: rawSource, targetPath: rawTarget });
     }
   },
 };

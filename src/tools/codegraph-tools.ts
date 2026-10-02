@@ -20,7 +20,7 @@ function unavailableResult(status: Awaited<ReturnType<typeof codeGraphClient.sta
     available: false,
     indexed: status.indexed,
     hint: status.hint,
-    fallback: 'CodeGraph chưa sẵn sàng — dùng search_codebase_fast / grep / read_file thay thế.',
+    fallback: 'CodeGraph is not ready — use search_codebase_fast / grep / read_file instead.',
   });
 }
 
@@ -28,66 +28,66 @@ export function createCodeGraphTools(): ToolDefinition[] {
   const codegraphExplore: ToolDefinition = {
     name: 'codegraph_explore',
     description:
-      'Truy vấn semantic code graph (CodeGraph): trả về source liên quan + call paths + blast radius trong 1 call. Dùng cho "how does X work", flow X→Y, survey một khu vực. Yêu cầu project đã `codegraph init`.',
+      'Query the semantic code graph (CodeGraph): returns related source + call paths + blast radius in 1 call. Use for "how does X work", flow X→Y, or surveying an area. Requires the project to have run `codegraph init`.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: { type: Type.STRING, description: 'Câu hỏi cấu trúc, tên symbol hoặc file (vd: "How does auth reach DB?").' },
+        query: { type: Type.STRING, description: 'Structured question, symbol name or file (e.g. "How does auth reach DB?").' },
       },
       required: ['query'],
     },
     async execute(args, workspace: Workspace) {
       const query = String(args.query || args.q || '').trim();
-      if (!query) return toolError('Tham số "query" là bắt buộc.', 'INVALID_ARGS');
+      if (!query) return toolError('The "query" parameter is required.', 'INVALID_ARGS');
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
       try {
         const output = await codeGraphClient.explore(workspace.rootDir, query);
         return toolSuccess({ available: true, query, output });
       } catch (err: any) {
-        return toolError(`codegraph explore thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph explore failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphNode: ToolDefinition = {
     name: 'codegraph_node',
-    description: 'Đọc source + callers của 1 symbol hoặc 1 file từ CodeGraph graph (line-numbered).',
+    description: 'Read the source + callers of 1 symbol or 1 file from the CodeGraph graph (line-numbered).',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        target: { type: Type.STRING, description: 'Tên symbol (vd: UserService.login) hoặc path file.' },
+        target: { type: Type.STRING, description: 'Symbol name (e.g. UserService.login) or file path.' },
       },
       required: ['target'],
     },
     async execute(args, workspace: Workspace) {
       const target = String(args.target || args.symbol || args.file || '').trim();
-      if (!target) return toolError('Tham số "target" là bắt buộc.', 'INVALID_ARGS');
+      if (!target) return toolError('The "target" parameter is required.', 'INVALID_ARGS');
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
       try {
         const output = await codeGraphClient.node(workspace.rootDir, target);
         return toolSuccess({ available: true, target, output });
       } catch (err: any) {
-        return toolError(`codegraph node thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph node failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphSearch: ToolDefinition = {
     name: 'codegraph_search',
-    description: 'Full-text search symbol trong CodeGraph index (FTS5).',
+    description: 'Full-text symbol search in the CodeGraph index (FTS5).',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: { type: Type.STRING, description: 'Từ khóa / tên symbol.' },
-        limit: { type: Type.INTEGER, description: 'Số kết quả (1-100, mặc định 20).' },
+        query: { type: Type.STRING, description: 'Keyword / symbol name.' },
+        limit: { type: Type.INTEGER, description: 'Number of results (1-100, default 20).' },
       },
       required: ['query'],
     },
     async execute(args, workspace: Workspace) {
       const query = String(args.query || '').trim();
-      if (!query) return toolError('Tham số "query" là bắt buộc.', 'INVALID_ARGS');
+      if (!query) return toolError('The "query" parameter is required.', 'INVALID_ARGS');
       const limit = args.limit === undefined ? 20 : Number(args.limit);
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
@@ -95,75 +95,75 @@ export function createCodeGraphTools(): ToolDefinition[] {
         const result = await codeGraphClient.search(workspace.rootDir, query, limit);
         return toolSuccess({ available: true, query, limit, result });
       } catch (err: any) {
-        return toolError(`codegraph search thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph search failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphCallers: ToolDefinition = {
     name: 'codegraph_callers',
-    description: 'Liệt kê callers của 1 symbol từ CodeGraph (qua dynamic-dispatch hops).',
+    description: 'List callers of 1 symbol from CodeGraph (via dynamic-dispatch hops).',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        symbol: { type: Type.STRING, description: 'Tên symbol.' },
-        limit: { type: Type.INTEGER, description: 'Số kết quả (mặc định 20).' },
+        symbol: { type: Type.STRING, description: 'Symbol name.' },
+        limit: { type: Type.INTEGER, description: 'Number of results (default 20).' },
       },
       required: ['symbol'],
     },
     async execute(args, workspace: Workspace) {
       const symbol = String(args.symbol || args.target || '').trim();
-      if (!symbol) return toolError('Tham số "symbol" là bắt buộc.', 'INVALID_ARGS');
+      if (!symbol) return toolError('The "symbol" parameter is required.', 'INVALID_ARGS');
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
       try {
         const result = await codeGraphClient.callers(workspace.rootDir, symbol, Number(args.limit || 20));
         return toolSuccess({ available: true, symbol, result });
       } catch (err: any) {
-        return toolError(`codegraph callers thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph callers failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphCallees: ToolDefinition = {
     name: 'codegraph_callees',
-    description: 'Liệt kê callees của 1 symbol từ CodeGraph.',
+    description: 'List callees of 1 symbol from CodeGraph.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        symbol: { type: Type.STRING, description: 'Tên symbol.' },
-        limit: { type: Type.INTEGER, description: 'Số kết quả (mặc định 20).' },
+        symbol: { type: Type.STRING, description: 'Symbol name.' },
+        limit: { type: Type.INTEGER, description: 'Number of results (default 20).' },
       },
       required: ['symbol'],
     },
     async execute(args, workspace: Workspace) {
       const symbol = String(args.symbol || args.target || '').trim();
-      if (!symbol) return toolError('Tham số "symbol" là bắt buộc.', 'INVALID_ARGS');
+      if (!symbol) return toolError('The "symbol" parameter is required.', 'INVALID_ARGS');
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
       try {
         const result = await codeGraphClient.callees(workspace.rootDir, symbol, Number(args.limit || 20));
         return toolSuccess({ available: true, symbol, result });
       } catch (err: any) {
-        return toolError(`codegraph callees thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph callees failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphImpact: ToolDefinition = {
     name: 'codegraph_impact',
-    description: 'Phân tích blast radius của 1 symbol từ CodeGraph trước khi sửa.',
+    description: 'Analyze the blast radius of 1 symbol from CodeGraph before editing.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        symbol: { type: Type.STRING, description: 'Tên symbol cần phân tích.' },
-        depth: { type: Type.INTEGER, description: 'Độ sâu (mặc định 2, tối đa 5).' },
+        symbol: { type: Type.STRING, description: 'Name of the symbol to analyze.' },
+        depth: { type: Type.INTEGER, description: 'Depth (default 2, max 5).' },
       },
       required: ['symbol'],
     },
     async execute(args, workspace: Workspace) {
       const symbol = String(args.symbol || args.target || '').trim();
-      if (!symbol) return toolError('Tham số "symbol" là bắt buộc.', 'INVALID_ARGS');
+      if (!symbol) return toolError('The "symbol" parameter is required.', 'INVALID_ARGS');
       const depth = args.depth === undefined ? 2 : Math.max(1, Math.min(5, Number(args.depth)));
       const g = await guard(workspace);
       if (g.blocked) return unavailableResult(g.status);
@@ -171,21 +171,21 @@ export function createCodeGraphTools(): ToolDefinition[] {
         const result = await codeGraphClient.impact(workspace.rootDir, symbol, depth);
         return toolSuccess({ available: true, symbol, depth, result });
       } catch (err: any) {
-        return toolError(`codegraph impact thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph impact failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };
 
   const codegraphStatus: ToolDefinition = {
     name: 'codegraph_status',
-    description: 'Kiểm tra CodeGraph có cài đặt và project đã `codegraph init` hay chưa.',
+    description: 'Check whether CodeGraph is installed and the project has run `codegraph init`.',
     parameters: { type: Type.OBJECT, properties: {} },
     async execute(_args, workspace: Workspace) {
       try {
         const status = await codeGraphClient.status(workspace.rootDir);
         return toolSuccess({ ...status });
       } catch (err: any) {
-        return toolError(`codegraph status thất bại: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`codegraph status failed: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };

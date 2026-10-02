@@ -56,50 +56,50 @@ async function checkRipgrepAvailable(): Promise<boolean> {
 export const searchTextTool: ToolDefinition = {
   name: "search_text",
   description:
-    "Tìm kiếm nội dung tệp tin bằng Biểu thức chính quy (Regex) hoặc chuỗi văn bản theo cơ chế Hybrid (Ripgrep native + TypeScript fallback). Tự động bỏ qua thư mục rác (node_modules, .git, dist) và giới hạn kết quả TOÀN CỤC để bảo vệ context token.",
+    "Search file contents with Regular Expressions (Regex) or plain text via a Hybrid engine (native Ripgrep + TypeScript fallback). Automatically skips junk directories (node_modules, .git, dist) and caps GLOBAL results to protect context tokens.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       query: {
         type: Type.STRING,
         description:
-          'Biểu thức chính quy (Regex) hoặc chuỗi văn bản cần tìm kiếm. Ví dụ: "function\\s+\\w+", "TODO:", "export\\s+class".',
+          'Regular Expression (Regex) or plain text to search for. Examples: "function\\s+\\w+", "TODO:", "export\\s+class".',
       },
       path: {
         type: Type.STRING,
         description:
-          'Thư mục hoặc tệp tin cụ thể để tìm kiếm (mặc định: "." quét toàn bộ workspace).',
+          'Specific directory or file to search (default: "." scans the whole workspace).',
       },
       isRegex: {
         type: Type.BOOLEAN,
         description:
-          "Nếu true (mặc định), xử lý query như Regular Expression. Nếu false, tìm kiếm chuỗi ký tự chính xác (literal string).",
+          "If true (default), treat the query as a Regular Expression. If false, search for the exact literal string.",
       },
       include: {
         type: Type.STRING,
         description:
-          'Bộ lọc định dạng tệp tin theo mẫu glob (ví dụ: "*.ts", "*.py", "*.json").',
+          'Glob file-format filter (e.g. "*.ts", "*.py", "*.json").',
       },
       caseSensitive: {
         type: Type.BOOLEAN,
         description:
-          "Nếu true, tìm kiếm phân biệt chữ hoa/thường. Mặc định false (không phân biệt).",
+          "If true, match case-sensitively. Default false (case-insensitive).",
       },
       wordMatch: {
         type: Type.BOOLEAN,
         description:
-          "Nếu true, chỉ khớp các từ hoàn chỉnh (tương đương \\b...\\b hoặc cờ -w trong ripgrep). Mặc định false.",
+          "If true, match whole words only (equivalent to \\b...\\b or the -w flag in ripgrep). Default false.",
       },
       outputMode: {
         type: Type.STRING,
         enum: ["content", "files_with_matches", "count"],
         description:
-          'Chế độ trả về: "content" (dòng khớp chi tiết path:line:text), "files_with_matches" (chỉ danh sách file), hoặc "count" (đếm số lượng). Mặc định: "content".',
+          'Return mode: "content" (detailed matching lines path:line:text), "files_with_matches" (file list only), or "count" (match count). Default: "content".',
       },
       maxMatches: {
         type: Type.INTEGER,
         description:
-          "Giới hạn số lượng kết quả TỔNG CỤC trả về tối đa (mặc định: 50, tối đa: 200). Đây là hard cap toàn repo, không phải per-file.",
+          "Maximum number of TOTAL results returned (default: 50, max: 200). This is a repo-wide hard cap, not per-file.",
       },
     },
     required: ["query"],
@@ -123,7 +123,7 @@ export const searchTextTool: ToolDefinition = {
 
     if (!rawQuery) {
       return {
-        error: 'Tham số "query" không được để trống.',
+        error: 'The "query" parameter must not be empty.',
         errorCode: "INVALID_ARGS",
       };
     }
@@ -133,7 +133,7 @@ export const searchTextTool: ToolDefinition = {
       workspace.resolveSafePath(rawPath);
     } catch (err: any) {
       return {
-        error: `Đường dẫn "${rawPath}" nằm ngoài phạm vi workspace hợp lệ.`,
+        error: `Path "${rawPath}" is outside the valid workspace scope.`,
         errorCode: "PATH_OUT_OF_BOUNDS",
       };
     }
@@ -238,7 +238,7 @@ export const searchTextTool: ToolDefinition = {
         totalFiles: files.length,
         files,
         guidance:
-          "Danh sách các file chứa kết quả. Hãy dùng read_file hoặc search_text với path cụ thể để xem chi tiết.",
+          "List of files containing results. Use read_file or search_text with a specific path to view details.",
       };
     }
 
@@ -295,15 +295,15 @@ export const searchTextTool: ToolDefinition = {
       truncated: isTruncated,
       totalFiles: fileSummary.length,
       content:
-        formattedContent || "Không tìm thấy kết quả nào khớp với yêu cầu.",
+        formattedContent || "No results matched the request.",
       matches: truncatedMatches,
       fileSummary,
       isCapped,
       warning: isCapped
-        ? `[SEARCH_CAPPED]: Đã đạt giới hạn tối đa ${maxMatches} kết quả (tổng cộng ${totalMatches} khớp). Còn nhiều kết quả khác chưa được hiển thị.`
+        ? `[SEARCH_CAPPED]: Reached the maximum of ${maxMatches} results (${totalMatches} total matches). More results are not shown.`
         : undefined,
       suggestion: isCapped
-        ? 'Hãy thu hẹp biểu thức chính quy (regex), hoặc chỉ định tham số "include" (ví dụ: "*.ts") hoặc "path" cụ thể hơn.'
+        ? 'Narrow the regex, or specify the "include" parameter (e.g. "*.ts") or a more specific "path".'
         : undefined,
     };
   },

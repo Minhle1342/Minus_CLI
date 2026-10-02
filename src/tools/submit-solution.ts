@@ -102,9 +102,9 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         return {
           success: false,
           submitted: false,
-          error: audit.reasons.join('\n') || 'submit_solution bị từ chối do thiếu bằng chứng thực nghiệm.',
+          error: audit.reasons.join('\n') || 'submit_solution rejected: missing empirical evidence.',
           errorCode: audit.errorCode || 'INVALID_SUMMARY_CONTENT',
-          suggestion: audit.suggestion || 'Hãy đưa trực tiếp kết quả phân tích nguyên nhân gốc rễ, vị trí phát sinh lỗi và giải pháp cụ thể vào trường "summary".',
+          suggestion: audit.suggestion || 'Put the root-cause analysis, error location and concrete solution directly into the "summary" field.',
         } as any;
       }
 

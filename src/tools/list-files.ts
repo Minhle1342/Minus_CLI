@@ -13,37 +13,37 @@ import { Workspace } from "../workspace/workspace.js";
 export const listFilesTool: ToolDefinition = {
   name: "list_files",
   description:
-    "Liệt kê danh sách các tệp tin và thư mục con trong một thư mục thuộc workspace. Hỗ trợ pattern glob (ví dụ: '**/*.ts'), pagination (limit/offset) và continuation token để duyệt an toàn trên workspace lớn.",
+    "List files and subdirectories in a workspace directory. Supports glob patterns (e.g. '**/*.ts'), pagination (limit/offset) and continuation tokens for safe browsing on large workspaces.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
         description:
-          'Đường dẫn tương đối tới thư mục cần xem (ví dụ: "." hoặc "src"). Mặc định là ".". Chấp nhận alias dirPath.',
+          'Relative path to the directory to view (e.g. "." or "src"). Default is ".". Accepts the dirPath alias.',
       },
       dirPath: {
         type: Type.STRING,
-        description: "Alias cho path: thư mục cần liệt kê.",
+        description: "Alias for path: the directory to list.",
       },
       pattern: {
         type: Type.STRING,
         description:
-          'Biểu thức glob tùy chọn để lọc hoặc tìm kiếm tệp tin đệ quy (ví dụ: "**/*.ts", "*.json", "src/**/*.js"). Nếu cung cấp, sẽ sử dụng fast-glob duyệt từ path.',
+          'Optional glob to filter or recursively search files (e.g. "**/*.ts", "*.json", "src/**/*.js"). If provided, fast-glob scans from path.',
       },
       limit: {
         type: Type.INTEGER,
         description:
-          "Số lượng entry tối đa trả về (mặc định: 100, tối đa: 500).",
+          "Maximum number of entries returned (default: 100, max: 500).",
       },
       offset: {
         type: Type.INTEGER,
-        description: "Số entry bỏ qua (để phân trang, mặc định: 0).",
+        description: "Number of entries to skip (for pagination, default: 0).",
       },
       continuationToken: {
         type: Type.STRING,
         description:
-          "Token tiếp tục từ lần gọi trước (base64 encoded offset). Ưu tiên hơn offset nếu cả hai đều cung cấp.",
+          "Continuation token from the previous call (base64 encoded offset). Takes precedence over offset if both are provided.",
       },
     },
     required: [],
@@ -83,7 +83,7 @@ export const listFilesTool: ToolDefinition = {
       if (!stat.isDirectory()) {
         return {
           path: rawPath,
-          error: `Đường dẫn "${rawPath}" không phải là thư mục.`,
+          error: `Path "${rawPath}" is not a directory.`,
         };
       }
 
@@ -149,7 +149,7 @@ export const listFilesTool: ToolDefinition = {
     } catch (err: any) {
       return {
         path: rawPath,
-        error: `Không thể liệt kê thư mục: ${err.message}`,
+        error: `Failed to list directory: ${err.message}`,
       };
     }
   },

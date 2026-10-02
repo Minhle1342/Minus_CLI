@@ -20,32 +20,32 @@ export function createGetArchitectureTopologyTool(
   return {
     name: "get_architecture_topology",
     description:
-      "Phân tích bản đồ kiến trúc & topo phân tầng của codebase (Controllers, Services, Repositories, UI, Tools, Config, Utils, Tests). " +
-      "Sử dụng TypeScript Compiler AST & Module Resolution để giải quyết chính xác đường dẫn import (bao gồm tsconfig paths aliases). " +
-      "Tự động phát hiện Circular Dependencies (vòng lặp phụ thuộc), vi phạm phân tầng Clean Architecture, và tính toán chỉ số ghép nối Robert C. Martin (Afferent/Efferent coupling, Instability, Hub nodes). " +
-      'Hỗ trợ tham số mode ("summary" | "detailed" | "full") để tối ưu hóa cửa sổ ngữ cảnh token cho LLM. ' +
-      "Hỗ trợ pagination cho layers/files (maxLayers, maxFilesPerLayer) và trả về truncated flag khi bị cắt.",
+      "Analyze the layered architecture & topology map of the codebase (Controllers, Services, Repositories, UI, Tools, Config, Utils, Tests). " +
+      "Use the TypeScript Compiler AST & Module Resolution to resolve import paths precisely (including tsconfig paths aliases). " +
+      "Automatically detect Circular Dependencies, Clean Architecture layer violations, and compute Robert C. Martin coupling metrics (Afferent/Efferent coupling, Instability, Hub nodes). " +
+      'Supports the mode parameter ("summary" | "detailed" | "full") to optimize the LLM token context window. ' +
+      "Supports pagination for layers/files (maxLayers, maxFilesPerLayer) and returns a truncated flag when cut.",
     parameters: {
       type: Type.OBJECT,
       properties: {
         entryDir: {
           type: Type.STRING,
           description:
-            'Thư mục gốc bắt đầu quét topo (mặc định "src" hoặc ".").',
+            'Root directory to start the topo scan (default "src" or ".").',
         },
         mode: {
           type: Type.STRING,
           description:
-            "Chế độ hiển thị kết quả nhằm tối ưu token: " +
-            '"summary" (mặc định - trả về số lượng tầng, metrics bất ổn định, top hub nodes, các chu trình vòng lặp và vi phạm phân tầng; tiết kiệm >90% token), ' +
-            '"detailed" (bao gồm danh sách file cụ thể từng tầng), ' +
-            '"full" (trả về toàn bộ ma trận dependencyGraph thô của tất cả các file).',
+            "Result display mode for token optimization: " +
+            '"summary" (default - returns layer counts, instability metrics, top hub nodes, cycle loops and layer violations; saves >90% tokens), ' +
+            '"detailed" (includes the concrete file list per layer), ' +
+            '"full" (returns the full raw dependencyGraph matrix of all files).',
           enum: ["summary", "detailed", "full"],
         },
         focusLayer: {
           type: Type.STRING,
           description:
-            'Tùy chọn lọc chỉ xem thông tin của một tầng kiến trúc cụ thể (ví dụ: "controller", "service", "repository", "ui", "tools", "utils", "config", "test").',
+            'Optionally filter to a single architecture layer (e.g. "controller", "service", "repository", "ui", "tools", "utils", "config", "test").',
           enum: [
             "controller",
             "service",
@@ -61,17 +61,17 @@ export function createGetArchitectureTopologyTool(
         forceRefresh: {
           type: Type.BOOLEAN,
           description:
-            "Bỏ qua bộ nhớ đệm 30s và quét mới toàn bộ từ đĩa (mặc định false).",
+            "Skip the 30s cache and rescan everything from disk (default false).",
         },
         maxLayers: {
           type: Type.INTEGER,
           description:
-            "Số lượng tầng kiến trúc tối đa trả về (mặc định: tất cả). Dùng cho pagination.",
+            "Maximum number of architecture layers returned (default: all). Used for pagination.",
         },
         maxFilesPerLayer: {
           type: Type.INTEGER,
           description:
-            "Số file tối đa mỗi tầng (mặc định: 100). Dùng cho pagination.",
+            "Maximum files per layer (default: 100). Used for pagination.",
         },
       },
       required: [],

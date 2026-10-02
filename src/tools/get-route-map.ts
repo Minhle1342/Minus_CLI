@@ -15,17 +15,17 @@ function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceServi
 export function createGetRouteMapTool(service?: CodebaseIntelligenceService): ToolDefinition {
   return {
     name: 'get_route_map',
-    description: 'Tự động quét và bóc tách toàn bộ API Routes & Endpoints trong workspace (hỗ trợ Express, Next.js App Router, Fastify, Hono, NestJS, FastAPI). Trả về HTTP Method, Route Path, Controller Handler và Middlewares.',
+    description: 'Automatically scan and extract all API Routes & Endpoints in the workspace (supports Express, Next.js App Router, Fastify, Hono, NestJS, FastAPI). Returns HTTP Method, Route Path, Controller Handler and Middlewares.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         pathPattern: {
           type: Type.STRING,
-          description: 'Mẫu regex/chuỗi để lọc URL path (ví dụ: "^/api/v1", "auth", "users").',
+          description: 'Regex/string pattern to filter URL paths (e.g. "^/api/v1", "auth", "users").',
         },
         framework: {
           type: Type.STRING,
-          description: 'Lọc framework cụ thể: "express", "nextjs", "nestjs", "fastify", "hono", hoặc "auto" (mặc định "auto").',
+          description: 'Filter by a specific framework: "express", "nextjs", "nestjs", "fastify", "hono", or "auto" (default "auto").',
         },
       },
       required: [],

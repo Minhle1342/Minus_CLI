@@ -74,10 +74,10 @@ export const createFileTool: ToolDefinition = {
         created: true,
         bytes,
         contentHash,
-        message: `Đã tạo mới thành công file "${rawPath}" (${bytes} bytes).`,
+        message: `Successfully created file "${rawPath}" (${bytes} bytes).`,
       });
     } catch (err: any) {
-      return toolError(`Không thể tạo file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
+      return toolError(`Failed to create file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
     }
   },
 };

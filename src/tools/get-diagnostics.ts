@@ -16,13 +16,13 @@ import type { DiagnosticItem } from './typescript-service.js';
  */
 export const getDiagnosticsTool: ToolDefinition = {
   name: 'get_diagnostics',
-  description: 'Lấy danh sách lỗi cú pháp và kiểu dữ liệu (TypeScript syntactic & semantic diagnostics) trực tiếp trong bộ nhớ RAM mà không cần chạy lại toàn bộ tsc CLI.',
+  description: 'Get TypeScript syntactic & semantic diagnostics directly from in-memory RAM without re-running the full tsc CLI.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
-        description: 'Tùy chọn: Đường dẫn file cần kiểm tra lỗi (nếu bỏ trống, sẽ quét toàn bộ workspace).',
+        description: 'Optional: path of the file to check (if omitted, scans the entire workspace).',
       },
     },
   },
@@ -41,10 +41,10 @@ export const getDiagnosticsTool: ToolDefinition = {
 
       if (!exists) {
         return toolError(
-          `File "${rawPath}" không tồn tại trên đĩa hoặc không thể truy cập.`,
+          `File "${rawPath}" does not exist on disk or cannot be accessed.`,
           'FILE_NOT_FOUND',
           { path: rawPath },
-          'Kiểm tra lại đường dẫn file hoặc gọi get_diagnostics không có tham số path để quét toàn bộ workspace.',
+          'Check the file path again or call get_diagnostics without the path parameter to scan the entire workspace.',
         );
       }
     }
@@ -125,7 +125,7 @@ export const getDiagnosticsTool: ToolDefinition = {
         warnings: [...(lspResult.warnings || [])],
       });
     } catch (err: any) {
-      return toolError(`Lỗi khi trích xuất diagnostics: ${err.message}`, 'EXECUTION_ERROR');
+      return toolError(`Failed to extract diagnostics: ${err.message}`, 'EXECUTION_ERROR');
     }
   },
 };

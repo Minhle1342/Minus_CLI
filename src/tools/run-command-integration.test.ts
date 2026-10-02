@@ -144,7 +144,7 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
 
   assert.equal(res.commandOutcome, 'blocked_preflight');
   assert.equal(res.preflightCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
-  assert.match(res.message, /chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa/);
+  assert.match(res.message, /no source files have been modified since/);
 
   // Calling test command after 1 file was modified (ALLOWED to proceed to shell)
   const allowedRes = await tool.execute(
@@ -175,7 +175,7 @@ test('Integration Phase 3: Git clone into current directory is blocked by prefli
 
   assert.equal(res.commandOutcome, 'blocked_preflight');
   assert.equal(res.preflightCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
-  assert.match(res.message, /thư mục hiện tại/);
+  assert.match(res.message, /current directory/);
   assert.match(res.suggestion, /DeepCode/);
 });
 

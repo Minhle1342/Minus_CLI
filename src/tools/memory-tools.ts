@@ -9,41 +9,41 @@ import { ProjectMemoryManager } from '../memory/project-memory.js';
 export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolDefinition {
   return {
     name: 'save_memory',
-    description: 'Lưu một thông tin, kinh nghiệm hoặc quy ước quan trọng vào bộ nhớ dài hạn của dự án (.codingagent/project-memory.json).',
+    description: 'Save an important piece of information, lesson or convention to the project long-term memory (.codingagent/project-memory.json).',
     parameters: {
       type: Type.OBJECT,
       properties: {
         key: {
           type: Type.STRING,
-          description: 'Từ khoá định danh cho kiến thức này (vd: "test_framework", "coding_style", "build_gotcha")',
+          description: 'Identifying keyword for this knowledge (e.g. "test_framework", "coding_style", "build_gotcha")',
         },
         insight: {
           type: Type.STRING,
-          description: 'Nội dung chi tiết của kinh nghiệm hoặc quy ước cần ghi nhớ cho các lần chạy sau.',
+          description: 'Detailed content of the lesson or convention to remember for future runs.',
         },
         category: {
           type: Type.STRING,
-          description: 'Phân loại: "convention", "architecture", "gotcha", "rule", "insight", "episodic".',
+          description: 'Category: "convention", "architecture", "gotcha", "rule", "insight", "episodic".',
           enum: ['convention', 'architecture', 'gotcha', 'rule', 'insight', 'episodic'],
         },
         scope: {
           type: Type.STRING,
-          description: 'Phạm vi: project (mặc định), session, hoặc goal.',
+          description: 'Scope: project (default), session, or goal.',
           enum: ['project', 'session', 'goal'],
         },
         confidence: {
           type: Type.NUMBER,
-          description: 'Độ tin cậy từ 0 đến 1. Memory do model tạo mặc định 0.5 và chỉ được tự động inject khi đủ ngưỡng.',
+          description: 'Confidence from 0 to 1. Model-created memories default to 0.5 and are only auto-injected above threshold.',
           minimum: 0,
           maximum: 1,
         },
         goalId: {
           type: Type.STRING,
-          description: 'ID durable goal nếu memory thuộc scope goal.',
+          description: 'Durable goal ID if the memory belongs to a goal scope.',
         },
         expiresAt: {
           type: Type.STRING,
-          description: 'Thời điểm hết hạn ISO-8601 tùy chọn. Memory do model tạo mặc định hết hạn sau 30 ngày.',
+          description: 'Optional ISO-8601 expiry time. Model-created memories expire after 30 days by default.',
         },
       },
       required: ['key', 'insight'],
@@ -54,7 +54,7 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
       const category = args.category || 'convention';
 
       if (!key || !insight) {
-        return { error: 'Tham số "key" và "insight" là bắt buộc.' };
+        return { error: 'The "key" and "insight" parameters are required.' };
       }
 
       const saved = await memoryManager.saveInsight(key, insight, category, {
@@ -65,7 +65,7 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
         source: 'model',
       });
       return {
-        message: `Đã lưu kiến thức "${key}" vào Bộ nhớ dài hạn thành công.`,
+        message: `Saved knowledge "${key}" to Long-term Memory successfully.`,
         saved,
       };
     },
@@ -79,38 +79,38 @@ export function createSaveMemoryTool(memoryManager: ProjectMemoryManager): ToolD
 export function createReadMemoryTool(memoryManager: ProjectMemoryManager): ToolDefinition {
   return {
     name: 'read_memory',
-    description: 'Đọc thông tin tổng quan về kiến trúc, scripts, và các kinh nghiệm đã ghi nhớ từ bộ nhớ dài hạn của dự án.',
+    description: 'Read the project overview of architecture, scripts, and recorded lessons from the project long-term memory.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         query: {
           type: Type.STRING,
-          description: 'Từ khoá tìm kiếm tuỳ chọn để lọc kinh nghiệm đã lưu.',
+          description: 'Optional search keyword to filter saved lessons.',
         },
         scope: {
           type: Type.STRING,
-          description: 'Lọc theo project, session, goal; bỏ trống để tìm tất cả scope.',
+          description: 'Filter by project, session, goal; leave empty to search all scopes.',
           enum: ['project', 'session', 'goal'],
         },
         limit: {
           type: Type.NUMBER,
-          description: 'Số memory tối đa trả về (mặc định 8).',
+          description: 'Maximum number of memories to return (default 8).',
           minimum: 1,
           maximum: 100,
         },
         minConfidence: {
           type: Type.NUMBER,
-          description: 'Ngưỡng độ tin cậy tối thiểu từ 0 đến 1.',
+          description: 'Minimum confidence threshold from 0 to 1.',
           minimum: 0,
           maximum: 1,
         },
         includeContested: {
           type: Type.BOOLEAN,
-          description: 'Chỉ bật khi cần audit các memory đang tranh chấp; mặc định false.',
+          description: 'Enable only when auditing contested memories; default false.',
         },
         includeExpired: {
           type: Type.BOOLEAN,
-          description: 'Chỉ bật khi cần audit memory đã hết hạn; mặc định false.',
+          description: 'Enable only when auditing expired memories; default false.',
         },
       },
     },

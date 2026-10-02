@@ -104,7 +104,7 @@ test('Preflight Guard: Prevents redundant idempotent test execution without code
   });
   assert.equal(rerunWithoutFix.allowed, false);
   assert.equal(rerunWithoutFix.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
-  assert.match(rerunWithoutFix.reason || '', /chưa có bất kỳ tệp mã nguồn nào được chỉnh sửa/);
+  assert.match(rerunWithoutFix.reason || '', /no source files have been modified since/);
 
   // Case 3: Test re-run AFTER a code mutation (ALLOWED)
   const rerunAfterFix = evaluateCommandPreflight(testCmd, {
@@ -197,7 +197,7 @@ test('Preflight Guard: Blocks dangerous git clone into current workspace directo
     const result = evaluateCommandPreflight(cmd, { mode: 'enforce' });
     assert.equal(result.allowed, false, `Expected "${cmd}" to be blocked.`);
     assert.equal(result.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
-    assert.match(result.reason || '', /thư mục hiện tại/);
+    assert.match(result.reason || '', /current directory/);
     assert.match(result.suggestion || '', /DeepCode/);
   }
 
@@ -252,7 +252,7 @@ test('Preflight Guard: Blocks non-existent local binary and discovers sibling ex
 
     assert.equal(res.allowed, false);
     assert.equal(res.errorCode, 'LOCAL_EXECUTABLE_NOT_FOUND');
-    assert.match(res.reason || '', /không tồn tại trên đĩa/);
+    assert.match(res.reason || '', /does not exist on disk/);
     assert.match(res.reason || '', /bin[\\/]Debug[\\/]GitKeyTests\.exe/);
 
     // Khi chạy file thực sự tồn tại trong Debug -> ALLOWED
@@ -300,7 +300,7 @@ test('Preflight Guard: Blocks non-existent workspace and missing scripts in pack
     });
     assert.equal(scriptResult.allowed, false, 'Phải chặn script không tồn tại trong package.json');
     assert.equal(scriptResult.errorCode, 'PACKAGE_SCRIPT_NOT_FOUND');
-    assert.match(scriptResult.reason || '', /Script "lint" không được định nghĩa/);
+    assert.match(scriptResult.reason || '', /Script "lint" is not defined/);
     assert.match(wsResult.suggestion || '', /--workspace/);
 
     // 3. Chạy script hợp lệ đã định nghĩa -> ALLOWED

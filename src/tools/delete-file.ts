@@ -75,10 +75,10 @@ export const deleteFileTool: ToolDefinition = {
         path: workspace.toRelativePath(safePath),
         previousHash: currentHash,
         reason,
-        message: `Đã xóa thành công file "${rawPath}".`,
+        message: `Successfully deleted file "${rawPath}".`,
       });
     } catch (err: any) {
-      return toolError(`Không thể xóa file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
+      return toolError(`Failed to delete file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
     }
   },
 };

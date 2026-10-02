@@ -375,11 +375,11 @@ export const runNodeScriptTool: ToolDefinition = {
       if (gateContext.evidenceGateMode !== 'observe' && !hasValidated && evidenceScore < evidenceThreshold && !allTargetsInspected) {
         const diag: ToolFailureDiagnosis = {
           category: 'PRE_MUTATION_GATE_BLOCKED',
-          message: `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto chặn "run_node_script" vì mức độ chắc chắn chưa đạt ngưỡng (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần khảo sát code và hình thành giả thuyết được kiểm chứng trước khi thực thi script sửa mã nguồn.`,
+          message: `[UNVERIFIED_MUTATION_BLOCKED]: Pareto gate blocks "run_node_script" because confidence is below threshold (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Survey the code and form a verified hypothesis before running source-editing scripts.`,
           isRetryable: false,
           maxRetries: 0,
           backoffMs: 0,
-          recoveryAction: 'Khảo sát mã nguồn với read_file / grep_search và ghi nhận giả thuyết với formulate_and_verify_hypothesis trước khi chạy script sửa file.',
+          recoveryAction: 'Survey the source with read_file / grep_search and record a hypothesis with formulate_and_verify_hypothesis before running file-editing scripts.',
           suggestedAlternative: 'read_file',
         };
         return {

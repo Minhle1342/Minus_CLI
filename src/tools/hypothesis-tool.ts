@@ -58,44 +58,44 @@ export function createHypothesisTool(
 
   return {
     name: 'formulate_and_verify_hypothesis',
-    description: 'Ghi nhận giả thuyết kỹ thuật có thể phản nghiệm. Evidence tĩnh chỉ tạo trạng thái supported; chỉ kết quả thực thi khớp expectedOutcome mới tạo trạng thái validated.',
+    description: 'Record a falsifiable technical hypothesis. Static evidence only yields supported status; only execution results matching expectedOutcome yield validated status.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         statement: {
           type: Type.STRING,
-          description: 'Phát biểu cụ thể về nguyên nhân gốc rễ hoặc cơ chế kỹ thuật gây lỗi.',
+          description: 'Concrete statement of the root cause or technical mechanism behind the bug.',
         },
         falsificationTest: {
           type: Type.STRING,
-          description: 'Điều kiện quan sát được có thể chứng minh giả thuyết này sai.',
+          description: 'Observable condition that could prove this hypothesis wrong.',
         },
         targetFiles: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Danh sách các file bị nghi ngờ chứa lỗi hoặc cần phẫu thuật sửa đổi (không được để trống).',
+          description: 'List of files suspected to contain the bug or needing surgical edits (must not be empty).',
         },
         evidence: {
           type: Type.STRING,
-          description: 'Dẫn chứng cụ thể: số dòng, tên biến, AST node, selector, failing test hoặc chuỗi gọi hàm.',
+          description: 'Concrete evidence: line numbers, variable names, AST nodes, selectors, failing tests or call chains.',
         },
         reproductionCommand: {
           type: Type.STRING,
-          description: 'Câu lệnh kiểm thử hoặc script cô lập để tái hiện lỗi (chạy ở chế độ read-only kiểm chứng, không sửa file).',
+          description: 'Isolated test command or script to reproduce the bug (runs in read-only verification mode, does not edit files).',
         },
         expectedOutcome: {
           type: Type.STRING,
           enum: ['pass', 'fail'],
-          description: 'Kết quả mong đợi của reproductionCommand. Mặc định là fail cho bài test tái hiện lỗi trước khi sửa.',
+          description: 'Expected result of reproductionCommand. Default is fail for bug-reproduction tests before fixing.',
         },
         blastRadius: {
           type: Type.STRING,
           enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
-          description: 'Mức độ rủi ro tác động tính toán từ tool analyze_impact (mặc định: MEDIUM).',
+          description: 'Impact risk level computed from the analyze_impact tool (default: MEDIUM).',
         },
         proposedFix: {
           type: Type.STRING,
-          description: 'Định hướng giải pháp phẫu thuật tối thiểu (Surgical Fix) nếu giả thuyết đúng.',
+          description: 'Minimal surgical-fix direction if the hypothesis is correct.',
         },
       },
       required: ['statement', 'falsificationTest', 'targetFiles', 'evidence'],
@@ -131,10 +131,10 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: 'formulate_and_verify_hypothesis bị từ chối: trường "statement" không được để trống.',
+          error: 'formulate_and_verify_hypothesis rejected: the "statement" field must not be empty.',
           errorCode: 'INSUFFICIENT_HYPOTHESIS_STATEMENT',
-          suggestion: 'Ví dụ: "Hàm parseHeaders trong src/http.ts bỏ sót trường hợp Authorization header chứa ký tự tab."',
-          guidance: 'Hãy bổ sung mô tả giả định nguyên nhân chi tiết.',
+          suggestion: 'Example: "parseHeaders in src/http.ts misses the case where the Authorization header contains a tab character."',
+          guidance: 'Add a detailed description of the assumed root cause.',
         };
       }
 
@@ -149,10 +149,10 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: 'formulate_and_verify_hypothesis bị từ chối: trường "falsificationTest" không được để trống.',
+          error: 'formulate_and_verify_hypothesis rejected: the "falsificationTest" field must not be empty.',
           errorCode: 'INSUFFICIENT_FALSIFICATION_CRITERIA',
-          suggestion: 'Ví dụ: "Nếu giá trị header.trim() không làm thay đổi chuỗi ban đầu thì giả thuyết không đúng."',
-          guidance: 'Hãy bổ sung tiêu chuẩn phản nghiệm rõ ràng.',
+          suggestion: 'Example: "If header.trim() does not change the original string, the hypothesis is wrong."',
+          guidance: 'Add a clear falsification criterion.',
         };
       }
 
@@ -167,10 +167,10 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: 'formulate_and_verify_hypothesis bị từ chối: trường "targetFiles" không được để trống. Hãy cung cấp ít nhất một file cụ thể.',
+          error: 'formulate_and_verify_hypothesis rejected: the "targetFiles" field must not be empty. Provide at least one concrete file.',
           errorCode: 'MISSING_TARGET_FILES',
-          suggestion: 'Ví dụ: ["src/http.ts"]',
-          guidance: 'Xác định rõ các file dự kiến cần can thiệp.',
+          suggestion: 'Example: ["src/http.ts"]',
+          guidance: 'Clearly identify the files expected to need changes.',
         };
       }
 
@@ -185,10 +185,10 @@ export function createHypothesisTool(
           evidence,
           blastRadius,
           canProceedToImplement: false,
-          error: 'formulate_and_verify_hypothesis bị từ chối: trường "evidence" không được để trống.',
+          error: 'formulate_and_verify_hypothesis rejected: the "evidence" field must not be empty.',
           errorCode: 'INSUFFICIENT_EVIDENCE',
-          suggestion: 'Ví dụ: "Dòng 45 trong src/http.ts dùng regex /^Bearer / nhưng không xử lý whitespace."',
-          guidance: 'Thu thập bằng chứng thực tế từ get_symbol_context_360 hoặc view_file trước.',
+          suggestion: 'Example: "Line 45 in src/http.ts uses regex /^Bearer / but does not handle whitespace."',
+          guidance: 'Collect real evidence from get_symbol_context_360 or view_file first.',
         };
       }
 
@@ -253,10 +253,10 @@ export function createHypothesisTool(
             blastRadius,
             canProceedToImplement: false,
             reproductionResult,
-            error: `Không thể dùng reproductionCommand làm bằng chứng: ${executionFailure.slice(0, 500)}`,
+            error: `Cannot use reproductionCommand as evidence: ${executionFailure.slice(0, 500)}`,
             errorCode: 'REPRODUCTION_EXECUTION_FAILED',
-            suggestion: 'Sửa môi trường hoặc câu lệnh để quá trình kiểm chứng thực sự khởi chạy, rồi thử lại.',
-            guidance: `Giả thuyết [${hypothesis.id}] chưa được kiểm chứng vì lệnh không chạy đáng tin cậy.`,
+            suggestion: 'Fix the environment or command so the verification actually runs, then retry.',
+            guidance: `Hypothesis [${hypothesis.id}] is not verified because the command did not run reliably.`,
           };
         }
         const outcomeMatched = expectedOutcome === 'pass' ? exitCode === 0 : exitCode !== 0;
@@ -273,10 +273,10 @@ export function createHypothesisTool(
             blastRadius,
             canProceedToImplement: false,
             reproductionResult,
-            error: `Kết quả reproductionCommand không khớp kỳ vọng: expected=${expectedOutcome}, observed=${observed} (exit ${exitCode}).`,
+            error: `reproductionCommand result does not match expectation: expected=${expectedOutcome}, observed=${observed} (exit ${exitCode}).`,
             errorCode: 'REPRODUCTION_OUTCOME_MISMATCH',
-            suggestion: 'Kiểm tra lại test tái hiện, expectedOutcome và dữ liệu đầu vào trước khi kết luận về cơ chế nguyên nhân.',
-            guidance: `Giả thuyết [${hypothesis.id}] vẫn đang được kiểm tra. Kết quả lệnh chưa cung cấp bằng chứng thực nghiệm theo tiêu chí đã khai báo.`,
+            suggestion: 'Re-check the reproduction test, expectedOutcome and input data before concluding the causal mechanism.',
+            guidance: `Hypothesis [${hypothesis.id}] is still under test. The command result does not yet provide experimental evidence per the declared criteria.`,
           };
         }
 
@@ -294,7 +294,7 @@ export function createHypothesisTool(
           canProceedToImplement: true,
           reproductionResult,
           learning: learningNotes,
-          guidance: `[HYPOTHESIS VALIDATED]: Kết quả thực thi khớp tiêu chí đã khai báo cho giả thuyết [${hypothesis.id}]. Có thể chuyển sang thay đổi tối thiểu cần thiết trong: ${targetFiles.join(', ')}.`,
+          guidance: `[HYPOTHESIS VALIDATED]: Execution result matches the declared criteria for hypothesis [${hypothesis.id}]. May proceed to the minimal required changes in: ${targetFiles.join(', ')}.`,
         };
       }
 
@@ -311,7 +311,7 @@ export function createHypothesisTool(
         blastRadius,
         canProceedToImplement: blastRadius === 'LOW' || blastRadius === 'MEDIUM',
         learning: learningNotes,
-        guidance: `[HYPOTHESIS SUPPORTED]: Bằng chứng tĩnh ủng hộ giả thuyết [${hypothesis.id}]. Thay đổi rủi ro thấp có thể dùng fast path nếu target đã được kiểm tra và evidence gate đạt ngưỡng; thay đổi rủi ro cao cần reproductionCommand cho bằng chứng thực nghiệm.`,
+        guidance: `[HYPOTHESIS SUPPORTED]: Static evidence supports hypothesis [${hypothesis.id}]. Low-risk changes may use the fast path if the target has been inspected and the evidence gate meets the threshold; high-risk changes need reproductionCommand for experimental evidence.`,
       };
     },
   };

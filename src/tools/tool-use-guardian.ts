@@ -163,7 +163,7 @@ export function classifyToolFailure(
         isRetryable: false,
         maxRetries: 0,
         backoffMs: 0,
-        recoveryAction: 'Thu thập bằng chứng còn thiếu được nêu trong thông báo gate: đọc đúng target, truy vết cấu trúc, hoặc chạy test tái hiện khi rủi ro cao.',
+        recoveryAction: 'Collect the missing evidence named in the gate notice: read the right target, trace the structure, or run a reproduction test for high-risk changes.',
         suggestedAlternative: 'read_file',
       };
     }
@@ -176,7 +176,7 @@ export function classifyToolFailure(
         isRetryable: false,
         maxRetries: 0,
         backoffMs: 0,
-        recoveryAction: 'Giải pháp đã được nghiệm thu. Toàn bộ tool calls đã bị khóa. Hãy lập tức hoàn tất lượt và gửi câu trả lời phân tích cuối cùng cho người dùng.',
+        recoveryAction: 'The solution has been accepted. All tool calls are now locked. Immediately conclude the turn and send the final analysis answer to the user.',
       };
     }
 
@@ -477,7 +477,7 @@ export class ToolUseGuardian {
     // 2a. Tool-Use Guardian: Post-Submission Terminal Gate Check
     const gateContext = options?.preMutationGate || this.preMutationGateContext;
     if (gateContext?.hasSubmittedSolution === true) {
-      const errorMsg = 'Tool call bị Tool-Use Guardian từ chối: Giải pháp đã được submit_solution nghiệm thu thành công. Toàn bộ công cụ đã bị khóa. Hãy lập tức hoàn tất lượt (conclude turn) và trả về câu trả lời phân tích tổng kết cho người dùng.';
+      const errorMsg = 'Tool call rejected by Tool-Use Guardian: the solution has been accepted via submit_solution. All tools are now locked. Immediately conclude the turn (conclude turn) and return the final summary analysis to the user.';
       return {
         valid: false,
         allowed: false,
@@ -507,7 +507,7 @@ export class ToolUseGuardian {
 
       const isPseudoClaim = !hasSubstance && (isEvasivePhrase || (!hasActionVerb && summary.length < 140));
       if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
-        const errorMsg = 'Tool "submit_solution" bị Tool-Use Guardian từ chối: trường "summary" chỉ chứa câu thông báo hoàn tất suông ("Đã cung cấp câu trả lời...") mà không có nội dung phân tích nguyên nhân, vị trí mã nguồn hoặc giải pháp thực tế. Hãy đưa toàn bộ phát hiện kỹ thuật vào summary hoặc trả lời chi tiết cho người dùng.';
+        const errorMsg = 'Tool "submit_solution" rejected by Tool-Use Guardian: the "summary" field contains only a hollow completion notice ("Answer provided...") with no root-cause analysis, source location, or concrete solution. Put all technical findings into summary or answer the user in detail.';
         return {
           valid: false,
           allowed: false,
@@ -542,7 +542,7 @@ export class ToolUseGuardian {
         !isNonCodeTask &&
         !userExempted
       ) {
-        const errorMsg = 'Tool "submit_solution" bị Chặn bởi Reproduction Verification Gate (SWE-Reasoner): Tác vụ sửa lỗi yêu cầu xác minh thực thi rằng bài test tái hiện lỗi đã vượt qua thành công sau khi sửa (post-fix PASS). Hãy thực thi bài test kiểm chứng trước khi nộp giải pháp.';
+        const errorMsg = 'Tool "submit_solution" blocked by the Reproduction Verification Gate (SWE-Reasoner): bugfix tasks require execution proof that the bug-reproduction test passes after the fix (post-fix PASS). Run the verification test before submitting the solution.';
         return {
           valid: false,
           allowed: false,
@@ -589,9 +589,9 @@ export class ToolUseGuardian {
         const omissions = detectLazyOmission(fullContent, targetForScan);
         if (omissions.length > 0) {
           const shown = omissions.slice(0, 3)
-            .map((finding) => `dòng ${finding.line}: "${finding.marker}"`)
+            .map((finding) => `line ${finding.line}: "${finding.marker}"`)
             .join('; ');
-          const errorMsg = `[LAZY_OMISSION_BLOCKED]: "${toolName}" chứa marker lười biếng (${shown}) — dấu hiệu LLM viết lại mà bỏ sót code. Hãy chia nhỏ thành các "replace_text" với khối oldText neo cụ thể, hoặc viết đầy đủ nội dung, tuyệt đối không dùng placeholder.`;
+          const errorMsg = `[LAZY_OMISSION_BLOCKED]: "${toolName}" contains lazy markers (${shown}) — a sign the LLM rewrote content while dropping code. Split into smaller "replace_text" calls with concrete anchor oldText blocks, or write the full content; never use placeholders.`;
           return {
             valid: false,
             allowed: false,
@@ -606,7 +606,7 @@ export class ToolUseGuardian {
         }
         if ((toolName === 'write_file' || toolName === 'write_to_file')
           && fullContent.split(/\r?\n/).length > resolveFullRewriteWarnLines()) {
-          hugeRewriteWarning = `Cảnh báo rewrite toàn file dài (${fullContent.split(/\r?\n/).length} dòng): ưu tiên nhiều "replace_text" từng khối nhỏ để giảm nguy cơ sót code thay vì một lần ghi đè toàn bộ.`;
+          hugeRewriteWarning = `Warning: long full-file rewrite (${fullContent.split(/\r?\n/).length} lines): prefer multiple small "replace_text" edits per chunk to reduce the risk of dropped code instead of one full overwrite.`;
         }
       }
     }
@@ -693,14 +693,14 @@ export class ToolUseGuardian {
       if (evidenceSufficient) continue;
 
       const missing = !targetInspected && !targetEmpiricallyValidated
-        ? `đọc chính target "${filePath || '(unknown)'}" trước khi sửa`
+        ? `read the exact target "${filePath || '(unknown)'}" before editing`
         : isHighRisk && !hasEmpiricalEvidence
-          ? 'chạy một reproduction/test có kết quả quan sát được cho thay đổi rủi ro cao'
-          : `bổ sung bằng chứng đến ngưỡng ${evidenceThreshold}`;
+          ? 'run a reproduction/test with observable results for high-risk changes'
+          : `add evidence up to threshold ${evidenceThreshold}`;
       const reasons = gateContext?.evidenceReasons?.length
-        ? ` Bằng chứng hiện có: ${gateContext.evidenceReasons.join(', ')}.`
+        ? ` Current evidence: ${gateContext.evidenceReasons.join(', ')}.`
         : '';
-      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Cổng Pareto thích ứng chặn "${toolName}" vì uncertainty vẫn cao so với chi phí sai (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Cần ${missing}.${reasons}`;
+      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Adaptive Pareto gate blocks "${toolName}" because uncertainty is still high relative to the cost of error (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need ${missing}.${reasons}`;
       if (gateContext?.evidenceGateMode === 'observe') {
         evidenceGateWarning = `[EVIDENCE_GATE_OBSERVE]: ${errorMsg}`;
         break;

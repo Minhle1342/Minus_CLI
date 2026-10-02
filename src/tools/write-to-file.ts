@@ -21,33 +21,33 @@ import {
  */
 export const writeToFileTool: ToolDefinition = {
   name: 'write_to_file',
-  description: 'Tạo file mới hoặc ghi đè toàn bộ nội dung file trong workspace theo tiêu chuẩn Antigravity. Tự động tạo thư mục cha nếu chưa tồn tại. Mặc định sẽ báo lỗi an toàn nếu file đã tồn tại trên đĩa trừ khi tham số Overwrite được chỉ định rõ là true. Tự động trả về contentHash, bytesWritten và phân tích Blast Radius.',
+  description: 'Create a new file or overwrite an entire file in the workspace (Antigravity standard). Automatically create parent directories if missing. By default it safely errors if the file already exists on disk unless Overwrite is explicitly true. Automatically returns contentHash, bytesWritten and blast-radius analysis.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       TargetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tuyệt đối hoặc tương đối tới file cần tạo hoặc ghi đè (ví dụ: "src/utils/helper.ts")',
+        description: 'Absolute or relative path to the file to create or overwrite (e.g. "src/utils/helper.ts")',
       },
       CodeContent: {
         type: Type.STRING,
-        description: 'Toàn bộ nội dung mã nguồn hoặc văn bản sẽ ghi vào file',
+        description: 'Complete source code or text content to write to the file',
       },
       Overwrite: {
         type: Type.BOOLEAN,
-        description: 'Bắt buộc. Đặt true để cho phép ghi đè nếu file đã tồn tại; đặt false để từ chối nếu file đã có sẵn trên đĩa nhằm chống ghi đè nhầm.',
+        description: 'Required. Set true to allow overwriting if the file already exists; set false to refuse if the file is already on disk to prevent accidental overwrites.',
       },
       Description: {
         type: Type.STRING,
-        description: 'Giải thích ngắn gọn, súc tích về thay đổi vừa thực hiện và lý do thiết kế.',
+        description: 'Short, concise explanation of the change just made and the design rationale.',
       },
       ArtifactMetadata: {
         type: Type.OBJECT,
-        description: 'Metadata tùy chọn đính kèm nếu file tạo ra là một artifact tài liệu/kế hoạch.',
+        description: 'Optional metadata attached if the created file is a documentation/plan artifact.',
         properties: {
-          Summary: { type: Type.STRING, description: 'Tóm tắt nội dung của artifact' },
-          UserFacing: { type: Type.BOOLEAN, description: 'True nếu artifact này hiển thị cho người dùng xem' },
-          RequestFeedback: { type: Type.BOOLEAN, description: 'True nếu yêu cầu người dùng xác nhận kế hoạch' },
+          Summary: { type: Type.STRING, description: 'Summary of the artifact content' },
+          UserFacing: { type: Type.BOOLEAN, description: 'True if this artifact is shown to the user' },
+          RequestFeedback: { type: Type.BOOLEAN, description: 'True if requesting the user to confirm the plan' },
         },
       },
     },
@@ -59,7 +59,7 @@ export const writeToFileTool: ToolDefinition = {
     const overwrite = args.Overwrite === true || args.overwrite === true;
 
     if (!rawPath) {
-      return toolError('Tham số "TargetFile" là bắt buộc.', 'INVALID_ARGS');
+      return toolError('The "TargetFile" parameter is required.', 'INVALID_ARGS');
     }
 
     try {
@@ -67,7 +67,7 @@ export const writeToFileTool: ToolDefinition = {
 
       if (workspace.isProtectedFile(safePath) || workspace.isProtectedFile(rawPath)) {
         return toolError(
-          `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          `Security: editing or overwriting sensitive configuration file "${rawPath}" is not allowed.`,
           'SECURITY_VIOLATION',
         );
       }
@@ -83,10 +83,10 @@ export const writeToFileTool: ToolDefinition = {
 
       if (isExisting && !overwrite) {
         return toolError(
-          `File "${rawPath}" đã tồn tại trên đĩa. Để cập nhật một phần nội dung, hãy dùng replace_file_content; hoặc đặt Overwrite: true nếu bạn chắc chắn muốn ghi đè toàn bộ.`,
+          `File "${rawPath}" already exists on disk. To update part of the content, use replace_file_content; or set Overwrite: true if you are sure you want to overwrite the whole file.`,
           'FILE_ALREADY_EXISTS',
           { TargetFile: rawPath },
-          'Sử dụng replace_file_content để sửa đổi chính xác từng phần hoặc đặt Overwrite=true để ghi đè.',
+          'Use replace_file_content for precise partial edits or set Overwrite=true to overwrite.',
         );
       }
 
@@ -154,13 +154,13 @@ export const writeToFileTool: ToolDefinition = {
         created: !isExisting,
         isNewFile: !isExisting,
         message: isExisting
-          ? `Đã ghi đè thành công file "${rawPath}".`
-          : `Đã tạo mới thành công file "${rawPath}".`,
+          ? `Successfully overwrote file "${rawPath}".`
+          : `Successfully created file "${rawPath}".`,
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {
-      return toolError(`Không thể ghi file: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
+      return toolError(`Failed to write file: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
     }
   },
 };

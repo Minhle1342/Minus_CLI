@@ -517,19 +517,19 @@ export function calculateComprehensiveBlastRadius(params: {
   const recommendedActions: string[] = [];
 
   if (breakingChange) {
-    warnings.push(`Phát hiện BREAKING CHANGE: Chữ ký hoặc export của symbol đã thay đổi trong "${normTarget}".`);
+    warnings.push(`BREAKING CHANGE detected: signature or export of symbol changed in "${normTarget}".`);
   }
   if (publicApiAffected && directConsumers.length > 0) {
-    warnings.push(`File này có ${directConsumers.length} module tiêu thụ trực tiếp. Thay đổi có thể gây lỗi compiler.`);
+    warnings.push(`This file has ${directConsumers.length} direct consumer module(s). The change may cause compiler errors.`);
   }
 
-  recommendedActions.push('Kiểm tra compiler/diagnostics bằng "get_diagnostics" hoặc "tsc --noEmit".');
+  recommendedActions.push('Check compiler/diagnostics with "get_diagnostics" or "tsc --noEmit".');
   if (impactedTestSuites.length > 0) {
     const testTargets = impactedTestSuites.slice(0, 3).join(' ');
-    recommendedActions.push(`Chạy các bài kiểm thử bị ảnh hưởng: npm test -- ${testTargets}`);
+    recommendedActions.push(`Run the impacted tests: npm test -- ${testTargets}`);
   }
   if (directConsumers.length > 0) {
-    recommendedActions.push(`Xác minh các module phụ thuộc trực tiếp: ${directConsumers.slice(0, 3).join(', ')}`);
+    recommendedActions.push(`Verify direct dependent modules: ${directConsumers.slice(0, 3).join(', ')}`);
   }
 
   return {

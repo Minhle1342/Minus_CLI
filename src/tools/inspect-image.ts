@@ -95,21 +95,21 @@ export function detectMimeType(filePath: string): string {
 export function createInspectImageTool(sessionAccessor?: () => Session | undefined): ToolDefinition {
   return {
     name: 'inspect_image',
-    description: 'Đọc và phân tích ảnh (PNG, JPG, JPEG, WEBP, GIF, SVG) trong workspace. Trích xuất kích thước, dung lượng, và đính kèm trực tiếp vào ngữ cảnh hội thoại đa phương thức (Multimodal Vision) để LLM có thể quan sát trực quan.',
+    description: 'Read and analyze an image (PNG, JPG, JPEG, WEBP, GIF, SVG) in the workspace. Extract dimensions, file size, and attach directly to the multimodal conversation context (Multimodal Vision) so the LLM can observe it visually.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         path: {
           type: Type.STRING,
-          description: 'Đường dẫn tương đối tới file ảnh trong workspace (ví dụ: "screenshots/login.png" hoặc "assets/logo.jpg")',
+          description: 'Relative path to the image file in the workspace (e.g. "screenshots/login.png" or "assets/logo.jpg")',
         },
         description: {
           type: Type.STRING,
-          description: 'Mô tả ngắn về mục đích kiểm tra ảnh (ví dụ: "Kiểm tra lỗi giao diện responsive trên mobile")',
+          description: 'Short description of the image-check purpose (e.g. "Check responsive layout issues on mobile")',
         },
         attachToContext: {
           type: Type.BOOLEAN,
-          description: 'Mặc định true. Đính kèm ảnh dạng Base64 vào ngữ cảnh multimodal của phiên làm việc để LLM quan sát trực tiếp.',
+          description: 'Default true. Attach the Base64 image to the working session multimodal context for the LLM to observe directly.',
         },
       },
       required: ['path'],
@@ -117,7 +117,7 @@ export function createInspectImageTool(sessionAccessor?: () => Session | undefin
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
       const rawPath = String(args.path || '').trim();
       if (!rawPath) {
-        return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
+        return toolError('The "path" parameter is required.', 'INVALID_ARGS');
       }
 
       try {
@@ -125,13 +125,13 @@ export function createInspectImageTool(sessionAccessor?: () => Session | undefin
         const stat = await fs.stat(safePath);
 
         if (!stat.isFile()) {
-          return toolError(`Đường dẫn "${rawPath}" không phải là tệp.`, 'INVALID_ARGS');
+          return toolError(`Path "${rawPath}" is not a file.`, 'INVALID_ARGS');
         }
 
         // Giới hạn dung lượng ảnh tối đa 15MB để tránh quá tải RAM/Token
         const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
         if (stat.size > MAX_IMAGE_SIZE) {
-          return toolError(`Dung lượng ảnh (${(stat.size / 1024 / 1024).toFixed(2)} MB) vượt quá giới hạn 15MB.`, 'EXECUTION_ERROR');
+          return toolError(`Image size (${(stat.size / 1024 / 1024).toFixed(2)} MB) exceeds the 15MB limit.`, 'EXECUTION_ERROR');
         }
 
         const buffer = await fs.readFile(safePath);
@@ -144,7 +144,7 @@ export function createInspectImageTool(sessionAccessor?: () => Session | undefin
         let attached = false;
         if (attachToContext && session) {
           session.addMultimodalUserMessage(
-            args.description || `[Đã đính kèm ảnh: ${path.relative(workspace.rootDir, safePath)}]`,
+            args.description || `[Attached image: ${path.relative(workspace.rootDir, safePath)}]`,
             [
               {
                 mimeType,
@@ -168,11 +168,11 @@ export function createInspectImageTool(sessionAccessor?: () => Session | undefin
           aspectRatio: dimensions.width && dimensions.height ? `${(dimensions.width / dimensions.height).toFixed(2)}:1` : undefined,
           attachedToMultimodalContext: attached,
           message: attached
-            ? `Ảnh đã được nạp và đính kèm vào ngữ cảnh Vision của mô hình. LLM có thể phân tích trực quan.`
-            : `Đã đọc siêu dữ liệu ảnh thành công.`,
+            ? `Image loaded and attached to the model Vision context. The LLM can analyze it visually.`
+            : `Image metadata read successfully.`,
         });
       } catch (err: any) {
-        return toolError(`Không thể đọc file ảnh "${rawPath}": ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`Failed to read image file "${rawPath}": ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };

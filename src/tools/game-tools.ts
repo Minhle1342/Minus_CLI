@@ -57,54 +57,54 @@ function findClosestPaletteColor(hex: string, paletteColors: string[]): { closes
 export const gameTilemapStudioTool: ToolDefinition = {
   name: 'game_tilemap_studio',
   description:
-    'Tạo, xử lý thuật toán (Cellular Automata hang động, BSP Dungeon hầm ngục, Random Walk) và xuất bản đồ Tilemap 2D sang Tiled JSON, Godot 4 TileMap, CSV và ASCII. ' +
-    'Tự động tính toán và gom nhóm các khối tường liền kề thành hình chữ nhật va chạm AABB Collision Rectangles để tối ưu hiệu năng vật lý.\n\n' +
-    '• KHI NÀO NÊN DÙNG: Khi lập trình màn chơi 2D, sinh bản đồ hang động, hầm ngục, phòng ốc hoặc bố cục grid cho platformer, roguelike, top-down RPG.\n' +
-    '• KHI NÀO KHÔNG DÙNG: Không dùng cho địa hình 3D Mesh hoặc giao diện UI đơn thuần.\n' +
-    '• FORMAT LỰA CHỌN: "concise" (mặc định: tóm tắt kích thước, số lượng collider, preview nhỏ để tiết kiệm token) hoặc "detailed" (ma trận đầy đủ và toàn bộ tọa độ rects).\n' +
-    '• KẾT QUẢ TRẢ VỀ: Đối tượng JSON chứa kích thước, số ô solid, danh sách AABB collision boxes, đường dẫn file đã lưu (nếu có targetFile).',
+    'Create and process algorithms (Cellular Automata caverns, BSP Dungeon, Random Walk) and export 2D Tilemaps to Tiled JSON, Godot 4 TileMap, CSV and ASCII. ' +
+    'Automatically compute and merge adjacent wall blocks into AABB Collision Rectangle shapes to optimize physics performance.\n\n' +
+    '• WHEN TO USE: When programming 2D levels, generating cavern maps, dungeons, rooms or grid layouts for platformers, roguelikes, top-down RPGs.\n' +
+    '• WHEN NOT TO USE: Not for 3D Mesh terrain or plain UI.\n' +
+    '• FORMAT OPTIONS: "concise" (default: summarizes dimensions, collider count, small preview to save tokens) or "detailed" (full matrix and all rect coordinates).\n' +
+    '• RETURNS: JSON object with dimensions, solid-cell count, AABB collision box list, and saved file path (if targetFile is set).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       generator: {
         type: Type.STRING,
         enum: ['cellular_automata', 'bsp_dungeon', 'random_walk', 'custom_matrix', 'blank'],
-        description: 'Thuật toán tạo ma trận màn chơi: cellular_automata (hang động hữu cơ), bsp_dungeon (phòng & hành lang hầm ngục), random_walk (đường hầm quanh co), custom_matrix (ma trận tự nhập), blank (bản đồ trống có viền tường bao).',
+        description: 'Level-matrix generation algorithm: cellular_automata (organic caverns), bsp_dungeon (dungeon rooms & corridors), random_walk (winding tunnels), custom_matrix (user-supplied matrix), blank (empty map with surrounding walls).',
       },
       width: {
         type: Type.INTEGER,
-        description: 'Chiều rộng bản đồ tính theo số ô tile (tối thiểu 5, tối đa 256; mặc định 20).',
+        description: 'Map width in tiles (min 5, max 256; default 20).',
       },
       height: {
         type: Type.INTEGER,
-        description: 'Chiều cao bản đồ tính theo số ô tile (tối thiểu 5, tối đa 256; mặc định 15).',
+        description: 'Map height in tiles (min 5, max 256; default 15).',
       },
       tileSize: {
         type: Type.INTEGER,
-        description: 'Kích thước cạnh của mỗi ô tile theo pixel (thường là 8, 16, 24, 32; mặc định 16).',
+        description: 'Edge size of each tile in pixels (usually 8, 16, 24, 32; default 16).',
       },
       fillRatio: {
         type: Type.NUMBER,
-        description: 'Tỷ lệ lấp đầy tường ban đầu cho cellular_automata hoặc random_walk (0.1 đến 0.9; mặc định 0.45).',
+        description: 'Initial wall fill ratio for cellular_automata or random_walk (0.1 to 0.9; default 0.45).',
       },
       outputFormat: {
         type: Type.STRING,
         enum: ['tiled_json', 'godot_tilemap', 'csv', 'matrix_ascii'],
-        description: 'Định dạng xuất dữ liệu: tiled_json (Phaser/Kaboom/Tiled), godot_tilemap (Godot 4 PackedInt32Array), csv, matrix_ascii (ký tự text trực quan). Mặc định: tiled_json.',
+        description: 'Data export format: tiled_json (Phaser/Kaboom/Tiled), godot_tilemap (Godot 4 PackedInt32Array), csv, matrix_ascii (visual text characters). Default: tiled_json.',
       },
       format: {
         type: Type.STRING,
         enum: ['concise', 'detailed'],
-        description: 'Mức độ chi tiết phản hồi: "concise" (tiết kiệm token context, tóm tắt collider và preview) hoặc "detailed" (trả về toàn bộ ma trận dữ liệu). Mặc định: "concise".',
+        description: 'Response detail level: "concise" (saves context tokens, summarizes colliders and preview) or "detailed" (returns the full data matrix). Default: "concise".',
       },
       customMatrix: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Mảng chuỗi biểu diễn các hàng tile khi generator="custom_matrix" (ký tự "#" hoặc "1" là tường, "." hoặc "0" là sàn trống).',
+        description: 'String array of tile rows when generator="custom_matrix" ("#" or "1" is a wall, "." or "0" is empty floor).',
       },
       targetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tệp trong workspace để lưu kết quả trực tiếp (ví dụ: "assets/maps/level1.json").',
+        description: 'Workspace file path to save results directly (e.g. "assets/maps/level1.json").',
       },
     },
     required: ['generator'],
@@ -124,12 +124,12 @@ export const gameTilemapStudioTool: ToolDefinition = {
     if (!validGenerators.includes(generator)) {
       return {
         is_error: true,
-        error: `Generator "${generator}" không hợp lệ.`,
+        error: `Generator "${generator}" is invalid.`,
         error_type: 'validation_error',
         suggestions: [
-          `Chọn một trong các generator hợp lệ: ${validGenerators.join(', ')}.`,
-          'Để tạo hang động tự nhiên, sử dụng: generator: "cellular_automata".',
-          'Để tạo hầm ngục có phòng và hành lang, sử dụng: generator: "bsp_dungeon".',
+          `Choose one of the valid generators: ${validGenerators.join(', ')}.`,
+          'To generate natural caverns, use: generator: "cellular_automata".',
+          'To generate dungeons with rooms and corridors, use: generator: "bsp_dungeon".',
         ],
       };
     }
@@ -137,18 +137,18 @@ export const gameTilemapStudioTool: ToolDefinition = {
     if (width < 5 || width > 256) {
       return {
         is_error: true,
-        error: `Chiều rộng width=${width} nằm ngoài giới hạn cho phép (5 - 256).`,
+        error: `Width width=${width} is out of allowed bounds (5 - 256).`,
         error_type: 'out_of_bounds',
-        suggestions: ['Đặt width trong khoảng 10 đến 60 ô tile cho màn chơi tiêu chuẩn.'],
+        suggestions: ['Set width between 10 and 60 tiles for a standard level.'],
       };
     }
 
     if (height < 5 || height > 256) {
       return {
         is_error: true,
-        error: `Chiều cao height=${height} nằm ngoài giới hạn cho phép (5 - 256).`,
+        error: `Height height=${height} is out of allowed bounds (5 - 256).`,
         error_type: 'out_of_bounds',
-        suggestions: ['Đặt height trong khoảng 10 đến 45 ô tile cho màn chơi tiêu chuẩn.'],
+        suggestions: ['Set height between 10 and 45 tiles for a standard level.'],
       };
     }
 
@@ -156,9 +156,9 @@ export const gameTilemapStudioTool: ToolDefinition = {
     if (!validFormats.includes(outputFormat)) {
       return {
         is_error: true,
-        error: `Định dạng xuất "${outputFormat}" không hợp lệ.`,
+        error: `Output format "${outputFormat}" is invalid.`,
         error_type: 'validation_error',
-        suggestions: [`Chọn outputFormat là một trong: ${validFormats.join(', ')}.`],
+        suggestions: [`Choose outputFormat from: ${validFormats.join(', ')}.`],
       };
     }
 
@@ -178,9 +178,9 @@ export const gameTilemapStudioTool: ToolDefinition = {
         if (!Array.isArray(customMatrix) || customMatrix.length === 0) {
           return {
             is_error: true,
-            error: 'Khi generator là "custom_matrix", tham số customMatrix phải là mảng chuỗi biểu diễn các dòng tile.',
+            error: 'When generator is "custom_matrix", customMatrix must be a string array of tile rows.',
             error_type: 'validation_error',
-            suggestions: ['Cung cấp customMatrix dạng: ["##########", "#........#", "##########"]'],
+            suggestions: ['Provide customMatrix as: ["##########", "#........#", "##########"]'],
           };
         }
         for (let y = 0; y < Math.min(height, customMatrix.length); y++) {
@@ -398,19 +398,19 @@ export const gameTilemapStudioTool: ToolDefinition = {
         // Concise mode: Tiết kiệm token, chỉ trả về mẫu đầu và thống kê
         response.collisionBoundingBoxes = collisionRects.slice(0, 8);
         response.hasMoreBoxes = collisionRects.length > 8;
-        response.asciiPreview = `${asciiPreview}${height > 15 || width > 30 ? '\n...(bản đồ xem trước thu nhỏ 30x15)' : ''}`;
+        response.asciiPreview = `${asciiPreview}${height > 15 || width > 30 ? '\n...(preview scaled down to 30x15)' : ''}`;
         response.guidance = savedFile
-          ? `Bản đồ đầy đủ đã được lưu an toàn vào "${savedFile}".`
-          : 'Dùng tham số targetFile để lưu bản đồ hoàn chỉnh vào workspace, hoặc dùng format: "detailed" để xem toàn bộ ma trận.';
+          ? `Full map safely saved to "${savedFile}".`
+          : 'Use targetFile to save the complete map to the workspace, or use format: "detailed" to view the full matrix.';
       }
 
       return response;
     } catch (err: any) {
       return {
         is_error: true,
-        error: `Lỗi bất ngờ khi sinh tilemap: ${err.message}`,
+        error: `Unexpected error generating tilemap: ${err.message}`,
         error_type: 'execution_error',
-        suggestions: ['Kiểm tra lại kích thước width/height hoặc chỉ định targetFile hợp lệ.'],
+        suggestions: ['Check the width/height dimensions or specify a valid targetFile.'],
       };
     }
   },
@@ -443,69 +443,69 @@ const RETRO_PALETTES: Record<string, string[]> = {
 export const gamePixelSpriteStudioTool: ToolDefinition = {
   name: 'game_pixel_sprite_studio',
   description:
-    'Thiết kế, kiểm tra và chuẩn hóa đặc tả Sprite Sheet, Animation States và Atlas Metadata cho Game 2D & Pixel Art. ' +
-    'Xác thực tính tuân thủ của mã màu HEX với bảng màu retro kinh điển (PICO-8 16 màu, GameBoy 4 sắc độ, NES, Endesga-32) và tự động gợi ý mã màu tương đồng gần nhất khi vi phạm. ' +
-    'Tính toán tọa độ slice frames và xuất metadata cho TexturePacker, Godot AnimatedSprite2D, Unity hoặc CSS.\n\n' +
-    '• KHI NÀO NÊN DÙNG: Khi lên kế hoạch hoạt ảnh nhân vật, tạo sprite sheet atlas hoặc kiểm tra độ tương thích bảng màu pixel art.\n' +
-    '• KHI NÀO KHÔNG DÙNG: Không dùng để phân tích file nhị phân ảnh 3D hoặc nén video.\n' +
-    '• FORMAT LỰA CHỌN: "concise" (mặc định: tóm tắt kích thước sheet, animation durations và báo cáo palette) hoặc "detailed" (trả về toàn bộ framesMap slice coordinates).\n' +
-    '• KẾT QUẢ TRẢ VỀ: Kích thước sheet, tổng frame, báo cáo bảng màu kèm màu đề xuất, và cấu trúc atlas metadata.',
+    'Design, validate and normalize Sprite Sheet, Animation States and Atlas Metadata specs for 2D & Pixel Art games. ' +
+    'Validate HEX color compliance against classic retro palettes (PICO-8 16 colors, GameBoy 4 shades, NES, Endesga-32) and auto-suggest the nearest matching color on violation. ' +
+    'Compute slice-frame coordinates and export metadata for TexturePacker, Godot AnimatedSprite2D, Unity or CSS.\n\n' +
+    '• WHEN TO USE: When planning character animations, creating sprite sheet atlases or checking pixel-art palette compatibility.\n' +
+    '• WHEN NOT TO USE: Not for analyzing 3D image binaries or video compression.\n' +
+    '• FORMAT OPTIONS: "concise" (default: summarizes sheet size, animation durations and palette report) or "detailed" (returns full framesMap slice coordinates).\n' +
+    '• RETURNS: Sheet size, total frames, palette report with suggested colors, and atlas metadata structure.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       spriteName: {
         type: Type.STRING,
-        description: 'Tên định danh của Sprite (ví dụ: "hero_knight", "slime_enemy", "coin").',
+        description: 'Identifying name of the sprite (e.g. "hero_knight", "slime_enemy", "coin").',
       },
       frameWidth: {
         type: Type.INTEGER,
-        description: 'Chiều rộng của 1 khung hình pixel (thường là 8, 16, 24, 32, 48, 64; mặc định 16).',
+        description: 'Width of 1 pixel frame (usually 8, 16, 24, 32, 48, 64; default 16).',
       },
       frameHeight: {
         type: Type.INTEGER,
-        description: 'Chiều cao của 1 khung hình pixel (thường là 8, 16, 24, 32, 48, 64; mặc định 16).',
+        description: 'Height of 1 pixel frame (usually 8, 16, 24, 32, 48, 64; default 16).',
       },
       palette: {
         type: Type.STRING,
         enum: ['pico-8', 'gameboy', 'nes', 'endesga-32', 'custom', 'none'],
-        description: 'Bảng màu Pixel Art giới hạn: pico-8 (16 màu), gameboy (4 màu xanh kinh điển), nes, endesga-32, custom hoặc none. Mặc định: pico-8.',
+        description: 'Restricted Pixel Art palette: pico-8 (16 colors), gameboy (4 classic greens), nes, endesga-32, custom or none. Default: pico-8.',
       },
       customColors: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách mã màu HEX cần kiểm tra tính tuân thủ bảng màu (ví dụ: ["#000000", "#fff1e8", "#ff004d"]).',
+        description: 'List of HEX colors to check for palette compliance (e.g. ["#000000", "#fff1e8", "#ff004d"]).',
       },
       animations: {
         type: Type.ARRAY,
         items: {
           type: Type.OBJECT,
           properties: {
-            name: { type: Type.STRING, description: 'Tên trạng thái hoạt ảnh (ví dụ: "idle", "walk", "jump", "attack", "hurt", "die").' },
-            frameCount: { type: Type.INTEGER, description: 'Số khung hình của animation này (ví dụ: 4, 6, 8).' },
-            fps: { type: Type.INTEGER, description: 'Tốc độ khung hình (frame rate, ví dụ: 8, 10, 12; mặc định 10).' },
-            loop: { type: Type.BOOLEAN, description: 'Lặp lại hoạt ảnh (mặc định: true).' },
+            name: { type: Type.STRING, description: 'Animation state name (e.g. "idle", "walk", "jump", "attack", "hurt", "die").' },
+            frameCount: { type: Type.INTEGER, description: 'Frame count of this animation (e.g. 4, 6, 8).' },
+            fps: { type: Type.INTEGER, description: 'Frame rate (frames per second, e.g. 8, 10, 12; default 10).' },
+            loop: { type: Type.BOOLEAN, description: 'Loop the animation (default: true).' },
           },
           required: ['name', 'frameCount'],
         },
-        description: 'Danh sách các trạng thái hoạt ảnh (Animation States) và số khung hình.',
+        description: 'List of animation states (Animation States) and frame counts.',
       },
       columns: {
         type: Type.INTEGER,
-        description: 'Số cột tối đa trên mỗi hàng của sprite sheet (nếu bỏ trống, tự động căn chỉnh tối ưu).',
+        description: 'Maximum columns per sprite sheet row (if empty, auto-layout is optimized).',
       },
       targetFormat: {
         type: Type.STRING,
         enum: ['texture_packer_json', 'godot_sprite_frames', 'unity_sprite_meta', 'css_spritesheet'],
-        description: 'Định dạng xuất metadata: texture_packer_json (Phaser/Kaboom/Pixi), godot_sprite_frames (Godot 4 SpriteFrames), unity_sprite_meta, css_spritesheet. Mặc định: texture_packer_json.',
+        description: 'Metadata export format: texture_packer_json (Phaser/Kaboom/Pixi), godot_sprite_frames (Godot 4 SpriteFrames), unity_sprite_meta, css_spritesheet. Default: texture_packer_json.',
       },
       format: {
         type: Type.STRING,
         enum: ['concise', 'detailed'],
-        description: 'Mức độ chi tiết phản hồi: "concise" (mặc định: tóm tắt frame & palette) hoặc "detailed" (trả về toàn bộ tọa độ cắt frame).',
+        description: 'Response detail level: "concise" (default: frame & palette summary) or "detailed" (returns all frame-slice coordinates).',
       },
       targetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tệp trong workspace để lưu metadata trực tiếp (ví dụ: "assets/sprites/hero.json").',
+        description: 'Workspace file path to save metadata directly (e.g. "assets/sprites/hero.json").',
       },
     },
     required: ['spriteName'],
@@ -526,18 +526,18 @@ export const gamePixelSpriteStudioTool: ToolDefinition = {
     if (!spriteName) {
       return {
         is_error: true,
-        error: 'Tham số "spriteName" không được để trống.',
+        error: 'The "spriteName" parameter must not be empty.',
         error_type: 'validation_error',
-        suggestions: ['Cung cấp tên sprite đại diện, ví dụ: spriteName: "hero_knight"'],
+        suggestions: ['Provide a representative sprite name, e.g. spriteName: "hero_knight"'],
       };
     }
 
     if (frameWidth < 4 || frameWidth > 512 || frameHeight < 4 || frameHeight > 512) {
       return {
         is_error: true,
-        error: `Kích thước frame (${frameWidth}x${frameHeight}) không hợp lệ (hỗ trợ từ 4 đến 512px).`,
+        error: `Frame size (${frameWidth}x${frameHeight}) is invalid (supported range 4 to 512px).`,
         error_type: 'out_of_bounds',
-        suggestions: ['Sử dụng kích thước pixel art chuẩn: 16x16, 24x24, 32x32 hoặc 48x48.'],
+        suggestions: ['Use standard pixel-art sizes: 16x16, 24x24, 32x32 or 48x48.'],
       };
     }
 
@@ -562,7 +562,7 @@ export const gamePixelSpriteStudioTool: ToolDefinition = {
             color: hex,
             closestValidColor: closestColor,
           });
-          suggestions.push(`Màu "${hex}" không thuộc bảng ${palette}. Hãy đổi sang mã tương đồng gần nhất "${closestColor}".`);
+          suggestions.push(`Color "${hex}" is not in the ${palette} palette. Switch to the nearest match "${closestColor}".`);
         }
       }
 
@@ -697,8 +697,8 @@ export const gamePixelSpriteStudioTool: ToolDefinition = {
     } else {
       response.metadataPreview = metadataContent.slice(0, 500);
       response.guidance = savedFile
-        ? `Metadata đã được ghi vào file "${savedFile}".`
-        : 'Dùng targetFile để lưu file JSON vào workspace hoặc đặt format: "detailed" để xem toàn bộ frame coordinates.';
+        ? `Metadata written to file "${savedFile}".`
+        : 'Use targetFile to save the JSON file to the workspace or set format: "detailed" to view all frame coordinates.';
     }
 
     return response;
@@ -712,36 +712,36 @@ export const gamePixelSpriteStudioTool: ToolDefinition = {
 export const game2DPhysicsConfigTool: ToolDefinition = {
   name: 'game_2d_physics_config',
   description:
-    'Tính toán chính xác công thức động học bước nhảy (kinematic jump: trọng lực g = 2h/tp^2, vận tốc nhảy v0 = 2h/tp), ' +
-    'thiết lập ma trận va chạm 32-bit bitmask (Collision Matrix Layer/Mask) và đặc tả cấu hình Hitbox/Hurtbox cho Game 2D.\n\n' +
-    '• KHI NÀO NÊN DÙNG: Khi cần tinh chỉnh cảm giác nhảy platformer (Game Feel / Juice: Coyote time, Jump buffer, Jump cut) hoặc thiết lập các lớp va chạm không bị xung đột chéo trong Godot, Unity, Phaser.\n' +
-    '• KHI NÀO KHÔNG DÙNG: Không dùng cho tính toán quỹ đạo tên lửa 3D hoặc thủy động lực học phức tạp.\n' +
-    '• FORMAT LỰA CHỌN: "concise" (mặc định: các thông số động học chính và code mẫu cốt lõi) hoặc "detailed" (toàn bộ ma trận bitmask 32-bit và giải thích toán học).\n' +
-    '• KẾT QUẢ TRẢ VỀ: Giá trị gravity, jump velocity, terminal velocity, bảng Coyote time & Jump buffer, ma trận va chạm và code mẫu tương ứng.',
+    'Precisely compute jump kinematic formulas (kinematic jump: gravity g = 2h/tp^2, jump velocity v0 = 2h/tp), ' +
+    'set up a 32-bit bitmask collision matrix (Collision Matrix Layer/Mask) and specify Hitbox/Hurtbox configuration for 2D games.\n\n' +
+    '• WHEN TO USE: When fine-tuning platformer jump feel (Game Feel / Juice: Coyote time, Jump buffer, Jump cut) or setting up cross-conflict-free collision layers in Godot, Unity, Phaser.\n' +
+    '• WHEN NOT TO USE: Not for 3D rocket trajectories or complex hydrodynamics.\n' +
+    '• FORMAT OPTIONS: "concise" (default: key kinematic parameters and core sample code) or "detailed" (full 32-bit bitmask matrix and math explanation).\n' +
+    '• RETURNS: gravity, jump velocity, terminal velocity values, Coyote time & Jump buffer table, collision matrix and matching sample code.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       mode: {
         type: Type.STRING,
         enum: ['kinematic_jump', 'collision_matrix', 'hitbox_hurtbox', 'full_physics_profile'],
-        description: 'Chế độ tính toán: kinematic_jump (tính trọng lực & vận tốc nhảy), collision_matrix (tạo ma trận bitmask), hitbox_hurtbox, full_physics_profile (tổng hợp). Mặc định: kinematic_jump.',
+        description: 'Computation mode: kinematic_jump (compute gravity & jump velocity), collision_matrix (build bitmask matrix), hitbox_hurtbox, full_physics_profile (combined). Default: kinematic_jump.',
       },
       jumpHeight: {
         type: Type.NUMBER,
-        description: 'Chiều cao nhảy mong muốn (đơn vị pixel hoặc world units, ví dụ: 48, 64; mặc định 48).',
+        description: 'Desired jump height (pixels or world units, e.g. 48, 64; default 48).',
       },
       timeToApex: {
         type: Type.NUMBER,
-        description: 'Thời gian từ lúc bấm nhảy đến khi đạt điểm cao nhất (tính bằng giây, ví dụ: 0.35s; mặc định 0.35).',
+        description: 'Time from jump press to apex (in seconds, e.g. 0.35s; default 0.35).',
       },
       maxFallSpeed: {
         type: Type.NUMBER,
-        description: 'Vận tốc rơi tối đa / terminal velocity (tùy chọn, mặc định 1.6x vận tốc nhảy ban đầu).',
+        description: 'Maximum fall speed / terminal velocity (optional, default 1.6x the initial jump velocity).',
       },
       layers: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách tên các layer vật lý (tối đa 32 layers, ví dụ: ["Player", "Terrain", "Enemy", "Hazard"]).',
+        description: 'List of physics layer names (max 32 layers, e.g. ["Player", "Terrain", "Enemy", "Hazard"]).',
       },
       collisionPairs: {
         type: Type.ARRAY,
@@ -754,17 +754,17 @@ export const game2DPhysicsConfigTool: ToolDefinition = {
           },
           required: ['layerA', 'layerB', 'collides'],
         },
-        description: 'Danh sách các cặp layer có tương tác va chạm với nhau hay không.',
+        description: 'List of layer pairs and whether they collide with each other.',
       },
       targetEngine: {
         type: Type.STRING,
         enum: ['unity_2d', 'godot_2d', 'phaser_arcade', 'custom_canvas'],
-        description: 'Engine đích để sinh mã cấu hình: godot_2d, unity_2d, phaser_arcade, custom_canvas. Mặc định: godot_2d.',
+        description: 'Target engine for generated config code: godot_2d, unity_2d, phaser_arcade, custom_canvas. Default: godot_2d.',
       },
       format: {
         type: Type.STRING,
         enum: ['concise', 'detailed'],
-        description: 'Mức độ chi tiết phản hồi: "concise" (mặc định: thông số chính & code cốt lõi) hoặc "detailed" (ma trận bitmask chi tiết).',
+        description: 'Response detail level: "concise" (default: key parameters & core code) or "detailed" (detailed bitmask matrix).',
       },
     },
     required: ['mode'],
@@ -786,18 +786,18 @@ export const game2DPhysicsConfigTool: ToolDefinition = {
     if (!validModes.includes(mode)) {
       return {
         is_error: true,
-        error: `Chế độ mode="${mode}" không được hỗ trợ.`,
+        error: `Mode mode="${mode}" is not supported.`,
         error_type: 'validation_error',
-        suggestions: [`Chọn mode trong danh sách: ${validModes.join(', ')}`],
+        suggestions: [`Choose mode from: ${validModes.join(', ')}`],
       };
     }
 
     if (timeToApex <= 0 || timeToApex > 2.0) {
       return {
         is_error: true,
-        error: `timeToApex=${timeToApex}s không thực tế cho game 2D (phải nằm trong khoảng 0.15s đến 1.0s).`,
+        error: `timeToApex=${timeToApex}s is unrealistic for 2D games (must be between 0.15s and 1.0s).`,
         error_type: 'out_of_bounds',
-        suggestions: ['Đặt timeToApex từ 0.28 đến 0.38 giây cho cảm giác nhảy linh hoạt (snappy platformer).'],
+        suggestions: ['Set timeToApex between 0.28 and 0.38 seconds for a snappy platformer jump feel.'],
       };
     }
 
@@ -931,47 +931,47 @@ public void CutJump() {
 export const gameScaffoldEngineTool: ToolDefinition = {
   name: 'game_scaffold_engine',
   description:
-    'Khởi tạo mã nguồn kiến trúc chuẩn cho Game 2D & Pixel: Vòng lặp game bước thời gian cố định ' +
-    '(Fixed Timestep Accumulator Game Loop để không phụ thuộc FPS), Máy trạng thái hữu hạn (Finite State Machine - FSM), ' +
-    'Quản lý Input trừu tượng (Action Mapping) và Object Pool (tái sử dụng đạn/quái vật tránh GC lag).\n\n' +
-    '• KHI NÀO NÊN DÙNG: Khi bắt đầu dựng khung dự án game mới, tạo hệ thống điều khiển nhân vật bằng FSM, hoặc tối ưu hóa hiệu năng bắn đạn/hiệu ứng hạt.\n' +
-    '• KHI NÀO KHÔNG DÙNG: Không dùng cho các ứng dụng web CRUD thuần túy không có game loop.\n' +
-    '• FORMAT LỰA CHỌN: "concise" (mặc định: tóm tắt kiến trúc và mã khung để tiết kiệm token) hoặc "detailed" (mã nguồn hoàn chỉnh chi tiết).\n' +
-    '• KẾT QUẢ TRẢ VỀ: Mã nguồn hoàn chỉnh, giải thích kiến trúc và đường dẫn tệp đã lưu (nếu có targetFile).',
+    'Initialize standard architecture source code for 2D & Pixel games: fixed-timestep game loop ' +
+    '(Fixed Timestep Accumulator Game Loop for FPS independence), Finite State Machine (FSM), ' +
+    'abstract Input management (Action Mapping) and Object Pool (reuse bullets/enemies to avoid GC lag).\n\n' +
+    '• WHEN TO USE: When scaffolding a new game project, building FSM-based character controls, or optimizing bullet/particle performance.\n' +
+    '• WHEN NOT TO USE: Not for pure CRUD web apps with no game loop.\n' +
+    '• FORMAT OPTIONS: "concise" (default: architecture and scaffold summary to save tokens) or "detailed" (complete detailed source).\n' +
+    '• RETURNS: Complete source code, architecture explanation and saved file path (if targetFile is set).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       engine: {
         type: Type.STRING,
         enum: ['html5_canvas_ts', 'phaser_ts', 'godot_gdscript', 'unity_csharp', 'pygame_python'],
-        description: 'Engine hoặc nền tảng đích: html5_canvas_ts, phaser_ts, godot_gdscript, unity_csharp, pygame_python. Mặc định: html5_canvas_ts.',
+        description: 'Target engine or platform: html5_canvas_ts, phaser_ts, godot_gdscript, unity_csharp, pygame_python. Default: html5_canvas_ts.',
       },
       architectureComponent: {
         type: Type.STRING,
         enum: ['fixed_timestep_loop', 'fsm_state_machine', 'object_pool', 'input_action_mapper', 'complete_2d_starter'],
-        description: 'Thành phần kiến trúc cần tạo: fixed_timestep_loop, fsm_state_machine, object_pool, input_action_mapper, complete_2d_starter.',
+        description: 'Architecture component to generate: fixed_timestep_loop, fsm_state_machine, object_pool, input_action_mapper, complete_2d_starter.',
       },
       entityName: {
         type: Type.STRING,
-        description: 'Tên thực thể (ví dụ: "Player", "Enemy", "Bullet"; mặc định: "Player").',
+        description: 'Entity name (e.g. "Player", "Enemy", "Bullet"; default: "Player").',
       },
       states: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
-        description: 'Danh sách trạng thái cho FSM (ví dụ: ["Idle", "Run", "Jump", "Fall", "Attack", "Hurt", "Death"]).',
+        description: 'State list for the FSM (e.g. ["Idle", "Run", "Jump", "Fall", "Attack", "Hurt", "Death"]).',
       },
       poolCapacity: {
         type: Type.INTEGER,
-        description: 'Sức chứa ban đầu của Object Pool (ví dụ: 30, 50, 100; mặc định 50).',
+        description: 'Initial Object Pool capacity (e.g. 30, 50, 100; default 50).',
       },
       format: {
         type: Type.STRING,
         enum: ['concise', 'detailed'],
-        description: 'Mức độ chi tiết: "concise" (mặc định: tóm tắt interface & preview) hoặc "detailed" (mã nguồn đầy đủ).',
+        description: 'Detail level: "concise" (default: interface summary & preview) or "detailed" (full source).',
       },
       targetFile: {
         type: Type.STRING,
-        description: 'Đường dẫn tệp đích để lưu code vào workspace (ví dụ: "src/game/GameLoop.ts").',
+        description: 'Destination file path to save code to the workspace (e.g. "src/game/GameLoop.ts").',
       },
     },
     required: ['architectureComponent'],
@@ -992,9 +992,9 @@ export const gameScaffoldEngineTool: ToolDefinition = {
     if (!validEngines.includes(engine)) {
       return {
         is_error: true,
-        error: `Engine "${engine}" không hợp lệ.`,
+        error: `Engine "${engine}" is invalid.`,
         error_type: 'validation_error',
-        suggestions: [`Chọn engine trong danh sách: ${validEngines.join(', ')}`],
+        suggestions: [`Choose engine from: ${validEngines.join(', ')}`],
       };
     }
 
@@ -1002,9 +1002,9 @@ export const gameScaffoldEngineTool: ToolDefinition = {
     if (!validComponents.includes(architectureComponent)) {
       return {
         is_error: true,
-        error: `Thành phần "${architectureComponent}" không hợp lệ.`,
+        error: `Component "${architectureComponent}" is invalid.`,
         error_type: 'validation_error',
-        suggestions: [`Chọn architectureComponent là một trong: ${validComponents.join(', ')}`],
+        suggestions: [`Choose architectureComponent from: ${validComponents.join(', ')}`],
       };
     }
 
@@ -1067,10 +1067,10 @@ export class GameLoop {
   };
 }
 `.trim();
-        explanation = 'Triển khai mẫu Fixed Timestep Accumulator chuẩn theo Glenn Fiedler (Fix Your Timestep).';
+        explanation = 'Standard Fixed Timestep Accumulator implementation per Glenn Fiedler (Fix Your Timestep).';
       } else {
         code = `// Fixed timestep loop for ${engine} is natively handled by engine runtime (e.g. _physics_process in Godot or FixedUpdate in Unity).`;
-        explanation = `Với ${engine}, hãy sử dụng cơ chế Fixed Update mặc định của engine.`;
+        explanation = `With ${engine}, use the engine default Fixed Update mechanism.`;
       }
     } else if (architectureComponent === 'fsm_state_machine') {
       code = `
@@ -1125,7 +1125,7 @@ export class ${entityName}StateMachine {
   }
 }
 `.trim();
-      explanation = `Finite State Machine chuẩn với ${states.length} states: ${states.join(', ')}.`;
+      explanation = `Standard Finite State Machine with ${states.length} states: ${states.join(', ')}.`;
     } else if (architectureComponent === 'object_pool') {
       code = `
 /**
@@ -1177,13 +1177,13 @@ export class ${entityName}Pool<T extends Poolable> {
   }
 }
 `.trim();
-      explanation = `Object Pool ngăn chặn việc cấp phát bộ nhớ liên tục trong vòng lặp đạn/hiệu ứng. Sức chứa khởi tạo: ${poolCapacity}.`;
+      explanation = `Object Pool prevents continuous memory allocation in bullet/effect loops. Initial capacity: ${poolCapacity}.`;
     } else {
       code = `
 // Complete 2D Starter Scaffolding for ${engine}
 // Bao gồm GameLoop, ActionInputMapper và FSM State Machine
 `.trim();
-      explanation = 'Bộ khung hoàn chỉnh cho Game 2D.';
+      explanation = 'Complete scaffold for 2D games.';
     }
 
     let savedFile: string | undefined;
@@ -1209,10 +1209,10 @@ export class ${entityName}Pool<T extends Poolable> {
     if (format === 'detailed') {
       response.fullCode = code;
     } else {
-      response.codePreview = code.slice(0, 500) + (code.length > 500 ? '\n...(xem file đầy đủ hoặc đặt format: "detailed")' : '');
+      response.codePreview = code.slice(0, 500) + (code.length > 500 ? '\n...(see the full file or set format: "detailed")' : '');
       response.guidance = savedFile
-        ? `Mã nguồn đã được ghi vào file "${savedFile}".`
-        : 'Dùng targetFile để lưu code trực tiếp hoặc đặt format: "detailed" để xem toàn bộ code.';
+        ? `Source code written to file "${savedFile}".`
+        : 'Use targetFile to save code directly or set format: "detailed" to view the full code.';
     }
 
     return response;

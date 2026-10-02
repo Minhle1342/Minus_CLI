@@ -96,35 +96,35 @@ export function classifyGuardianError(errorMsg: string): { failureType: string; 
   if (lower.includes('scene') && (lower.includes('not found') || lower.includes('missing'))) {
     return {
       failureType: 'SCENE_NOT_FOUND',
-      recoveryHint: 'File Scene không tồn tại trên đĩa hoặc đường dẫn chưa chính xác.',
-      suggestedFix: 'Hãy đặt action: "compose_scene" để tự động tạo mới scene tại đường dẫn chỉ định (vd: "Assets/Scenes/Main.unity").',
+      recoveryHint: 'Scene file does not exist on disk or the path is incorrect.',
+      suggestedFix: 'Set action: "compose_scene" to auto-create the scene at the specified path (e.g. "Assets/Scenes/Main.unity").',
     };
   }
   if (lower.includes('prefab') && (lower.includes('not found') || lower.includes('missing'))) {
     return {
       failureType: 'PREFAB_NOT_FOUND',
-      recoveryHint: 'Asset Prefab được chỉ định chưa được tạo hoặc sai đường dẫn.',
-      suggestedFix: 'Dùng action: "assemble_prefab" để khởi tạo prefab asset trước khi gắn vào Scene, hoặc kiểm tra lại đường dẫn trong Assets/Prefabs/.',
+      recoveryHint: 'The specified Prefab asset has not been created or the path is wrong.',
+      suggestedFix: 'Use action: "assemble_prefab" to initialize the prefab asset before attaching it to the Scene, or double-check the path under Assets/Prefabs/.',
     };
   }
   if (lower.includes('component') || lower.includes('type')) {
     return {
       failureType: 'UNKNOWN_COMPONENT_TYPE',
-      recoveryHint: 'Tên component có thể bị viết sai chính tả hoặc thiếu namespace.',
-      suggestedFix: 'Kiểm tra tên Component chuẩn của Unity (vd: "Rigidbody2D", "BoxCollider2D", "SpriteRenderer") hoặc đảm bảo script C# đã tồn tại trong Assets/Scripts/.',
+      recoveryHint: 'The component name may be misspelled or missing a namespace.',
+      suggestedFix: 'Check the standard Unity component names (e.g. "Rigidbody2D", "BoxCollider2D", "SpriteRenderer") or make sure the C# script exists under Assets/Scripts/.',
     };
   }
   if (lower.includes('bridge') || lower.includes('econnrefused') || lower.includes('timeout')) {
     return {
       failureType: 'UNITY_BRIDGE_OFFLINE',
-      recoveryHint: 'Unity Editor HTTP Bridge chưa được khởi động hoặc đang ở chế độ background.',
-      suggestedFix: 'Tool đã tự động tạo script C# Editor (Assets/Editor/Generated/GameplayAssembler.cs). Bạn có thể mở Unity Editor và chọn Tools > Agent > Assemble Gameplay để áp dụng trực tiếp.',
+      recoveryHint: 'The Unity Editor HTTP Bridge has not been started or is running in background mode.',
+      suggestedFix: 'The tool auto-generated a C# Editor script (Assets/Editor/Generated/GameplayAssembler.cs). Open Unity Editor and choose Tools > Agent > Assemble Gameplay to apply it directly.',
     };
   }
   return {
     failureType: 'GENERAL_EXECUTION_ERROR',
     recoveryHint: errorMsg,
-    suggestedFix: 'Kiểm tra lại cấu trúc tham số đầu vào và đường dẫn tài nguyên.',
+    suggestedFix: 'Double-check the input parameter structure and resource paths.',
   };
 }
 
@@ -480,7 +480,7 @@ async function sendToUnityBridge(bridgeUrl: string, payload: Record<string, any>
 
       req.on('timeout', () => {
         req.destroy();
-        resolve({ success: false, error: 'TIMEOUT: Unity Bridge phản hồi quá thời gian quy định.' });
+        resolve({ success: false, error: 'TIMEOUT: Unity Bridge response exceeded the time limit.' });
       });
 
       req.on('error', (err) => {
@@ -502,17 +502,17 @@ async function sendToUnityBridge(bridgeUrl: string, payload: Record<string, any>
 export const unityGameplayStudioTool: ToolDefinition = {
   name: 'unity_gameplay_studio',
   description:
-    'Sử dụng sức mạnh toàn diện của Unity Editor để tạo/lắp ráp Scene, khởi tạo Prefab, gắn kết tham chiếu Component (SerializedObject/SerializedProperty), ' +
-    'cấu hình thứ tự Build Settings và tự động sinh C# Editor script tự động hóa gameplay hoàn chỉnh.\n\n' +
-    '• KHI NÀO NÊN DÙNG:\n' +
-    '  - Khi phát triển gameplay trong Unity cần kết nối các Scene (.unity) và Prefab (.prefab) lại với nhau.\n' +
-    '  - Khi cần gán tham chiếu (wiring references) giữa các GameObjects/Components trong Scene (vd: gán Player vào GameManager, gắn Cinemachine Target, liên kết UI Button OnClick, gán Prefab cho Spawner).\n' +
-    '  - Khi cấu hình Build Settings Scene list để chuyển màn (MainMenu -> Level1 -> GameOver).\n' +
-    '  - Khi tạo kịch bản tự động hóa Unity Editor để thực thi qua Menu hoặc Unity CLI batchmode.\n\n' +
-    '• KHI NÀO KHÔNG DÙNG: Không dùng cho các game engine khác (Godot/Phaser) hoặc tạo tilemap ma trận 2D thuần túy (dùng game_tilemap_studio).\n\n' +
-    '• FORMAT LỰA CHỌN: "concise" (mặc định: tóm tắt số lượng prefab, hierarchy tree, các reference đã gắn và đường dẫn file đã lưu để tiết kiệm token) ' +
-    'hoặc "detailed" (trả về toàn bộ mã nguồn C# Editor script, chi tiết SerializedProperty và lệnh chạy Unity batchmode).\n\n' +
-    '• KẾT QUẢ TRẢ VỀ: Trạng thái thực thi, danh sách các đối tượng và tham chiếu đã thiết lập, đường dẫn file C# Editor script đã ghi, và hướng dẫn chạy trực tiếp trong Unity Editor.',
+    'Use the full power of the Unity Editor to create/assemble Scenes, initialize Prefabs, wire Component references (SerializedObject/SerializedProperty), ' +
+    'configure Build Settings order, and auto-generate complete gameplay-automation C# Editor scripts.\n\n' +
+    '• WHEN TO USE:\n' +
+    '  - When developing Unity gameplay that connects Scenes (.unity) and Prefabs (.prefab) together.\n' +
+    '  - When wiring references between GameObjects/Components in a Scene (e.g. assigning Player to GameManager, attaching a Cinemachine Target, linking UI Button OnClick, assigning a Prefab to a Spawner).\n' +
+    '  - When configuring the Build Settings scene list for level transitions (MainMenu -> Level1 -> GameOver).\n' +
+    '  - When creating Unity Editor automation scripts to run via Menu or Unity CLI batchmode.\n\n' +
+    '• WHEN NOT TO USE: Not for other game engines (Godot/Phaser) or pure 2D matrix tilemaps (use game_tilemap_studio).\n\n' +
+    '• FORMAT OPTIONS: "concise" (default: summarizes prefab count, hierarchy tree, wired references and saved file path to save tokens) ' +
+    'or "detailed" (returns the full C# Editor script source, SerializedProperty details and the Unity batchmode command).\n\n' +
+    '• RETURNS: Execution status, list of configured objects and references, written C# Editor script path, and instructions for running directly in Unity Editor.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -527,39 +527,39 @@ export const unityGameplayStudioTool: ToolDefinition = {
           'execute_editor_script',
         ],
         description:
-          'Hành động cần thực hiện trên Unity Editor: ' +
-          '"compose_scene" (lắp ráp Scene với prefabs & references), ' +
-          '"assemble_prefab" (tạo hoặc chỉnh sửa Prefab asset), ' +
-          '"wire_references" (gắn kết tham chiếu giữa các Component/GameObject), ' +
-          '"manage_build_scenes" (sắp xếp danh sách Scene trong Build Settings), ' +
-          '"inspect_and_validate" (kiểm tra tính hợp lệ và tìm các script bị thiếu), ' +
-          '"execute_editor_script" (sinh script C# Editor tự động hóa).',
+          'Action to perform in Unity Editor: ' +
+          '"compose_scene" (assemble a Scene with prefabs & references), ' +
+          '"assemble_prefab" (create or edit a Prefab asset), ' +
+          '"wire_references" (wire references between Components/GameObjects), ' +
+          '"manage_build_scenes" (order the Scene list in Build Settings), ' +
+          '"inspect_and_validate" (validate and find missing scripts), ' +
+          '"execute_editor_script" (generate an automation C# Editor script).',
       },
       scenePath: {
         type: Type.STRING,
-        description: 'Đường dẫn file Scene mục tiêu trong Unity (vd: "Assets/Scenes/MainLevel.unity"). Tự động thêm đuôi .unity nếu thiếu.',
+        description: 'Target Unity Scene file path (e.g. "Assets/Scenes/MainLevel.unity"). Auto-appends the .unity extension if missing.',
       },
       prefabPath: {
         type: Type.STRING,
-        description: 'Đường dẫn file Prefab mục tiêu (vd: "Assets/Prefabs/Player.prefab"). Tự động thêm đuôi .prefab nếu thiếu.',
+        description: 'Target Prefab file path (e.g. "Assets/Prefabs/Player.prefab"). Auto-appends the .prefab extension if missing.',
       },
       gameplayType: {
         type: Type.STRING,
         enum: ['2d_platformer', '2d_topdown', '3d_action', 'fps', 'rpg', 'custom'],
-        description: 'Thể loại gameplay để tự động thiết lập Camera (Orthographic vs Perspective), Lighting và Canvas chuẩn. Mặc định: "custom".',
+        description: 'Gameplay genre for auto-setting Camera (Orthographic vs Perspective), Lighting and default Canvas. Default: "custom".',
       },
       prefabsToInstantiate: {
         type: Type.ARRAY,
-        description: 'Danh sách các Prefab cần đưa vào Scene, bao gồm tọa độ, scale, đối tượng cha và component bổ sung.',
+        description: 'List of Prefabs to place into the Scene, including position, scale, parent object and extra components.',
         items: {
           type: Type.OBJECT,
           properties: {
-            prefabPath: { type: Type.STRING, description: 'Đường dẫn asset Prefab (vd: "Assets/Prefabs/Player.prefab").' },
-            instanceName: { type: Type.STRING, description: 'Tên GameObject đặt trong Scene Hierarchy (vd: "Player").' },
-            parentPath: { type: Type.STRING, description: 'Đường dẫn GameObject cha nếu muốn lồng vào nhóm (vd: "Environment/Platforms").' },
+            prefabPath: { type: Type.STRING, description: 'Prefab asset path (e.g. "Assets/Prefabs/Player.prefab").' },
+            instanceName: { type: Type.STRING, description: 'GameObject name placed in the Scene Hierarchy (e.g. "Player").' },
+            parentPath: { type: Type.STRING, description: 'Parent GameObject path for nesting into a group (e.g. "Environment/Platforms").' },
             position: {
               type: Type.OBJECT,
-              description: 'Tọa độ đặt trong không gian World (vd: {"x": 0, "y": 1.5, "z": 0}).',
+              description: 'Placement coordinates in World space (e.g. {"x": 0, "y": 1.5, "z": 0}).',
               properties: {
                 x: { type: Type.NUMBER },
                 y: { type: Type.NUMBER },
@@ -568,7 +568,7 @@ export const unityGameplayStudioTool: ToolDefinition = {
             },
             rotation: {
               type: Type.OBJECT,
-              description: 'Góc xoay Euler (vd: {"x": 0, "y": 0, "z": 0}).',
+              description: 'Euler rotation angles (e.g. {"x": 0, "y": 0, "z": 0}).',
               properties: {
                 x: { type: Type.NUMBER },
                 y: { type: Type.NUMBER },
@@ -577,7 +577,7 @@ export const unityGameplayStudioTool: ToolDefinition = {
             },
             scale: {
               type: Type.OBJECT,
-              description: 'Tỉ lệ phóng to/thu nhỏ (vd: {"x": 1, "y": 1, "z": 1}).',
+              description: 'Scale factor (e.g. {"x": 1, "y": 1, "z": 1}).',
               properties: {
                 x: { type: Type.NUMBER },
                 y: { type: Type.NUMBER },
@@ -586,51 +586,51 @@ export const unityGameplayStudioTool: ToolDefinition = {
             },
             componentsToAdd: {
               type: Type.ARRAY,
-              description: 'Danh sách tên các Component cần gắn thêm (vd: ["Rigidbody2D", "PlayerController"]).',
+              description: 'List of extra Component names to attach (e.g. ["Rigidbody2D", "PlayerController"]).',
               items: { type: Type.STRING },
             },
             propertyOverrides: {
               type: Type.OBJECT,
-              description: 'Các giá trị SerializedProperty muốn ghi đè riêng cho instance này.',
+              description: 'SerializedProperty values to override specifically for this instance.',
             },
           },
         },
       },
       referenceWirings: {
         type: Type.ARRAY,
-        description: 'Danh sách các liên kết tham chiếu cần gán giữa các Component/GameObject thông qua SerializedObject.',
+        description: 'List of reference links to wire between Components/GameObjects via SerializedObject.',
         items: {
           type: Type.OBJECT,
           properties: {
-            sourceObject: { type: Type.STRING, description: 'Tên GameObject chứa Component có field cần gán (vd: "GameManager").' },
-            sourceComponent: { type: Type.STRING, description: 'Tên Component chứa field (vd: "GameManager" hoặc "CinemachineVirtualCamera").' },
-            fieldName: { type: Type.STRING, description: 'Tên SerializedField trong C# script (vd: "playerTarget", "healthSlider", "enemyPrefab").' },
-            targetObject: { type: Type.STRING, description: 'Tên GameObject mục tiêu trong Scene (vd: "Player").' },
-            targetComponent: { type: Type.STRING, description: 'Tùy chọn: Tên component cụ thể trên targetObject (nếu null sẽ gán GameObject/Transform).' },
-            targetAssetPath: { type: Type.STRING, description: 'Tùy chọn: Đường dẫn Prefab hoặc ScriptableObject Asset nếu field nhận Asset thay vì Scene object.' },
+            sourceObject: { type: Type.STRING, description: 'Name of the GameObject holding the Component with the field to wire (e.g. "GameManager").' },
+            sourceComponent: { type: Type.STRING, description: 'Name of the Component holding the field (e.g. "GameManager" or "CinemachineVirtualCamera").' },
+            fieldName: { type: Type.STRING, description: 'SerializedField name in the C# script (e.g. "playerTarget", "healthSlider", "enemyPrefab").' },
+            targetObject: { type: Type.STRING, description: 'Target GameObject name in the Scene (e.g. "Player").' },
+            targetComponent: { type: Type.STRING, description: 'Optional: specific component name on the targetObject (null wires the GameObject/Transform).' },
+            targetAssetPath: { type: Type.STRING, description: 'Optional: Prefab or ScriptableObject asset path if the field takes an asset instead of a Scene object.' },
           },
         },
       },
       prefabDefinition: {
         type: Type.OBJECT,
-        description: 'Cấu hình định nghĩa Prefab khi tạo mới với action "assemble_prefab".',
+        description: 'Prefab definition config when creating new content with action "assemble_prefab".',
         properties: {
-          rootName: { type: Type.STRING, description: 'Tên root GameObject của Prefab.' },
+          rootName: { type: Type.STRING, description: 'Root GameObject name of the Prefab.' },
           tag: { type: Type.STRING, description: 'Tag cho root object (vd: "Player", "Enemy").' },
           layer: { type: Type.STRING, description: 'Layer cho root object (vd: "Default", "Character").' },
           components: {
             type: Type.ARRAY,
-            description: 'Danh sách component cần gắn trên root GameObject.',
+            description: 'List of components to attach on the root GameObject.',
             items: {
               type: Type.OBJECT,
               properties: {
-                name: { type: Type.STRING, description: 'Tên component (vd: "Rigidbody2D", "BoxCollider2D").' },
+                name: { type: Type.STRING, description: 'Component name (e.g. "Rigidbody2D", "BoxCollider2D").' },
               },
             },
           },
           childHierarchy: {
             type: Type.ARRAY,
-            description: 'Cây GameObject con của Prefab (vd: MuzzlePoint, GroundCheck, Visual).',
+            description: 'Child GameObject tree of the Prefab (e.g. MuzzlePoint, GroundCheck, Visual).',
             items: {
               type: Type.OBJECT,
               properties: {
@@ -650,31 +650,31 @@ export const unityGameplayStudioTool: ToolDefinition = {
       },
       buildScenes: {
         type: Type.ARRAY,
-        description: 'Danh sách Scene cần đưa vào Unity Build Settings theo thứ tự ưu tiên (Index 0: Splash/MainMenu, Index 1: Level_01, v.v.).',
+        description: 'List of Scenes to include in Unity Build Settings in priority order (Index 0: Splash/MainMenu, Index 1: Level_01, etc.).',
         items: {
           type: Type.OBJECT,
           properties: {
-            path: { type: Type.STRING, description: 'Đường dẫn Scene (vd: "Assets/Scenes/MainMenu.unity").' },
-            enabled: { type: Type.BOOLEAN, description: 'Trạng thái kích hoạt trong build (mặc định: true).' },
+            path: { type: Type.STRING, description: 'Scene path (e.g. "Assets/Scenes/MainMenu.unity").' },
+            enabled: { type: Type.BOOLEAN, description: 'Enabled state in the build (default: true).' },
           },
         },
       },
       customEditorCode: {
         type: Type.STRING,
-        description: 'Mã C# UnityEditor tùy biến muốn chèn thêm vào hàm RunAssembly().',
+        description: 'Custom C# UnityEditor code to inject into the RunAssembly() function.',
       },
       outputEditorScriptPath: {
         type: Type.STRING,
-        description: 'Đường dẫn file C# Editor Script sinh ra (mặc định: "Assets/Editor/Generated/GameplayAssembler.cs").',
+        description: 'Generated C# Editor script file path (default: "Assets/Editor/Generated/GameplayAssembler.cs").',
       },
       bridgeUrl: {
         type: Type.STRING,
-        description: 'URL của Unity Editor HTTP Bridge nếu Unity đang mở và có plugin lắng nghe (vd: "http://127.0.0.1:8080/exec").',
+        description: 'Unity Editor HTTP Bridge URL when Unity is open with a listening plugin (e.g. "http://127.0.0.1:8080/exec").',
       },
       format: {
         type: Type.STRING,
         enum: ['concise', 'detailed'],
-        description: 'Mức độ chi tiết phản hồi: "concise" (tiết kiệm token context) hoặc "detailed" (toàn bộ code và cấu trúc chi tiết). Mặc định: "concise".',
+        description: 'Response detail level: "concise" (saves context tokens) or "detailed" (full code and detailed structure). Default: "concise".',
       },
     },
     required: ['action'],
@@ -695,7 +695,7 @@ export const unityGameplayStudioTool: ToolDefinition = {
       const err = classifyGuardianError('Missing prefabPath or prefabDefinition for action assemble_prefab');
       return {
         success: false,
-        error: 'Thiếu đường dẫn hoặc thông tin định nghĩa Prefab.',
+        error: 'Missing path or Prefab definition info.',
         guardianDiagnosis: err,
       };
     }
@@ -762,18 +762,18 @@ export const unityGameplayStudioTool: ToolDefinition = {
         fullEditorScript: generatedScript,
         batchmodeCliCommand: batchCliCommand,
         instructions:
-          '1. Mở Unity Editor -> Chọn menu "Tools > Agent > Assemble Gameplay" để chạy script.\\n' +
-          `2. Hoặc chạy tự động qua terminal: ${batchCliCommand}`,
+          '1. Open Unity Editor -> choose menu "Tools > Agent > Assemble Gameplay" to run the script.\\n' +
+          `2. Or run automatically via terminal: ${batchCliCommand}`,
       };
     }
 
     return {
       success: true,
       summary,
-      scriptPreview: generatedScript.slice(0, 450) + '\\n// ... [Xem đầy đủ trong file đã lưu hoặc chọn format: "detailed"]',
+      scriptPreview: generatedScript.slice(0, 450) + '\\n// ... [See the full saved file or choose format: "detailed"]',
       quickInstruction:
-        `Đã lưu C# Editor automation tại "${summary.editorScriptSavedAt}". ` +
-        `Trong Unity Editor, nhấn "Tools > Agent > Assemble Gameplay" hoặc chạy batchmode để tự động lắp ráp hoàn tất.`,
+        `Saved C# Editor automation at "${summary.editorScriptSavedAt}". ` +
+        `In Unity Editor, press "Tools > Agent > Assemble Gameplay" or run batchmode to auto-complete the assembly.`,
     };
   },
 };

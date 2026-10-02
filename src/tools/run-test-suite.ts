@@ -15,27 +15,27 @@ import { IsolatedExecutionSubstrate } from '../execution/isolated-substrate.js';
 export const runTestSuiteTool: ToolDefinition = {
   name: 'run_test_suite',
   description:
-    'Thực thi bộ kiểm thử (Test Suite) của dự án với Test Engineering Harness. ' +
-    'Tự động phân tích kết quả test (Jest/Vitest/Mocha/Pytest/Cargo/Go), đồng bộ bằng chứng cho CriticGate ' +
-    'và tự động thẩm định trạng thái Giả thuyết (Hypothesis Validation/Falsification).',
+    'Run the project test suite with the Test Engineering Harness. ' +
+    'Automatically analyze test results (Jest/Vitest/Mocha/Pytest/Cargo/Go), sync evidence to CriticGate ' +
+    'and automatically validate the Hypothesis status (Hypothesis Validation/Falsification).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       command: {
         type: Type.STRING,
-        description: 'Lệnh chạy test cụ thể (vd: "npm test", "npx vitest run", "pytest"). Bỏ trống để tự động nhận diện.',
+        description: 'Specific test command (e.g. "npm test", "npx vitest run", "pytest"). Leave empty for auto-detection.',
       },
       hypothesisId: {
         type: Type.STRING,
-        description: 'Mã giả thuyết (Hypothesis ID) đang được kiểm chứng thực nghiệm nếu có.',
+        description: 'Hypothesis ID under experimental verification, if any.',
       },
       useScratchWorkspace: {
         type: Type.BOOLEAN,
-        description: 'Nếu true, chạy test trên Ephemeral Scratch Sandbox để cách ly hoàn toàn mà không ảnh hưởng tới workspace.',
+        description: 'If true, run tests on an Ephemeral Scratch Sandbox for full isolation without affecting the workspace.',
       },
       timeoutMs: {
         type: Type.NUMBER,
-        description: 'Thời gian chờ tối đa cho bộ test (mặc định: 120,000ms = 2 phút).',
+        description: 'Maximum wait time for the test suite (default: 120,000ms = 2 minutes).',
       },
     },
   },
@@ -74,7 +74,7 @@ export const runTestSuiteTool: ToolDefinition = {
       });
     } catch (err: any) {
       return toolError(
-        `Lỗi thực thi Test Engineering Harness: ${err.message}`,
+        `Test Engineering Harness execution failed: ${err.message}`,
         'TEST_HARNESS_FAILURE',
         { command: args.command }
       );

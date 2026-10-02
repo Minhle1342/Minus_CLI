@@ -59,7 +59,7 @@ export const readFileTool: ToolDefinition = {
   async execute(args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
     const rawPath = String(args.path || args.filePath || '').trim();
     if (!rawPath) {
-      return { error: 'Tham số "path" là bắt buộc.' };
+      return { error: 'The "path" parameter is required.' };
     }
 
     try {
@@ -67,7 +67,7 @@ export const readFileTool: ToolDefinition = {
       const stat = await fs.stat(safePath);
 
       if (context?.signal?.aborted) {
-        return { path: rawPath, error: 'Đã huỷ thao tác đọc file.', errorCode: 'OPERATION_CANCELLED' };
+        return { path: rawPath, error: 'File read operation cancelled.', errorCode: 'OPERATION_CANCELLED' };
       }
 
       // 1. Nếu là thư mục, tự động chuyển sang hành vi liệt kê danh sách tệp/thư mục con (Directory Listing Fallback)
@@ -76,7 +76,7 @@ export const readFileTool: ToolDefinition = {
       }
 
       if (!stat.isFile()) {
-        return { path: rawPath, error: `Đường dẫn "${rawPath}" không phải là tệp tin hợp lệ.` };
+        return { path: rawPath, error: `Path "${rawPath}" is not a valid file.` };
       }
 
       // Kiểm tra xem LLM có truyền phạm vi cụ thể (scoped read) hay không
@@ -92,10 +92,10 @@ export const readFileTool: ToolDefinition = {
       if (stat.size > MAX_SYSTEM_FILE_SIZE) {
         return {
           path: rawPath,
-          error: `File quá lớn (${Math.round(stat.size / (1024 * 1024))}MB > 10MB). Không thể mở trực tiếp bằng read_file.`,
+          error: `File too large (${Math.round(stat.size / (1024 * 1024))}MB > 10MB). Cannot open directly with read_file.`,
           errorCode: 'FILE_EXCEEDS_SYSTEM_LIMIT',
           fileSizeBytes: stat.size,
-          suggestion: 'Hãy sử dụng run_command với các tiện ích CLI như ripgrep, head, tail hoặc sed để trích xuất dữ liệu từ file ngoại cỡ này.',
+          suggestion: 'Use run_command with CLI utilities like ripgrep, head, tail or sed to extract data from this oversized file.',
         };
       }
 
@@ -103,10 +103,10 @@ export const readFileTool: ToolDefinition = {
       if (!hasExplicitScope && stat.size > 200 * 1024) {
         return {
           path: rawPath,
-          error: `File quá lớn (${Math.round(stat.size / 1024)}KB). Giới hạn tối đa mỗi lần đọc toàn bộ là 200KB để chống tràn context token.`,
+          error: `File too large (${Math.round(stat.size / 1024)}KB). Maximum full-read size is 200KB to prevent context-token overflow.`,
           errorCode: 'FILE_TOO_LARGE',
           fileSizeBytes: stat.size,
-          suggestion: `Hãy đọc từng phần bằng tham số "startLine" và "endLine" (hoặc "offset" và "limit"), hoặc sử dụng "outlineOnly: true" để xem cấu trúc hàm/lớp, hoặc dùng "symbol: <tên_symbol>" để chỉ trích xuất phần thân hàm/lớp bạn cần.`,
+          suggestion: `Read in parts with the "startLine" and "endLine" parameters (or "offset" and "limit"), or use "outlineOnly: true" to view the function/class structure, or use "symbol: <symbol_name>" to extract only the function/class body you need.`,
         };
       }
 
@@ -117,7 +117,7 @@ export const readFileTool: ToolDefinition = {
       const canUseNativeBatch = stat.size <= 200 * 1024;
       const nativeBatch = canUseNativeBatch ? await nativeBatchReadFilesAsync(workspace.rootDir, [rawPath], 200 * 1024, context?.signal) : null;
       if (context?.signal?.aborted) {
-        return { path: rawPath, error: 'Đã huỷ thao tác đọc file.', errorCode: 'OPERATION_CANCELLED' };
+        return { path: rawPath, error: 'File read operation cancelled.', errorCode: 'OPERATION_CANCELLED' };
       }
 
       if (nativeBatch && nativeBatch[0] && nativeBatch[0].content !== null && nativeBatch[0].content !== undefined) {
@@ -148,7 +148,7 @@ export const readFileTool: ToolDefinition = {
           parser: outline.parser,
           extractionConfidence: outline.confidence,
           notice: isCapped
-            ? `[OUTLINE CAPPED]: File có ${outline.symbols.length} symbols. Đã giới hạn hiển thị ${MAX_OUTLINE_SYMBOLS} symbols đầu tiên để tối ưu context token.`
+            ? `[OUTLINE CAPPED]: File has ${outline.symbols.length} symbols. Display limited to the first ${MAX_OUTLINE_SYMBOLS} symbols to optimize context tokens.`
             : undefined,
           contentHash,
           eol,
@@ -198,16 +198,16 @@ export const readFileTool: ToolDefinition = {
           return {
             path: rawPath,
             warning: sliced.ambiguousMatches?.length
-              ? `Symbol "${symbolName}" không duy nhất trong file "${rawPath}". Hãy dùng qualifiedName.`
-              : `Không tìm thấy symbol "${symbolName}" trong file "${rawPath}".`,
+              ? `Symbol "${symbolName}" is ambiguous in file "${rawPath}". Use a qualifiedName.`
+              : `Symbol "${symbolName}" not found in file "${rawPath}".`,
             parser: sliced.parser,
             extractionConfidence: sliced.confidence,
             ambiguousMatches: sliced.ambiguousMatches,
             totalSymbolsFound: outline.symbols.length,
             availableSymbolsSample: availableSymbols,
             suggestion: sliced.ambiguousMatches?.length
-              ? 'Gọi lại bằng một qualifiedName trong ambiguousMatches.'
-              : 'Hãy sử dụng một trong các symbols khả dụng bên trên, hoặc sử dụng "outlineOnly: true" hoặc "startLine/endLine" để đọc.',
+              ? 'Call again with a qualifiedName from ambiguousMatches.'
+              : 'Use one of the available symbols above, or use "outlineOnly: true" or "startLine/endLine" to read.',
           };
         }
       }
@@ -224,7 +224,7 @@ export const readFileTool: ToolDefinition = {
       if (startLine > totalLines) {
         return {
           path: rawPath,
-          error: `Dòng bắt đầu startLine/offset (${startLine}) vượt quá tổng số dòng của file (${totalLines}).`,
+          error: `Start line startLine/offset (${startLine}) exceeds the total line count of the file (${totalLines}).`,
           totalLines,
         };
       }
@@ -250,20 +250,20 @@ export const readFileTool: ToolDefinition = {
           endLine = Math.min(totalLines, startLine + requestedLimit - 1);
         }
         if (rawLimit > MAX_LINE_RANGE) {
-          autoWindowNotice = `[MAX_RANGE_CAPPED]: Tham số limit (${rawLimit}) vượt quá giới hạn an toàn (${MAX_LINE_RANGE} dòng). Đã tự động giới hạn xuống ${MAX_LINE_RANGE} dòng.`;
+          autoWindowNotice = `[MAX_RANGE_CAPPED]: limit parameter (${rawLimit}) exceeds the safe limit (${MAX_LINE_RANGE} lines). Automatically capped to ${MAX_LINE_RANGE} lines.`;
         }
       } else if (args.endLine !== undefined) {
         const requestedEndLine = Math.min(totalLines, Number(args.endLine) || totalLines);
         if (requestedEndLine - startLine + 1 > MAX_LINE_RANGE) {
           endLine = startLine + MAX_LINE_RANGE - 1;
-          autoWindowNotice = `[MAX_RANGE_CAPPED]: Khoảng dòng yêu cầu vượt quá giới hạn an toàn (${MAX_LINE_RANGE} dòng). Đã tự động giới hạn từ dòng ${startLine} đến ${endLine} để chống tràn context token.`;
+          autoWindowNotice = `[MAX_RANGE_CAPPED]: Requested line range exceeds the safe limit (${MAX_LINE_RANGE} lines). Automatically capped from line ${startLine} to ${endLine} to prevent context-token overflow.`;
         } else {
           endLine = requestedEndLine;
         }
       } else if (totalLines > 350) {
         // Có startLine/offset nhưng không truyền endLine/limit trên file lớn
         endLine = Math.min(totalLines, startLine + 249);
-        autoWindowNotice = `[AUTO_WINDOW_APPLIED]: Do không chỉ định endLine hoặc limit trên file lớn (${totalLines} dòng), hệ thống tự động đọc 250 dòng (L${startLine}-L${endLine}) để bảo vệ context window.`;
+        autoWindowNotice = `[AUTO_WINDOW_APPLIED]: Since endLine or limit was not specified on a large file (${totalLines} lines), the system automatically reads 250 lines (L${startLine}-L${endLine}) to protect the context window.`;
       } else {
         endLine = totalLines;
       }
@@ -298,7 +298,7 @@ export const readFileTool: ToolDefinition = {
           offset: nextStart,
           limit: nextEnd - nextStart + 1,
         };
-        paginationSuggestion = `Để đọc tiếp phần kế tiếp (từ dòng ${nextStart} đến ${nextEnd}), hãy gọi: read_file(path="${rawPath}", startLine=${nextStart}, endLine=${nextEnd})`;
+        paginationSuggestion = `To continue reading the next part (lines ${nextStart} to ${nextEnd}), call: read_file(path="${rawPath}", startLine=${nextStart}, endLine=${nextEnd})`;
       }
 
       return {
@@ -321,7 +321,7 @@ export const readFileTool: ToolDefinition = {
         symbolsCount: outline?.symbols?.length,
         outline: outline?.symbols?.slice(0, 30),
         notice: isUnscopedLargeFile
-          ? `[WINDOWED FILE VIEW]: File "${rawPath}" có ${totalLines} dòng (> 350). 120 dòng đầu tiên và AST Symbol Outline được hiển thị để bảo vệ context window. Để đọc các đoạn khác, hãy truyền startLine/endLine hoặc symbol.`
+          ? `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). The first 120 lines and AST Symbol Outline are shown to protect the context window. To read other sections, pass startLine/endLine or symbol.`
           : autoWindowNotice,
       };
     } catch (err: any) {
@@ -403,15 +403,15 @@ async function listDirectoryFallback(safePath: string, rawPath: string): Promise
         name: e.name,
         type: e.isDirectory() ? 'directory' : 'file',
       })),
-      content: `Directory listing for "${cleanPath}":\n${formattedList}${isCapped ? `\n\n... và ${sorted.length - MAX_DIR_ENTRIES} mục khác. Hãy chỉ định đường dẫn thư mục con cụ thể.` : ''}`,
-      notice: `[DIRECTORY_FALLBACK]: "${cleanPath}" là thư mục, không phải tệp tin. Tool đã tự động chuyển sang liệt kê danh sách tệp con để bạn dễ dàng định hướng tệp cần đọc.`,
-      suggestion: `Hãy chọn một tệp từ danh sách trên và gọi lại read_file với path="${cleanPath.replace(/\/$/, '')}/<tên_tệp>".`,
+      content: `Directory listing for "${cleanPath}":\n${formattedList}${isCapped ? `\n\n... and ${sorted.length - MAX_DIR_ENTRIES} more entries. Specify a concrete subdirectory path.` : ''}`,
+      notice: `[DIRECTORY_FALLBACK]: "${cleanPath}" is a directory, not a file. The tool automatically switched to listing child files to help you locate the file to read.`,
+      suggestion: `Pick a file from the list above and call read_file again with path="${cleanPath.replace(/\/$/, '')}/<file_name>".`,
     };
   } catch (err: any) {
     return {
       path: rawPath,
       isDirectory: true,
-      error: `Không thể đọc nội dung thư mục "${rawPath}": ${err.message}`,
+      error: `Failed to read directory contents of "${rawPath}": ${err.message}`,
       errorCode: 'DIR_READ_ERROR',
     };
   }

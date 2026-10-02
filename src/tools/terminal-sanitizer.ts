@@ -94,7 +94,7 @@ export function distillTestOutput(text: string, exitCode?: number): string {
   }
 
   if (skippedPassCount > 0) {
-    distilled.unshift(`[INFO: Đã rút gọn ${skippedPassCount} dòng PASS thành công của test suites]`);
+    distilled.unshift(`[INFO: Condensed ${skippedPassCount} successful PASS line(s) of test suites]`);
   }
 
   return distilled.join('\n');
@@ -171,7 +171,7 @@ export function truncateTerminalOutput(
 
   let finalOutput = nativeRes.text;
   if (options?.logFilePath) {
-    finalOutput += `\n[💡 TOÀN BỘ LOG ĐẦY ĐỦ ĐÃ ĐƯỢC LƯU TẠI TỆP: ${options.logFilePath} — Có thể dùng tool "read_file" nếu cần xem đoạn giữa]`;
+    finalOutput += `\n[💡 FULL LOG SAVED TO FILE: ${options.logFilePath} — Use the "read_file" tool to view the middle section if needed]`;
   }
 
   const truncatedLength = finalOutput.length;

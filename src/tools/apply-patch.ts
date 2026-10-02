@@ -14,25 +14,25 @@ import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
  */
 export const applyPatchTool: ToolDefinition = {
   name: 'apply_patch',
-  description: 'Áp dụng Unified Diff patch (chuẩn Codex CLI) để sửa đổi, tạo mới, hoặc xóa file với engine Fuzz Matching thông minh. Hỗ trợ multi-file diff, tự động bù trừ lệch dòng (line offset), chuẩn hóa thụt đầu dòng (indentation tolerance), và matching mờ (fuzzy context matching).\n\nVí dụ 1-Shot Unified Diff mẫu:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
+  description: 'Apply a Unified Diff patch (Codex CLI standard) to modify, create, or delete files with a smart Fuzz Matching engine. Supports multi-file diffs, automatic line-offset compensation, indentation normalization, and fuzzy context matching.\n\nSample 1-Shot Unified Diff:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
   parameters: {
     type: Type.OBJECT,
     properties: {
       patch: {
         type: Type.STRING,
-        description: 'Nội dung Unified Diff patch (bao gồm --- / +++ / @@ hunks) hoặc khối diff. Có thể chứa nhiều file trong cùng một patch. Ví dụ 1-Shot:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
+        description: 'Unified Diff patch content (including --- / +++ / @@ hunks) or diff block. May contain multiple files in one patch. 1-Shot example:\n--- a/src/example.ts\n+++ b/src/example.ts\n@@ -10,3 +10,3 @@\n context line\n-old line\n+new line\n context line',
       },
       path: {
         type: Type.STRING,
-        description: 'Tùy chọn: Đường dẫn file mục tiêu nếu patch chỉ chứa các khối hunk @@ mà không có header file (--- / +++).',
+        description: 'Optional: target file path if the patch only contains @@ hunk blocks without file headers (--- / +++).',
       },
       fuzzLevel: {
         type: Type.INTEGER,
-        description: 'Mức độ chấp nhận sai lệch (0: exact line/text, 1: normalize whitespace/indentation, 2: context reduction, 3: fuzzy similarity advisory). Mặc định là 2.',
+        description: 'Tolerance for mismatch (0: exact line/text, 1: normalize whitespace/indentation, 2: context reduction, 3: fuzzy similarity advisory). Default is 2.',
       },
       expectedFileHashes: {
         type: Type.OBJECT,
-        description: 'Bản đồ đường dẫn file -> contentHash MỚI NHẤT từ lần read_file gần nhất để ngăn ngừa ghi đè nội dung cũ (optimistic locking). Mỗi lần sửa file xong, hash cũ hết hiệu lực: lần patch kế tiếp phải read_file lại lấy hash mới. Không bao giờ tái dùng hash qua 2 lần sửa, không bỏ trường này để lách conflict.',
+        description: 'Map of file path -> LATEST contentHash from the most recent read_file to prevent overwriting stale content (optimistic locking). After each file edit the old hash expires: the next patch must read_file again for a fresh hash. Never reuse a hash across 2 edits, and never omit this field to bypass conflicts.',
         additionalProperties: {
           type: Type.STRING,
         },
@@ -49,7 +49,7 @@ export const applyPatchTool: ToolDefinition = {
       : undefined;
 
     if (!rawPatch) {
-      return toolError('Tham số "patch" không được để trống.', 'INVALID_ARGS');
+      return toolError('The "patch" parameter must not be empty.', 'INVALID_ARGS');
     }
 
     try {
@@ -57,7 +57,7 @@ export const applyPatchTool: ToolDefinition = {
       const parsed = PatchEngine.parsePatch(rawPatch, defaultPath);
 
       if (parsed.files.length === 0) {
-        return toolError('Nội dung patch không chứa hunk hoặc file hợp lệ nào.', 'INVALID_PATCH');
+        return toolError('Patch content contains no valid hunks or files.', 'INVALID_PATCH');
       }
 
       // 2. Kiểm tra an toàn path, protected files và expectedFileHashes cho tất cả các file
@@ -68,7 +68,7 @@ export const applyPatchTool: ToolDefinition = {
           try {
             safePath = workspace.resolveSafePath(targetPath);
           } catch (err: any) {
-            return toolError(`Đường dẫn "${targetPath}" vi phạm an toàn workspace: ${err.message}`, 'SECURITY_VIOLATION');
+            return toolError(`Path "${targetPath}" violates workspace safety: ${err.message}`, 'SECURITY_VIOLATION');
           }
 
           if (workspace.isProtectedFile(safePath)) {
@@ -111,7 +111,7 @@ export const applyPatchTool: ToolDefinition = {
             startLine: Math.max(1, approxLine - 10),
             endLine: approxLine + Math.max(20, hunkData?.oldLines || 10) + 10,
           };
-          if (failedFile.error && (failedFile.error.includes('ENOENT') || failedFile.error.includes('Không thể đọc file'))) {
+          if (failedFile.error && (failedFile.error.includes('ENOENT') || failedFile.error.includes('Cannot read file'))) {
             try {
               similarFiles = await workspace.findSimilarWorkspaceFiles(failedFile.path, 3);
             } catch {}
@@ -120,9 +120,9 @@ export const applyPatchTool: ToolDefinition = {
 
         let suggestion = 'Use read_file to inspect latest content or switch to replace_text with exact strings.';
         if (result.error?.includes('PRE_COMMIT_SYNTAX_ERROR')) {
-          suggestion = 'Kiểm tra và sửa lại lỗi cú pháp trong bản vá trước khi thử lại.';
+          suggestion = 'Check and fix the syntax errors in the patch before retrying.';
         } else if (similarFiles.length > 0) {
-          suggestion = `File "${failedFile?.path}" không tồn tại. Tìm thấy file tương tự: ${JSON.stringify(similarFiles)}. Hãy gọi lại apply_patch hoặc replace_text với đường dẫn đúng "${similarFiles[0]}".`;
+          suggestion = `File "${failedFile?.path}" does not exist. Found similar files: ${JSON.stringify(similarFiles)}. Call apply_patch or replace_text again with the correct path "${similarFiles[0]}".`;
         } else if (suggestedRead) {
           suggestion = `Use read_file with path: "${suggestedRead.path}", startLine: ${suggestedRead.startLine}, endLine: ${suggestedRead.endLine} to inspect exact line context, or switch to replace_text.`;
         }
@@ -174,7 +174,7 @@ export const applyPatchTool: ToolDefinition = {
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       };
     } catch (err: any) {
-      return toolError(`Lỗi xử lý patch: ${err.message}`, 'PATCH_ERROR');
+      return toolError(`Failed to process patch: ${err.message}`, 'PATCH_ERROR');
     }
   },
 };

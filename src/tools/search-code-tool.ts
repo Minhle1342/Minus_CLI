@@ -56,51 +56,51 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
   return {
     name: 'search_codebase_fast',
     description:
-      'Tìm kiếm mã nguồn toàn cục bằng BM25/fuzzy và semantic symbol index tùy chọn. ' +
-      'Chế độ auto giữ lexical cho identifier/path/error literal và chỉ dùng hybrid cho truy vấn ý định tự nhiên.',
+      'Search source code globally with BM25/fuzzy and an optional semantic symbol index. ' +
+      'Auto mode keeps lexical matching for identifier/path/error literals and uses hybrid only for natural-language intent queries.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         query: {
           type: Type.STRING,
-          description: 'Từ khóa, tên symbol, chuỗi lỗi hoặc đoạn code cần tìm.',
+          description: 'Keyword, symbol name, error string or code snippet to find.',
           minLength: 1 as any,
           maxLength: 500 as any,
         },
         limit: {
           type: Type.INTEGER,
-          description: 'Số kết quả tối đa, từ 1 đến 100 (mặc định 8).',
+          description: 'Maximum results, from 1 to 100 (default 8).',
           minimum: 1,
           maximum: 100,
         },
         fuzzy: {
           type: Type.BOOLEAN,
-          description: 'Cho phép khớp gần đúng khi gõ sai nhẹ (mặc định true).',
+          description: 'Allow near-miss matching on slight typos (default true).',
         },
         filePattern: {
           type: Type.STRING,
-          description: 'Mẫu glob tùy chọn để lọc tệp kết quả (ví dụ: "*.ts", "src/**/*.ts", "*.test.ts").',
+          description: 'Optional glob to filter result files (e.g. "*.ts", "src/**/*.ts", "*.test.ts").',
         },
         mode: {
           type: Type.STRING,
           enum: ['auto', 'lexical', 'hybrid', 'semantic'],
-          description: 'Chiến lược retrieval. auto dùng selective gate (mặc định).',
+          description: 'Retrieval strategy. auto uses the selective gate (default).',
         },
         contextMode: {
           type: Type.STRING,
           enum: ['hits', 'adaptive_bundle'],
-          description: 'Chỉ trả hits hoặc kèm context bundle đa độ phân giải.',
+          description: 'Return hits only, or include a multi-resolution context bundle.',
         },
         maxContextTokens: {
           type: Type.INTEGER,
           minimum: 64,
           maximum: 100000,
-          description: 'Ngân sách token cho adaptive_bundle (mặc định 4000).',
+          description: 'Token budget for adaptive_bundle (default 4000).',
         },
         graphExpansion: {
           type: Type.STRING,
           enum: ['none', 'dependencies', 'impact', 'auto'],
-          description: 'Mở rộng tối đa một hop theo import graph sau seed retrieval.',
+          description: 'Expand at most one hop along the import graph after seed retrieval.',
         },
       },
       required: ['query'],
@@ -108,16 +108,16 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
     async execute(args, workspace: Workspace) {
       const query = String(args.query || '').trim();
       if (!query) {
-        return { error: 'Tham số "query" là bắt buộc.', errorCode: 'INVALID_ARGS' };
+        return { error: 'The "query" parameter is required.', errorCode: 'INVALID_ARGS' };
       }
       if (query.length > 500) {
-        return { error: 'Tham số "query" không được vượt quá 500 ký tự.', errorCode: 'INVALID_ARGS' };
+        return { error: 'The "query" parameter must not exceed 500 characters.', errorCode: 'INVALID_ARGS' };
       }
 
       const limit = args.limit === undefined ? 8 : Number(args.limit);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         return {
-          error: 'Tham số "limit" phải là số nguyên từ 1 đến 100.',
+          error: 'The "limit" parameter must be an integer from 1 to 100.',
           errorCode: 'INVALID_ARGS',
         };
       }
@@ -211,7 +211,7 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
           return {
             query,
             totalHits: 0,
-            message: `Không tìm thấy kết quả phù hợp cho từ khóa "${query}" trong ${index.indexedFiles} file đã index.`,
+            message: `No matching results for keyword "${query}" in ${index.indexedFiles} indexed file(s).`,
             index,
             retrieval,
           };
@@ -247,12 +247,12 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
           retrieval,
           ...(contextBundle ? { contextBundle } : {}),
           tip: contextBundle
-            ? 'Context bundle đã chứa full body cho symbol trọng tâm và preview/fold cho hàng xóm.'
-            : 'Dùng contextMode="adaptive_bundle" hoặc read_compressed_code fidelity="adaptive" để đọc chi tiết trong một lượt.',
+            ? 'Context bundle already contains the full body for the focus symbol and preview/fold for neighbors.'
+            : 'Use contextMode="adaptive_bundle" or read_compressed_code fidelity="adaptive" to read details in one pass.',
         };
       } catch (error: any) {
         return {
-          error: `Lỗi khi xây dựng hoặc tìm kiếm code index: ${error.message}`,
+          error: `Failed to build or search the code index: ${error.message}`,
           errorCode: 'MINISEARCH_ERROR',
         };
       }

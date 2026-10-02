@@ -9,13 +9,13 @@ import { SharedContextService } from '../agent/shared-context-service.js';
 export function createReadSharedContextTool(sharedContext: SharedContextService): ToolDefinition {
   return {
     name: 'read_shared_context',
-    description: 'Đọc dữ liệu từ bộ nhớ chia sẻ chung (Shared Blackboard Context) giữa các Subagents hoặc liệt kê toàn bộ keys kèm versionHash.',
+    description: 'Read data from the shared memory (Shared Blackboard Context) across subagents, or list all keys with versionHash.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         key: {
           type: Type.STRING,
-          description: 'Khóa cần đọc trong shared context. Nếu để trống, trả về danh sách toàn bộ các keys có sẵn.',
+          description: 'Key to read in the shared context. If empty, returns the list of all available keys.',
         },
       },
       required: [],
@@ -39,7 +39,7 @@ export function createReadSharedContextTool(sharedContext: SharedContextService)
         return {
           success: false,
           key,
-          error: `Không tìm thấy key '${key}' trong shared context.`,
+          error: `Key '${key}' not found in shared context.`,
         };
       }
 
@@ -58,33 +58,33 @@ export function createReadSharedContextTool(sharedContext: SharedContextService)
 export function createWriteSharedContextTool(sharedContext: SharedContextService): ToolDefinition {
   return {
     name: 'write_shared_context',
-    description: 'Ghi hoặc cập nhật dữ liệu vào bộ nhớ chia sẻ chung (Shared Blackboard) giữa các agents với cơ chế Optimistic Concurrency Control (OCC) chống xung đột ghi đè.',
+    description: 'Write or update data in the shared memory (Shared Blackboard) across agents with Optimistic Concurrency Control (OCC) against overwrite conflicts.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         key: {
           type: Type.STRING,
-          description: 'Khóa dữ liệu cần lưu (ví dụ: "api_contracts", "design_tokens", "backend_endpoints").',
+          description: 'Data key to store (e.g. "api_contracts", "design_tokens", "backend_endpoints").',
         },
         value: {
           type: Type.STRING,
-          description: 'Dữ liệu cần lưu (chuỗi hoặc JSON stringified).',
+          description: 'Data to store (string or JSON stringified).',
         },
         agentId: {
           type: Type.STRING,
-          description: 'Định danh của Agent thực hiện ghi (mặc định: "agent").',
+          description: 'ID of the writing agent (default: "agent").',
         },
         expectedVersionHash: {
           type: Type.STRING,
-          description: 'Mã băm phiên bản kỳ vọng (OCC versionHash) để đảm bảo không bị Agent khác ghi đè giữa chừng.',
+          description: 'Expected version hash (OCC versionHash) to ensure no other agent overwrites mid-write.',
         },
         filePath: {
           type: Type.STRING,
-          description: 'Đường dẫn file liên kết (tùy chọn) để kích hoạt cơ chế File-bound OCC.',
+          description: 'Linked file path (optional) to enable the File-bound OCC mechanism.',
         },
         expectedFileHash: {
           type: Type.STRING,
-          description: 'Mã băm SHA-256 kỳ vọng của file liên kết để chống xung đột ghi đè dữ liệu tệp.',
+          description: 'Expected SHA-256 hash of the linked file to prevent file-data overwrite conflicts.',
         },
       },
       required: ['key', 'value'],
@@ -98,10 +98,10 @@ export function createWriteSharedContextTool(sharedContext: SharedContextService
       const expectedFileHash = args.expectedFileHash ? String(args.expectedFileHash).trim() : undefined;
 
       if (!key) {
-        return { error: 'Tham số "key" là bắt buộc.' };
+        return { error: 'The "key" parameter is required.' };
       }
       if (rawValue === undefined) {
-        return { error: 'Tham số "value" là bắt buộc.' };
+        return { error: 'The "value" parameter is required.' };
       }
 
       let parsedValue: any = rawValue;
@@ -121,7 +121,7 @@ export function createWriteSharedContextTool(sharedContext: SharedContextService
         });
         return {
           success: true,
-          message: `Đã ghi thành công key '${key}' vào shared context.`,
+          message: `Successfully wrote key '${key}' to shared context.`,
           entry,
         };
       } catch (err: any) {

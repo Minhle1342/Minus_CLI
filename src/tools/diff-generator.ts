@@ -33,7 +33,7 @@ export function computeLineDiff(oldText: string, newText: string, filePath: stri
   const normNew = (newText || '').replace(/\r\n/g, '\n');
 
   if (normOld === normNew) {
-    return `--- a/${filePath}\n+++ b/${filePath}\n@@ -1,1 +1,1 @@\n (không có thay đổi nội dung)`;
+    return `--- a/${filePath}\n+++ b/${filePath}\n@@ -1,1 +1,1 @@\n (no content changes)`;
   }
 
   const oldLines = normOld.split('\n');
@@ -243,7 +243,7 @@ export async function generateFileToolDiff(
       `--- a/${target}`,
       '+++ /dev/null',
       '@@ -1,1 +0,0 @@',
-      '-(toàn bộ nội dung file sẽ bị xóa)',
+      '-(entire file content will be deleted)',
     ].join('\n');
   }
 

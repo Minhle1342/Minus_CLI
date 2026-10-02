@@ -109,10 +109,10 @@ export const multiReplaceFileContentTool: ToolDefinition = {
       : [];
 
     if (!rawPath) {
-      return toolError('Tham số "TargetFile" là bắt buộc.', 'INVALID_ARGS');
+      return toolError('The "TargetFile" parameter is required.', 'INVALID_ARGS');
     }
     if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
-      return toolError('Tham số "ReplacementChunks" phải là một mảng chứa ít nhất một khối thay thế.', 'INVALID_ARGS');
+      return toolError('The "ReplacementChunks" parameter must be an array containing at least one replacement chunk.', 'INVALID_ARGS');
     }
 
     try {
@@ -120,7 +120,7 @@ export const multiReplaceFileContentTool: ToolDefinition = {
 
       if (workspace.isProtectedFile(safePath)) {
         return toolError(
-          `Bảo mật: Không được phép chỉnh sửa file cấu hình nhạy cảm "${rawPath}".`,
+          `Security: editing sensitive configuration file "${rawPath}" is not allowed.`,
           'SECURITY_VIOLATION',
         );
       }
@@ -129,11 +129,11 @@ export const multiReplaceFileContentTool: ToolDefinition = {
       try {
         stat = await fs.stat(safePath);
       } catch {
-        return toolError(`File "${rawPath}" không tồn tại trên đĩa.`, 'FILE_NOT_FOUND', { TargetFile: rawPath });
+        return toolError(`File "${rawPath}" does not exist on disk.`, 'FILE_NOT_FOUND', { TargetFile: rawPath });
       }
 
       if (!stat.isFile()) {
-        return toolError(`"${rawPath}" không phải là file hợp lệ.`, 'INVALID_ARGS', { TargetFile: rawPath });
+        return toolError(`"${rawPath}" is not a valid file.`, 'INVALID_ARGS', { TargetFile: rawPath });
       }
 
       const originalRawContent = await fs.readFile(safePath, 'utf-8');
@@ -153,11 +153,11 @@ export const multiReplaceFileContentTool: ToolDefinition = {
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         if (chunk.TargetContent === '') {
-          return toolError(`Chunk index ${i} có TargetContent để trống.`, 'INVALID_ARGS', { chunkIndex: i });
+          return toolError(`Chunk index ${i} has empty TargetContent.`, 'INVALID_ARGS', { chunkIndex: i });
         }
         if (chunk.StartLine > chunk.EndLine) {
           return toolError(
-            `Chunk index ${i} có StartLine (${chunk.StartLine}) lớn hơn EndLine (${chunk.EndLine}).`,
+            `Chunk index ${i} has StartLine (${chunk.StartLine}) greater than EndLine (${chunk.EndLine}).`,
             'INVALID_ARGS',
             { chunkIndex: i },
           );
@@ -171,7 +171,7 @@ export const multiReplaceFileContentTool: ToolDefinition = {
         const next = sortedByStart[i + 1];
         if (curr.EndLine >= next.StartLine) {
           return toolError(
-            `Các chunk thay thế bị chồng lấn phạm vi dòng: chunk [${curr.StartLine}, ${curr.EndLine}] và chunk [${next.StartLine}, ${next.EndLine}]. Mỗi chunk phải nằm ở phạm vi dòng tách biệt.`,
+            `Replacement chunks have overlapping line ranges: chunk [${curr.StartLine}, ${curr.EndLine}] and chunk [${next.StartLine}, ${next.EndLine}]. Each chunk must be in a separate line range.`,
             'INVALID_ARGS',
           );
         }
@@ -201,7 +201,7 @@ export const multiReplaceFileContentTool: ToolDefinition = {
           const occurrences = rangeText.split(normalizedTarget).length - 1;
           if (occurrences > 1 && !chunk.AllowMultiple) {
             return toolError(
-              `Chunk dòng [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent xuất hiện ${occurrences} lần và AllowMultiple=false.`,
+              `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent occurs ${occurrences} times and AllowMultiple=false.`,
               'AMBIGUOUS_REPLACEMENT',
               { chunk },
             );
@@ -226,7 +226,7 @@ export const multiReplaceFileContentTool: ToolDefinition = {
           const totalOccurrences = currentContent.split(normalizedTarget).length - 1;
           if (totalOccurrences > 1 && !chunk.AllowMultiple) {
             return toolError(
-              `Chunk dòng [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent không nằm đúng phạm vi dòng nhưng xuất hiện ${totalOccurrences} lần trong file.`,
+              `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent is outside the line range but occurs ${totalOccurrences} times in the file.`,
               'AMBIGUOUS_REPLACEMENT',
               { chunk },
             );
@@ -239,7 +239,7 @@ export const multiReplaceFileContentTool: ToolDefinition = {
           totalChunksApplied++;
         } else {
           return toolError(
-            `Chunk dòng [${chunk.StartLine}, ${chunk.EndLine}]: Không tìm thấy TargetContent trong file "${rawPath}". Hãy kiểm tra lại nội dung và thụt lề dòng.`,
+            `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent not found in file "${rawPath}". Check the content and line indentation again.`,
             'PATCH_ERROR',
             { chunk },
           );
@@ -302,13 +302,13 @@ export const multiReplaceFileContentTool: ToolDefinition = {
         TargetFile: workspace.toRelativePath(safePath),
         chunksApplied: totalChunksApplied,
         contentHash,
-        message: `Đã áp dụng thành công ${totalChunksApplied}/${chunks.length} khối chỉnh sửa vào file "${rawPath}".`,
+        message: `Successfully applied ${totalChunksApplied}/${chunks.length} edit chunk(s) to file "${rawPath}".`,
         ...(unifiedDiff ? { unifiedDiff } : {}),
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {
-      return toolError(`Lỗi khi áp dụng nhiều khối thay thế: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
+      return toolError(`Failed to apply replacement chunks: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
     }
   },
 };

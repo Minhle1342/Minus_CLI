@@ -16,25 +16,25 @@ function getIntelligenceService(workspace: Workspace): CodebaseIntelligenceServi
 export function createGetSymbolContext360Tool(service?: CodebaseIntelligenceService): ToolDefinition {
   return {
     name: 'get_symbol_context_360',
-    description: 'Cung cấp góc nhìn toàn cảnh 360 độ về một symbol trong 1 payload duy nhất: Định nghĩa, Type signature, Doc comments, Callers (ai gọi nó), Callees (nó gọi ai), Imports phụ thuộc, Referencing files và các file Test liên quan.',
+    description: 'Provide a 360-degree view of a symbol in a single payload: definition, type signature, doc comments, callers (who calls it), callees (who it calls), dependent imports, referencing files and related test files.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         symbol: {
           type: Type.STRING,
-          description: 'Tên symbol cần lấy ngữ cảnh 360 độ (function, class, interface, type, variable). Có thể dùng alias symbolName.',
+          description: 'Name of the symbol to get the 360-degree context for (function, class, interface, type, variable). Alias symbolName may be used.',
         },
         symbolName: {
           type: Type.STRING,
-          description: 'Alias cho symbol: tên symbol cần tra cứu.',
+          description: 'Alias for symbol: name of the symbol to look up.',
         },
         path: {
           type: Type.STRING,
-          description: 'Đường dẫn tương đối tới file gợi ý nơi định nghĩa symbol. Có thể dùng alias filePath.',
+          description: 'Relative path to the file hinting where the symbol is defined. Alias filePath may be used.',
         },
         filePath: {
           type: Type.STRING,
-          description: 'Alias cho path: đường dẫn file gợi ý.',
+          description: 'Alias for path: hint file path.',
         },
       },
       required: [],
@@ -42,7 +42,7 @@ export function createGetSymbolContext360Tool(service?: CodebaseIntelligenceServ
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
       const symbolName = String(args.symbol || args.symbolName || '').trim();
       if (!symbolName) {
-        return { error: 'Tham số "symbol" (hoặc "symbolName") là bắt buộc.' };
+        return { error: 'The "symbol" (or "symbolName") parameter is required.' };
       }
 
       const filePath = String(args.path || args.filePath || '').trim() || undefined;

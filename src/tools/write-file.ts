@@ -44,7 +44,7 @@ export const writeFileTool: ToolDefinition = {
     const overwrite = args.overwrite !== false;
 
     if (!rawPath) {
-      return toolError('Tham số "path" là bắt buộc.', 'INVALID_ARGS');
+      return toolError('The "path" parameter is required.', 'INVALID_ARGS');
     }
 
     try {
@@ -52,7 +52,7 @@ export const writeFileTool: ToolDefinition = {
       
       if (workspace.isProtectedFile(safePath)) {
         return toolError(
-          `Bảo mật: Không được phép chỉnh sửa hoặc ghi đè file cấu hình nhạy cảm "${rawPath}".`,
+          `Security: editing or overwriting sensitive configuration file "${rawPath}" is not allowed.`,
           'SECURITY_VIOLATION',
         );
       }
@@ -68,10 +68,10 @@ export const writeFileTool: ToolDefinition = {
 
       if (isExisting && !overwrite) {
         return toolError(
-          `File "${rawPath}" đã tồn tại trên đĩa. Để cập nhật một phần nội dung, hãy dùng replace_text; hoặc đặt overwrite: true nếu muốn ghi đè toàn bộ.`,
+          `File "${rawPath}" already exists on disk. To update part of the content, use replace_text; or set overwrite: true to overwrite the whole file.`,
           'FILE_ALREADY_EXISTS',
           { path: rawPath },
-          'Sử dụng replace_text để sửa đổi chính xác từng phần hoặc đặt overwrite=true để ghi đè.',
+          'Use replace_text for precise partial edits or set overwrite=true to overwrite.',
         );
       }
 
@@ -137,13 +137,13 @@ export const writeFileTool: ToolDefinition = {
         contentHash,
         created: !isExisting,
         message: isExisting
-          ? `Đã ghi đè thành công file "${rawPath}".`
-          : `Đã tạo mới thành công file "${rawPath}".`,
+          ? `Successfully overwrote file "${rawPath}".`
+          : `Successfully created file "${rawPath}".`,
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {
-      return toolError(`Không thể ghi file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
+      return toolError(`Failed to write file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
     }
   },
 };

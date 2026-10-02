@@ -51,7 +51,7 @@ export const findReferencesTool: ToolDefinition = {
     }
 
     if (!rawPath || !symbol) {
-      return toolError('Cả "path" (hoặc "filePath") và "symbol" (hoặc "symbolName") đều là bắt buộc.', 'INVALID_ARGS');
+      return toolError('Both "path" (or "filePath") and "symbol" (or "symbolName") are required.', 'INVALID_ARGS');
     }
 
     try {
@@ -69,7 +69,7 @@ export const findReferencesTool: ToolDefinition = {
         references,
       });
     } catch (err: any) {
-      return toolError(`Lỗi khi tìm kiếm references: ${err.message}`, 'EXECUTION_ERROR');
+      return toolError(`Failed to find references: ${err.message}`, 'EXECUTION_ERROR');
     }
   },
 };
