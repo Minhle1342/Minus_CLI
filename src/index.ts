@@ -308,7 +308,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
   ) {
     const rawModel = model.replace(/^google\//, '');
     if (!apiKey) {
-      throw new Error(`Chưa cấu hình GEMINI_API_KEY trong .env! Vui lòng lấy key miễn phí tại: https://aistudio.google.com/`);
+      throw new Error(`GEMINI_API_KEY is not configured in .env! Get a free key at: https://aistudio.google.com/`);
     }
     return new GeminiLLM(apiKey, rawModel, undefined, tokenConfig);
   }
@@ -324,7 +324,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^groq\//, '');
     const key = groqApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình GROQ_API_KEY trong .env! Vui lòng lấy key miễn phí tại https://console.groq.com/keys hoặc dùng /model 1 (Gemini).`);
+      throw new Error(`GROQ_API_KEY is not configured in .env! Get a free key at https://console.groq.com/keys or use /model 1 (Gemini).`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://api.groq.com/openai/v1', undefined, tokenConfig);
   }
@@ -334,7 +334,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^cerebras\//, '');
     const key = cerebrasApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình CEREBRAS_API_KEY trong file .env!\n👉 Vui lòng lấy API key miễn phí tại: https://cloud.cerebras.ai/ và dán vào CEREBRAS_API_KEY trong .env, hoặc chuyển sang model đã có sẵn key như /model 1 (Gemini) hoặc /model 4 (Groq).`);
+      throw new Error(`CEREBRAS_API_KEY is not configured in .env!\n👉 Get a free API key at: https://cloud.cerebras.ai/ and paste it into CEREBRAS_API_KEY in .env, or switch to a model with an available key such as /model 1 (Gemini) or /model 4 (Groq).`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://api.cerebras.ai/v1', undefined, tokenConfig);
   }
@@ -344,7 +344,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^sambanova\//, '');
     const key = sambanovaApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình SAMBANOVA_API_KEY trong file .env!\n👉 Vui lòng lấy key miễn phí tại: https://cloud.sambanova.ai/ và dán vào SAMBANOVA_API_KEY trong .env.`);
+      throw new Error(`SAMBANOVA_API_KEY is not configured in .env!\n👉 Get a free key at: https://cloud.sambanova.ai/ and paste it into SAMBANOVA_API_KEY in .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://api.sambanova.ai/v1', undefined, tokenConfig);
   }
@@ -354,7 +354,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^github\//, '');
     const key = githubToken;
     if (!key) {
-      throw new Error(`Chưa cấu hình GITHUB_TOKEN trong file .env!\n👉 Vui lòng tạo Personal Access Token tại https://github.com/settings/tokens và dán vào GITHUB_TOKEN trong .env.`);
+      throw new Error(`GITHUB_TOKEN is not configured in .env!\n👉 Create a Personal Access Token at https://github.com/settings/tokens and paste it into GITHUB_TOKEN in .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://models.inference.ai.azure.com', undefined, tokenConfig);
   }
@@ -364,7 +364,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^siliconflow\//, '');
     const key = siliconflowApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình SILICONFLOW_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://siliconflow.cn/ và dán vào .env.`);
+      throw new Error(`SILICONFLOW_API_KEY is not configured in .env!\n👉 Get a key at https://siliconflow.cn/ and paste it into .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://api.siliconflow.cn/v1', undefined, tokenConfig);
   }
@@ -374,7 +374,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^mistral\//, '');
     const key = mistralApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình MISTRAL_API_KEY trong file .env!\n👉 Vui lòng lấy key miễn phí tại https://console.mistral.ai/ và dán vào .env.`);
+      throw new Error(`MISTRAL_API_KEY is not configured in .env!\n👉 Get a free key at https://console.mistral.ai/ and paste it into .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://api.mistral.ai/v1', undefined, tokenConfig);
   }
@@ -416,9 +416,9 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
 
     throw new Error(
-      `Chưa tìm thấy OPENAI_API_KEY hoặc OAuth token của Codex CLI!\n` +
-      `👉 Cách tốt nhất: Thêm OPENAI_API_KEY=sk-... vào file .env để kết nối trực tiếp không qua Cloudflare.\n` +
-      `👉 Hoặc đăng nhập 'codex login' và cấu hình proxy.`
+      `No OPENAI_API_KEY or Codex CLI OAuth token found!\n` +
+      `👉 Best option: add OPENAI_API_KEY=sk-... to your .env file for a direct connection bypassing Cloudflare.\n` +
+      `👉 Or run 'codex login' and configure a proxy.`
     );
   }
 
@@ -427,7 +427,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     const rawModel = model.replace(/^openai\//, '');
     const key = openaiApiKey || getCodexCredentials()?.accessToken;
     if (!key) {
-      throw new Error(`Chưa cấu hình OPENAI_API_KEY trong file .env! Vui lòng dán key vào .env.`);
+      throw new Error(`OPENAI_API_KEY is not configured in .env! Please paste your key into .env.`);
     }
     const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
     return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
@@ -437,7 +437,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
   if (model.startsWith('claude-') || model.startsWith('anthropic/')) {
     const rawModel = model.replace(/^anthropic\//, '');
     if (anthropicApiKeys.length === 0) {
-      throw new Error(`ChÆ°a cáº¥u hÃ¬nh ANTHROPIC_API_KEY trong file .env! Vui lÃ²ng láº¥y key táº¡i https://console.anthropic.com/settings/keys.`);
+      throw new Error(`ANTHROPIC_API_KEY is not configured in .env! Get a key at https://console.anthropic.com/settings/keys.`);
     }
     const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1';
     if (anthropicApiKeys.length === 1) {
@@ -457,7 +457,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
   if (model === 'deepseek-chat' || model === 'deepseek-reasoner') {
     const key = deepseekApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình DEEPSEEK_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://platform.deepseek.com/ và dán vào .env.`);
+      throw new Error(`DEEPSEEK_API_KEY is not configured in .env!\n👉 Get a key at https://platform.deepseek.com/ and paste it into .env.`);
     }
     return new DeepseekLLM(key, model, undefined, 'https://api.deepseek.com', undefined, tokenConfig);
   }
@@ -484,7 +484,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     }
     const key = openrouterApiKey || deepseekApiKey;
     if (!key) {
-      throw new Error(`Chưa cấu hình OPENROUTER_API_KEY trong file .env!\n👉 Vui lòng lấy key tại https://openrouter.ai/keys và dán vào .env.`);
+      throw new Error(`OPENROUTER_API_KEY is not configured in .env!\n👉 Get a key at https://openrouter.ai/keys and paste it into .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig);
   }
@@ -518,10 +518,10 @@ async function main() {
     hasCodexAuth;
 
   if (!hasAnyKey) {
-    console.error(`\n${c.red}${c.bold}❌ LỖI KHỞI ĐỘNG:${c.reset} Chưa cấu hình API Key hoặc chưa đăng nhập Codex CLI!`);
-    console.error(`${c.gray}Vui lòng thực hiện một trong các cách sau:${c.reset}`);
-    console.error(`  ${c.brightYellow}1. Đăng nhập Codex CLI:${c.reset} Gõ lệnh ${c.cyan}codex login${c.reset} trong terminal (Dùng tài khoản ChatGPT Plus)`);
-    console.error(`  ${c.brightYellow}2. Hoặc điền ít nhất một API key miễn phí vào file .env:${c.reset}`);
+    console.error(`\n${c.red}${c.bold}❌ STARTUP ERROR:${c.reset} No API key configured and Codex CLI login not found!`);
+    console.error(`${c.gray}Please do one of the following:${c.reset}`);
+    console.error(`  ${c.brightYellow}1. Log in to Codex CLI:${c.reset} Run ${c.cyan}codex login${c.reset} in the terminal (using a ChatGPT Plus account)`);
+    console.error(`  ${c.brightYellow}2. Or fill in at least one free API key in the .env file:${c.reset}`);
     console.error(`     ${c.cyan}GEMINI_API_KEY=AIzaSy...${c.reset} (Google AI Studio)`);
     console.error(`     ${c.cyan}GROQ_API_KEY=gsk_...${c.reset} (Groq Cloud)`);
     console.error(`     ${c.cyan}CEREBRAS_API_KEY=csk-...${c.reset} (Cerebras Cloud)`);
@@ -602,8 +602,8 @@ async function main() {
   } catch (err: any) {
     if (err.message && (err.message.includes('Docker') || err.message.includes('SANDBOX_MODE=docker'))) {
       console.warn(`\n${c.yellow}⚠️  [Docker Sandbox]: ${err.message}${c.reset}`);
-      console.warn(`${c.gray}👉 Đang tự động chuyển sang Local Process Sandbox (Host OS với bộ lọc Allowlist).${c.reset}`);
-      console.warn(`${c.gray}💡 Để chạy lệnh không giới hạn (Zero-Restriction), vui lòng khởi động Docker Desktop trên máy tính.${c.reset}\n`);
+      console.warn(`${c.gray}👉 Automatically falling back to Local Process Sandbox (Host OS with Allowlist filtering).${c.reset}`);
+      console.warn(`${c.gray}💡 To run unrestricted commands (Zero-Restriction), please start Docker Desktop on your machine.${c.reset}\n`);
       process.env.SANDBOX_MODE = 'local';
       const fallbackSandbox = new SandboxManager({ workspacePath: workspace.rootDir, mode: 'local' });
       await fallbackSandbox.init();
@@ -628,8 +628,8 @@ async function main() {
   const getSandboxStatusLabel = (): string => {
     const sbStatus = kernel.ctx.sandbox.getStatus();
     return sbStatus.isIsolated
-      ? `${c.brightGreen}${c.bold}✔ Docker Sandbox (Isolated - Không giới hạn lệnh)${c.reset} ${c.dim}[${sbStatus.containerId || ''}]${c.reset}`
-      : `${c.yellow}⚠ Local Sandbox (Host OS - Giới hạn Allowlist)${c.reset}`;
+      ? `${c.brightGreen}${c.bold}✔ Docker Sandbox (Isolated - Unlimited commands)${c.reset} ${c.dim}[${sbStatus.containerId || ''}]${c.reset}`
+      : `${c.yellow}⚠ Local Sandbox (Host OS - Allowlist restricted)${c.reset}`;
   };
 
   const toolRegistry = kernel.ctx.tools;
@@ -676,7 +676,7 @@ async function main() {
     } catch (err: any) {
       if (controller.signal.aborted || err?.name === 'AbortError' || err?.message?.includes('cancelled') || err?.message?.includes('COMMAND_CANCELLED') || err?.message?.includes('aborted')) {
         lastCancellationTimestamp = Date.now();
-        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+        CLI.renderTaskCancelledToast('Stopped the running task as requested (Ctrl+C / Esc).');
         return undefined;
       }
       throw err;
@@ -690,7 +690,7 @@ async function main() {
 
   const executeDurableGoal = async (objective?: string): Promise<void> => {
     if (!activeSession) {
-      throw new Error('Không có active session để chạy goal.');
+      throw new Error('No active session to run a goal.');
     }
 
     if (objective) {
@@ -702,7 +702,7 @@ async function main() {
 
     const state = agentLoop.goalManager.beginRound();
     if (!state) {
-      throw new Error('Không có durable goal để tiếp tục. Dùng /goal <mục tiêu> trước.');
+      throw new Error('No durable goal to continue. Use /goal <objective> first.');
     }
 
     CLI.renderGoalBanner(state.objective);
@@ -710,7 +710,7 @@ async function main() {
       if (objective) {
         const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(objective, workspace);
         if (attachmentResult.hasAttachments) {
-          CLI.renderAttachmentSummary(attachmentResult.attachments);
+          CLI.renderAttachmentSummary(attachmentResult.attachments, attachmentResult.relatedFiles);
         }
         const goalAutonomousPrompt = `[AUTONOMOUS GOAL EXECUTION - CODEX CLI RALPH LOOP]:
 Goal Objective: ${objective}
@@ -757,7 +757,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
             sessionPersistence.save(activeSession).catch(() => {});
             void agentLoop.summarizeSessionEpisodic(activeSession).catch(() => {});
           }
-          console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}Tất cả ${agentLoop.planManager.getTasks().length} task trong kế hoạch đã hoàn thành và đạt verification!${c.reset}\n`);
+          console.log(`\n${c.green}${c.bold}🎉 [GOAL COMPLETED]${c.reset} ${c.brightGreen}All ${agentLoop.planManager.getTasks().length} tasks in the plan are complete and verified!${c.reset}\n`);
         }
       } catch {
         // keep active
@@ -794,24 +794,24 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     isComposeActive ||
     wasCrashedAndRecovered
   ) {
-    let interruptionType = 'Phiên làm việc';
+    let interruptionType = 'Session';
     let activeDetail = '';
 
     if (isComposeActive) {
       const composeState = kernel.ctx.compose.getState();
       interruptionType = 'MIMO Compose Pipeline';
-      activeDetail = `Tính năng: "${composeState?.featureName}" [Phase: ${composeState?.phase}]`;
+      activeDetail = `Feature: "${composeState?.featureName}" [Phase: ${composeState?.phase}]`;
     } else if (isGoalIncomplete) {
       interruptionType = 'Durable Goal Mode';
       activeDetail = nextIncomplete
-        ? `Task #${nextIncomplete.id} "${nextIncomplete.title}" (Mục tiêu: ${existingGoalState.objective})`
-        : `Mục tiêu: "${existingGoalState.objective}"`;
+        ? `Task #${nextIncomplete.id} "${nextIncomplete.title}" (Objective: ${existingGoalState.objective})`
+        : `Objective: "${existingGoalState.objective}"`;
     } else if (isPlanIncomplete && nextIncomplete) {
       interruptionType = 'Execution Plan';
       activeDetail = `Task #${nextIncomplete.id} "${nextIncomplete.title}"`;
     } else if (wasCrashedAndRecovered) {
       interruptionType = 'Crash Recovered';
-      activeDetail = 'Đã tự động đóng an toàn các tool call dở dang';
+      activeDetail = 'Automatically closed dangling tool calls safely';
     }
 
     CLI.renderInterruptedSessionNotice({
@@ -847,7 +847,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       activeExecutionController.abort();
       lastCancellationTimestamp = Date.now();
       slashHints.clear();
-      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (/cancel).');
+      CLI.renderTaskCancelledToast('Stopped the running task as requested (/cancel).');
       return;
     }
 
@@ -889,7 +889,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       activeExecutionController.abort();
       lastCancellationTimestamp = now;
       slashHints.clear(promptWidth);
-      CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+      CLI.renderTaskCancelledToast('Stopped the running task as requested (Ctrl+C / Esc).');
       return;
     }
 
@@ -914,8 +914,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           (rl as any).cursor = 0;
           slashHints.clear(promptWidth);
         } catch {}
-        console.log(`\n  ${c.yellow}⚠️  Nhấn Ctrl+C thêm 1 lần nữa trong 2 giây để thoát chương trình, hoặc tiếp tục nhập lệnh / prompt.${c.reset}`);
-        CLI.renderPromptInputNotice('Sẵn sàng nhận lệnh mới. Mời bạn nhập yêu cầu / prompt:');
+        console.log(`\n  ${c.yellow}⚠️  Press Ctrl+C once more within 2 seconds to exit, or keep typing commands / prompts.${c.reset}`);
+        CLI.renderPromptInputNotice('Ready for a new command. Enter your request / prompt:');
         try {
           rl.setPrompt(CLI.getPromptSymbol());
           rl.prompt(true);
@@ -941,7 +941,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       }, workspace.rootDir);
       await kernel.dispose().catch(() => {});
     } catch {}
-    console.log(`\n${c.green}Tạm biệt! Phiên làm việc đã được lưu trữ an toàn. 👋${c.reset}\n`);
+    console.log(`\n${c.green}Goodbye! Your session has been saved safely. 👋${c.reset}\n`);
     process.exit(0);
   };
 
@@ -958,7 +958,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         activeExecutionController.abort();
         lastCancellationTimestamp = Date.now();
         slashHints.clear(promptWidth);
-        CLI.renderTaskCancelledToast('Đã dừng tác vụ đang thực thi theo yêu cầu của bạn (Ctrl+C / Esc).');
+        CLI.renderTaskCancelledToast('Stopped the running task as requested (Ctrl+C / Esc).');
         return;
       }
     }
@@ -1094,7 +1094,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       CLI.stopToolDotSpinner();
 
       CLI.renderPermissionPrompt(request);
-      const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Duyệt thực thi? [y: Đồng ý | n: Từ chối | a: Luôn duyệt trong phiên]:${c.reset} `)).trim().toLowerCase();
+      const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Approve execution? [y: Approve | n: Reject | a: Always approve in session]:${c.reset} `)).trim().toLowerCase();
       flushStdin(rl);
 
       if (answer === 'y' || answer === 'yes' || answer === '') {
@@ -1265,10 +1265,10 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           saveSession({ autoStartDocker: true });
           CLI.renderDockerToggleNotice(true);
           if (!currentStatus.isIsolated) {
-            console.log(`  ${c.brightCyan}🚀 Đang khởi động Docker Desktop...${c.reset}`);
+            console.log(`  ${c.brightCyan}🚀 Starting Docker Desktop...${c.reset}`);
             const switched = await kernel.ctx.sandbox.switchToDocker(true);
             if (switched) {
-              console.log(`  ${c.brightGreen}✔ Sandbox đã chuyển sang Docker Container thành công!${c.reset}\n`);
+              console.log(`  ${c.brightGreen}✔ Sandbox switched to Docker Container successfully!${c.reset}\n`);
             }
           }
           continue;
@@ -1280,19 +1280,19 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           CLI.renderDockerToggleNotice(false);
           if (currentStatus.isIsolated) {
             await kernel.ctx.sandbox.switchToLocal();
-            console.log(`  ${c.slate}✔ Đã chuyển về Local Sandbox.${c.reset}\n`);
+            console.log(`  ${c.slate}✔ Switched back to Local Sandbox.${c.reset}\n`);
           }
           continue;
         }
 
         if (sub === 'start') {
           if (currentStatus.isIsolated) {
-            console.log(`\n  ${c.emerald}✔ Docker Desktop và Docker Sandbox đã đang hoạt động.${c.reset}\n`);
+            console.log(`\n  ${c.emerald}✔ Docker Desktop and Docker Sandbox are already running.${c.reset}\n`);
           } else {
-            console.log(`  ${c.brightCyan}🚀 Đang khởi động Docker Desktop...${c.reset}`);
+            console.log(`  ${c.brightCyan}🚀 Starting Docker Desktop...${c.reset}`);
             const switched = await kernel.ctx.sandbox.switchToDocker(true);
             if (switched) {
-              console.log(`  ${c.brightGreen}✔ Sandbox đã chuyển sang Docker Container thành công!${c.reset}\n`);
+              console.log(`  ${c.brightGreen}✔ Sandbox switched to Docker Container successfully!${c.reset}\n`);
             }
           }
           continue;
@@ -1436,10 +1436,10 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       ) {
         const goalArg = trimmed.replace(/^\/(?:brainstorm|review-design)\s*/i, '').trim();
         if (!goalArg) {
-          console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu thiết kế cần thẩm định. Ví dụ: /brainstorm Kiến trúc bộ nhớ đa tác tử${c.reset}\n`);
+          console.log(`\n${c.yellow}⚠️ Please provide a design goal to review. Example: /brainstorm Multi-agent memory architecture${c.reset}\n`);
           continue;
         }
-        console.log(`\n${c.brightCyan}⏳ Đang khởi chạy quy trình Multi-Agent Structured Peer-Review (5 Personas)...${c.reset}`);
+        console.log(`\n${c.brightCyan}⏳ Launching the Multi-Agent Structured Peer-Review flow (5 Personas)...${c.reset}`);
         const bEngine = new MultiAgentBrainstormingEngine();
         const bResult = await bEngine.runReview(goalArg);
         CLI.renderBrainstormResult(bResult);
@@ -1449,8 +1449,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       // Lệnh Giải thích theo đối thoại Socrates (/explain-like-socrates hoặc /socrates)
       // Nếu chỉ gõ tên lệnh không kèm câu hỏi/chủ đề -> Hiển thị hướng dẫn sử dụng
       if (trimmed === '/explain-like-socrates' || trimmed === '/socrates') {
-        console.log(`\n${c.yellow}⚠️ Cách dùng:${c.reset} ${c.bold}/explain-like-socrates <khái niệm hoặc câu hỏi cần giải thích>${c.reset}`);
-        console.log(`${c.gray}Ví dụ: /explain-like-socrates Cơ chế hoạt động của Event Loop trong Node.js${c.reset}\n`);
+        console.log(`\n${c.yellow}⚠️ Usage:${c.reset} ${c.bold}/explain-like-socrates <concept or question to explain>${c.reset}`);
+        console.log(`${c.gray}Example: /explain-like-socrates How the Node.js Event Loop works${c.reset}\n`);
         continue;
       }
 
@@ -1468,9 +1468,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (subCmd === 'resume' && targetId) {
           const success = agentLoop.subagentManager.resume(targetId);
           if (success) {
-            console.log(`\n${c.green}✔ Đã kích hoạt tiếp tục subagent:${c.reset} ${targetId}\n`);
+            console.log(`\n${c.green}✔ Resumed subagent:${c.reset} ${targetId}\n`);
           } else {
-            console.log(`\n${c.yellow}⚠️ Không thể tiếp tục subagent "${targetId}" (không tồn tại hoặc không ở trạng thái stopped).\n${c.reset}`);
+            console.log(`\n${c.yellow}⚠️ Cannot resume subagent "${targetId}" (not found or not in stopped state).\n${c.reset}`);
           }
           continue;
         }
@@ -1478,9 +1478,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (subCmd === 'stop' && targetId) {
           const success = agentLoop.subagentManager.stop(targetId);
           if (success) {
-            console.log(`\n${c.yellow}🛑 Đã dừng subagent:${c.reset} ${targetId}\n`);
+            console.log(`\n${c.yellow}🛑 Stopped subagent:${c.reset} ${targetId}\n`);
           } else {
-            console.log(`\n${c.yellow}⚠️ Không thể dừng subagent "${targetId}".\n${c.reset}`);
+            console.log(`\n${c.yellow}⚠️ Cannot stop subagent "${targetId}".\n${c.reset}`);
           }
           continue;
         }
@@ -1488,7 +1488,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (subCmd === 'inspect' && targetId) {
           const agent = agentLoop.agentRegistry.get(targetId);
           if (!agent) {
-            console.log(`\n${c.yellow}⚠️ Không tìm thấy agent với ID "${targetId}".\n${c.reset}`);
+            console.log(`\n${c.yellow}⚠️ No agent found with ID "${targetId}".\n${c.reset}`);
           } else {
             CLI.renderAgents([agent]);
             if (agent.metadata?.systemInstruction) {
@@ -1512,10 +1512,10 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (subCmd === 'spawn') {
           const objective = parts.slice(1).join(' ').trim();
           if (!objective) {
-            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu cho subagent. Ví dụ: /agents spawn Viết unit test song song${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ Please provide an objective for the subagent. Example: /agents spawn Write unit tests in parallel${c.reset}\n`);
           } else {
             const handle = agentLoop.subagentManager.start(objective);
-            console.log(`\n${c.green}✔ Đã khởi chạy Subagent:${c.reset} ${handle.id} [${handle.status}] (${handle.sessionId})\n`);
+            console.log(`\n${c.green}✔ Launched subagent:${c.reset} ${handle.id} [${handle.status}] (${handle.sessionId})\n`);
           }
           continue;
         }
@@ -1523,13 +1523,13 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (subCmd === 'allocate') {
           const objective = parts.slice(1).join(' ').trim();
           if (!objective) {
-            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp mục tiêu cho task. Ví dụ: /agents allocate Tối ưu thuật toán DP${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ Please provide an objective for the task. Example: /agents allocate Optimize the DP algorithm${c.reset}\n`);
           } else {
             try {
               const handle = agentLoop.orchestrator.allocateTask(objective, [], { checkAntiDuplication: true });
-              console.log(`\n${c.green}✔ Đã điều phối task qua Capability Matching:${c.reset} ${handle.id} [${handle.status}]\n`);
+              console.log(`\n${c.green}✔ Dispatched task via Capability Matching:${c.reset} ${handle.id} [${handle.status}]\n`);
             } catch (err: any) {
-              console.log(`\n${c.crimson}✖ Không thể phân bổ tác vụ:${c.reset} ${err.message}\n`);
+              console.log(`\n${c.crimson}✖ Cannot allocate task:${c.reset} ${err.message}\n`);
             }
           }
           continue;
@@ -1559,37 +1559,37 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
         if (subCmd === 'cancel' || subCmd === 'remove' || subCmd === 'rm') {
           if (!arg) {
-            console.log(`\n${c.yellow}⚠️ Vui lòng cung cấp ID tin nhắn cần hủy. Ví dụ: /queue cancel input-12345${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ Please provide the ID of the message to cancel. Example: /queue cancel input-12345${c.reset}\n`);
             continue;
           }
           const cancelled = activeSession ? agentLoop.inbox.cancel(activeSession.id, arg.trim()) : false;
           if (cancelled) {
-            console.log(`\n${c.green}✔ Đã hủy thành công tin nhắn [${arg.trim()}] khỏi hàng đợi.${c.reset}\n`);
+            console.log(`\n${c.green}✔ Successfully cancelled message [${arg.trim()}] from the queue.${c.reset}\n`);
           } else {
-            console.log(`\n${c.yellow}⚠️ Không tìm thấy tin nhắn với ID "${arg.trim()}" trong hàng đợi.${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ No message found with ID "${arg.trim()}" in the queue.${c.reset}\n`);
           }
           continue;
         }
 
         if (subCmd === 'clear' || subCmd === 'clean') {
           const count = activeSession ? agentLoop.inbox.clear(activeSession.id) : 0;
-          console.log(`\n${c.green}✔ Đã xóa toàn bộ ${count} tin nhắn đang chờ trong hàng đợi.${c.reset}\n`);
+          console.log(`\n${c.green}✔ Cleared all ${count} pending messages from the queue.${c.reset}\n`);
           continue;
         }
 
         if (subCmd === 'add' || subCmd === 'push') {
           if (!arg) {
-            console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung tin nhắn cần đưa vào hàng đợi. Ví dụ: /queue add Hãy tập trung sửa file tests${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ Please enter the message to queue. Example: /queue add Focus on fixing the tests file${c.reset}\n`);
             continue;
           }
           if (activeSession) {
             const item = agentLoop.inbox.enqueue(activeSession.id, arg, 'human');
-            console.log(`\n${c.green}✔ Đã thêm tin nhắn vào hàng đợi [ID: ${item.id}]. Tin nhắn sẽ được xử lý hoặc tiêm bẻ lái vào bước tiếp theo.${c.reset}\n`);
+            console.log(`\n${c.green}✔ Message added to the queue [ID: ${item.id}]. It will be processed or steering-injected at the next step.${c.reset}\n`);
           }
           continue;
         }
 
-        console.log(`\n${c.yellow}⚠️ Cú pháp chưa đúng. Hỗ trợ: /queue [list|cancel <id>|clear|add <text>]${c.reset}\n`);
+        console.log(`\n${c.yellow}⚠️ Invalid syntax. Supported: /queue [list|cancel <id>|clear|add <text>]${c.reset}\n`);
         continue;
       }
 
@@ -1597,13 +1597,13 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       if (trimmed === '/steer' || trimmed.startsWith('/steer ')) {
         const steerText = trimmed.replace(/^\/steer\s*/i, '').trim();
         if (!steerText) {
-          console.log(`\n${c.yellow}⚠️ Vui lòng nhập nội dung điều chỉnh hướng đi. Ví dụ: /steer Dừng việc chỉnh sửa file đó, hãy kiểm tra file config trước.${c.reset}\n`);
+          console.log(`\n${c.yellow}⚠️ Please enter the steering adjustment. Example: /steer Stop editing that file and check the config file first.${c.reset}\n`);
           continue;
         }
         if (activeSession) {
           const item = agentLoop.inbox.enqueue(activeSession.id, steerText, 'human', { isSteering: true });
-          console.log(`\n${c.bgCyan}${c.bold} ⚡ ĐÃ ĐƯA VÀO HÀNG ĐỢI BẺ LÁI (MID-TURN STEERING) ${c.reset}`);
-          console.log(`  ${c.brightCyan}Tin nhắn [${item.id}]: "${steerText}" sẽ được tiêm vào Agent ngay tại bước kế tiếp.${c.reset}\n`);
+          console.log(`\n${c.bgCyan}${c.bold} ⚡ STEERING QUEUED (MID-TURN STEERING) ${c.reset}`);
+          console.log(`  ${c.brightCyan}Message [${item.id}]: "${steerText}" will be injected into the Agent at the next step.${c.reset}\n`);
         }
         continue;
       }
@@ -1618,8 +1618,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         // 1. Goal Mode
         const goalState = agentLoop.goalManager.getState();
         if (goalState?.phase === 'active' || goalState?.phase === 'paused') {
-          agentLoop.goalManager.pause('Tác vụ đã được dừng qua lệnh /cancel.');
-          console.log(`\n${c.yellow}⏸️ [GOAL PAUSED]${c.reset} ${c.dim}Đã tạm dừng Durable Goal: "${goalState.objective}". Dùng /resume để tiếp tục khi cần.${c.reset}`);
+          agentLoop.goalManager.pause('Task stopped via the /cancel command.');
+          console.log(`\n${c.yellow}⏸️ [GOAL PAUSED]${c.reset} ${c.dim}Paused Durable Goal: "${goalState.objective}". Use /resume to continue when needed.${c.reset}`);
           cancelledAny = true;
         }
 
@@ -1633,7 +1633,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         // 3. Subagents
         const subagentsStopped = agentLoop.subagentManager.stopAll();
         if (subagentsStopped > 0) {
-          console.log(`\n${c.yellow}🛑 [SUBAGENTS STOPPED]${c.reset} ${c.dim}Đã dừng ${subagentsStopped} subagent(s).${c.reset}`);
+          console.log(`\n${c.yellow}🛑 [SUBAGENTS STOPPED]${c.reset} ${c.dim}Stopped ${subagentsStopped} subagent(s).${c.reset}`);
           cancelledAny = true;
         }
 
@@ -1644,7 +1644,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
             kernel.ctx.tasks.stopTask(task.id);
           }
           if (tasks.length > 0) {
-            console.log(`\n${c.yellow}🛑 [TASKS STOPPED]${c.reset} ${c.dim}Đã dừng ${tasks.length} background task(s).${c.reset}`);
+            console.log(`\n${c.yellow}🛑 [TASKS STOPPED]${c.reset} ${c.dim}Stopped ${tasks.length} background task(s).${c.reset}`);
             cancelledAny = true;
           }
         }
@@ -1654,9 +1654,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         }
 
         if (cancelledAny) {
-          CLI.renderTaskCancelledToast('Đã dừng toàn bộ các tiến trình và lưu phiên làm việc.');
+          CLI.renderTaskCancelledToast('Stopped all processes and saved the session.');
         } else {
-          console.log(`\n${c.cyan}ℹ️ Hiện tại không có tác vụ nền hoặc goal nào đang chạy.${c.reset}\n`);
+          console.log(`\n${c.cyan}ℹ️ No background tasks or goals are running right now.${c.reset}\n`);
         }
         continue;
       }
@@ -1674,20 +1674,20 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         ];
 
         if (selectableSessionIds.length === 0) {
-          console.log(`\n${c.yellow}Không có session đã lưu để resume.${c.reset}\n`);
+          console.log(`\n${c.yellow}No saved sessions to resume.${c.reset}\n`);
           continue;
         }
 
         let selectedSessionId = requestedSessionId;
         if (!selectedSessionId) {
-          console.log(`\n${c.brightCyan}${c.bold}Chọn session cần khôi phục context:${c.reset}`);
+          console.log(`\n${c.brightCyan}${c.bold}Select a session to restore context:${c.reset}`);
           selectableSessionIds.forEach((id, index) => {
-            const activeMarker = id === activeSession.id ? `${c.green}▶ đang hoạt động${c.reset}` : '';
+            const activeMarker = id === activeSession.id ? `${c.green}▶ active${c.reset}` : '';
             console.log(`  ${c.brightYellow}[${index + 1}]${c.reset} ${id} ${activeMarker}`);
           });
-          const answer = (await rl.question(`  Chọn số hoặc session ID (Enter/0 để hủy): `)).trim();
+          const answer = (await rl.question(`  Select a number or session ID (Enter/0 to cancel): `)).trim();
           if (!answer || answer === '0' || answer.toLowerCase() === 'q') {
-            console.log(`${c.gray}Đã hủy resume; session hiện tại không thay đổi.${c.reset}\n`);
+            console.log(`${c.gray}Resume cancelled; the current session is unchanged.${c.reset}\n`);
             continue;
           }
           const index = Number(answer);
@@ -1697,7 +1697,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         }
 
         if (!selectableSessionIds.includes(selectedSessionId)) {
-          console.log(`\n${c.yellow}Không tìm thấy session:${c.reset} ${selectedSessionId}\n`);
+          console.log(`\n${c.yellow}Session not found:${c.reset} ${selectedSessionId}\n`);
           continue;
         }
 
@@ -1709,14 +1709,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
             ? activeSession
             : await kernel.ctx.sessions.load(selectedSessionId);
           if (!selectedSession) {
-            console.log(`\n${c.yellow}Không thể tải session:${c.reset} ${selectedSessionId}\n`);
+            console.log(`\n${c.yellow}Cannot load session:${c.reset} ${selectedSessionId}\n`);
             continue;
           }
           // Ensure the selected event log is durable too. Rendering below reads
           // its history projection and never rewrites or compacts that history.
           await kernel.ctx.sessions.save(selectedSession);
         } catch (err: any) {
-          console.error(`\n${c.red}Không thể lưu/khôi phục session:${c.reset} ${err.message}\n`);
+          console.error(`\n${c.red}Cannot save/restore session:${c.reset} ${err.message}\n`);
           continue;
         }
 
@@ -1728,11 +1728,11 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
         // 1. Nếu có Compose feature đang active
         if (kernel.ctx.compose && kernel.ctx.compose.isActive()) {
-          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING COMPOSE FEATURE]${c.reset} ${c.dim}Tiếp tục Compose pipeline...${c.reset}\n`);
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING COMPOSE FEATURE]${c.reset} ${c.dim}Continuing the Compose pipeline...${c.reset}\n`);
           try {
             await applyComposeResult(await kernel.ctx.compose.advance(workspace));
           } catch (err: any) {
-            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Compose:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error resuming Compose:${c.reset}`, err.message);
           }
           continue;
         }
@@ -1740,13 +1740,13 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         // 2. Nếu có Goal Mode (paused hoặc active)
         const goalState = agentLoop.goalManager.getState();
         if (goalState && (goalState.phase === 'paused' || goalState.phase === 'active')) {
-          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING GOAL MODE]${c.reset} ${c.dim}Tiếp tục Durable Goal:${c.reset} ${c.bold}${goalState.objective}${c.reset}\n`);
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING GOAL MODE]${c.reset} ${c.dim}Continuing Durable Goal:${c.reset} ${c.bold}${goalState.objective}${c.reset}\n`);
           agentLoop.goalManager.resume();
           try {
             await executeDurableGoal();
           } catch (err: any) {
             agentLoop.goalManager.block(err.message || 'Goal execution failed.');
-            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Goal:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error resuming Goal:${c.reset}`, err.message);
           }
           continue;
         }
@@ -1754,7 +1754,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         // 3. Nếu có Plan Task dở dang
         const nextTask = agentLoop.planManager.getNextIncompleteTask();
         if (nextTask) {
-          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING IN-FLIGHT PLAN]${c.reset} ${c.dim}Tiếp tục Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING IN-FLIGHT PLAN]${c.reset} ${c.dim}Continuing Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
           const resumePrompt = `[RESUME INCOMPLETE PLAN]:
 Continue executing the in-flight plan.
 Next Target Task #${nextTask.id}: ${nextTask.title}
@@ -1767,7 +1767,7 @@ Please focus on executing and verifying this task, and update its status to COMP
               await agentLoop.submit(activeSession, resumePrompt, 'system', { signal });
             });
           } catch (err: any) {
-            console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error executing Plan Resume:${c.reset}`, err.message);
           }
           continue;
         }
@@ -1776,7 +1776,7 @@ Please focus on executing and verifying this task, and update its status to COMP
         // Trước đây banner yêu cầu /resume nhưng handler rơi thẳng xuống
         // nhánh "không phát hiện tác vụ".
         if ((activeSession as any)?.wasInterruptedAndRecovered) {
-          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING INTERRUPTED SESSION]${c.reset} ${c.dim}Tiếp tục từ lịch sử đã được crash-recovery; model sẽ kiểm tra các tool call có outcome chưa xác định trước khi hành động.${c.reset}\n`);
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING INTERRUPTED SESSION]${c.reset} ${c.dim}Continuing from crash-recovered history; the model will review tool calls with unknown outcomes before acting.${c.reset}\n`);
           const recoveryPrompt = `[RESUME INTERRUPTED SESSION]:
 The previous process was interrupted and the session has been repaired by the harness.
 Review the recovered conversation and the crash-recovery tool results first.
@@ -1793,7 +1793,7 @@ Continue the user's original request and finish with fresh observable evidence w
             // The repaired events are durable; consume this one-shot startup marker.
             (activeSession as any).wasInterruptedAndRecovered = false;
           } catch (err: any) {
-            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục phiên bị gián đoạn:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error resuming the interrupted session:${c.reset}`, err.message);
           }
           continue;
         }
@@ -1803,12 +1803,12 @@ Continue the user's original request and finish with fresh observable evidence w
           ? (kernel.ctx as any).subagents.getHandles().filter((h: any) => h.status === 'stopped')
           : [];
         if (stoppedAgents.length > 0) {
-          console.log(`\n${c.yellow}ℹ Phát hiện ${stoppedAgents.length} subagent bị dừng do restart. Dùng /agents resume <id> để khởi động lại.${c.reset}\n`);
+          console.log(`\n${c.yellow}ℹ Detected ${stoppedAgents.length} subagents stopped by a restart. Use /agents resume <id> to restart them.${c.reset}\n`);
           continue;
         }
 
-        console.log(`\n${c.yellow}ℹ Không phát hiện tác vụ, kế hoạch hoặc mục tiêu dở dang nào cần phục hồi.${c.reset}`);
-        console.log(`💡 ${c.brightCyan}Gợi ý: Bạn có thể bắt đầu tác vụ mới bằng cách nhập yêu cầu, hoặc dùng ${c.bold}/goal <mục tiêu>${c.reset}${c.brightCyan}, ${c.bold}/plan <yêu cầu>${c.reset}${c.brightCyan}, ${c.bold}/compose <tính năng>${c.reset}${c.brightCyan}.${c.reset}\n`);
+        console.log(`\n${c.yellow}ℹ No unfinished tasks, plans, or goals found to recover.${c.reset}`);
+        console.log(`💡 ${c.brightCyan}Tip: You can start a new task by typing a request, or use ${c.bold}/goal <objective>${c.reset}${c.brightCyan}, ${c.bold}/plan <request>${c.reset}${c.brightCyan}, ${c.bold}/compose <feature>${c.reset}${c.brightCyan}.${c.reset}\n`);
         continue;
       }
 
@@ -1817,8 +1817,8 @@ Continue the user's original request and finish with fresh observable evidence w
         if (!planPrompt) {
           const tasks = agentLoop.planManager.getTasks();
           if (tasks.length === 0) {
-            console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào được khởi tạo trong phiên này.${c.reset}`);
-            console.log(`💡 ${c.brightCyan}Gợi ý:${c.reset} Gõ ${c.bold}/plan <yêu cầu>${c.reset} để kích hoạt Skill Lập kế hoạch và phân rã tác vụ lớn (Ví dụ: ${c.dim}/plan Tái cấu trúc module xác thực${c.reset})\n`);
+            console.log(`\n${c.yellow}ℹ No plan has been created in this session yet.${c.reset}`);
+            console.log(`💡 ${c.brightCyan}Tip:${c.reset} Type ${c.bold}/plan <request>${c.reset} to trigger the planning Skill and break down the large task (Example: ${c.dim}/plan Refactor the auth module${c.reset})\n`);
           } else {
             CLI.renderPlan(tasks);
           }
@@ -1828,10 +1828,10 @@ Continue the user's original request and finish with fresh observable evidence w
         if (planPrompt.toLowerCase() === 'resume') {
           const nextTask = agentLoop.planManager.getNextIncompleteTask();
           if (!nextTask) {
-            console.log(`\n${c.yellow}ℹ Toàn bộ các task trong kế hoạch đã hoàn tất (hoặc chưa có kế hoạch nào).${c.reset}\n`);
+            console.log(`\n${c.yellow}ℹ All tasks in the plan are complete (or there is no plan yet).${c.reset}\n`);
             continue;
           }
-          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING PLAN EXECUTION]${c.reset} ${c.dim}Tiếp tục từ Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
+          console.log(`\n${c.magenta}${c.bold}▶ [RESUMING PLAN EXECUTION]${c.reset} ${c.dim}Continuing from Task #${nextTask.id}:${c.reset} ${c.bold}${nextTask.title}${c.reset}\n`);
           const resumePrompt = `[RESUME INCOMPLETE PLAN]:
 Continue executing the in-flight plan.
 Next Target Task #${nextTask.id}: ${nextTask.title}
@@ -1844,13 +1844,13 @@ Please focus on executing and verifying this task, and update its status to COMP
               await agentLoop.submit(activeSession, resumePrompt, 'system', { signal });
             });
           } catch (err: any) {
-            console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Plan Resume:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error executing Plan Resume:${c.reset}`, err.message);
           }
           continue;
         }
 
         // Người dùng yêu cầu lập kế hoạch cho một nhiệm vụ cụ thể:
-        console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Đang kích hoạt Planning Skills (writing-plans, planning-with-files) cho tác vụ:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
+        console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Activating Planning Skills (writing-plans, planning-with-files) for task:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
 
         const expandedPlanningPrompt = `[PLANNING MODE REQUEST]: The user requests an exhaustive, phased implementation plan and task decomposition before modifying code.
 Carefully research the relevant codebase files, dependencies, and architecture.
@@ -1865,7 +1865,7 @@ ${planPrompt}`;
         // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
         const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(planPrompt, workspace);
         if (attachmentResult.hasAttachments) {
-          CLI.renderAttachmentSummary(attachmentResult.attachments);
+          CLI.renderAttachmentSummary(attachmentResult.attachments, attachmentResult.relatedFiles);
         }
 
         sessionCount++;
@@ -1875,10 +1875,10 @@ ${planPrompt}`;
           });
           const tasks = agentLoop.planManager.getTasks();
           if (tasks.length > 0) {
-            console.log(`\n💡 ${c.brightGreen}${c.bold}[PLAN READY]${c.reset} ${c.dim}Kế hoạch gồm ${tasks.length} bước đã sẵn sàng. Gõ ${c.bold}${c.brightCyan}/goal resume${c.reset} ${c.dim}hoặc ${c.bold}${c.brightCyan}/goal on${c.reset} ${c.dim}để chuyển sang chế độ tự trị (Autonomous Ralph Loop) thực thi trọn gói.${c.reset}\n`);
+            console.log(`\n💡 ${c.brightGreen}${c.bold}[PLAN READY]${c.reset} ${c.dim}The plan with ${tasks.length} steps is ready. Type ${c.bold}${c.brightCyan}/goal resume${c.reset} ${c.dim}or ${c.bold}${c.brightCyan}/goal on${c.reset} ${c.dim}to switch to autonomous mode (Autonomous Ralph Loop) for full execution.${c.reset}\n`);
           }
         } catch (err: any) {
-          console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Planning Loop:${c.reset}`, err.message);
+          console.error(`\n${c.red}${c.bold}❌ Error executing the Planning Loop:${c.reset}`, err.message);
         }
         continue;
       }
@@ -1939,30 +1939,30 @@ ${planPrompt}`;
           if (action === 'inspect') {
             const inspected = targetId ? await kernel.ctx.sessions.load(targetId) : activeSession;
             if (!inspected) {
-              console.log(`\n${c.yellow}Không tìm thấy session để inspect.${c.reset}\n`);
+              console.log(`\n${c.yellow}No session found to inspect.${c.reset}\n`);
             } else {
               console.log(`\n${c.brightCyan}Session diagnostics:${c.reset}\n${JSON.stringify(inspected.getDiagnostics(), null, 2)}\n`);
             }
           } else if (action === 'open' && targetId) {
             const loaded = await kernel.ctx.sessions.load(targetId);
             if (!loaded) {
-              console.log(`\n${c.yellow}Không tìm thấy session:${c.reset} ${targetId}\n`);
+              console.log(`\n${c.yellow}Session not found:${c.reset} ${targetId}\n`);
             } else {
               activeSession = loaded;
               agentLoop.bindSession(activeSession);
               saveSession({ activeSessionId: activeSession.id });
-              console.log(`\n${c.green}✔ Đã mở session:${c.reset} ${activeSession.id} (${activeSession.seq} events)\n`);
+              console.log(`\n${c.green}✔ Opened session:${c.reset} ${activeSession.id} (${activeSession.seq} events)\n`);
             }
           } else if (action === 'new') {
             activeSession = await kernel.ctx.sessions.create(targetId);
             agentLoop.bindSession(activeSession);
             saveSession({ activeSessionId: activeSession.id });
-            console.log(`\n${c.green}✔ Đã tạo session:${c.reset} ${activeSession.id}\n`);
+            console.log(`\n${c.green}✔ Created session:${c.reset} ${activeSession.id}\n`);
           } else {
             const ids = await kernel.ctx.sessions.list();
             console.log(`\n${c.brightCyan}Persisted sessions:${c.reset}`);
             for (const id of ids) console.log(`  ${id === activeSession.id ? c.green + '▶' : ' '} ${id}${c.reset}`);
-            console.log(`${c.gray}Dùng /sessions open <id>, /sessions new [id] hoặc /sessions inspect [id].${c.reset}\n`);
+            console.log(`${c.gray}Use /sessions open <id>, /sessions new [id] or /sessions inspect [id].${c.reset}\n`);
           }
         } catch (err: any) {
           console.error(`\n${c.red}✖ Session operation failed:${c.reset}`, err.message);
@@ -1974,7 +1974,7 @@ ${planPrompt}`;
         const { episodicRecord, newSession } = await agentLoop.resetSessionWithEpisodicEpilogue(activeSession);
         activeSession = newSession;
         saveSession({ activeSessionId: activeSession.id });
-        console.log(`\n${c.green}✔ Đã lưu tóm tắt Episodic Memory từ phiên cũ và tạo session mới sạch:${c.reset} ${activeSession.id}`);
+        console.log(`\n${c.green}✔ Saved the Episodic Memory summary from the previous session and created a clean new session:${c.reset} ${activeSession.id}`);
         if (episodicRecord) {
           console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
         }
@@ -1991,9 +1991,9 @@ ${planPrompt}`;
           activeSession = await kernel.ctx.sessions.fork(activeSession, boundarySeq);
           agentLoop.bindSession(activeSession);
           saveSession({ activeSessionId: activeSession.id });
-          console.log(`\n${c.green}✔ Đã fork session:${c.reset} ${parentId} @ seq ${boundarySeq} → ${activeSession.id}\n`);
+          console.log(`\n${c.green}✔ Forked session:${c.reset} ${parentId} @ seq ${boundarySeq} → ${activeSession.id}\n`);
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Không thể fork session:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Cannot fork session:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2028,17 +2028,17 @@ ${planPrompt}`;
           const resumed = agentLoop.subagentManager.resume(agentId);
           if (resumed) {
             await sessionPersistence.save(activeSession);
-            console.log(`\n${c.green}✔ Đã explicit resume subagent:${c.reset} ${agentId} (${resumed.sessionId})\n`);
+            console.log(`\n${c.green}✔ Resumed subagent:${c.reset} ${agentId} (${resumed.sessionId})\n`);
           } else {
-            console.log(`\n${c.yellow}Subagent không tồn tại hoặc chưa ở trạng thái stopped/failed:${c.reset} ${agentId}\n`);
+            console.log(`\n${c.yellow}Subagent does not exist or is not in stopped/failed state:${c.reset} ${agentId}\n`);
           }
         } else if (action === 'stop' && agentId) {
           const stopped = agentLoop.subagentManager.stop(agentId);
           if (stopped) await sessionPersistence.save(activeSession);
-          console.log(`\n${stopped ? c.green : c.yellow}${stopped ? '✔ Đã dừng' : 'Không thể dừng'} subagent:${c.reset} ${agentId}\n`);
+          console.log(`\n${stopped ? c.green : c.yellow}${stopped ? '✔ Stopped' : 'Cannot stop'} subagent:${c.reset} ${agentId}\n`);
         } else {
           console.log(`\n${c.brightCyan}Subagents:${c.reset} ${JSON.stringify(agentLoop.subagentManager.list(), null, 2)}\n`);
-          console.log(`${c.gray}Dùng /agents resume <id> hoặc /agents stop <id> để điều khiển explicit.${c.reset}\n`);
+          console.log(`${c.gray}Use /agents resume <id> or /agents stop <id> for explicit control.${c.reset}\n`);
         }
         continue;
       }
@@ -2062,14 +2062,14 @@ ${planPrompt}`;
 
         if (goalArg.toLowerCase() === 'status') {
           const state = agentLoop.goalManager.getState();
-          console.log(`\n${c.brightMagenta}Goal lifecycle:${c.reset} ${state ? JSON.stringify(state, null, 2) : 'chưa có durable goal'}\n`);
+          console.log(`\n${c.brightMagenta}Goal lifecycle:${c.reset} ${state ? JSON.stringify(state, null, 2) : 'no durable goal yet'}\n`);
           continue;
         }
 
         if (goalArg.toLowerCase() === 'plan') {
           const tasks = agentLoop.planManager.getTasks();
           if (tasks.length === 0) {
-            console.log(`\n${c.yellow}ℹ Hiện tại chưa có kế hoạch nào gắn với goal này. Dùng /plan <yêu cầu> để tạo kế hoạch.${c.reset}\n`);
+            console.log(`\n${c.yellow}ℹ No plan is attached to this goal yet. Use /plan <request> to create one.${c.reset}\n`);
           } else {
             CLI.renderPlan(tasks);
           }
@@ -2078,16 +2078,16 @@ ${planPrompt}`;
 
         if (goalArg.toLowerCase() === 'pause') {
           const state = agentLoop.goalManager.pause();
-          console.log(`\n${c.yellow}Goal paused:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+          console.log(`\n${c.yellow}Goal paused:${c.reset} ${state?.objective || 'no goal yet'}\n`);
           continue;
         }
 
         if (goalArg.toLowerCase() === 'complete') {
           try {
             const state = agentLoop.goalManager.complete(agentLoop.planManager);
-            console.log(`\n${c.green}Goal completed:${c.reset} ${state?.objective || 'chưa có goal'}\n`);
+            console.log(`\n${c.green}Goal completed:${c.reset} ${state?.objective || 'no goal yet'}\n`);
           } catch (err: any) {
-            console.log(`\n${c.red}Không thể hoàn thành Goal:${c.reset} ${err.message}\n`);
+            console.log(`\n${c.red}Cannot complete Goal:${c.reset} ${err.message}\n`);
           }
           continue;
         }
@@ -2102,14 +2102,14 @@ ${planPrompt}`;
         if (goalArg.toLowerCase() === 'resume') {
           const state = agentLoop.goalManager.resume();
           if (!state) {
-            console.log(`\n${c.yellow}Chưa có durable goal để resume.${c.reset}\n`);
+            console.log(`\n${c.yellow}No durable goal to resume.${c.reset}\n`);
             continue;
           }
           try {
             await executeDurableGoal();
           } catch (err: any) {
             agentLoop.goalManager.block(err.message || 'Goal execution failed.');
-            console.error(`\n${c.red}${c.bold}❌ Lỗi tiếp tục Goal:${c.reset}`, err.message);
+            console.error(`\n${c.red}${c.bold}❌ Error resuming Goal:${c.reset}`, err.message);
           }
           continue;
         }
@@ -2117,9 +2117,9 @@ ${planPrompt}`;
         let taskPrompt = goalArg;
         if (!taskPrompt) {
           CLI.renderGoalStatus(agentLoop.isGoalMode);
-          const inputGoal = (await rl.question(`${c.brightMagenta}Nhập mục tiêu cần thực thi (hoặc 'on'/'off' để đổi chế độ): ${c.reset}`)).trim();
+          const inputGoal = (await rl.question(`${c.brightMagenta}Enter the objective to execute (or 'on'/'off' to switch modes): ${c.reset}`)).trim();
           if (!inputGoal) {
-            console.log(`${c.dim}Đã hủy lệnh /goal.${c.reset}\n`);
+            console.log(`${c.dim}Cancelled the /goal command.${c.reset}\n`);
             continue;
           }
           if (inputGoal.toLowerCase() === 'on') {
@@ -2139,10 +2139,10 @@ ${planPrompt}`;
           await executeDurableGoal(taskPrompt);
         } catch (err: any) {
           agentLoop.goalManager.block(err.message || 'Goal execution failed.');
-          console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Goal Mode:${c.reset}`, err.message);
+          console.error(`\n${c.red}${c.bold}❌ Error executing Goal Mode:${c.reset}`, err.message);
           if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
-            console.log(`\n${c.yellow}💡 Gợi ý: Model này không tồn tại hoặc tài khoản/API key chưa được cấp quyền truy cập.`);
-            console.log(`👉 Bạn có thể chuyển sang model khác: /model 1 (Gemini) hoặc /model 4 (Groq)${c.reset}\n`);
+            console.log(`\n${c.yellow}💡 Tip: This model does not exist or the account/API key lacks access.`);
+            console.log(`👉 You can switch to another model: /model 1 (Gemini) or /model 4 (Groq)${c.reset}\n`);
           }
         }
         continue;
@@ -2170,7 +2170,7 @@ ${planPrompt}`;
             console.log(`\n${c.yellow}⚠️  ${rollbackRes.message}${c.reset}\n`);
           }
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi hoàn tác:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error during undo:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2220,14 +2220,14 @@ ${planPrompt}`;
         }
 
         if (!fs.existsSync(resolvedPath)) {
-          console.error(`\n${c.red}✖ Lỗi: Đường dẫn không tồn tại:${c.reset} ${resolvedPath}\n`);
+          console.error(`\n${c.red}✖ Error: Path does not exist:${c.reset} ${resolvedPath}\n`);
           continue;
         }
 
         try {
           const stat = fs.statSync(resolvedPath);
           if (!stat.isDirectory()) {
-            console.error(`\n${c.red}✖ Lỗi: Đường dẫn không phải là thư mục:${c.reset} ${resolvedPath}\n`);
+            console.error(`\n${c.red}✖ Error: Path is not a directory:${c.reset} ${resolvedPath}\n`);
             continue;
           }
 
@@ -2259,7 +2259,7 @@ ${planPrompt}`;
           saveSession({ activeSessionId: activeSession.id, workspacePath: workspace.rootDir });
           CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi chuyển workspace:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error switching workspace:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2280,10 +2280,10 @@ ${planPrompt}`;
         // Nếu người dùng chỉ gõ /model hoặc /modal mà không truyền tên -> Mở menu chọn số thứ tự
         if (!targetModel) {
           CLI.renderModelSelector(modelName);
-          const choice = (await rl.question(`${c.brightYellow}Chọn mô hình [1-${AVAILABLE_MODELS.length} hoặc tên model]: ${c.reset}`)).trim();
+          const choice = (await rl.question(`${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`)).trim();
           
           if (!choice) {
-            console.log(`${c.dim}Đã hủy chọn mô hình.${c.reset}\n`);
+            console.log(`${c.dim}Model selection cancelled.${c.reset}\n`);
             continue;
           }
 
@@ -2298,7 +2298,7 @@ ${planPrompt}`;
           modelName = targetModel;
           saveSession({ modelName }, workspace.rootDir);
           saveSession({ modelName });
-          console.log(`\n${c.green}✔ Đã kích hoạt mô hình:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Đã lưu cho các phiên sau)${c.reset}\n`);
+          console.log(`\n${c.green}✔ Activated model:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Saved for future sessions)${c.reset}\n`);
 
           // Kiểm tra an toàn Token Budget Context Window
           try {
@@ -2309,12 +2309,12 @@ ${planPrompt}`;
             }, 0);
             const approxTokens = Math.ceil(historyChars / 3.5);
             if (approxTokens > profile.maxSupportedInputTokens * 0.75) {
-              console.log(`${c.yellow}⚠️  [CẢNH BÁO CONTEXT]: Lịch sử hội thoại (~${approxTokens.toLocaleString()} tokens) chiếm hơn 75% giới hạn ngữ cảnh của ${modelName} (${profile.maxSupportedInputTokens.toLocaleString()} tokens).`);
-              console.log(`💡 ${c.dim}AgentLoop sẽ tự động kích hoạt Context Compactor để nén an toàn lịch sử trước khi gửi yêu cầu.${c.reset}\n`);
+              console.log(`${c.yellow}⚠️  [CONTEXT WARNING]: Conversation history (~${approxTokens.toLocaleString()} tokens) exceeds 75% of the context limit of ${modelName} (${profile.maxSupportedInputTokens.toLocaleString()} tokens).`);
+              console.log(`💡 ${c.dim}AgentLoop will automatically trigger the Context Compactor to safely compress history before sending the request.${c.reset}\n`);
             }
           } catch {}
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi đổi model:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error switching model:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2353,7 +2353,7 @@ ${planPrompt}`;
           }
           saveSession({ tokenConfig: presetConfig });
 
-          console.log(`\n${c.green}✔ Đã áp dụng Gói Cấu hình Token:${c.reset} ${c.bold}${tierDef.badge} - ${tierDef.label}${c.reset}`);
+          console.log(`\n${c.green}✔ Applied Token Preset:${c.reset} ${c.bold}${tierDef.badge} - ${tierDef.label}${c.reset}`);
           console.log(`  ${c.gray}↳ ${tierDef.description}${c.reset}\n`);
           CLI.renderTokenConfig(modelName, presetConfig, profile);
           continue;
@@ -2362,48 +2362,48 @@ ${planPrompt}`;
         // 2. Cấu hình Output Tokens (chấp nhận: low | med | high | max | số nguyên)
         if (subCmd === 'output' || subCmd === 'max_output' || subCmd === 'max_tokens' || subCmd === 'completion') {
           if (!val) {
-            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens output <low|medium|high|max|số_token>${c.reset}\n`);
+            console.log(`\n${c.red}✖ Please choose a preset or enter a token count:${c.reset} ${c.bold}/tokens output <low|medium|high|max|token_count>${c.reset}\n`);
             continue;
           }
           const resolvedOutput = resolveOutputTokensPreset(val, profile);
           if (resolvedOutput === null || resolvedOutput <= 0) {
-            console.log(`\n${c.red}✖ Mức output không hợp lệ. Khả dụng: low (2K), medium (8K), high (16K), max (${profile.maxSupportedOutputTokens.toLocaleString()}) hoặc nhập số nguyên.${c.reset}\n`);
+            console.log(`\n${c.red}✖ Invalid output level. Available: low (2K), medium (8K), high (16K), max (${profile.maxSupportedOutputTokens.toLocaleString()}) or enter an integer.${c.reset}\n`);
             continue;
           }
           agentLoop.setTokenConfig({ maxOutputTokens: resolvedOutput });
           const updated = agentLoop.getTokenConfig();
           saveSession({ tokenConfig: updated });
-          console.log(`\n${c.green}✔ Đã cập nhật Max Output Tokens:${c.reset} ${c.bold}${resolvedOutput.toLocaleString()}${c.reset} ${c.gray}(Đã lưu cho các phiên sau)${c.reset}\n`);
+          console.log(`\n${c.green}✔ Updated Max Output Tokens:${c.reset} ${c.bold}${resolvedOutput.toLocaleString()}${c.reset} ${c.gray}(Saved for future sessions)${c.reset}\n`);
           continue;
         }
 
         // 3. Cấu hình Input Tokens / Context Window (chấp nhận: low | med | high | max | số nguyên)
         if (subCmd === 'input' || subCmd === 'max_input' || subCmd === 'context') {
           if (!val) {
-            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens input <low|medium|high|max|số_token>${c.reset}\n`);
+            console.log(`\n${c.red}✖ Please choose a preset or enter a token count:${c.reset} ${c.bold}/tokens input <low|medium|high|max|token_count>${c.reset}\n`);
             continue;
           }
           const resolvedInput = resolveInputTokensPreset(val, profile);
           if (resolvedInput === null || resolvedInput <= 0) {
-            console.log(`\n${c.red}✖ Mức context window không hợp lệ. Khả dụng: low (16K), medium (64K), high (128K), max (${profile.maxSupportedInputTokens.toLocaleString()}) hoặc nhập số nguyên.${c.reset}\n`);
+            console.log(`\n${c.red}✖ Invalid context-window level. Available: low (16K), medium (64K), high (128K), max (${profile.maxSupportedInputTokens.toLocaleString()}) or enter an integer.${c.reset}\n`);
             continue;
           }
           agentLoop.setTokenConfig({ maxInputTokens: resolvedInput });
           const updated = agentLoop.getTokenConfig();
           saveSession({ tokenConfig: updated });
-          console.log(`\n${c.green}✔ Đã cập nhật Max Input Tokens (Context Window):${c.reset} ${c.bold}${resolvedInput.toLocaleString()}${c.reset} ${c.gray}(Đã cập nhật ContextCompactor)${c.reset}\n`);
+          console.log(`\n${c.green}✔ Updated Max Input Tokens (Context Window):${c.reset} ${c.bold}${resolvedInput.toLocaleString()}${c.reset} ${c.gray}(ContextCompactor updated)${c.reset}\n`);
           continue;
         }
 
         // 4. Cấu hình Thinking Token Budget (chấp nhận: off | low | med | high | max | số nguyên)
         if (subCmd === 'thinking' || subCmd === 'budget') {
           if (!val) {
-            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens thinking <off|low|medium|high|max|số_token>${c.reset}\n`);
+            console.log(`\n${c.red}✖ Please choose a preset or enter a token count:${c.reset} ${c.bold}/tokens thinking <off|low|medium|high|max|token_count>${c.reset}\n`);
             continue;
           }
           const resolvedThinking = resolveThinkingTokensPreset(val, profile);
           if (resolvedThinking === null) {
-            console.log(`\n${c.red}✖ Mức thinking budget không hợp lệ. Khả dụng: off (0), low (2K), medium (8K), high (24K), max (64K) hoặc nhập số nguyên.${c.reset}\n`);
+            console.log(`\n${c.red}✖ Invalid thinking budget level. Available: off (0), low (2K), medium (8K), high (24K), max (64K) or enter an integer.${c.reset}\n`);
             continue;
           }
           agentLoop.setTokenConfig({
@@ -2413,9 +2413,9 @@ ${planPrompt}`;
           const updated = agentLoop.getTokenConfig();
           saveSession({ tokenConfig: updated });
           const budgetLabel = resolvedThinking.thinkingBudget === 0
-            ? 'TẮT (0 tokens)'
+            ? 'OFF (0 tokens)'
             : `${resolvedThinking.thinkingBudget?.toLocaleString()} tokens (effort: ${resolvedThinking.reasoningEffort})`;
-          console.log(`\n${c.green}✔ Đã cập nhật Thinking Token Budget:${c.reset} ${c.bold}${budgetLabel}${c.reset}\n`);
+          console.log(`\n${c.green}✔ Updated Thinking Token Budget:${c.reset} ${c.bold}${budgetLabel}${c.reset}\n`);
           continue;
         }
 
@@ -2423,32 +2423,32 @@ ${planPrompt}`;
         if (subCmd === 'effort' || subCmd === 'reasoning') {
           const effortTier = normalizePresetTier(val);
           if (!effortTier) {
-            console.log(`\n${c.red}✖ Reasoning effort hợp lệ: low | medium | high | max (ví dụ: /tokens effort high)${c.reset}\n`);
+            console.log(`\n${c.red}✖ Valid reasoning effort: low | medium | high | max (e.g. /tokens effort high)${c.reset}\n`);
             continue;
           }
           agentLoop.setTokenConfig({ reasoningEffort: effortTier });
           const updated = agentLoop.getTokenConfig();
           saveSession({ tokenConfig: updated });
-          console.log(`\n${c.green}✔ Đã cập nhật Reasoning Effort:${c.reset} ${c.bold}${effortTier}${c.reset}\n`);
+          console.log(`\n${c.green}✔ Updated Reasoning Effort:${c.reset} ${c.bold}${effortTier}${c.reset}\n`);
           continue;
         }
 
         // 6. Cấu hình Dynamic Context Budget (chấp nhận: low | med | high | max | số nguyên)
         if (subCmd === 'dynamic' || subCmd === 'dynamic_budget' || subCmd === 'dynamic_context') {
           if (!val) {
-            console.log(`\n${c.red}✖ Vui lòng chọn gói sẵn hoặc nhập số token:${c.reset} ${c.bold}/tokens dynamic <low|medium|high|max|số_token>${c.reset}\n`);
+            console.log(`\n${c.red}✖ Please choose a preset or enter a token count:${c.reset} ${c.bold}/tokens dynamic <low|medium|high|max|token_count>${c.reset}\n`);
             continue;
           }
           const resolvedDynamic = resolveDynamicBudgetPreset(val);
           if (resolvedDynamic === null || resolvedDynamic <= 0) {
-            console.log(`\n${c.red}✖ Mức dynamic context không hợp lệ. Khả dụng: low (1,000), medium (2,000), high (4,000), max (8,000) hoặc nhập số nguyên.${c.reset}\n`);
+            console.log(`\n${c.red}✖ Invalid dynamic-context level. Available: low (1,000), medium (2,000), high (4,000), max (8,000) or enter an integer.${c.reset}\n`);
             continue;
           }
           agentLoop.setTokenConfig({ dynamicContextBudget: resolvedDynamic });
           process.env.MINUS_DYNAMIC_CONTEXT_BUDGET = String(resolvedDynamic);
           const updated = agentLoop.getTokenConfig();
           saveSession({ tokenConfig: updated });
-          console.log(`\n${c.green}✔ Đã cập nhật Dynamic Context Budget:${c.reset} ${c.bold}${resolvedDynamic.toLocaleString()} tokens${c.reset} ${c.gray}(Đã đồng bộ DynamicContextArbiter & env)${c.reset}\n`);
+          console.log(`\n${c.green}✔ Updated Dynamic Context Budget:${c.reset} ${c.bold}${resolvedDynamic.toLocaleString()} tokens${c.reset} ${c.gray}(DynamicContextArbiter & env synced)${c.reset}\n`);
           continue;
         }
 
@@ -2457,12 +2457,12 @@ ${planPrompt}`;
           const defaultConfig = resolveTokenConfig(modelName);
           agentLoop.setTokenConfig(defaultConfig);
           saveSession({ tokenConfig: defaultConfig });
-          console.log(`\n${c.green}✔ Đã khôi phục cấu hình token mặc định cho mô hình:${c.reset} ${c.bold}${modelName}${c.reset}\n`);
+          console.log(`\n${c.green}✔ Restored default token config for model:${c.reset} ${c.bold}${modelName}${c.reset}\n`);
           CLI.renderTokenConfig(modelName, defaultConfig, profile);
           continue;
         }
 
-        console.log(`\n${c.yellow}⚠️ Lệnh con không hợp lệ: "${subCmd}". Gõ /tokens để xem danh sách gói đóng gói sẵn và hướng dẫn.${c.reset}\n`);
+        console.log(`\n${c.yellow}⚠️ Invalid subcommand: "${subCmd}". Type /tokens to see the preset bundles and usage help.${c.reset}\n`);
         continue;
       }
 
@@ -2477,11 +2477,11 @@ ${planPrompt}`;
       ) {
         const parts = trimmed.split(' ');
         const imgPath = parts[1];
-        const userPrompt = parts.slice(2).join(' ').trim() || 'Hãy quan sát và phân tích chi tiết hình ảnh đính kèm này.';
+        const userPrompt = parts.slice(2).join(' ').trim() || 'Observe and analyze the attached image in detail.';
 
         if (!imgPath) {
-          console.log(`\n${c.red}✖ Cách dùng:${c.reset} ${c.bold}/image <đường_dẫn_ảnh> [câu hỏi / chỉ dẫn]${c.reset}`);
-          console.log(`${c.gray}Ví dụ: /image screenshots/ui.png Kiểm tra lỗi hiển thị nút bấm${c.reset}\n`);
+          console.log(`\n${c.red}✖ Usage:${c.reset} ${c.bold}/image <image_path> [question / instructions]${c.reset}`);
+          console.log(`${c.gray}Example: /image screenshots/ui.png Check the button rendering glitch${c.reset}\n`);
           continue;
         }
 
@@ -2489,7 +2489,7 @@ ${planPrompt}`;
           const resolvedPath = path.isAbsolute(imgPath) ? imgPath : path.resolve(workspace.rootDir, imgPath);
           const stat = await fs.promises.stat(resolvedPath);
           if (!stat.isFile()) {
-            console.log(`\n${c.red}✖ Đường dẫn "${imgPath}" không phải là tệp.${c.reset}\n`);
+            console.log(`\n${c.red}✖ Path "${imgPath}" is not a file.${c.reset}\n`);
             continue;
           }
 
@@ -2498,12 +2498,12 @@ ${planPrompt}`;
           const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : ext === '.svg' ? 'image/svg+xml' : 'image/png';
           const base64 = buf.toString('base64');
 
-          console.log(`\n${c.green}✔ Đã tải ảnh:${c.reset} ${c.bold}${path.basename(resolvedPath)}${c.reset} ${c.gray}(${(stat.size / 1024).toFixed(1)} KB, ${mime})${c.reset}`);
-          console.log(`${c.cyan}👁️  Đang gửi ảnh cùng chỉ thị đến mô hình ${modelName}...${c.reset}\n`);
+          console.log(`\n${c.green}✔ Loaded image:${c.reset} ${c.bold}${path.basename(resolvedPath)}${c.reset} ${c.gray}(${(stat.size / 1024).toFixed(1)} KB, ${mime})${c.reset}`);
+          console.log(`${c.cyan}👁️  Sending the image with instructions to model ${modelName}...${c.reset}\n`);
 
           // In hộp yêu cầu của User
           console.log(`\n${c.cyan}${c.bold}┌── 👁️ VISION / MULTIMODAL REQUEST ──────────────────────────────────────────┐${c.reset}`);
-          console.log(`${c.bold}[Ảnh: ${path.relative(workspace.rootDir, resolvedPath)}] ${userPrompt}${c.reset}`);
+          console.log(`${c.bold}[Image: ${path.relative(workspace.rootDir, resolvedPath)}] ${userPrompt}${c.reset}`);
           console.log(`${c.cyan}${c.bold}└────────────────────────────────────────────────────────────────────────────┘${c.reset}`);
 
           activeSession.addMultimodalUserMessage(
@@ -2517,7 +2517,7 @@ ${planPrompt}`;
             await agentLoop.run(activeSession, { signal });
           });
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi đọc ảnh:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error reading image:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2530,14 +2530,14 @@ ${planPrompt}`;
         const skillsRegistry = (agentLoop.kernel?.ctx as any)?.skills;
 
         if (!skillsRegistry) {
-          console.log(`\n${c.yellow}⚠️  Skill registry chưa được khởi tạo.${c.reset}\n`);
+          console.log(`\n${c.yellow}⚠️  Skill registry is not initialized.${c.reset}\n`);
           continue;
         }
 
         if (subCmd === 'inspect' && targetId) {
           const skill = skillsRegistry.get(targetId);
           if (!skill) {
-            console.log(`\n${c.red}✖ Không tìm thấy skill: ${targetId}${c.reset}\n`);
+            console.log(`\n${c.red}✖ Skill not found: ${targetId}${c.reset}\n`);
           } else {
             console.log(`\n${c.cyan}${c.bold}=== SKILL MANIFEST: ${skill.id} ===${c.reset}`);
             console.log(`Name: ${skill.name} (v${skill.version})`);
@@ -2570,11 +2570,11 @@ ${planPrompt}`;
             if (cap) {
               CLI.renderCapabilities([cap]);
             } else {
-              console.log(`\n${c.red}✖ Không tìm thấy capability: ${subTarget}${c.reset}\n`);
+              console.log(`\n${c.red}✖ Capability not found: ${subTarget}${c.reset}\n`);
             }
           } else if (target === 'categories') {
             const cats = capabilitiesCatalog.getCategories ? capabilitiesCatalog.getCategories() : [];
-            console.log(`\n${c.cyan}${c.bold}Các Capability Categories khả dụng:${c.reset}`);
+            console.log(`\n${c.cyan}${c.bold}Available Capability Categories:${c.reset}`);
             for (const cat of cats) {
               const count = capabilitiesCatalog.getByCategory(cat).length;
               console.log(`  • ${c.yellow}${cat}${c.reset} (${count} capabilities)`);
@@ -2593,16 +2593,16 @@ ${planPrompt}`;
                 if (searchResults.length > 0) {
                   CLI.renderCapabilities(searchResults);
                 } else {
-                  console.log(`\n${c.red}✖ Không tìm thấy capability hoặc category: ${target}${c.reset}`);
+                  console.log(`\n${c.red}✖ Capability or category not found: ${target}${c.reset}`);
                   if (capabilitiesCatalog.getCategories) {
-                    console.log(`${c.gray}Các category khả dụng: ${capabilitiesCatalog.getCategories().join(', ')}${c.reset}\n`);
+                    console.log(`${c.gray}Available categories: ${capabilitiesCatalog.getCategories().join(', ')}${c.reset}\n`);
                   }
                 }
               }
             }
           }
         } else {
-          console.log(`\n${c.yellow}⚠️  Capability catalog chưa được khởi tạo.${c.reset}\n`);
+          console.log(`\n${c.yellow}⚠️  Capability catalog is not initialized.${c.reset}\n`);
         }
         continue;
       }
@@ -2615,23 +2615,23 @@ ${planPrompt}`;
         const approvalMgr = (agentLoop.kernel?.ctx as any)?.approvals;
 
         if (!approvalMgr) {
-          console.log(`\n${c.yellow}⚠️  Approval manager chưa được khởi tạo.${c.reset}\n`);
+          console.log(`\n${c.yellow}⚠️  Approval manager is not initialized.${c.reset}\n`);
           continue;
         }
 
         if (subCmd === 'approve' && targetId) {
           const success = approvalMgr.resolveApproval(targetId, true, 'Approved by operator via CLI');
           if (success) {
-            console.log(`\n${c.green}✔ Đã phê duyệt yêu cầu: ${targetId}${c.reset}\n`);
+            console.log(`\n${c.green}✔ Approved request: ${targetId}${c.reset}\n`);
           } else {
-            console.log(`\n${c.red}✖ Không thể phê duyệt yêu cầu: ${targetId}${c.reset}\n`);
+            console.log(`\n${c.red}✖ Cannot approve request: ${targetId}${c.reset}\n`);
           }
         } else if (subCmd === 'reject' && targetId) {
           const success = approvalMgr.resolveApproval(targetId, false, 'Rejected by operator via CLI');
           if (success) {
-            console.log(`\n${c.yellow}⚠️  Đã từ chối yêu cầu: ${targetId}${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️  Rejected request: ${targetId}${c.reset}\n`);
           } else {
-            console.log(`\n${c.red}✖ Không thể từ chối yêu cầu: ${targetId}${c.reset}\n`);
+            console.log(`\n${c.red}✖ Cannot reject request: ${targetId}${c.reset}\n`);
           }
         } else {
           CLI.renderApprovals(approvalMgr.getPending());
@@ -2645,10 +2645,10 @@ ${planPrompt}`;
         const sub = parts[0]?.toLowerCase();
         if (sub === 'reset') {
           kernel.ctx.permissions.clearSessionApprovals();
-          console.log(`\n${c.green}✔ Đã reset toàn bộ danh mục auto-approved trong phiên này.${c.reset}\n`);
+          console.log(`\n${c.green}✔ Reset all auto-approved categories in this session.${c.reset}\n`);
         } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
           kernel.ctx.permissions.setMode(sub as any);
-          console.log(`\n${c.green}✔ Đã chuyển chế độ phân quyền sang: ${c.bold}${sub}${c.reset}\n`);
+          console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}\n`);
         } else {
           CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);
         }
@@ -2660,17 +2660,17 @@ ${planPrompt}`;
         const parts = trimmed.split(/\s+/).slice(1);
         const targetPath = parts.join(' ').trim();
         if (!targetPath) {
-          console.log(`\n${c.red}✖ Cách dùng:${c.reset} ${c.bold}/add <đường_dẫn_file_hoặc_thư_mục>${c.reset}`);
-          console.log(`${c.gray}💡 Mẹo: Bạn có thể gõ trực tiếp @đường_dẫn ngay trong câu prompt (ví dụ: "Tối ưu @src/agent/agent-loop.ts")${c.reset}\n`);
+          console.log(`\n${c.red}✖ Usage:${c.reset} ${c.bold}/add <file_or_folder_path>${c.reset}`);
+          console.log(`${c.gray}💡 Tip: You can type @path directly in your prompt (e.g. "Optimize @src/agent/agent-loop.ts")${c.reset}\n`);
           continue;
         }
 
         const res = await PromptAttachmentProcessor.resolveAndAttach(`@${targetPath}`, workspace);
         if (res.hasAttachments) {
-          CLI.renderAttachmentSummary(res.attachments);
-          console.log(`\n${c.green}✔ Đã đính kèm thành công:${c.reset} ${c.bold}${targetPath}${c.reset}\n`);
+          CLI.renderAttachmentSummary(res.attachments, res.relatedFiles);
+          console.log(`\n${c.green}✔ Attached successfully:${c.reset} ${c.bold}${targetPath}${c.reset}\n`);
         } else {
-          console.log(`\n${c.red}✖ Không tìm thấy file hoặc thư mục hợp lệ trong workspace:${c.reset} ${targetPath}\n`);
+          console.log(`\n${c.red}✖ No valid file or folder found in workspace:${c.reset} ${targetPath}\n`);
         }
         continue;
       }
@@ -2700,14 +2700,14 @@ ${planPrompt}`;
 
         if (subCmd === 'on' || subCmd === 'enable' || subCmd === 'all' || trimmed === '/shrink') {
           agentLoop.setCollapsePreferences({ compactSteps: true, thinking: true, tools: true, diff: true });
-          console.log(`\n${c.green}✔ Đã bật chế độ Thu gọn (1-line step compact mode). Bấm Ctrl+O để mở rộng/thu gọn nhanh.${c.reset}\n`);
+          console.log(`\n${c.green}✔ Enabled Compact mode (1-line step compact mode). Press Ctrl+O for quick expand/collapse.${c.reset}\n`);
           CLI.renderCollapseStatus(agentLoop.collapsePreferences);
           continue;
         }
 
         if (subCmd === 'off' || subCmd === 'disable' || subCmd === 'expand' || isExpandCmd) {
           agentLoop.setCollapsePreferences({ compactSteps: false, thinking: false, tools: false, diff: false });
-          console.log(`\n${c.yellow}✔ Đã tắt chế độ Thu gọn (Full Verbose Mode). Toàn bộ chi tiết step sẽ hiển thị đầy đủ.${c.reset}\n`);
+          console.log(`\n${c.yellow}✔ Disabled Compact mode (Full Verbose Mode). All step details will be shown in full.${c.reset}\n`);
           CLI.renderCollapseStatus(agentLoop.collapsePreferences);
           continue;
         }
@@ -2715,32 +2715,32 @@ ${planPrompt}`;
         if (subCmd === 'steps' || subCmd === 'step') {
           const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.compactSteps);
           agentLoop.setCollapsePreferences({ compactSteps: isTurnOn });
-          const statusText = isTurnOn ? `${c.green}BẬT (1-line per step)${c.reset}` : `${c.yellow}TẮT (Full step)${c.reset}`;
-          console.log(`\n${c.green}✔ Đã cập nhật thu gọn các Step:${c.reset} ${statusText}\n`);
+          const statusText = isTurnOn ? `${c.green}ON (1-line per step)${c.reset}` : `${c.yellow}OFF (Full step)${c.reset}`;
+          console.log(`\n${c.green}✔ Updated step collapsing:${c.reset} ${statusText}\n`);
           continue;
         }
 
         if (subCmd === 'thinking' || subCmd === 'reasoning' || subCmd === 'cot') {
           const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.thinking);
           agentLoop.setCollapsePreferences({ thinking: isTurnOn });
-          const statusText = isTurnOn ? `${c.green}BẬT (Folded)${c.reset}` : `${c.yellow}TẮT (Expanded)${c.reset}`;
-          console.log(`\n${c.green}✔ Đã cập nhật thu gọn suy luận System 2:${c.reset} ${statusText}\n`);
+          const statusText = isTurnOn ? `${c.green}ON (Folded)${c.reset}` : `${c.yellow}OFF (Expanded)${c.reset}`;
+          console.log(`\n${c.green}✔ Updated System-2 reasoning collapsing:${c.reset} ${statusText}\n`);
           continue;
         }
 
         if (subCmd === 'tools' || subCmd === 'tool') {
           const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.tools);
           agentLoop.setCollapsePreferences({ tools: isTurnOn });
-          const statusText = isTurnOn ? `${c.green}BẬT (Preview)${c.reset}` : `${c.yellow}TẮT (Full Raw)${c.reset}`;
-          console.log(`\n${c.green}✔ Đã cập nhật thu gọn Tool Outputs:${c.reset} ${statusText}\n`);
+          const statusText = isTurnOn ? `${c.green}ON (Preview)${c.reset}` : `${c.yellow}OFF (Full Raw)${c.reset}`;
+          console.log(`\n${c.green}✔ Updated tool-output collapsing:${c.reset} ${statusText}\n`);
           continue;
         }
 
         if (subCmd === 'diff' || subCmd === 'diffs' || subCmd === 'patch') {
           const isTurnOn = val === 'on' || val === 'true' || (!val && !currentPrefs.diff);
           agentLoop.setCollapsePreferences({ diff: isTurnOn });
-          const statusText = isTurnOn ? `${c.green}BẬT (>20 lines)${c.reset}` : `${c.yellow}TẮT (Full Patch)${c.reset}`;
-          console.log(`\n${c.green}✔ Đã cập nhật thu gọn Diff Patches:${c.reset} ${statusText}\n`);
+          const statusText = isTurnOn ? `${c.green}ON (>20 lines)${c.reset}` : `${c.yellow}OFF (Full Patch)${c.reset}`;
+          console.log(`\n${c.green}✔ Updated diff-patch collapsing:${c.reset} ${statusText}\n`);
           continue;
         }
 
@@ -2748,12 +2748,12 @@ ${planPrompt}`;
           const parsedDepth = parseInt(val, 10);
           if (!isNaN(parsedDepth) && parsedDepth > 0) {
             agentLoop.setCollapsePreferences({ treeDepth: parsedDepth });
-            console.log(`\n${c.green}✔ Đã đặt độ sâu cây thư mục mặc định:${c.reset} ${parsedDepth} tầng\n`);
+            console.log(`\n${c.green}✔ Set the default directory-tree depth:${c.reset} ${parsedDepth} levels\n`);
             continue;
           }
         }
 
-        console.log(`\n${c.yellow}⚠️ Cú pháp chưa đúng. Gõ /collapse để xem hướng dẫn.${c.reset}\n`);
+        console.log(`\n${c.yellow}⚠️ Invalid syntax. Type /collapse for help.${c.reset}\n`);
         continue;
       }
 
@@ -2781,7 +2781,7 @@ ${planPrompt}`;
             const scanResult = await exploreDirectoryTree(targetDir, { maxDepth: isNaN(depth) ? 3 : depth });
             CLI.renderWorkspaceTree(scanResult);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi quét cây thư mục:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error scanning the directory tree:${c.reset}`, err.message);
           }
           continue;
         }
@@ -2791,7 +2791,7 @@ ${planPrompt}`;
             const report = inspectContext(activeSession, agentLoop, modelName);
             CLI.renderContextInspection(report);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi kiểm tra ngữ cảnh:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error inspecting context:${c.reset}`, err.message);
           }
           continue;
         }
@@ -2801,7 +2801,7 @@ ${planPrompt}`;
           if (latest) {
             CLI.renderReasoningInspection(latest);
           } else {
-            console.log(`\n${c.yellow}⚠️ Chưa có chuỗi suy luận nào được ghi nhận gần đây.${c.reset}\n`);
+            console.log(`\n${c.yellow}⚠️ No reasoning traces recorded recently.${c.reset}\n`);
           }
           continue;
         }
@@ -2828,7 +2828,7 @@ ${planPrompt}`;
           continue;
         }
 
-        console.log(`\n${c.yellow}⚠️ Không tìm thấy không gian khám phá "${domain}". Gõ /explore để xem danh mục.${c.reset}\n`);
+        console.log(`\n${c.yellow}⚠️ Exploration domain "${domain}". Type /explore to see the catalog.${c.reset}\n`);
         continue;
       }
 
@@ -2858,7 +2858,7 @@ ${planPrompt}`;
           const scanResult = await exploreDirectoryTree(targetDir, { maxDepth: depth });
           CLI.renderWorkspaceTree(scanResult);
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi quét cây thư mục:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error scanning the directory tree:${c.reset}`, err.message);
         }
         continue;
       }
@@ -2881,14 +2881,14 @@ ${planPrompt}`;
 
         if (sub === 'snapshot' || sub === 'guardian') {
           try {
-            console.log(`\n${c.cyan}🛡️ Đang kích hoạt Context Guardian để chụp Snapshot & lập Thẻ Chuyển Giao...${c.reset}`);
+            console.log(`\n${c.cyan}🛡️ Activating Context Guardian to capture a Snapshot & build the Handoff Card...${c.reset}`);
             const guardianRes = await agentLoop.contextGuardian.protectPreCompaction(activeSession);
-            console.log(`\n${c.green}✔ Đã chụp thành công Context Guardian Snapshot:${c.reset} ${c.bold}${guardianRes.snapshotId}${c.reset}`);
+            console.log(`\n${c.green}✔ Captured Context Guardian Snapshot:${c.reset} ${c.bold}${guardianRes.snapshotId}${c.reset}`);
             console.log(`  ${c.gray}↳ File: ${guardianRes.snapshotPath}${c.reset}`);
-            console.log(`  ${c.gray}↳ Toàn vẹn (Integrity Score): ${guardianRes.integrity.score}% (${guardianRes.integrity.checks.length} checks passing)${c.reset}\n`);
+            console.log(`  ${c.gray}↳ Integrity Score: ${guardianRes.integrity.score}% (${guardianRes.integrity.checks.length} checks passing)${c.reset}\n`);
             console.log(guardianRes.briefing);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi kích hoạt Context Guardian:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error activating Context Guardian:${c.reset}`, err.message);
           }
           continue;
         }
@@ -2898,19 +2898,19 @@ ${planPrompt}`;
             const briefing = await agentLoop.contextAgent.loadBriefing();
             console.log(`\n${briefing}\n`);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi tải Briefing:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error loading Briefing:${c.reset}`, err.message);
           }
           continue;
         }
 
         if (sub === 'save') {
           try {
-            console.log(`\n${c.cyan}💾 Đang kích hoạt Context Agent để lưu tóm tắt phiên làm việc...${c.reset}`);
+            console.log(`\n${c.cyan}💾 Activating Context Agent to save the session summary...${c.reset}`);
             const saveRes = await agentLoop.contextAgent.saveSessionSummary(activeSession);
-            console.log(`${c.green}✔ Đã lưu tóm tắt phiên: ${saveRes.sessionFile}${c.reset}`);
-            console.log(`${c.green}✔ Đã đồng bộ ACTIVE_CONTEXT.md: ${saveRes.activeContextFile}${c.reset}\n`);
+            console.log(`${c.green}✔ Saved session summary: ${saveRes.sessionFile}${c.reset}`);
+            console.log(`${c.green}✔ Synced ACTIVE_CONTEXT.md: ${saveRes.activeContextFile}${c.reset}\n`);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi lưu phiên làm việc:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error saving the session:${c.reset}`, err.message);
           }
           continue;
         }
@@ -2920,22 +2920,22 @@ ${planPrompt}`;
             const statusStr = await agentLoop.contextAgent.getStatus();
             console.log(`\n${c.cyan}${statusStr}${c.reset}\n`);
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi đọc trạng thái:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error reading status:${c.reset}`, err.message);
           }
           continue;
         }
 
         if (sub === 'compact' || sub === 'prune' || sub === 'compress') {
           try {
-            console.log(`\n${c.cyan}🧹 Đang kích hoạt Context Compactor để nén ngữ cảnh an toàn...${c.reset}`);
+            console.log(`\n${c.cyan}🧹 Activating Context Compactor to safely compress context...${c.reset}`);
             const compactRes = await agentLoop.contextCompactor.compact(activeSession.getHistory());
             if (compactRes && compactRes.stats.tokensSaved > 0) {
-              console.log(`${c.green}✔ Đã nén thành công ngữ cảnh: Tiết kiệm ${compactRes.stats.tokensSaved.toLocaleString()} tokens.${c.reset}\n`);
+              console.log(`${c.green}✔ Compressed context successfully. Saved ${compactRes.stats.tokensSaved.toLocaleString()} tokens.${c.reset}\n`);
             } else {
-              console.log(`${c.yellow}⚠️ Ngữ cảnh hiện tại vẫn trong ngưỡng tối ưu, chưa cần nén.${c.reset}\n`);
+              console.log(`${c.yellow}⚠️ Context is still within the optimal threshold; no compression needed.${c.reset}\n`);
             }
           } catch (err: any) {
-            console.error(`\n${c.red}✖ Lỗi khi nén ngữ cảnh:${c.reset}`, err.message);
+            console.error(`\n${c.red}✖ Error compressing context:${c.reset}`, err.message);
           }
         }
 
@@ -2943,20 +2943,20 @@ ${planPrompt}`;
           const report = inspectContext(activeSession, agentLoop, modelName);
           CLI.renderContextInspection(report);
         } catch (err: any) {
-          console.error(`\n${c.red}✖ Lỗi khi phân tích ngữ cảnh:${c.reset}`, err.message);
+          console.error(`\n${c.red}✖ Error analyzing context:${c.reset}`, err.message);
         }
         continue;
       }
 
       if (trimmed.toLowerCase() === '/exit' || trimmed.toLowerCase() === '/quit' || trimmed.toLowerCase() === 'exit') {
-        console.log(`\n${c.green}Tạm biệt! Chúc bạn lập trình vui vẻ! 👋${c.reset}\n`);
+        console.log(`\n${c.green}Goodbye! Happy coding! 👋${c.reset}\n`);
         break;
       }
 
       // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
       const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace);
       if (attachmentResult.hasAttachments) {
-        CLI.renderAttachmentSummary(attachmentResult.attachments);
+        CLI.renderAttachmentSummary(attachmentResult.attachments, attachmentResult.relatedFiles);
       }
 
       // Các prompt tiếp tục cùng một session và được flush xuống JSONL.
@@ -2968,19 +2968,19 @@ ${planPrompt}`;
           checkAndAutoCompleteGoal();
         });
       } catch (err: any) {
-        console.error(`\n${c.red}${c.bold}❌ Lỗi thực thi Agent Loop:${c.reset}`, err.message);
+        console.error(`\n${c.red}${c.bold}❌ Agent Loop execution error:${c.reset}`, err.message);
         if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
-          console.log(`\n${c.yellow}💡 Gợi ý: Model này không tồn tại hoặc tài khoản/API key chưa được cấp quyền truy cập.`);
-          console.log(`👉 Bạn có thể chuyển ngay sang các model đang hoạt động tốt với key có sẵn:`);
-          console.log(`   - ${c.brightCyan}/model 1${c.yellow} : Google Gemini Flash (Đang có sẵn key)`);
-          console.log(`   - ${c.brightCyan}/model 4${c.yellow} : Groq Llama 3.3 70B (Đang có sẵn key)`);
-          console.log(`   - ${c.brightCyan}/model 25${c.yellow}: Pollinations GPT-4o-mini (Không cần key)${c.reset}\n`);
+          console.log(`\n${c.yellow}💡 Tip: This model does not exist or the account/API key lacks access.`);
+          console.log(`👉 You can switch right away to models that work with your available keys:`);
+          console.log(`   - ${c.brightCyan}/model 1${c.yellow} : Google Gemini Flash (Key available)`);
+          console.log(`   - ${c.brightCyan}/model 4${c.yellow} : Groq Llama 3.3 70B (Key available)`);
+          console.log(`   - ${c.brightCyan}/model 25${c.yellow}: Pollinations GPT-4o-mini (No key needed)${c.reset}\n`);
         } else if (err.message && err.message.includes('402')) {
-          console.log(`\n${c.yellow}💡 Gợi ý: Tài khoản hiện tại đã hết số dư ($0.00).`);
-          console.log(`👉 Bạn chỉ cần gõ ${c.brightCyan}/model 1${c.yellow} để chuyển sang ${c.bold}Google Gemini Flash (Miễn phí 100%)${c.yellow} hoặc ${c.brightCyan}/model 4${c.yellow} (Groq Free)!${c.reset}\n`);
+          console.log(`\n${c.yellow}💡 Tip: The current account is out of credit ($0.00).`);
+          console.log(`👉 Just type ${c.brightCyan}/model 1${c.yellow} to switch to ${c.bold}Google Gemini Flash (100% free)${c.yellow} or ${c.brightCyan}/model 4${c.yellow} (Groq Free)!${c.reset}\n`);
         } else if (err.message && err.message.includes('401')) {
-          console.log(`\n${c.yellow}💡 Gợi ý: API Key của nhà cung cấp này không hợp lệ hoặc đã hết hạn.`);
-          console.log(`👉 Vui lòng kiểm tra lại file .env hoặc gõ ${c.brightCyan}/model 1${c.yellow} để dùng Gemini.${c.reset}\n`);
+          console.log(`\n${c.yellow}💡 Tip: This provider's API key is invalid or expired.`);
+          console.log(`👉 Please check your .env file or type ${c.brightCyan}/model 1${c.yellow} to use Gemini.${c.reset}\n`);
         }
       }
 
@@ -2988,7 +2988,7 @@ ${planPrompt}`;
       while (activeSession && agentLoop.inbox.pending(activeSession.id) > 0 && !isShuttingDown) {
         const nextPending = agentLoop.inbox.peek(activeSession.id);
         if (!nextPending) break;
-        console.log(`\n  ${c.bgCyan}${c.bold} ⚡ ĐANG XỬ LÝ CÂU LỆNH TỒN ĐỌNG TỪ HÀNG ĐỢI ${c.reset} [${nextPending.id}]`);
+        console.log(`\n  ${c.bgCyan}${c.bold} ⚡ PROCESSING PENDING COMMANDS FROM THE QUEUE ${c.reset} [${nextPending.id}]`);
         console.log(`  ${c.brightCyan}"${nextPending.text}"${c.reset}\n`);
         sessionCount++;
         try {
@@ -2997,7 +2997,7 @@ ${planPrompt}`;
             checkAndAutoCompleteGoal();
           });
         } catch (drainErr: any) {
-          console.error(`\n${c.red}${c.bold}❌ Lỗi xử lý hàng đợi Queued Messages:${c.reset}`, drainErr.message);
+          console.error(`\n${c.red}${c.bold}❌ Error processing the Queued Messages queue:${c.reset}`, drainErr.message);
           break;
         }
       }
