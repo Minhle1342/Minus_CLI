@@ -1129,7 +1129,13 @@ export class AgentLoop {
         await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
         this.goalManager.disarm();
         rejectSteerItems(new Error(cancellationMessage));
-        this.inbox.clear(session.id, cancellationMessage);
+        // NOTE: queued (not yet claimed) steering messages are preserved when a
+        // drain loop owns this session, so the post-turn drain can execute them
+        // with a fresh signal. Without a drainer (direct run), clear to avoid
+        // hanging promises.
+        if (!this.drainingInbox || this.drainingSessionId !== session.id) {
+          this.inbox.clear(session.id, cancellationMessage);
+        }
         return cancellationMessage;
       }
 
@@ -4033,7 +4039,9 @@ export class AgentLoop {
       if (claimedSteerItems.length > 0) {
         rejectSteerItems(new Error('Agent turn ended abruptly before steer message could be resolved.'));
       }
-      if (options?.signal?.aborted) {
+      // Preserve the queue for the drain loop when one owns this session (see
+      // the break in drainInbox); otherwise clear so no promise hangs forever.
+      if (options?.signal?.aborted && (!this.drainingInbox || this.drainingSessionId !== session.id)) {
         this.inbox.clear(session.id, 'Agent execution cancelled.');
       }
     }
@@ -4267,6 +4275,10 @@ export class AgentLoop {
         } catch (error) {
           item.reject(error);
         }
+        // An aborted signal must not be reused for the remaining queue:
+        // leave leftovers pending so the post-turn drain executes them
+        // with a fresh signal instead of instant-cancelling each one.
+        if (options?.signal?.aborted) break;
       }
     } finally {
       this.drainingInbox = false;

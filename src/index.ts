@@ -667,6 +667,52 @@ async function main() {
   let activeExecutionController: AbortController | null = null;
   let lastCancellationTimestamp = 0;
   let isPromptingPermission = false;
+  // Canceller for the currently pending interactive question (permission / pickers).
+  // rl.question has no cancellation API, so all interactive prompts go through
+  // askCancellable, which listens on rl 'line' directly and can be dismissed.
+  let activeQuestionCancel: (() => void) | null = null;
+
+  /**
+   * Cancellable replacement for rl.question (which cannot be aborted).
+   * Resolves with the typed line, or undefined when cancelled via Esc / Ctrl+C
+   * (through activeQuestionCancel) or an aborted AbortSignal.
+   */
+  const askCancellable = (
+    rlInterface: readline.Interface,
+    promptText: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> => {
+    return new Promise((resolve) => {
+      let settled = false;
+      const cleanup = () => {
+        if (activeQuestionCancel === onAbort) activeQuestionCancel = null;
+        rlInterface.removeListener('line', onLine);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onLine = (line: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(line);
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try { output.write('\n'); } catch {}
+        resolve(undefined);
+      };
+      activeQuestionCancel = onAbort;
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      rlInterface.setPrompt(promptText);
+      rlInterface.prompt();
+      rlInterface.on('line', onLine);
+    });
+  };
 
   const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
     const controller = new AbortController();
@@ -683,7 +729,6 @@ async function main() {
     } finally {
       if (activeExecutionController === controller) {
         activeExecutionController = null;
-        lastCancellationTimestamp = Date.now();
       }
     }
   };
@@ -846,6 +891,11 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     if (trimmed === '/cancel' || trimmed === '/stop' || trimmed === '/abort') {
       activeExecutionController.abort();
       lastCancellationTimestamp = Date.now();
+      // /cancel means "stop everything": drop queued steering too (Esc/Ctrl+C
+      // preserves the queue so it can run as follow-up turns instead).
+      if (activeSession) {
+        agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.');
+      }
       slashHints.clear();
       CLI.renderTaskCancelledToast('Stopped the running task as requested (/cancel).');
       return;
@@ -882,6 +932,16 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
   const handleGracefulShutdown = async (signal: string) => {
     const now = Date.now();
+
+    // 0. Esc / Ctrl+C dismisses a pending interactive question first
+    // (permission dialog, session/model/goal pickers) instead of exiting.
+    // SIGTERM still proceeds to safe exit below.
+    if (signal === 'SIGINT' && activeQuestionCancel && !activeExecutionController) {
+      activeQuestionCancel();
+      slashHints.clear(promptWidth);
+      CLI.renderTaskCancelledToast('Dismissed the current prompt (Ctrl+C / Esc).');
+      return;
+    }
 
     // 1. Nếu đang có tác vụ đang thực thi (activeExecutionController):
     // Dừng tác vụ ngay lập tức, KHÔNG đóng chương trình, tự động hiển thị thông báo sẵn sàng nhận prompt mới!
@@ -951,9 +1011,16 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
   let slashHintRefreshScheduled = false;
   const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
+    const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
+    // Esc / Ctrl+C dismisses a pending interactive question (pickers). While a task
+    // runs, the abort below resolves the permission dialog through its signal instead.
+    if (isCancelKey && activeQuestionCancel && !activeExecutionController) {
+      activeQuestionCancel();
+      slashHints.clear(promptWidth);
+      return;
+    }
     // Phím tắt Ctrl+C hoặc Escape trong lúc đang thực thi: Hủy tác vụ hiện tại ngay lập tức (Antigravity CLI style)
     if (activeExecutionController) {
-      const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
       if (isCancelKey) {
         activeExecutionController.abort();
         lastCancellationTimestamp = Date.now();
@@ -1094,7 +1161,18 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       CLI.stopToolDotSpinner();
 
       CLI.renderPermissionPrompt(request);
-      const answer = (await rl.question(`  ${c.brightYellow}${c.bold}👉 Approve execution? [y: Approve | n: Reject | a: Always approve in session]:${c.reset} `)).trim().toLowerCase();
+      const rawAnswer = await askCancellable(
+        rl,
+        `  ${c.brightYellow}${c.bold}👉 Approve execution? [y: Approve | n: Reject | a: Always approve in session]:${c.reset} `,
+        activeExecutionController?.signal,
+      );
+      flushStdin(rl);
+      // Esc / Ctrl+C dismisses the dialog: fail safe by denying the permission.
+      if (rawAnswer === undefined) {
+        flushStdin(rl);
+        return 'reject';
+      }
+      const answer = rawAnswer.trim().toLowerCase();
       flushStdin(rl);
 
       if (answer === 'y' || answer === 'yes' || answer === '') {
@@ -1685,8 +1763,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
             const activeMarker = id === activeSession.id ? `${c.green}▶ active${c.reset}` : '';
             console.log(`  ${c.brightYellow}[${index + 1}]${c.reset} ${id} ${activeMarker}`);
           });
-          const answer = (await rl.question(`  Select a number or session ID (Enter/0 to cancel): `)).trim();
-          if (!answer || answer === '0' || answer.toLowerCase() === 'q') {
+          const answer = (await askCancellable(rl, `  Select a number or session ID (Enter/0 to cancel): `))?.trim();
+          if (answer === undefined || !answer || answer === '0' || answer.toLowerCase() === 'q') {
             console.log(`${c.gray}Resume cancelled; the current session is unchanged.${c.reset}\n`);
             continue;
           }
@@ -2117,7 +2195,7 @@ ${planPrompt}`;
         let taskPrompt = goalArg;
         if (!taskPrompt) {
           CLI.renderGoalStatus(agentLoop.isGoalMode);
-          const inputGoal = (await rl.question(`${c.brightMagenta}Enter the objective to execute (or 'on'/'off' to switch modes): ${c.reset}`)).trim();
+          const inputGoal = (await askCancellable(rl, `${c.brightMagenta}Enter the objective to execute (or 'on'/'off' to switch modes): ${c.reset}`))?.trim();
           if (!inputGoal) {
             console.log(`${c.dim}Cancelled the /goal command.${c.reset}\n`);
             continue;
@@ -2280,7 +2358,7 @@ ${planPrompt}`;
         // Nếu người dùng chỉ gõ /model hoặc /modal mà không truyền tên -> Mở menu chọn số thứ tự
         if (!targetModel) {
           CLI.renderModelSelector(modelName);
-          const choice = (await rl.question(`${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`)).trim();
+          const choice = (await askCancellable(rl, `${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`))?.trim();
           
           if (!choice) {
             console.log(`${c.dim}Model selection cancelled.${c.reset}\n`);
