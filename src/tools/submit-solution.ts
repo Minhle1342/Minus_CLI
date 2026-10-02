@@ -95,6 +95,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         session: (context as any)?.session,
         turn: context?.turn,
         workspaceRoot: workspace.rootDir,
+        userRequest: context?.userRequest,
       });
 
       if (!audit.allowed) {

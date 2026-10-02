@@ -119,11 +119,11 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(exploreDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('formulate_and_verify_hypothesis'), 'formulate_and_verify_hypothesis must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in explore');
-  assert.equal(exploreDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must not be exposed in explore');
+  assert.ok(exploreDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore phase');
   assert.ok(exploreDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be exposed in explore');
   assert.ok(exploreDecision.allowedToolNames.includes('request_phase_transition'), 'coding exploration can request a Harness-owned transition');
 
-  // 2. Pure read-only exploration (must NOT include editing mutations)
+  // 2. Pure read-only exploration (edit tools still available for immediate fixes)
   const readOnlyClassification: any = {
     id: 'class-test-readonly',
     taskClass: 'exploration',
@@ -135,7 +135,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   };
   const readOnlyDecision = gate.decide(readOnlyClassification, registry.getAll());
   assert.ok(readOnlyDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed in read-only');
-  assert.equal(readOnlyDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in pure read-only exploration');
+  assert.ok(readOnlyDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore phase');
   assert.ok(readOnlyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in pure read-only exploration');
 
   // 3. Implement phase on feature
@@ -339,7 +339,7 @@ test('Phase governance banners are advisory: no lock/disable/forbid claims', () 
   }
 });
 
-test('create_file and edit tools are blocked in plan/explore but fully authorized in implement after phase authority elevation', () => {
+test('create_file and edit tools are authorized in all phases including plan/explore and implement', () => {
   const registry = new ToolRegistry(new PlanManager());
   const gate = new ThisTurnToolGate();
   const engine = new ClassificationEngine();
@@ -356,9 +356,9 @@ test('create_file and edit tools are blocked in plan/explore but fully authorize
   };
 
   const planDecision = gate.decide(planClassification, registry.getAll());
-  assert.equal(planDecision.allowedToolNames.includes('create_file'), false, 'create_file must NOT be allowed in plan phase');
-  assert.equal(planDecision.allowedToolNames.includes('replace_text'), false, 'replace_text must NOT be allowed in plan phase');
-  assert.equal(planDecision.allowedToolNames.includes('write_file'), false, 'write_file must NOT be allowed in plan phase');
+  assert.ok(planDecision.allowedToolNames.includes('create_file'), 'create_file is authorized in plan phase');
+  assert.ok(planDecision.allowedToolNames.includes('replace_text'), 'replace_text is authorized in plan phase');
+  assert.ok(planDecision.allowedToolNames.includes('write_file'), 'write_file is authorized in plan phase');
   assert.ok(planDecision.allowedToolNames.includes('request_phase_transition'), 'request_phase_transition must be allowed in plan phase');
 
   // 2. Transition accepted to implement
@@ -420,11 +420,11 @@ test('Hybrid Multilingual Architecture: Supports English, Vietnamese, French, Ja
     assert.ok(initialDecision.allowedToolNames.includes('read_file'), `[${lang}] must allow read_file`);
     assert.ok(initialDecision.allowedToolNames.includes('search_text'), `[${lang}] must allow search_text`);
     
-    // If in explore/plan, edit tools are guarded and transition is available
+    // In all phases, edit tools are authorized and transition is available
     if (classification.phase === 'explore' || classification.phase === 'plan') {
       assert.ok(initialDecision.allowedToolNames.includes('request_phase_transition'), `[${lang}] must expose request_phase_transition`);
-      assert.equal(initialDecision.allowedToolNames.includes('create_file'), false, `[${lang}] must not expose create_file in ${classification.phase}`);
-      assert.equal(initialDecision.allowedToolNames.includes('replace_text'), false, `[${lang}] must not expose replace_text in ${classification.phase}`);
+      assert.ok(initialDecision.allowedToolNames.includes('create_file'), `[${lang}] must expose create_file in ${classification.phase}`);
+      assert.ok(initialDecision.allowedToolNames.includes('replace_text'), `[${lang}] must expose replace_text in ${classification.phase}`);
 
       // 2. Perform phase transition to implement with evidence
       const session = new Session();
@@ -483,6 +483,68 @@ test('replace_text and edit tools remain authorized in implement phase across mu
   assert.ok(decision.allowedToolNames.includes('submit_solution'), 'submit_solution must be authorized in implement');
 });
 
+test('EDIT and CREATE tools are authorized in ALL phases across all MINUS_TOOL_CONTROL_MODEs', async () => {
+  const gate = new ThisTurnToolGate();
+  const registry = new ToolRegistry();
+  const workspace = new Workspace(process.cwd());
 
+  const editAndCreateTools = [
+    'replace_text',
+    'create_file',
+    'write_file',
+    'apply_patch',
+    'delete_file',
+    'move_file',
+    'write_to_file',
+    'replace_file_content',
+    'multi_replace_file_content',
+  ];
 
+  const phases = ['explore', 'plan', 'implement', 'verify', 'release'] as const;
 
+  for (const phase of phases) {
+    const classification: any = {
+      id: `class-test-${phase}`,
+      taskClass: 'exploration',
+      phase,
+      complexity: 'small',
+      risk: 'R0',
+      requiredCapabilities: ['inspect', 'search'],
+      reversibility: 'read-only',
+    };
+
+    const decision = gate.decide(classification, registry.getAll());
+    for (const toolName of editAndCreateTools) {
+      assert.ok(
+        decision.allowedToolNames.includes(toolName),
+        `Tool "${toolName}" must be authorized in phase "${phase}" by ThisTurnToolGate`,
+      );
+    }
+
+    // Verify ToolRunner execution across all 3 modes (off, shadow, enforce)
+    const runner = new ToolRunner(registry, workspace);
+    const context: any = {
+      decisionId: decision.id,
+      allowedToolNames: decision.allowedToolNames,
+      allowedToolSetHash: decision.allowedToolSetHash,
+      classificationPhase: phase,
+      turn: 1,
+    };
+
+    for (const controlMode of ['off', 'shadow', 'enforce'] as const) {
+      // Test with replace_text (mock or real args)
+      const res = await runner.run('replace_text', {
+        filePath: 'non_existent_anchor_test.ts',
+        oldText: 'a',
+        newText: 'b',
+      }, { ...context, controlMode });
+
+      // Must NOT be blocked by TOOL_NOT_ALLOWED_THIS_TURN
+      assert.notEqual(
+        res.result?.errorCode,
+        'TOOL_NOT_ALLOWED_THIS_TURN',
+        `replace_text must NOT be rejected with TOOL_NOT_ALLOWED_THIS_TURN in phase "${phase}" under controlMode "${controlMode}"`,
+      );
+    }
+  }
+});

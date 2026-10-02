@@ -33,7 +33,7 @@ import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-r
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
-import { CompletionEvidenceGate, extractCommandString, isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
+import { CompletionEvidenceGate, extractCommandString, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
@@ -1232,6 +1232,9 @@ export class AgentLoop {
       const exploreCompletedNow = false;
       previousClassification = classification;
 
+      const configuredReproMode = configuredEvidenceGateMode()
+        || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
+
       // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng & Reproduction Verification cho ToolUseGuardian
       this.toolRunner.guardian.setPreMutationGateContext({
         isBugfixTask: classification.taskClass === 'bugfix',
@@ -1258,8 +1261,11 @@ export class AgentLoop {
         ...(this.cascadeFreeze
           ? { cascadeReason: `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}` }
           : {}),
+        allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
+        userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(retrievalUserRequest),
         reproductionStatus: {
-          hasPostFixPass: this.completionEvidenceGate.hasVerifiedPassingTest(session, turn),
+          enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
+          hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
           hasPreFixRepro: paretoEvidence.hasFailureEvidence || hasValidatedHypothesis,
         },
       });
@@ -2652,6 +2658,8 @@ export class AgentLoop {
             });
             inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(classification.risk)
               && paretoEvidence.inspectedFiles.length > 0;
+            const configuredReproMode = configuredEvidenceGateMode()
+              || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
             const previousGate = this.toolRunner.guardian.getPreMutationGateContext();
             this.toolRunner.guardian.setPreMutationGateContext({
               ...previousGate!,
@@ -2663,8 +2671,12 @@ export class AgentLoop {
               evidenceReasons: paretoEvidence.reasons,
               inspectedFiles: paretoEvidence.inspectedFiles,
               hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
+              allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
+              userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest || retrievalUserRequest),
               reproductionStatus: {
                 ...previousGate?.reproductionStatus,
+                enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
+                hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
                 hasPreFixRepro: paretoEvidence.hasFailureEvidence || validatedNow.length > 0,
               },
             });
@@ -2727,7 +2739,7 @@ export class AgentLoop {
                 changedFileCount: this.targetFilesModifiedInTurn.size,
                 hasCallers: this.editTouchedCallers,
                 blastRisk: this.maxEditBlastRisk,
-                sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => isSensitivePath(file)),
+                sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
               })
               : undefined;
 

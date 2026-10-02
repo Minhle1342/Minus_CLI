@@ -6,7 +6,7 @@ import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
-import { READ_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
+import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
 
 /**
@@ -266,7 +266,8 @@ export class ToolRunner {
     if (controlMode === 'shadow' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
       const hashValid = Boolean(context.decisionId && context.allowedToolSetHash && hashAllowedToolSet(names) === context.allowedToolSetHash);
-      const isAllowed = isToolAuthorized(toolName, names) || (toolName === 'update_plan_task' && Boolean(this.registry.get('update_plan_task')));
+      const isEditOrCreate = EDIT_TOOL_NAMES.has(toolName);
+      const isAllowed = isToolAuthorized(toolName, names) || isEditOrCreate || (toolName === 'update_plan_task' && Boolean(this.registry.get('update_plan_task')));
       const currentCallCount = this.budgetTracker.getCallCount(context.turn);
       const isWithinBudget = context.maxToolCalls === undefined || currentCallCount < context.maxToolCalls;
 
@@ -316,7 +317,8 @@ export class ToolRunner {
       }
       const targetTool = this.getTool(toolName);
       const isMutationInImplement = context.classificationPhase === 'implement' && Boolean(this.rootRegistry?.get(toolName));
-      const canGracefullyBypass = (toolName === 'update_plan_task' || isMutationInImplement) && Boolean(targetTool);
+      const isEditOrCreateTool = EDIT_TOOL_NAMES.has(toolName);
+      const canGracefullyBypass = (toolName === 'update_plan_task' || isMutationInImplement || isEditOrCreateTool) && Boolean(targetTool);
       if (!isToolAuthorized(toolName, names) && !canGracefullyBypass) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';

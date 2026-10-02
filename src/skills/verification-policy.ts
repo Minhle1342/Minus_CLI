@@ -152,7 +152,8 @@ export class VerificationPolicy {
       this.modifiedFiles.add(filePath);
     }
     const isNonExec = filePath ? isNonExecutableFile(filePath) : false;
-    if (!filePath || !isNonExec || isSensitivePath(filePath) || ['R3', 'R4', 'R5'].includes(this.requiredRisk)) {
+    const isSensitiveCode = filePath ? (!isNonExec && isSensitivePath(filePath)) : false;
+    if (!filePath || !isNonExec || isSensitiveCode || ['R3', 'R4', 'R5'].includes(this.requiredRisk)) {
       this.hasUnverifiedModifications = true;
       this.lastVerification = undefined;
       this.verificationHistory = [];
@@ -260,7 +261,7 @@ export class VerificationPolicy {
     const hasOnlyNonExecutableModifications =
       this.modifiedFiles.size > 0 &&
       ['R0', 'R1', 'R2'].includes(this.requiredRisk) &&
-      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f) && !isSensitivePath(f));
+      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f));
 
     const mandatesVerification = (this.modifiedFiles.size > 0 && !hasOnlyNonExecutableModifications)
       || this.hasUnverifiedModifications
@@ -300,7 +301,7 @@ export class VerificationPolicy {
         classificationRisk: this.requiredRisk,
         blastRisk: measured?.blastRisk,
         sensitivePathTouched: measured?.sensitivePathTouched
-          ?? Array.from(this.modifiedFiles).some((file) => isSensitivePath(file)),
+          ?? Array.from(this.modifiedFiles).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
       });
       if (measuredDecision.level !== 'LOW') {
         minimum = 'full_test';

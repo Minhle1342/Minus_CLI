@@ -101,6 +101,13 @@ export function isNonExecutableFile(filePath: string): boolean {
   );
 }
 
+export function isUserExplicitlyExemptingTests(userRequest?: string): boolean {
+  if (!userRequest) return false;
+  return /\b(?:khong can (?:chay )?(?:test|kiem thu|build)|no test(?:ing)? required|skip test(?:ing)?|do not run tests?)\b/i.test(
+    userRequest.normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
+  );
+}
+
 export function classifyToolEvidence(
   toolName: string,
   args: Record<string, any> = {},
@@ -230,12 +237,7 @@ export class CompletionEvidenceGate {
     // Thu thập đường dẫn các file đã được chỉnh sửa
     const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));
     const allMutationsAreNonExecutable = mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile) && mutations.every((m) => observedMutationFiles(m.toolName, m.args, m.payload).length > 0);
-    const userExplicitlyExemptsTesting = Boolean(
-      options.userRequest &&
-      /\b(?:khong can (?:chay )?(?:test|kiem thu|build)|no test(?:ing)? required|skip test(?:ing)?|do not run tests?)\b/i.test(
-        options.userRequest.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      )
-    );
+    const userExplicitlyExemptsTesting = isUserExplicitlyExemptingTests(options.userRequest);
 
     if (effectiveCodeChangeRequired && mutations.length === 0) {
       reasons.push('The request requires a code change, but no successful mutation result exists in this turn.');
@@ -484,5 +486,32 @@ export class CompletionEvidenceGate {
     return successful.some(
       (item) => item.kinds.includes('verification') && item.result.seq > latestMutationSeq,
     );
+  }
+
+  /**
+   * SWE-Reasoner Reproduction Verification:
+   * Kiểm tra xem đã có bài test kiểm chứng (verification) HOẶC bài test tái hiện (scratch reproduction script)
+   * chạy thành công (exit code 0 / PASS) sau lần sửa code cuối cùng hay chưa.
+   */
+  hasPostFixReproductionPass(session: Session, turn?: number): boolean {
+    const executions = this.executionsForTurn(session, turn);
+    const successful = executions.filter((item) => !isToolResultFailure(item.payload));
+    const mutations = successful.filter((item) => item.kinds.includes('mutation'));
+    const latestMutationSeq = mutations.at(-1)?.result.seq ?? -1;
+    return successful.some(
+      (item) => (item.kinds.includes('verification') || item.kinds.includes('reproduction')) && item.result.seq > latestMutationSeq,
+    );
+  }
+
+  /**
+   * Kiểm tra xem toàn bộ các mutation đã quan sát được có phải đều là file tĩnh / tài liệu / config không thực thi hay không.
+   */
+  hasOnlyNonExecutableMutations(session: Session, turn?: number): boolean {
+    const executions = this.executionsForTurn(session, turn);
+    const successful = executions.filter((item) => !isToolResultFailure(item.payload));
+    const mutations = successful.filter((item) => item.kinds.includes('mutation'));
+    if (mutations.length === 0) return false;
+    const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));
+    return mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile);
   }
 }
