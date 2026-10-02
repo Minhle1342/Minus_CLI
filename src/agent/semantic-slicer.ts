@@ -1,6 +1,7 @@
 import ts from 'typescript';
+import { getNativeCore } from '../native/index.js';
 
-export type SymbolParser = 'typescript-ast' | 'python-indentation' | 'heuristic';
+export type SymbolParser = 'typescript-ast' | 'python-indentation' | 'rust-tree-sitter' | 'heuristic';
 export type ExtractionConfidence = 'high' | 'medium' | 'low';
 
 export interface CodeSymbol {
@@ -12,6 +13,9 @@ export interface CodeSymbol {
   signature: string;
   parser?: SymbolParser;
   confidence?: ExtractionConfidence;
+  outgoingCalls?: string[];
+  typesReferenced?: string[];
+  graphEdges?: Array<{ target: string; relation: 'calls' | 'uses_type' | 'extends' | 'implements' | 'imports'; weight?: number; targetPath?: string }>;
 }
 
 export interface FileOutline {
@@ -21,6 +25,7 @@ export interface FileOutline {
   summary: string;
   parser: SymbolParser;
   confidence: ExtractionConfidence;
+  imports?: string[];
 }
 
 export interface SymbolSlice {
@@ -39,6 +44,7 @@ interface ParsedSymbols {
   symbols: CodeSymbol[];
   parser: SymbolParser;
   confidence: ExtractionConfidence;
+  imports?: string[];
 }
 
 /**
@@ -57,7 +63,7 @@ export class SemanticSlicer {
         + (symbols.length > 8 ? `... và ${symbols.length - 8} symbols khác.` : '.')
       : `File "${filePath}" (${totalLines} dòng). Không phát hiện symbols cấp cao [${parsed.parser}/${parsed.confidence}].`;
 
-    return { path: filePath, totalLines, symbols, summary, parser: parsed.parser, confidence: parsed.confidence };
+    return { path: filePath, totalLines, symbols, summary, parser: parsed.parser, confidence: parsed.confidence, ...(parsed.imports ? { imports: parsed.imports } : {}) };
   }
 
   static sliceSymbol(content: string, symbolName: string, filePath = 'file.ts'): SymbolSlice {
@@ -99,7 +105,38 @@ export class SemanticSlicer {
       return this.parseTypeScript(filePath, content);
     }
     if (extension === '.py') return this.parsePython(content);
+    if (extension === '.rs') return this.parseRust(content);
     return this.parseHeuristically(content);
+  }
+
+  private static parseRust(content: string): ParsedSymbols {
+    const native = getNativeCore();
+    if (process.env.MINUS_DISABLE_NATIVE_RUST_PARSER === '1' || typeof native?.rsParseRustCode !== 'function') return this.parseHeuristically(content);
+    try {
+      const parsed = native.rsParseRustCode(content);
+      if (!parsed || !Array.isArray(parsed.symbols)) return this.parseHeuristically(content);
+      const maxLine = content.split('\n').length;
+      const confidence: ExtractionConfidence = parsed.hasError ? 'low' : 'high';
+      const symbols: CodeSymbol[] = parsed.symbols
+        .filter((symbol) => symbol.name && symbol.startLine >= 1 && symbol.endLine >= symbol.startLine && symbol.endLine <= maxLine)
+        .map((symbol) => ({
+          name: symbol.name,
+          qualifiedName: symbol.qualifiedName,
+          kind: symbol.kind as CodeSymbol['kind'],
+          startLine: symbol.startLine,
+          endLine: symbol.endLine,
+          signature: symbol.signature,
+          parser: 'rust-tree-sitter' as const,
+          confidence,
+          outgoingCalls: symbol.outgoingCalls,
+          typesReferenced: symbol.typesReferenced,
+          graphEdges: symbol.graphEdges.filter((edge) =>
+            ['calls', 'uses_type', 'extends', 'implements', 'imports'].includes(edge.relation)) as CodeSymbol['graphEdges'],
+        }));
+      return { symbols, parser: 'rust-tree-sitter', confidence, imports: parsed.imports };
+    } catch {
+      return this.parseHeuristically(content);
+    }
   }
 
   private static parseTypeScript(filePath: string, content: string): ParsedSymbols {

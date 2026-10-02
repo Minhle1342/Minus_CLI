@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 #[napi(object)]
 pub struct RsExtractResult {
     pub files_extracted: u32,
-    pub bytes_written: u64,
+    pub bytes_written: f64,
     pub top_level_stripped: bool,
 }
 
@@ -162,7 +162,7 @@ pub fn extract_archive_native(
     };
     Ok(RsExtractResult {
         files_extracted,
-        bytes_written,
+        bytes_written: bytes_written as f64,
         top_level_stripped,
     })
 }

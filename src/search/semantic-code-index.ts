@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { getNativeCore, type NativeCodeGraph, type NativeGraphEdge } from '../native/index.js';
 import {
   createCodeEmbeddingProviderFromEnv,
   type CodeEmbeddingProvider,
@@ -49,6 +50,7 @@ const EXTENSIONS = new Set([
 const IGNORED_DIRECTORIES = new Set([
   'node_modules', '.git', 'dist', 'build', '.codingagent', '.minus', '.next', '.cache', 'coverage', 'out',
 ]);
+const CHUNK_SCHEMA_VERSION = 'code-chunks-v2-rust-ast';
 
 /** Symbol-level semantic index with incremental embedding reuse and bounded graph expansion. */
 export class SemanticCodeIndex {
@@ -57,6 +59,11 @@ export class SemanticCodeIndex {
   private readonly store: PersistentVectorStore<SemanticCodeChunk>;
   private fileManifest = new Map<string, string>();
   private chunksByPath = new Map<string, SemanticCodeChunk[]>();
+  private chunksById = new Map<string, SemanticCodeChunk>();
+  private chunksByName = new Map<string, SemanticCodeChunk[]>();
+  private outEdges = new Map<string, Array<{ targetId: string; relation: string; weight: number }>>();
+  private inEdges = new Map<string, Array<{ sourceId: string; relation: string; weight: number }>>();
+  private nativeGraph?: NativeCodeGraph;
   private buildPromise?: Promise<number>;
   private status: SemanticCodeIndexDiagnostics['status'] = 'cold';
   private builtAt?: string;
@@ -138,7 +145,7 @@ export class SemanticCodeIndex {
     const missing: EmbeddingInput[] = [];
     for (const chunk of chunks) {
       const previous = existing.get(chunk.id);
-      if (previous && previous.metadata.sourceHash === chunk.sourceHash) {
+      if (previous && previous.metadata.sourceHash === chunk.sourceHash && previous.metadata.embeddingText === chunk.embeddingText) {
         vectorsById.set(chunk.id, previous.vector);
       } else {
         missing.push({ id: chunk.id, text: chunk.embeddingText });
@@ -152,6 +159,7 @@ export class SemanticCodeIndex {
       missing.forEach((item, index) => vectorsById.set(item.id, vectors[index]));
     }
     const revisionMaterial = [
+      CHUNK_SCHEMA_VERSION,
       this.provider.modelId,
       ...[...manifest.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value}`),
     ].join('\n');
@@ -210,54 +218,323 @@ export class SemanticCodeIndex {
 
   private rebuildPathMap(chunks: SemanticCodeChunk[]): void {
     this.chunksByPath.clear();
+    this.chunksById.clear();
+    this.chunksByName.clear();
+    this.outEdges.clear();
+    this.inEdges.clear();
+    this.nativeGraph = undefined;
+
     for (const chunk of chunks) {
+      this.chunksById.set(chunk.id, chunk);
+
       const existing = this.chunksByPath.get(chunk.path) || [];
       existing.push(chunk);
       this.chunksByPath.set(chunk.path, existing);
+
+      const nameList = this.chunksByName.get(chunk.name) || [];
+      nameList.push(chunk);
+      this.chunksByName.set(chunk.name, nameList);
     }
+
+    // Xây dựng các cạnh đồ thị ngữ nghĩa (Callers, Callees, Types, Inheritance)
+    for (const chunk of chunks) {
+      const edges = chunk.graphEdges || [];
+      for (const edge of edges) {
+        const candidates = this.chunksByName.get(edge.target) || [];
+        if (candidates.length === 0) continue;
+
+        // Qualified Rust calls must resolve through their named module or local owner.
+        let resolved: SemanticCodeChunk | undefined;
+        const targetPath = edge.targetPath;
+        if (chunk.language === 'rust' && targetPath) {
+          resolved = candidates.find((c) => c.path === chunk.path
+            && c.qualifiedName.endsWith(`::${targetPath.replaceAll('::', '.')}.${edge.target}`));
+          const imports = chunk.imports.filter((imp) => imp === targetPath
+            || imp.endsWith(`::${targetPath}`));
+          if (/^(?:crate|self|super)::/.test(targetPath)) imports.push(targetPath);
+          if (!resolved) resolved = candidates.find((c) => imports.some((imp) =>
+            this.resolveImportPath(chunk.path, imp) === c.path));
+          if (!resolved) continue;
+        }
+
+        // Prefer a local symbol, then a symbol in a referenced file.
+        if (!resolved) resolved = candidates.find((c) => c.path === chunk.path);
+        if (!resolved && chunk.imports.length > 0) {
+          resolved = candidates.find((c) => {
+            return chunk.imports.some((imp) => {
+              const res = this.resolveImportPath(chunk.path, imp);
+              return res === c.path;
+            });
+          });
+        }
+        if (!resolved && chunk.language !== 'rust') {
+          resolved = candidates[0];
+        } else if (!resolved && candidates.length === 1) {
+          resolved = candidates[0];
+        }
+
+        if (resolved && resolved.id !== chunk.id) {
+          const outs = this.outEdges.get(chunk.id) || [];
+          if (!outs.some((e) => e.targetId === resolved!.id)) {
+            outs.push({ targetId: resolved.id, relation: edge.relation, weight: edge.weight ?? 1.0 });
+            this.outEdges.set(chunk.id, outs);
+          }
+          const ins = this.inEdges.get(resolved.id) || [];
+          if (!ins.some((e) => e.sourceId === chunk.id)) {
+            ins.push({ sourceId: chunk.id, relation: edge.relation, weight: edge.weight ?? 1.0 });
+            this.inEdges.set(resolved.id, ins);
+          }
+        }
+      }
+    }
+
+    const constructor = getNativeCore()?.RsCodeGraph;
+    if (constructor) {
+      try {
+        const edges: NativeGraphEdge[] = [];
+        for (const [source, outgoing] of this.outEdges) {
+          for (const edge of outgoing) edges.push({ source, target: edge.targetId, weight: edge.weight });
+        }
+        this.nativeGraph = new constructor(chunks.map((chunk) => chunk.id), edges);
+      } catch {
+        this.nativeGraph = undefined;
+      }
+    }
+  }
+
+  /**
+   * Personalized PageRank (PPR) lan truyền xác suất trên Code Property Graph
+   */
+  computePersonalizedPageRank(
+    seeds: Map<string, number>,
+    mode: GraphExpansionMode,
+    maxIterations = 8,
+    dampingFactor = 0.85,
+  ): Map<string, number> {
+    if (seeds.size === 0) return new Map();
+
+    let totalInitial = 0;
+    for (const score of seeds.values()) totalInitial += score;
+    const p0 = new Map<string, number>();
+    for (const [id, score] of seeds) {
+      p0.set(id, totalInitial > 0 ? score / totalInitial : 1 / seeds.size);
+    }
+
+    let pCurrent = new Map<string, number>(p0);
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+      const pNext = new Map<string, number>();
+
+      for (const [nodeId, score] of pCurrent) {
+        if (score <= 0) continue;
+
+        const outList: Array<{ neighborId: string; weight: number }> = [];
+
+        if (mode === 'dependencies' || mode === 'auto') {
+          for (const edge of this.outEdges.get(nodeId) || []) {
+            outList.push({ neighborId: edge.targetId, weight: edge.weight });
+          }
+        }
+
+        if (mode === 'impact' || mode === 'auto') {
+          for (const edge of this.inEdges.get(nodeId) || []) {
+            outList.push({ neighborId: edge.sourceId, weight: edge.weight });
+          }
+        }
+
+        if (outList.length === 0) {
+          pNext.set(nodeId, (pNext.get(nodeId) || 0) + score * (1 - dampingFactor));
+          continue;
+        }
+
+        let totalWeight = 0;
+        for (const out of outList) totalWeight += out.weight;
+
+        for (const out of outList) {
+          const transitionProb = totalWeight > 0 ? out.weight / totalWeight : 1 / outList.length;
+          const contributed = score * dampingFactor * transitionProb;
+          pNext.set(out.neighborId, (pNext.get(out.neighborId) || 0) + contributed);
+        }
+      }
+
+      for (const [id, restartProb] of p0) {
+        pNext.set(id, (pNext.get(id) || 0) + (1 - dampingFactor) * restartProb);
+      }
+
+      pCurrent = pNext;
+    }
+
+    return pCurrent;
   }
 
   private expandGraph(seeds: SemanticCodeSearchHit[], mode: GraphExpansionMode): SemanticCodeSearchHit[] {
     const results = [...seeds];
-    const reverseImports = new Map<string, Set<string>>();
-    for (const [sourcePath, chunks] of this.chunksByPath) {
-      for (const imported of chunks[0]?.imports || []) {
-        const targetPath = this.resolveImportPath(sourcePath, imported);
-        if (!targetPath) continue;
-        const sources = reverseImports.get(targetPath) || new Set<string>();
-        sources.add(sourcePath);
-        reverseImports.set(targetPath, sources);
+    const seedIds = new Set(seeds.map((s) => s.chunk.id));
+
+    // 1. Chạy Personalized PageRank trên Code Property Graph
+    const seedScores = new Map<string, number>();
+    for (const seed of seeds) {
+      seedScores.set(seed.chunk.id, Math.max(0.1, seed.semanticScore));
+    }
+
+    let candidates: Array<[string, number]> | undefined;
+    if (process.env.MINUS_DISABLE_NATIVE_GRAPH !== '1' && this.nativeGraph?.personalizedPageRankTop) {
+      try {
+        const scores = this.nativeGraph.personalizedPageRankTop(
+          [...seedScores].map(([id, score]) => ({ id, score })), mode, 6, 0.85, 12,
+        );
+        if (Array.isArray(scores) && scores.every((item) =>
+          this.chunksById.has(item.id) && !seedIds.has(item.id) && Number.isFinite(item.score))) {
+          candidates = scores.map((item) => [item.id, item.score]);
+        }
+      } catch {
+        // Preserve TypeScript graph expansion on addon errors.
+      }
+    }
+    candidates ||= Array.from(this.computePersonalizedPageRank(seedScores, mode, 6, 0.85).entries())
+      .filter(([id]) => !seedIds.has(id))
+      .sort((a, b) => b[1] - a[1]);
+
+    let addedSymbols = 0;
+    for (const [id, pprScore] of candidates) {
+      const neighbor = this.chunksById.get(id);
+      if (!neighbor) continue;
+
+      const seedSource = seeds.find((s) => {
+        const outs = this.outEdges.get(s.chunk.id) || [];
+        const ins = this.inEdges.get(s.chunk.id) || [];
+        return outs.some((e) => e.targetId === id) || ins.some((e) => e.sourceId === id);
+      });
+
+      const baseScore = seedSource?.semanticScore ?? seeds[0]?.semanticScore ?? 0.5;
+      results.push({
+        chunk: neighbor,
+        semanticScore: roundScore(baseScore * 0.75),
+        graphScore: roundScore(Math.min(0.35, pprScore * 0.5 + 0.15)),
+        expandedFrom: seedSource?.chunk.qualifiedName || seeds[0]?.chunk.qualifiedName,
+      });
+
+      if (++addedSymbols >= 12) break;
+    }
+
+    // 2. Fallback Import Cấp File nếu graph symbols còn ít (bảo đảm 100% backward compatibility)
+    if (addedSymbols < 4) {
+      const reverseImports = new Map<string, Set<string>>();
+      for (const [sourcePath, chunks] of this.chunksByPath) {
+        for (const imported of chunks[0]?.imports || []) {
+          const targetPath = this.resolveImportPath(sourcePath, imported);
+          if (!targetPath) continue;
+          const sources = reverseImports.get(targetPath) || new Set<string>();
+          sources.add(sourcePath);
+          reverseImports.set(targetPath, sources);
+        }
+      }
+
+      for (const seed of seeds) {
+        const relatedPaths = new Set<string>();
+        if (mode === 'dependencies' || mode === 'auto') {
+          for (const imported of seed.chunk.imports) {
+            const resolved = this.resolveImportPath(seed.chunk.path, imported);
+            if (resolved) relatedPaths.add(resolved);
+          }
+        }
+        if (mode === 'impact' || mode === 'auto') {
+          for (const importer of reverseImports.get(seed.chunk.path) || []) relatedPaths.add(importer);
+        }
+        for (const relatedPath of [...relatedPaths].sort()) {
+          const neighbor = this.chunksByPath.get(relatedPath)?.[0];
+          if (!neighbor || results.some((r) => r.chunk.id === neighbor.id)) continue;
+          results.push({
+            chunk: neighbor,
+            semanticScore: roundScore(seed.semanticScore * 0.72),
+            graphScore: 0.18,
+            expandedFrom: seed.chunk.qualifiedName,
+          });
+          if (++addedSymbols >= 12) break;
+        }
       }
     }
 
-    for (const seed of seeds) {
-      const relatedPaths = new Set<string>();
-      if (mode === 'dependencies' || mode === 'auto') {
-        for (const imported of seed.chunk.imports) {
-          const resolved = this.resolveImportPath(seed.chunk.path, imported);
-          if (resolved) relatedPaths.add(resolved);
+    return results;
+  }
+
+  /**
+   * Truy xuất các láng giềng đồ thị của một symbol (phục vụ Code Intelligence & Blast Radius)
+   */
+  getSymbolNeighbors(
+    symbolNameOrId: string,
+    options?: { depth?: number; direction?: 'upstream' | 'downstream' | 'both' },
+  ): Array<{ chunk: SemanticCodeChunk; relation: string; depth: number }> {
+    const depth = Math.max(1, Math.min(options?.depth ?? 2, 4));
+    const direction = options?.direction ?? 'both';
+
+    let startChunk = this.chunksById.get(symbolNameOrId);
+    if (!startChunk) {
+      const candidates = this.chunksByName.get(symbolNameOrId);
+      if (candidates && candidates.length > 0) startChunk = candidates[0];
+    }
+    if (!startChunk) return [];
+
+    const results: Array<{ chunk: SemanticCodeChunk; relation: string; depth: number }> = [];
+    const visited = new Set<string>([startChunk.id]);
+    let currentLevel = [startChunk.id];
+
+    for (let d = 1; d <= depth; d++) {
+      const nextLevel: string[] = [];
+
+      for (const currentId of currentLevel) {
+        if (direction === 'downstream' || direction === 'both') {
+          for (const edge of this.outEdges.get(currentId) || []) {
+            if (!visited.has(edge.targetId)) {
+              visited.add(edge.targetId);
+              nextLevel.push(edge.targetId);
+              const neighbor = this.chunksById.get(edge.targetId);
+              if (neighbor) {
+                results.push({ chunk: neighbor, relation: edge.relation, depth: d });
+              }
+            }
+          }
+        }
+
+        if (direction === 'upstream' || direction === 'both') {
+          for (const edge of this.inEdges.get(currentId) || []) {
+            if (!visited.has(edge.sourceId)) {
+              visited.add(edge.sourceId);
+              nextLevel.push(edge.sourceId);
+              const neighbor = this.chunksById.get(edge.sourceId);
+              if (neighbor) {
+                results.push({ chunk: neighbor, relation: `called_by_${edge.relation}`, depth: d });
+              }
+            }
+          }
         }
       }
-      if (mode === 'impact' || mode === 'auto') {
-        for (const importer of reverseImports.get(seed.chunk.path) || []) relatedPaths.add(importer);
-      }
-      let added = 0;
-      for (const relatedPath of [...relatedPaths].sort()) {
-        const neighbor = this.chunksByPath.get(relatedPath)?.[0];
-        if (!neighbor) continue;
-        results.push({
-          chunk: neighbor,
-          semanticScore: roundScore(seed.semanticScore * 0.72),
-          graphScore: 0.18,
-          expandedFrom: seed.chunk.qualifiedName,
-        });
-        if (++added >= 12) break;
-      }
+
+      currentLevel = nextLevel;
+      if (currentLevel.length === 0) break;
     }
+
     return results;
   }
 
   private resolveImportPath(sourcePath: string, imported: string): string | undefined {
+    if (sourcePath.endsWith('.rs') && /^(?:crate|self|super)::/.test(imported)) {
+      const marker = '/src/';
+      const markerIndex = sourcePath.lastIndexOf(marker);
+      if (markerIndex >= 0 || sourcePath.startsWith('src/')) {
+        const root = markerIndex >= 0 ? sourcePath.slice(0, markerIndex + marker.length) : 'src/';
+        const sourceModule = sourcePath.slice(root.length).replace(/(?:mod\.rs|lib\.rs|main\.rs|\.rs)$/, '');
+        const parts = imported.split('::');
+        const prefix = parts.shift();
+        const base = prefix === 'crate' ? root : path.posix.join(root, sourceModule, prefix === 'super' ? '..' : '.');
+        const modulePath = path.posix.normalize(path.posix.join(base, ...parts));
+        for (const candidate of [modulePath, `${modulePath}.rs`, `${modulePath}/mod.rs`,
+          `${path.posix.dirname(modulePath)}.rs`, `${path.posix.dirname(modulePath)}/mod.rs`]) {
+          if (this.chunksByPath.has(candidate)) return candidate;
+        }
+      }
+      return undefined;
+    }
     if (!imported.startsWith('.')) return undefined;
     const base = path.posix.normalize(path.posix.join(path.posix.dirname(sourcePath), imported));
     const candidates = [

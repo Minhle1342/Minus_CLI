@@ -154,6 +154,24 @@ export class PersistentVectorStore<TMetadata extends object = Record<string, unk
       .slice(0, boundedLimit);
   }
 
+  /**
+   * Search kết hợp Vector Cosine Similarity với Graph Prior Weight (Personalized PageRank)
+   */
+  async searchWithGraphPrior(
+    vector: number[],
+    graphPriors: Map<string, number>,
+    limit = 10,
+    minSimilarity = 0,
+    graphWeight = 0.25,
+  ): Promise<VectorStoreHit<TMetadata>[]> {
+    const hits = await this.search(vector, Math.max(limit * 2, 16), minSimilarity);
+    return hits.map((hit) => {
+      const prior = graphPriors.get(hit.id) || 0;
+      const fusedSim = (hit.similarity * (1 - graphWeight)) + (prior * graphWeight);
+      return { ...hit, similarity: Math.round(fusedSim * 10_000) / 10_000 };
+    }).sort((a, b) => b.similarity - a.similarity || a.id.localeCompare(b.id)).slice(0, limit);
+  }
+
   getRecords(): VectorStoreRecord<TMetadata>[] {
     return this.records.map(({ label: _label, ...record }) => record);
   }

@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import ts from 'typescript';
 import { SemanticSlicer, type CodeSymbol } from '../agent/semantic-slicer.js';
+
+export interface CodeGraphEdge {
+  target: string;
+  relation: 'calls' | 'uses_type' | 'extends' | 'implements' | 'imports';
+  weight?: number;
+  targetPath?: string;
+}
 
 export interface SemanticCodeChunk {
   id: string;
@@ -17,6 +25,10 @@ export interface SemanticCodeChunk {
   embeddingText: string;
   imports: string[];
   parserConfidence: 'high' | 'low';
+  outgoingCalls?: string[];
+  typesReferenced?: string[];
+  parentSymbol?: string;
+  graphEdges?: CodeGraphEdge[];
 }
 
 export interface SemanticChunkerOptions {
@@ -43,7 +55,7 @@ export function chunkCodeFile(
   const normalizedPath = filePath.replace(/\\/g, '/');
   const lines = content.split('\n');
   const outline = SemanticSlicer.extractOutline(normalizedPath, content);
-  const imports = extractImports(content);
+  const imports = outline.imports || extractImports(content);
   const language = LANGUAGE_BY_EXTENSION[path.extname(filePath).toLowerCase()] || 'text';
   const maxCharacters = clamp(options.maxChunkCharacters ?? 12_000, 1_000, 100_000);
 
@@ -53,6 +65,13 @@ export function chunkCodeFile(
     const text = source.length <= maxCharacters ? source : source.slice(0, maxCharacters);
     const sourceHash = sha256(source);
     const qualifiedName = `${normalizedPath}::${symbol.qualifiedName || symbol.name}`;
+    const relations = language === 'rust' && symbol.parser === 'rust-tree-sitter'
+      ? { calls: symbol.outgoingCalls || [], types: symbol.typesReferenced || [], edges: symbol.graphEdges || [] }
+      : extractAstRelations(source, language, symbol.name);
+    const parentSymbol = symbol.qualifiedName && symbol.qualifiedName.includes('.')
+      ? symbol.qualifiedName.slice(0, symbol.qualifiedName.lastIndexOf('.'))
+      : undefined;
+
     chunks.push({
       id: sha256(`${qualifiedName}\0${symbol.kind}\0${sourceHash}`),
       path: normalizedPath,
@@ -65,9 +84,13 @@ export function chunkCodeFile(
       endLine: symbol.endLine,
       sourceHash,
       text,
-      embeddingText: buildEmbeddingText(normalizedPath, symbol, text, imports),
+      embeddingText: buildEmbeddingText(normalizedPath, symbol, text, imports, relations.calls, relations.types),
       imports,
-      parserConfidence: language === 'typescript' || language === 'javascript' || language === 'python' ? 'high' : 'low',
+      parserConfidence: symbol.confidence === 'high' ? 'high' : 'low',
+      outgoingCalls: relations.calls,
+      typesReferenced: relations.types,
+      parentSymbol,
+      graphEdges: relations.edges,
     });
   }
 
@@ -97,10 +120,133 @@ export function chunkCodeFile(
       embeddingText: `path: ${normalizedPath}\nlanguage: ${language}\n${source.slice(0, maxCharacters)}`,
       imports,
       parserConfidence: 'low',
+      outgoingCalls: [],
+      typesReferenced: [],
+      graphEdges: [],
     });
     if (endOffset >= lines.length) break;
   }
   return chunks;
+}
+
+const KEYWORD_CALL_FILTER = new Set([
+  'if', 'while', 'for', 'switch', 'catch', 'function', 'return', 'throw',
+  'typeof', 'instanceof', 'import', 'export', 'super', 'require', 'new',
+  'async', 'await', 'case', 'break', 'continue', 'default', 'finally',
+  'try', 'with', 'yield', 'let', 'const', 'var', 'print', 'len', 'range',
+]);
+
+function extractAstRelations(
+  sourceCode: string,
+  language: string,
+  symbolName: string,
+): { calls: string[]; types: string[]; edges: CodeGraphEdge[] } {
+  const calls = new Set<string>();
+  const types = new Set<string>();
+  const edges: CodeGraphEdge[] = [];
+
+  if (language === 'typescript' || language === 'javascript') {
+    const parseCode = (code: string) => {
+      try {
+        const sf = ts.createSourceFile('snippet.tsx', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+        const visit = (node: ts.Node) => {
+          if (ts.isCallExpression(node)) {
+            if (ts.isIdentifier(node.expression)) {
+              const name = node.expression.text;
+              if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName) {
+                calls.add(name);
+              }
+            } else if (ts.isPropertyAccessExpression(node.expression)) {
+              const name = node.expression.name.text;
+              if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName) {
+                calls.add(name);
+              }
+            }
+          } else if (ts.isNewExpression(node)) {
+            if (ts.isIdentifier(node.expression)) {
+              const name = node.expression.text;
+              if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName) {
+                calls.add(name);
+                types.add(name);
+              }
+            }
+          } else if (ts.isTypeReferenceNode(node)) {
+            if (ts.isIdentifier(node.typeName)) {
+              const name = node.typeName.text;
+              if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName) {
+                types.add(name);
+              }
+            }
+          } else if (ts.isHeritageClause(node)) {
+            for (const type of node.types) {
+              if (ts.isIdentifier(type.expression)) {
+                const name = type.expression.text;
+                types.add(name);
+                edges.push({
+                  target: name,
+                  relation: node.token === ts.SyntaxKind.ExtendsKeyword ? 'extends' : 'implements',
+                  weight: 1.2,
+                });
+              }
+            }
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(sf);
+      } catch {
+        // Fallback nếu snippet không khép kín
+      }
+    };
+
+    parseCode(sourceCode);
+    if (types.size === 0 && !sourceCode.includes('class ') && !sourceCode.includes('interface ')) {
+      parseCode(`class __Wrapper__ {\n${sourceCode}\n}`);
+    }
+  }
+
+  // Regex fallback cho types: : Type, as Type, <Type>
+  const typeMatches = sourceCode.matchAll(/[:<]\s*([A-Z][A-Za-z0-9_]*)\b/g);
+  for (const m of typeMatches) {
+    const name = m[1];
+    if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName && name.length >= 2) {
+      types.add(name);
+    }
+  }
+
+  // Regex fallback cho các hàm gọi
+  if (calls.size === 0) {
+    const callMatches = sourceCode.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g);
+    for (const m of callMatches) {
+      const name = m[1];
+      if (!KEYWORD_CALL_FILTER.has(name) && name !== symbolName && name.length >= 2) {
+        calls.add(name);
+      }
+    }
+  }
+
+  // Class inheritance (Python: class Foo(Bar):)
+  const pyExtends = sourceCode.match(/class\s+[A-Za-z0-9_]+\s*\(\s*([A-Za-z0-9_]+)\s*\)/);
+  if (pyExtends && pyExtends[1] && pyExtends[1] !== 'object') {
+    types.add(pyExtends[1]);
+    edges.push({ target: pyExtends[1], relation: 'extends', weight: 1.2 });
+  }
+
+  const callsList = Array.from(calls).slice(0, 50);
+  const typesList = Array.from(types).slice(0, 30);
+
+  for (const call of callsList) {
+    if (!edges.some((e) => e.target === call && e.relation === 'calls')) {
+      edges.push({ target: call, relation: 'calls', weight: 1.0 });
+    }
+  }
+
+  for (const type of typesList) {
+    if (!edges.some((e) => e.target === type)) {
+      edges.push({ target: type, relation: 'uses_type', weight: 0.8 });
+    }
+  }
+
+  return { calls: callsList, types: typesList, edges };
 }
 
 function buildEmbeddingText(
@@ -108,6 +254,8 @@ function buildEmbeddingText(
   symbol: CodeSymbol,
   source: string,
   imports: string[],
+  calls: string[] = [],
+  types: string[] = [],
 ): string {
   const leadingComment = source
     .split('\n')
@@ -120,6 +268,8 @@ function buildEmbeddingText(
     `symbol: ${symbol.name}`,
     `signature: ${symbol.signature}`,
     imports.length > 0 ? `imports: ${imports.join(', ')}` : '',
+    calls.length > 0 ? `calls: ${calls.slice(0, 10).join(', ')}` : '',
+    types.length > 0 ? `types: ${types.slice(0, 10).join(', ')}` : '',
     leadingComment,
     source.slice(0, 8_000),
   ].filter(Boolean).join('\n');

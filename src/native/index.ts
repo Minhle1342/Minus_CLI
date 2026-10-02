@@ -104,7 +104,30 @@ export interface NativeExtractResult {
   topLevelStripped: boolean;
 }
 
+export interface NativeGraphEdge { source: string; target: string; weight: number }
+export interface NativeGraphScore { id: string; score: number }
+export interface NativeCodeGraph {
+  personalizedPageRank(seeds: NativeGraphScore[], mode: string, maxIterations: number, dampingFactor: number): NativeGraphScore[];
+  personalizedPageRankTop?(seeds: NativeGraphScore[], mode: string, maxIterations: number, dampingFactor: number, limit: number): NativeGraphScore[];
+}
+export interface NativeRustRelation { target: string; relation: string; weight: number; targetPath?: string }
+export interface NativeRustSymbol {
+  name: string;
+  qualifiedName: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
+  signature: string;
+  outgoingCalls: string[];
+  typesReferenced: string[];
+  graphEdges: NativeRustRelation[];
+}
+export interface NativeRustCode { symbols: NativeRustSymbol[]; imports: string[]; hasError: boolean }
+
 interface NativeCoreModule {
+  RsCodeGraph?: new (ids: string[], edges: NativeGraphEdge[]) => NativeCodeGraph;
+  rsBatchSubwordSimilarity?(query: string, documents: string[]): number[];
+  rsParseRustCode?(source: string): NativeRustCode;
   rsVersion(): string;
   rsAnalyzeShellCommand(command: string): NativeShellAnalysis;
   rsResolveSafePath(rootDir: string, targetPath: string): NativePathResult;

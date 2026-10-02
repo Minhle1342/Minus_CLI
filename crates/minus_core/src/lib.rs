@@ -10,6 +10,8 @@ pub mod symbols;
 pub mod toolchain;
 pub mod vector;
 pub mod workspace;
+pub mod code_graph;
+pub mod rust_code;
 
 use napi_derive::napi;
 
@@ -31,6 +33,8 @@ pub use workspace::{
     vfs_destroy_session_native, vfs_generate_diff_native, vfs_list_modified_native,
     vfs_read_file_native, vfs_write_file_native, RsVfsFileStatus,
 };
+pub use code_graph::{RsCodeGraph, RsGraphEdge, RsGraphScore};
+pub use rust_code::{parse_rust_code_native, RsRustCode, RsRustRelation, RsRustSymbol};
 use napi::{Env, Task};
 use napi::bindgen_prelude::{AsyncTask, Float64Array};
 
@@ -100,6 +104,20 @@ pub fn rs_batch_cosine_similarity(query: Float64Array, database: Float64Array, d
 #[napi]
 pub fn rs_generate_subword_embedding(text: String) -> Vec<f64> {
     generate_subword_embedding_native(&text)
+}
+
+#[napi]
+pub fn rs_batch_subword_similarity(query: String, documents: Vec<String>) -> Vec<f64> {
+    let query_vector = generate_subword_embedding_native(&query);
+    documents.iter().map(|document| {
+        let vector = generate_subword_embedding_native(document);
+        cosine_similarity_simd(&query_vector, &vector)
+    }).collect()
+}
+
+#[napi]
+pub fn rs_parse_rust_code(source: String) -> RsRustCode {
+    parse_rust_code_native(&source)
 }
 
 #[napi]

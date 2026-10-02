@@ -79,7 +79,6 @@ const ALLOWED_COMMAND_PREFIXES = [
   'sed ',
   'awk ',
   // Build, Test & Package Management
-  'npm ',
   'npm test',
   'npm run ',
   'npm start',

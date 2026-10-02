@@ -105,14 +105,16 @@ export function fuseSearchResults(
     byId.set(id, candidate);
   });
 
+  const isStructuralQuery = /\b(?:caller|callee|callers|callees|dependency|dependencies|impact|blast|graph|flow|hierarchy|trace|reach)\b/i.test(lowerQuery);
   const symbolsByPath = new Set(semanticHits.map((hit) => hit.chunk.path));
   const results = [...byId.values()].filter((hit) => hit.symbol || !symbolsByPath.has(hit.path));
   for (const hit of results) {
     const parts = hit.scoreComponents;
+    const structuralBoost = isStructuralQuery && (parts.graphBoost > 0 || hit.expandedFrom) ? 0.35 : 0;
     // Lexical evidence remains the anchor for repository identifiers and paths.
     // A semantic-only candidate must not displace a strong lexical candidate
     // unless graph or exact-match evidence also supports it.
-    hit.score = round((parts.lexicalRrf + parts.semanticRrf * 0.65) * 30 + parts.exactBoost + parts.graphBoost);
+    hit.score = round((parts.lexicalRrf + parts.semanticRrf * 0.65) * 30 + parts.exactBoost + (parts.graphBoost * 1.5) + structuralBoost);
   }
   const ranked = results
     .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path));

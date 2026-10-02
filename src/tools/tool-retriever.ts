@@ -1,8 +1,9 @@
 import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
-import { getNativeCore } from '../native/index.js';
+import { batchSubwordSimilarity } from '../native/semantic-batch.js';
 import { ToolTransitionGraph } from './tool-transition-graph.js';
+import { LocalCrossEncoderReranker } from './reranker.js';
 
 export interface ToolDocument {
   id: string;
@@ -41,6 +42,7 @@ export type ToolRetrievalQueryInput =
       lexicalQuery?: string;
       lastToolName?: string;
       lastToolResult?: unknown;
+      phase?: string;
       /**
        * True khi workspace có `.codegraph/` index. Khi true + query là
        * structural/flow, các tool code-intel trùng lắp bị prune khỏi
@@ -83,6 +85,7 @@ export class ToolRetriever {
   private toolsMap = new Map<string, ToolDefinition>();
   private config: Required<ToolRetrieverConfig>;
   private transitionGraph = new ToolTransitionGraph();
+  private reranker = new LocalCrossEncoderReranker();
 
   constructor(config?: ToolRetrieverConfig) {
     this.config = {
@@ -172,6 +175,13 @@ export class ToolRetriever {
   }
 
   /**
+   * Getter truy cập LocalCrossEncoderReranker
+   */
+  getReranker(): LocalCrossEncoderReranker {
+    return this.reranker;
+  }
+
+  /**
    * Truy xuất động danh sách FunctionDeclaration phù hợp nhất với ngữ cảnh
    */
   retrieve(queryInput: ToolRetrievalQueryInput, allTools?: ToolDefinition[]): FunctionDeclaration[] {
@@ -192,6 +202,9 @@ export class ToolRetriever {
     const lastToolResult = typeof queryInput === 'object' && queryInput.lastToolResult !== undefined
       ? queryInput.lastToolResult
       : (/evidence:(.+)/s.exec(rawQuery)?.[1] || undefined);
+    const phase = typeof queryInput === 'object' && queryInput.phase
+      ? queryInput.phase
+      : (/phase:([a-zA-Z0-9_-]+)/i.exec(rawQuery)?.[1] || undefined);
 
     const cleanedQuery = rawQuery.trim();
     const lowerQ = cleanedQuery.toLowerCase();
@@ -239,7 +252,7 @@ export class ToolRetriever {
       selectedToolNames.add('update_plan_task');
     }
 
-    // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph
+    // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph + Local Cross-Encoder Reranker
     if (cleanedQuery.length > 0 || lastToolName) {
       try {
         const searchHits = this.miniSearch.search(lexicalQuery || cleanedQuery);
@@ -250,26 +263,22 @@ export class ToolRetriever {
 
         const targetDense = denseQuery.trim() || cleanedQuery;
         const queryTerms = this.semanticTerms(targetDense);
-        const native = getNativeCore();
-        let queryVector: number[] | undefined;
-        if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
-          try { queryVector = native.rsGenerateSubwordEmbedding(targetDense); } catch {}
-        }
-
-        const semanticCandidates = activePool.map((tool) => {
+        const semanticDocuments = activePool.map((tool) => {
           const category = this.inferCategory(tool);
           const tags = this.inferTags(tool);
-          const text = `${tool.name} ${category} ${tags} ${tool.description || ''} ${Object.keys(tool.parameters?.properties || {}).join(' ')}`;
+          return `${tool.name} ${category} ${tags} ${tool.description || ''} ${Object.keys(tool.parameters?.properties || {}).join(' ')}`;
+        });
+        const nativeScores = batchSubwordSimilarity(targetDense, semanticDocuments);
+
+        const semanticCandidates = activePool.map((tool, index) => {
+          const category = this.inferCategory(tool);
+          const tags = this.inferTags(tool);
+          const text = semanticDocuments[index];
           const toolTerms = this.semanticTerms(text);
           let semanticScore = this.termOverlap(queryTerms, toolTerms);
-          if (queryVector && native && typeof native.rsGenerateSubwordEmbedding === 'function' && typeof native.rsCosineSimilarity === 'function') {
-            try {
-              const toolVector = native.rsGenerateSubwordEmbedding(text);
-              semanticScore = Math.max(semanticScore, Math.max(0, native.rsCosineSimilarity(queryVector, toolVector)));
-            } catch {}
-          }
+          if (nativeScores) semanticScore = Math.max(semanticScore, Math.max(0, nativeScores[index]));
           const graphBoost = this.transitionGraph.getTransitionBoost(lastToolName, lastToolResult, tool.name);
-          semanticScore += this.hierarchyBoost(cleanedQuery, category, tool.name) + graphBoost;
+          semanticScore += this.hierarchyBoost(cleanedQuery, category, tool.name, phase) + graphBoost;
           return { name: tool.name, score: semanticScore, graphBoost };
         }).filter((candidate) => candidate.score > 0)
           .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
@@ -290,8 +299,49 @@ export class ToolRetriever {
         const topScore = fused[0]?.score || 0;
         const cutoffScore = fused[this.config.topK - 1]?.score || 0;
         const adaptiveExtra = topScore > 0 && cutoffScore > 0 && (topScore - cutoffScore) / topScore < 0.12 ? 2 : 0;
-        for (const candidate of fused.slice(0, this.config.topK + adaptiveExtra)) {
-          selectedToolNames.add(candidate.name);
+
+        // Two-Tier Candidate Clustering & Local Cross-Encoder Reranking
+        const graphSuggested = lastToolName ? this.transitionGraph.getSuggestedTools(lastToolName, lastToolResult) : [];
+        const candidateMap = new Map<string, ToolDefinition>();
+
+        // 1. Thu thập ứng viên gợi ý từ Markov Transition Graph
+        for (const name of graphSuggested) {
+          const tool = activePoolMap.get(name);
+          if (tool && !selectedToolNames.has(name)) {
+            candidateMap.set(name, tool);
+          }
+        }
+
+        // 2. Thu thập top ứng viên từ Hybrid Graph-RRF Fusion
+        for (const candidate of fused.slice(0, 16)) {
+          const tool = activePoolMap.get(candidate.name);
+          if (tool && !selectedToolNames.has(candidate.name)) {
+            candidateMap.set(candidate.name, tool);
+          }
+        }
+
+        const candidatePoolTools = Array.from(candidateMap.values());
+        if (candidatePoolTools.length > 0) {
+          const reranked = this.reranker.rerank(cleanedQuery, candidatePoolTools, {
+            topK: this.config.topK + adaptiveExtra,
+            minScore: this.config.minScore,
+            adaptiveCutoffRatio: 0.35,
+          });
+
+          for (const item of reranked) {
+            selectedToolNames.add(item.tool.name);
+          }
+
+          // Bảo đảm Markov transition graph primary successor (boost >= 0.25) luôn được giữ nếu còn trong activePool
+          for (const name of graphSuggested.slice(0, 2)) {
+            if (activePoolMap.has(name) && this.transitionGraph.getTransitionBoost(lastToolName, lastToolResult, name) >= 0.25) {
+              selectedToolNames.add(name);
+            }
+          }
+        } else {
+          for (const candidate of fused.slice(0, this.config.topK + adaptiveExtra)) {
+            selectedToolNames.add(candidate.name);
+          }
         }
       } catch {
         // Fallback an toàn nếu query chứa ký tự regex đặc biệt
@@ -331,9 +381,19 @@ export class ToolRetriever {
     return matched / Math.sqrt(queryTerms.size * documentTerms.size);
   }
 
-  private hierarchyBoost(query: string, category: string, toolName: string): number {
+  private hierarchyBoost(query: string, category: string, toolName: string, phase?: string): number {
     const q = query.toLowerCase();
     let boost = 0;
+    if (phase === 'explore') {
+      if (category === 'code_intelligence' || category === 'search') boost += 0.15;
+    } else if (phase === 'plan') {
+      if (category === 'planning' || /plan|task/.test(toolName)) boost += 0.20;
+    } else if (phase === 'implement') {
+      if (category === 'filesystem_mutation' || /patch|text|file/.test(toolName)) boost += 0.15;
+    } else if (phase === 'verify') {
+      if (/diagnostic|run|test|command/.test(toolName) || category === 'filesystem_verification') boost += 0.20;
+    }
+
     if (/(plan|task|milestone|roadmap|kế hoạch|giai đoạn)/i.test(q) && (category === 'planning' || /plan|task/.test(toolName))) boost += 0.25;
     if (/(error|exception|diagnostic|failed|failure)/.test(q) && /diagnostic|inspect|symbol|call_graph/.test(toolName)) boost += 0.18;
     if (/(caller|callee|dependency|impact|symbol|architecture|graph)/.test(q) && category === 'code_intelligence') boost += 0.16;
