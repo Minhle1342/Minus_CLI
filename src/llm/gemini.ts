@@ -118,6 +118,7 @@ export class GeminiLLM {
     const generateConfig: any = {
       systemInstruction: request?.systemPrompt || this.systemPrompt,
       tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+      abortSignal: request?.signal,
     };
 
     if (
@@ -155,7 +156,7 @@ export class GeminiLLM {
       };
     }
 
-    return await retryWithExponentialBackoff(
+    const generation = retryWithExponentialBackoff<LLMResponse>(
       async () => {
         if (request?.signal?.aborted) {
           return {
@@ -239,6 +240,10 @@ export class GeminiLLM {
           }
         }
 
+        if (request?.signal?.aborted) {
+          return { text: '', toolCalls: [], finishReason: 'aborted', rawFinishReason: 'aborted' };
+        }
+
         const functionCallParts = streamedParts.filter((part) => part.functionCall);
         const nonFunctionCallParts = streamedParts.filter((part) => !part.functionCall);
         const normalizedFunctionCallParts = toolCalls.map((call, index) => {
@@ -292,8 +297,17 @@ export class GeminiLLM {
         baseDelayMs: 1500,
         maxDelayMs: 12000,
         jitterMs: 500,
+        signal: request?.signal,
       },
     );
+    try {
+      return await generation;
+    } catch (error: any) {
+      if (request?.signal?.aborted || error?.name === 'AbortError') {
+        return { text: '', toolCalls: [], finishReason: 'aborted', rawFinishReason: 'aborted' };
+      }
+      throw error;
+    }
   }
 
   /**

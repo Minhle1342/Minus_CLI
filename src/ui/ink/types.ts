@@ -51,6 +51,7 @@ export interface TuiState {
   liveReasoning: string;
   isThinking: boolean;
   thinkingStartedAt: number | null;
+  reasoningInterrupted: boolean;
   isReasoningCollapsed: boolean;
   isCompactMode: boolean;
   finalAnswer: string | null;
@@ -89,6 +90,7 @@ export type TuiAction =
   | { type: 'REQUEST_PERMISSION'; permission: TuiPermissionRequest }
   | { type: 'RESOLVE_PERMISSION' }
   | { type: 'SET_ABORTING'; isAborting: boolean }
+  | { type: 'ABORT_SETTLED'; failed?: boolean }
   | {
       type: 'RETRY_UPDATE';
       retryInfo: {

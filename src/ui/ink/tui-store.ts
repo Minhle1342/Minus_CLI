@@ -27,6 +27,7 @@ export function createInitialState(options: {
     liveReasoning: '',
     isThinking: false,
     thinkingStartedAt: null,
+    reasoningInterrupted: false,
     isReasoningCollapsed: true,
     isCompactMode: true,
     finalAnswer: null,
@@ -99,6 +100,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         isThinking: false,
         thinkingStartedAt: null,
         liveReasoning: '',
+        reasoningInterrupted: false,
         finalAnswer: null,
         errorMessage: null,
         isAborting: false,
@@ -161,12 +163,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
     }
     case 'THINKING_START':
+      if (state.isAborting) return state;
       return {
         ...state,
         status: 'thinking',
         isThinking: true,
         thinkingStartedAt: action.startedAt,
         liveReasoning: '',
+        reasoningInterrupted: false,
         finalAnswer: null,
         errorMessage: null,
       };
@@ -177,6 +181,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         thinkingStartedAt: null,
       };
     case 'REASONING_CHUNK': {
+      if (state.isAborting || state.reasoningInterrupted) return state;
       const combined = state.liveReasoning + action.chunk;
       // Bounded Circular Ring Buffer: Giữ tối đa 4.000 ký tự gần nhất hiển thị trên TUI để tránh rò rỉ RAM Heap
       const boundedReasoning = combined.length > 4000 ? combined.slice(-3500) : combined;
@@ -189,6 +194,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         liveReasoning: '',
+        reasoningInterrupted: false,
       };
     case 'TOGGLE_REASONING_COLLAPSE':
       return {
@@ -222,6 +228,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: 'completed',
         isThinking: false,
         thinkingStartedAt: null,
+        isAborting: false,
+        reasoningInterrupted: false,
         finalAnswer: action.answer,
       };
     case 'ERROR':
@@ -230,6 +238,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: 'error',
         isThinking: false,
         thinkingStartedAt: null,
+        isAborting: false,
+        reasoningInterrupted: false,
         errorMessage: action.error,
       };
     case 'SHOW_DIFF':
@@ -256,6 +266,20 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         isAborting: action.isAborting,
+        reasoningInterrupted: action.isAborting && state.status === 'thinking' && state.isThinking
+          ? true
+          : state.reasoningInterrupted,
+      };
+    case 'ABORT_SETTLED':
+      if (!state.isAborting) return state;
+      return {
+        ...state,
+        status: action.failed ? 'error' : 'idle',
+        isThinking: false,
+        thinkingStartedAt: null,
+        isAborting: false,
+        reasoningInterrupted: !action.failed && state.reasoningInterrupted,
+        retryInfo: null,
       };
     case 'RETRY_UPDATE':
       return {
@@ -269,6 +293,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
 export class TuiStore extends EventEmitter {
   private state: TuiState;
+  private flushPendingReasoning?: () => void;
 
   constructor(initialOptions: Parameters<typeof createInitialState>[0] = {}) {
     super();
@@ -285,6 +310,9 @@ export class TuiStore extends EventEmitter {
   }
 
   abortCurrent(): void {
+    if (this.state.isAborting) return;
+    // Preserve the last batched tokens before freezing the visible trace.
+    this.flushPendingReasoning?.();
     this.dispatch({ type: 'SET_ABORTING', isAborting: true });
     this.emit('abort');
   }
@@ -296,6 +324,8 @@ export class TuiStore extends EventEmitter {
     const batcher = new StreamBatcher((batchedThought) => {
       this.dispatch({ type: 'REASONING_CHUNK', chunk: batchedThought });
     });
+    const flushPendingReasoning = () => batcher.flush();
+    this.flushPendingReasoning = flushPendingReasoning;
 
     const onStepBefore = (step: number, maxSteps: number) => {
       batcher.flush();
@@ -335,7 +365,15 @@ export class TuiStore extends EventEmitter {
     };
 
     const onModelThought = (thought: string) => {
+      if (this.state.isAborting || this.state.reasoningInterrupted) return;
       batcher.push(thought);
+    };
+
+    const onAgentStatus = (record: { id: string; status: string }) => {
+      if (!['root', 'main', 'primary', 'interactive-agent', 'coding-agent'].includes(record.id)) return;
+      if (this.state.isAborting && ['idle', 'stopped', 'error'].includes(record.status)) {
+        this.dispatch({ type: 'ABORT_SETTLED', failed: record.status === 'error' });
+      }
     };
 
     const onModelUsage = (usage: any) => {
@@ -361,17 +399,17 @@ export class TuiStore extends EventEmitter {
 
     const onAbortRequested = () => {
       batcher.clear();
-      // Forward abort signal to kernel and event bus
+      // Forward once. Both kernel methods already emit the abort events.
       try {
-        events.emit('agent:abort');
-        events.emit('abort');
+        if (typeof (kernel as any).cancelCurrentTask === 'function') {
+          (kernel as any).cancelCurrentTask();
+        } else if (typeof (kernel as any).abort === 'function') {
+          (kernel as any).abort();
+        } else {
+          events.emit('agent:abort');
+          events.emit('abort');
+        }
       } catch {}
-      if (typeof (kernel as any).cancelCurrentTask === 'function') {
-        (kernel as any).cancelCurrentTask();
-      }
-      if (typeof (kernel as any).abort === 'function') {
-        (kernel as any).abort();
-      }
     };
 
     this.on('abort', onAbortRequested);
@@ -385,12 +423,14 @@ export class TuiStore extends EventEmitter {
     events.on('model:thought', onModelThought);
     events.on('model:usage', onModelUsage);
     events.on('model:final_answer', onModelFinalAnswer);
+    events.on('agent/status', onAgentStatus);
     events.on('workspace:changed', onWorkspaceChanged);
     events.on('model:changed', onModelChanged);
     (events as any).on?.('model:retry', onModelRetry);
 
     return () => {
       batcher.clear();
+      if (this.flushPendingReasoning === flushPendingReasoning) this.flushPendingReasoning = undefined;
       this.off('abort', onAbortRequested);
       events.off('step:before', onStepBefore);
       events.off('step:after', onStepAfter);
@@ -401,6 +441,7 @@ export class TuiStore extends EventEmitter {
       events.off('model:thought', onModelThought);
       events.off('model:usage', onModelUsage);
       events.off('model:final_answer', onModelFinalAnswer);
+      events.off('agent/status', onAgentStatus);
       events.off('workspace:changed', onWorkspaceChanged);
       events.off('model:changed', onModelChanged);
       (events as any).off?.('model:retry', onModelRetry);

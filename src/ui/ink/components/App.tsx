@@ -41,11 +41,9 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
   };
 
   const handleAbort = () => {
-    if (onAbort) {
-      onAbort();
-    } else {
-      store.abortCurrent();
-    }
+    if (store.getState().isAborting) return;
+    store.abortCurrent();
+    onAbort?.();
   };
 
   const handleResolvePermission = (approved: boolean, rememberSession?: boolean) => {
@@ -86,6 +84,8 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
         status={state.status}
         isThinking={state.isThinking}
         thinkingStartedAt={state.thinkingStartedAt}
+        isAborting={state.isAborting}
+        reasoningInterrupted={state.reasoningInterrupted}
       />
 
       {/* 4. Reactive Step Stream (One-Liner Log) */}
@@ -107,7 +107,7 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
       {/* 7. Aborting Indicator Banner */}
       {state.isAborting && (
         <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
-          <Text color="red" bold>⏳ Đang dừng và hủy yêu cầu hiện tại...</Text>
+          <Text color="red" bold>⏳ Stopping the current request...</Text>
         </Box>
       )}
 
@@ -144,7 +144,7 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
         onSubmit={handleSubmit}
         onToggleCompact={handleToggleCompact}
         onAbort={handleAbort}
-        disabled={state.status === 'executing_tool' || state.status === 'thinking' || Boolean(state.activePermission)}
+        disabled={state.isAborting || state.status === 'executing_tool' || state.status === 'thinking' || Boolean(state.activePermission)}
         workspacePath={state.workspacePath}
       />
     </Box>

@@ -9,6 +9,8 @@ interface LiveReasoningBoxProps {
   status: AgentUIStatus;
   isThinking: boolean;
   thinkingStartedAt?: number | null;
+  isAborting?: boolean;
+  reasoningInterrupted?: boolean;
 }
 
 export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
@@ -17,10 +19,12 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   status,
   isThinking,
   thinkingStartedAt,
+  isAborting = false,
+  reasoningInterrupted = false,
 }) => {
   const hasReasoning = Boolean(reasoning && reasoning.trim().length > 0);
 
-  if (!hasReasoning && !(isThinking && status === 'thinking')) {
+  if (!hasReasoning && !(isThinking && status === 'thinking') && !reasoningInterrupted) {
     return null;
   }
 
@@ -28,7 +32,9 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
     return (
       <Box paddingX={1} marginY={0} gap={1}>
         <Text color="red" bold>🧠 Thinking:</Text>
-        <LoadingSpinner startTime={thinkingStartedAt ?? undefined} />
+        {reasoningInterrupted
+          ? <Text color="yellow">{isAborting ? 'Stopping…' : 'Thinking interrupted'}</Text>
+          : <LoadingSpinner startTime={thinkingStartedAt ?? undefined} />}
       </Box>
     );
   }
@@ -42,7 +48,8 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
       <Box paddingX={1} marginY={0} gap={1}>
         <Text color="red" bold>🧠 Thinking:</Text>
         <Text color="white" italic>{truncatedSummary}</Text>
-        <Text color="gray" dimColor>(Ctrl+O để xem chi tiết)</Text>
+        {reasoningInterrupted && <Text color="yellow">{isAborting ? '(Stopping…)' : '(Thinking interrupted)'}</Text>}
+        <Text color="gray" dimColor>(Ctrl+O to expand)</Text>
       </Box>
     );
   }
@@ -54,8 +61,9 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
     <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
         <Text color="red" bold>🧠 REASONING TRACE (System 2 CoT)</Text>
-        <Text color="gray">[Nhấn Ctrl+O để thu gọn]</Text>
+        <Text color="gray">[Ctrl+O to collapse]</Text>
       </Box>
+      {reasoningInterrupted && <Text color="yellow">{isAborting ? 'Stopping…' : 'Thinking interrupted'}</Text>}
       <Box flexDirection="column" marginTop={0}>
         {lines.map((line, idx) => (
           <Text key={idx} color="white" italic>

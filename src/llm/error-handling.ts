@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 export type LLMErrorKind =
   | 'TRANSIENT_RATE_LIMIT'
   | 'HARD_QUOTA_EXHAUSTED'
@@ -188,6 +190,7 @@ export interface RetryOptions {
   jitterMs?: number;
   onRetry?: (attempt: number, delayMs: number, error: ClassifiedLLMError) => void;
   sleepFn?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -201,14 +204,32 @@ export async function retryWithExponentialBackoff<T>(
   const baseDelayMs = options.baseDelayMs ?? 1500;
   const maxDelayMs = options.maxDelayMs ?? 15000;
   const jitterMs = options.jitterMs ?? 500;
-  const sleep = options.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const sleep = options.sleepFn ?? ((ms: number) => delay(ms, undefined, { signal: options.signal }));
+  const abortError = () => new DOMException('LLM request cancelled.', 'AbortError');
+
+  const waitForBackoff = async (ms: number): Promise<void> => {
+    if (!options.signal) return sleep(ms);
+    if (options.signal.aborted) throw abortError();
+    let onAbort: () => void = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(abortError());
+      options.signal!.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([sleep(ms), aborted]);
+    } finally {
+      options.signal.removeEventListener('abort', onAbort);
+    }
+  };
 
   let lastError: any;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    if (options.signal?.aborted) throw abortError();
     try {
       return await fn();
     } catch (err: any) {
+      if (options.signal?.aborted || err?.name === 'AbortError') throw err?.name === 'AbortError' ? err : abortError();
       lastError = err;
       const classified = classifyLLMError(err);
 
@@ -231,7 +252,7 @@ export async function retryWithExponentialBackoff<T>(
         options.onRetry(attempt, finalDelayMs, classified);
       }
 
-      await sleep(finalDelayMs);
+      await waitForBackoff(finalDelayMs);
     }
   }
 
