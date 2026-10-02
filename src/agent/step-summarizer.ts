@@ -27,23 +27,23 @@ export async function summarizeStepWithCodestral(
         const argsStr = tc.args ? JSON.stringify(tc.args).slice(0, 150) : '{}';
         return `${tc.name}(${argsStr})`;
       }).join(', ')
-    : 'Không gọi công cụ (trả lời trực tiếp/hoàn thành)';
+    : 'No tool called (direct answer/completion)';
 
   const reasoningSnippet = input.reasoningContent ? input.reasoningContent.slice(0, 1000) : '';
   const textSnippet = input.text ? input.text.slice(0, 800) : '';
 
   const prompt = [
-    `Bạn là một chuyên gia giám sát hành vi của AI coding agent. Hãy tóm tắt hành vi và ý định suy luận của Agent ở Step ${input.step} trong ĐÚNG 1 câu tiếng Việt ngắn gọn, súc tích (khoảng 15-25 từ).`,
+    `You are a behavior-monitoring expert for an AI coding agent. Summarize the Agent's behavior and reasoning intent at Step ${input.step} in EXACTLY 1 short, concise English sentence (about 15-25 words).`,
     '',
-    `[Ngữ cảnh Step ${input.step}]:`,
-    input.userGoal ? `- Mục tiêu người dùng: ${input.userGoal.slice(0, 200)}` : '',
-    reasoningSnippet ? `- Suy luận nội tâm: ${reasoningSnippet}` : '',
-    textSnippet ? `- Phản hồi sơ bộ: ${textSnippet}` : '',
-    `- Công cụ thực thi: ${toolCallsFormatted}`,
+    `[Step ${input.step} Context]:`,
+    input.userGoal ? `- User goal: ${input.userGoal.slice(0, 200)}` : '',
+    reasoningSnippet ? `- Internal reasoning: ${reasoningSnippet}` : '',
+    textSnippet ? `- Preliminary response: ${textSnippet}` : '',
+    `- Executed tools: ${toolCallsFormatted}`,
     '',
-    'Quy tắc:',
-    '1. Trả về DUY NHẤT 1 câu tóm tắt hành vi (ví dụ: "Đang đọc file src/ui/cli-ui.ts để phân tích vị trí render reasoning.", "Đang thực thi lệnh npm test để kiểm chứng các unit test.").',
-    '2. Tuyệt đối không thêm lời giải thích thừa, tiêu đề hay markdown code blocks.',
+    'Rules:',
+    '1. Return ONLY 1 behavior-summary sentence (e.g.: "Reading src/ui/cli-ui.ts to analyze the reasoning render location.", "Running npm test to verify the unit tests.").',
+    '2. Never add extra explanations, headings, or markdown code blocks.',
   ].filter(Boolean).join('\n');
 
   try {
@@ -90,26 +90,26 @@ export function generateFallbackStepSummary(input: StepSummaryInput): string {
     const actions = input.toolCalls.map((tc) => {
       if (tc.name === 'read_file') {
         const p = (tc.args as any)?.path;
-        return p ? `đọc file ${p}` : 'đọc file';
+        return p ? `read file ${p}` : 'read file';
       }
       if (tc.name === 'replace_text' || tc.name === 'write_file' || tc.name === 'apply_patch') {
         const p = (tc.args as any)?.path || (tc.args as any)?.filePath;
-        return p ? `sửa đổi file ${p}` : 'chỉnh sửa code';
+        return p ? `modify file ${p}` : 'edit code';
       }
       if (tc.name === 'run_command') {
         const cmd = (tc.args as any)?.command;
-        return cmd ? `chạy lệnh "${cmd.slice(0, 40)}"` : 'thực thi lệnh hệ thống';
+        return cmd ? `run command "${cmd.slice(0, 40)}"` : 'execute system command';
       }
       if (tc.name === 'grep_search' || tc.name === 'find_by_name') {
         const q = (tc.args as any)?.query || (tc.args as any)?.pattern;
-        return q ? `tìm kiếm "${q}" trong workspace` : 'tìm kiếm mã nguồn';
+        return q ? `search "${q}" in the workspace` : 'search the source code';
       }
       if (tc.name === 'submit_solution') {
-        return 'nộp giải pháp hoàn thành nhiệm vụ';
+        return 'submit the solution to complete the task';
       }
-      return `thực thi công cụ ${tc.name}`;
+      return `execute tool ${tc.name}`;
     });
-    return `Đang ${actions.join(' và ')}.`;
+    return `Doing ${actions.join(' and ')}.`;
   }
 
   if (input.text && input.text.trim()) {
@@ -117,6 +117,6 @@ export function generateFallbackStepSummary(input: StepSummaryInput): string {
     return firstLine.endsWith('.') ? firstLine : `${firstLine}.`;
   }
 
-  return 'Đang phân tích ngữ cảnh và xác định bước thực thi tiếp theo.';
+  return 'Analyzing context and determining the next execution step.';
 }
 

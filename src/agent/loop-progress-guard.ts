@@ -175,7 +175,7 @@ export class LoopProgressGuard {
         isOscillating: true,
         affectedFiles: [m0, m1],
         oscillationType: 'ping-pong',
-        message: `[TRAJECTORY DYSREGULATION INTERVENTION]: Phát hiện chu kỳ dao động con thoi (Ping-Pong Mutation) liên tục giữa "${m0}" và "${m1}". Dừng việc thay đổi mã thử-sai lặp đi lặp lại giữa hai file này. Hãy dừng lại, tạo bài kiểm thử cô lập trong scratch/ hoặc đọc lại yêu cầu gốc để khảo sát nguyên nhân cốt lõi trước khi tiếp tục.`,
+        message: `[TRAJECTORY DYSREGULATION INTERVENTION]: Detected a continuous ping-pong mutation cycle between "${m0}" and "${m1}". Stop the repeated trial-and-error edits across these two files. Pause, create an isolated test in scratch/ or re-read the original request to investigate the root cause before continuing.`,
       };
     }
 
@@ -189,7 +189,7 @@ export class LoopProgressGuard {
           isOscillating: true,
           affectedFiles: [targetFile],
           oscillationType: 'hyper-mutation',
-          message: `[TRAJECTORY DYSREGULATION INTERVENTION]: File "${targetFile}" đã bị can thiệp 4 lần liên tiếp mà chưa có bước kiểm thử xác nhận. Hãy dừng việc sửa mã mò mẫm; hãy chạy test hoặc tạo scratch test để xác minh hành vi trước khi sửa tiếp.`,
+          message: `[TRAJECTORY DYSREGULATION INTERVENTION]: File "${targetFile}" was modified 4 times in a row with no confirming test step. Stop blind code edits; run a test or create a scratch test to verify behavior before editing further.`,
         };
       }
     }

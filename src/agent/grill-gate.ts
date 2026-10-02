@@ -13,16 +13,16 @@ export class GrillGate {
     const text = objective.trim();
     const questions: ComposeGrillAnswer[] = [];
     if (!/\b(?:must|shall|when|if|only|không|phải|khi)\b/iu.test(text)) {
-      questions.push({ id: 'success', question: 'Điều kiện thành công quan sát được của tính năng này là gì?' });
+      questions.push({ id: 'success', question: 'What is the observable success condition of this feature?' });
     }
     if (!/\b(?:error|failure|fallback|retry|timeout|lỗi|thất bại)\b/iu.test(text)) {
-      questions.push({ id: 'failure', question: 'Hệ thống phải xử lý lỗi, timeout và đường lui như thế nào?' });
+      questions.push({ id: 'failure', question: 'How should the system handle errors, timeouts, and fallbacks?' });
     }
     if (!/\b(?:compatible|migration|schema|api|breaking|tương thích|di trú)\b/iu.test(text)) {
-      questions.push({ id: 'compatibility', question: 'Có ràng buộc tương thích ngược, API, schema hoặc migration nào không?' });
+      questions.push({ id: 'compatibility', question: 'Are there any backward-compatibility, API, schema, or migration constraints?' });
     }
     if (!/\b(?:tests?|verify|verification|acceptance|kiểm thử|xác minh)\b/iu.test(text)) {
-      questions.push({ id: 'verification', question: 'Những lệnh kiểm thử nào phải vượt qua để chấp nhận thay đổi?' });
+      questions.push({ id: 'verification', question: 'Which test commands must pass to accept the change?' });
     }
     return questions;
   }

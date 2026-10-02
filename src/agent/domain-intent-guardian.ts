@@ -83,10 +83,10 @@ export class DomainIntentGuardian {
     // 2. Trích xuất Non-Negotiable Constraints
     const constraints: string[] = [];
     if (!explicitlyAllowsTestModification) {
-      constraints.push('Không được tự tiện sửa đổi hoặc xóa các bài test hiện có để ép pass test');
+      constraints.push('Do not arbitrarily modify or delete existing tests to force a pass');
     }
     if (lower.includes('backward compatibility') || lower.includes('tương thích ngược') || lower.includes('không phá vỡ')) {
-      constraints.push('Bắt buộc bảo toàn tương thích ngược (Backward Compatibility), không thay đổi public API signatures');
+      constraints.push('Must preserve backward compatibility — do not change public API signatures');
     }
 
     // Match các mệnh đề cấm đoán tiếng Anh & tiếng Việt
@@ -102,7 +102,7 @@ export class DomainIntentGuardian {
         if (match[1]) {
           const phrase = match[1].trim();
           if (phrase.length >= 3 && !constraints.some((c) => c.toLowerCase().includes(phrase.toLowerCase()))) {
-            constraints.push(`Bảo toàn ràng buộc: ${phrase}`);
+            constraints.push(`Preserve constraint: ${phrase}`);
           }
         }
       }
@@ -111,10 +111,10 @@ export class DomainIntentGuardian {
     // 3. Trích xuất Domain Invariants
     const invariants: string[] = [];
     if (lower.includes('bảo mật') || lower.includes('security') || lower.includes('sql injection') || lower.includes('auth')) {
-      invariants.push('Nguyên tắc bất biến: Tuyệt đối không dùng concatenated SQL query hay bypass auth checks');
+      invariants.push('Invariant: never use concatenated SQL queries or bypass auth checks');
     }
     if (lower.includes('tax') || lower.includes('thuế') || lower.includes('vat')) {
-      invariants.push('Nguyên tắc bất biến: Tuân thủ chính xác công thức và điều kiện miễn giảm thuế');
+      invariants.push('Invariant: follow tax formulas and exemption conditions exactly');
     }
 
     // 4. Xác định Core Goal tóm lược (lọc bỏ lời chào hỏi và lấy ý định cốt lõi đa dòng)
@@ -183,8 +183,8 @@ export class DomainIntentGuardian {
         return {
           type: 'TEST_TAMPERING',
           severity: 'BLOCKING',
-          message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] Bạn đang cố gắng sửa đổi file test '${targetPath}'. Yêu cầu nghiệp vụ ban đầu không cho phép sửa đổi test suite để ép pass.`,
-          courseCorrectionGuidance: `Dừng việc sửa file test! Hãy sửa mã nguồn logic nghiệp vụ thực tế trong src/ để thỏa mãn các điều kiện kiểm thử của bài test.`,
+          message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] You are attempting to modify test file '${targetPath}'. The original business requirement does not allow modifying the test suite to force a pass.`,
+          courseCorrectionGuidance: `Stop editing test files! Fix the actual business-logic source code in src/ to satisfy the test assertions.`,
         };
       }
     }
@@ -228,8 +228,8 @@ export class DomainIntentGuardian {
         return {
           type: 'GOAL_DRIFT',
           severity: 'WARNING',
-          message: `[SPECIFICATION DRIFT DETECTED (Wink Meta AI)]: Hệ thống phát hiện bạn có dấu hiệu từ bỏ mục tiêu nghiệp vụ ban đầu ("${this.contract.coreGoal}").`,
-          courseCorrectionGuidance: `Tuyệt đối không hạ thấp tiêu chuẩn hoặc hardcode giải pháp giả tạo. Mục tiêu nghiệp vụ bắt buộc: "${this.contract.coreGoal}". Hãy tập trung giải quyết đúng nguyên nhân gốc theo đúng hợp đồng nghiệp vụ đã đóng băng.`,
+          message: `[SPECIFICATION DRIFT DETECTED (Wink Meta AI)]: The system detected signs that you are abandoning the original business goal ("${this.contract.coreGoal}").`,
+          courseCorrectionGuidance: `Do not lower the bar or hardcode a fake solution. Mandatory business goal: "${this.contract.coreGoal}". Focus on solving the true root cause per the frozen business contract.`,
         };
       }
     }

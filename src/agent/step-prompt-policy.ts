@@ -41,6 +41,8 @@ export interface StepPromptPolicyContext {
   hasSubmittedSolution: boolean;
   hasVerifiedTests: boolean;
   activeAgentCount: number;
+  /** True when the turn prompt carries @-attached files (anchors + 2-hop neighborhood). */
+  hasAttachments?: boolean;
   harnessProfileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
   candidates: StepPromptCandidates;
 }
@@ -155,8 +157,18 @@ export class StepPromptPolicy {
       }
     }
 
+    // Attachment neighborhood: @-attached files are anchors — force dependency/blast-radius
+    // guidance so the model expands to hop-1/hop-2 related files instead of staring at anchors.
+    if (context.hasAttachments && !context.hasSubmittedSolution) {
+      if (!selectedPlaybooks.includes('architecture')) selectedPlaybooks.push('architecture');
+    }
+
     if (selectedPlaybooks.length > 0) reasonCodes.push(`PLAYBOOKS_${selectedPlaybooks.join('_').toUpperCase()}`);
     else reasonCodes.push('NO_STEP_PLAYBOOK_REQUIRED');
+
+    if (context.hasAttachments && !context.hasSubmittedSolution) {
+      reasonCodes.push('ATTACHMENT_NEIGHBORHOOD');
+    }
 
     let selectedGitPlaybook: GitWorkflowPromptId | undefined;
 
@@ -240,6 +252,7 @@ export class StepPromptPolicy {
     const includeScaffold = antiDeception
       || context.consecutiveFailures >= 2
       || confidence < 0.8
+      || context.hasAttachments === true
       || (riskyMutation && (!evidenceSufficient || highRisk))
       || (parserTask && context.paretoUncertainty === 'high');
     if (includeScaffold) reasonCodes.push('COGNITIVE_SCAFFOLD_REQUIRED');

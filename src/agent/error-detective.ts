@@ -853,8 +853,8 @@ export class ErrorDetective {
     if (isDifferentialRegression && newRegressionsCount && newRegressionsCount > 0) {
       lines.push(
         `🚨 [DIFFERENTIAL REGRESSION PINPOINTED]:`,
-        `   • Phát hiện ${newRegressionsCount} lỗi MỚI xuất hiện do lần sửa đổi gần nhất (bỏ qua ${preExistingCount || 0} lỗi tồn đọng trước đó).`,
-        `   • Ưu tiên tuyệt đối 100%: Tập trung xử lý các lỗi mới này trước!`,
+        `   • Detected ${newRegressionsCount} NEW errors introduced by the latest modification (ignoring ${preExistingCount || 0} pre-existing errors).`,
+        `   • Absolute top priority: fix these new errors first!`,
       );
     }
 

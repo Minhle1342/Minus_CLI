@@ -115,7 +115,7 @@ export class HypothesisTracker {
     if (target) {
       target.status = 'falsified';
       target.rejectionReason = reason;
-      target.learning = learning || `Giả thuyết ${target.id} không đúng do: ${reason}`;
+      target.learning = learning || `Hypothesis ${target.id} is incorrect because: ${reason}`;
       target.testedAt = new Date().toISOString();
     }
   }

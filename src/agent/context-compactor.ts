@@ -459,7 +459,7 @@ export class ContextCompactor {
     }
     const uniqueDecisions = Array.from(new Set(keyDecisions)).slice(0, 8);
     const summaryText = assistantThoughts.slice(-1)[0]
-      || (uniqueTools.length > 0 ? `Đã thực thi công cụ: ${uniqueTools.join(', ')}` : 'Đã hoàn tất bước trao đổi.');
+      || (uniqueTools.length > 0 ? `Executed tools: ${uniqueTools.join(', ')}` : 'Exchange step completed.');
 
     const stableTurnHash = crypto.createHash('sha256')
       .update(serializeHistory(turnMessages))
@@ -469,7 +469,7 @@ export class ContextCompactor {
     const doc: ArchivedTurnDocument = {
       id: `archived-turn-${turnNum}-${stableTurnHash}`,
       turnNumber: turnNum,
-      userPrompt: userPrompt.trim() || `Yêu cầu turn #${turnNum}`,
+      userPrompt: userPrompt.trim() || `Turn #${turnNum} request`,
       assistantSummary: summaryText.trim(),
       toolsUsed: uniqueTools,
       filesTouched: uniqueFiles,
@@ -479,7 +479,7 @@ export class ContextCompactor {
       timestamp: new Date().toISOString(),
     };
 
-    const synopsis = `• Turn #${turnNum}: Yêu cầu: "${userPrompt.slice(0, 100)}${userPrompt.length > 100 ? '...' : ''}" ➔ Kết quả: ${summaryText.slice(0, 120)}${summaryText.length > 120 ? '...' : ''}${uniqueFiles.length > 0 ? ` [Files: ${uniqueFiles.slice(0, 3).join(', ')}]` : ''}`;
+    const synopsis = `• Turn #${turnNum}: Request: "${userPrompt.slice(0, 100)}${userPrompt.length > 100 ? '...' : ''}" ➔ Result: ${summaryText.slice(0, 120)}${summaryText.length > 120 ? '...' : ''}${uniqueFiles.length > 0 ? ` [Files: ${uniqueFiles.slice(0, 3).join(', ')}]` : ''}`;
 
     return { synopsis, doc };
   }
@@ -599,7 +599,7 @@ export class ContextCompactor {
     const turnRangeLabel = totalArchivedTurns === 1 ? 'TURN 1' : `TURNS 1 to ${totalArchivedTurns}`;
     const structuredSummary = [
       `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
-      `> Ngữ cảnh các lượt trao đổi cũ đã được nén theo chuẩn Anchored Structured Compression (/context-compression):`,
+      `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
       ``,
       `## 1. Session Intent`,
       sessionIntent,
@@ -609,18 +609,18 @@ export class ContextCompactor {
       ...highSaliencySection,
       ``,
       `## 4. Decisions Made`,
-      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Tuân thủ quy chuẩn kỹ thuật của codebase.']),
+      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
       ``,
       `## 5. Current State & Tools Executed`,
-      `- Đã thực thi các công cụ: ${allTools.slice(0, 8).join(', ') || 'none'}`,
-      `- Trạng thái: Các lượt trao đổi cũ đã được đóng gói an toàn và lưu vết bất biến.`,
+      `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
+      `- Status: older exchange turns safely packaged with an immutable trace.`,
       ``,
       `## 6. Next Steps`,
-      `- Tiếp tục thực thi nhiệm vụ trên các tệp tin trong active sliding window.`,
+      `- Continue the task on files in the active sliding window.`,
       ``,
       `### Chronological Turn Index`,
       ...[...priorSynopsisLines, ...synopsisLines],
-      `\n> (Hệ thống sẽ tự động re-inject thông tin chi tiết nếu người dùng đề cập đến các bước trên)`
+      `\n> (The system will automatically re-inject details if the user refers to the steps above)`
     ].join('\n');
 
     const rollingSynopsisMessage: SessionMessage = {
@@ -794,7 +794,7 @@ export class ContextCompactor {
           // Cơ chế 1: Superseded State Deduplication (Khử trạng thái cũ của file đã bị sửa)
           if (isMutated) {
             prunedPartsCount++;
-            const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" đã được sửa đổi ở bước sau. Vui lòng đọc lại file nếu cần nội dung mới nhất]`;
+            const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" was modified in a later step. Please re-read the file if you need the latest content]`;
             maskedObservations.push(createMaskedObservationRecord(resp, resp.response, `obs-${msgIdx}`, supersededMask));
             return {
               functionResponse: {
@@ -822,7 +822,7 @@ export class ContextCompactor {
                 path: r.path,
                 totalLines: outline.totalLines,
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Đọc lại bằng view_file nếu cần]`,
+                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Re-read with view_file if needed]`,
               };
             }
             // 2b: Command log cũ -> Giữ status gọn
@@ -832,14 +832,14 @@ export class ContextCompactor {
                 compressedPayload = {
                   exitCode: 0,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Lệnh thực thi thành công (exit 0). Log dài (${rawLog.length} chars) đã được ẩn]`,
+                  observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). Long log (${rawLog.length} chars) hidden]`,
                 };
               } else {
                 const logLines = rawLog.split('\n');
                 compressedPayload = {
                   exitCode: r.exitCode,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Lệnh thất bại (exit ${r.exitCode})]`,
+                  observationMask: `[OBSERVATION MASKED: Command failed (exit ${r.exitCode})]`,
                   errorTail: logLines.slice(-3).join('\n'),
                 };
               }
@@ -848,14 +848,14 @@ export class ContextCompactor {
             else if (Array.isArray(r.matches)) {
               compressedPayload = {
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: Kết quả tìm kiếm (${r.totalMatches || r.matches.length} matches) đã được ẩn]`,
+                observationMask: `[OBSERVATION MASKED: Search results (${r.totalMatches || r.matches.length} matches) hidden]`,
               };
             }
             // 2d: Khác
             else {
               compressedPayload = {
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: Dữ liệu cũ (${respStr.length} chars) đã được nén]`,
+                observationMask: `[OBSERVATION MASKED: Stale data (${respStr.length} chars) compressed]`,
               };
             }
 
@@ -888,7 +888,7 @@ export class ContextCompactor {
             const outline = SemanticSlicer.extractOutline(r.path || 'file', r.content);
             const topSymbols = outline.symbols.slice(0, 10).map((s) => `${s.kind} ${s.name} (L${s.startLine}-${s.endLine})`);
             if (outline.symbols.length > 10) {
-              topSymbols.push(`... (+${outline.symbols.length - 10} symbols khác)`);
+              topSymbols.push(`... (+${outline.symbols.length - 10} more symbols)`);
             }
 
             compressedPayload = {
@@ -896,7 +896,7 @@ export class ContextCompactor {
               totalLines: outline.totalLines,
               semanticOutline: outline.summary,
               symbols: topSymbols,
-              hint: '[Nội dung đã được nén thành Outline ngữ nghĩa. Dùng read_file với startLine/endLine nếu cần xem chi tiết]',
+              hint: '[Content compressed into a semantic outline. Use read_file with startLine/endLine for details]',
             };
           }
           // Case B: Log chạy lệnh dài -> Giữ Header + Tail của Stack Trace (Phase 2 Hierarchical Pruning)
@@ -905,16 +905,16 @@ export class ContextCompactor {
             const logLines = rawLog.split('\n');
             let logTail = rawLog;
             if (r.exitCode === 0 && logLines.length > 6) {
-              logTail = logLines.slice(0, 2).join('\n') + '\n... [Command/Test thành công: đã ẩn ' + (logLines.length - 4) + ' dòng log] ...\n' + logLines.slice(-2).join('\n');
+              logTail = logLines.slice(0, 2).join('\n') + '\n... [Command/Test succeeded: hid ' + (logLines.length - 4) + ' log lines] ...\n' + logLines.slice(-2).join('\n');
             } else if (logLines.length > 12) {
-              logTail = logLines.slice(0, 3).join('\n') + '\n... [Cắt ' + (logLines.length - 8) + ' dòng log] ...\n' + logLines.slice(-5).join('\n');
+              logTail = logLines.slice(0, 3).join('\n') + '\n... [Trimmed ' + (logLines.length - 8) + ' log lines] ...\n' + logLines.slice(-5).join('\n');
             } else if (rawLog.length > this.config.maxCharactersPerToolResult) {
-              logTail = rawLog.slice(0, 150) + '\n... [Cắt ' + (rawLog.length - 300) + ' ký tự] ...\n' + rawLog.slice(-150);
+              logTail = rawLog.slice(0, 150) + '\n... [Trimmed ' + (rawLog.length - 300) + ' chars] ...\n' + rawLog.slice(-150);
             }
 
             compressedPayload = {
               exitCode: r.exitCode,
-              summary: `[Log thực thi dài (${rawLog.length} chars) đã được nén]`,
+              summary: `[Long execution log (${rawLog.length} chars) compressed]`,
               logTail,
             };
           }
@@ -924,13 +924,13 @@ export class ContextCompactor {
             compressedPayload = {
               totalMatches: r.totalMatches || r.matches.length,
               topMatches,
-              summary: `[Tìm thấy ${r.totalMatches || r.matches.length} kết quả. Đã hiển thị 3 kết quả đầu]`,
+              summary: `[Found ${r.totalMatches || r.matches.length} results. Showing first 3]`,
             };
           }
           // Case D: Payload đối tượng khác
           else {
             compressedPayload = {
-              summary: `[Dữ liệu dài (${respStr.length} chars) đã được nén]`,
+              summary: `[Long data (${respStr.length} chars) compressed]`,
               preview: respStr.slice(0, 250) + '...',
             };
           }
@@ -952,7 +952,7 @@ export class ContextCompactor {
               name: resp.name,
               id: resp.id,
               response: {
-                summary: `[Dữ liệu nén: ${String(resp.response).slice(0, 200)}...]`,
+                summary: `[Compressed data: ${String(resp.response).slice(0, 200)}...]`,
               },
             },
           };
@@ -1034,7 +1034,7 @@ export class ContextCompactor {
     }
 
     const summaryLines = falsifiedHypotheses.map(
-      (h) => `• [${h.id} Falsified]: "${h.statement}" ➔ ${h.rejectionReason || 'Failed verification'} (Bài học: ${h.learning || 'Cần đổi chiến lược'})`,
+      (h) => `• [${h.id} Falsified]: "${h.statement}" ➔ ${h.rejectionReason || 'Failed verification'} (Lesson: ${h.learning || 'Need a strategy change'})`,
     );
     const distilledSummary = [
       `\n🧠 [DISTILLED LEARNED INVARIANTS - CODEX ARCHITECTURE]:`,

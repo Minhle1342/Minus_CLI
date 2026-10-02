@@ -247,8 +247,8 @@ export class ProcessFailureDetector {
           return {
             type: 'RELEVANCE_DRIFT',
             phase: this.currentPhase,
-            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] Hệ thống phát hiện bạn đã gọi 4 thao tác khảo sát liên tiếp trên các file nằm ngoài phạm vi cốt lõi của bài toán.`,
-            suggestedAction: `Dừng việc khảo sát dàn trải. Hãy dùng GitNexus đồ thị gọi hàm (Call Graph) hoặc grep chính xác các symbols của lỗi để định vị đúng module cần can thiệp.`,
+            message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] The system detected 4 consecutive survey operations on files outside the core scope of the problem.`,
+            suggestedAction: `Stop broad surveying. Use the GitNexus call graph or grep the exact error symbols to locate the right module to change.`,
           };
         }
       } else {
@@ -273,10 +273,10 @@ export class ProcessFailureDetector {
             return {
               type: 'LOCALIZATION_FAILURE_BACKTRACK',
               phase: this.currentPhase,
-              message: `[PROCESS-LEVEL FAILURE: LOCALIZATION FAILURE DETECTED] Bạn đã sửa code nhưng test vẫn thất bại ${this.postMutationTestFailures} lần liên tiếp. Theo nghiên cứu SWE-Reasoner (arXiv:2503.23803), đây là dấu hiệu của việc định vị sai nguyên nhân gốc (Fault Localization Failure), không phải lỗi cú pháp đơn thuần.`,
+              message: `[PROCESS-LEVEL FAILURE: LOCALIZATION FAILURE DETECTED] You edited code but tests still failed ${this.postMutationTestFailures} times in a row. Per SWE-Reasoner (arXiv:2503.23803), this signals wrong root-cause localization (Fault Localization Failure), not a mere syntax error.`,
               suggestedAction: nextHypo
-                ? `Cắt tỉa nhánh hiện tại (Pruning) và quay đầu (Backtracking). Hãy chuyển sang giả thuyết tiếp theo: '${nextHypo.targetFile}' (${nextHypo.description}).`
-                : `Dừng việc sửa file hiện tại. Hãy hoàn nguyên mã chưa kiểm chứng và lập lại bài test tái hiện cô lập trong scratch/ để xác định lại root cause.`,
+                ? `Prune the current branch and backtrack. Switch to the next hypothesis: '${nextHypo.targetFile}' (${nextHypo.description}).`
+                : `Stop editing the current file. Revert unverified code and re-create an isolated reproduction test in scratch/ to re-identify the root cause.`,
             };
           }
         } else {
@@ -312,8 +312,8 @@ export class ProcessFailureDetector {
               type: 'SEMANTIC_LOOP',
               phase: this.currentPhase,
               similarity: sim,
-              message: `[PROCESS-LEVEL FAILURE: SEMANTIC FAILURE LOOP DETECTED] Hệ thống phát hiện các lần can thiệp gần nhất có độ tương đồng ngữ nghĩa cao (${Math.round(sim * 100)}%) nhưng đều thất bại. Bạn đang bị kẹt trong vòng lặp sửa đổi vi mô (Micro-patching Loop).`,
-              suggestedAction: `Dừng việc thử nghiệm các biến thể cú pháp tương tự trên file '${targetFile || 'hiện tại'}'. Hãy Hoàn nguyên (Rollback) và Chuyển hướng Chiến lược (Strategy Pivot) sang phương án cấu trúc khác hoặc viết test tái hiện cô lập trong scratch/.`,
+              message: `[PROCESS-LEVEL FAILURE: SEMANTIC FAILURE LOOP DETECTED] The system detected that recent interventions are semantically highly similar (${Math.round(sim * 100)}%) but all failed. You are stuck in a micro-patching loop.`,
+              suggestedAction: `Stop trying similar syntax variants on file '${targetFile || 'current'}'. Roll back and pivot strategy to a structurally different approach, or write an isolated reproduction test in scratch/.`,
             };
           }
         }

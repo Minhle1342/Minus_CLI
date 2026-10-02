@@ -233,7 +233,7 @@ test('guardian allows a small inspected edit but requires empirical evidence at 
   });
   assert.equal(highRiskBlocked.valid, false);
   assert.equal(highRiskBlocked.errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
-  assert.match(highRiskBlocked.error || '', /rủi ro cao/);
+  assert.match(highRiskBlocked.error || '', /high-risk changes/);
 
   guardian.setPreMutationGateContext({
     taskClass: 'bugfix',

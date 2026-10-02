@@ -150,6 +150,29 @@ function isComprehensiveSubmissionSummary(value: string): boolean {
 }
 
 /**
+ * Trích anchor paths từ prompt đã được PromptAttachmentProcessor mở rộng.
+ * Header có dạng `[Attached File: <path> (<n> lines ...)]`,
+ * `[Attached Binary File: <path> (<n> KB)]`, `[Attached Directory: <path>/ (<n> entries)]`.
+ * Trả về [] khi turn không có attach.
+ */
+function detectAttachmentAnchors(text: string): string[] {
+  if (!text || !text.includes('[User Attached Workspace Context]')) return [];
+  const anchors = new Set<string>();
+  let match: RegExpExecArray | null;
+  const filePattern = /\[Attached (?:Binary )?File: (.+?) \(\d+(?:\.\d+)? (?:lines|KB)/g;
+  while ((match = filePattern.exec(text)) !== null) {
+    const candidate = match[1].trim();
+    if (candidate) anchors.add(candidate);
+  }
+  const dirPattern = /\[Attached Directory: (.+?) \(\d+ entries/g;
+  while ((match = dirPattern.exec(text)) !== null) {
+    const candidate = match[1].trim().replace(/\/+$/, '');
+    if (candidate) anchors.add(candidate);
+  }
+  return [...anchors];
+}
+
+/**
  * Extract the [REQUEST ANALYSIS] block the model opens its reasoning with
  * (goal, scope, ambiguities — see CORE_SYSTEM_PROMPT §3). Returns undefined
  * when the model did not include one.
@@ -182,7 +205,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
       enforceScratchTest: false,
       criticStrictness: 'strict',
       compactionRatioBias: -0.05,
-      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Tác vụ sửa lỗi/bảo mật cần bằng chứng tỷ lệ thuận với rủi ro. Dùng kiểm chứng thực nghiệm cho thay đổi rủi ro cao; thay đổi nhỏ, dễ đảo ngược có thể tiến hành khi target đã được đọc và cơ chế nguyên nhân có bằng chứng trực tiếp.',
+      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Bugfix/security tasks require risk-proportional evidence. Use empirical verification for high-risk changes; small, easily reversible changes may proceed once the target has been read and the causal mechanism has direct evidence.',
     };
   }
 
@@ -192,7 +215,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
       enforceScratchTest: false,
       criticStrictness: 'standard',
       compactionRatioBias: -0.05,
-      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Ưu tiên khảo sát cấu trúc, gọi các công cụ đọc/tìm kiếm và trích xuất ngữ cảnh. Hạn chế can thiệp trực tiếp vào mã nguồn trước khi có kế hoạch.',
+      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Prioritize structural survey — call read/search tools and extract context. Avoid direct source-code intervention before a plan exists.',
     };
   }
 
@@ -202,7 +225,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
       enforceScratchTest: false,
       criticStrictness: 'lenient',
       compactionRatioBias: +0.05,
-      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Tác vụ dựng khung/tính năng mới. Ưu tiên tốc độ kiến tạo mã nguồn và nới lỏng kiểm tra blocker kiểm thử ở các bước ban đầu.',
+      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Scaffolding/new-feature task. Prioritize source-code creation speed and relax test-blocker checks in the early steps.',
     };
   }
 
@@ -211,7 +234,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
     enforceScratchTest: false,
     criticStrictness: 'standard',
     compactionRatioBias: 0,
-    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Vận hành cân bằng theo quy trình TDD chuẩn.',
+    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Balanced operation following the standard TDD workflow.',
   };
 }
 
@@ -235,21 +258,21 @@ export function calculateTaskComplexity(
 
   if (taskClass === 'bugfix' || taskClass === 'security') {
     score += 0.35;
-    reasons.push('Tác vụ sửa lỗi/bảo mật đòi hỏi suy luận sâu & kiểm chứng thực thi');
+    reasons.push('Bugfix/security task requires deep reasoning and execution verification');
   } else if (taskClass === 'feature' || taskClass === 'refactor') {
     score += 0.25;
-    reasons.push('Tác vụ tính năng mới/tái cấu trúc yêu cầu mở rộng không gian tìm kiếm');
+    reasons.push('New-feature/refactor task requires an expanded search space');
   }
 
   const hasStackTrace = /(?:(?:Error|Exception):|at\s+[\w$./\\-]+\s*\([^)]+:\d+:\d+\)|Traceback \(most recent call last\):)/i.test(userRequest);
   if (hasStackTrace) {
     score += 0.25;
-    reasons.push('Phát hiện dấu vết Stack Trace lỗi trong yêu cầu');
+    reasons.push('Error stack trace detected in the request');
   }
 
   if (userRequest.length > 500) {
     score += 0.15;
-    reasons.push('Yêu cầu mô tả chi tiết với nhiều ràng buộc');
+    reasons.push('Detailed request description with many constraints');
   }
 
   score = Math.min(1.0, Math.max(0.1, score));
@@ -258,7 +281,7 @@ export function calculateTaskComplexity(
   return {
     score,
     scaleFactor,
-    reason: reasons.length > 0 ? reasons.join('; ') : 'Tác vụ tiêu chuẩn',
+    reason: reasons.length > 0 ? reasons.join('; ') : 'Standard task',
   };
 }
 
@@ -747,8 +770,8 @@ export class AgentLoop {
 
         if (isRetryableLLMError && currentRetries >= this.MAX_CIRCUIT_BREAKER_RETRIES) {
           const detailMsg = isServerError
-            ? `LLM Provider đang quá tải hoặc không khả dụng: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng máy chủ LLM vẫn báo lỗi (${errClassification.kind}: ${errClassification.message || 'Mô hình đang chịu tải cao tạm thời / 503 UNAVAILABLE'}). Vui lòng chờ vài phút rồi thử lại hoặc đổi sang model khác bằng lệnh /model.`
-            : `LLM đã hết Quota: Hệ thống đã tự động gửi prompt "Continue" 5 lần nhưng LLM vẫn báo lỗi hạn mức (${errClassification.kind}: ${errClassification.message || 'Hạn mức API đã cạn kiệt hoặc bị giới hạn tần suất liên tục'}). Vui lòng đổi sang model khác bằng lệnh /model hoặc kiểm tra gói cước billing.`;
+            ? `LLM provider is overloaded or unavailable: the system has automatically sent the "Continue" prompt 5 times but the LLM server still reports an error (${errClassification.kind}: ${errClassification.message || 'Model temporarily under high load / 503 UNAVAILABLE'}). Please wait a few minutes and retry, or switch to another model with the /model command.`
+            : `LLM quota exhausted: the system has automatically sent the "Continue" prompt 5 times but the LLM still reports a quota error (${errClassification.kind}: ${errClassification.message || 'API quota depleted or continuously rate-limited'}). Please switch to another model with the /model command or check your billing plan.`;
           const quotaExhaustedError = new Error(detailMsg);
           (quotaExhaustedError as any).isQuotaExhausted = isQuotaOrRateLimit;
           (quotaExhaustedError as any).isServerUnavailable = isServerError;
@@ -792,7 +815,7 @@ export class AgentLoop {
           'Agent stopped: cancellation requested.',
           'CANCELLED' as any,
         );
-        return 'Tác vụ đã được dừng theo yêu cầu của người dùng.';
+        return 'Task stopped at the request of the user.';
       }
 
       // Preserve an auditable, balanced lifecycle even when a provider, hook,
@@ -838,11 +861,11 @@ export class AgentLoop {
             ? error.message
             : (isQuotaOrRateLimit
                 ? (errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
-                    ? `LLM đã hết Quota (Hạn mức API đã hết). Bạn có thể đổi sang model khác bằng lệnh /model, hoặc kiểm tra gói cước billing trước khi tiếp tục.`
-                    : `LLM Rate Limit Exceeded (Giới hạn tần suất 429). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc /plan resume.`)
-                : `LLM Provider Server Unavailable (Quá tải máy chủ 503). Hệ thống đã tự động lưu tiến độ kế hoạch. Bạn có thể đợi vài phút rồi dùng /goal resume hoặc đổi model bằng lệnh /model.`);
+                    ? `LLM quota exhausted (API quota depleted). You can switch to another model with the /model command, or check your billing plan before continuing.`
+                    : `LLM Rate Limit Exceeded (429 frequency limit). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume or /plan resume.`)
+                : `LLM Provider Server Unavailable (server overload 503). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume, or switch models with the /model command.`);
           await CLI.renderExecutionStopped(
-            `Agent suspended: ${suspensionAdvice}\nChi tiết: ${detail}`,
+            `Agent suspended: ${suspensionAdvice}\nDetails: ${detail}`,
             'CIRCUIT_BREAKER_TRIGGERED',
           );
         } else {
@@ -875,6 +898,11 @@ export class AgentLoop {
       ?.map((part: any) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
       .join('\n') || (options?.isRecoveryResume ? '[RESUME INTERRUPTED SESSION]' : '');
+    // @-attached files are investigation anchors: expand scope to their 2-hop
+    // neighborhood (resolved upstream by PromptAttachmentProcessor) instead of
+    // letting the model fixate on anchor content alone.
+    const attachmentAnchors = detectAttachmentAnchors(turnUserRequest);
+    const hasAttachmentAnchors = attachmentAnchors.length > 0;
     // Explicit ellipsis resolution: short follow-ups ("còn trang B thì sao")
     // inherit the previous turn's topic for classification/retrieval only.
     // The original wording stays untouched for plan goals, prompts, snapshots.
@@ -1076,6 +1104,8 @@ export class AgentLoop {
           const initialScaffold = this.cognitiveHarness.createScaffold({
             request: userText,
             phase: 'explore',
+            hasAttachments: hasAttachmentAnchors,
+            anchorPaths: attachmentAnchors,
           });
           prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
         }
@@ -1487,6 +1517,8 @@ export class AgentLoop {
         phase: classification.phase,
         activeTask: activeTask?.title,
         consecutiveFailures: consecutiveFails,
+        hasAttachments: hasAttachmentAnchors,
+        anchorPaths: attachmentAnchors,
       });
       const compactScaffoldPrompt = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
       const legacyScaffoldPrompt = step === 1 || consecutiveFails > 1
@@ -1545,6 +1577,7 @@ export class AgentLoop {
         activeAgentCount: this.agentRegistry.list().filter((agent) => (
           agent.id !== this.agentId && ['running', 'waiting'].includes(agent.status)
         )).length,
+        hasAttachments: hasAttachmentAnchors,
         harnessProfileName: harnessProfile.profileName,
         candidates: {
           legacyPlanContext,
@@ -1694,6 +1727,8 @@ export class AgentLoop {
           ...(currentHypothesis?.targetFiles || []),
           ...retrievalState.discoveredFiles,
           ...(composeState?.registeredFiles || []),
+          // @-attached anchors steer the graph map toward the attachment neighborhood.
+          ...attachmentAnchors,
         ];
 
         const baseSeedSymbols = [
@@ -1887,9 +1922,9 @@ export class AgentLoop {
           detectWorkspaceTestCommand(this._workspace.rootDir),
           detectWorkspaceBuildCommand(this._workspace.rootDir),
         ]);
-        const cmdHint = detectedCmd ? ` (ví dụ: \`${detectedCmd}\`)` : '';
-        const buildHint = detectedBuildCmd ? ` (ví dụ: \`${detectedBuildCmd}\`)` : '';
-        testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: Bạn đã thực hiện ${this.editToolCallsInTurn} lượt sửa đổi mã nguồn. Theo quy trình Verification Ladder: nếu dự án có lệnh build đặc thù (không phải "npm run build" hay "tsc"), hãy kiểm tra \`package.json\` (mục scripts) hoặc chạy \`get_diagnostics\` trước khi chạy full test suite. Khuyến khích bạn chạy static type-checking/build${buildHint} hoặc kiểm thử của dự án thông qua công cụ "run_command"${cmdHint} để kiểm chứng thực nghiệm các thay đổi và đảm bảo không phát sinh hồi quy trước khi kết thúc tác vụ hoặc gọi "submit_solution".`;
+        const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
+        const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
+        testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".`;
       }
 
       // Every model-visible dynamic block enters one arbiter. A preliminary pass
@@ -3089,7 +3124,7 @@ export class AgentLoop {
                 }
               }
               if (cleanedFiles.length > 0) {
-                const cleanupNotice = `\n[AUTO-CLEANUP]: Đã tự động dọn dẹp file kiểm thử tạm (${cleanedFiles.join(', ')}) sau khi kiểm thử thành công. Bạn không cần thực hiện thêm bước xóa file.`;
+                const cleanupNotice = `\n[AUTO-CLEANUP]: Automatically cleaned up temporary test files (${cleanedFiles.join(', ')}) after successful tests. You do not need to perform an extra file-deletion step.`;
                 const currentResult = executionResult.result;
                 const mergedResult = {
                   ...currentResult,
@@ -3172,12 +3207,12 @@ export class AgentLoop {
             // Xây dựng bản tóm tắt giải pháp giàu cấu trúc để dự phòng và hiển thị
             const richSummaryParts: string[] = [];
             if (summaryText) richSummaryParts.push(summaryText);
-            if (rootCauseText) richSummaryParts.push(`\n**Nguyên nhân cốt lõi (Root Cause):**\n${rootCauseText}`);
+            if (rootCauseText) richSummaryParts.push(`\n**Root Cause:**\n${rootCauseText}`);
             if (filesModifiedList.length > 0) {
-              richSummaryParts.push(`\n**Các tệp đã chỉnh sửa (Modified Files):**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
+              richSummaryParts.push(`\n**Modified Files:**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
             }
             if (verificationText) {
-              richSummaryParts.push(`\n**Bằng chứng kiểm chứng (Verification Evidence):**\n\`${verificationText}\``);
+              richSummaryParts.push(`\n**Verification Evidence:**\n\`${verificationText}\``);
             }
             submittedSolutionSummary = richSummaryParts.length > 0 ? richSummaryParts.join('\n') : summaryText;
 
@@ -3289,7 +3324,7 @@ export class AgentLoop {
           });
           if (processIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
             try {
-              const interventionMsg = `${processIntervention.message}\n👉 Hành động gợi ý: ${processIntervention.suggestedAction}`;
+              const interventionMsg = `${processIntervention.message}\n👉 Suggested action: ${processIntervention.suggestedAction}`;
               if (Object.isExtensible(executionResult.result)) {
                 (executionResult.result as any).processFailureIntervention = interventionMsg;
               } else {
@@ -3329,7 +3364,7 @@ export class AgentLoop {
           });
           if (domainIntentIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
             try {
-              const driftMsg = `${domainIntentIntervention.message}\n👉 Hướng dẫn chỉnh hướng: ${domainIntentIntervention.courseCorrectionGuidance}`;
+              const driftMsg = `${domainIntentIntervention.message}\n👉 Course-correction guidance: ${domainIntentIntervention.courseCorrectionGuidance}`;
               if (Object.isExtensible(executionResult.result)) {
                 (executionResult.result as any).domainIntentIntervention = driftMsg;
               } else {
@@ -3660,8 +3695,8 @@ export class AgentLoop {
             CLI.renderReflectionAlert(
               consecutiveEmptyTurns,
               hasSubmittedSolution
-                ? 'Giải pháp đã submit_solution thành công nhưng model chưa sinh câu trả lời văn bản. Đang kích hoạt Continuation Protocol...'
-                : 'Model sinh suy luận System 2 nhưng chưa phát sinh tool_calls. Đang tự động kích hoạt Continuation Protocol...',
+                ? 'Solution submitted successfully via submit_solution but the model has not produced a text answer yet. Activating Continuation Protocol...'
+                : 'Model produced System 2 reasoning but no tool_calls yet. Automatically activating Continuation Protocol...',
             );
             const noteText = hasSubmittedSolution
               ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
@@ -3672,8 +3707,8 @@ export class AgentLoop {
             CLI.renderReflectionAlert(
               consecutiveEmptyTurns,
               hasSubmittedSolution
-                ? 'Model trả về phản hồi rỗng sau khi submit_solution. Đang gửi lời nhắc yêu cầu báo cáo kết quả hoàn chỉnh...'
-                : 'Model trả về phản hồi rỗng. Đang tự động kích hoạt Continuation Protocol để tiếp tục tác vụ...',
+                ? 'Model returned an empty response after submit_solution. Sending a reminder requesting a complete result report...'
+                : 'Model returned an empty response. Automatically activating Continuation Protocol to continue the task...',
             );
             const noteText = hasSubmittedSolution
               ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
@@ -3753,7 +3788,7 @@ export class AgentLoop {
           this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
           CLI.renderReflectionAlert(
             consecutivePlanCompletionRejects,
-            `[Auto-Reconciliation]: Tự động điều hòa hoàn tất các task tồn đọng trong Plan do Model đã cung cấp câu trả lời thực chất. Tiếp tục chuyển sang Completion Gate.`,
+            `[Auto-Reconciliation]: Automatically reconciled remaining Plan tasks as complete because the model provided a substantive answer. Proceeding to the Completion Gate.`,
           );
         } else {
           const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
@@ -3896,8 +3931,8 @@ export class AgentLoop {
           CLI.renderReflectionAlert(
             consecutiveIncompleteFinals,
             canRetryIncompleteFinal
-              ? `Final Answer chưa vượt qua completion gate (${finalAnswerDecision.reason || 'policy'}). Agent sẽ tiếp tục ngay trong lượt hiện tại.`
-              : 'Model liên tục trả về Final Answer không có đủ evidence, kết quả, hoặc blocker thực. Turn sẽ kết thúc với thông báo rõ ràng.',
+              ? `Final answer did not pass the completion gate (${finalAnswerDecision.reason || 'policy'}). The agent will continue immediately within the current turn.`
+              : 'Model keeps returning Final Answers without sufficient evidence, results, or a real blocker. The turn will end with a clear notice.',
           );
           session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
           if (canRetryIncompleteFinal && fullContinuationPrompt) {
@@ -4134,7 +4169,7 @@ export class AgentLoop {
         }
       }
     }
-    if (!objective) objective = 'Tác vụ lập trình';
+    if (!objective) objective = 'Programming task';
     const compactObjective = objective.slice(0, 150).replace(/\s+/g, ' ');
 
     // 2. Thu thập các files đã chỉnh sửa qua tool calls
@@ -4163,10 +4198,10 @@ export class AgentLoop {
     // 3. Xác định outcome
     const filesList = Array.from(modifiedFiles);
     const verificationOutcome = testsPassed
-      ? 'Đã xác thực test thành công (exitCode: 0)'
+      ? 'Tests verified successfully (exitCode: 0)'
       : testsFailed
-        ? 'Test chưa pass hoàn toàn'
-        : filesList.length > 0 ? 'Đã chỉnh sửa code' : 'Đã khảo sát';
+        ? 'Tests not fully passing'
+        : filesList.length > 0 ? 'Modified code' : 'Surveyed';
 
     // 4. Tìm tóm tắt cuối cùng từ model nếu có
     const lastAssistant = [...events].reverse().find((e) => e.type === 'assistant/message');
@@ -4180,7 +4215,7 @@ export class AgentLoop {
       }
     }
 
-    const summaryStatement = `[Phiên ${session.id.slice(0, 10)}] Mục tiêu: "${compactObjective}". Files sửa: ${filesList.join(', ') || 'không'}. Kết quả: ${verificationOutcome}.${finalSummary ? ` Tóm tắt: ${finalSummary}` : ''}`;
+    const summaryStatement = `[Session ${session.id.slice(0, 10)}] Objective: "${compactObjective}". Modified files: ${filesList.join(', ') || 'none'}. Result: ${verificationOutcome}.${finalSummary ? ` Summary: ${finalSummary}` : ''}`;
 
     return this.memoryManager.saveEpisodicSummary(session.id, summaryStatement, {
       outcome: testsPassed ? 'success' : testsFailed ? 'failure' : 'completed',

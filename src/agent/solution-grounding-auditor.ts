@@ -152,9 +152,9 @@ export class SolutionGroundingAuditor {
         allowed: false,
         score: 0,
         reconciledFilesModified: [],
-        reasons: ['Trường "summary" không được để trống.'],
+        reasons: ['The "summary" field must not be empty.'],
         errorCode: 'EMPTY_SUMMARY',
-        suggestion: 'Hãy cung cấp tóm tắt các thay đổi đã triển khai và kết quả kiểm chứng thực nghiệm.',
+        suggestion: 'Provide a summary of the implemented changes and the empirical verification results.',
         informationDensity: 0,
         extractedEntities: [],
       };
@@ -236,11 +236,11 @@ export class SolutionGroundingAuditor {
         score: 40,
         reconciledFilesModified,
         reasons: [
-          `submit_solution bị từ chối: ${reconciledFilesModified.length} file đã đổi (ngưỡng HIGH) nhưng verificationMethod khai báo là "${payload.verificationMethod || '(trống)'}". Thay đổi mức này bắt buộc automated test pass thật, không chấp nhận kiểm tra bằng mắt hay tuyên bố suông.`,
+          `submit_solution rejected: ${reconciledFilesModified.length} files changed (HIGH threshold) but the declared verificationMethod is "${payload.verificationMethod || '(empty)'}". Changes at this level require a real automated test pass — no visual inspection or bare claims accepted.`,
         ],
         errorCode: 'VERIFICATION_TIER_MISMATCH',
         suggestion:
-          'Hãy chạy test suite thật (npm test / pytest / go test ...) và khai báo verificationMethod là "automated_test_pass" kèm lệnh đã chạy trong verificationEvidence.',
+          'Run a real test suite (npm test / pytest / go test ...) and declare verificationMethod as "automated_test_pass" with the executed command in verificationEvidence.',
         informationDensity: density,
         extractedEntities: entities,
       };
@@ -268,11 +268,11 @@ export class SolutionGroundingAuditor {
         score: 10,
         reconciledFilesModified,
         reasons: [
-          'submit_solution bị từ chối: trường "summary" chỉ chứa câu thông báo chung chung ("Đã cung cấp câu trả lời...", "sẽ báo cáo...") mà không có hành động cụ thể hay thực thể kỹ thuật nào.',
+          'submit_solution rejected: the "summary" field only contains a generic status sentence ("Đã cung cấp câu trả lời...", "sẽ báo cáo...") with no concrete action or technical entity.',
         ],
         errorCode: 'INVALID_SUMMARY_CONTENT',
         suggestion:
-          'Hãy đưa trực tiếp kết quả phân tích nguyên nhân gốc rễ, vị trí phát sinh lỗi, các file đã chỉnh sửa và giải pháp cụ thể vào trường "summary".',
+          'Put the root-cause analysis result, error location, modified files, and concrete solution directly into the "summary" field.',
         informationDensity: density,
         extractedEntities: entities,
       };

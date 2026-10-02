@@ -240,6 +240,36 @@ export class CognitiveHarness {
     phase?: string;
     activeTask?: string;
     consecutiveFailures?: number;
+    hasAttachments?: boolean;
+    anchorPaths?: string[];
+  }): CognitiveScaffold {
+    const scaffold = this.buildScaffold(params);
+    const anchors = (params.anchorPaths || []).map((p) => (p || '').trim()).filter(Boolean);
+    if (!params.hasAttachments && anchors.length === 0) return scaffold;
+    return this.applyAttachmentScope(scaffold, anchors);
+  }
+
+  private applyAttachmentScope(scaffold: CognitiveScaffold, anchorPaths: string[]): CognitiveScaffold {
+    const shown = anchorPaths.slice(0, 5).join(', ') || '(attached file)';
+    const more = anchorPaths.length > 5 ? ` (+${anchorPaths.length - 5} more)` : '';
+    return {
+      ...scaffold,
+      negativeGate: [
+        `🔒 [ATTACHMENT ANCHOR RULE] User @-attached file(s) [${shown}]${more} are INVESTIGATION ANCHORS, not the whole truth. NEVER conclude root cause or apply fixes based on anchor content alone.`,
+        ...scaffold.negativeGate,
+      ],
+      executionTopology: [
+        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, same-dir siblings, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / grep_search / analyze_impact before concluding.',
+        ...scaffold.executionTopology,
+      ],
+    };
+  }
+
+  private buildScaffold(params: {
+    request: string;
+    phase?: string;
+    activeTask?: string;
+    consecutiveFailures?: number;
   }): CognitiveScaffold {
     const { request, phase = 'explore', activeTask = '', consecutiveFailures = 0 } = params;
     const lowerReq = request.toLowerCase();

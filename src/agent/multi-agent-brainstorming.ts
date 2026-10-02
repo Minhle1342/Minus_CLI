@@ -111,13 +111,13 @@ export class MultiAgentBrainstormingEngine {
       {
         id: 'dec-1',
         topic: 'Initial Architecture & Scope Definition',
-        decision: `Thống nhất thiết kế nền tảng giải quyết bài toán: ${cleanGoal}`,
+        decision: `Agreed base design to solve the problem: ${cleanGoal}`,
         alternativesConsidered: ['Monolithic Approach', 'Multi-Layer Service-Oriented Approach'],
         objectionsRaised: [],
         resolution: {
           accepted: true,
-          rationale: 'Thiết kế ban đầu đáp ứng tiêu chí Understanding Lock đã xác nhận.',
-          actionItems: ['Tiến hành vòng phản biện tuần tự với 3 Reviewers.'],
+          rationale: 'Initial design meets the confirmed Understanding Lock criteria.',
+          actionItems: ['Proceed with the sequential review round with 3 reviewers.'],
         },
         timestamp: new Date().toISOString(),
       },
@@ -157,7 +157,7 @@ export class MultiAgentBrainstormingEngine {
     decisionLog.push({
       id: 'dec-2',
       topic: 'Arbitration & Objection Resolution',
-      decision: `Phán quyết cuối cùng của Integrator/Arbiter: ${disposition}`,
+      decision: `Final Integrator/Arbiter verdict: ${disposition}`,
       alternativesConsidered: ['Reject Entirely', 'Approve with Constraints', 'Request Full Architecture Revision'],
       objectionsRaised: allObjections,
       resolution: {
@@ -223,7 +223,7 @@ export class MultiAgentBrainstormingEngine {
           lines.push(`  - [${obj.severity.toUpperCase()}] ${obj.description} (Target: ${obj.target})`);
         }
       } else {
-        lines.push('- *Không có phản biện nghiêm trọng.*');
+        lines.push('- *No major objections.*');
       }
     }
 
@@ -258,8 +258,8 @@ export class MultiAgentBrainstormingEngine {
     return {
       confirmed: true,
       coreProblem: goal,
-      inScope: ['Kiến trúc hệ thống', 'Độ tin cậy & An toàn', 'Tuân thủ giao thức', 'Xác minh bằng chứng'],
-      outOfScope: ['Tính năng không liên quan ngoài yêu cầu', 'Tái cấu trúc diện rộng không cần thiết'],
+      inScope: ['System architecture', 'Reliability & Safety', 'Protocol compliance', 'Evidence verification'],
+      outOfScope: ['Out-of-scope features beyond the request', 'Unnecessary wide refactoring'],
     };
   }
 
@@ -268,7 +268,7 @@ export class MultiAgentBrainstormingEngine {
       const prompt = `You are the Primary Designer (Lead Agent). Create a clean architectural design proposal for: "${goal}".\nFocus on clarity, components, interfaces, and invariants.`;
       return await this.options.llmCaller(prompt, 'primary-designer');
     }
-    return `Kiến trúc đề xuất giải quyết "${goal}": Tích hợp module phân cấp, cô lập trạng thái theo phiên, kiểm định hợp lệ đầu vào và đảm bảo tính khép kín của quy trình.`;
+    return `Proposed architecture to solve "${goal}": hierarchical module integration, per-session state isolation, input validation, and end-to-end process closure.`;
   }
 
   private async invokeSkepticChallenger(
@@ -284,12 +284,12 @@ export class MultiAgentBrainstormingEngine {
         roleName: 'Skeptic / Challenger',
         focusAreas: ['Edge cases', 'Failure modes', 'Hidden assumptions', 'YAGNI violations'],
         summary: response.slice(0, 200),
-        assumptionsChallenged: ['Giả định các thành phần mạng luôn sẵn sàng', 'Giả định input luôn đúng chuẩn'],
-        edgeCasesIdentified: ['Độ trễ cao khi mở rộng', 'Xung đột tài nguyên đồng thời'],
+        assumptionsChallenged: ['Assume network components are always available', 'Assume inputs are always well-formed'],
+        edgeCasesIdentified: ['High latency when scaling', 'Concurrent resource contention'],
         objections: [
           {
             id: 'sk-1',
-            description: 'Giả định xử lý đồng thời không có race conditions chưa được chứng minh bằng chứng thực.',
+            description: 'Assumption of race-free concurrent handling is not empirically proven.',
             severity: 'high',
             target: 'Concurrency Model',
           },
@@ -303,13 +303,13 @@ export class MultiAgentBrainstormingEngine {
       role: 'skeptic-challenger',
       roleName: 'Skeptic / Challenger',
       focusAreas: ['Edge cases', 'Failure modes', 'Hidden assumptions', 'YAGNI violations'],
-      summary: 'Giả định rằng hệ thống luôn hoạt động bình thường mà không tính tới ngắt đột ngột hoặc xung đột tài nguyên.',
-      assumptionsChallenged: ['Dữ liệu không bao giờ bị corrupt', 'Mọi tác tử đều hoàn thành đúng thời hạn'],
-      edgeCasesIdentified: ['Tác tử bị treo vĩnh viễn', 'File bị ghi đè chéo'],
+      summary: 'Assumes the system always operates normally, ignoring abrupt interruptions or resource contention.',
+      assumptionsChallenged: ['Data is never corrupted', 'Every agent always finishes on time'],
+      edgeCasesIdentified: ['Permanently stalled agent', 'Cross-overwritten file'],
       objections: [
         {
           id: 'sk-1',
-          description: 'Cần cơ chế phát hiện tác tử bị treo (stale) và xử lý ngắt an toàn.',
+          description: 'Need a stale-agent detection mechanism with safe interruption handling.',
           severity: 'high',
           target: 'Fault Tolerance & Liveness',
         },
@@ -332,11 +332,11 @@ export class MultiAgentBrainstormingEngine {
         roleName: 'Constraint Guardian',
         focusAreas: ['Performance', 'Security & Secrets', 'Reliability', 'Operational Cost'],
         summary: response.slice(0, 200),
-        constraintsViolated: ['Cần chống lộ lọt thông tin nhạy cảm', 'Cần kiểm soát chi phí token'],
+        constraintsViolated: ['Must prevent sensitive-information leaks', 'Must control token cost'],
         objections: [
           {
             id: 'cg-1',
-            description: 'Bắt buộc phải có lớp kiểm định bằng chứng và quét rò rỉ mã khóa (Secret Scanning) trước khi coi tác vụ hoàn tất.',
+            description: 'Must have an evidence-validation layer with secret-leak scanning (Secret Scanning) before the task counts as complete.',
             severity: 'critical',
             target: 'Security & Verification Gate',
           },
@@ -350,12 +350,12 @@ export class MultiAgentBrainstormingEngine {
       role: 'constraint-guardian',
       roleName: 'Constraint Guardian',
       focusAreas: ['Performance', 'Security & Secrets', 'Reliability', 'Operational Cost'],
-      summary: 'Thiết kế cần đảm bảo các giới hạn tài nguyên, không để rò rỉ token hay xung đột file đồng thời.',
+      summary: 'Design must respect resource limits, with no token leaks or concurrent file conflicts.',
       constraintsViolated: [],
       objections: [
         {
           id: 'cg-1',
-          description: 'Bắt buộc phải có khóa file đồng thời (File-Level Locking) và cổng kiểm tra bằng chứng (Evidence Quality Gate).',
+          description: 'Must have concurrent file locking (File-Level Locking) and an evidence quality gate (Evidence Quality Gate).',
           severity: 'high',
           target: 'Security & Quality Gates',
         },
@@ -374,12 +374,12 @@ export class MultiAgentBrainstormingEngine {
       role: 'user-advocate',
       roleName: 'User Advocate',
       focusAreas: ['Cognitive Load', 'Usability', 'Clear Error Handling', 'User Visibility'],
-      summary: 'Đảm bảo người dùng luôn nhìn thấy tiến trình rõ ràng trên CLI, không bị ẩn thông báo quan trọng.',
-      uxIssuesIdentified: ['Tránh im lặng khi tác vụ đang chạy nền'],
+      summary: 'Ensure users always see clear progress on the CLI, with no important notifications hidden.',
+      uxIssuesIdentified: ['Avoid silence while tasks run in the background'],
       objections: [
         {
           id: 'ua-1',
-          description: 'Giao diện dòng lệnh phải hiển thị trạng thái của từng tác tử, khóa file và kết quả thẩm định trực quan.',
+          description: 'The command-line interface must display the status of each agent, file locks, and visual review results.',
           severity: 'medium',
           target: 'CLI Feedback & Transparency',
         },
@@ -397,16 +397,16 @@ export class MultiAgentBrainstormingEngine {
   ) {
     const acceptedObjections = allObjections.map((o) => o.objection);
     const actions = [
-      'Bổ sung cơ chế Heartbeat Monitor phát hiện tác tử stale',
-      'Tích hợp File-Level Concurrency Locking tránh xung đột file đồng thời',
-      'Thiết lập Evidence-Based Quality Gate quét mã khóa và kiểm tra git diff thực tế',
-      'Cung cấp giao diện hiển thị CLI rõ ràng cho người dùng',
+      'Add a Heartbeat Monitor mechanism to detect stale agents',
+      'Integrate File-Level Concurrency Locking to avoid concurrent file conflicts',
+      'Set up an Evidence-Based Quality Gate that scans secrets and checks the actual git diff',
+      'Provide a clear CLI display interface for users',
     ];
 
     return {
       disposition: 'APPROVED' as ReviewDisposition,
-      rationale: 'Tất cả các phản biện hợp lệ từ Skeptic, Constraint Guardian và User Advocate đã được tiếp thu và chuyển hóa thành các ràng buộc kiến trúc bắt buộc.',
-      revisedDesign: `${initialDesign}\n\n[REVISED WITH PEER-REVIEW CONSTRAINTS]: Bổ sung Khóa file đồng thời, Cổng kiểm định bằng chứng Evidence Gate, Giám sát nhịp tim Heartbeat, và hiển thị trạng thái trên CLI UI.`,
+      rationale: 'All valid objections from the Skeptic, Constraint Guardian, and User Advocate have been absorbed into mandatory architecture constraints.',
+      revisedDesign: `${initialDesign}\n\n[REVISED WITH PEER-REVIEW CONSTRAINTS]: Added concurrent File Locking, Evidence Gate evidence-validation gate, Heartbeat monitoring, and status display on the CLI UI.`,
       acceptedObjections,
       actions,
     };

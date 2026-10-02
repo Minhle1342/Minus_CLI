@@ -231,6 +231,7 @@ test('simple and final steps omit known context diluters', () => {
 });
 
 test('off mode is a legacy prompt snapshot and shadow reports potential savings', () => {
+
   const input = context({ activeStepQuery: 'Read package name and answer' });
   const off = policy.decide(input, 'off');
   assert.deepEqual({
@@ -255,4 +256,12 @@ test('off mode is a legacy prompt snapshot and shadow reports potential savings'
   assert.equal(shadow.includeStaticToolPlaybooks, true);
   assert.equal(shadow.injectedEstimatedTokens, shadow.estimatedTokensBefore);
   assert.ok(shadow.estimatedTokensSaved > 0);
+});
+
+test('attachment anchors force architecture playbook and scaffold guidance', () => {
+  const input = context({ activeStepQuery: 'Explain the current status', hasAttachments: true });
+  const decision = policy.decide(input, 'enforce');
+  assert.ok(decision.selectedPlaybooks.includes('architecture'), 'attachments must force dependency/blast-radius playbook');
+  assert.ok(decision.reasonCodes.includes('ATTACHMENT_NEIGHBORHOOD'));
+  assert.ok(decision.scaffoldPrompt.length > 0, 'attachment scope must inject scaffold guidance');
 });

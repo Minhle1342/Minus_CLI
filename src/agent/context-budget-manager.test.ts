@@ -280,7 +280,7 @@ test('Bug 3 (Medium-High): routine run_command with exitCode 0 is masked outside
   const oldResp = (result.messages![2].parts![0] as any).functionResponse.response;
   assert.equal(oldResp.status, 'masked');
   assert.equal(oldResp.exitCode, 0);
-  assert.match(oldResp.observationMask, /Lệnh thực thi thành công/);
+  assert.match(oldResp.observationMask, /Command executed successfully/);
 });
 
 test('Bug 4 (Medium): superseded state deduplication matches relative vs absolute and slash variants', () => {

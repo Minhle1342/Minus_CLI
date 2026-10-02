@@ -626,7 +626,7 @@ export function detectClassicVulnerabilities(codeSnippet: string): DetectedVulne
     if ((hasInterpolatedSqlInput || hasConcatSqlInput) && !hasParameterized) {
       vulns.push({
         type: 'sql-injection',
-        description: 'SQL Injection: Ghép trực tiếp biến đầu vào người dùng vào câu lệnh SQL (chưa dùng Parameterized Queries / Prepared Statements)',
+        description: 'SQL Injection: user input variables concatenated directly into SQL statements (no Parameterized Queries / Prepared Statements)',
       });
     }
   }
@@ -637,22 +637,22 @@ export function detectClassicVulnerabilities(codeSnippet: string): DetectedVulne
     if (/-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(codeSnippet)) {
       vulns.push({
         type: 'hardcoded-credentials',
-        description: 'Hardcoded Secret: Khóa bảo mật Private Key được nhúng trực tiếp trong mã nguồn',
+        description: 'Hardcoded Secret: Private Key embedded directly in source code',
       });
     } else if (/\bAKIA[0-9A-Z]{16}\b/.test(codeSnippet) && !codeSnippet.includes('AKIAIOSFODNN7EXAMPLE')) {
       vulns.push({
         type: 'hardcoded-credentials',
-        description: 'Hardcoded Secret: AWS Access Key ID thực tế được nhúng trực tiếp trong mã nguồn',
+        description: 'Hardcoded Secret: real AWS Access Key ID embedded directly in source code',
       });
     } else if (/\bghp_[a-zA-Z0-9]{36}\b/.test(codeSnippet)) {
       vulns.push({
         type: 'hardcoded-credentials',
-        description: 'Hardcoded Secret: GitHub Personal Access Token được nhúng trực tiếp trong mã nguồn',
+        description: 'Hardcoded Secret: GitHub Personal Access Token embedded directly in source code',
       });
     } else if (/\bsk-[a-zA-Z0-9]{32,}\b|\bsk-ant-[a-zA-Z0-9]{32,}\b/.test(codeSnippet)) {
       vulns.push({
         type: 'hardcoded-credentials',
-        description: 'Hardcoded Secret: Khóa bí mật API Key (OpenAI/Anthropic) được nhúng trực tiếp trong mã nguồn',
+        description: 'Hardcoded Secret: API Key secret (OpenAI/Anthropic) embedded directly in source code',
       });
     }
   }
@@ -667,7 +667,7 @@ export function detectClassicVulnerabilities(codeSnippet: string): DetectedVulne
   if ((hasRawEval || hasRawInnerHTML) && !hasSanitize) {
     vulns.push({
       type: 'unsafe-eval-xss',
-      description: 'Dangerous Execution / XSS: eval hoặc dangerouslySetInnerHTML trực tiếp từ dữ liệu người dùng mà không sanitize',
+      description: 'Dangerous Execution / XSS: eval or dangerouslySetInnerHTML fed directly from user data without sanitization',
     });
   }
 
@@ -761,12 +761,12 @@ export function evaluateInsecureCodeConfidence(
       allow: false,
       reason: 'insecure-code-confidence',
       continuationPrompt: [
-        '[SYSTEM SECURITY GUARD]: Phản hồi của bạn bị TỪ CHỐI do hiện tượng "Tự tin thái quá vào code nhiễm độc" (Insecure Code Confidence).',
-        'Bạn đã tuyên bố đoạn mã là "hoàn toàn an toàn" hoặc "đã tối ưu bảo mật", nhưng mã nguồn lại chứa lỗ hổng bảo mật nghiêm trọng kinh điển:',
+        '[SYSTEM SECURITY GUARD]: Your response is REJECTED for "overconfidence in tainted code" (Insecure Code Confidence).',
+        'You claimed the code is "completely safe" or "security-optimized", but the source contains classic severe security vulnerabilities:',
         ...allVulns.map((v) => `- ${v.description}`),
-        'HƯỚNG DẪN KHẮC PHỤC:',
-        '1. Nếu đây là code đưa vào vận hành: Bắt buộc sửa chữa lỗ hổng (dùng Parameterized Query / Prepared Statements, đưa Secret vào biến môi trường, hoặc sanitize đầu vào).',
-        '2. HOẶC nếu đây là mã minh họa / ví dụ đơn giản: Hãy nêu rõ cảnh báo rủi ro (Security Disclaimer) một cách trung thực thay vì khẳng định an toàn tuyệt đối.',
+        'REMEDIATION GUIDANCE:',
+        '1. If this code will run in production: you must fix the vulnerability (use Parameterized Query / Prepared Statements, move secrets into environment variables, or sanitize inputs).',
+        '2. OR if this is illustrative/sample code: state the risk warning (Security Disclaimer) honestly instead of claiming absolute safety.',
       ].join('\n'),
     };
   }

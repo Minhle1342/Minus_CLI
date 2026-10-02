@@ -58,10 +58,10 @@ export class SemanticSlicer {
     const parsed = this.parseSymbols(filePath, content);
     const { symbols } = parsed;
     const summary = symbols.length > 0
-      ? `File "${filePath}" (${totalLines} dòng) chứa ${symbols.length} symbols [${parsed.parser}/${parsed.confidence}]: `
+      ? `File "${filePath}" (${totalLines} lines) contains ${symbols.length} symbols [${parsed.parser}/${parsed.confidence}]: `
         + symbols.slice(0, 8).map((symbol) => `${symbol.kind} ${symbol.qualifiedName || symbol.name} (L${symbol.startLine}-${symbol.endLine})`).join(', ')
-        + (symbols.length > 8 ? `... và ${symbols.length - 8} symbols khác.` : '.')
-      : `File "${filePath}" (${totalLines} dòng). Không phát hiện symbols cấp cao [${parsed.parser}/${parsed.confidence}].`;
+        + (symbols.length > 8 ? `... and ${symbols.length - 8} more symbols.` : '.')
+      : `File "${filePath}" (${totalLines} lines). No top-level symbols detected [${parsed.parser}/${parsed.confidence}].`;
 
     return { path: filePath, totalLines, symbols, summary, parser: parsed.parser, confidence: parsed.confidence, ...(parsed.imports ? { imports: parsed.imports } : {}) };
   }

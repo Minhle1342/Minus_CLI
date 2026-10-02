@@ -162,7 +162,7 @@ export class CrossAgentDualInvestigator {
     const risk = inputs.risk;
 
     // Thesis: Tuyên bố khẳng định
-    const thesisClaim = `Khẳng định lỗi xuất phát từ: "${claim}". Sửa đổi sẽ giải quyết dứt điểm vấn đề.`;
+    const thesisClaim = `Asserted error origin: "${claim}". The change will resolve the issue definitively.`;
 
     // Antithesis: Giả thuyết vô hiệu (Null Hypothesis) & Phản biện rủi ro
     const targetFiles = inputs.targetFiles && inputs.targetFiles.length > 0 
@@ -179,19 +179,19 @@ export class CrossAgentDualInvestigator {
     );
     
     let antithesisRebuttal = inputs.adversaryRebuttal
-      ? `Phản biện Đối lập (Skeptical Critic): ${inputs.adversaryRebuttal} | Sửa đổi trên [${targetFiles}] có thể gây phá vỡ tương thích ngược hoặc bỏ sót nguyên nhân gốc rễ.`
+      ? `Counter-argument (Skeptical Critic): ${inputs.adversaryRebuttal} | Changes to [${targetFiles}] may break backward compatibility or miss the root cause.`
       : (inputs.skepticalCriticActive || inputs.consecutiveFailures >= 2)
-      ? `Phản biện Đối lập (Skeptical Critic - Anti-Confirmation Bias): Nghi vấn triệu chứng thứ cấp tại [${targetFiles}]. Cần truy vết caller/config trước khi khẳng định lỗi logic tại đây.`
-      : `Phản biện: Cần kiểm tra xem hành vi hiện tại có phải là thiết kế chủ ý không. ` +
-        `Sửa đổi trên [${targetFiles}] có thể gây phá vỡ tương thích ngược (regression) ` +
-        `hoặc giả định về nguyên nhân gốc rễ chưa đầy đủ.`;
+      ? `Counter-argument (Skeptical Critic - Anti-Confirmation Bias): suspected secondary symptom at [${targetFiles}]. Trace callers/config before asserting a logic error here.`
+      : `Counter-argument: check whether the current behavior is intentional design. ` +
+        `Changes to [${targetFiles}] may break backward compatibility (regression) ` +
+        `or the root-cause assumption may be incomplete.`;
 
     if (hasSurfaceSymptomError) {
-      antithesisRebuttal += ` Cảnh báo Null Hypothesis: Lỗi có thể bắt nguồn từ dữ liệu đầu vào sai từ caller hoặc hạ tầng/index, không phải lỗi logic tại [${targetFiles}].`;
+      antithesisRebuttal += ` Null Hypothesis warning: the error may stem from bad caller input data or infra/index, not a logic error at [${targetFiles}].`;
     }
 
     if (hasCoreModuleTarget) {
-      antithesisRebuttal += ` Cảnh báo Blast Radius: Can thiệp vào module chia sẻ lõi [${targetFiles}] có nguy cơ phá vỡ hợp đồng của nhiều callers downstream.`;
+      antithesisRebuttal += ` Blast Radius warning: touching the shared core module [${targetFiles}] risks breaking the contracts of many downstream callers.`;
     }
 
     // Epistemic Arbiter: Phán quyết dựa trên bằng chứng và tiêu chuẩn phản nghiệm
@@ -205,33 +205,33 @@ export class CrossAgentDualInvestigator {
     if (!hasSpecificEvidence) {
       outcome = 'INSUFFICIENT_EVIDENCE';
       confidence = 0.50;
-      arbiterReasoning = `Thiếu bằng chứng thực nghiệm: Chưa xác định được tệp mục tiêu hoặc dấu vết lỗi cụ thể.`;
-      recommendedAction = `Thực hiện định vị lỗi (read/grep/find) trước khi đề xuất thay đổi hoặc tạo giả thuyết mới.`;
+      arbiterReasoning = `Missing empirical evidence: no target file or concrete error trace identified yet.`;
+      recommendedAction = `Localize the fault (read/grep/find) before proposing changes or a new hypothesis.`;
     } else if (inputs.consecutiveFailures >= 3 && (hasCoreModuleTarget || risk === 'CRITICAL')) {
       outcome = 'REJECTED_THESIS';
       confidence = 0.88;
-      arbiterReasoning = `Đã xảy ra ${inputs.consecutiveFailures} lần lỗi liên tiếp trên module cốt lõi/rủi ro cao. Giả thuyết/phương án hiện tại bị bác bỏ do nguy cơ hồi quy nghiêm trọng.`;
-      recommendedAction = `Bác bỏ giả thuyết hiện tại; thực hiện chuyển hướng chiến lược (Strategic Pivot) và tái lập giả thuyết mới từ trace lỗi thực tế.`;
+      arbiterReasoning = `${inputs.consecutiveFailures} consecutive failures on a core/high-risk module. The current hypothesis/approach is rejected due to severe regression risk.`;
+      recommendedAction = `Reject the current hypothesis; execute a strategic pivot and rebuild a new hypothesis from the actual error trace.`;
     } else if (risk === 'CRITICAL' && inputs.consecutiveFailures >= 2) {
       outcome = 'REFINED_HYPOTHESIS';
       confidence = 0.75;
-      arbiterReasoning = `Rủi ro CRITICAL kèm ${inputs.consecutiveFailures} lần lỗi liên tiếp: Thesis chưa được kiểm chứng độc lập. Cần siết chặt tiêu chí phản nghiệm trước khi áp dụng code patch.`;
-      recommendedAction = `Thực hiện dry-run hoặc kiểm tra AST/syntax trên worktree tạm trước khi ghi đè tệp gốc. Chạy test xác nhận: "${falsificationTest}".`;
+      arbiterReasoning = `CRITICAL risk with ${inputs.consecutiveFailures} consecutive failures: the thesis is not yet independently verified. Tighten falsification criteria before applying a code patch.`;
+      recommendedAction = `Dry-run or AST/syntax-check on a temporary worktree before overwriting the original file. Run confirmation test: "${falsificationTest}".`;
     } else if (hasCoreModuleTarget && (hasSurfaceSymptomError || inputs.consecutiveFailures >= 1)) {
       outcome = 'REFINED_HYPOTHESIS';
       confidence = 0.78;
-      arbiterReasoning = `Antithesis phát hiện bẫy triệu chứng bề mặt trên module cốt lõi [${targetFiles}]. Cần kiểm tra caller/schema trước khi can thiệp cấu trúc.`;
-      recommendedAction = `Khoanh vùng kiểm tra caller hoặc cấu hình trước; bảo toàn tuyệt đối chữ ký hàm công khai của [${targetFiles}].`;
+      arbiterReasoning = `Antithesis detected a surface-symptom trap on core module [${targetFiles}]. Check callers/schema before structural intervention.`;
+      recommendedAction = `Scope-check callers or configuration first; strictly preserve the public function signatures of [${targetFiles}].`;
     } else if (inputs.consecutiveFailures === 0 && inputs.recentError && !hasCoreModuleTarget) {
       outcome = 'CONFIRMED_THESIS';
       confidence = 0.90;
-      arbiterReasoning = `Thesis nhắm đúng vào trace lỗi cụ thể tại module cục bộ và có falsification test rõ ràng.`;
-      recommendedAction = `Tiến hành sửa đổi theo đúng phạm vi [${targetFiles}], bảo toàn tuyệt đối các exports công khai.`;
+      arbiterReasoning = `Thesis targets the specific error trace in a local module and has a clear falsification test.`;
+      recommendedAction = `Proceed with changes scoped to [${targetFiles}], strictly preserving public exports.`;
     } else {
       outcome = 'CONFIRMED_THESIS';
       confidence = 0.82;
-      arbiterReasoning = `Antithesis đã chỉ ra nguy cơ hồi quy; tuy nhiên với phạm vi khoanh vùng nhỏ, Thesis được chấp thuận kèm điều kiện kiểm thử hồi quy tức thì.`;
-      recommendedAction = `Áp dụng patch tối thiểu (Minimal Delta) và chạy ngay: "${falsificationTest}".`;
+      arbiterReasoning = `Antithesis flagged a regression risk; however, with a small scoping footprint, the thesis is approved conditioned on immediate regression testing.`;
+      recommendedAction = `Apply a minimal patch (Minimal Delta) and run immediately: "${falsificationTest}".`;
     }
 
     const verdict: DialecticalVerdict = {
@@ -277,7 +277,7 @@ export class TestTimeMonteCarloRollout {
             }
           } catch {
             step1Valid = false;
-            criticalRisks.push(`Tệp mục tiêu [${file}] hiện tại không hợp lệ cú pháp`);
+            criticalRisks.push(`Target file [${file}] currently has invalid syntax`);
           }
         }
       }
@@ -287,10 +287,10 @@ export class TestTimeMonteCarloRollout {
 
     steps.push({
       stepIndex: 1,
-      action: `Speculative Dry-Run: Áp dụng patch đề xuất lên bộ đệm tạm`,
+      action: `Speculative Dry-Run: Apply the proposed patch to a temporary buffer`,
       predictedOutcome: step1Valid 
-        ? `Patch áp dụng thành công mà không gây mâu thuẫn cú pháp tệp`
-        : `Phát hiện lỗi cú pháp hiện hữu trên tệp mục tiêu`,
+        ? `Patch applied successfully with no file syntax conflicts`
+        : `Pre-existing syntax error detected on the target file`,
       syntaxValid: step1Valid,
       regressionRisk: !step1Valid ? 'HIGH' : (isHighRisk ? 'MEDIUM' : 'NONE'),
       score: step1Score,
@@ -305,27 +305,27 @@ export class TestTimeMonteCarloRollout {
     if (inputs.consecutiveFailures >= 2) {
       step2Regression = 'MEDIUM';
       step2Score = 0.70;
-      criticalRisks.push(`Môi trường đang trong trạng thái bất ổn (${inputs.consecutiveFailures} failures)`);
+      criticalRisks.push(`Environment is unstable (${inputs.consecutiveFailures} failures)`);
     }
 
     if (inputs.risk === 'CRITICAL') {
       step2Regression = 'HIGH';
       step2Score = Math.min(step2Score, 0.65);
-      criticalRisks.push(`Module mục tiêu thuộc lõi hệ thống có blast radius CRITICAL`);
+      criticalRisks.push(`Target module is a system core with CRITICAL blast radius`);
     }
 
     if (hasCoreModuleTarget && (inputs.risk === 'HIGH' || inputs.risk === 'CRITICAL')) {
       step2Regression = 'HIGH';
       step2Score = Math.min(step2Score, 0.62);
-      criticalRisks.push(`Module mục tiêu [${inputs.targetFiles?.join(', ')}] là module lõi dùng chung - nguy cơ breaking changes tới callers downstream`);
+      criticalRisks.push(`Target module [${inputs.targetFiles?.join(', ')}] is a shared core module - risk of breaking changes to downstream callers`);
     }
 
     steps.push({
       stepIndex: 2,
-      action: `Impact Lookahead: Kiểm tra tính bất biến của các public contracts`,
+      action: `Impact Lookahead: Verify public contract immutability`,
       predictedOutcome: isHighRisk 
-        ? `Cần bảo đảm không thay đổi chữ ký hàm hoặc schema dữ liệu đang được các module khác gọi`
-        : `Tác động cục bộ an toàn, không có nguy cơ hồi quy diện rộng`,
+        ? `Must ensure no change to function signatures or data schemas consumed by other modules`
+        : `Local impact is safe, no wide regression risk`,
       syntaxValid: true,
       regressionRisk: step2Regression,
       score: step2Score,
