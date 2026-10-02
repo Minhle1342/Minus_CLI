@@ -56,7 +56,7 @@ async function runTests() {
     });
 
     assert.ok(verdict.thesisClaim.includes('parser.ts') || verdict.thesisClaim.includes('regex backtracking'), 'Thesis should address proposed fix');
-    assert.ok(verdict.antithesisRebuttal.includes('Phản biện'), 'Antithesis rebuttal must provide skeptical critique');
+    assert.ok(verdict.antithesisRebuttal.includes('Counter-argument'), 'Antithesis rebuttal must provide skeptical critique');
     assert.ok(verdict.epistemicArbiterReasoning.length > 0, 'Arbiter reasoning must be populated');
     assert.ok(verdict.confidence > 0 && verdict.confidence <= 1.0, 'Confidence must be between 0 and 1');
     console.log('   ✅ Dual Investigation produces structured Thesis, Antithesis, and Arbiter verdict');
@@ -258,7 +258,7 @@ async function runTests() {
       recentError: 'TypeError: Cannot read properties of undefined',
     });
     assert.strictEqual(rejected.outcome, 'REJECTED_THESIS', 'Should return REJECTED_THESIS after 3 failures on core module');
-    assert.match(rejected.recommendedAction, /Bác bỏ giả thuyết hiện tại/);
+    assert.match(rejected.recommendedAction, /Reject the current hypothesis/);
 
     console.log('   ✅ All 4 dialectical outcomes (including REJECTED_THESIS & INSUFFICIENT_EVIDENCE) are fully operational');
   }

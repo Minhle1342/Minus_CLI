@@ -594,7 +594,7 @@ async function runUnitTests() {
     oldText: 'Line 99: Not Exist',
     newText: 'New',
   }, workspace);
-  assert(replaceNotFound.error && replaceNotFound.error.includes('Không tìm thấy'), 'replace_text báo lỗi rõ ràng khi không tìm thấy oldText');
+  assert(replaceNotFound.error && replaceNotFound.error.includes('not found'), 'replace_text báo lỗi rõ ràng khi không tìm thấy oldText');
 
   // Test 3.6A: robust replace_text matching and stale-edit protection.
   const robustReplacePath = 'temp/test-replace-robust.txt';
@@ -981,7 +981,7 @@ async function runUnitTests() {
       console.log = savedLog;
     }
     const output = loggedLines.join('\n');
-    assert(output.includes('GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW)'), 'renderDiffView in tiêu đề Diff View');
+    assert(output.includes('CHANGE PREVIEW (DIFF VIEW)'), 'renderDiffView in tiêu đề Diff View');
     assert(output.includes('-const x = 1;'), 'renderDiffView in nội dung dòng cũ');
     assert(output.includes('+const x = 2;'), 'renderDiffView in nội dung dòng mới');
     const hasRed = output.includes('\x1b[31m') || output.includes('\x1b[38;5;196m');
@@ -1008,7 +1008,7 @@ async function runUnitTests() {
       console.log = savedLog;
     }
     const output = loggedLines.join('\n');
-    assert(output.includes('GIAO DIỆN XEM TRƯỚC THAY ĐỔI (DIFF VIEW): src/main.ts'), 'renderPermissionPrompt tự động kích hoạt Diff View');
+    assert(output.includes('CHANGE PREVIEW (DIFF VIEW): src/main.ts'), 'renderPermissionPrompt tự động kích hoạt Diff View');
     assert(output.includes('-oldLine') && output.includes('+newLine'), 'renderPermissionPrompt in diff đối chiếu trước khi hỏi cấp quyền');
   }
 
@@ -2627,7 +2627,7 @@ export async function calculateTotal(items: any[]): Promise<number> {
   assert(Boolean(monorepoData.monorepoWorkspaces?.some((w) => w.relativePath === 'apps/web')), 'Xác định đúng đường dẫn apps/web');
 
   const monorepoDigest = monorepoMemory.getProjectDigest();
-  assert(monorepoDigest.includes('Kiến trúc Monorepo:') && monorepoDigest.includes('apps/web') && monorepoDigest.includes('apps/api'), 'Digest chứa danh mục Monorepo workspaces');
+  assert(monorepoDigest.includes('Monorepo architecture') && monorepoDigest.includes('apps/web') && monorepoDigest.includes('apps/api'), 'Digest chứa danh mục Monorepo workspaces');
   assert(monorepoDigest.includes('--workspace=apps/web'), 'Digest chứa hướng dẫn chạy lệnh với --workspace=apps/web');
 
   // Test TestEngineeringHarness detectTestCommand in Monorepo
@@ -5788,7 +5788,7 @@ Always write tests first!`;
   CLI.renderAttachmentSummary(attachResult.attachments);
   console.log = originalLog2;
 
-  assert(attachSummaryOutput.includes('ĐÃ ĐÍNH KÈM VÀO NGỮ CẢNH'), 'CLI.renderAttachmentSummary hiển thị banner đính kèm');
+  assert(attachSummaryOutput.includes('ATTACHED TO CONTEXT'), 'CLI.renderAttachmentSummary hiển thị banner đính kèm');
   assert(attachSummaryOutput.includes('package.json'), 'CLI.renderAttachmentSummary hiển thị tên file đính kèm');
 
   console.log('\n========================================');
@@ -7546,10 +7546,10 @@ Always write tests first!`;
   // 41.3. ContextGuardian: Tạo Thẻ Chuyển Giao (Fase 4: Transition Briefing)
   const briefing = guardianInstance.generateTransitionBriefing(extracted, 'mock-snapshot.md');
   assert(briefing.includes('CONTEXT GUARDIAN: TRANSITION BRIEFING'), 'Tiêu đề Transition Briefing chuẩn xác');
-  assert(briefing.includes('Trạng Thái Hiện Tại'), 'Chứa mục Trạng Thái Hiện Tại');
-  assert(briefing.includes('Quyết Định Kiến Trúc Trọng Yếu'), 'Chứa mục Quyết Định Kiến Trúc Trọng Yếu');
-  assert(briefing.includes('KHÔNG TỰ ĐỘNG KIỂM THỬ TRÌNH DUYỆT'), 'Chứa cảnh báo bất biến No Browser Subagent');
-  assert(briefing.includes('KHÔNG TỰ ĐỘNG PUSH LÊN MAIN'), 'Chứa cảnh báo bất biến No Push Main');
+  assert(briefing.includes('Current State'), 'Chứa mục Trạng Thái Hiện Tại');
+  assert(briefing.includes('Critical Architectural Decisions'), 'Chứa mục Quyết Định Kiến Trúc Trọng Yếu');
+  assert(briefing.includes('NO AUTOMATED BROWSER TESTING'), 'Chứa cảnh báo bất biến No Browser Subagent');
+  assert(briefing.includes('NO AUTO PUSH TO MAIN'), 'Chứa cảnh báo bất biến No Push Main');
 
   // 41.4. ContextGuardian: Lưu trữ bền vững 3 tầng (Fase 3 & Pre-Compaction Protection)
   const preCompactResult = await guardianInstance.protectPreCompaction(guardianSession, {
@@ -7919,8 +7919,8 @@ Always write tests first!`;
 
   assert(quotaThrew === true, 'AgentLoop dừng lại và ném ngoại lệ khi vượt quá 5 lần retry');
   assert(quotaAttempts === 6, `Đã thử đủ 6 lần (1 lần gốc + 5 lần retry Continue), thực tế: ${quotaAttempts}`);
-  assert(quotaErrMessage.includes('LLM đã hết Quota'), `Thông báo lỗi chứa rõ "LLM đã hết Quota", thực tế: ${quotaErrMessage}`);
-  assert(quotaErrMessage.includes('5 lần'), `Thông báo lỗi ghi nhận đã tự động gửi 5 lần, thực tế: ${quotaErrMessage}`);
+  assert(quotaErrMessage.includes('LLM quota exhausted'), `Thông báo lỗi chứa rõ "LLM quota exhausted", thực tế: ${quotaErrMessage}`);
+  assert(quotaErrMessage.includes('5 times'), `Thông báo lỗi ghi nhận đã tự động gửi 5 lần, thực tế: ${quotaErrMessage}`);
 
   // 3. Kiểm tra phân loại lỗi chính xác cho trường hợp 503 UNAVAILABLE từ Google Gemini SDK
   const gemini503Error = new Error('got status: UNAVAILABLE. {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}');
@@ -7984,7 +7984,7 @@ Always write tests first!`;
 
   assert(perm503Threw === true, 'AgentLoop dừng lại và ném ngoại lệ khi 503 UNAVAILABLE vượt quá 5 lần retry');
   assert(permanent503Calls === 6, `Đã thử đủ 6 lần khi 503 (1 lần gốc + 5 lần retry Continue), thực tế: ${permanent503Calls}`);
-  assert(perm503ErrMsg.includes('quá tải hoặc không khả dụng'), `Thông báo lỗi ghi rõ server quá tải hoặc không khả dụng, thực tế: ${perm503ErrMsg}`);
+  assert(perm503ErrMsg.includes('overloaded or unavailable'), `Thông báo lỗi ghi rõ server quá tải hoặc không khả dụng, thực tế: ${perm503ErrMsg}`);
   // ========================================
   // 46. KIỂM THỬ MULTI-AGENT CHUẨN CÔNG NGHIỆP (BRAINSTORMING, ANTI-DUP, LOCKS, GATES & HEARTBEATS)
   // ========================================
@@ -8752,7 +8752,7 @@ Always write tests first!`;
     'SCAFFOLD-CEGIS Test Tampering Auditor chặn đứng hành vi sửa đổi file test khi chỉ có yêu cầu sửa logic mã nguồn',
   );
   assert(
-    Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('sửa mã nguồn')),
+    Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('Fix the actual business-logic source code')),
     'Hướng dẫn chỉnh hướng yêu cầu Agent tập trung sửa mã nguồn thay vì sửa test case để ép pass',
   );
 
@@ -8780,7 +8780,7 @@ Always write tests first!`;
     'Wink Nudge phát hiện tư tưởng bỏ cuộc hoặc mock tạm thời (Goal Substitution / Specification Drift) trong CoT',
   );
   assert(
-    Boolean(driftNudge?.courseCorrectionGuidance?.includes('Mục tiêu nghiệp vụ')),
+    Boolean(driftNudge?.courseCorrectionGuidance?.includes('Mandatory business goal')),
     'Wink Nudge sinh hướng dẫn tái neo đậu (re-anchoring guidance) dựa trên hợp đồng đóng băng',
   );
 
