@@ -132,3 +132,9 @@ test('run_command denies unauthorized git before spawning any process', async ()
   const scoped = await tool.execute({ command: 'git --global config user.name x' }, workspace);
   assert.equal(scoped.errorCode, 'GIT_SCOPE_VIOLATION');
 });
+
+test('parseGitInvocation ignores git keywords in non-git commands via AST', () => {
+  assert.equal(parseGitInvocation('echo "git commit -m test"'), undefined);
+  assert.equal(parseGitInvocation('grep "git push" README.md'), undefined);
+  assert.equal(parseGitInvocation('cat git.log'), undefined);
+});

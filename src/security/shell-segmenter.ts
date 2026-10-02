@@ -1,71 +1,84 @@
 import { getNativeCore } from '../native/index.js';
+import { parseShellAst, ShellAstNode, ShellSimpleCommand } from './shell-ast-parser.js';
 
 export interface ShellAnalysis {
   segments: string[];
   operators: string[];
   complex: boolean;
   error?: string;
+  ast?: ShellAstNode;
+  commands?: ShellSimpleCommand[];
+  hasSubshell?: boolean;
+  hasObfuscation?: boolean;
+  obfuscationReasons?: string[];
 }
 
-/** Quote-aware segmentation; substitutions and groups are marked complex for fail-closed policy. */
+/** Quote-aware AST segmentation; substitutions and groups are marked complex for fail-closed policy. */
 export function analyzeShellCommand(command: string): ShellAnalysis {
+  // 1. Phân tích cú pháp bằng AST Parser chuẩn POSIX/Bash
+  const astResult = parseShellAst(command);
+
+  // 2. Tận dụng Rust Native Core nếu có để so khớp siêu tốc, áp dụng chiến lược Phòng thủ Chiều sâu (Defense-in-Depth)
   const native = getNativeCore();
+  let nativeRes: { segments: string[]; operators: string[]; complex: boolean; error?: string } | undefined;
   if (native) {
     try {
       const res = native.rsAnalyzeShellCommand(command);
-      return {
+      nativeRes = {
         segments: res.segments,
         operators: res.operators,
         complex: res.complex,
         error: res.error || undefined,
       };
     } catch {
-      // Fallback xuống TypeScript thuần nếu có lỗi
+      // Fallback sang AST Parser thuần
     }
   }
 
-  const segments: string[] = [];
-  const operators: string[] = [];
-  let current = '';
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  let complex = false;
-  const push = (): boolean => {
-    const value = current.trim();
-    if (!value) return false;
-    segments.push(value);
-    current = '';
-    return true;
-  };
-  for (let i = 0; i < command.length; i++) {
-    const char = command[i];
-    if (escaped) { current += char; escaped = false; continue; }
-    if (char === '`' && quote !== "'") { complex = true; current += char; escaped = true; continue; }
-    if (char === '\\' && quote !== "'") { current += char; escaped = true; continue; }
-    if (quote) { current += char; if (char === quote) quote = undefined; continue; }
-    if (char === "'" || char === '"') { quote = char; current += char; continue; }
-    if ((char === '$' && command[i + 1] === '(') || char === '(' || char === ')') complex = true;
-    const two = command.slice(i, i + 2);
-    if (two === '&&' || two === '||') {
-      if (!push()) return { segments, operators, complex: true, error: 'Empty shell command segment.' };
-      operators.push(two); i++; continue;
-    }
-    // Single ampersands are background/command-chain operators on POSIX/cmd;
-    // redirects can hide mutations or make a test's exit status ambiguous.
-    // Treat them as complex so the command cannot pass the ordinary allowlist.
-    if (char === '&' || char === '<' || char === '>') complex = true;
-    if (char === '|' || char === ';' || char === '\n' || char === '\r') {
-      if (!push()) {
-        if (char === '\r' && command[i + 1] === '\n') continue;
-        return { segments, operators, complex: true, error: 'Empty shell command segment.' };
-      }
-      operators.push(char === '\n' || char === '\r' ? 'newline' : char);
-      continue;
-    }
-    current += char;
+  // 3. Hợp nhất kết quả với quy tắc Fail-Closed:
+  if (astResult.error) {
+    return {
+      segments: astResult.segments,
+      operators: astResult.operators,
+      complex: true,
+      error: astResult.error,
+      ast: astResult.ast,
+      commands: astResult.commands,
+      hasSubshell: astResult.hasSubshell,
+      hasObfuscation: astResult.hasObfuscation,
+      obfuscationReasons: astResult.obfuscationReasons,
+    };
   }
-  if (quote || escaped) return { segments, operators, complex: true, error: 'Unterminated quote or escape sequence.' };
-  push();
-  if (segments.length === 0) return { segments, operators, complex, error: 'No executable command segment.' };
-  return { segments, operators, complex };
+
+  if (nativeRes?.error) {
+    return {
+      segments: nativeRes.segments.length > 0 ? nativeRes.segments : astResult.segments,
+      operators: nativeRes.operators.length > 0 ? nativeRes.operators : astResult.operators,
+      complex: true,
+      error: nativeRes.error,
+      ast: astResult.ast,
+      commands: astResult.commands,
+      hasSubshell: astResult.hasSubshell,
+      hasObfuscation: astResult.hasObfuscation,
+      obfuscationReasons: astResult.obfuscationReasons,
+    };
+  }
+
+  // Bất kỳ lớp nào (AST Parser hoặc Native Core) phát hiện dấu hiệu nguy hiểm/phức tạp
+  // (subshell, redirect, background &, obfuscation) -> Phải đánh dấu complex = true
+  const isComplex = astResult.complex || Boolean(nativeRes?.complex);
+
+  const segments = astResult.segments.length > 0 ? astResult.segments : (nativeRes?.segments || []);
+  const operators = astResult.operators.length > 0 ? astResult.operators : (nativeRes?.operators || []);
+
+  return {
+    segments,
+    operators,
+    complex: isComplex,
+    ast: astResult.ast,
+    commands: astResult.commands,
+    hasSubshell: astResult.hasSubshell,
+    hasObfuscation: astResult.hasObfuscation,
+    obfuscationReasons: astResult.obfuscationReasons,
+  };
 }

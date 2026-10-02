@@ -5,6 +5,7 @@ import type { Session } from '../session/session.js';
 import { MemoryCategory, MemoryQueryOptions, MemoryRecord, MemoryScope, MemorySource } from './types.js';
 import { VectorMemoryStore, EmbeddingService, cosineSimilarity } from './vector-memory.js';
 import { writeFileAtomically } from './atomic-write.js';
+import { TemporalKnowledgeGraph } from './temporal-knowledge-graph.js';
 
 export interface LearnedInsight extends Partial<Omit<MemoryRecord, 'key' | 'insight' | 'category'>> {
   key: string;
@@ -66,6 +67,7 @@ export class ProjectMemoryManager {
   private memoryData: ProjectMemoryData;
   private session?: Session;
   private vectorStore: VectorMemoryStore;
+  private knowledgeGraph: TemporalKnowledgeGraph;
 
   constructor(workspaceDir: string, embeddingService?: EmbeddingService) {
     this.workspaceDir = path.resolve(workspaceDir);
@@ -73,6 +75,9 @@ export class ProjectMemoryManager {
     this.vectorStore = new VectorMemoryStore(
       path.join(this.workspaceDir, '.codingagent', 'vector-memory.json'),
       embeddingService
+    );
+    this.knowledgeGraph = new TemporalKnowledgeGraph(
+      path.join(this.workspaceDir, '.codingagent', 'temporal-knowledge-graph.json'),
     );
     this.memoryData = this.getDefaultMemory();
   }
@@ -101,10 +106,15 @@ export class ProjectMemoryManager {
     return this.vectorStore;
   }
 
+  getKnowledgeGraph(): TemporalKnowledgeGraph {
+    return this.knowledgeGraph;
+  }
+
   /**
    * Khởi tạo bộ nhớ: Nạp từ đĩa hoặc tự động index nếu chưa tồn tại
    */
   async init(workspace?: Workspace): Promise<ProjectMemoryData> {
+    await this.knowledgeGraph.init();
     try {
       await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
       const raw = await fs.readFile(this.memoryFilePath, 'utf-8');
@@ -564,6 +574,17 @@ export class ProjectMemoryManager {
       // Tự động phân rã và dọn dẹp các memory có điểm utility thấp (ngưỡng max 60 records)
       this.pruneLowUtilityMemories(60, 0.25);
 
+      // Đồng bộ Bi-Temporal Knowledge Graph nếu là quy tắc, kiến trúc hoặc quy ước
+      if (record.category === 'architecture' || record.category === 'rule' || record.category === 'convention') {
+        this.knowledgeGraph.upsertEntity({
+          id: record.key,
+          name: record.key,
+          type: record.category === 'architecture' ? 'decision' : (record.category === 'convention' ? 'convention' : 'rule'),
+          summary: record.insight,
+          metadata: { confidence: record.confidence, tags: record.tags },
+        });
+      }
+
       await this.save();
 
       // Đồng bộ Vector Memory Store (RAG)
@@ -623,20 +644,47 @@ export class ProjectMemoryManager {
   }
 
   /**
-   * Tính toán điểm hữu dụng (Utility Score theo chuẩn MIRIX / CoALA):
-   * Utility = 0.4 * Recency + 0.3 * Frequency + 0.3 * Confidence
+   * Tính toán điểm hữu dụng theo mô hình Đường cong Quên lãng Ebbinghaus (Ebbinghaus Forgetting Curve SOTA):
+   * R(t) = exp(-delta_t / S)
+   * Trong đó Memory Strength S = S0 * (1 + ln(1 + accessCount)) * (0.5 + 0.5 * importance) * (0.5 + 0.5 * confidence)
+   * Utility = 0.5 * Retention + 0.25 * Frequency + 0.25 * Confidence
    */
   calculateUtility(item: LearnedInsight): number {
     const now = Date.now();
-    const createdTime = item.createdAt ? Date.parse(item.createdAt) : now;
-    const ageInDays = Math.max(0, (now - createdTime) / (24 * 60 * 60 * 1000));
-    // Chu kỳ bán rã thời gian: episodic memories bán rã nhanh (3 ngày), kiến thức dài hạn 30 ngày
-    const halfLifeDays = item.category === 'episodic' ? 3 : 30;
-    const recencyScore = Math.pow(0.5, ageInDays / halfLifeDays);
+    const lastActiveTime = (item as any).lastAccessedAt
+      ? Date.parse((item as any).lastAccessedAt)
+      : (item.updatedAt ? Date.parse(item.updatedAt) : (item.createdAt ? Date.parse(item.createdAt) : now));
+    const ageInDays = Math.max(0, (now - lastActiveTime) / (24 * 60 * 60 * 1000));
+
+    // Chu kỳ bán rã cơ bản (Base Half-Life Days) theo loại tri thức:
+    // Conventions & Rules tồn tại lâu nhất (180 ngày)
+    // Architecture (90 ngày), Gotchas (60 ngày), Insights (30 ngày), Episodic memories (7 ngày)
+    const baseHalfLifeDays: Record<string, number> = {
+      convention: 180,
+      rule: 180,
+      architecture: 90,
+      gotcha: 60,
+      insight: 30,
+      episodic: 7,
+    };
+    const s0 = baseHalfLifeDays[item.category || 'insight'] || 30;
+
+    // Sức mạnh ghi nhớ theo Spacing Effect (Ebbinghaus Spaced Repetition):
+    // Tần suất truy cập (accessCount) làm chậm suy giảm trí nhớ
     const accessCount = (item as any).accessCount || 1;
-    const frequencyScore = Math.min(accessCount / 10, 1.0);
-    const confidenceScore = item.confidence ?? 0.8;
-    return 0.4 * recencyScore + 0.3 * frequencyScore + 0.3 * confidenceScore;
+    const spacingFactor = 1 + Math.log(1 + accessCount);
+
+    const importance = (item as any).importance ?? 0.8;
+    const confidence = item.confidence ?? 0.8;
+
+    // Memory Strength S
+    const memoryStrength = s0 * spacingFactor * (0.5 + 0.5 * importance) * (0.5 + 0.5 * confidence);
+
+    // Ebbinghaus Retention R = exp(-delta_t / S)
+    const retention = Math.exp(-ageInDays / Math.max(1, memoryStrength));
+
+    const frequencyScore = Math.min(accessCount / 15, 1.0);
+    return Math.max(0, Math.min(1, 0.5 * retention + 0.25 * frequencyScore + 0.25 * confidence));
   }
 
   /**
@@ -685,11 +733,12 @@ export class ProjectMemoryManager {
   }
 
   /**
-   * Lưu toàn bộ dữ liệu trí nhớ xuống đĩa (.codingagent/project-memory.json)
+   * Lưu toàn bộ dữ liệu trí nhớ xuống đĩa (.codingagent/project-memory.json và temporal-knowledge-graph.json)
    */
   async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.memoryFilePath), { recursive: true });
     await writeFileAtomically(this.memoryFilePath, JSON.stringify(this.memoryData, null, 2));
+    await this.knowledgeGraph.save();
   }
 
   /**

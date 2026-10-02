@@ -6,6 +6,7 @@ import { ContextInspectionReport } from '../context/context-inspector.js';
 import type { BrainstormingSessionResult } from '../agent/multi-agent-brainstorming.js';
 import type { QualityGateResult } from '../agent/agent-orchestrator.js';
 import { formatTuiErrorDetail } from './ink/components/StepStream.js';
+import { supportsTerminalColor } from './tui-theme.js';
 
 export interface UICollapsePreferences {
   thinking: boolean;
@@ -24,7 +25,7 @@ export const DEFAULT_COLLAPSE_PREFERENCES: UICollapsePreferences = {
 };
 
 // ANSI escape codes for styling
-export const colors = {
+const ansiColors = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
   dim: '\x1b[2m',
@@ -40,7 +41,7 @@ export const colors = {
   blue: '\x1b[34m',
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
-  white: '\x1b[37m',
+  white: '\x1b[39m',
   gray: '\x1b[90m',
   brightCyan: '\x1b[96m',
   brightGreen: '\x1b[92m',
@@ -50,24 +51,24 @@ export const colors = {
   brightBlue: '\x1b[94m',
 
   // Minimalist Precision Accents
-  emerald: '\x1b[38;5;48m',
-  teal: '\x1b[38;5;50m',
-  slate: '\x1b[38;5;244m',
-  amber: '\x1b[38;5;214m',
-  crimson: '\x1b[38;5;196m',
-  purple: '\x1b[38;5;141m',
-  indigo: '\x1b[38;5;75m',
+  emerald: '\x1b[32m',
+  teal: '\x1b[36m',
+  slate: '\x1b[90m',
+  amber: '\x1b[33m',
+  crimson: '\x1b[31m',
+  purple: '\x1b[35m',
+  indigo: '\x1b[36m',
 
   // TrueColor Accents
-  geminiCyan: '\x1b[38;2;36;200;219m',
-  geminiBlue: '\x1b[38;2;66;133;244m',
-  geminiPurple: '\x1b[38;2;161;110;255m',
-  geminiAmber: '\x1b[38;2;251;188;4m',
-  geminiGreen: '\x1b[38;2;52;168;83m',
-  geminiRed: '\x1b[38;2;234;67;53m',
-  subtleBorder: '\x1b[38;2;75;85;99m',
-  mutedText: '\x1b[38;2;156;163;175m',
-  cardBg: '\x1b[48;2;30;35;45m',
+  geminiCyan: '\x1b[36m',
+  geminiBlue: '\x1b[36m',
+  geminiPurple: '\x1b[35m',
+  geminiAmber: '\x1b[33m',
+  geminiGreen: '\x1b[32m',
+  geminiRed: '\x1b[31m',
+  subtleBorder: '\x1b[90m',
+  mutedText: '\x1b[37m',
+  cardBg: '',
 
   // Backgrounds
   bgCyan: '\x1b[46m',
@@ -78,6 +79,10 @@ export const colors = {
   bgGreenDark: '\x1b[48;5;22m',
   bgRedDark: '\x1b[48;5;52m',
 };
+
+export const colors = Object.fromEntries(
+  Object.entries(ansiColors).map(([name, code]) => [name, supportsTerminalColor() ? code : '']),
+) as typeof ansiColors;
 
 export const c = colors;
 
@@ -982,8 +987,21 @@ export function padRightVisible(text: string, targetWidth: number): string {
 }
 
 export function getTerminalWidth(fallback = 80, min = 40, max = 140): number {
-  const cols = process.stdout?.columns || fallback;
-  return Math.max(min, Math.min(max, cols));
+  const cols = process.stdout?.columns;
+  if (Number.isFinite(cols) && cols > 0) return Math.min(max, Math.floor(cols));
+  return Math.max(min, Math.min(max, fallback));
+}
+
+export function truncateToTerminalWidth(value: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  if (getVisibleWidth(value) <= maxWidth) return value;
+  const suffix = maxWidth > 1 ? '…' : '';
+  let result = '';
+  for (const { segment } of SHARED_SEGMENTER.segment(value)) {
+    if (getVisibleWidth(result + segment + suffix) > maxWidth) break;
+    result += segment;
+  }
+  return result + suffix;
 }
 
 export function wrapVisibleText(text: string, maxWidth: number): string[] {
@@ -1042,10 +1060,12 @@ export function wrapVisibleText(text: string, maxWidth: number): string[] {
 
 export function createBoxHeader(title: string, color = c.subtleBorder, width?: number): string {
   const targetWidth = width || getTerminalWidth();
-  const titleWidth = getVisibleWidth(title);
+  if (targetWidth < 8) return `${color}${'─'.repeat(targetWidth)}${c.reset}`;
+  const visibleTitle = truncateToTerminalWidth(title, targetWidth - 8);
+  const titleWidth = getVisibleWidth(visibleTitle);
   // '╭── ' = 4 cols, ' ' after title = 1 col, '╮' = 1 col => tổng ký tự khung biên = 6 cols
   const remaining = Math.max(2, targetWidth - 6 - titleWidth);
-  return `${color}╭── ${title} ${color}${'─'.repeat(remaining)}╮${c.reset}`;
+  return `${color}╭── ${visibleTitle} ${color}${'─'.repeat(remaining)}╮${c.reset}`;
 }
 
 export function createBoxDivider(color = c.subtleBorder, width?: number): string {

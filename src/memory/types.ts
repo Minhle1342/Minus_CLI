@@ -33,6 +33,12 @@ export interface MemoryRecord {
   verifiedAt?: string;
   supersededBy?: string;
   accessCount?: number;
+  validFrom?: string;
+  validTo?: string;
+  transactionFrom?: string;
+  transactionTo?: string;
+  importance?: number;
+  lastAccessedAt?: string;
 }
 
 export interface MemoryQueryOptions {

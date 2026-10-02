@@ -34,6 +34,8 @@ import {
   resolvePhaseDynamicGuidance,
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
+  type MonorepoKind,
+  clearPromptContextCache,
 } from './prompt-sections.js';
 import { PromptAssembler } from './prompt-assembler.js';
 
@@ -55,6 +57,8 @@ export {
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
   type PromptAssemblyContext,
+  type MonorepoKind,
+  clearPromptContextCache,
   PromptAssembler,
   SECTION_PHASE_EXPLORE_GUIDANCE,
   SECTION_PHASE_PLAN_GUIDANCE,

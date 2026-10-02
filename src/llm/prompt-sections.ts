@@ -5,6 +5,8 @@ import type { ToolProvider, ToolRegistry } from '../tools/registry.js';
 import type { TaskPhase } from '../control/classification-types.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 
+export type MonorepoKind = 'pnpm' | 'npm-yarn' | 'turborepo' | 'nx' | 'cargo' | 'lerna' | 'none';
+
 export interface PromptAssemblyContext {
   workspace?: Workspace;
   toolNames?: string[];
@@ -19,13 +21,42 @@ export interface PromptAssemblyContext {
   hasCodebaseTools?: boolean;
   /** Keep the legacy all-playbooks system section. Step-aware AgentLoop requests disable it. */
   includeStaticToolPlaybooks?: boolean;
+
+  // Polyglot & Monorepo Fingerprinting
+  isMonorepo?: boolean;
+  monorepoKind?: MonorepoKind;
+  ecosystems?: string[];
+  primaryLanguage?: string;
+  isPython?: boolean;
+  isRust?: boolean;
+  isGo?: boolean;
 }
 
-const projectContextCache = new Map<string, { isUnity: boolean; isFrontend: boolean }>();
+interface CachedProjectFingerprint {
+  isUnity: boolean;
+  isFrontend: boolean;
+  isMonorepo: boolean;
+  monorepoKind: MonorepoKind;
+  ecosystems: string[];
+  primaryLanguage?: string;
+  isPython: boolean;
+  isRust: boolean;
+  isGo: boolean;
+}
+
+const projectContextCache = new Map<string, CachedProjectFingerprint>();
+
+/**
+ * Clear the project context cache (useful for testing or workspace root switches).
+ */
+export function clearPromptContextCache(): void {
+  projectContextCache.clear();
+}
 
 /**
  * Auto-detect project and tool context to load only the needed instruction modules.
- * Cache by rootDir to avoid repeated disk I/O on every step.
+ * Implements SOTA Deterministic Workspace Fingerprinting (Polyglot & Monorepo Detector).
+ * Cached by rootDir to avoid repeated disk I/O on every step.
  */
 export function detectPromptContext(
   workspace?: Workspace,
@@ -44,18 +75,132 @@ export function detectPromptContext(
       isUnity = hasProjectSettings || (hasAssets && fs.existsSync(path.join(rootDir, 'ProjectSettings')));
     } catch {}
 
-    // 2. Check whether the project is a frontend project
-    let isFrontend = false;
+    // 2. Monorepo and Polyglot Ecosystems
+    let isMonorepo = false;
+    let monorepoKind: MonorepoKind = 'none';
+    const ecosystems: string[] = [];
+
+    // Monorepo config file indicators
     try {
-      const pkgPath = path.join(rootDir, 'package.json');
-      if (fs.existsSync(pkgPath)) {
-        const rawPkg = fs.readFileSync(pkgPath, 'utf8');
-        const lower = rawPkg.toLowerCase();
-        isFrontend = (lower.includes('"react"') && !lower.includes('"ink"')) || lower.includes('"react-dom"') || lower.includes('"vue"') || lower.includes('"svelte"') || lower.includes('"next"') || lower.includes('"vite"') || lower.includes('"tailwindcss"');
+      if (fs.existsSync(path.join(rootDir, 'pnpm-workspace.yaml'))) {
+        isMonorepo = true;
+        monorepoKind = 'pnpm';
+      } else if (fs.existsSync(path.join(rootDir, 'turbo.json'))) {
+        isMonorepo = true;
+        monorepoKind = 'turborepo';
+      } else if (fs.existsSync(path.join(rootDir, 'nx.json'))) {
+        isMonorepo = true;
+        monorepoKind = 'nx';
+      } else if (fs.existsSync(path.join(rootDir, 'lerna.json'))) {
+        isMonorepo = true;
+        monorepoKind = 'lerna';
       }
     } catch {}
 
-    cachedProject = { isUnity, isFrontend };
+    // Check Node / JavaScript / TypeScript ecosystem & package.json
+    let isFrontend = false;
+    let hasNode = false;
+    try {
+      const pkgPath = path.join(rootDir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        hasNode = true;
+        ecosystems.push('node');
+        const rawPkg = fs.readFileSync(pkgPath, 'utf8');
+        try {
+          const parsed = JSON.parse(rawPkg);
+          if (parsed.workspaces && (!isMonorepo || monorepoKind === 'none')) {
+            isMonorepo = true;
+            monorepoKind = 'npm-yarn';
+          }
+          const allDeps = {
+            ...(parsed.dependencies || {}),
+            ...(parsed.devDependencies || {}),
+            ...(parsed.peerDependencies || {}),
+          };
+          const depKeys = Object.keys(allDeps).map((k) => k.toLowerCase());
+          const frontendLibs = [
+            'react', 'react-dom', 'vue', 'svelte', '@sveltejs/kit',
+            'next', 'nuxt', 'vite', 'tailwindcss', '@angular/core',
+            'solid-js', 'astro', 'gatsby', 'remix',
+          ];
+          isFrontend = depKeys.some((k) => frontendLibs.includes(k) && k !== 'ink');
+        } catch {
+          // Fallback substring checks if JSON parsing fails
+          const lower = rawPkg.toLowerCase();
+          if (lower.includes('"workspaces"') && (!isMonorepo || monorepoKind === 'none')) {
+            isMonorepo = true;
+            monorepoKind = 'npm-yarn';
+          }
+          isFrontend = (lower.includes('"react"') && !lower.includes('"ink"'))
+            || lower.includes('"react-dom"')
+            || lower.includes('"vue"')
+            || lower.includes('"svelte"')
+            || lower.includes('"next"')
+            || lower.includes('"vite"')
+            || lower.includes('"tailwindcss"');
+        }
+      }
+    } catch {}
+
+    // Check Python ecosystem
+    let isPython = false;
+    try {
+      if (
+        fs.existsSync(path.join(rootDir, 'pyproject.toml')) ||
+        fs.existsSync(path.join(rootDir, 'requirements.txt')) ||
+        fs.existsSync(path.join(rootDir, 'setup.py')) ||
+        fs.existsSync(path.join(rootDir, 'Pipfile')) ||
+        fs.existsSync(path.join(rootDir, 'poetry.lock'))
+      ) {
+        isPython = true;
+        ecosystems.push('python');
+      }
+    } catch {}
+
+    // Check Rust ecosystem
+    let isRust = false;
+    try {
+      const cargoPath = path.join(rootDir, 'Cargo.toml');
+      if (fs.existsSync(cargoPath)) {
+        isRust = true;
+        ecosystems.push('rust');
+        if (!isMonorepo) {
+          const cargoContent = fs.readFileSync(cargoPath, 'utf8');
+          if (cargoContent.includes('[workspace]')) {
+            isMonorepo = true;
+            monorepoKind = 'cargo';
+          }
+        }
+      }
+    } catch {}
+
+    // Check Go ecosystem
+    let isGo = false;
+    try {
+      if (fs.existsSync(path.join(rootDir, 'go.mod')) || fs.existsSync(path.join(rootDir, 'go.work'))) {
+        isGo = true;
+        ecosystems.push('go');
+      }
+    } catch {}
+
+    // Determine primary language
+    let primaryLanguage: string | undefined;
+    if (isRust && !hasNode && !isPython && !isGo) primaryLanguage = 'rust';
+    else if (isPython && !hasNode && !isRust && !isGo) primaryLanguage = 'python';
+    else if (isGo && !hasNode && !isPython && !isRust) primaryLanguage = 'go';
+    else if (hasNode) primaryLanguage = fs.existsSync(path.join(rootDir, 'tsconfig.json')) ? 'typescript' : 'javascript';
+
+    cachedProject = {
+      isUnity,
+      isFrontend,
+      isMonorepo,
+      monorepoKind,
+      ecosystems,
+      primaryLanguage,
+      isPython,
+      isRust,
+      isGo,
+    };
     projectContextCache.set(rootDir, cachedProject);
   }
 
@@ -81,6 +226,13 @@ export function detectPromptContext(
     isArchitectureAnalysis,
     isUnity: cachedProject.isUnity,
     isFrontend: cachedProject.isFrontend,
+    isMonorepo: cachedProject.isMonorepo,
+    monorepoKind: cachedProject.monorepoKind,
+    ecosystems: cachedProject.ecosystems,
+    primaryLanguage: cachedProject.primaryLanguage,
+    isPython: cachedProject.isPython,
+    isRust: cachedProject.isRust,
+    isGo: cachedProject.isGo,
     hasComputerTool,
     hasGitTools,
     hasSubagentTools,

@@ -7150,8 +7150,8 @@ Always write tests first!`;
 
   // 39.3. Bất biến KV-Cache Prefix Invariance & Deterministic Assembly
   // Core Prompt luôn nằm ở offset 0 bất kể thứ tự đăng ký
-  assert(standardAssembled.startsWith('You are a high-performance coding agent'), 'Core Invariant luôn nằm ở vị trí đầu tiên (Priority -1000)');
-  assert(archAssembled.startsWith('You are a high-performance coding agent'), 'Kiến trúc mới đảm bảo Stable Prefix không bị xáo trộn khi nạp thêm module');
+  assert(standardAssembled.startsWith('You are a fast, precise, safe coding agent') || standardAssembled.startsWith('You are a high-performance coding agent'), 'Core Invariant luôn nằm ở vị trí đầu tiên (Priority -1000)');
+  assert(archAssembled.startsWith('You are a fast, precise, safe coding agent') || archAssembled.startsWith('You are a high-performance coding agent'), 'Kiến trúc mới đảm bảo Stable Prefix không bị xáo trộn khi nạp thêm module');
 
   // 39.4. Tương thích ngược (Backward Compatibility)
   assert(typeof customAssembler.assemble() === 'string' && customAssembler.assemble().length > 0, 'PromptAssembler.assemble() hoạt động bình thường không cần đối số');

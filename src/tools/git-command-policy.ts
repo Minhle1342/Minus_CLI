@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { detectExplicitGitMutationIntent, normalizeIntentText } from './git-intent.js';
+import { parseShellAst } from '../security/shell-ast-parser.js';
 
 export type GitCommandRisk = 'read' | 'write' | 'network' | 'destructive';
 
@@ -87,10 +88,14 @@ export interface ParsedGitInvocation {
  * Trả về `undefined` khi phân đoạn không chứa lời gọi Git.
  */
 export function parseGitInvocation(segment: string): ParsedGitInvocation | undefined {
-  const invocation = /\bgit(?:\.exe)?\b([^;&|\n]*)/i.exec(segment || '');
-  if (!invocation) return undefined;
-  const tokens = (invocation[1].match(/"[^"]*"|'[^']*'|\S+/g) || [])
-    .map((token) => token.replace(/^["']|["']$/g, ''));
+  if (!segment) return undefined;
+
+  // 1. Phân tích cú pháp bằng AST Parser để kiểm tra lệnh thực thi có đúng là Git không
+  const parsed = parseShellAst(segment);
+  const gitCmd = parsed.commands.find((cmd) => /^(?:.*[/\\])?git(?:\.exe)?$/i.test(cmd.executable));
+  if (!gitCmd) return undefined;
+
+  const tokens = gitCmd.args;
   let subcommandIndex = -1;
   let index = 0;
   while (index < tokens.length) {
