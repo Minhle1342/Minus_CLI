@@ -18,6 +18,20 @@ test('verification classifier recognizes common custom scripts and package-manag
   ]) assert.equal(isVerificationCommand(command), true, command);
 });
 
+test('verification classifier recognizes python byte-compile checks as static verification', () => {
+  for (const command of [
+    'python -m py_compile oop.py',
+    'python3 -m py_compile src/app.py',
+    'python -m compileall src',
+    'python3 -m compileall -q .',
+  ]) assert.equal(isVerificationCommand(command), true, command);
+  // Running the script itself proves nothing about correctness — still not verification.
+  for (const command of [
+    'python oop.py',
+    'python3 src/app.py',
+  ]) assert.equal(isVerificationCommand(command), false, command);
+});
+
 test('verification classifier rejects wrappers and commands that can mask test failure', () => {
   for (const command of [
     'echo npm test',

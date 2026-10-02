@@ -42,7 +42,7 @@ export interface SubmitSolutionResult {
 export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
   return {
     name: 'submit_solution',
-    description: 'Explicitly submit the finalized solution and empirical verification proof for the current task or goal. PRECONDITION: after your last code edit you must have run a real verification command (test suite such as npm test / pytest / jest, build, lint, typecheck, or get_diagnostics) and seen it pass — running the script you just created (e.g. "python regex.py") does NOT count as verification and the call will be rejected with VERIFICATION_FAILED. Call this tool only when that verification has executed successfully.',
+    description: 'Explicitly submit the finalized solution and empirical verification proof for the current task or goal. PRECONDITION: after your last code edit you must have run a real verification command (test suite such as npm test / pytest / jest, build, lint, typecheck, get_diagnostics, or python -m py_compile for standalone scripts) and seen it pass — running the script you just created (e.g. "python regex.py") does NOT count as verification and the call will be rejected with VERIFICATION_FAILED. Call this tool only when that verification has executed successfully.',
     parameters: {
       type: 'OBJECT',
       properties: {

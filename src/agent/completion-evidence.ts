@@ -62,6 +62,7 @@ function isVerificationSegment(command: string): boolean {
   if (/^(?:vitest|jest|mocha|ava|playwright)\s+(?:run|test)\b/i.test(normalized)) return true;
   if (/^(?:cargo\s+test\b|cargo\s+nextest\s+run\b|go\s+test\b|dotnet\s+(?:test|build)\b|mvn\s+(?:test|verify)\b|gradle\s+(?:test|check)\b|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)\b|ctest\b|make\s+(?:test|check)\b|composer\s+test\b|bundle\s+exec\s+rspec\b|phpunit\b|pytest\b|py\.test\b|tsc(?:\s|$))/i.test(normalized)) return true;
   if (/^python(?:3)?(?:\.exe)?\s+(?:-m\s+(?:unittest|pytest)\b|(?:[^\s]*[\\/])*(?:test_[^\s]+\.py|[^\s]+_test\.py|tests?\.py)\b)/i.test(normalized)) return true;
+  if (/^python(?:3)?(?:\.exe)?\s+-m\s+(?:py_compile|compileall)\b/i.test(normalized)) return true;
   if (/^(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|(?:--[a-z0-9_-]+\s+)*(?:test|tests)[\\/]|(?:[^\s]*[\\/])*(?:test|tests)\.[cm]?[jt]sx?\b)/i.test(normalized)) return true;
   return false;
 }
