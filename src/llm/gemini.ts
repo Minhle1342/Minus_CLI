@@ -81,7 +81,7 @@ export class GeminiLLM {
     tokenConfig?: Partial<TokenConfig>,
   ) {
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY không được để trống.');
+      throw new Error('GEMINI_API_KEY must not be empty.');
     }
     this.client = new GoogleGenAI({ apiKey });
     this.modelName = modelName;

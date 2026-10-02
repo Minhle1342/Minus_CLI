@@ -15,7 +15,7 @@ export function createSandboxPlugin(options?: SandboxPluginOptions): AgentPlugin
   return {
     name: 'sandbox-plugin',
     version: '1.0.0',
-    description: 'Cung cấp môi trường thực thi lệnh cô lập bằng Docker hoặc Local Process Sandbox',
+    description: 'Isolated command-execution environment via Docker or Local Process Sandbox',
     async apply(ctx: KernelContext) {
       if (options && (options.mode || options.dockerImage || options.memoryLimitMb || options.cpuLimit)) {
         const { SandboxManager } = await import('../../sandbox/sandbox-manager.js');

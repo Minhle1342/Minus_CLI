@@ -7,7 +7,7 @@ import { createPlanTool, createUpdatePlanTaskTool } from '../../tools/plan-tools
 export const PlanningPlugin: AgentPlugin = {
   name: 'planning-plugin',
   version: '1.0.0',
-  description: 'Cung cấp công cụ lập kế hoạch động và theo dõi tiến độ công việc',
+  description: 'Dynamic planning tools and work-progress tracking',
   apply(ctx: KernelContext) {
     ctx.registerTool(createPlanTool(ctx.plan));
     ctx.registerTool(createUpdatePlanTaskTool(ctx.plan));

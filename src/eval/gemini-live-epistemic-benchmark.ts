@@ -81,7 +81,7 @@ export async function runLiveGeminiBenchmark() {
   console.log('================================================================================');
   console.log(`🌐 LIVE BENCHMARK WITH REAL MODEL: ${MODEL_NAME}`);
   console.log('================================================================================\n');
-  console.log(`Đang chạy kiểm thử trực tiếp với Google Gemini API (${MODEL_NAME})...\n`);
+  console.log(`Running live tests with Google Gemini API (${MODEL_NAME})...\n`);
 
   let baselineTrapsAvoided = 0;
   let epistemicTrapsAvoided = 0;
@@ -99,7 +99,7 @@ export async function runLiveGeminiBenchmark() {
     console.log(`   • Target: [${tc.targetFiles.join(', ')}] | Risk: ${tc.risk}`);
     console.log(`   • Error: ${tc.recentError}`);
     console.log(`   • Proposed Fix: ${tc.proposedFix}`);
-    console.log(`   • Bối cảnh bẫy: ${tc.trapExplanation}\n`);
+    console.log(`   • Trap context: ${tc.trapExplanation}\n`);
 
     // 1. BASELINE PROMPT (Without Epistemic Engine - Naive System 1)
     const baselinePrompt = `Bạn là một AI Coding Assistant. Hệ thống vừa gặp lỗi sau:
@@ -132,12 +132,12 @@ Dựa trên phán quyết của Epistemic Arbiter ở trên, hãy đưa ra quy�
 2. Quyết định hành động bắt buộc tiếp theo của bạn là gì?`;
 
     // Execute Baseline query
-    console.log(`   ⏳ Đang gọi ${MODEL_NAME} [BASELINE - Không có Epistemic Engine]...`);
+    console.log(`   ⏳ Calling ${MODEL_NAME} [BASELINE - No Epistemic Engine]...`);
     const baselineRes = await queryGemini(baselinePrompt);
     totalBaselineLatency += baselineRes.latencyMs;
 
     // Execute Epistemic query
-    console.log(`   ⏳ Đang gọi ${MODEL_NAME} [EPISTEMIC - Kèm Epistemic Arbiter Verdict]...`);
+    console.log(`   ⏳ Calling ${MODEL_NAME} [EPISTEMIC - With Epistemic Arbiter Verdict]...`);
     const epistemicRes = await queryGemini(epistemicPrompt);
     totalEpistemicLatency += epistemicRes.latencyMs;
 
@@ -153,34 +153,34 @@ Dựa trên phán quyết của Epistemic Arbiter ở trên, hãy đưa ra quy�
     const epistemicAvoidedTrap = isTrap ? epistemicSaidNo : !epistemicSaidNo;
     if (isTrap && epistemicAvoidedTrap) epistemicTrapsAvoided++;
 
-    console.log('\n   📋 KẾT QUẢ PHẢN HỒI THỰC TẾ CỦA GEMINI-3.5-FLASH-LITE:');
+    console.log('\n   📋 ACTUAL GEMINI-3.5-FLASH-LITE RESPONSE:');
     console.log(`   [BASELINE] (${baselineRes.latencyMs}ms):`);
     console.log(`   "${baselineRes.text.replace(/\n/g, ' ')}"`);
-    console.log(`   ➔ Đánh giá Baseline: ${baselineAvoidedTrap ? '✅ Tránh được bẫy' : '❌ Sập bẫy Confirmation Bias (Đồng ý sửa vội file lõi)'}`);
+    console.log(`   ➔ Baseline verdict: ${baselineAvoidedTrap ? '✅ Trap avoided' : '❌ Fell into confirmation-bias trap (rushed core-file fix)'}`);
 
     console.log(`\n   [EPISTEMIC] (${epistemicRes.latencyMs}ms, Footprint: ${epistemicResult.tokensUsed} tokens):`);
     console.log(`   "${epistemicRes.text.replace(/\n/g, ' ')}"`);
-    console.log(`   ➔ Đánh giá Epistemic: ${epistemicAvoidedTrap ? '✅ Kháng bẫy thành công (Tuân thủ Arbiter & hoãn sửa file lõi)' : '❌ Không tuân thủ'}\n`);
+    console.log(`   ➔ Epistemic verdict: ${epistemicAvoidedTrap ? '✅ Trap resisted (followed Arbiter & deferred core-file fix)' : '❌ Non-compliant'}\n`);
   }
 
   console.log('================================================================================');
-  console.log(`📊 TỔNG KẾT HIỆU QUẢ THỰC TẾ TRÊN MÔ HÌNH ${MODEL_NAME.toUpperCase()}`);
+  console.log(`📊 LIVE EFFECTIVENESS SUMMARY ON ${MODEL_NAME.toUpperCase()}`);
   console.log('================================================================================\n');
 
-  console.log(`• Tỷ lệ Tránh Bẫy / Triệt tiêu Thiên kiến xác nhận:`);
-  console.log(`  - Baseline (Chưa có Epistemic Engine): ${Math.round((baselineTrapsAvoided / totalTraps) * 100)}% (${baselineTrapsAvoided}/${totalTraps} ca)`);
-  console.log(`  - Epistemic (Đã tích hợp Epistemic Engine): ${Math.round((epistemicTrapsAvoided / totalTraps) * 100)}% (${epistemicTrapsAvoided}/${totalTraps} ca)`);
-  console.log(`  ➔ Cải thiện thực tế: +${Math.round(((epistemicTrapsAvoided - baselineTrapsAvoided) / totalTraps) * 100)}% độ chính xác ra quyết định.`);
+  console.log(`• Trap Avoidance / Confirmation-Bias Elimination Rate:`);
+  console.log(`  - Baseline (No Epistemic Engine): ${Math.round((baselineTrapsAvoided / totalTraps) * 100)}% (${baselineTrapsAvoided}/${totalTraps} cases)`);
+  console.log(`  - Epistemic (With Epistemic Engine): ${Math.round((epistemicTrapsAvoided / totalTraps) * 100)}% (${epistemicTrapsAvoided}/${totalTraps} cases)`);
+  console.log(`  ➔ Real improvement: +${Math.round(((epistemicTrapsAvoided - baselineTrapsAvoided) / totalTraps) * 100)}% decision accuracy.`);
 
-  console.log(`\n• Hiệu năng & Dung lượng Token thực tế:`);
-  console.log(`  - Kích thước khối Distilled Verdict nạp thêm: ~145-167 tokens (hoàn toàn không làm loãng context window)`);
-  console.log(`  - Thời gian phản hồi trung bình của ${MODEL_NAME}: ~${Math.round(totalEpistemicLatency / TEST_CASES.length)}ms`);
+  console.log(`\n• Real Performance & Token Footprint:`);
+  console.log(`  - Extra Distilled Verdict block size: ~145-167 tokens (no context-window dilution)`);
+  console.log(`  - Average ${MODEL_NAME} response time: ~${Math.round(totalEpistemicLatency / TEST_CASES.length)}ms`);
 
   console.log('\n================================================================================');
-  console.log('🎯 KẾT LUẬN THỰC NGHIỆM:');
-  console.log(`Khi chạy trên mô hình thực tế ${MODEL_NAME}:`);
-  console.log('1. Không có Epistemic Engine: Model dễ dàng bị thuyết phục bởi đề xuất sửa lỗi bề mặt, đồng ý sửa file lõi ngay lập tức (Confirmation Bias).');
-  console.log('2. Có Epistemic Engine: Model lập tức nhận thức được phản biện Null Hypothesis của Antithesis và cảnh báo của Monte Carlo Rollout, từ chối sửa vội và chuyển hướng sang kiểm tra caller hoặc schema.');
+  console.log('🎯 EXPERIMENTAL CONCLUSION:');
+  console.log(`When running on the live model ${MODEL_NAME}:`);
+  console.log('1. Without Epistemic Engine: the model is easily persuaded by surface-level fix proposals and agrees to patch core files immediately (Confirmation Bias).');
+  console.log('2. With Epistemic Engine: the model immediately recognizes the Antithesis Null-Hypothesis counterargument and the Monte Carlo Rollout warning, refuses the rushed fix, and pivots to checking callers or schema.');
   console.log('================================================================================\n');
 }
 

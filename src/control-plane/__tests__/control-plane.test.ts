@@ -246,7 +246,7 @@ export async function runControlPlaneTests(): Promise<{ passed: number; failed: 
     console.log(`\n========================================`);
     console.log(`EDCP SCENARIOS: ${passed} Passed, ${failed} Failed`);
     if (failureList.length > 0) {
-      console.log('DANH SÁCH LỖI:');
+      console.log('ERROR LIST:');
       failureList.forEach((f, idx) => console.log(`  ${idx + 1}. ❌ ${f}`));
     }
     console.log(`========================================\n`);

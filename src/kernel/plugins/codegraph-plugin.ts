@@ -5,21 +5,21 @@ export const CODEGRAPH_PROMPT_SECTION_ID = 'codegraph-usage-policy';
 
 export const CODEGRAPH_USAGE_POLICY = `CODEGRAPH SEMANTIC CODE INTELLIGENCE POLICY (OVERRIDES DEFAULT SEARCH FLOW)
 
-Khi project đã có \`.codegraph/\` index, CodeGraph là pre-built knowledge graph thay thế
-grep + Read loop — tuân thủ thứ tự sau thay vì flow tìm kiếm mặc định:
+When the project has a \`.codegraph/\` index, CodeGraph is the pre-built knowledge graph
+that replaces the grep + Read loop — follow this order instead of the default search flow:
 
-1. codegraph_explore TRƯỚC TIÊN cho mọi câu hỏi cấu trúc ("how does X work", flow X→Y,
-   survey khu vực, bug cần trace) và TRƯỚC MỌI EDIT. 1 call trả source + call paths
-   (kể cả dynamic-dispatch hops mà grep không theo được) + blast radius.
-2. KHÔNG grep / Read / search_codebase_fast trước để "tìm" code đã index — đó là
-   làm lại việc graph đã làm, tốn tool calls. Coi source trả về như đã đọc file,
-   không re-verify bằng grep (AST parse chính xác hơn grep).
-3. Đào sâu bằng codegraph_node (1 symbol/file + caller/callee trail), codegraph_callers/
-   callees cho edges, codegraph_impact trước khi sửa.
-4. Chỉ Read trực tiếp khi: (a) response có staleness banner nêu tên file (graph lag
-   ~2s sau edit), (b) file ngoài index (config, docs), (c) codegraph_status báo
-   indexed=false — khi đó fallback search_codebase_fast / grep / read_file và gợi ý
-   \`codegraph init\`. Không tự chạy init/sync khi chưa được user cho phép.`;
+1. Call codegraph_explore FIRST for every structural question ("how does X work", flow X→Y,
+   surveying an area, bug tracing) and BEFORE EVERY EDIT. One call returns source + call paths
+   (including dynamic-dispatch hops grep cannot follow) + blast radius.
+2. Do NOT grep / Read / search_codebase_fast first to "find" indexed code — that redo
+   work the graph already did and wastes tool calls. Treat returned source as already-read
+   files; do not re-verify with grep (AST parsing is more accurate than grep).
+3. Go deeper with codegraph_node (one symbol/file + caller/callee trail), codegraph_callers/
+   callees for edges, codegraph_impact before modifying code.
+4. Read files directly only when: (a) the response carries a staleness banner naming files
+   (graph lags ~2s after edits), (b) the file is outside the index (configs, docs),
+   (c) codegraph_status reports indexed=false — then fall back to search_codebase_fast /
+   grep / read_file and suggest \`codegraph init\`. Never run init/sync without user approval.`;
 
 export const CodeGraphPlugin: AgentPlugin = {
   name: 'codegraph-plugin',

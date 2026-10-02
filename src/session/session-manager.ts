@@ -36,7 +36,7 @@ export class SessionManager {
 
   async create(id?: string): Promise<Session> {
     if (id && (this.sessions.has(id) || await this.persistence.load(id))) {
-      throw new Error(`Session "${id}" đã tồn tại.`);
+      throw new Error(`Session "${id}" already exists.`);
     }
     const session = this.register(new Session(id));
     await this.save(session);
@@ -50,7 +50,7 @@ export class SessionManager {
 
   async fork(parent: Session | string, boundarySeq?: number, childId?: string): Promise<Session> {
     const parentSession = typeof parent === 'string' ? await this.load(parent) : parent;
-    if (!parentSession) throw new Error(`Session "${parent}" không tồn tại.`);
+    if (!parentSession) throw new Error(`Session "${parent}" does not exist.`);
     const child = this.register(parentSession.fork(boundarySeq, childId));
     await this.save(child);
     return child;

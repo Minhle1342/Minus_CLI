@@ -128,12 +128,12 @@ export class TestEngineeringHarness {
       if (report.isPassed) {
         this.hypothesisTracker.markValidated(
           activeHypothesisId,
-          `Xác minh thực nghiệm thành công: ${report.summaryText}`
+          `Experimental verification succeeded: ${report.summaryText}`
         );
       } else {
         this.hypothesisTracker.markFalsified(
           activeHypothesisId,
-          `Phản nghiệm thất bại: ${report.summaryText}`
+          `Experimental falsification: ${report.summaryText}`
         );
 
         // Kích hoạt tự động Rollback về trạng thái sạch nếu có Rollback Orchestrator
@@ -237,10 +237,10 @@ export class TestEngineeringHarness {
         }
 
         feedback = reproPassed && regressionPassed
-          ? `Bản vá hoàn hảo: Vượt qua Repro Test và bảo toàn Regression Suite (Điểm: ${score}/100)`
+          ? `Perfect patch: passed Repro Test and preserved Regression Suite (Score: ${score}/100)`
           : !reproPassed
-            ? `Bản vá thất bại: Chưa vượt qua bài test tái hiện (ExitCode ${reproExec.exitCode})`
-            : `Bản vá gây lỗi hồi quy (Regression Test ExitCode != 0)`;
+            ? `Patch failed: did not pass the reproduction test (ExitCode ${reproExec.exitCode})`
+            : `Patch caused a regression failure (Regression Test ExitCode != 0)`;
 
         rankings.push({
           candidateId: candidate.id,
@@ -259,7 +259,7 @@ export class TestEngineeringHarness {
           regressionPassed: false,
           diffSizeChars: candidate.content.length,
           score: 0,
-          feedback: `Lỗi trong quá trình thử nghiệm sandbox: ${err.message}`,
+          feedback: `Error during sandbox trial: ${err.message}`,
         });
       } finally {
         await scratch.dispose();
@@ -338,13 +338,13 @@ export class ReproductionVerificationManager {
     const hasPostPass = this.attempts.some((a) => a.phase === 'post-fix' && a.isPassed);
     const lastAttempt = this.attempts[this.attempts.length - 1];
 
-    let details = 'Chưa có bài kiểm thử tái hiện nào được ghi nhận.';
+    let details = 'No reproduction test has been recorded yet.';
     if (hasPreFail && hasPostPass) {
-      details = 'Đã xác minh đầy đủ: Lỗi được tái hiện thành công (pre-fix FAIL) và bản sửa đổi vượt qua kiểm thử (post-fix PASS).';
+      details = 'Fully verified: bug reproduced successfully (pre-fix FAIL) and the fix passes tests (post-fix PASS).';
     } else if (hasPreFail && !hasPostPass) {
-      details = 'Đã tái hiện lỗi thành công (pre-fix FAIL), đang chờ lượt kiểm thử xác nhận vượt qua sau khi sửa (post-fix PASS).';
+      details = 'Bug reproduced successfully (pre-fix FAIL), awaiting post-fix PASS confirmation run.';
     } else if (!hasPreFail && hasPostPass) {
-      details = 'Đã kiểm thử thành công sau sửa nhưng thiếu bước chứng minh lỗi ban đầu (pre-fix FAIL).';
+      details = 'Post-fix tests pass, but the initial bug proof step is missing (pre-fix FAIL).';
     }
 
     return {

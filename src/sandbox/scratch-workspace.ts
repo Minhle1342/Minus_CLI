@@ -64,7 +64,7 @@ export class EphemeralScratchWorkspace {
         }
       } catch (err: any) {
         if (err.code !== 'ENOENT') {
-          console.warn(`[ScratchWorkspace] Không thể sao chép file "${relPath}": ${err.message}`);
+          console.warn(`[ScratchWorkspace] Failed to copy file "${relPath}": ${err.message}`);
         }
       }
     }

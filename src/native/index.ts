@@ -678,7 +678,7 @@ export function nativeTruncateToolOutput(
   const tail = lines.slice(Math.max(half, lines.length - half));
   const result = [
     ...head,
-    `\n[... Đã cắt bớt ${lines.length - (head.length + tail.length)} dòng (${originalBytes} bytes) ...]\n`,
+    `\n[... Truncated ${lines.length - (head.length + tail.length)} lines (${originalBytes} bytes) ...]\n`,
     ...tail,
   ].join('\n');
 

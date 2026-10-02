@@ -70,11 +70,11 @@ async function main(): Promise<void> {
   if (!dockerReady) {
     if (isPredev) {
       console.log(
-        `\x1b[90mℹ  [search:up] Docker daemon chưa bật. Tự động bỏ qua SearXNG cục bộ để bảo vệ RAM cho ứng dụng.\x1b[0m`,
+        `\x1b[90mℹ  [search:up] Docker daemon is off. Automatically skipping local SearXNG to protect app RAM.\x1b[0m`,
       );
     } else {
       console.warn(
-        `\n\x1b[33m⚠️  [search:up] Docker daemon không khả dụng. Tự động bỏ qua SearXNG container.\x1b[0m\n`,
+        `\n\x1b[33m⚠️  [search:up] Docker daemon is unavailable. Automatically skipping SearXNG container.\x1b[0m\n`,
       );
     }
     return;
@@ -82,15 +82,15 @@ async function main(): Promise<void> {
 
   try {
     await runDockerCompose();
-    console.log(`\x1b[32m✔ [search:up] SearXNG container đã khởi chạy thành công.\x1b[0m`);
+    console.log(`\x1b[32m✔ [search:up] SearXNG container started successfully.\x1b[0m`);
   } catch (composeError: any) {
     console.warn(
-      `\n\x1b[33m⚠️  [search:up] Không thể khởi chạy SearXNG qua docker compose: ${composeError?.message || composeError}. Tự động bỏ qua.\x1b[0m\n`,
+      `\n\x1b[33m⚠️  [search:up] Failed to start SearXNG via docker compose: ${composeError?.message || composeError}. Skipping automatically.\x1b[0m\n`,
     );
   }
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.warn(`\n\x1b[33m⚠️  [search:up] ${message}. Tự động bỏ qua.\x1b[0m\n`);
+  console.warn(`\n\x1b[33m⚠️  [search:up] ${message}. Skipping automatically.\x1b[0m\n`);
 });

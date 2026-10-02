@@ -305,12 +305,12 @@ export class PlaybookReflector {
         const target = (lastMutation.args?.TargetFile || lastMutation.args?.path || 'source code').toString();
         deltas.push({
           type: 'ADD',
-          reason: `Phát hiện sửa thành công sau chu trình kiểm thử Red -> Green trên file ${target}`,
+          reason: `Detected successful fix after Red -> Green test cycle on file ${target}`,
           bullet: {
             category: 'test_verification',
-            trigger: `Khi sửa chữa lỗi liên quan đến: "${userRequest.slice(0, 80)}"`,
-            actionRule: `Thực hiện sửa đổi mục tiêu trên '${target}' và ngay lập tức chạy test kiểm chứng tái hiện để xác nhận kết quả.`,
-            antiPattern: `Không sửa tràn lan sang các module khác trước khi bài test trên file hiện tại chuyển sang màu xanh.`,
+            trigger: `When fixing errors related to: "${userRequest.slice(0, 80)}"`,
+            actionRule: `Apply a targeted fix on '${target}' and immediately run the reproduction verification test to confirm the result.`,
+            antiPattern: `Do not spread edits across other modules before the test on the current file turns green.`,
           },
         });
       }
@@ -325,12 +325,12 @@ export class PlaybookReflector {
     if (hasTypeScriptError && finalSuccess) {
       deltas.push({
         type: 'ADD',
-        reason: 'Khắc phục thành công lỗi TypeScript TS18047 possibly null/undefined',
+        reason: 'Successfully fixed TypeScript TS18047 possibly null/undefined error',
         bullet: {
           category: 'type_safety',
-          trigger: 'Khi gặp lỗi TypeScript TS18047: variable is possibly null or undefined trong assert hoặc logic',
-          actionRule: 'Sử dụng Optional Chaining (?.) hoặc bọc Boolean(...) tường minh để narrow type an toàn trước khi truy cập thuộc tính con.',
-          antiPattern: 'Tránh dùng bọc try-catch mù quáng vì tsc vẫn sẽ bắt lỗi compile trước khi runtime chạy.',
+          trigger: 'When hitting TypeScript TS18047: variable is possibly null or undefined in asserts or logic',
+          actionRule: 'Use Optional Chaining (?.) or explicit Boolean(...) wrapping to safely narrow the type before accessing child properties.',
+          antiPattern: 'Avoid blind try-catch wrapping because tsc still catches compile errors before runtime runs.',
         },
       });
     }

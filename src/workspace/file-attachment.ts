@@ -34,12 +34,26 @@ export interface AttachedItemSummary {
   preview?: string;
 }
 
+export type RelatedFileReason = 'import' | 'imported-by' | 'same-dir' | 'dir-top-ranked';
+
+export interface RelatedFileInfo {
+  path: string;
+  hop: 1 | 2;
+  reason: RelatedFileReason;
+  via?: string;
+}
+
 export interface AttachmentResult {
   originalPrompt: string;
   expandedPrompt: string;
   attachments: AttachedItemSummary[];
   hasAttachments: boolean;
   skippedAttachments?: Array<{ path: string; reason: 'attachment_limit' | 'source_byte_limit' | 'context_token_limit' }>;
+  /** User @-attached files (anchors). Set even when neighborhood expansion is disabled. */
+  anchorPaths?: string[];
+  /** 2-hop neighborhood around anchors. Only set when MINUS_ATTACH_EXPAND=on (default). */
+  relatedFiles?: RelatedFileInfo[];
+  expansionEnabled?: boolean;
 }
 
 /**
@@ -323,7 +337,30 @@ export class FileMentionEngine {
 }
 
 /**
+ * Attachment neighborhood budgets (2-hop investigation scope).
+ * Related files are rendered as signature outlines only, never full content,
+ * so the neighborhood stays within ~2k tokens on top of anchor attachments.
+ */
+const ATTACH_CODE_EXTENSIONS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.java',
+  '.c', '.cc', '.cpp', '.h', '.hpp', '.cs', '.php', '.rb', '.swift', '.kt', '.kts',
+]);
+const MAX_RELATED_HOP1 = 8;
+const MAX_RELATED_HOP2 = 12;
+const MAX_DIR_ANCHOR_FILES = 10;
+const MAX_DIR_SCAN_DEPTH = 3;
+const MAX_IMPORTER_SCAN_FILES = 300;
+const MAX_SCAN_FILE_BYTES = 64 * 1024;
+const MAX_RELATED_OUTLINE_SYMBOLS = 12;
+const MAX_NEIGHBORHOOD_CHARS = 8000;
+
+/**
  * PromptAttachmentProcessor - Tự động bóc tách các file/thư mục được @mention và đính kèm vào context
+ *
+ * Quy ước anchor: file được @mention là ĐIỂM NEO (anchor), không phải toàn bộ sự thật.
+ * Khi MINUS_ATTACH_EXPAND=on (mặc định), processor tự động mở rộng vùng điều tra 2-hop:
+ * hop-1 = file anchor import + file import anchor + sibling cùng thư mục (+ top-ranked files nếu anchor là thư mục),
+ * hop-2 = file mà hop-1 import. LLM bị bắt buộc kiểm tra neighborhood trước khi kết luận/sửa code.
  */
 export class PromptAttachmentProcessor {
   private static readonly MAX_ATTACHMENTS = 8;
@@ -335,6 +372,27 @@ export class PromptAttachmentProcessor {
    * Hỗ trợ Unicode (Tiếng Việt), đường dẫn trong ngoặc kép @"...", ký tự định tuyến Next.js (), [], @, +, #,...
    */
   private static readonly MENTION_REGEX = /(?:@(?:"([^"]+)"|'([^']+)'|([^\s"'`]+))|(?:^|\s)\/(?:add|attach)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+)))/gu;
+
+  private static readonly INVESTIGATION_SCOPE_DIRECTIVE = [
+    '[INVESTIGATION SCOPE - ATTACHMENT ANCHOR RULE]',
+    'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth.',
+    'MANDATORY expansion before concluding root cause or editing code:',
+    '1. Read the anchor file(s).',
+    '2. Inspect HOP-1 files (direct imports, importers, same-dir siblings, dir top-ranked files).',
+    '3. Inspect HOP-2 files (files related to hop-1) with read_file / grep_search / analyze_impact.',
+    'FORBIDDEN: concluding root cause or applying fixes based on anchor content alone without checking callers/dependencies.',
+  ].join('\n');
+
+  /**
+   * Neighborhood expansion switch. Defaults to ON per directive
+   * (lấy top-ranked files trong dir làm anchor, luôn mở rộng 2-hop).
+   * Set MINUS_ATTACH_EXPAND=off|0|false|no|disabled to disable.
+   */
+  static isAttachmentExpansionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+    const raw = env.MINUS_ATTACH_EXPAND?.trim().toLowerCase();
+    if (!raw) return true;
+    return !['off', '0', 'false', 'no', 'disabled'].includes(raw);
+  }
 
   /**
    * Bóc tách các đường dẫn được đề cập trong prompt
@@ -384,11 +442,281 @@ export class PromptAttachmentProcessor {
     return Array.from(paths);
   }
 
+  private static extractRelativeImports(content: string): string[] {
+    const specifiers: string[] = [];
+    const pattern = /(?:import|export\s+(?:\{|\*))\s+(?:[^'"`]*?\s+from\s+)?['"`]([^'"`]+)['"`]|require\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      const specifier = match[1] || match[2];
+      if (specifier?.startsWith('.')) specifiers.push(specifier);
+    }
+    return [...new Set(specifiers)];
+  }
+
+  private static resolveRelativeImport(fromRelPath: string, specifier: string, workspace: Workspace): string | undefined {
+    if (!specifier.startsWith('.')) return undefined;
+    const fromPosix = fromRelPath.split(path.sep).join('/');
+    const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromPosix), specifier));
+    const ext = path.posix.extname(base).toLowerCase();
+    const noExt = ATTACH_CODE_EXTENSIONS.has(ext) ? base.slice(0, -ext.length) : base;
+    const candidates = [
+      base,
+      ...[...ATTACH_CODE_EXTENSIONS].map((e) => `${noExt}${e}`),
+      ...[...ATTACH_CODE_EXTENSIONS].map((e) => `${noExt}/index${e}`),
+    ];
+    for (const candidate of candidates) {
+      try {
+        const safe = workspace.resolveSafePath(candidate);
+        if (fs.existsSync(safe) && fs.statSync(safe).isFile()) {
+          return workspace.toRelativePath(safe);
+        }
+      } catch {
+        // Unsafe or missing candidate — try next.
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Xếp hạng file trong thư mục được @attach để lấy top-ranked làm anchor bổ sung.
+   * Ưu tiên file code, kích thước vừa phải (dễ đọc toàn bộ), sắp xếp ổn định theo tên.
+   */
+  private static async collectTopRankedFilesInDir(safeDirAbs: string, workspace: Workspace, limit = MAX_DIR_ANCHOR_FILES): Promise<string[]> {
+    const scored: Array<{ rel: string; score: number }> = [];
+    const visit = async (dirAbs: string, depth: number): Promise<void> => {
+      if (depth > MAX_DIR_SCAN_DEPTH) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = await fsp.readdir(dirAbs, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      const files = entries.filter((e) => e.isFile()).sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of files) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!ATTACH_CODE_EXTENSIONS.has(ext)) continue;
+        try {
+          const abs = path.join(dirAbs, entry.name);
+          const stat = await fsp.stat(abs);
+          if (stat.size > MAX_SCAN_FILE_BYTES) continue;
+          // File code nhỏ được ưu tiên (đọc trọn vẹn trong 1 lần), cộng depth penalty.
+          const score = stat.size + depth * 4096;
+          scored.push({ rel: workspace.toRelativePath(abs), score });
+        } catch {
+          // Bỏ qua file không đọc được.
+        }
+      }
+      const dirs = entries.filter((e) => e.isDirectory() && !workspace.isIgnoredDirectory(e.name) && !e.name.startsWith('.'))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of dirs) {
+        await visit(path.join(dirAbs, entry.name), depth + 1);
+      }
+    };
+    await visit(safeDirAbs, 0);
+    scored.sort((a, b) => a.score - b.score || a.rel.localeCompare(b.rel));
+    return scored.slice(0, Math.max(1, limit)).map((item) => item.rel);
+  }
+
+  /** Tìm file import anchor (importers) bằng quét giới hạn toàn workspace. */
+  private static async findImporters(anchorRel: string, workspace: Workspace): Promise<string[]> {
+    const base = path.basename(anchorRel).replace(/\.[^.]+$/, '');
+    if (!base || base.length < 2) return [];
+    const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const importLine = new RegExp(`(?:import|require|from)\\s*[^\\n]*?${escaped}`, 'i');
+    let entries: WorkspaceEntryInfo[];
+    try {
+      entries = FileMentionEngine.listWorkspaceEntries(workspace);
+    } catch {
+      return [];
+    }
+    const candidates = entries
+      .filter((e) => e.type === 'file'
+        && e.relativePath !== anchorRel
+        && e.sizeBytes > 0
+        && e.sizeBytes <= MAX_SCAN_FILE_BYTES
+        && ATTACH_CODE_EXTENSIONS.has(path.extname(e.relativePath).toLowerCase()))
+      .slice(0, MAX_IMPORTER_SCAN_FILES);
+    const found: string[] = [];
+    await Promise.all(candidates.map(async (entry) => {
+      try {
+        const safe = workspace.resolveSafePath(entry.relativePath);
+        const content = await fsp.readFile(safe, 'utf8');
+        if (importLine.test(content)) found.push(entry.relativePath);
+      } catch {
+        // Bỏ qua file không đọc được.
+      }
+    }));
+    found.sort();
+    return found.slice(0, 4);
+  }
+
+  /**
+   * Mở rộng vùng điều tra 2-hop quanh anchor files.
+   * Không bao giờ throw — thất bại thì degrade về danh sách seed (dir top-ranked).
+   */
+  private static async expandNeighborhood(
+    anchors: string[],
+    workspace: Workspace,
+    seed: RelatedFileInfo[] = [],
+  ): Promise<RelatedFileInfo[]> {
+    const related = new Map<string, RelatedFileInfo>();
+    for (const item of seed) related.set(item.path, item);
+    const isAnchor = new Set(anchors);
+    const hop1Paths: string[] = [];
+    let hop1Count = 0;
+
+    const addRelated = (relPath: string, hop: 1 | 2, reason: RelatedFileReason, via?: string): boolean => {
+      if (!relPath || isAnchor.has(relPath) || related.has(relPath)) return false;
+      related.set(relPath, { path: relPath, hop, reason, via });
+      return true;
+    };
+
+    const readSource = async (relPath: string): Promise<string | undefined> => {
+      try {
+        const safe = workspace.resolveSafePath(relPath);
+        const stat = await fsp.stat(safe);
+        if (stat.size > MAX_SCAN_FILE_BYTES || workspace.isBinaryFile(relPath)) return undefined;
+        return await fsp.readFile(safe, 'utf8');
+      } catch {
+        return undefined;
+      }
+    };
+
+    for (const anchor of anchors.slice(0, 8)) {
+      // Hop-1a: file mà anchor import trực tiếp.
+      const content = await readSource(anchor);
+      if (content !== undefined) {
+        for (const spec of this.extractRelativeImports(content)) {
+          if (hop1Count >= MAX_RELATED_HOP1) break;
+          const target = this.resolveRelativeImport(anchor, spec, workspace);
+          if (target && addRelated(target, 1, 'import', anchor)) {
+            hop1Paths.push(target);
+            hop1Count++;
+          }
+        }
+      }
+      // Hop-1b: sibling cùng thư mục (tối đa 3 file code).
+      try {
+        const dirAbs = path.dirname(workspace.resolveSafePath(anchor));
+        const entries = await fsp.readdir(dirAbs, { withFileTypes: true });
+        const siblings = entries
+          .filter((e) => e.isFile() && ATTACH_CODE_EXTENSIONS.has(path.extname(e.name).toLowerCase()))
+          .map((e) => e.name)
+          .sort()
+          .slice(0, 3);
+        for (const name of siblings) {
+          if (hop1Count >= MAX_RELATED_HOP1) break;
+          const rel = workspace.toRelativePath(path.join(dirAbs, name));
+          if (rel !== anchor && addRelated(rel, 1, 'same-dir', anchor)) {
+            hop1Paths.push(rel);
+            hop1Count++;
+          }
+        }
+      } catch {
+        // Bỏ qua khi không đọc được thư mục chứa anchor.
+      }
+      // Hop-1c: file import anchor (callers ngược).
+      if (hop1Count < MAX_RELATED_HOP1) {
+        const importers = await this.findImporters(anchor, workspace).catch((): string[] => []);
+        for (const importer of importers.slice(0, 4)) {
+          if (hop1Count >= MAX_RELATED_HOP1) break;
+          if (addRelated(importer, 1, 'imported-by', anchor)) {
+            hop1Paths.push(importer);
+            hop1Count++;
+          }
+        }
+      }
+    }
+
+    // Hop-2: file mà hop-1 import (liên hệ của file có liên hệ với anchor).
+    let hop2Count = 0;
+    for (const hop1Path of hop1Paths.slice(0, 8)) {
+      if (hop2Count >= MAX_RELATED_HOP2) break;
+      const content = await readSource(hop1Path);
+      if (content === undefined) continue;
+      for (const spec of this.extractRelativeImports(content)) {
+        if (hop2Count >= MAX_RELATED_HOP2) break;
+        const target = this.resolveRelativeImport(hop1Path, spec, workspace);
+        if (target && addRelated(target, 2, 'import', hop1Path)) hop2Count++;
+      }
+    }
+
+    return [...related.values()];
+  }
+
+  private static renderCompactNeighborhoodBlock(anchors: string[], related: RelatedFileInfo[]): string {
+    const format = (item: RelatedFileInfo): string =>
+      `- ${item.path} (hop-${item.hop} • ${item.reason}${item.via ? ` via ${item.via}` : ''})`;
+    const hop1 = related.filter((item) => item.hop === 1);
+    const hop2 = related.filter((item) => item.hop === 2);
+    return [
+      '[Attachment Neighborhood - 2-hop Investigation Scope (compact)]',
+      `Anchors (user @-attached, NOT the whole truth): ${anchors.join(', ')}`,
+      hop1.length > 0 ? `Hop-1:\n${hop1.map(format).join('\n')}` : 'Hop-1: (none found)',
+      hop2.length > 0 ? `Hop-2:\n${hop2.map(format).join('\n')}` : 'Hop-2: (none found)',
+      this.INVESTIGATION_SCOPE_DIRECTIVE,
+    ].join('\n');
+  }
+
+  private static async renderNeighborhoodBlock(
+    anchors: string[],
+    related: RelatedFileInfo[],
+    workspace: Workspace,
+  ): Promise<string> {
+    const format = (item: RelatedFileInfo): string =>
+      `- ${item.path} (hop-${item.hop} • ${item.reason}${item.via ? ` via ${item.via}` : ''})`;
+    const hop1 = related.filter((item) => item.hop === 1);
+    const hop2 = related.filter((item) => item.hop === 2);
+    const lines = [
+      '[Attachment Neighborhood - 2-hop Investigation Scope]',
+      `Anchors (user @-attached, ground truth but NOT the whole truth): ${anchors.join(', ')}`,
+      hop1.length > 0 ? `Hop-1 (directly related):\n${hop1.map(format).join('\n')}` : 'Hop-1 (directly related): (none found)',
+      hop2.length > 0 ? `Hop-2 (related to hop-1):\n${hop2.map(format).join('\n')}` : 'Hop-2 (related to hop-1): (none found)',
+    ];
+
+    const outlineLines: string[] = [];
+    for (const item of related) {
+      const usedChars = lines.join('\n').length + outlineLines.join('\n').length;
+      if (usedChars > MAX_NEIGHBORHOOD_CHARS - 1500) break;
+      try {
+        if (workspace.isBinaryFile(item.path)) continue;
+        const safe = workspace.resolveSafePath(item.path);
+        const stat = await fsp.stat(safe);
+        if (stat.size > MAX_SCAN_FILE_BYTES) continue;
+        const content = await fsp.readFile(safe, 'utf8');
+        const outline = SemanticSlicer.extractOutline(item.path, content);
+        if (outline.symbols.length === 0) continue;
+        outlineLines.push(
+          `### ${item.path} (hop-${item.hop} • ${item.reason})\n`
+          + outline.symbols.slice(0, MAX_RELATED_OUTLINE_SYMBOLS)
+            .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
+            .join('\n'),
+        );
+      } catch {
+        // Bỏ qua file liên quan không đọc được — danh sách path phía trên vẫn đủ để LLM tự inspect.
+      }
+    }
+    if (outlineLines.length > 0) {
+      lines.push(`Related-file outlines (signatures only; use read_file with startLine/endLine for full code):\n${outlineLines.join('\n')}`);
+    }
+    lines.push(this.INVESTIGATION_SCOPE_DIRECTIVE);
+
+    const block = lines.join('\n');
+    return block.length > MAX_NEIGHBORHOOD_CHARS
+      ? this.renderCompactNeighborhoodBlock(anchors, related)
+      : block;
+  }
+
   /**
    * Đọc và đính kèm nội dung của tất cả các file / thư mục được nhắc tới vào user prompt
    */
-  static async resolveAndAttach(userPrompt: string, workspace: Workspace): Promise<AttachmentResult> {
+  static async resolveAndAttach(
+    userPrompt: string,
+    workspace: Workspace,
+    options?: { expansionEnabled?: boolean },
+  ): Promise<AttachmentResult> {
     const mentionedPaths = this.extractMentionedPaths(userPrompt);
+    const expansionEnabled = options?.expansionEnabled ?? this.isAttachmentExpansionEnabled();
 
     if (mentionedPaths.length === 0) {
       return {
@@ -396,12 +724,16 @@ export class PromptAttachmentProcessor {
         expandedPrompt: userPrompt,
         attachments: [],
         hasAttachments: false,
+        expansionEnabled,
       };
     }
 
     const attachments: AttachedItemSummary[] = [];
     const attachedContextBlocks: string[] = [];
     const skippedAttachments: NonNullable<AttachmentResult['skippedAttachments']> = [];
+    const anchorFiles: string[] = [];
+    const attachedDirs: string[] = [];
+    const dirTopRanked: RelatedFileInfo[] = [];
     let attachedSourceBytes = 0;
     let attachedContextTokens = 0;
 
@@ -427,7 +759,9 @@ export class PromptAttachmentProcessor {
         let contextBlock: string;
 
         if (stat.isFile()) {
-          if (workspace.isBinaryFile(relPath)) {
+          const isBinary = workspace.isBinaryFile(relPath);
+          if (!isBinary && !anchorFiles.includes(relPath)) anchorFiles.push(relPath);
+          if (isBinary) {
             attachment = {
               path: relPath,
               type: 'file',
@@ -484,6 +818,15 @@ export class PromptAttachmentProcessor {
             fileCount,
           };
           contextBlock = `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries)]\n\`\`\`\n${treeListing}\n\`\`\`\n---`;
+          if (!attachedDirs.includes(relPath)) attachedDirs.push(relPath);
+          if (expansionEnabled) {
+            const topRanked = await this.collectTopRankedFilesInDir(safePath, workspace).catch((): string[] => []);
+            for (const topRel of topRanked) {
+              if (!dirTopRanked.some((item) => item.path === topRel)) {
+                dirTopRanked.push({ path: topRel, hop: 1, reason: 'dir-top-ranked', via: relPath });
+              }
+            }
+          }
         } else {
           continue;
         }
@@ -510,12 +853,47 @@ export class PromptAttachmentProcessor {
         expandedPrompt: userPrompt,
         attachments: [],
         hasAttachments: false,
+        expansionEnabled,
       };
     }
 
     if (skippedAttachments.length > 0) {
       const skippedSummary = skippedAttachments.map(({ path: skippedPath, reason }) => `- ${skippedPath}: ${reason}`).join('\n');
       attachedContextBlocks.push(`\n[Attachment limits] The following user-mentioned paths were not attached:\n${skippedSummary}`);
+    }
+
+    // Mở rộng vùng điều tra 2-hop quanh anchor (mặc định ON qua MINUS_ATTACH_EXPAND).
+    // Dir attach không có file anchor: lấy top-ranked files trong dir làm anchor mở rộng.
+    let relatedFiles: RelatedFileInfo[] = [...dirTopRanked];
+    const expansionAnchors = anchorFiles.length > 0
+      ? anchorFiles
+      : dirTopRanked.map((item) => item.path);
+    const blockAnchors = anchorFiles.length > 0
+      ? anchorFiles
+      : attachedDirs.map((dir) => `${dir}/`);
+    if (expansionEnabled && blockAnchors.length > 0) {
+      try {
+        if (expansionAnchors.length > 0) {
+          relatedFiles = await this.expandNeighborhood(expansionAnchors, workspace, dirTopRanked);
+        }
+        const neighborhoodBlock = await this.renderNeighborhoodBlock(blockAnchors, relatedFiles, workspace);
+        if (neighborhoodBlock) {
+          const estimatedTokens = Math.ceil(Buffer.byteLength(neighborhoodBlock, 'utf8') / 4);
+          if (attachedContextTokens + estimatedTokens <= this.MAX_CONTEXT_TOKENS) {
+            attachedContextBlocks.push(neighborhoodBlock);
+            attachedContextTokens += estimatedTokens;
+          } else {
+            const compactBlock = this.renderCompactNeighborhoodBlock(blockAnchors, relatedFiles);
+            const compactTokens = Math.ceil(Buffer.byteLength(compactBlock, 'utf8') / 4);
+            if (attachedContextTokens + compactTokens <= this.MAX_CONTEXT_TOKENS) {
+              attachedContextBlocks.push(compactBlock);
+              attachedContextTokens += compactTokens;
+            }
+          }
+        }
+      } catch {
+        // Degrade gracefully: anchor attachments phía trên vẫn đầy đủ giá trị.
+      }
     }
 
     // Gắn phần attachments vào đuôi user prompt
@@ -527,6 +905,9 @@ export class PromptAttachmentProcessor {
       attachments,
       hasAttachments: attachments.length > 0,
       skippedAttachments: skippedAttachments.length > 0 ? skippedAttachments : undefined,
+      anchorPaths: anchorFiles.length > 0 ? anchorFiles : undefined,
+      relatedFiles: relatedFiles.length > 0 ? relatedFiles : undefined,
+      expansionEnabled,
     };
   }
 
@@ -571,7 +952,7 @@ export class PromptAttachmentProcessor {
     let count = 0;
     for (const entry of dirEntries) {
       if (count >= maxEntriesPerDir) {
-        lines.push(`${indent}... (+${dirEntries.length - count} thư mục khác)`);
+        lines.push(`${indent}... (+${dirEntries.length - count} more directories)`);
         break;
       }
       lines.push(`${indent}📁 ${entry.name}/`);
@@ -589,7 +970,7 @@ export class PromptAttachmentProcessor {
     let fileCount = 0;
     for (const entry of fileEntries) {
       if (fileCount >= maxEntriesPerDir) {
-        lines.push(`${indent}... (+${fileEntries.length - fileCount} tệp tin khác)`);
+        lines.push(`${indent}... (+${fileEntries.length - fileCount} more files)`);
         break;
       }
       lines.push(`${indent}📄 ${entry.name}`);

@@ -63,14 +63,14 @@ export async function getCodeGraphStatus(workspaceDir: string): Promise<CodeGrap
       binary,
       version,
       dbPath: indexed ? path.join(root, '.codegraph', 'codegraph.db') : undefined,
-      hint: indexed ? undefined : 'Chạy `codegraph init` trong project để build graph.',
+      hint: indexed ? undefined : 'Run `codegraph init` in the project to build the graph.',
     };
   } catch {
     return {
       available: false,
       indexed,
       binary,
-      hint: 'Chưa cài CodeGraph. Cài: npm i -g @colbymchenry/codegraph rồi chạy `codegraph init` trong project.',
+      hint: 'CodeGraph is not installed. Install: npm i -g @colbymchenry/codegraph then run `codegraph init` in the project.',
     };
   }
 }

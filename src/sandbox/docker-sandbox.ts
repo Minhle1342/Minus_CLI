@@ -176,8 +176,8 @@ export class DockerSandbox implements ISandboxProvider {
       return false;
     }
 
-    console.log(`\n\x1b[36m🚀 Đang tự động khởi chạy Docker Desktop...\x1b[0m`);
-    process.stdout.write(`\x1b[33m⏳ Đang chờ Docker Daemon khởi động và sẵn sàng...\x1b[0m`);
+    console.log(`\n\x1b[36m🚀 Automatically starting Docker Desktop...\x1b[0m`);
+    process.stdout.write(`\x1b[33m⏳ Waiting for Docker Daemon to start and become ready...\x1b[0m`);
 
     const startTime = Date.now();
     const maxWaitMs = maxWaitSeconds * 1000;
@@ -185,7 +185,7 @@ export class DockerSandbox implements ISandboxProvider {
     while (Date.now() - startTime < maxWaitMs) {
       try {
         await execFileAsync('docker', ['info'], { timeout: 3000 });
-        console.log(`\n\x1b[32m✔ Docker Daemon đã sẵn sàng!\x1b[0m\n`);
+        console.log(`\n\x1b[32m✔ Docker Daemon is ready!\x1b[0m\n`);
         clearDockerUnavailable();
         return true;
       } catch {
@@ -194,7 +194,7 @@ export class DockerSandbox implements ISandboxProvider {
       }
     }
 
-    console.log(`\n\x1b[33m⚠️  Docker Desktop chưa phản hồi sau ${maxWaitSeconds}s.\x1b[0m\n`);
+    console.log(`\n\x1b[33m⚠️  Docker Desktop has not responded after ${maxWaitSeconds}s.\x1b[0m\n`);
     markDockerUnavailable();
     return false;
   }
@@ -259,7 +259,7 @@ export class DockerSandbox implements ISandboxProvider {
     const available = await this.isAvailable();
     if (!available) {
       this.isDockerReady = false;
-      throw new Error('Docker Daemon không khả dụng trên hệ thống.');
+      throw new Error('Docker Daemon is unavailable on this system.');
     }
 
     // Tự động dọn dẹp các sandbox mồ côi trước khi khởi tạo container mới
@@ -303,7 +303,7 @@ export class DockerSandbox implements ISandboxProvider {
       }
     } catch (err: any) {
       this.isDockerReady = false;
-      throw new Error(`Không thể khởi tạo Docker Sandbox: ${err.message}`);
+      throw new Error(`Failed to initialize Docker Sandbox: ${err.message}`);
     }
   }
 
@@ -312,7 +312,7 @@ export class DockerSandbox implements ISandboxProvider {
    */
   async exec(command: string, options?: SandboxOptions): Promise<SandboxExecutionResult> {
     if (!this.containerId || !this.isDockerReady) {
-      throw new Error('Docker Sandbox chưa được khởi tạo.');
+      throw new Error('Docker Sandbox has not been initialized.');
     }
 
     if (options?.signal?.aborted) {

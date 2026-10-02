@@ -46,7 +46,7 @@ HOW TO USE RESULTS:
 export const SearchPlugin: AgentPlugin = {
   name: 'search-plugin',
   version: '2.0.0',
-  description: 'Bộ công cụ điều tra thông tin mã nguồn và Web đa tầng theo triết lý Codex CLI (BM25 + SearXNG + Deep Fetch)',
+  description: 'Multi-layer source-code and Web investigation toolkit in the Codex CLI philosophy (BM25 + SearXNG + Deep Fetch)',
   apply(ctx: KernelContext) {
     ctx.registerTool(createSearchCodebaseFastTool());
     ctx.registerTool(createWebSearchTool());

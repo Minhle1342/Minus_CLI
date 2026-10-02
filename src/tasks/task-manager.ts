@@ -86,7 +86,7 @@ export class TaskManager {
     child.on('exit', (code) => {
       task.status = task.stopRequested || code === 0 ? 'stopped' : 'failed';
       task.exitCode = code;
-      task.logs.push(`[SYSTEM] Tiến trình kết thúc với mã thoát: ${code}`);
+      task.logs.push(`[SYSTEM] Process exited with code: ${code}`);
     });
 
     child.on('error', (err) => {
@@ -133,10 +133,10 @@ export class TaskManager {
   getTaskLogs(taskId: string, linesCount: number = 30): string {
     const task = this.tasks.get(taskId);
     if (!task) {
-      return `Không tìm thấy background task với ID: ${taskId}`;
+      return `Background task not found with ID: ${taskId}`;
     }
     const count = Math.max(1, linesCount);
-    return task.logs.slice(-count).join('\n') || '(Chưa có log output)';
+    return task.logs.slice(-count).join('\n') || '(No log output yet)';
   }
 
   /**

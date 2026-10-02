@@ -13,77 +13,77 @@ export function createComputerTool(controller: ComputerController): ToolDefiniti
   return {
     name: 'computer',
     description:
-      'Công cụ điều khiển máy tính (Computer Use) tương tác trực tiếp với hệ điều hành và giao diện đồ hoạ (Desktop GUI). Cho phép chụp màn hình (screenshot), di chuột (mouse_move), click chuột (left_click, right_click, double_click, triple_click, middle_click), kéo thả (drag), gõ văn bản Unicode (type), bấm phím/tổ hợp phím tắt (key - ví dụ: "enter", "tab", "esc", "ctrl+c", "ctrl+v", "win+r", "alt+tab"), cuộn chuột (scroll), và chờ UI render (wait). Khi chụp màn hình, ảnh sẽ tự động được nạp trực tiếp vào ngữ cảnh Vision để Agent quan sát trực quan.',
+      'Computer control tool (Computer Use) that interacts directly with the operating system and desktop GUI. Supports screenshots, mouse_move, mouse clicks (left_click, right_click, double_click, triple_click, middle_click), drag, Unicode text typing (type), key presses / keyboard shortcuts (key - e.g. "enter", "tab", "esc", "ctrl+c", "ctrl+v", "win+r", "alt+tab"), mouse scroll (scroll), and waiting for UI render (wait). On screenshot, the image is automatically loaded into the Vision context for the agent to observe directly.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         action: {
           type: Type.STRING,
           description:
-            'Hành động cần thực hiện: "screenshot" (chụp ảnh màn hình), "left_click", "right_click", "double_click", "triple_click", "middle_click", "mouse_move", "drag", "mouse_down", "mouse_up", "type" (gõ chữ), "key" (bấm phím tắt), "scroll" (cuộn), "wait" (chờ), "cursor_position", "screen_size".',
+            'Action to perform: "screenshot" (capture the screen), "left_click", "right_click", "double_click", "triple_click", "middle_click", "mouse_move", "drag", "mouse_down", "mouse_up", "type" (type text), "key" (press a shortcut), "scroll" (scroll), "wait" (wait), "cursor_position", "screen_size".',
         },
         coordinate: {
           type: Type.ARRAY,
           items: { type: Type.INTEGER },
           description:
-            'Toạ độ [x, y] để thao tác chuột. Toạ độ này tương ứng với toạ độ trên ảnh chụp màn hình gần nhất (hệ thống sẽ tự động phóng tỉ lệ sang toạ độ vật lý thật).',
+            '[x, y] coordinates for mouse actions. These correspond to coordinates on the most recent screenshot (the system automatically scales them to real physical coordinates).',
         },
         x: {
           type: Type.INTEGER,
-          description: 'Toạ độ hoành độ x (thay thế hoặc tương đương phần tử 0 của coordinate).',
+          description: 'X coordinate (replaces or equals element 0 of coordinate).',
         },
         y: {
           type: Type.INTEGER,
-          description: 'Toạ độ tung độ y (thay thế hoặc tương đương phần tử 1 của coordinate).',
+          description: 'Y coordinate (replaces or equals element 1 of coordinate).',
         },
         start_coordinate: {
           type: Type.ARRAY,
           items: { type: Type.INTEGER },
-          description: 'Toạ độ bắt đầu [start_x, start_y] khi thực hiện thao tác kéo thả (drag).',
+          description: 'Start coordinates [start_x, start_y] for drag operations.',
         },
         end_coordinate: {
           type: Type.ARRAY,
           items: { type: Type.INTEGER },
-          description: 'Toạ độ kết thúc [end_x, end_y] khi thực hiện thao tác kéo thả (drag).',
+          description: 'End coordinates [end_x, end_y] for drag operations.',
         },
         text: {
           type: Type.STRING,
-          description: 'Văn bản cần gõ cho action="type". Hỗ trợ đầy đủ bảng mã Unicode và tiếng Việt có dấu.',
+          description: 'Text to type for action="type". Full Unicode support.',
         },
         key: {
           type: Type.STRING,
           description:
-            'Phím hoặc tổ hợp phím tắt cho action="key" (ví dụ: "enter", "escape", "tab", "backspace", "delete", "up", "down", "ctrl+a", "ctrl+c", "ctrl+v", "alt+f4", "alt+tab", "win+r", "f5").',
+            'Key or keyboard shortcut for action="key" (e.g. "enter", "escape", "tab", "backspace", "delete", "up", "down", "ctrl+a", "ctrl+c", "ctrl+v", "alt+f4", "alt+tab", "win+r", "f5").',
         },
         direction: {
           type: Type.STRING,
-          description: 'Hướng cuộn cho action="scroll": "up", "down", "left", hoặc "right" (mặc định: "down").',
+          description: 'Scroll direction for action="scroll": "up", "down", "left", or "right" (default: "down").',
         },
         amount: {
           type: Type.INTEGER,
-          description: 'Số nấc cuộn chuột cho action="scroll" (mặc định: 3).',
+          description: 'Number of mouse-wheel notches for action="scroll" (default: 3).',
         },
         duration_ms: {
           type: Type.INTEGER,
-          description: 'Thời gian mili-giây cho action="wait" hoặc thời lượng thực hiện thao tác drag.',
+          description: 'Duration in milliseconds for action="wait" or the duration of a drag operation.',
         },
         interval_ms: {
           type: Type.INTEGER,
-          description: 'Độ trễ mili-giây giữa các phím gõ cho action="type" (mặc định 15ms).',
+          description: 'Delay in milliseconds between keystrokes for action="type" (default 15ms).',
         },
         coordinateSpace: {
           type: Type.STRING,
           description:
-            'Không gian toạ độ: "auto" (mặc định: tự động dịch chuyển từ toạ độ ảnh chụp sang toạ độ màn hình vật lý), "scaled" (toạ độ ảnh), hoặc "screen" (toạ độ vật lý thực của màn hình).',
+            'Coordinate space: "auto" (default: automatically maps screenshot coordinates to physical screen coordinates), "scaled" (image coordinates), or "screen" (real physical screen coordinates).',
         },
         attachToContext: {
           type: Type.BOOLEAN,
           description:
-            'Mặc định true khi action="screenshot". Tự động đính kèm ảnh vào ngữ cảnh hội thoại Vision để mô hình quan sát trực quan.',
+            'Defaults to true for action="screenshot". Automatically attaches the image to the Vision conversation context for the model to observe directly.',
         },
         description: {
           type: Type.STRING,
-          description: 'Mô tả mục đích của thao tác (ví dụ: "Chụp ảnh màn hình để tìm nút Login" hoặc "Click vào thanh tìm kiếm").',
+          description: 'Purpose of the action (e.g. "Take a screenshot to find the Login button" or "Click the search bar").',
         },
       },
       required: ['action'],
@@ -91,7 +91,7 @@ export function createComputerTool(controller: ComputerController): ToolDefiniti
     async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
       const rawAction = String(args.action || '').trim();
       if (!rawAction) {
-        return toolError('Tham số "action" là bắt buộc.', 'INVALID_ARGS');
+        return toolError('The "action" parameter is required.', 'INVALID_ARGS');
       }
 
       try {
@@ -123,14 +123,14 @@ export function createComputerTool(controller: ComputerController): ToolDefiniti
 
         if (!result.success) {
           return toolError(
-            result.error || `Thực thi thao tác computer (${rawAction}) thất bại.`,
+            result.error || `Failed to execute computer action (${rawAction}).`,
             'EXECUTION_ERROR'
           );
         }
 
         return toolSuccess(result);
       } catch (err: any) {
-        return toolError(`Lỗi khi thực thi thao tác computer: ${err.message}`, 'EXECUTION_ERROR');
+        return toolError(`Error executing computer action: ${err.message}`, 'EXECUTION_ERROR');
       }
     },
   };

@@ -337,7 +337,7 @@ export class AgentKernel {
    */
   async use(plugin: AgentPlugin): Promise<this> {
     if (this.plugins.has(plugin.name)) {
-      console.warn(`Plugin "${plugin.name}" đã được đăng ký trước đó. Đang nạp lại.`);
+      console.warn(`Plugin "${plugin.name}" was already registered. Reloading.`);
       await this.unuse(plugin.name);
     }
 

@@ -7,7 +7,7 @@ import { createReadCompressedCodeTool, createPackCodebaseTool } from '../../tool
 export const RepomixPlugin: AgentPlugin = {
   name: 'repomix-plugin',
   version: '1.0.0',
-  description: 'Tối ưu hóa token khi đọc mã nguồn bằng nén cấu trúc Tree-sitter qua Repomix',
+  description: 'Token-efficient source reading via Tree-sitter structural compression (Repomix)',
   apply(ctx: KernelContext) {
     ctx.registerTool(createReadCompressedCodeTool());
     ctx.registerTool(createPackCodebaseTool());

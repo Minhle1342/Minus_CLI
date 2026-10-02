@@ -81,13 +81,13 @@ export class SandboxManager {
           return;
         } catch (err: any) {
           // Khởi tạo Docker lỗi, fallback nếu ở chế độ auto hoặc docker
-          console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể khởi động Docker container: ${err.message}\x1b[0m`);
-          console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS).\x1b[0m\n`);
+          console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Failed to start Docker container: ${err.message}\x1b[0m`);
+          console.warn(`\x1b[90m👉 Automatically falling back to Local Process Sandbox (Host OS).\x1b[0m\n`);
         }
       } else if (this.mode === 'docker') {
-        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể kết nối Docker Daemon (chưa khởi động hoặc không khả dụng).\x1b[0m`);
-        console.warn(`\x1b[90m👉 Đang tự động chuyển sang Local Process Sandbox (Host OS với bộ lọc Allowlist).\x1b[0m`);
-        console.warn(`\x1b[90m💡 Để chạy lệnh không giới hạn (Zero-Restriction), vui lòng kiểm tra Docker Desktop trên máy tính.\x1b[0m\n`);
+        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Cannot connect to Docker Daemon (not started or unavailable).\x1b[0m`);
+        console.warn(`\x1b[90m👉 Automatically falling back to Local Process Sandbox (Host OS with Allowlist filter).\x1b[0m`);
+        console.warn(`\x1b[90m💡 To run unrestricted commands (Zero-Restriction), please check Docker Desktop on this machine.\x1b[0m\n`);
       }
     }
 
@@ -209,7 +209,7 @@ export class SandboxManager {
         this.mode = 'docker';
         return true;
       } catch (err: any) {
-        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Không thể chuyển sang Docker: ${err.message}\x1b[0m`);
+        console.warn(`\n\x1b[33m⚠️  [Docker Sandbox]: Failed to switch to Docker: ${err.message}\x1b[0m`);
       }
     }
     return false;

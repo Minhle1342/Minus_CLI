@@ -58,7 +58,7 @@ async function main() {
 
   // 1. Liệt kê danh sách tasks
   if (options.list) {
-    console.log(`\n${c.bold}📋 DANH SÁCH BÀI TOÁN BENCHMARK (${BENCHMARK_TASKS.length} tasks):${c.reset}\n`);
+    console.log(`\n${c.bold}📋 BENCHMARK TASKS (${BENCHMARK_TASKS.length} tasks):${c.reset}\n`);
     for (const task of BENCHMARK_TASKS) {
       console.log(`• ${c.cyan}${c.bold}${task.id.padEnd(32)}${c.reset} [${task.category.toUpperCase()}] (${task.difficulty})`);
       console.log(`  ${c.dim}${task.title}${c.reset}`);
@@ -69,16 +69,16 @@ async function main() {
 
   // 2. Chế độ Replay Trajectory (Zero-API cost)
   if (options.replay) {
-    console.log(`\n${c.bold}🔍 ĐANG THẨM ĐỊNH TRAJECTORY: ${options.replay}${c.reset}\n`);
+    console.log(`\n${c.bold}🔍 EVALUATING TRAJECTORY: ${options.replay}${c.reset}\n`);
     try {
       const result = ReplayEvaluator.evaluateSessionFile(options.replay);
       console.log(`• Session ID: ${c.bold}${result.sessionId}${c.reset}`);
-      console.log(`• Điểm chất lượng: ${result.score >= 80 ? c.green : c.yellow}${c.bold}${result.score}/100${c.reset}`);
-      console.log(`• Hoàn thành mục tiêu: ${result.hasCompletedGoal ? c.green + 'Có (Đã submit)' : c.red + 'Chưa'}${c.reset}`);
-      console.log(`• Số bước: ${result.totalSteps} steps | Lượt gọi tool: ${result.toolUsageCount}`);
-      console.log(`• Guardian can thiệp: ${result.guardianBlocksCount} lần | Tool trùng lặp: ${result.duplicateToolCallsCount}`);
+      console.log(`• Quality score: ${result.score >= 80 ? c.green : c.yellow}${c.bold}${result.score}/100${c.reset}`);
+      console.log(`• Goal completed: ${result.hasCompletedGoal ? c.green + 'Yes (Submitted)' : c.red + 'No'}${c.reset}`);
+      console.log(`• Steps: ${result.totalSteps} steps | Tool calls: ${result.toolUsageCount}`);
+      console.log(`• Guardian interventions: ${result.guardianBlocksCount} times | Duplicate tools: ${result.duplicateToolCallsCount}`);
       if (result.recommendations.length > 0) {
-        console.log(`\n${c.yellow}Khuyến nghị cải thiện:${c.reset}`);
+        console.log(`\n${c.yellow}Improvement recommendations:${c.reset}`);
         for (const rec of result.recommendations) {
           console.log(`  - ${rec}`);
         }
@@ -86,7 +86,7 @@ async function main() {
       console.log('');
       return;
     } catch (err: any) {
-      console.error(`❌ Lỗi khi đọc file replay: ${err.message}`);
+      console.error(`❌ Error reading replay file: ${err.message}`);
       process.exit(1);
     }
   }
@@ -109,7 +109,7 @@ async function main() {
       process.exitCode = 1;
     }
   } catch (err: any) {
-    console.error(`\n❌ Benchmark Runner gặp sự cố:`, err);
+    console.error(`\n❌ Benchmark Runner failed:`, err);
     process.exit(1);
   }
 }

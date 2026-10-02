@@ -124,7 +124,7 @@ export function inspectContext(
       category: 'system',
       estimatedTokens: systemPromptTokens,
       itemCount: tools.length,
-      description: `Persona cốt lõi và ${tools.length} định nghĩa Tool declarations`,
+      description: `Core persona and ${tools.length} Tool declaration definitions`,
       percentage: totalEstimatedTokens > 0 ? Number(((systemPromptTokens / totalEstimatedTokens) * 100).toFixed(1)) : 0,
     },
     {
@@ -132,7 +132,7 @@ export function inspectContext(
       category: 'memory',
       estimatedTokens: memoryTokens,
       itemCount: learnedInsights.length,
-      description: `${learnedInsights.length} quy ước và kiến trúc dự án đã ghi nhớ`,
+      description: `${learnedInsights.length} memorized project conventions and architecture`,
       percentage: totalEstimatedTokens > 0 ? Number(((memoryTokens / totalEstimatedTokens) * 100).toFixed(1)) : 0,
     },
     {
@@ -140,7 +140,7 @@ export function inspectContext(
       category: 'plan',
       estimatedTokens: planTokens,
       itemCount: tasks.length,
-      description: `${tasks.length} tasks trong dynamic plan + mục tiêu goal`,
+      description: `${tasks.length} tasks in dynamic plan + goal objective`,
       percentage: totalEstimatedTokens > 0 ? Number(((planTokens / totalEstimatedTokens) * 100).toFixed(1)) : 0,
     },
     {
@@ -148,7 +148,7 @@ export function inspectContext(
       category: 'history',
       estimatedTokens: totalHistoryTokens,
       itemCount: history.length,
-      description: `${session.getEvents().filter((e) => e.type === 'turn/start').length || 1} lượt trao đổi (${history.length} tin nhắn User/Model/Tool)`,
+      description: `${session.getEvents().filter((e) => e.type === 'turn/start').length || 1} exchanges (${history.length} User/Model/Tool messages)`,
       percentage: totalEstimatedTokens > 0 ? Number(((totalHistoryTokens / totalEstimatedTokens) * 100).toFixed(1)) : 0,
     },
     {
@@ -156,7 +156,7 @@ export function inspectContext(
       category: 'attachments',
       estimatedTokens: attachmentTokens,
       itemCount: attachmentCount,
-      description: `${attachmentCount} tệp tin được đính kèm vào ngữ cảnh`,
+      description: `${attachmentCount} files attached to context`,
       percentage: totalEstimatedTokens > 0 ? Number(((attachmentTokens / totalEstimatedTokens) * 100).toFixed(1)) : 0,
     },
   ];
@@ -164,16 +164,16 @@ export function inspectContext(
   // Khuyến nghị nén/tối ưu ngữ cảnh (Context Health & Optimization)
   const recommendations: string[] = [];
   if (utilizationPercent > 75) {
-    recommendations.push(`⚠️ Cảnh báo: Ngữ cảnh đã vượt quá 75% (${utilizationPercent}%). Gõ /compact để nén lịch sử cũ.`);
+    recommendations.push(`⚠️ Warning: Context exceeded 75% (${utilizationPercent}%). Type /compact to compress old history.`);
   }
   if (attachmentTokens > maxInputTokens * 0.4) {
-    recommendations.push(`💡 Các tệp đính kèm chiếm ${layers[4].percentage}% context. Khuyến nghị chỉ đính kèm phần hàm cần sửa.`);
+    recommendations.push(`💡 Attachments occupy ${layers[4].percentage}% of context. Recommend attaching only the function to fix.`);
   }
   if (totalHistoryTokens > maxInputTokens * 0.5) {
-    recommendations.push(`💡 Lịch sử hội thoại dài. AgentLoop hỗ trợ Immutable Prefix Caching bảo toàn KV-Cache.`);
+    recommendations.push(`💡 Long conversation history. AgentLoop supports Immutable Prefix Caching to preserve KV-Cache.`);
   }
   if (recommendations.length === 0) {
-    recommendations.push(`✔ Context Window đang ở trạng thái tối ưu (${utilizationPercent}% dung lượng).`);
+    recommendations.push(`✔ Context Window is in optimal state (${utilizationPercent}% capacity).`);
   }
 
   return {

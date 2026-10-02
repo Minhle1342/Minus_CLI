@@ -99,23 +99,23 @@ export class ContextAgent {
       sessionIndex,
       timestamp: new Date().toISOString(),
       topics: additionalMetadata?.topics || [
-        'Triển khai Context Guardian & Context Agent',
-        'Tối ưu hóa và bảo vệ tính toàn vẹn ngữ cảnh',
+        'Implemented Context Guardian & Context Agent',
+        'Optimized and protected context integrity',
       ],
       decisions: additionalMetadata?.decisions || [
         {
-          topic: 'Kiến trúc Context Continuity',
-          rationale: 'Kết hợp Context Guardian (Pre-Compaction) và Context Agent (Post-Session) để loại bỏ 100% rủi ro mất mát thông tin',
+          topic: 'Context Continuity architecture',
+          rationale: 'Combined Context Guardian (Pre-Compaction) and Context Agent (Post-Session) to eliminate 100% of information-loss risk',
         },
       ],
       tasksCompleted: additionalMetadata?.tasksCompleted || [
-        'Thiết lập module ContextGuardian (4 Fases)',
-        'Thiết lập module ContextAgent (Save/Load/Status/Maintain)',
+        'Set up ContextGuardian module (4 Phases)',
+        'Set up ContextAgent module (Save/Load/Status/Maintain)',
       ],
       tasksPending: additionalMetadata?.tasksPending || [],
       filesModified: Array.from(filesModified),
       discoveries: [
-        'Giữ vững ngưỡng 150 dòng cho ACTIVE_CONTEXT.md giúp LLM nạp nhanh chóng mà không chiếm dụng token window',
+        'Kept the 150-line limit for ACTIVE_CONTEXT.md so the LLM loads quickly without consuming the token window',
       ],
       errorsResolved: [],
       metrics: {
@@ -151,26 +151,26 @@ export class ContextAgent {
       `- **Timestamp**: ${data.timestamp}`,
       `- **Messages**: ${data.metrics.messageCount} | **Tool Calls**: ${data.metrics.toolCallCount}`,
       ``,
-      `## Tópicos Discutidos`,
+      `## Discussed Topics`,
       ...data.topics.map((t) => `- ${t}`),
       ``,
-      `## Decisões Técnicas`,
+      `## Technical Decisions`,
       ...data.decisions.map((d) => `- **${d.topic}**: ${d.rationale}`),
       ``,
-      `## Tarefas Concluídas`,
+      `## Completed Tasks`,
       ...data.tasksCompleted.map((t) => `- [x] ${t}`),
       ``,
-      `## Tarefas Pendentes`,
+      `## Pending Tasks`,
       ...(data.tasksPending.length > 0
-        ? data.tasksPending.map((t) => `- [ ] ${t.description} (Prioridade: ${t.priority})`)
-        : [`- Không có công việc tồn đọng (Tất cả đã hoàn thành)`]),
+        ? data.tasksPending.map((t) => `- [ ] ${t.description} (Priority: ${t.priority})`)
+        : [`- No pending work (All complete)`]),
       ``,
-      `## Arquivos Modificados`,
+      `## Modified Files`,
       ...(data.filesModified.length > 0
         ? data.filesModified.map((f) => `- \`${f}\``)
-        : [`- Không có thay đổi file`]),
+        : [`- No file changes`]),
       ``,
-      `## Descobertas Técnicas`,
+      `## Technical Discoveries`,
       ...data.discoveries.map((d) => `- ${d}`),
       ``,
     ];
@@ -243,7 +243,7 @@ export class ContextAgent {
     try {
       activeContext = await fs.readFile(this.activeContextPath, 'utf8');
     } catch {
-      activeContext = 'Chưa có tệp ACTIVE_CONTEXT.md. Hệ thống sẽ khởi tạo phiên đầu tiên.';
+      activeContext = 'No ACTIVE_CONTEXT.md file yet. The system will initialize the first session.';
     }
 
     const sessions = await this.listSessionFiles();
@@ -251,19 +251,19 @@ export class ContextAgent {
 
     const briefing = [
       `# 📋 CONTEXT AGENT: SESSION BRIEFING`,
-      `Chào mừng bạn trở lại với dự án **${path.basename(this.workspaceDir)}**!`,
+      `Welcome back to project **${path.basename(this.workspaceDir)}**!`,
       ``,
-      `### Tóm Tắt Trạng Thái (Status Overview):`,
-      `- **Phiên gần nhất**: \`${lastSession}\``,
-      `- **Tổng số phiên đã ghi nhận**: ${sessions.length}`,
-      `- **Tệp ngữ cảnh tích lũy**: \`.codingagent/ACTIVE_CONTEXT.md\``,
+      `### Status Overview:`,
+      `- **Last session**: \`${lastSession}\``,
+      `- **Total recorded sessions**: ${sessions.length}`,
+      `- **Accumulated context file**: \`.codingagent/ACTIVE_CONTEXT.md\``,
       ``,
-      `### Nội Dung Ngữ Cảnh Tích Lũy (Active Context):`,
+      `### Accumulated Context (Active Context):`,
       '```markdown',
       activeContext.trim(),
       '```',
       ``,
-      `*Hệ thống đã sẵn sàng tiếp nhận yêu cầu tiếp theo với đầy đủ ngữ cảnh được phục hồi trọn vẹn.*`,
+      `*The system is ready for the next request with fully restored context.*`,
     ].join('\n');
 
     return briefing;

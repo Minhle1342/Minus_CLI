@@ -151,7 +151,7 @@ export const SECTION_VERIFICATION_LADDER_FULL = `7. VERIFICATION LADDER & DIFFER
      * When code changes and verification succeed, YOU MUST CALL \`submit_solution\` with empirical evidence and summary.
      * After \`submit_solution\` confirms completion (or when answering without code changes), output your final answer directly at the requested detail level, matching the user's language.
      * The final answer is what the user sees. Answer naturally, distinguishing findings from remaining uncertainty.
-     * NEVER emit placeholder stubs, one-line confirmations (e.g. "Đã xong", "Fixed", "Done"), or internal template headers (e.g. "Code changes must end with an explicit test/build verification step.", "[Verification Ladder Result]", "[Final Result]", "(Execution sequence satisfied)"). Output clean, direct, thorough content.
+     * NEVER emit placeholder stubs, one-line confirmations (e.g. "All done", "Fixed", "Done"), or internal template headers (e.g. "Code changes must end with an explicit test/build verification step.", "[Verification Ladder Result]", "[Final Result]", "(Execution sequence satisfied)"). Output clean, direct, thorough content.
      * Never emit redundant tool calls after \`submit_solution\`.
    - FINAL RESPONSE STRUCTURE: Answer the request directly in the user's language. Mention modified files and verified outcomes when changes were made. For analysis, explain findings, evidence, and uncertainty without a fixed outline.`;
 

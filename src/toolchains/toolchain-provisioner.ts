@@ -114,7 +114,7 @@ export class ToolchainProvisioner {
       await execFileAsync('powershell', ['-NoProfile', '-Command', psScript]);
       return true;
     } catch (err: any) {
-      console.warn(`[ToolchainProvisioner] Không thể cập nhật User PATH: ${err.message}`);
+      console.warn(`[ToolchainProvisioner] Could not update User PATH: ${err.message}`);
       return false;
     }
   }
@@ -123,14 +123,14 @@ export class ToolchainProvisioner {
    * Tải tệp tin qua HTTPS stream
    */
   private static async downloadFile(url: string, destPath: string, options?: ProvisionOptions): Promise<void> {
-    options?.onProgress?.(`Đang tải từ ${url}...`);
+    options?.onProgress?.(`Downloading from ${url}...`);
     const res = await fetch(url, {
       redirect: 'follow',
       signal: options?.signal,
     });
 
     if (!res.ok || !res.body) {
-      throw new Error(`Tải tệp tin thất bại HTTP ${res.status}: ${res.statusText} (${url})`);
+      throw new Error(`File download failed HTTP ${res.status}: ${res.statusText} (${url})`);
     }
 
     const parentDir = path.dirname(destPath);
@@ -145,7 +145,7 @@ export class ToolchainProvisioner {
    * Giải nén archive vào thư mục đích
    */
   private static async extractArchive(archivePath: string, targetDir: string, options?: ProvisionOptions): Promise<void> {
-    options?.onProgress?.(`Đang giải nén vào ${targetDir}...`);
+    options?.onProgress?.(`Extracting to ${targetDir}...`);
     const tempExtract = path.join(os.tmpdir(), `minus_extract_${Date.now()}`);
     await fsp.mkdir(tempExtract, { recursive: true });
 
@@ -154,7 +154,7 @@ export class ToolchainProvisioner {
       if (isNativeArchiveEnabled()) {
         const nativeRes = nativeExtractArchive(archivePath, tempExtract, true);
         if (nativeRes && nativeRes.filesExtracted > 0) {
-          options?.onProgress?.(`Đã giải nén ${nativeRes.filesExtracted} file bằng Rust native.`);
+          options?.onProgress?.(`Extracted ${nativeRes.filesExtracted} file(s) with Rust native.`);
         } else if (nativeRes) {
           throw new Error(`Native extract wrote 0 files from ${archivePath}.`);
         } else {
@@ -251,7 +251,7 @@ export class ToolchainProvisioner {
         toolchain: typeof recipeOrBinary === 'string' ? recipeOrBinary : 'unknown',
         binary: typeof recipeOrBinary === 'string' ? recipeOrBinary : 'unknown',
         durationMs: Date.now() - startTime,
-        error: `Không tìm thấy công thức cài đặt cho "${typeof recipeOrBinary === 'string' ? recipeOrBinary : 'unknown'}".`,
+        error: `No install recipe found for "${typeof recipeOrBinary === 'string' ? recipeOrBinary : 'unknown'}".`,
       };
     }
 
@@ -294,7 +294,7 @@ export class ToolchainProvisioner {
         toolchain: recipe.id,
         binary: recipe.verifyBinary,
         durationMs: Date.now() - startTime,
-        error: `Toolchain "${recipe.displayName}" chưa hỗ trợ nền tảng "${platform}".`,
+        error: `Toolchain "${recipe.displayName}" does not support platform "${platform}".`,
       };
     }
 
@@ -313,7 +313,7 @@ export class ToolchainProvisioner {
         try {
           await recipe.postInstall(targetDir, binDir);
         } catch (err: any) {
-          console.warn(`[ToolchainProvisioner] Cảnh báo postInstall "${recipe.id}": ${err.message}`);
+          console.warn(`[ToolchainProvisioner] postInstall warning "${recipe.id}": ${err.message}`);
         }
       }
 
@@ -337,10 +337,10 @@ export class ToolchainProvisioner {
       try {
         version = await this.verifyInstallation(exePath, recipe.verifyArgs);
       } catch (err: any) {
-        console.warn(`[ToolchainProvisioner] Cảnh báo xác minh "${recipe.id}": ${err.message}`);
+        console.warn(`[ToolchainProvisioner] verification warning "${recipe.id}": ${err.message}`);
       }
 
-      options?.onProgress?.(`Đã cấu hình thành công ${recipe.displayName} (${version || 'ready'}).`);
+      options?.onProgress?.(`Successfully configured ${recipe.displayName} (${version || 'ready'}).`);
 
       return {
         success: true,
@@ -359,7 +359,7 @@ export class ToolchainProvisioner {
         toolchain: recipe.id,
         binary: recipe.verifyBinary,
         durationMs: Date.now() - startTime,
-        error: `Lỗi trong quá trình cài đặt ${recipe.displayName}: ${err.message}`,
+        error: `Error while installing ${recipe.displayName}: ${err.message}`,
       };
     } finally {
       await fsp.rm(tempArchive, { force: true }).catch(() => {});

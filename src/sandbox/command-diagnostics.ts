@@ -15,27 +15,27 @@ export interface CommandFailureDiagnostic {
 export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestion: string }> = {
   rm: {
     tool: 'delete_file',
-    suggestion: 'Lệnh POSIX "rm" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "delete_file" (cross-platform, an toàn hash, <2ms) để xóa file hoặc thư mục.',
+    suggestion: 'POSIX command "rm" is unavailable on Windows shell. Use the dedicated "delete_file" tool (cross-platform, hash-safe, <2ms) to delete files or directories.',
   },
   cat: {
     tool: 'read_file',
-    suggestion: 'Lệnh POSIX "cat" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "read_file" với "startLine"/"endLine" hoặc "symbol".',
+    suggestion: 'POSIX command "cat" is unavailable on Windows shell. Use the dedicated "read_file" tool with "startLine"/"endLine" or "symbol".',
   },
   ls: {
     tool: 'list_files',
-    suggestion: 'Lệnh POSIX "ls" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "list_files" để liệt kê thư mục.',
+    suggestion: 'POSIX command "ls" is unavailable on Windows shell. Use the dedicated "list_files" tool to list directories.',
   },
   touch: {
     tool: 'create_file',
-    suggestion: 'Lệnh POSIX "touch" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "create_file" hoặc "write_file" để tạo file.',
+    suggestion: 'POSIX command "touch" is unavailable on Windows shell. Use the dedicated "create_file" or "write_file" tool to create files.',
   },
   cp: {
     tool: 'create_file',
-    suggestion: 'Lệnh POSIX "cp" không khả dụng trên Windows shell. Hãy sử dụng "read_file" kết hợp "create_file" để sao chép file an toàn trong workspace.',
+    suggestion: 'POSIX command "cp" is unavailable on Windows shell. Use "read_file" combined with "create_file" to copy files safely within the workspace.',
   },
   mv: {
     tool: 'move_file',
-    suggestion: 'Lệnh POSIX "mv" không khả dụng trên Windows shell. Hãy sử dụng tool chuyên dụng "move_file" để di chuyển hoặc đổi tên file.',
+    suggestion: 'POSIX command "mv" is unavailable on Windows shell. Use the dedicated "move_file" tool to move or rename files.',
   },
 };
 
@@ -111,7 +111,7 @@ export function diagnoseCommandFailure(
         success: false,
         errorCode: 'POSIX_COMMAND_ON_WINDOWS',
         missingExecutable,
-        diagnostic: `Lệnh POSIX "${missingExecutable}" không khả dụng trên môi trường Windows shell (cmd.exe).`,
+        diagnostic: `POSIX command "${missingExecutable}" is unavailable on Windows shell (cmd.exe).`,
         suggestion: posixMapping.suggestion,
       };
     }
@@ -170,8 +170,8 @@ export function diagnoseCommandFailure(
       return {
         success: false,
         errorCode: 'WORKSPACE_NOT_FOUND',
-        diagnostic: `Workspace "${scriptFailure.workspaceName || 'chỉ định'}" không tồn tại trong dự án hoặc không được cấu hình trong package.json.`,
-        suggestion: 'Dự án có thể là single-package (không phải Monorepo). Hãy bỏ cờ --workspace và kiểm tra scripts trực tiếp trong package.json.',
+        diagnostic: `Workspace "${scriptFailure.workspaceName || 'specified'}" does not exist in the project or is not configured in package.json.`,
+        suggestion: 'The project may be single-package (not a monorepo). Drop the --workspace flag and check scripts directly in package.json.',
       };
     }
     if (scriptFailure.isMissingPackageJson) {
@@ -232,8 +232,8 @@ export function diagnoseCommandFailure(
     return {
       success: false,
       errorCode: 'POWERSHELL_SYNTAX_ON_CMD',
-      diagnostic: 'Cú pháp toán tử gọi PowerShell ("& <lệnh>") không tương thích với shell Windows cmd.exe.',
-      suggestion: 'Bỏ ký tự "&" ở đầu lệnh (ví dụ: "path\\to\\app.exe" thay vì "& .\\path\\to\\app.exe") hoặc chạy qua PowerShell: powershell -NoProfile -Command "...".',
+      diagnostic: 'PowerShell invocation operator syntax ("& <command>") is incompatible with Windows cmd.exe shell.',
+      suggestion: 'Remove the leading "&" character (e.g. "path\\to\\app.exe" instead of "& .\\path\\to\\app.exe") or run via PowerShell: powershell -NoProfile -Command "...".',
     };
   }
 
@@ -241,8 +241,8 @@ export function diagnoseCommandFailure(
     return {
       success: false,
       errorCode: 'DOTNET_PROJECT_OR_SOLUTION_NOT_FOUND',
-      diagnostic: 'Lệnh .NET (dotnet test/build/run) không tìm thấy file .csproj hoặc .sln trong thư mục hiện tại.',
-      suggestion: 'Kiểm tra đường dẫn file .csproj hoặc .sln trong các thư mục con (ví dụ: "dotnet test path/to/project.csproj" hoặc "dotnet test src/MySolution.sln"), hoặc xác minh xem dự án hiện tại có phải là dự án .NET hay không.',
+      diagnostic: '.NET command (dotnet test/build/run) found no .csproj or .sln file in the current directory.',
+      suggestion: 'Check the .csproj or .sln path in subdirectories (e.g. "dotnet test path/to/project.csproj" or "dotnet test src/MySolution.sln"), or verify whether the current project is a .NET project.',
     };
   }
 
@@ -250,8 +250,8 @@ export function diagnoseCommandFailure(
     return {
       success: false,
       errorCode: 'DOTNET_RESTORE_REQUIRED',
-      diagnostic: 'File cấu hình dependency của .NET (project.assets.json) chưa được khởi tạo.',
-      suggestion: 'Chạy "dotnet restore" để tải các gói NuGet cần thiết trước khi chạy build hoặc test.',
+      diagnostic: '.NET dependency config file (project.assets.json) has not been initialized.',
+      suggestion: 'Run "dotnet restore" to download the required NuGet packages before building or testing.',
     };
   }
 

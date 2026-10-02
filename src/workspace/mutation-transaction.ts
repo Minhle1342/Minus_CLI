@@ -178,7 +178,7 @@ export class MutationTransaction {
         const safePath = this.workspace.resolveSafePath(op.path);
         if (this.workspace.isProtectedFile(safePath)) {
           return toolError(
-            `Bảo mật: Không được phép xóa file cấu hình nhạy cảm "${op.path}".`,
+            `Security: Deleting sensitive configuration file "${op.path}" is not allowed.`,
             'SECURITY_VIOLATION',
           );
         }
@@ -186,7 +186,7 @@ export class MutationTransaction {
         const currentHash = await computeFileHash(safePath);
         if (currentHash === 'sha256:absent') {
           return toolError(
-            `File "${op.path}" không tồn tại để xóa.`,
+            `File "${op.path}" does not exist to delete.`,
             'FILE_NOT_FOUND',
             { path: op.path },
           );
@@ -194,7 +194,7 @@ export class MutationTransaction {
 
         if (op.expectedFileHash && op.expectedFileHash !== currentHash) {
           return toolError(
-            `Xung đột nội dung khi xóa file "${op.path}". Hash thực tế (${currentHash}) khác với expectedFileHash (${op.expectedFileHash}).`,
+            `Content conflict when deleting file "${op.path}". Actual hash (${currentHash}) differs from expectedFileHash (${op.expectedFileHash}).`,
             'STALE_FILE_HASH',
             { path: op.path, expectedHash: op.expectedFileHash, currentHash },
           );
@@ -212,7 +212,7 @@ export class MutationTransaction {
 
         if (this.workspace.isProtectedFile(safeSource) || this.workspace.isProtectedFile(safeTarget)) {
           return toolError(
-            `Bảo mật: Không được phép di chuyển file cấu hình nhạy cảm.`,
+            `Security: Moving sensitive configuration files is not allowed.`,
             'SECURITY_VIOLATION',
           );
         }
@@ -220,7 +220,7 @@ export class MutationTransaction {
         const sourceHash = await computeFileHash(safeSource);
         if (sourceHash === 'sha256:absent') {
           return toolError(
-            `File nguồn "${op.sourcePath}" không tồn tại.`,
+            `Source file "${op.sourcePath}" does not exist.`,
             'FILE_NOT_FOUND',
             { path: op.sourcePath },
           );
@@ -228,7 +228,7 @@ export class MutationTransaction {
 
         if (op.expectedSourceHash && op.expectedSourceHash !== sourceHash) {
           return toolError(
-            `Xung đột nội dung cho file nguồn "${op.sourcePath}". Hash thực tế (${sourceHash}) khác với expectedSourceHash (${op.expectedSourceHash}).`,
+            `Content conflict for source file "${op.sourcePath}". Actual hash (${sourceHash}) differs from expectedSourceHash (${op.expectedSourceHash}).`,
             'STALE_FILE_HASH',
             { path: op.sourcePath, expectedHash: op.expectedSourceHash, currentHash: sourceHash },
           );
@@ -237,7 +237,7 @@ export class MutationTransaction {
         const targetHash = await computeFileHash(safeTarget);
         if (targetHash !== 'sha256:absent') {
           return toolError(
-            `File đích "${op.targetPath}" đã tồn tại. Không thể ghi đè.`,
+            `Target file "${op.targetPath}" already exists. Cannot overwrite.`,
             'FILE_ALREADY_EXISTS',
             { path: op.targetPath },
           );

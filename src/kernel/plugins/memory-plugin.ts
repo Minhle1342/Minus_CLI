@@ -7,7 +7,7 @@ import { createSaveMemoryTool, createReadMemoryTool } from '../../tools/memory-t
 export const MemoryPlugin: AgentPlugin = {
   name: 'memory-plugin',
   version: '1.0.0',
-  description: 'Quản lý tri thức dài hạn, Warm-Start Digest và Memory tools',
+  description: 'Long-term knowledge management, Warm-Start Digest, and Memory tools',
   apply(ctx: KernelContext) {
     ctx.registerTool(createSaveMemoryTool(ctx.memory));
     ctx.registerTool(createReadMemoryTool(ctx.memory));

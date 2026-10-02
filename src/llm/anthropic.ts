@@ -60,7 +60,7 @@ export class AnthropicLLM {
     }
 
     if (!this.apiKey) {
-      throw new Error('ANTHROPIC_API_KEY không được để trống khi khởi tạo AnthropicLLM.');
+      throw new Error('ANTHROPIC_API_KEY must not be empty when initializing AnthropicLLM.');
     }
   }
 

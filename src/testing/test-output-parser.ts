@@ -108,8 +108,8 @@ export class TestOutputParser {
 
     const isPassed = exitCode === 0 && failed === 0;
     const summaryText = isPassed
-      ? `✅ [Test Engineering]: Toàn bộ ${totalTests || passed} test cases đã VƯỢT QUA thành công (${durationMs}ms).`
-      : `❌ [Test Engineering]: Phát hiện ${failed} test thất bại (Exit code: ${exitCode}, Thời gian: ${durationMs}ms).`;
+      ? `✅ [Test Engineering]: All ${totalTests || passed} test cases PASSED (${durationMs}ms).`
+      : `❌ [Test Engineering]: Detected ${failed} failed test(s) (Exit code: ${exitCode}, Duration: ${durationMs}ms).`;
 
     return {
       framework,

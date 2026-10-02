@@ -54,13 +54,13 @@ export class IsolatedExecutionSubstrate implements IExecutionSubstrate {
     if (!evalResult.allowed) {
       return {
         stdout: '',
-        stderr: `[Sandbox Policy Rejection]: ${evalResult.reason || 'Lệnh vi phạm chính sách sandbox.'}`,
+        stderr: `[Sandbox Policy Rejection]: ${evalResult.reason || 'Command violates sandbox policy.'}`,
         exitCode: 126, // Command invoked cannot execute
         durationMs: Date.now() - startTime,
         substrateType: this.type,
         success: false,
         diagnostic: evalResult.reason,
-        suggestion: 'Kiểm tra lại quyền hạn hoặc thực hiện thao tác trong phạm vi workspace.',
+        suggestion: 'Check permissions or perform the operation within the workspace scope.',
       };
     }
 

@@ -42,7 +42,7 @@ export class FallbackRouterLLM {
     });
 
     if (this.tiers.length === 0) {
-      throw new Error('Không có nhà cung cấp nào hợp lệ hoặc có API key khả dụng trong cấu hình Fallback Router.');
+      throw new Error('No valid provider with an available API key found in the Fallback Router configuration.');
     }
   }
 
@@ -91,7 +91,7 @@ export class FallbackRouterLLM {
         }
 
         if (attempt > 0) {
-          console.log(`\n${c.yellow}${c.bold}⚡ [AUTO-FALLBACK ACTIVATED]${c.reset} ${c.brightYellow}Chuyển sang Tier ${currentTier.tier}: ${c.bold}${currentTier.name}${c.reset} (${currentTier.provider})...`);
+          console.log(`\n${c.yellow}${c.bold}⚡ [AUTO-FALLBACK ACTIVATED]${c.reset} ${c.brightYellow}Switching to Tier ${currentTier.tier}: ${c.bold}${currentTier.name}${c.reset} (${currentTier.provider})...`);
         }
 
         const response = await client.generateStream(session, tools, callbacks, mergedRequest);
@@ -130,18 +130,18 @@ export class FallbackRouterLLM {
 
         if (isRateLimitOrOverload && attempt < this.tiers.length - 1) {
           const nextTier = this.tiers[(currentIndex + 1) % this.tiers.length];
-          console.log(`\n${c.yellow}⚠️  Phát hiện Rate-Limit / Quá tải ở ${currentTier.name} (Tier ${currentTier.tier}). Đang tự động chuyển vùng sang ${nextTier.name} (Tier ${nextTier.tier})...${c.reset}`);
+          console.log(`\n${c.yellow}⚠️  Detected rate-limit / overload on ${currentTier.name} (Tier ${currentTier.tier}). Automatically failing over to ${nextTier.name} (Tier ${nextTier.tier})...${c.reset}`);
           continue;
         }
 
         // Lỗi khác hoặc đã hết danh sách fallback
         if (attempt === this.tiers.length - 1) {
-          throw new Error(`Toàn bộ ${this.tiers.length} nhà cung cấp trong 3-Tier Fallback Pool đều gặp lỗi: ${msg}`);
+          throw new Error(`All ${this.tiers.length} providers in the 3-Tier Fallback Pool failed: ${msg}`);
         }
       }
     }
 
-    throw lastError || new Error('Fallback Router không thể khởi tạo phản hồi.');
+    throw lastError || new Error('Fallback Router could not initialize a response.');
   }
 
   async generate(session: Session, tools: FunctionDeclaration[], request?: LLMRequestOptions): Promise<LLMResponse> {

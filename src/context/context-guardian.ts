@@ -212,8 +212,8 @@ export class ContextGuardian {
           // Phát hiện bug fixes
           if (text.includes('Đã sửa') || text.includes('Fixed') || text.includes('Sửa lỗi') || text.includes('Root Cause') || text.includes('Nguyên nhân gốc')) {
             appliedFixes.push({
-              symptom: 'Phát hiện sự không tương thích hoặc lỗi kiểm thử',
-              rootCause: 'Xảy ra do giả định sai về dữ liệu hoặc cấu hình tham số',
+              symptom: 'Detected incompatibility or test failure',
+              rootCause: 'Caused by incorrect assumptions about data or parameter configuration',
               exactSolution: text.slice(0, 250),
               affectedFiles: Array.from(mutatedFilesSet).slice(0, 3),
             });
@@ -257,8 +257,8 @@ export class ContextGuardian {
       p1: {
         discoveredPatterns,
         componentDependencies: [
-          'src/context/context-guardian.ts phụ thuộc vào Session và Workspace',
-          'src/agent/agent-loop.ts tích hợp ContextGuardian tại bước kích hoạt compactor',
+          'src/context/context-guardian.ts depends on Session and Workspace',
+          'src/agent/agent-loop.ts integrates ContextGuardian at the compactor trigger step',
         ],
         userPreferences,
         projectContext: {
@@ -290,59 +290,59 @@ export class ContextGuardian {
     const hasFiles = data.p0.codeMutations.length > 0;
     const filesDetailed = data.p0.codeMutations.every((m) => Boolean(m.path && m.nature));
     checks.push({
-      name: 'Mỗi file sửa đổi có đầy đủ đường dẫn và bản chất thay đổi',
+      name: 'Each modified file has full path and change nature',
       passed: hasFiles && filesDetailed,
-      details: `${data.p0.codeMutations.length} file(s) được ghi nhận`,
+      details: `${data.p0.codeMutations.length} file(s) recorded`,
     });
-    if (!hasFiles || !filesDetailed) missingItems.push('Thông tin chi tiết của các file sửa đổi');
+    if (!hasFiles || !filesDetailed) missingItems.push('Modified file detail info');
 
     // 2. Mỗi lỗi/bug có triệu chứng, nguyên nhân gốc và giải pháp
     const fixesValid = data.p0.appliedFixes.every((f) => Boolean(f.symptom && f.rootCause && f.exactSolution));
     checks.push({
-      name: 'Mỗi bug fix có đầy đủ triệu chứng, nguyên nhân gốc và giải pháp',
+      name: 'Each bug fix has full symptom, root cause and solution',
       passed: fixesValid,
-      details: `${data.p0.appliedFixes.length} fix(es) được ghi nhận`,
+      details: `${data.p0.appliedFixes.length} fix(es) recorded`,
     });
-    if (!fixesValid) missingItems.push('Chi tiết nguyên nhân gốc của bug fixes');
+    if (!fixesValid) missingItems.push('Bug fix root-cause details');
 
     // 3. Mỗi quyết định kiến trúc có nội dung và lý do (What & Why)
     const decisionsValid = data.p0.technicalDecisions.every((d) => Boolean(d.decision && d.rationale));
     checks.push({
-      name: 'Mỗi quyết định kiến trúc có giải trình lý do rõ ràng',
+      name: 'Each architectural decision has a clear rationale',
       passed: decisionsValid,
-      details: `${data.p0.technicalDecisions.length} quyết định kiến trúc`,
+      details: `${data.p0.technicalDecisions.length} architectural decisions`,
     });
-    if (!decisionsValid) missingItems.push('Giải trình lý do của các quyết định kiến trúc');
+    if (!decisionsValid) missingItems.push('Architectural decision rationales');
 
     // 4. Các nhiệm vụ có trạng thái và mức độ ưu tiên
     const tasksValid = data.p0.taskState.every((t) => Boolean(t.description && t.priority));
     checks.push({
-      name: 'Các nhiệm vụ được phân cấp ưu tiên rõ ràng (P0/P1/P2)',
+      name: 'Tasks are clearly prioritized (P0/P1/P2)',
       passed: tasksValid,
       details: `${data.p0.taskState.length} task(s)`,
     });
-    if (!tasksValid) missingItems.push('Phân cấp ưu tiên của các nhiệm vụ');
+    if (!tasksValid) missingItems.push('Task priority levels');
 
     // 5. Có danh sách quy ước/pattern đã khám phá
     checks.push({
-      name: 'Quy ước và pattern thiết kế được ghi nhận',
+      name: 'Design conventions and patterns are recorded',
       passed: data.p1.discoveredPatterns.length > 0,
       details: `${data.p1.discoveredPatterns.length} pattern(s)`,
     });
-    if (data.p1.discoveredPatterns.length === 0) missingItems.push('Quy ước và pattern thiết kế đã quan sát');
+    if (data.p1.discoveredPatterns.length === 0) missingItems.push('Observed design conventions and patterns');
 
     // 6. Có danh sách lệnh đã xác minh hoạt động chính xác
     checks.push({
-      name: 'Lệnh thực thi đã kiểm chứng thành công được ghi nhận',
+      name: 'Verified successful execution commands are recorded',
       passed: data.p0.workingCommands.length > 0,
       details: `${data.p0.workingCommands.length} command(s)`,
     });
-    if (data.p0.workingCommands.length === 0) missingItems.push('Bằng chứng lệnh kiểm chứng thành công');
+    if (data.p0.workingCommands.length === 0) missingItems.push('Successful verification command evidence');
 
     // 7. Tính nhất quán giữa các phần (Cross-reference Consistency)
     const consistent = Boolean(data.projectId && data.timestamp);
     checks.push({
-      name: 'Tính nhất quán và không mâu thuẫn giữa các mục ngữ cảnh',
+      name: 'Consistency and no conflicts across context items',
       passed: consistent,
       details: `Project: ${data.projectId}`,
     });
@@ -350,11 +350,11 @@ export class ContextGuardian {
     // 8. Đầy đủ các liên kết đường dẫn tệp cốt lõi
     const pathsValid = data.p1.projectContext.keyFiles.every((f) => !f.startsWith('..'));
     checks.push({
-      name: 'Đường dẫn tệp đầy đủ và hợp lệ trong phạm vi workspace',
+      name: 'Complete and valid file paths within workspace scope',
       passed: pathsValid,
       details: `${data.p1.projectContext.keyFiles.length} key file(s)`,
     });
-    if (!pathsValid) missingItems.push('Đường dẫn tệp hợp lệ trong workspace');
+    if (!pathsValid) missingItems.push('Valid file paths within workspace');
 
     const passedCount = checks.filter((c) => c.passed).length;
     const score = Math.round((passedCount / checks.length) * 100);
@@ -375,16 +375,16 @@ export class ContextGuardian {
       `# 🛡️ CONTEXT GUARDIAN: TRANSITION BRIEFING (PRE-COMPACTION PRESERVED)`,
       ``,
       `> [!IMPORTANT]`,
-      `> Ngữ cảnh này được trích xuất và bảo vệ bởi **Context Guardian** ngay trước thời điểm nén.`,
-      `> Mọi quyết định, sửa đổi, và quy ước dưới đây là BẤT BIẾN (Invariants) — không được đảo ngược.`,
+      `> This context was extracted and protected by **Context Guardian** just before compaction.`,
+      `> All decisions, modifications, and conventions below are IMMUTABLE (Invariants) — do not reverse.`,
       ``,
-      `## 1. Trạng Thái Hiện Tại (Current State)`,
-      `- **Dự án**: \`${data.projectId}\``,
-      `- **Giai đoạn**: ${data.phase}`,
-      `- **Thời điểm chụp**: ${data.timestamp}`,
-      `- **Tiến độ**: ${data.p0.taskState.filter((t) => t.status === 'completed').length}/${data.p0.taskState.length} tác vụ đã hoàn thành`,
+      `## 1. Current State`,
+      `- **Project**: \`${data.projectId}\``,
+      `- **Phase**: ${data.phase}`,
+      `- **Captured at**: ${data.timestamp}`,
+      `- **Progress**: ${data.p0.taskState.filter((t) => t.status === 'completed').length}/${data.p0.taskState.length} tasks completed`,
       ``,
-      `## 2. Việc Đã Hoàn Thành Trong Phiên (What Was Done)`,
+      `## 2. Work Done In Session (What Was Done)`,
     ];
 
     for (let i = 0; i < data.p0.taskState.length; i++) {
@@ -392,41 +392,41 @@ export class ContextGuardian {
       lines.push(`${i + 1}. [${task.status.toUpperCase()}] ${task.description} (${task.priority})`);
     }
 
-    lines.push(``, `## 3. Quyết Định Kiến Trúc Trọng Yếu - Không Thay Đổi Không Lý Do (Critical Decisions)`);
+    lines.push(``, `## 3. Critical Architectural Decisions - Do Not Change Without Reason (Critical Decisions)`);
     for (const d of data.p0.technicalDecisions) {
       lines.push(`- **${d.topic}**: ${d.decision}`);
-      lines.push(`  ↳ *Lý do*: ${d.rationale}`);
+      lines.push(`  ↳ *Rationale*: ${d.rationale}`);
       if (d.affectedFiles.length > 0) {
-        lines.push(`  ↳ *Tệp liên quan*: \`${d.affectedFiles.join('`, `')}\``);
+        lines.push(`  ↳ *Related files*: \`${d.affectedFiles.join('`, `')}\``);
       }
     }
 
-    lines.push(``, `## 4. Sửa Lỗi Đã Áp Dụng - Tuyệt Đối Không Revert (Applied Fixes)`);
+    lines.push(``, `## 4. Applied Fixes - Never Revert (Applied Fixes)`);
     for (const fix of data.p0.appliedFixes) {
-      lines.push(`- **Triệu chứng**: ${fix.symptom}`);
-      lines.push(`  ↳ **Nguyên nhân gốc**: ${fix.rootCause}`);
-      lines.push(`  ↳ **Giải pháp chuẩn**: ${fix.exactSolution}`);
+      lines.push(`- **Symptom**: ${fix.symptom}`);
+      lines.push(`  ↳ **Root cause**: ${fix.rootCause}`);
+      lines.push(`  ↳ **Standard solution**: ${fix.exactSolution}`);
       if (fix.affectedFiles.length > 0) {
-        lines.push(`  ↳ **Tệp ảnh hưởng**: \`${fix.affectedFiles.join('`, `')}\``);
+        lines.push(`  ↳ **Affected files**: \`${fix.affectedFiles.join('`, `')}\``);
       }
     }
 
-    lines.push(``, `## 5. Tệp Mã Nguồn Đã Thay Đổi (Mutated Files)`);
+    lines.push(``, `## 5. Changed Source Files (Mutated Files)`);
     for (const mut of data.p0.codeMutations) {
       lines.push(`- \`${mut.path}\`: ${mut.nature} (${mut.rationale || 'Verified'})`);
     }
 
-    lines.push(``, `## 6. Lệnh Thực Thi Đã Kiểm Chứng (Verified Commands)`);
+    lines.push(``, `## 6. Verified Execution Commands (Verified Commands)`);
     for (const cmd of data.p0.workingCommands) {
       lines.push(`- \`${cmd}\``);
     }
 
-    lines.push(``, `## 7. Cảnh Báo & Ranh Giới An Toàn (Alerts & Invariants)`);
-    lines.push(`- **KHÔNG TỰ ĐỘNG KIỂM THỬ TRÌNH DUYỆT**: Tuyệt đối không tự động chạy browser subagents.`);
-    lines.push(`- **KHÔNG TỰ ĐỘNG PUSH LÊN MAIN**: Không kích hoạt pipeline Railway.`);
-    lines.push(`- **100% REGRESSION PASS**: Mọi thay đổi bắt buộc phải duy trì 100% pass rate toàn bộ test suite.`);
+    lines.push(``, `## 7. Alerts & Safety Boundaries (Alerts & Invariants)`);
+    lines.push(`- **NO AUTOMATED BROWSER TESTING**: Never auto-run browser subagents.`);
+    lines.push(`- **NO AUTO PUSH TO MAIN**: Do not trigger the Railway pipeline.`);
+    lines.push(`- **100% REGRESSION PASS**: All changes must keep a 100% pass rate across the full test suite.`);
 
-    lines.push(``, `## 8. Truy Xuất Thông Tin Chi Tiết (Information Recovery)`);
+    lines.push(``, `## 8. Detailed Information Recovery (Information Recovery)`);
     if (snapshotPath) {
       lines.push(`- **Snapshot File**: \`${snapshotPath}\``);
     }

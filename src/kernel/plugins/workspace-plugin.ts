@@ -22,7 +22,7 @@ let onToolBeforeHandler: ((toolName: string, args: Record<string, any>) => void)
 export const WorkspacePlugin: AgentPlugin = {
   name: 'workspace-plugin',
   version: '1.0.0',
-  description: 'Quản lý Workspace, Shadow Checkpoint Snapshots và lệnh Rollback',
+  description: 'Workspace management, Shadow Checkpoint Snapshots, and Rollback commands',
   apply(ctx: KernelContext) {
     onToolBeforeHandler = (toolName: string, args: Record<string, any>) => {
       if (FILE_MUTATION_TOOLS.has(toolName)) {

@@ -214,8 +214,8 @@ export class ComputerController {
         base64: undefined,
         attachedToMultimodalContext: attached,
         message: attached
-          ? `Đã chụp màn hình (${driverResult.width}x${driverResult.height}) và tự động nạp vào bộ nhớ Vision của Agent. Agent có thể quan sát trực tiếp các thành phần UI.`
-          : `Đã chụp màn hình thành công và lưu tại: ${driverResult.path}`,
+          ? `Screenshot captured (${driverResult.width}x${driverResult.height}) and automatically loaded into the agent's Vision memory. The agent can directly observe UI elements.`
+          : `Screenshot captured successfully and saved at: ${driverResult.path}`,
       };
       return cleanResult;
     }

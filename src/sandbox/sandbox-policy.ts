@@ -90,7 +90,7 @@ export class SandboxPolicyEngine {
    */
   evaluateCommand(command: string, cwd?: string): CommandPolicyEvaluation {
     if (!command || !command.trim()) {
-      return { allowed: false, riskLevel: 'SAFE_READ_ONLY', reason: 'Lệnh rỗng.' };
+      return { allowed: false, riskLevel: 'SAFE_READ_ONLY', reason: 'Empty command.' };
     }
 
     const trimmed = command.trim();
@@ -101,7 +101,7 @@ export class SandboxPolicyEngine {
         return {
           allowed: false,
           riskLevel: 'SYSTEM_RISK',
-          reason: `Lệnh bị từ chối bởi Sandbox Policy Engine: Phát hiện mẫu lệnh hủy diệt hệ thống nguy hiểm (${pattern}).`,
+          reason: `Command rejected by Sandbox Policy Engine: detected dangerous system-destructive command pattern (${pattern}).`,
         };
       }
     }
@@ -125,7 +125,7 @@ export class SandboxPolicyEngine {
       return {
         allowed: false,
         riskLevel: 'WORKSPACE_MUTATION',
-        reason: `Sandbox đang hoạt động ở chế độ nghiêm ngặt (strict / read-only). Lệnh sửa đổi trạng thái "${trimmed}" bị chặn.`,
+        reason: `Sandbox is running in strict (read-only) mode. State-modifying command "${trimmed}" is blocked.`,
       };
     }
 
@@ -136,7 +136,7 @@ export class SandboxPolicyEngine {
         return {
           allowed: false,
           riskLevel: 'UNAUTHORIZED_ESCAPE',
-          reason: `Từ chối thực thi: Thư mục làm việc "${cwd}" nằm ngoài ranh giới cho phép của Sandbox Workspace (${this.workspaceRoot}).`,
+          reason: `Execution denied: working directory "${cwd}" is outside the allowed Sandbox Workspace boundary (${this.workspaceRoot}).`,
         };
       }
     }

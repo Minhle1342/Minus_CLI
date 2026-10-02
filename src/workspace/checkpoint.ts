@@ -119,7 +119,7 @@ export class CheckpointManager {
     if (this.checkpoints.length === 0) {
       return {
         success: false,
-        message: 'Không tìm thấy checkpoint nào trong phiên làm việc hiện tại để hoàn tác.',
+        message: 'No checkpoint found in the current session to undo.',
       };
     }
 
@@ -138,7 +138,7 @@ export class CheckpointManager {
     if (targetIndex === -1) {
       return {
         success: false,
-        message: `Không tìm thấy task checkpoint "${checkpointIdOrTaskId}" để rollback.`,
+        message: `Task checkpoint "${checkpointIdOrTaskId}" not found for rollback.`,
       };
     }
 
@@ -157,7 +157,7 @@ export class CheckpointManager {
         });
         return {
           success: true,
-          message: `Đã hoàn tác thành công về Checkpoint #${targetCp.index} (${targetCp.timestamp}: "${targetCp.description}").`,
+          message: `Successfully rolled back to Checkpoint #${targetCp.index} (${targetCp.timestamp}: "${targetCp.description}").`,
           checkpoint: targetCp,
         };
       } catch (err: any) {
@@ -165,13 +165,13 @@ export class CheckpointManager {
           await execAsync('git restore .', { cwd: this.workspaceDir });
           return {
             success: true,
-            message: `Đã hoàn tác các thay đổi chưa commit về trạng thái sạch gần nhất.`,
+            message: `Reverted uncommitted changes to the nearest clean state.`,
             checkpoint: targetCp,
           };
         } catch (subErr: any) {
           return {
             success: false,
-            message: `Lỗi khi hoàn tác git: ${subErr.message}`,
+            message: `Git rollback error: ${subErr.message}`,
           };
         }
       }
@@ -179,7 +179,7 @@ export class CheckpointManager {
 
     return {
       success: true,
-      message: `Đã hoàn tác Checkpoint #${targetCp.index} (${targetCp.description}).`,
+      message: `Rolled back Checkpoint #${targetCp.index} (${targetCp.description}).`,
       checkpoint: targetCp,
     };
   }

@@ -253,19 +253,19 @@ export async function runComparisonBenchmark() {
   console.log('📈 SUMMARY OF COMPARATIVE IMPROVEMENTS (COMMIT 39cde7d vs CURRENT)');
   console.log('================================================================================\n');
 
-  console.log('| Chỉ số Đo lường (Metric)                     | Commit 39cde7d (Cũ) | Bản Hiện tại (Mới) | Mức độ Cải tiến (Delta)      |');
+  console.log('| Metric                                      | Commit 39cde7d (Old) | Current (New)      | Improvement (Delta)          |');
   console.log('|:---------------------------------------------|:-------------------:|:------------------:|:----------------------------:|');
-  console.log(`| 1. Tỷ lệ sập bẫy Confirmation Bias            | ${baselineTrapRate}% (5/5 traps)   | 0% (0/5 traps)     | 🟢 +100% Triệt tiêu thiên kiến|`);
-  console.log(`| 2. Ngăn chặn phá vỡ Hợp đồng Lõi (Rollout)  | ${100 - baselineRegressionRate}% (Chỉ chặn 29%)| 100% (Chặn 71%)    | 🟢 +71% An toàn tiền commit  |`);
-  console.log(`| 3. Context Footprint (Anti-Context Dilution) | ~520 tk (Raw trace) | 159 tk (Distilled) | 🟢 Tiết kiệm ${tokenSavingsPercent}% token   |`);
-  console.log(`| 4. Overhead tác vụ Thường ngày (Explore/Read) | Không có Gating     | 0.04ms / 0 tokens  | 🟢 100% Zero-Cost Bypass     |\n`);
+  console.log(`| 1. Confirmation Bias trap rate                | ${baselineTrapRate}% (5/5 traps)   | 0% (0/5 traps)     | 🟢 +100% Bias eliminated     |`);
+  console.log(`| 2. Core-contract break prevention (Rollout)   | ${100 - baselineRegressionRate}% (Only 29%)| 100% (Blocks 71%)    | 🟢 +71% Pre-commit safety    |`);
+  console.log(`| 3. Context Footprint (Anti-Context Dilution) | ~520 tk (Raw trace) | 159 tk (Distilled) | 🟢 Saves ${tokenSavingsPercent}% tokens     |`);
+  console.log(`| 4. Everyday task overhead (Explore/Read)      | No Gating           | 0.04ms / 0 tokens  | 🟢 100% Zero-Cost Bypass     |\n`);
 
-  console.log('🎯 KẾT LUẬN:');
-  console.log('So với commit 39cde7d gần nhất, bản cập nhật mới giúp:');
-  console.log('1. Loại bỏ 100% các đột biến sửa code sai lầm do thiên kiến xác nhận (Confirmation Bias).');
-  console.log('2. Tăng 71% khả năng phát hiện và chặn đứng nguy cơ phá vỡ hợp đồng dùng chung nhờ Test-Time Monte Carlo Rollout.');
-  console.log('3. Giảm 69% chi phí token so với trao đổi đa tác nhân thô nhờ Distillation Barrier (giới hạn cứng <= 180 tokens).');
-  console.log('4. Giữ nguyên 0ms độ trễ và 0 token phụ trội trên các tác vụ đọc/khảo sát thông thường nhờ Selective Evidence Gating.');
+  console.log('🎯 CONCLUSION:');
+  console.log('Compared with the latest commit 39cde7d, the new update:');
+  console.log('1. Eliminates 100% of mistaken code mutations caused by confirmation bias.');
+  console.log('2. Improves shared-contract break detection and blocking by 71% via Test-Time Monte Carlo Rollout.');
+  console.log('3. Cuts token cost by 69% vs raw multi-agent exchange via Distillation Barrier (hard cap <= 180 tokens).');
+  console.log('4. Keeps 0ms latency and 0 extra tokens on routine read/explore tasks via Selective Evidence Gating.');
   console.log('================================================================================\n');
 }
 

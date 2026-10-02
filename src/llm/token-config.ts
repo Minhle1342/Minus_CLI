@@ -546,9 +546,9 @@ export interface TokenTierDefinition {
 export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition> = {
   low: {
     tier: 'low',
-    label: 'Tiết kiệm / Phản hồi nhanh (Low / Eco)',
+    label: 'Economy / Fast response (Low / Eco)',
     badge: '🟢 LOW',
-    description: 'Output 2K, Context 16K, Thinking 2K, Dynamic 1K (effort: low) - Tối ưu token & phản hồi tức thì',
+    description: 'Output 2K, Context 16K, Thinking 2K, Dynamic 1K (effort: low) - Token-efficient with instant responses',
     outputTokens: 2048,
     inputTokens: 16000,
     thinkingTokens: 2048,
@@ -557,9 +557,9 @@ export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition
   },
   medium: {
     tier: 'medium',
-    label: 'Tiêu chuẩn / Cân bằng (Medium / Balanced)',
+    label: 'Standard / Balanced (Medium / Balanced)',
     badge: '🟡 MEDIUM',
-    description: 'Output 8K, Context 64K, Thinking 8K, Dynamic 2K (effort: medium) - Cân bằng cho công việc thường ngày',
+    description: 'Output 8K, Context 64K, Thinking 8K, Dynamic 2K (effort: medium) - Balanced for everyday work',
     outputTokens: 8192,
     inputTokens: 64000,
     thinkingTokens: 8192,
@@ -568,9 +568,9 @@ export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition
   },
   high: {
     tier: 'high',
-    label: 'Nâng cao / Chuyên sâu (High / Deep Thinking)',
+    label: 'Advanced / Deep (High / Deep Thinking)',
     badge: '🟠 HIGH',
-    description: 'Output 16K, Context 128K, Thinking 24K, Dynamic 4K (effort: high) - Dành cho refactor lớn và suy luận sâu',
+    description: 'Output 16K, Context 128K, Thinking 24K, Dynamic 4K (effort: high) - For large refactors and deep reasoning',
     outputTokens: 16384,
     inputTokens: 128000,
     thinkingTokens: 24576,
@@ -579,9 +579,9 @@ export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition
   },
   max: {
     tier: 'max',
-    label: 'Cực đại / Tối đa (Max / Unlimited)',
+    label: 'Maximum (Max / Unlimited)',
     badge: '🔴 MAX',
-    description: 'Output Max, Context Max, Thinking 64K, Dynamic 8K (effort: max) - Khai thác 100% giới hạn phần cứng model',
+    description: 'Output Max, Context Max, Thinking 64K, Dynamic 8K (effort: max) - Full use of the model hardware limits',
     outputTokens: 'max',
     inputTokens: 'max',
     thinkingTokens: 'max',

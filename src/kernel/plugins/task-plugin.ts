@@ -9,7 +9,7 @@ import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskT
 export const TaskPlugin: AgentPlugin = {
   name: 'task-plugin',
   version: '2.0.0',
-  description: 'Quản lý các tiến trình nền (manage_task với send_input stdin) và lịch trình hẹn giờ (schedule)',
+  description: 'Background process management (manage_task with send_input stdin) and scheduled jobs (schedule)',
   apply(ctx: KernelContext) {
     if (ctx.tasks) {
       ctx.registerTool(createManageTaskTool(ctx.tasks));

@@ -95,18 +95,18 @@ export class ReplayEvaluator {
 
     if (!hasCompletedGoal) {
       score -= 30;
-      recommendations.push('Agent kết thúc mà chưa gọi submit_solution.');
+      recommendations.push('Agent finished without calling submit_solution.');
     }
     if (duplicateToolCallsCount > 2) {
       score -= Math.min(20, duplicateToolCallsCount * 5);
-      recommendations.push(`Phát hiện ${duplicateToolCallsCount} lượt gọi tool trùng lặp tham số (vòng lặp thừa).`);
+      recommendations.push(`Detected ${duplicateToolCallsCount} duplicate tool calls with identical params (redundant loop).`);
     }
     if (guardianBlocksCount > 0) {
       score -= Math.min(20, guardianBlocksCount * 5);
-      recommendations.push(`Agent bị ToolUseGuardian can thiệp chặn ${guardianBlocksCount} lần do vi phạm rule.`);
+      recommendations.push(`Agent was blocked by ToolUseGuardian ${guardianBlocksCount} time(s) for rule violations.`);
     }
     if (cacheHitRate < 30 && totalTokens > 20000) {
-      recommendations.push('Tỷ lệ cache hit thấp (<30%), cần tối ưu tiền tố Prompt Cache.');
+      recommendations.push('Low cache hit rate (<30%), optimize the Prompt Cache prefix.');
     }
 
     score = Math.max(0, score);

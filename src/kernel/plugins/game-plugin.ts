@@ -20,7 +20,7 @@ import {
 export const GamePlugin: AgentPlugin = {
   name: 'game-plugin',
   version: '1.0.0',
-  description: 'Bộ công cụ chuyên biệt phát triển Game 2D, Pixel Art, Tilemap và Physics',
+  description: 'Specialized toolkit for 2D game development: Pixel Art, Tilemap, and Physics',
   apply(ctx: KernelContext) {
     if (!ctx.tools.get(gameTilemapStudioTool.name)) ctx.registerTool(gameTilemapStudioTool);
     if (!ctx.tools.get(gamePixelSpriteStudioTool.name)) ctx.registerTool(gamePixelSpriteStudioTool);

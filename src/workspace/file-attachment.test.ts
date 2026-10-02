@@ -121,3 +121,79 @@ test('handles Unicode, Next.js route symbols, quotes, and lossless completion', 
   });
 });
 
+test('attachment expansion defaults to ON unless explicitly disabled', () => {
+  assert.equal(PromptAttachmentProcessor.isAttachmentExpansionEnabled({} as NodeJS.ProcessEnv), true);
+  assert.equal(PromptAttachmentProcessor.isAttachmentExpansionEnabled({ MINUS_ATTACH_EXPAND: 'off' } as NodeJS.ProcessEnv), false);
+  assert.equal(PromptAttachmentProcessor.isAttachmentExpansionEnabled({ MINUS_ATTACH_EXPAND: '0' } as NodeJS.ProcessEnv), false);
+  assert.equal(PromptAttachmentProcessor.isAttachmentExpansionEnabled({ MINUS_ATTACH_EXPAND: 'on' } as NodeJS.ProcessEnv), true);
+});
+
+test('expands 2-hop neighborhood around @-attached anchors with scope directive', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'alpha.ts'), `import { beta } from './beta.js';\nexport const alpha = 1;\n`);
+    await writeFile(path.join(root, 'beta.ts'), `import { gamma } from './gamma.js';\nexport const beta = 2;\n`);
+    await writeFile(path.join(root, 'gamma.ts'), `export const gamma = 3;\n`);
+    await writeFile(path.join(root, 'delta.ts'), `import { alpha } from './alpha.js';\nexport const delta = 4;\n`);
+    await writeFile(path.join(root, 'zeta.ts'), `export const zeta = 99;\n`);
+
+    const result = await PromptAttachmentProcessor.resolveAndAttach('Fix bug in @alpha.ts', workspace);
+
+    assert.equal(result.hasAttachments, true);
+    assert.equal(result.expansionEnabled, true);
+    assert.deepEqual(result.anchorPaths, ['alpha.ts']);
+
+    const byPath = new Map((result.relatedFiles || []).map((item) => [item.path, item]));
+    assert.equal(byPath.get('beta.ts')?.hop, 1, 'direct import is hop-1');
+    assert.equal(byPath.get('beta.ts')?.reason, 'import');
+    assert.equal(byPath.get('delta.ts')?.hop, 1, 'importer / sibling is hop-1');
+    assert.equal(byPath.get('gamma.ts')?.hop, 2, 'import of hop-1 is hop-2');
+    assert.equal(byPath.has('zeta.ts'), false, 'unrelated file must not enter the neighborhood');
+
+    assert.match(result.expandedPrompt, /\[Attachment Neighborhood - 2-hop Investigation Scope\]/);
+    assert.match(result.expandedPrompt, /ATTACHMENT ANCHOR RULE/);
+  });
+});
+
+test('directory attachment ranks top files as hop-1 anchors', async () => {
+  const { mkdir } = await import('node:fs/promises');
+
+  await withWorkspace(async (workspace, root) => {
+    const libDir = path.join(root, 'lib');
+    await mkdir(libDir, { recursive: true });
+    await writeFile(path.join(libDir, 'small.ts'), `export const small = 1;\n`);
+    await writeFile(path.join(libDir, 'mid.ts'), `export const mid = 'x'.repeat(100);\n`);
+    await writeFile(path.join(libDir, 'big.ts'), `export const big = '${'y'.repeat(70 * 1024)}';\n`);
+    await writeFile(path.join(libDir, 'notes.md'), '# notes\n');
+
+    const result = await PromptAttachmentProcessor.resolveAndAttach('Review @lib', workspace);
+
+    assert.equal(result.hasAttachments, true);
+    assert.equal(result.anchorPaths, undefined);
+    const ranked = (result.relatedFiles || []).filter((item) => item.reason === 'dir-top-ranked').map((item) => item.path);
+    assert.ok(ranked.includes('lib/small.ts'), `expected small.ts in [${ranked.join(', ')}]`);
+    assert.ok(ranked.includes('lib/mid.ts'), `expected mid.ts in [${ranked.join(', ')}]`);
+    assert.ok(!ranked.includes('lib/big.ts'), 'oversized file must be excluded from dir top-ranked');
+    assert.ok(!ranked.includes('lib/notes.md'), 'non-code file must be excluded from dir top-ranked');
+    assert.match(result.expandedPrompt, /\[Attachment Neighborhood/);
+  });
+});
+
+test('MINUS_ATTACH_EXPAND=off disables neighborhood expansion', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'solo.ts'), `export const solo = 1;\n`);
+    const previous = process.env.MINUS_ATTACH_EXPAND;
+    process.env.MINUS_ATTACH_EXPAND = 'off';
+    try {
+      const result = await PromptAttachmentProcessor.resolveAndAttach('Check @solo.ts', workspace);
+      assert.equal(result.hasAttachments, true);
+      assert.equal(result.expansionEnabled, false);
+      assert.equal(result.relatedFiles, undefined);
+      assert.ok(!result.expandedPrompt.includes('[Attachment Neighborhood'));
+      assert.deepEqual(result.anchorPaths, ['solo.ts']);
+    } finally {
+      if (previous === undefined) delete process.env.MINUS_ATTACH_EXPAND;
+      else process.env.MINUS_ATTACH_EXPAND = previous;
+    }
+  });
+});
+

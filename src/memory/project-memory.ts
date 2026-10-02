@@ -426,12 +426,12 @@ export class ProjectMemoryManager {
       const entries = await fs.readdir(rootDir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.isDirectory() && !['node_modules', '.git', 'dist', 'target', 'build', '.codingagent', '__pycache__', '.pytest_cache'].includes(entry.name)) {
-          if (entry.name === 'src') keyDirectories['src/'] = 'Mã nguồn chính của dự án';
-          else if (entry.name === 'test' || entry.name === 'tests') keyDirectories[entry.name + '/'] = 'Thư mục kiểm thử';
-          else if (entry.name === 'docs') keyDirectories['docs/'] = 'Tài liệu hướng dẫn';
-          else if (entry.name === 'app' || entry.name === 'pages' || entry.name === 'components') keyDirectories[entry.name + '/'] = 'Giao diện & Thành phần ứng dụng';
-          else if (entry.name === 'api' || entry.name === 'routes' || entry.name === 'controllers') keyDirectories[entry.name + '/'] = 'API & Bộ định tuyến';
-          else keyDirectories[entry.name + '/'] = 'Thư mục module';
+          if (entry.name === 'src') keyDirectories['src/'] = 'Main project source code';
+          else if (entry.name === 'test' || entry.name === 'tests') keyDirectories[entry.name + '/'] = 'Test directory';
+          else if (entry.name === 'docs') keyDirectories['docs/'] = 'Guides and documentation';
+          else if (entry.name === 'app' || entry.name === 'pages' || entry.name === 'components') keyDirectories[entry.name + '/'] = 'App UI & components';
+          else if (entry.name === 'api' || entry.name === 'routes' || entry.name === 'controllers') keyDirectories[entry.name + '/'] = 'API & routers';
+          else keyDirectories[entry.name + '/'] = 'Module directory';
         }
       }
     } catch {}
@@ -813,7 +813,7 @@ export class ProjectMemoryManager {
 
     const lines: string[] = [
       `[PROJECT KNOWLEDGE BASE - WARM START MEMORY]`,
-      `- Dự án: ${this.memoryData.projectName} (${this.memoryData.projectType})`,
+      `- Project: ${this.memoryData.projectName} (${this.memoryData.projectType})`,
     ];
 
     const scoreScript = (key: string, cmd: string): number => {
@@ -865,7 +865,7 @@ export class ProjectMemoryManager {
       const commands = sortedScriptKeys
         .slice(0, 5)
         .map((key) => `"${key}": ${this.memoryData.scripts[key]}`);
-      lines.push(`- Lệnh khả dụng: ${commands.join(', ')}`);
+      lines.push(`- Available commands: ${commands.join(', ')}`);
     }
 
     if (this.memoryData.isMonorepo && this.memoryData.monorepoWorkspaces && this.memoryData.monorepoWorkspaces.length > 0) {
@@ -895,8 +895,8 @@ export class ProjectMemoryManager {
           })
         : [...this.memoryData.monorepoWorkspaces].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
-      lines.push(`- Kiến trúc Monorepo: [${sortedWorkspaces.map((w) => w.relativePath).join(', ')}]`);
-      lines.push(`- Lệnh khả dụng theo workspace:`);
+      lines.push(`- Monorepo architecture: [${sortedWorkspaces.map((w) => w.relativePath).join(', ')}]`);
+      lines.push(`- Available commands per workspace:`);
 
       for (const w of sortedWorkspaces.slice(0, 4)) {
         const subScriptKeys = Object.keys(w.scripts);
@@ -910,14 +910,14 @@ export class ProjectMemoryManager {
 
         const scriptsFormatted = sortedSubKeys.length > 0
           ? sortedSubKeys.slice(0, 4).map((k) => `"${k}": npm run ${k} --workspace=${w.relativePath}`).join(', ')
-          : 'Không có script định nghĩa';
+          : 'No scripts defined';
         lines.push(`  * ${w.relativePath} (${w.projectType || 'Package'}): ${scriptsFormatted}`);
       }
     }
 
     const dirKeys = Object.keys(this.memoryData.keyDirectories).sort();
     if (dirKeys.length > 0) {
-      lines.push(`- Cấu trúc thư mục: ${dirKeys.join(', ')}`);
+      lines.push(`- Directory structure: ${dirKeys.join(', ')}`);
     }
 
     const trustedInsights = this.memoryData.learnedInsights
@@ -926,7 +926,7 @@ export class ProjectMemoryManager {
       .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
       .slice(0, 4);
     if (trustedInsights.length > 0) {
-      lines.push(`- Kinh nghiệm đã ghi nhớ:`);
+      lines.push(`- Remembered experience:`);
       for (const item of trustedInsights) {
         lines.push(`  * [${item.key}; source=${item.source || 'manual'}; confidence=${(item.confidence ?? 1).toFixed(2)}]: ${item.insight}`);
       }
@@ -934,7 +934,7 @@ export class ProjectMemoryManager {
 
     const episodicInsights = this.getEpisodicSummaries(2);
     if (episodicInsights.length > 0) {
-      lines.push(`- Tóm tắt phiên trước (Episodic Context):`);
+      lines.push(`- Previous session summary (Episodic Context):`);
       for (const item of episodicInsights) {
         lines.push(`  * [${item.key}]: ${item.insight}`);
       }
@@ -955,7 +955,7 @@ export class ProjectMemoryManager {
         ? [...this.memoryData.codingConventions].sort((a, b) => scoreConvention(b) - scoreConvention(a))
         : this.memoryData.codingConventions;
 
-      lines.push(`- Chỉ dẫn dự án (AGENTS.md): ${sortedConventions.slice(0, 3).join('; ')}`);
+      lines.push(`- Project instructions (AGENTS.md): ${sortedConventions.slice(0, 3).join('; ')}`);
     }
 
     return lines.join('\n');

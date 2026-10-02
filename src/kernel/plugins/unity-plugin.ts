@@ -14,7 +14,7 @@ import { GamePlugin } from './game-plugin.js';
 export const UnityPlugin: AgentPlugin = {
   name: 'unity-plugin',
   version: '1.0.0',
-  description: 'Công cụ chuyên biệt Unity Engine: Scene Composition, Prefab, Build Settings',
+  description: 'Specialized Unity Engine toolkit: Scene Composition, Prefab, Build Settings',
   apply(ctx: KernelContext) {
     if (!ctx.tools.get(unityGameplayStudioTool.name)) ctx.registerTool(unityGameplayStudioTool);
   },
@@ -29,7 +29,7 @@ export const UnityPlugin: AgentPlugin = {
 export const GameStudioPlugin: AgentPlugin = {
   name: 'game-studio',
   version: '1.0.0',
-  description: 'Nạp đồng thời toàn bộ công cụ Game 2D + Unity Engine',
+  description: 'Loads the full 2D Game + Unity Engine toolchain in one call',
   apply(ctx: KernelContext) {
     GamePlugin.apply(ctx);
     UnityPlugin.apply(ctx);

@@ -228,7 +228,7 @@ export class PatchEngine {
         totalHunks: 0,
         hunksApplied: 0,
         fileResults: [],
-        error: 'Không tìm thấy file hoặc hunk hợp lệ nào trong nội dung patch.',
+        error: 'No valid file or hunk found in patch content.',
       };
     }
 
@@ -250,7 +250,7 @@ export class PatchEngine {
           hunksApplied: 0,
           fuzzLevelUsed: 0,
           hunkResults: [],
-          error: 'Thiếu đường dẫn file trong patch header.',
+          error: 'Missing file path in patch header.',
         });
         continue;
       }
@@ -268,7 +268,7 @@ export class PatchEngine {
     // 2. Nếu có bất kỳ hunk/file nào thất bại -> Rollback, không chạm vào đĩa
     if (!allSucceeded) {
       const failedFiles = fileResults.filter((f) => !f.success);
-      const firstError = failedFiles[0]?.error || 'Một số hunks không thể áp dụng vào tệp tin.';
+      const firstError = failedFiles[0]?.error || 'Some hunks could not be applied to the files.';
       return {
         success: false,
         filesModified: [],
@@ -277,7 +277,7 @@ export class PatchEngine {
         totalHunks,
         hunksApplied,
         fileResults,
-        error: `Patch thất bại: ${firstError}`,
+        error: `Patch failed: ${firstError}`,
       };
     }
 
@@ -308,7 +308,7 @@ export class PatchEngine {
               totalHunks,
               hunksApplied,
               fileResults,
-              error: `PRE_COMMIT_SYNTAX_ERROR: Patch tạo ra lỗi cú pháp trong "${res.path}" (Dòng ${syntaxErrors[0].line}: ${syntaxErrors[0].message}). Toàn bộ patch bị hủy bỏ để bảo vệ đĩa.`,
+              error: `PRE_COMMIT_SYNTAX_ERROR: Patch introduces a syntax error in "${res.path}" (Line ${syntaxErrors[0].line}: ${syntaxErrors[0].message}). The entire patch was aborted to protect the disk.`,
             };
           }
         }
@@ -378,7 +378,7 @@ export class PatchEngine {
           totalHunks,
           hunksApplied,
           fileResults,
-          error: `TRANSACTION_ROLLBACK: Lỗi ghi đĩa trong quá trình áp dụng patch: ${writeErr.message}. Toàn bộ file đã được hoàn nguyên an toàn.`,
+          error: `TRANSACTION_ROLLBACK: Disk write error while applying patch: ${writeErr.message}. All files were safely restored.`,
         };
       }
     }
@@ -449,7 +449,7 @@ export class PatchEngine {
           hunksApplied: 0,
           fuzzLevelUsed: 0,
           hunkResults: [],
-          error: `Không thể đọc file "${relPath}": ${err.message}`,
+          error: `Cannot read file "${relPath}": ${err.message}`,
         };
       }
     }
@@ -488,7 +488,7 @@ export class PatchEngine {
       // Tìm kiếm file tương tự trong workspace nếu đường dẫn bị lệch thư mục (ví dụ index.html <-> src/index.html)
       const similarFiles = await workspace.findSimilarWorkspaceFiles(relPath, 3);
       const hint = similarFiles.length > 0
-        ? ` Tìm thấy file tương tự trong workspace: ${JSON.stringify(similarFiles)}. Hãy kiểm tra lại đường dẫn file.`
+        ? ` Found similar file(s) in workspace: ${JSON.stringify(similarFiles)}. Please double-check the file path.`
         : '';
       return {
         path: relPath,
@@ -498,7 +498,7 @@ export class PatchEngine {
         hunksApplied: 0,
         fuzzLevelUsed: 0,
         hunkResults: [],
-        error: `Không thể đọc file "${relPath}" (ENOENT: no such file or directory).${hint}`,
+        error: `Cannot read file "${relPath}" (ENOENT: no such file or directory).${hint}`,
       };
     }
 
@@ -552,7 +552,7 @@ export class PatchEngine {
           hunkIndex: hIdx,
           applied: false,
           fuzzLevelUsed: 0,
-          error: matchRes.error || `Hunk #${hIdx + 1} (dòng ${hunk.oldStart}) không khớp với nội dung file.`,
+          error: matchRes.error || `Hunk #${hIdx + 1} (line ${hunk.oldStart}) does not match file content.`,
           contextExpected: hunk.lines.filter((l) => !l.startsWith('+')).map((l) => l.slice(1)),
           closestMatches: matchRes.closestMatches,
         });
@@ -565,7 +565,7 @@ export class PatchEngine {
           hunksApplied: hIdx,
           fuzzLevelUsed: maxFuzzUsed,
           hunkResults,
-          error: `Hunk #${hIdx + 1} không thể áp dụng vào "${relPath}". ${matchRes.error || ''}`,
+          error: `Hunk #${hIdx + 1} could not be applied to "${relPath}". ${matchRes.error || ''}`,
         };
       }
 
@@ -913,7 +913,7 @@ export class PatchEngine {
       matchedLinesCount: 0,
       replacementLines: [],
       fuzzLevel: 0,
-      error: `Không tìm thấy đoạn mã khớp (Độ tương đồng cao nhất: ${(bestScore * 100).toFixed(1)}% tại dòng ${bestIdx + 1}).`,
+      error: `No matching code segment found (highest similarity: ${(bestScore * 100).toFixed(1)}% at line ${bestIdx + 1}).`,
       closestMatches: candidates.slice(0, 3),
     };
   }

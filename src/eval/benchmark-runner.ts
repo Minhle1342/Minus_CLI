@@ -41,7 +41,7 @@ class BenchmarkMockLLM {
     if (this.stepCount === 1) {
       const testFile = this.task.initialFiles.find((f) => f.path.includes('test/')) || this.task.initialFiles[0];
       return {
-        text: 'Tôi sẽ đọc file kiểm thử để hiểu rõ các ca kiểm thử và kỳ vọng.',
+        text: 'I will read the test file to understand the test cases and expectations.',
         toolCalls: [
           {
             name: 'read_file',
@@ -57,16 +57,16 @@ class BenchmarkMockLLM {
     if (this.stepCount === 2) {
       const solution = this.getSolutionForTask(this.task.id);
       return {
-        text: 'Tôi thiết lập và kiểm chứng giả thuyết kỹ thuật ở Phase Explore trước khi can thiệp mã nguồn.',
+        text: 'I formulate and verify the technical hypothesis in the Explore phase before touching source code.',
         toolCalls: [
           {
             name: 'formulate_and_verify_hypothesis',
             args: {
-              statement: `Sự cố trong bài toán ${this.task.id} xuất phát từ việc thiếu kiểm tra điều kiện biên hoặc xử lý ngoại lệ chưa đầy đủ.`,
-              falsificationTest: `Nếu ca kiểm thử trong ${this.task.verifyCommand || 'test'} chạy thành công mà không cần can thiệp mã thì giả thuyết là sai.`,
+              statement: `The failure in task ${this.task.id} stems from missing boundary-condition checks or incomplete exception handling.`,
+              falsificationTest: `If the test cases in ${this.task.verifyCommand || 'test'} pass without code changes, the hypothesis is false.`,
               targetFiles: [solution.path],
-              evidence: `Phân tích tệp kiểm thử cho thấy các trường hợp dữ liệu kiểm tra chưa được bao quát ở mã nguồn đích ${solution.path}.`,
-              proposedFix: `Cập nhật hàm và cấu trúc dữ liệu trong ${solution.path} để bao quát tất cả các trường hợp kiểm thử.`,
+              evidence: `Test file analysis shows uncovered test data cases in target source ${solution.path}.`,
+              proposedFix: `Update functions and data structures in ${solution.path} to cover all test cases.`,
             },
           },
         ],
@@ -79,7 +79,7 @@ class BenchmarkMockLLM {
     if (this.stepCount === 3) {
       const solution = this.getSolutionForTask(this.task.id);
       return {
-        text: 'Giả thuyết đã được xác minh. Tôi tiến hành cập nhật mã nguồn để thỏa mãn các yêu cầu kiểm thử.',
+        text: 'Hypothesis verified. I will update the source code to satisfy the test requirements.',
         toolCalls: [
           {
             name: 'write_file',
@@ -97,7 +97,7 @@ class BenchmarkMockLLM {
     // Step 4: Chạy lệnh test kiểm chứng
     if (this.stepCount === 4 && this.task.verifyCommand) {
       return {
-        text: 'Tôi sẽ chạy lệnh kiểm thử để xác minh rằng giải pháp hoạt động chính xác.',
+        text: 'I will run the test command to verify the solution works correctly.',
         toolCalls: [
           {
             name: 'run_command',
@@ -113,13 +113,13 @@ class BenchmarkMockLLM {
     if (this.stepCount === 5) {
       const solution = this.getSolutionForTask(this.task.id);
       return {
-        text: 'Toàn bộ bài test đã pass thành công. Tôi nộp kết quả hoàn thành nhiệm vụ.',
+        text: 'All tests passed. I submit the completed task result.',
         toolCalls: [
           {
             name: 'submit_solution',
             args: {
-              summary: `Đã hoàn thành xuất sắc nhiệm vụ ${this.task.title}. Toàn bộ các ca kiểm thử trong ${this.task.verifyCommand || 'test'} đã vượt qua 100%.`,
-              verificationEvidence: `Lệnh kiểm thử ${this.task.verifyCommand || 'test'} đã chạy thành công với Exit Code 0.`,
+              summary: `Successfully completed task ${this.task.title}. All test cases in ${this.task.verifyCommand || 'test'} passed 100%.`,
+              verificationEvidence: `Test command ${this.task.verifyCommand || 'test'} ran successfully with Exit Code 0.`,
               filesModified: [solution.path],
             },
           },
@@ -131,7 +131,7 @@ class BenchmarkMockLLM {
 
     // Step 6+: Trả về câu trả lời cuối cùng sau khi đã nộp nghiệm thu
     return {
-      text: `Nhiệm vụ ${this.task.title} đã được giải quyết trọn vẹn và xác minh thành công.`,
+      text: `Task ${this.task.title} has been fully resolved and verified.`,
       toolCalls: [],
       finishReason: 'stop',
       usage: { promptTokens: 300, completionTokens: 40, totalTokens: 340, cachedTokens: 200 },
@@ -550,7 +550,7 @@ export class BenchmarkRunner {
     console.log(`\n${c.geminiCyan}${c.bold}================================================================${c.reset}`);
     console.log(`${c.geminiCyan}${c.bold}🧪  MINUS CODING AGENT — EVALUATION & BENCHMARKING SUITE${c.reset}`);
     console.log(`${c.geminiCyan}${c.bold}================================================================${c.reset}`);
-    console.log(`🎯 Số lượng task kiểm thử: ${c.bold}${tasks.length}${c.reset}`);
+    console.log(`🎯 Test task count: ${c.bold}${tasks.length}${c.reset}`);
     console.log(`🤖 Model: ${c.bold}${this.options.mockMode ? 'MockLLM (Zero-API Cost)' : (this.options.modelName || process.env.GEMINI_MODEL || 'gemini-2.5-flash')}${c.reset}`);
     console.log(`🛡️  Sandbox Mode: ${c.bold}${this.options.sandboxMode}${c.reset}`);
     console.log(`📁 Sandbox Root: ${c.dim}${this.options.sandboxBaseDir}${c.reset}\n`);
@@ -559,7 +559,7 @@ export class BenchmarkRunner {
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
-      console.log(`${c.dim}[${i + 1}/${tasks.length}]${c.reset} 🚀 Đang đánh giá task: ${c.bold}${task.title}${c.reset} (${c.cyan}${task.category}${c.reset})...`);
+      console.log(`${c.dim}[${i + 1}/${tasks.length}]${c.reset} 🚀 Evaluating task: ${c.bold}${task.title}${c.reset} (${c.cyan}${task.category}${c.reset})...`);
 
       const result = await this.runSingleTask(task);
       results.push(result);
@@ -568,9 +568,9 @@ export class BenchmarkRunner {
         ? `${c.green}${c.bold}✔ PASSED${c.reset}`
         : `${c.red}${c.bold}✖ ${result.status}${c.reset}`;
 
-      console.log(`   └─ Kết quả: ${statusBadge} | Steps: ${result.metrics.stepsTaken} | Thời gian: ${(result.metrics.durationMs / 1000).toFixed(2)}s | Tokens: ${result.metrics.tokens.totalTokens}`);
+      console.log(`   └─ Result: ${statusBadge} | Steps: ${result.metrics.stepsTaken} | Duration: ${(result.metrics.durationMs / 1000).toFixed(2)}s | Tokens: ${result.metrics.tokens.totalTokens}`);
       if (result.errorDetails) {
-        console.log(`      ${c.red}Chi tiết lỗi: ${result.errorDetails}${c.reset}`);
+        console.log(`      ${c.red}Error details: ${result.errorDetails}${c.reset}`);
       }
       console.log('');
     }
@@ -623,7 +623,7 @@ export class BenchmarkRunner {
         difficulty: task.difficulty,
         status: 'ERROR',
         metrics: this.emptyMetrics(Date.now() - startTaskTime),
-        errorDetails: `Lỗi khởi tạo workspace: ${err.message}`,
+        errorDetails: `Workspace initialization error: ${err.message}`,
       };
     }
 
@@ -649,7 +649,7 @@ export class BenchmarkRunner {
       agentLoop.planManager.createPlan([
         {
           title: task.title,
-          acceptanceCriteria: `Thực thi kiểm thử và bảo đảm ${task.verifyCommand || 'kiểm chứng'} vượt qua với Exit Code 0`,
+          acceptanceCriteria: `Run tests and ensure ${task.verifyCommand || 'verification'} passes with Exit Code 0`,
         },
       ]);
     }
@@ -665,7 +665,7 @@ export class BenchmarkRunner {
       finalAnswer = await Promise.race([
         agentLoop.run(session),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error(`TASK_TIMED_OUT: Quá giới hạn ${task.timeoutMs || 120000}ms`)), task.timeoutMs || 120000)
+          setTimeout(() => reject(new Error(`TASK_TIMED_OUT: Exceeded limit of ${task.timeoutMs || 120000}ms`)), task.timeoutMs || 120000)
         ),
       ]);
     } catch (err: any) {
@@ -705,7 +705,7 @@ export class BenchmarkRunner {
         }
       } catch (verifyErr: any) {
         status = 'FAILED';
-        errorDetails = `Ground-truth test thất bại (Exit code != 0): ${verifyErr.message}`;
+        errorDetails = `Ground-truth test failed (Exit code != 0): ${verifyErr.message}`;
         verificationMessage = verifyErr.stdout || verifyErr.stderr || verifyErr.message;
       }
     }
@@ -901,16 +901,16 @@ export class BenchmarkRunner {
 
   private printScorecard(report: BenchmarkSuiteReport): void {
     console.log(`\n${c.bold}================================================================${c.reset}`);
-    console.log(`${c.bold}📊 BẢNG TỔNG KẾT ĐÁNH GIÁ (EVALUATION SCORECARD)${c.reset}`);
+    console.log(`${c.bold}📊 EVALUATION SCORECARD${c.reset}`);
     console.log(`${c.bold}================================================================${c.reset}`);
 
     const passRateColor = report.passRatePercent >= 80 ? c.green : report.passRatePercent >= 50 ? c.yellow : c.red;
-    console.log(`• Tỷ lệ hoàn thành (Pass@1): ${passRateColor}${c.bold}${report.passRatePercent}%${c.reset} (${report.passedTasks}/${report.totalTasks} tasks)`);
-    console.log(`• Số step trung bình: ${c.bold}${report.averageSteps}${c.reset} steps/task`);
-    console.log(`• Time-to-final trung bình: ${c.bold}${(report.averageTimeToFinalAnswerMs / 1000).toFixed(2)}s${c.reset}`);
-    console.log(`• Tổng thời gian model request: ${c.bold}${(report.totalModelRequestTimeMs / 1000).toFixed(2)}s${c.reset} | TTFT p50/p95: ${report.ttftP50Ms.toFixed(0)}/${report.ttftP95Ms.toFixed(0)}ms`);
-    console.log(`• Tổng token tiêu thụ: ${c.bold}${report.totalTokens.toLocaleString()}${c.reset} tokens`);
-    console.log(`• Tần suất vi phạm Guardian: ${c.bold}${report.guardianViolationRate}%${c.reset}`);
+    console.log(`• Pass rate (Pass@1): ${passRateColor}${c.bold}${report.passRatePercent}%${c.reset} (${report.passedTasks}/${report.totalTasks} tasks)`);
+    console.log(`• Average steps: ${c.bold}${report.averageSteps}${c.reset} steps/task`);
+    console.log(`• Average time-to-final: ${c.bold}${(report.averageTimeToFinalAnswerMs / 1000).toFixed(2)}s${c.reset}`);
+    console.log(`• Total model request time: ${c.bold}${(report.totalModelRequestTimeMs / 1000).toFixed(2)}s${c.reset} | TTFT p50/p95: ${report.ttftP50Ms.toFixed(0)}/${report.ttftP95Ms.toFixed(0)}ms`);
+    console.log(`• Total tokens consumed: ${c.bold}${report.totalTokens.toLocaleString()}${c.reset} tokens`);
+    console.log(`• Guardian violation rate: ${c.bold}${report.guardianViolationRate}%${c.reset}`);
     console.log(`----------------------------------------------------------------`);
     console.log(`${'TASK ID'.padEnd(30)} ${'CATEGORY'.padEnd(12)} ${'STATUS'.padEnd(10)} ${'STEPS'.padEnd(6)} ${'TIME'.padEnd(8)}`);
     console.log(`----------------------------------------------------------------`);
@@ -928,9 +928,9 @@ export class BenchmarkRunner {
     try {
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf8');
-      console.log(`💾 Báo cáo chi tiết đã được lưu tại: ${c.cyan}${outputPath}${c.reset}`);
+      console.log(`💾 Detailed report saved at: ${c.cyan}${outputPath}${c.reset}`);
     } catch (err: any) {
-      console.error(`⚠️  Không thể lưu báo cáo ra ${outputPath}: ${err.message}`);
+      console.error(`⚠️  Failed to save report to ${outputPath}: ${err.message}`);
     }
   }
 }

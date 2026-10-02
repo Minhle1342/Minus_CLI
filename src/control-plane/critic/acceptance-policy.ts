@@ -23,7 +23,7 @@ export class AcceptancePolicy {
         const hasDeferred = hasUnfulfilledDeferredPromise(trimmed) || isCompletionStub(trimmed);
         if (hasDeferred) {
           violations.push(
-            'Deferred action promise detected in response ("I will modify/Tôi sẽ tiến hành..."). You must execute the necessary tool immediately rather than promising to do it later.',
+            'Deferred action promise detected in response ("I will modify..."). You must execute the necessary tool immediately rather than promising to do it later.',
           );
         }
       }

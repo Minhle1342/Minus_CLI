@@ -58,7 +58,7 @@ export class DeepseekLLM {
     }
 
     if (!this.apiKey) {
-      throw new Error('API key không được để trống khi khởi tạo DeepseekLLM / OpenAI-compatible provider.');
+      throw new Error('API key must not be empty when initializing DeepseekLLM / OpenAI-compatible provider.');
     }
   }
 
