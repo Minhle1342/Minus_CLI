@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useWindowSize } from 'ink';
 import { TuiStore } from '../tui-store.js';
 import { TuiState } from '../types.js';
 import { Header } from './Header.js';
@@ -9,6 +9,7 @@ import { LiveReasoningBox } from './LiveReasoningBox.js';
 import { DiffPreviewBox } from './DiffPreviewBox.js';
 import { PermissionPromptBox } from './PermissionPromptBox.js';
 import { InputPromptBar } from './InputPromptBar.js';
+import { CLI } from '../../cli-ui.js';
 
 interface AppProps {
   store: TuiStore;
@@ -18,6 +19,9 @@ interface AppProps {
 
 export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
   const [state, setState] = useState<TuiState>(store.getState());
+  const { columns } = useWindowSize();
+  // The final-answer box has two border cells and two horizontal padding cells.
+  const answerWidth = Math.max(1, (columns || 80) - 4);
 
   useEffect(() => {
     const onStoreChange = (newState: TuiState) => {
@@ -119,7 +123,7 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
             <Text dimColor>RESULT</Text>
           </Box>
           <Box flexDirection="column" marginTop={1}>
-            <Text color="white" wrap="wrap">{state.finalAnswer}</Text>
+            <Text color="white" wrap="wrap">{CLI.formatMarkdownTables(state.finalAnswer, { width: answerWidth, layout: 'stacked' })}</Text>
           </Box>
         </Box>
       )}

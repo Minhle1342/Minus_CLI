@@ -480,8 +480,28 @@ export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATI
    - Structured Peer-Review: Use brainstorm_design before major architecture changes (Primary Designer, Skeptic, Constraint Guardian, User Advocate, Integrator/Arbiter).`;
 
 /**
- * Default prompt-section configuration registered into PromptAssembler.
+ * Renderer-compatible table instructions, disclosed only for tabular requests.
  */
+export const SECTION_TABULAR_OUTPUT = `TABULAR OUTPUT (TERMINAL/TUI):
+- Use a standard Markdown pipe table only when the requested answer needs tabular data. Respect a requested non-table format.
+- Include a header and separator row, with exactly the same number of cells in every row; retain empty cells.
+- Escape literal pipes in cells as \\|, including pipes inside inline code. Keep each row on one physical line; use <br> for line breaks within a cell.
+- Do not draw ASCII/Unicode box borders, pad columns with spaces, or put the table inside a code fence to force alignment.
+- Preserve full values, identifiers, paths and URLs. Never truncate or omit data just to fit terminal width.
+- The renderer handles wrapping and layout: the Ink TUI displays each row as a vertical record with column labels; other CLI views may render a grid. Do not pre-render that layout yourself.`;
+
+/** Conservative output-intent gate: table mentions in code tasks are not enough. */
+export function needsTabularOutput(request?: string): boolean {
+  if (!request?.trim()) return false;
+  const text = request
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
+    .toLowerCase();
+  if (/\b(?:no tables?|without (?:a )?tables?|do not (?:use|create|include) (?:a )?tables?|don't (?:use|create|include) (?:a )?tables?|khong (?:dung|can|tao|su dung) bang)\b/.test(text)) return false;
+  return /\b(?:tabular (?:data|output|format)|tabulate|(?:as|in) (?:a |an )?(?:markdown |pipe )?table|(?:create|make|show|generate) (?:me )?(?:a |an )?(?:markdown |comparison )?table\s*(?:$|showing|listing|summarizing|with columns)|table (?:of|format)|(?:comparison|feature|pricing) (?:table|matrix)|lap bang|tao bang (?:so sanh|thong ke|tong hop|du lieu)|(?:dang|duoi dang|dinh dang) bang|bang (?:markdown|so sanh|thong ke|tong hop))\b/.test(text);
+}
+
+/** Default prompt-section configuration registered into PromptAssembler. */
 export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'core', content: CORE_SYSTEM_PROMPT, priority: -1000 },
   { id: 'git-operations', content: SECTION_GIT_OPERATIONS, priority: 100, condition: (ctx: PromptAssemblyContext) => ctx.hasGitTools ?? true },
@@ -498,6 +518,7 @@ export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },
   { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },
   { id: 'architecture-analysis', content: SECTION_ARCHITECTURE_ANALYSIS, priority: 1000, condition: (ctx: PromptAssemblyContext) => ctx.isArchitectureAnalysis ?? false },
+  { id: 'tabular-output', content: SECTION_TABULAR_OUTPUT, priority: 1010, condition: (ctx: PromptAssemblyContext) => needsTabularOutput(ctx.request) },
 ];
 
 /**

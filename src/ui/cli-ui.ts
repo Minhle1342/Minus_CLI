@@ -2135,7 +2135,7 @@ export class CLI {
     // Giảm thiểu khoảng trắng thừa giữa các step
   }
 
-  static formatMarkdownTables(text: string): string {
+  static formatMarkdownTables(text: string, options: { width?: number; layout?: 'grid' | 'stacked' } = {}): string {
     const lines = text.split('\n');
     const result: string[] = [];
     let i = 0;
@@ -2181,8 +2181,33 @@ export class CLI {
         (width, row) => Math.max(width, getVisibleWidth(row[column] || '')),
         1,
       ));
-      const termWidth = getTerminalWidth(95, 60, 130);
+      const termWidth = Number.isFinite(options.width)
+        ? Math.max(1, Math.floor(options.width!))
+        : getTerminalWidth(95, 60, 130);
       const contentBudget = termWidth - (colCount * 3 + 1);
+
+      // Ink can reflow text independently of our padding. In stacked mode no
+      // column alignment is required, and labels stay paired with full values.
+      if (options.layout === 'stacked') {
+        const indent = termWidth > 4 ? '  ' : '';
+        const valueWidth = Math.max(1, termWidth - indent.length);
+        const stacked: string[] = [];
+        const rows = dataRows.length > 0 ? dataRows : [Array<string>(colCount).fill('')];
+        for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+          if (rowIndex > 0) stacked.push('');
+          stacked.push(...wrapVisibleText(`[${rowIndex + 1}]`, termWidth));
+          for (let column = 0; column < colCount; column++) {
+            stacked.push(...wrapVisibleText(`${normalizedHeader[column] || `Column ${column + 1}`}:`, termWidth));
+            // HTML line breaks are common in generated Markdown table cells.
+            const valueLines = rows[rowIndex][column].split(/<br\s*\/?\s*>/i);
+            for (const valueLine of valueLines) {
+              stacked.push(...wrapVisibleText(valueLine.trim(), valueWidth).map(part => `${indent}${part}`));
+            }
+          }
+        }
+        result.push(stacked.join('\n'));
+        continue;
+      }
 
       // If even one character per column cannot fit, switch to a stacked layout
       // instead of emitting a table wider than the terminal.
