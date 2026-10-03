@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { Box, Text, useInput, useWindowSize } from 'ink';
-import { SLASH_COMMANDS } from '../../cli-ui.js';
+import { SLASH_COMMANDS, getVisibleWidth } from '../../cli-ui.js';
+import { inkColors } from '../../tui-theme.js';
 import { Workspace } from '../../../workspace/workspace.js';
 import { FileMentionEngine } from '../../../workspace/file-attachment.js';
 import {
@@ -445,14 +446,25 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
   const safeSelectedIndex = suggestions.length > 0
     ? Math.min(Math.max(0, selectedIndex), suggestions.length - 1)
     : 0;
-  // ponytail: grapheme count can overflow on wide glyphs; use terminal-cell width measurement if that matters.
-  const visibleCount = Math.max(1, columns - 5);
+  const visibleCells = Math.max(1, columns - 5);
   const cursorGraphemeIndex = graphemes.findIndex(({ index }) => index >= cursorOffset);
-  const viewportStart = Math.min(
-    Math.max(0, graphemes.length - visibleCount),
-    Math.max(0, (cursorGraphemeIndex < 0 ? graphemes.length : cursorGraphemeIndex) - visibleCount + 1),
-  );
-  const visibleGraphemes = graphemes.slice(viewportStart, viewportStart + visibleCount);
+  const cursorViewIndex = cursorGraphemeIndex < 0 ? graphemes.length : cursorGraphemeIndex;
+  let viewportStart = cursorViewIndex;
+  let usedCells = cursorGraphemeIndex < 0 ? 1 : getVisibleWidth(graphemes[cursorViewIndex].segment);
+  while (viewportStart > 0) {
+    const previousWidth = getVisibleWidth(graphemes[viewportStart - 1].segment);
+    if (usedCells + previousWidth > visibleCells) break;
+    usedCells += previousWidth;
+    viewportStart--;
+  }
+  let viewportEnd = cursorGraphemeIndex < 0 ? cursorViewIndex : cursorViewIndex + 1;
+  while (viewportEnd < graphemes.length) {
+    const nextWidth = getVisibleWidth(graphemes[viewportEnd].segment);
+    if (usedCells + nextWidth > visibleCells) break;
+    usedCells += nextWidth;
+    viewportEnd++;
+  }
+  const visibleGraphemes = graphemes.slice(viewportStart, viewportEnd);
   const visibleBeforeCursor = visibleGraphemes.filter(({ index }) => index < cursorOffset).map(({ segment }) => segment).join('');
   const cursorGrapheme = visibleGraphemes.find(({ index }) => index === cursorOffset)?.segment;
   const visibleAfterCursor = visibleGraphemes
@@ -464,15 +476,15 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
     <Box flexDirection="column" paddingX={1} marginY={0}>
       {/* Khung Gợi Ý Interactive với Phím Điều Hướng */}
       {showSuggestions && (
-        <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
+        <Box flexDirection="column" borderStyle="single" borderColor={inkColors.muted} paddingX={1} marginY={0}>
           <Box justifyContent="space-between">
-            <Text color="red" bold>
+            <Text color={inkColors.accent} bold>
               {suggestionType === 'command'
-                ? '⚡ GỢI Ý SLASH COMMANDS'
-                : '📁 GỢI Ý FILE / THƯ MỤC (@MENTION)'}
+                ? 'Lệnh'
+                : 'Tệp / thư mục'}
             </Text>
-            <Text color="gray" dimColor>
-              ↑/↓: Chọn · Tab/Enter: Điền · Esc: Đóng
+            <Text color={inkColors.muted}>
+              ↑/↓ chọn · Tab điền · Esc đóng
             </Text>
           </Box>
           <Box flexDirection="column" marginTop={0}>
@@ -482,21 +494,21 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
 
               return (
                 <Box key={`${item.label}-${index}`} gap={1}>
-                  <Text color={isSelected ? 'red' : 'gray'} bold>
+                  <Text color={isSelected ? inkColors.accent : inkColors.muted} bold>
                     {isSelected ? '❯' : ' '}
                   </Text>
-                  <Text color={isSelected ? 'red' : 'white'} bold>
+                  <Text color={isSelected ? inkColors.accent : inkColors.muted} bold>
                     {badge}
                   </Text>
                   <Text
-                    color="white"
+                    color={isSelected ? inkColors.accent : undefined}
                     bold={isSelected}
-                    underline={isSelected}
+                    wrap="truncate-end"
                   >
                     {item.label}
                   </Text>
                   {item.desc && (
-                    <Text color="gray" dimColor>
+                    <Text color={inkColors.muted} wrap="truncate-end">
                       ─ {item.desc}
                     </Text>
                   )}
@@ -509,33 +521,33 @@ export const InputPromptBar: React.FC<InputPromptBarProps> = ({
 
       {/* Dòng nhập lệnh chính với cursor rendering chân thực */}
       {disabled ? (
-        <Box gap={1} width={Math.max(1, columns - 2)} backgroundColor="gray" marginTop={0}>
-          <Text color="red" bold>❯</Text>
-          <Text color="gray" dimColor>[Đang thực thi nhiệm vụ... Nhấn Esc hoặc Ctrl+C để hủy yêu cầu]</Text>
+        <Box gap={1} width={Math.max(1, columns - 2)} marginTop={0}>
+          <Text color={inkColors.accent} bold>❯</Text>
+          <Text color={inkColors.muted} wrap="truncate-end">Đang chạy · Esc/Ctrl+C hủy</Text>
         </Box>
       ) : (
-        <Box gap={1} width={Math.max(1, columns - 2)} backgroundColor="gray" marginTop={0}>
-          <Text color="red" bold>❯</Text>
+        <Box gap={1} width={Math.max(1, columns - 2)} marginTop={0}>
+          <Text color={inkColors.accent} bold>❯</Text>
           {value.length === 0 ? (
-            <Text color="red">█</Text>
+            <Text color={inkColors.accent}>▌</Text>
           ) : !cursorGrapheme ? (
             <Box>
-              <Text color="white">{visibleGraphemes.map(({ segment }) => segment).join('')}</Text>
-              <Text color="red">█</Text>
+              <Text>{visibleGraphemes.map(({ segment }) => segment).join('')}</Text>
+              <Text color={inkColors.accent}>▌</Text>
             </Box>
           ) : (
             <Box>
-              <Text color="white">{visibleBeforeCursor}</Text>
-              <Text backgroundColor="white" color="black">
+              <Text>{visibleBeforeCursor}</Text>
+              <Text inverse>
                 {cursorGrapheme}
               </Text>
-              <Text color="white">{visibleAfterCursor}</Text>
+              <Text>{visibleAfterCursor}</Text>
             </Box>
           )}
         </Box>
       )}
       {!disabled && value.length === 0 && (
-        <Text color="gray" dimColor>Enter gửi · ↑/↓ lịch sử · Ctrl+O reasoning · Esc xóa/hủy</Text>
+        <Text color={inkColors.muted} wrap="truncate-end">Enter gửi · ↑/↓ lịch sử · Ctrl+O suy nghĩ · Esc xóa/hủy</Text>
       )}
     </Box>
   );

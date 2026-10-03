@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { AgentUIStatus } from '../types.js';
 import { LoadingSpinner } from './StepStream.js';
+import { inkColors } from '../../tui-theme.js';
 
 interface LiveReasoningBoxProps {
   reasoning: string;
@@ -58,7 +59,7 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   const lines = clean.split('\n').slice(-6);
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor={inkColors.muted} paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
         <Text color="red" bold>🧠 REASONING TRACE (System 2 CoT)</Text>
         <Text color="gray">[Ctrl+O to collapse]</Text>
@@ -66,8 +67,8 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
       {reasoningInterrupted && <Text color="yellow">{isAborting ? 'Stopping…' : 'Thinking interrupted'}</Text>}
       <Box flexDirection="column" marginTop={0}>
         {lines.map((line, idx) => (
-          <Text key={idx} color="white" italic>
-            {line.length > 90 ? `${line.slice(0, 87)}…` : line}
+          <Text key={idx} wrap="truncate-end">
+            {line}
           </Text>
         ))}
       </Box>

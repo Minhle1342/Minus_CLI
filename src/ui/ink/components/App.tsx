@@ -10,6 +10,7 @@ import { DiffPreviewBox } from './DiffPreviewBox.js';
 import { PermissionPromptBox } from './PermissionPromptBox.js';
 import { InputPromptBar } from './InputPromptBar.js';
 import { CLI } from '../../cli-ui.js';
+import { inkColors } from '../../tui-theme.js';
 
 interface AppProps {
   store: TuiStore;
@@ -100,9 +101,9 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
 
       {/* 6. Retry Information Banner (Exponential Backoff Feedback) */}
       {state.retryInfo && (
-        <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
-          <Text color="red" bold>
-            🔄 [RETRYING] Đang thử lại (lần {state.retryInfo.attempt}/{state.retryInfo.maxRetries}) sau {(state.retryInfo.delayMs / 1000).toFixed(1)}s...
+        <Box paddingX={1} marginY={0}>
+          <Text color={inkColors.warning}>
+            Đang thử lại {state.retryInfo.attempt}/{state.retryInfo.maxRetries} sau {(state.retryInfo.delayMs / 1000).toFixed(1)}s
             {state.retryInfo.message ? ` (${state.retryInfo.message})` : ''}
           </Text>
         </Box>
@@ -130,8 +131,8 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
 
       {/* 9. Error Banner */}
       {state.errorMessage && (
-        <Box borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
-          <Text color="red" bold>✖ LỖI: {state.errorMessage}</Text>
+        <Box paddingX={1} marginY={0}>
+          <Text color={inkColors.danger} bold>Lỗi: {state.errorMessage}</Text>
         </Box>
       )}
 

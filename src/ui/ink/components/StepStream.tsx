@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { TuiStepItem } from '../types.js';
+import { inkColors } from '../../tui-theme.js';
 
 export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -25,12 +26,12 @@ export const BlinkingDot: React.FC<{ active?: boolean }> = ({ active = true }) =
 
   if (!active) {
     return (
-      <Text color="gray">●</Text>
+      <Text color={inkColors.muted}>●</Text>
     );
   }
 
   return (
-    <Text color="#34A853" bold>{visible ? '●' : ' '}</Text>
+    <Text color={inkColors.accent} bold>{visible ? '●' : ' '}</Text>
   );
 };
 
@@ -52,10 +53,10 @@ export const LoadingSpinner: React.FC<{ startTime?: number }> = ({ startTime }) 
 
   return (
     <Box gap={1}>
-      <Text color="red" bold>
+      <Text color={inkColors.accent} bold>
         {SPINNER_FRAMES[frameIndex]}
       </Text>
-      <Text color="white">
+      <Text>
         running ({sec}s)
       </Text>
     </Box>
@@ -214,7 +215,7 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
   if (visibleSteps.length === 0) {
     return (
       <Box paddingX={1} marginY={0}>
-        <Text color="gray" italic>Chưa có bước thực thi nào...</Text>
+        <Text color={inkColors.muted}>Chưa có bước thực thi nào…</Text>
       </Box>
     );
   }
@@ -233,21 +234,21 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
         if (step.status === 'running') {
           statusElement = <LoadingSpinner startTime={step.timestamp} />;
         } else if (step.status === 'failed') {
-          statusElement = <Text color="red">✖ failed</Text>;
+          statusElement = <Text color={inkColors.danger}>✖ failed</Text>;
         } else if (step.result && step.result.stdout !== undefined) {
           statusElement = (
-            <Text color="white">
-              ✔ {step.result.exitCode === 0 ? 'exit 0' : `exit ${step.result.exitCode}`}
+            <Text color={step.result.exitCode === 0 ? inkColors.success : inkColors.danger}>
+              {step.result.exitCode === 0 ? '✔' : '✖'} {step.result.exitCode === 0 ? 'exit 0' : `exit ${step.result.exitCode}`}
             </Text>
           );
         } else if (step.result && step.result.replacements !== undefined) {
-          statusElement = <Text color="white">✔ {step.result.replacements} replaced</Text>;
+          statusElement = <Text color={inkColors.success}>✔ {step.result.replacements} replaced</Text>;
         } else if (step.result && step.result.created) {
-          statusElement = <Text color="white">✔ created</Text>;
+          statusElement = <Text color={inkColors.success}>✔ created</Text>;
         } else if (step.result && step.result.hunksApplied !== undefined) {
-          statusElement = <Text color="white">✔ {step.result.hunksApplied} hunks</Text>;
+          statusElement = <Text color={inkColors.success}>✔ {step.result.hunksApplied} hunks</Text>;
         } else {
-          statusElement = <Text color="white">✔ OK</Text>;
+          statusElement = <Text color={inkColors.success}>✔ OK</Text>;
         }
 
         const durationStr = step.durationMs > 0 ? ` (${step.durationMs}ms)` : '';
@@ -267,17 +268,18 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
 
         return (
           <Box key={step.id} flexDirection="column">
-            <Box gap={1}>
-              <BlinkingDot active={step.status === 'running'} />
-              <Text bold color="white">{step.toolName}</Text>
-              <Text color="gray">{targetStr}</Text>
-              {statusElement}
-              {durationStr && <Text color="gray">{durationStr}</Text>}
-              {tokStr && <Text color="gray">{tokStr}</Text>}
-            </Box>
+            <Text wrap="wrap">
+              <BlinkingDot active={step.status === 'running'} />{' '}
+              <Text bold>{step.toolName}</Text>
+              <Text color={inkColors.muted}>{targetStr}</Text>
+              {step.status !== 'running' && <> {statusElement}</>}
+              {durationStr && <Text color={inkColors.muted}>{durationStr}</Text>}
+              {tokStr && <Text color={inkColors.muted}>{tokStr}</Text>}
+            </Text>
+            {step.status === 'running' && <Box paddingLeft={2}>{statusElement}</Box>}
             {isError && errDetail && (
               <Box paddingLeft={2}>
-                <Text color="red">└─ {errDetail}</Text>
+                <Text color={inkColors.danger}>└─ {errDetail}</Text>
               </Box>
             )}
           </Box>

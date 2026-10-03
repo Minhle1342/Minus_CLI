@@ -71,7 +71,7 @@ const ansiColors = {
   cardBg: '',
 
   // Backgrounds
-  bgCyan: '\x1b[46m',
+  bgCyan: '\x1b[36m', // Legacy name; queue notices use foreground accent.
   bgBlue: '\x1b[44m',
   bgMagenta: '\x1b[45m',
   bgBlack: '\x1b[40m',
@@ -1004,6 +1004,20 @@ export function truncateToTerminalWidth(value: string, maxWidth: number): string
   return result + suffix;
 }
 
+function wrapTerminalLine(value: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let current = '';
+  for (const { segment } of SHARED_SEGMENTER.segment(value)) {
+    if (current && getVisibleWidth(current + segment) > maxWidth) {
+      lines.push(current);
+      current = '';
+    }
+    current += segment;
+  }
+  lines.push(current);
+  return lines;
+}
+
 export function wrapVisibleText(text: string, maxWidth: number): string[] {
   if (maxWidth <= 0) return [text];
   const words = text.split(' ');
@@ -1273,22 +1287,26 @@ export class CLI {
    */
   static renderBanner(opts: BannerOptions): void {
     const wsName = path.basename(opts.workspaceRoot) || opts.workspaceRoot;
-    const branch = opts.activeBranch ? ` · ${c.brightCyan}git:${opts.activeBranch}${c.reset}` : '';
+    const width = Math.max(1, getTerminalWidth() - 2);
+    const branch = opts.activeBranch ? ` · git:${opts.activeBranch}` : '';
     const steps = isFinite(opts.maxSteps) ? `${opts.maxSteps} steps` : 'dynamic ∞';
 
-    console.log(`\n  ${c.brightCyan}${c.bold}⚡ MINUS CLI${c.reset} ${c.slate}v2.5${c.reset} · ${c.bold}${opts.modelName}${c.reset}${branch} · ${c.slate}${wsName}${c.reset}`);
-    console.log(`  ${c.slate}Workspace:${c.reset} ${c.brightCyan}${opts.workspaceRoot}${c.reset}`);
-    console.log(`  ${c.slate}Budget: ${steps} · ${opts.tools.length} tools · Type ${c.brightCyan}/help${c.slate} for commands, ${c.white}Ctrl+C${c.slate} to cancel.${c.reset}\n`);
+    console.log(`\n  ${c.cyan}${c.bold}MINUS CLI${c.reset} ${c.slate}${truncateToTerminalWidth(`v2.5 · ${opts.modelName}${branch} · ${wsName}`, width - 10)}${c.reset}`);
+    console.log(`  ${c.slate}Workspace:${c.reset} ${truncateToTerminalWidth(opts.workspaceRoot, width - 11)}`);
+    console.log(`  ${c.slate}${truncateToTerminalWidth(`${steps} · ${opts.tools.length} tools · /help · Ctrl+C hủy`, width)}${c.reset}\n`);
   }
 
   /**
    * Hiển thị bảng lệnh gợi ý nhanh gọn
    */
   static renderQuickCommands(): void {
-    console.log(`\n${c.brightCyan}${c.bold}❯ COMMANDS${c.reset}`);
+    const width = Math.max(1, getTerminalWidth() - 2);
+    console.log(`\n  ${c.cyan}${c.bold}Lệnh${c.reset}`);
     for (const cmd of SLASH_COMMANDS) {
-      const aliasStr = cmd.aliases?.length ? ` ${c.slate}(${cmd.aliases.join(', ')})${c.reset}` : '';
-      console.log(`  ${c.brightCyan}${cmd.command.padEnd(16)}${c.reset} ${c.mutedText}${cmd.description}${aliasStr}${c.reset}`);
+      const name = truncateToTerminalWidth(cmd.command, width);
+      const descriptionText = `${cmd.description}${cmd.aliases?.length ? ` (${cmd.aliases.join(', ')})` : ''}`;
+      const description = truncateToTerminalWidth(descriptionText, width - getVisibleWidth(name) - 1);
+      console.log(`  ${c.cyan}${name}${c.reset}${description ? ` ${c.mutedText}${description}${c.reset}` : ''}`);
     }
     console.log('');
   }
@@ -1305,16 +1323,14 @@ export class CLI {
     for (const m of AVAILABLE_MODELS) {
       if (m.provider !== lastProvider) {
         lastProvider = m.provider;
-        console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.geminiAmber}${c.bold}❖ ${m.provider.toUpperCase()}${c.reset}`);
+        console.log(`\n  ${c.slate}${truncateToTerminalWidth(m.provider.toUpperCase(), width)}${c.reset}`);
       }
 
       const isCurrent = m.name === currentModel;
-      const marker = isCurrent ? ` ${c.emerald}${c.bold}* [ACTIVE]${c.reset}` : '';
-      const recBadge = m.recommended ? ` ${c.geminiAmber}(Recommended)${c.reset}` : '';
-      
-      console.log(`${c.geminiPurple}${c.bold}│${c.reset}    ${c.brightCyan}${c.bold}[${m.id.padStart(2, ' ')}]${c.reset} ${c.bold}${m.name}${c.reset}${recBadge}${marker}`);
-      console.log(`${c.geminiPurple}${c.bold}│${c.reset}         ${c.mutedText}${m.desc}${c.reset}`);
-      console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
+      const prefix = `${isCurrent ? '●' : m.recommended ? '★' : ' '} [${m.id}] `;
+      const label = truncateToTerminalWidth(m.name, width - getVisibleWidth(prefix));
+      console.log(`  ${isCurrent ? c.emerald : m.recommended ? c.amber : c.cyan}${prefix}${c.reset}${c.bold}${label}${c.reset}`);
+      if (m.desc) console.log(`    ${c.mutedText}${truncateToTerminalWidth(m.desc, width - 2)}${c.reset}`);
     }
 
     console.log(`${createBoxDivider(c.geminiPurple, width)}`);
@@ -1326,7 +1342,8 @@ export class CLI {
    * Bảng hướng dẫn sử dụng tối giản
    */
   static renderHelp(): void {
-    console.log(`\n${c.brightCyan}${c.bold}❯ MINUS CLI GUIDE${c.reset}`);
+    const width = Math.max(1, getTerminalWidth() - 4);
+    console.log(`\n  ${c.cyan}${c.bold}Hướng dẫn${c.reset}`);
     const byCategory = new Map<string, SlashCommandDefinition[]>();
     for (const cmd of SLASH_COMMANDS) {
       const cat = cmd.category || 'General';
@@ -1335,9 +1352,11 @@ export class CLI {
       byCategory.set(cat, list);
     }
     for (const [cat, cmds] of byCategory.entries()) {
-      console.log(`\n  ${c.geminiAmber}${c.bold}${cat}${c.reset}`);
+      console.log(`\n  ${c.amber}${c.bold}${truncateToTerminalWidth(cat, width)}${c.reset}`);
       for (const item of cmds) {
-        console.log(`    ${c.brightCyan}${(item.usage || item.command).padEnd(26)}${c.reset} ${c.mutedText}${item.description}${c.reset}`);
+        const usage = truncateToTerminalWidth(item.usage || item.command, width - 2);
+        const description = truncateToTerminalWidth(item.description, width - getVisibleWidth(usage) - 3);
+        console.log(`    ${c.cyan}${usage}${c.reset}${description ? ` ${c.mutedText}${description}${c.reset}` : ''}`);
       }
     }
     console.log('');
@@ -1845,10 +1864,10 @@ export class CLI {
       isGoal?: boolean;
     },
   ): void {
-    const stepTag = `STEP ${_step}/${_maxSteps}`;
-    const taskTag = context?.activeTask ? `─── [${stepTag}] "${truncateDisplayText(context.activeTask, 40)}" ───` : `─── [${stepTag}] ─────────────────────────`;
-
-    console.log(`\n${c.slate}${taskTag}──────────────────────────────${c.reset}`);
+    const width = getTerminalWidth();
+    const label = `─── STEP ${_step}/${_maxSteps}${context?.activeTask ? ` · ${context.activeTask}` : ''} `;
+    const visibleLabel = truncateToTerminalWidth(label, width);
+    console.log(`\n${c.slate}${visibleLabel}${'─'.repeat(Math.max(0, width - getVisibleWidth(visibleLabel)))}${c.reset}`);
   }
 
   /**
@@ -2016,14 +2035,10 @@ export class CLI {
    */
   static renderCompactOneLiner(opts: CompactStepOptions): void {
     const isError = isToolResultFailure(opts.result);
-
-    const dot = `${c.emerald}●${c.reset}`;
-    const toolPrefix = `${dot} ${c.bold}${opts.toolName}${c.reset}`;
-
+    const width = getTerminalWidth();
+    const dot = `${isError ? c.crimson : c.emerald}●${c.reset}`;
     const rawTarget = opts.args.path || opts.args.filePath || opts.args.targetFile
       || opts.args.command || opts.args.query || opts.args.statement || opts.args.summary || '';
-    const targetStr = rawTarget ? ` "${c.white}${truncateDisplayText(String(rawTarget), 40)}${c.reset}"` : '';
-
     const duration = opts.durationMs > 0 ? ` ${c.slate}(${opts.durationMs}ms)${c.reset}` : '';
 
     let statusBadge = '';
@@ -2049,11 +2064,22 @@ export class CLI {
       telemetryStr = ` ${c.dim}· ${tokStr}${c.reset}`;
     }
 
-    process.stdout.write(`  ${toolPrefix}${targetStr}${statusBadge}${duration}${telemetryStr}\n`);
+    const toolName = truncateToTerminalWidth(opts.toolName, Math.max(3, Math.floor(width / 3)));
+    const toolPrefix = `${dot} ${c.bold}${toolName}${c.reset}`;
+    const baseWidth = getVisibleWidth(`  ${toolPrefix}${statusBadge}`);
+    const targetReserve = rawTarget ? 8 : 0;
+    const visibleDuration = baseWidth + getVisibleWidth(duration) + targetReserve <= width ? duration : '';
+    const visibleTelemetry = baseWidth + getVisibleWidth(visibleDuration + telemetryStr) + targetReserve <= width ? telemetryStr : '';
+    const targetWidth = width - getVisibleWidth(`  ${toolPrefix}${statusBadge}${visibleDuration}${visibleTelemetry}`) - 3;
+    const targetStr = rawTarget && targetWidth > 1
+      ? ` "${c.white}${truncateToTerminalWidth(String(rawTarget), targetWidth)}${c.reset}"`
+      : '';
+
+    process.stdout.write(`  ${toolPrefix}${targetStr}${statusBadge}${visibleDuration}${visibleTelemetry}\n`);
 
     if (isError) {
       const cleanErr = formatTuiErrorDetail(getToolFailureDetail(opts.result), 120);
-      process.stdout.write(`    ${c.crimson}└─ ${cleanErr}${c.reset}\n`);
+      process.stdout.write(`    ${c.crimson}└─ ${truncateToTerminalWidth(cleanErr, Math.max(1, width - 7))}${c.reset}\n`);
     }
   }
 
@@ -2396,7 +2422,7 @@ export class CLI {
       }
       const langTag = lang ? ` ${c.slate}[${lang}]${c.reset}` : '';
       output.push(`\n  ${c.slate}── Code${langTag} ──${c.reset}\n`
-        + codeLines.map((codeLine) => `  ${c.brightCyan}${codeLine}${c.reset}`).join('\n')
+        + codeLines.map((codeLine) => `  ${codeLine}`).join('\n')
         + `\n  ${c.slate}──────────────${c.reset}\n`);
     }
 
@@ -2563,23 +2589,26 @@ export class CLI {
       : `└── ⏳ [MINUS PERMISSION APPROVAL] Please review before granting permission ────────┘`;
 
     let buf = `\n  ${c.brightCyan}${bannerHeader}${c.reset}\n`;
+    const contentWidth = Math.max(1, getTerminalWidth() - 4);
 
     const maxLines = 50;
     const renderLines = lines.slice(0, maxLines);
 
     for (const line of renderLines) {
+      let lineColor = '';
       if (line.startsWith('---') || line.startsWith('+++')) {
-        buf += `  ${c.dim}${c.white}${line}${c.reset}\n`;
+        lineColor = c.slate;
       } else if (line.startsWith('@@')) {
-        buf += `  ${c.brightCyan}${line}${c.reset}\n`;
+        lineColor = c.cyan;
       } else if (line.startsWith('-')) {
-        buf += `  ${c.crimson}${line}${c.reset}\n`;
+        lineColor = c.crimson;
       } else if (line.startsWith('+')) {
-        buf += `  ${c.emerald}${line}${c.reset}\n`;
+        lineColor = c.emerald;
       } else if (line.startsWith('rename from ') || line.startsWith('rename to ') || line.startsWith('similarity index ')) {
-        buf += `  ${c.brightYellow}${line}${c.reset}\n`;
-      } else {
-        buf += `  ${c.slate}${line}${c.reset}\n`;
+        lineColor = c.amber;
+      }
+      for (const segment of wrapTerminalLine(line.replace(/\t/g, '    '), contentWidth)) {
+        buf += `  ${lineColor}${segment}${c.reset}\n`;
       }
     }
 
@@ -2587,7 +2616,7 @@ export class CLI {
       buf += `  ${c.slate}  ... (+${lines.length - maxLines} more changed lines)${c.reset}\n`;
     }
 
-    buf += `  ${c.brightCyan}${bannerFooter}${c.reset}`;
+    buf += `  ${c.slate}${truncateToTerminalWidth(isAuto ? 'Thay đổi sẽ tự động áp dụng' : 'Xem kỹ trước khi cấp quyền', contentWidth)}${c.reset}`;
     console.log(buf);
   }
 

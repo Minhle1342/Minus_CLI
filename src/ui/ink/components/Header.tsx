@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { AgentUIStatus, UIWorkflowPhase } from '../types.js';
+import { inkColors } from '../../tui-theme.js';
 
 interface HeaderProps {
   modelName: string;
@@ -22,42 +23,27 @@ export const Header: React.FC<HeaderProps> = ({
   const shortWorkspace = safeWorkspace.length > 30 ? `…${safeWorkspace.slice(-28)}` : safeWorkspace;
   const safeSandbox = (sandboxMode || 'local').toUpperCase();
 
-  let statusColor = 'gray';
-  let statusLabel = 'IDLE';
+  let statusColor: string | undefined = inkColors.muted;
+  let statusLabel = 'Sẵn sàng';
   if (status === 'thinking') {
-    statusColor = 'red';
-    statusLabel = 'THINKING';
+    statusColor = inkColors.accent;
+    statusLabel = 'Đang suy nghĩ';
   } else if (status === 'executing_tool') {
-    statusColor = 'white';
-    statusLabel = 'EXECUTING';
+    statusColor = inkColors.accent;
+    statusLabel = 'Đang chạy';
   } else if (status === 'completed') {
-    statusColor = 'white';
-    statusLabel = 'COMPLETED';
+    statusColor = inkColors.success;
+    statusLabel = 'Hoàn tất';
   } else if (status === 'error') {
-    statusColor = 'red';
-    statusLabel = 'ERROR';
+    statusColor = inkColors.danger;
+    statusLabel = 'Lỗi';
   }
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1} marginY={0}>
-      <Box justifyContent="space-between">
-        <Box gap={1}>
-          <Text bold color="red">MINUS CODING AGENT</Text>
-          <Text color="gray">│</Text>
-          <Text color="white">🤖 {modelName}</Text>
-          <Text color="gray">│</Text>
-          <Text color="white">🛡️  {safeSandbox}</Text>
-        </Box>
-        <Box gap={1}>
-          <Text color="gray">📁 {shortWorkspace}</Text>
-        </Box>
-      </Box>
-      <Box justifyContent="flex-end" marginTop={0}>
-        <Box gap={1}>
-          <Text color="gray">Trạng thái:</Text>
-          <Text color={statusColor} bold>{statusLabel}</Text>
-        </Box>
-      </Box>
+    <Box flexDirection="column" paddingX={1} marginY={0}>
+      <Text wrap="truncate-end"><Text bold color={inkColors.accent}>MINUS</Text> · {modelName}</Text>
+      <Text color={inkColors.muted} wrap="truncate-end">{shortWorkspace} · {safeSandbox}</Text>
+      <Text color={statusColor}>{statusLabel}</Text>
     </Box>
   );
 };

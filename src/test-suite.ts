@@ -133,6 +133,7 @@ import {
   isToolResultFailure,
   writeTypewriterText,
 } from './ui/cli-ui.js';
+import { supportsTerminalColor } from './ui/tui-theme.js';
 import { AgentInbox } from './agent/agent-inbox.js';
 import { createStartBackgroundTaskTool, createGetTaskOutputTool, createStopTaskTool } from './tools/task-tools.js';
 import { createManageTaskTool } from './tools/manage-task.js';
@@ -986,8 +987,12 @@ async function runUnitTests() {
     assert(output.includes('+const x = 2;'), 'renderDiffView in nội dung dòng mới');
     const hasRed = output.includes('\x1b[31m') || output.includes('\x1b[38;5;196m');
     const hasGreen = output.includes('\x1b[32m') || output.includes('\x1b[38;5;48m');
-    assert(hasRed, 'renderDiffView tô màu đỏ cho dòng xóa/thay thế (-) trong Git Diff');
-    assert(hasGreen, 'renderDiffView tô màu xanh cho dòng thêm mới (+) trong Git Diff');
+    if (supportsTerminalColor()) {
+      assert(hasRed, 'renderDiffView tô màu đỏ cho dòng xóa/thay thế (-) trong Git Diff');
+      assert(hasGreen, 'renderDiffView tô màu xanh cho dòng thêm mới (+) trong Git Diff');
+    } else {
+      assert(!output.includes('\x1b['), 'Không in mã màu khi đầu ra không phải TTY');
+    }
   }
 
   // Test 3.9.5: Kiểm tra CLI.renderPermissionPrompt tự động hiển thị Diff View khi request.diff tồn tại

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { TuiDiffPayload } from '../types.js';
+import { inkColors } from '../../tui-theme.js';
 
 interface DiffPreviewBoxProps {
   diff: TuiDiffPayload;
@@ -13,30 +14,30 @@ export const DiffPreviewBox: React.FC<DiffPreviewBoxProps> = ({ diff }) => {
   const remainingCount = lines.length - maxLines;
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="red" paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor={inkColors.muted} paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
-        <Text color="red" bold>
-          {diff?.isAutoApproved ? '⚡ [AUTO-APPROVED DIFF]' : '📝 [DIFF PREVIEW]'}: {diff?.file || 'unknown'}
+        <Text color={inkColors.accent} bold wrap="truncate-end">
+          Diff · {diff?.file || 'unknown'}{diff?.isAutoApproved ? ' (tự động duyệt)' : ''}
         </Text>
       </Box>
       <Box flexDirection="column" marginTop={0}>
         {renderLines.map((line, idx) => {
-          const text = typeof line === 'string' ? line : String(line ?? '');
-          let lineColor = 'gray';
-          if (text.startsWith('+')) lineColor = 'white';
-          else if (text.startsWith('-')) lineColor = 'red';
-          else if (text.startsWith('@@')) lineColor = 'red';
-          else if (text.startsWith('---') || text.startsWith('+++')) lineColor = 'white';
+          const text = (typeof line === 'string' ? line : String(line ?? '')).replace(/\t/g, '    ');
+          let lineColor: string | undefined;
+          if (text.startsWith('---') || text.startsWith('+++')) lineColor = inkColors.muted;
+          else if (text.startsWith('@@')) lineColor = inkColors.accent;
+          else if (text.startsWith('+')) lineColor = inkColors.success;
+          else if (text.startsWith('-')) lineColor = inkColors.danger;
 
           return (
-            <Text key={`diff-line-${idx}`} color={lineColor}>
-              {text.length > 95 ? `${text.slice(0, 92)}…` : text}
+            <Text key={`diff-line-${idx}`} color={lineColor} wrap="wrap">
+              {text}
             </Text>
           );
         })}
         {remainingCount > 0 && (
-          <Text color="gray" italic>
-            ... (+{remainingCount} dòng thay đổi nữa)
+          <Text color={inkColors.muted}>
+            … và {remainingCount} dòng nữa
           </Text>
         )}
       </Box>

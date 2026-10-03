@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import { TuiPermissionRequest } from '../types.js';
 import { formatToolTargetWithLines } from './StepStream.js';
+import { inkColors } from '../../tui-theme.js';
 
 export interface PermissionPromptBoxProps {
   permission: TuiPermissionRequest;
@@ -27,25 +28,21 @@ export const PermissionPromptBox: React.FC<PermissionPromptBoxProps> = ({
   const target = formatToolTargetWithLines(permission.toolName, args) || permission.target || '';
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="yellow" paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor={inkColors.warning} paddingX={1} marginY={0}>
       <Box justifyContent="space-between">
-        <Text color="yellow" bold>
-          ⚠️ YÊU CẦU PHÊ DUYỆT THỰC THI (PERMISSION REQUIRED)
+        <Text color={inkColors.warning} bold>
+          Cần phê duyệt
         </Text>
-        <Text color="gray">[Cần xác nhận]</Text>
       </Box>
 
-      <Box gap={1} marginTop={0}>
-        <Text color="white" bold>Công cụ:</Text>
-        <Text color="yellow" bold>{permission.toolName}</Text>
-        {target ? <Text color="gray">({String(target)})</Text> : null}
-      </Box>
+      <Text wrap="truncate-end"><Text color={inkColors.muted}>Công cụ </Text><Text bold>{permission.toolName}</Text></Text>
+      {target ? <Text color={inkColors.muted} wrap="truncate-end">{String(target)}</Text> : null}
 
       <Box marginTop={0}>
-        <Text color="white">
-          Nhấn <Text color="green" bold>[y]</Text> Duyệt ·{' '}
-          <Text color="cyan" bold>[a]</Text> Luôn duyệt trong phiên ·{' '}
-          <Text color="red" bold>[n/Esc]</Text> Từ chối
+        <Text>
+          <Text color={inkColors.success} bold>y</Text> duyệt ·{' '}
+          <Text color={inkColors.accent} bold>a</Text> cả phiên ·{' '}
+          <Text color={inkColors.danger} bold>n/Esc</Text> từ chối
         </Text>
       </Box>
     </Box>
