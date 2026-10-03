@@ -85,7 +85,8 @@ describe('dark terminal TUI theme', () => {
         CLI.renderDiffView('--- a/very-long-name.ts\n+++ b/very-long-name.ts\n@@ -1,1 +1,1 @@\n-old value with a long explanation\n+new value with a long explanation', 'src/very-long-name.ts');
       });
       assertFits(output, columns);
-      assert.match(output, /Diff · src\/very-long-name\.ts/);
+      assert.match(output, /CHANGE PREVIEW \(DIFF VIEW\)/);
+      assert.match(output, /very-long-name\.ts/);
       assert.match(output, /\+new value/);
     }
   });
@@ -189,6 +190,6 @@ describe('dark terminal TUI theme', () => {
       isThinking: true,
     }), { columns: 40 });
     assertFits(reasoning, 40);
-    assert.match(stripAnsiForDisplay(reasoning), /Suy nghĩ/);
+    assert.match(stripAnsiForDisplay(reasoning), /REASONING TRACE/);
   });
 });

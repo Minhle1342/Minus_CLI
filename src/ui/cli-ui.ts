@@ -1323,18 +1323,19 @@ export class CLI {
     for (const m of AVAILABLE_MODELS) {
       if (m.provider !== lastProvider) {
         lastProvider = m.provider;
-        console.log(`\n  ${c.slate}${truncateToTerminalWidth(m.provider.toUpperCase(), width)}${c.reset}`);
+        console.log(`\n  ${c.slate}${truncateToTerminalWidth(m.provider.toUpperCase(), width - 2)}${c.reset}`);
       }
 
       const isCurrent = m.name === currentModel;
       const prefix = `${isCurrent ? '●' : m.recommended ? '★' : ' '} [${m.id}] `;
-      const label = truncateToTerminalWidth(m.name, width - getVisibleWidth(prefix));
+      const label = truncateToTerminalWidth(m.name, width - 2 - getVisibleWidth(prefix));
       console.log(`  ${isCurrent ? c.emerald : m.recommended ? c.amber : c.cyan}${prefix}${c.reset}${c.bold}${label}${c.reset}`);
-      if (m.desc) console.log(`    ${c.mutedText}${truncateToTerminalWidth(m.desc, width - 2)}${c.reset}`);
+      if (m.desc) console.log(`    ${c.mutedText}${truncateToTerminalWidth(m.desc, width - 4)}${c.reset}`);
     }
 
     console.log(`${createBoxDivider(c.geminiPurple, width)}`);
-    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${c.slate}👉 Enter a model ID (e.g. ${c.brightCyan}0${c.slate}, ${c.brightCyan}1${c.slate}, ${c.brightCyan}9r${c.slate}, ${c.brightCyan}26${c.slate}, ${c.brightCyan}cs${c.slate}...) or ${c.brightCyan}any model name${c.slate} to switch models:${c.reset}`);
+    const switchHint = truncateToTerminalWidth(`${c.slate}👉 Enter a model ID (e.g. ${c.brightCyan}0${c.slate}, ${c.brightCyan}1${c.slate}, ${c.brightCyan}9r${c.slate}, ${c.brightCyan}26${c.slate}, ${c.brightCyan}cs${c.slate}...) or ${c.brightCyan}any model name${c.slate} to switch models:`, width - 3);
+    console.log(`${c.geminiPurple}${c.bold}│${c.reset}  ${switchHint}${c.reset}`);
     console.log(`${createBoxFooter(c.geminiPurple, width)}\n`);
   }
 
@@ -1631,14 +1632,16 @@ export class CLI {
 
     const modeStr = `${c.brightCyan}${options.mode || 'auto'}${c.reset}`;
 
-    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Daemon Status:${c.reset}     ${daemonStatus}`);
-    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Auto-open on dev:${c.reset}    ${autoStatus}`);
-    console.log(`${c.brightCyan}│${c.reset}  ${c.bold}Sandbox Mode:${c.reset}           ${modeStr}`);
+    const statusRow = (text: string) => truncateToTerminalWidth(text, width - 3);
+    console.log(`${c.brightCyan}│${c.reset}  ${statusRow(`${c.bold}Daemon Status:${c.reset}     ${daemonStatus}`)}`);
+    console.log(`${c.brightCyan}│${c.reset}  ${statusRow(`${c.bold}Auto-open on dev:${c.reset}    ${autoStatus}`)}`);
+    console.log(`${c.brightCyan}│${c.reset}  ${statusRow(`${c.bold}Sandbox Mode:${c.reset}           ${modeStr}`)}`);
     console.log(`${createBoxDivider(c.brightCyan, width)}`);
-    console.log(`${c.brightCyan}│${c.reset}  ${c.slate}💡 Quick commands:${c.reset}`);
-    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker on${c.reset}     ➔ Enable auto-open of Docker Desktop on dev`);
-    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker off${c.reset}    ➔ Disable auto-open (run the lightweight Local Sandbox)`);
-    console.log(`${c.brightCyan}│${c.reset}     ${c.brightCyan}/docker start${c.reset}  ➔ Start Docker Desktop immediately`);
+    console.log(`${c.brightCyan}│${c.reset}  ${statusRow(`${c.slate}💡 Quick commands:${c.reset}`)}`);
+    const commandRow = (command: string, description: string) => truncateToTerminalWidth(`${c.brightCyan}${command.padEnd(15)}${c.reset}  ➔ ${c.white}${description}${c.reset}`, width - 6);
+    console.log(`${c.brightCyan}│${c.reset}     ${commandRow('/docker on', 'Enable auto-open of Docker Desktop on dev')}`);
+    console.log(`${c.brightCyan}│${c.reset}     ${commandRow('/docker off', 'Disable auto-open (run the lightweight Local Sandbox)')}`);
+    console.log(`${c.brightCyan}│${c.reset}     ${commandRow('/docker start', 'Start Docker Desktop immediately')}`);
     console.log(`${createBoxFooter(c.brightCyan, width)}\n`);
   }
 
@@ -1662,14 +1665,15 @@ export class CLI {
   static renderDockerStartupPrompt(options: { isAvailable?: boolean; autoStartEnabled?: boolean } = {}): void {
     const width = getTerminalWidth(80, 50, 95);
     console.log(`\n${createBoxHeader('🐳 DOCKER DESKTOP STARTUP OPTIONS', c.geminiBlue, width)}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.amber}Docker Desktop is not running on your machine.${c.reset}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.mutedText}You can open Docker Desktop to use Docker Sandbox & SearXNG,${c.reset}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.mutedText}or skip it to save ~1.5GB RAM (using the safe Local Sandbox).${c.reset}`);
+    const optionRow = (text: string) => truncateToTerminalWidth(text, width - 3);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.amber}Docker Desktop is not running on your machine.${c.reset}`)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.mutedText}You can open Docker Desktop to use Docker Sandbox & SearXNG,${c.reset}`)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.mutedText}or skip it to save ~1.5GB RAM (using the safe Local Sandbox).${c.reset}`)}`);
     console.log(`${createBoxDivider(c.geminiBlue, width)}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[y]${c.reset} ${c.white}Open Docker Desktop now${c.reset}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[n]${c.reset} ${c.slate}Skip (use Local Sandbox)${c.reset}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[a]${c.reset} ${c.emerald}Always auto-open after npm run dev${c.reset}`);
-    console.log(`${c.geminiBlue}│${c.reset}  ${c.brightCyan}${c.bold}[d]${c.reset} ${c.amber}Always skip on npm run dev (do not ask again)${c.reset}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.brightCyan}${c.bold}[y]${c.reset} ${c.white}Open Docker Desktop now${c.reset}`)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.brightCyan}${c.bold}[n]${c.reset} ${c.slate}Skip (use Local Sandbox)${c.reset}`)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.brightCyan}${c.bold}[a]${c.reset} ${c.emerald}Always auto-open after npm run dev${c.reset}`)}`);
+    console.log(`${c.geminiBlue}│${c.reset}  ${optionRow(`${c.brightCyan}${c.bold}[d]${c.reset} ${c.amber}Always skip on npm run dev (do not ask again)${c.reset}`)}`);
     console.log(`${createBoxFooter(c.geminiBlue, width)}`);
   }
 
@@ -2581,12 +2585,13 @@ export class CLI {
     const displayTarget = target || 'File Mutation';
     const isAuto = Boolean(options.autoApproved);
 
-    const bannerHeader = isAuto
+    const bannerWidth = Math.max(1, getTerminalWidth() - 2);
+    const bannerHeader = truncateToTerminalWidth(isAuto
       ? `┌── ⚡ [AUTO-APPROVED IN SESSION] CHANGE PREVIEW (DIFF VIEW): ${displayTarget} `
-      : `┌── 📄 CHANGE PREVIEW (DIFF VIEW): ${displayTarget} `;
-    const bannerFooter = isAuto
+      : `┌── 📄 CHANGE PREVIEW (DIFF VIEW): ${displayTarget} `, bannerWidth);
+    const bannerFooter = truncateToTerminalWidth(isAuto
       ? `└── ⚡ [AUTO-APPROVED SESSION ACTION] Changes will be applied automatically ──────────┘`
-      : `└── ⏳ [MINUS PERMISSION APPROVAL] Please review before granting permission ────────┘`;
+      : `└── ⏳ [MINUS PERMISSION APPROVAL] Please review before granting permission ────────┘`, bannerWidth);
 
     let buf = `\n  ${c.brightCyan}${bannerHeader}${c.reset}\n`;
     const contentWidth = Math.max(1, getTerminalWidth() - 4);
