@@ -135,10 +135,10 @@ export function requestPhaseTransition(
   if (current.phase === 'explore' && targetPhase === 'plan') {
     // Planning is a non-mutating continuation, so evidence references establish auditability rather than proof of a fix.
   } else if (current.phase === 'explore' && targetPhase === 'implement') {
-    if (classification.complexity === 'large' && !options.hasPlan) return reject('PLAN_REQUIRED', 'A large change must have an accepted plan before implementation.');
     if (!options.evidenceSufficient) return reject('EXPLORATION_EVIDENCE_REQUIRED', 'Observed inspection or validated-hypothesis evidence is required before implementation.');
   } else if (current.phase === 'plan' && targetPhase === 'implement') {
-    if (!options.hasPlan) return reject('PLAN_REQUIRED', 'Create and validate an execution plan before implementation.');
+    // Planning is opt-in. An explicit /plan request may create a plan, but an
+    // absent plan must not block an evidence-backed implementation transition.
   } else {
     return reject('INVALID_PHASE_TRANSITION', `The Harness does not allow ${current.phase} -> ${String(targetPhase)} from a model request.`);
   }

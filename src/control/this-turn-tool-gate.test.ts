@@ -174,12 +174,12 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(verifyDecision.allowedToolNames.includes('replace_text'), 'replace_text is available in verify under Unified Agentic Loop for quick adjustments');
 });
 
-test('ClassificationEngine strictly scopes capabilities according to phase and preserves plan on failure', () => {
+test('ClassificationEngine scopes an explicit planning request and preserves plan on failure', () => {
   const engine = new ClassificationEngine();
 
-  // Bug 1: Large task without plan must be in plan phase WITHOUT 'edit' or 'complete'
+  // An explicit planning request enters plan phase without edit/complete authority.
   const planClassification = engine.classify({
-    request: 'Triển khai toàn bộ kiến trúc hệ thống mới cho module auth',
+    request: '[PLANNING MODE REQUEST]: Lập kế hoạch triển khai toàn bộ kiến trúc hệ thống mới cho module auth',
   });
   assert.equal(planClassification.phase, 'plan');
   assert.equal(planClassification.requiredCapabilities.includes('edit'), false, 'plan phase must NOT have edit capability');
@@ -188,7 +188,7 @@ test('ClassificationEngine strictly scopes capabilities according to phase and p
 
   // Bug 2: Failure during plan phase must preserve plan phase and not fall into exploration trap
   const recoveredFromPlan = engine.classify({
-    request: 'Triển khai toàn bộ kiến trúc hệ thống mới cho module auth',
+    request: '[PLANNING MODE REQUEST]: Lập kế hoạch triển khai toàn bộ kiến trúc hệ thống mới cho module auth',
     previous: planClassification,
     lastToolName: 'create_plan',
     lastToolFailed: true,

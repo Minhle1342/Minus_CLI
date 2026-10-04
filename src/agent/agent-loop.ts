@@ -1468,6 +1468,17 @@ export class AgentLoop {
         reliableToolOrchestrationMode,
       );
 
+      // Planning is opt-in, but once the user explicitly enters the plan
+      // phase, create_plan must be model-visible and runtime-authorized. Pin
+      // it after route filtering so declaration visibility and ToolScope stay
+      // aligned instead of producing an authorization loop.
+      if (classification.phase === 'plan' && candidateProvider.get('create_plan')
+        && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
+        const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
+          .find((tool: any) => tool.name === 'create_plan');
+        if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
+      }
+
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;

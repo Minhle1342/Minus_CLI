@@ -28,6 +28,7 @@ const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai 
 const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
 const verifyIntent = /\b(?:test|verify|verification|build|lint|typecheck|kiem thu|xac minh|doi chieu)\b/i;
 const exploreIntent = /\b(?:explain|inspect|investigate|review|analy[sz]e|how|why|what|kiem tra|phan tich|danh gia|giai thich|tim hieu)\b/i;
+const planningIntent = /(?:^|\s)\/plan(?:\s|$)|\[planning mode request\]|\b(?:write|create|make|generate)\s+(?:an?\s+)?(?:implementation\s+)?plan\b|lap\s+ke\s*hoach|phan\s+ra\s+(?:task|tac\s+vu|cong\s+viec)/i;
 
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
@@ -41,7 +42,14 @@ export class ClassificationEngine {
     let risk: ControlRisk = 'R0';
     let capabilities: Capability[] = ['inspect', 'search', 'memory'];
 
-    if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
+    if (planningIntent.test(normalizedText)) {
+      taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
+      complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
+      risk = complexity === 'large' ? 'R3' : 'R2';
+      phase = 'plan';
+      capabilities = ['inspect', 'search', 'plan', 'memory'];
+      reasons.push('EXPLICIT_PLANNING_INTENT');
+    } else if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
     } else if (releaseIntent.test(normalizedText)) {
@@ -80,12 +88,8 @@ export class ClassificationEngine {
         capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];
         reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
-        phase = input.hasPlan || (risk === 'R3' && input.hasValidatedHypothesis) || complexity !== 'large' ? 'implement' : 'plan';
-        if (phase === 'plan') {
-          capabilities = ['inspect', 'search', 'plan', 'memory'];
-        } else {
-          capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
-        }
+        phase = 'implement';
+        capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
         if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
           reasons.push('PARETO_EVIDENCE_FAST_PATH');
         }
@@ -148,7 +152,7 @@ export class ClassificationEngine {
           'verify',
         ]));
         reasons.push('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY');
-      } else if (preservePlanCapability && !input.hasPlan && complexity === 'large') {
+      } else if (preservePlanCapability && !input.hasPlan) {
         phase = 'plan';
         capabilities = Array.from(new Set<Capability>([
           'inspect',

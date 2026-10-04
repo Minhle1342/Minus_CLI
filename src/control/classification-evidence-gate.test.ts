@@ -10,13 +10,28 @@ test('R2 bugfix skips the evidence gate and goes straight to implement', () => {
   assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
 });
 
-test('R3 bugfix without evidence goes to plan instead of forcing explore', () => {
+test('R3 work without an explicit planning request goes to implement', () => {
   const engine = new ClassificationEngine();
   const decision = engine.classify({ request: 'Refactor the authentication system architecture across all modules' });
   assert.equal(decision.taskClass, 'refactor');
   assert.equal(decision.risk, 'R3');
-  assert.equal(decision.phase, 'plan');
+  assert.equal(decision.phase, 'implement');
   assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
+});
+
+test('an explicit planning request enters plan phase', () => {
+  const decision = new ClassificationEngine().classify({
+    request: '[PLANNING MODE REQUEST]: Create a plan to refactor the authentication system architecture.',
+  });
+  assert.equal(decision.phase, 'plan');
+  assert.ok(decision.requiredCapabilities.includes('plan'));
+  assert.ok(decision.reasonCodes.includes('EXPLICIT_PLANNING_INTENT'));
+});
+
+test('a planning-only request enters plan phase without mutation language', () => {
+  const decision = new ClassificationEngine().classify({ request: 'Make a plan for investigating the authentication flow.' });
+  assert.equal(decision.phase, 'plan');
+  assert.equal(decision.taskClass, 'feature');
 });
 
 test('R3 large refactor fast-paths to implement with an accepted plan', () => {
