@@ -238,7 +238,10 @@ export class PlanManager {
 
     this.activeTurn = turn;
     this.goal = goal;
-    this.planRequired = this.inferPlanRequirement(goal);
+    // A regular multi-step coding request must not force the model to create
+    // a plan. Explicit planning flows (/plan, planning skills) and goal mode
+    // can still ask for or mandate one through their own prompts/state.
+    this.planRequired = false;
     this.verificationRequired = this.inferVerificationRequirement(goal);
 
     if (options?.preserveIncompletePlan) {
@@ -888,15 +891,6 @@ export class PlanManager {
       `🎯 [GLOBAL GOAL ANCHOR]: "${requirements.goal || '(not captured)'}"`,
       ...lines,
     ].join('\n');
-  }
-
-  private inferPlanRequirement(goal: string): boolean {
-    const text = normalizeComparableText(goal);
-    if (!text) return false;
-    return (
-      /\b(implement|refactor|fix|migrate|integrate|build|create|sua|trien khai)\b/.test(text)
-      && /\b(and|then|after|verify|tests?|build|lint|multi|steps?|kiem chung)\b/.test(text)
-    );
   }
 
   private inferVerificationRequirement(goal: string): boolean {

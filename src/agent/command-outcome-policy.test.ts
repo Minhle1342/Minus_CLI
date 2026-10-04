@@ -44,6 +44,14 @@ test('preflight rejection is blocked before dispatch instead of treated as a com
   assert.equal(plan.getTasks()[0].evidence.at(-1)?.outcome, 'blocked');
 });
 
+test('multi-step coding requests do not mandate create_plan', () => {
+  const plan = new PlanManager();
+  plan.beginTurn(1, 'Implement the auth refactor, then run tests and build the project.');
+
+  assert.equal(plan.getRequirements().required, false);
+  assert.equal(plan.renderStepPromptContext(), '');
+});
+
 test('git work via run_command counts like dedicated git tools in the capability guard', () => {
   const context = {
     userRequest: 'commit và push code mới lên nhánh develop',
