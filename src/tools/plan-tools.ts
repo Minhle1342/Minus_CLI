@@ -202,7 +202,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
         },
         evidence: {
           type: Type.STRING,
-          description: 'Concise explanation of the observed result. It annotates but cannot replace an actual tool result.',
+          description: 'Concise explanation of the observed result. Annotation only: it is recorded as notes and can never satisfy the completion evidence gate by itself — run a real tool first.',
         },
       },
       required: ['id', 'status'],
@@ -224,7 +224,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
 
       let updated;
       try {
-        updated = planManager.updateTask(id, status, args.evidence || args.notes);
+        updated = planManager.updateTask(id, status, args.notes || args.evidence);
       } catch (error: any) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         let hint = 'Execute a tool matching the task acceptance criteria before marking it complete.';
@@ -245,6 +245,18 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
       }
 
       if (!updated) {
+        // Recovery paths below invent tasks with derived acceptance criteria, which
+        // would otherwise resolve to a permissive evidence kind. Only allow them when
+        // starting work (IN_PROGRESS): terminal transitions must target an existing
+        // step, otherwise a freshly invented task bypasses the completion evidence
+        // gate in PlanManager.updateTask.
+        if (status !== 'IN_PROGRESS' && !planManager.hasPlan()) {
+          return {
+            error: 'No execution plan has been created in this session. Call "create_plan" first to define execution steps, or skip calling "update_plan_task" for simple single-step tasks.',
+            errorCode: 'NO_PLAN_EXISTS',
+            hint: 'Call create_plan first with a tasks array: [{ title: "Inspect code" }, { title: "Implement fix" }, { title: "Run verification" }].',
+          };
+        }
         if (!planManager.hasPlan()) {
           // Antigravity & Codex resilience pattern: Auto-recover/initialize plan from context if possible
           const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
@@ -252,9 +264,9 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
             || `Task #${id}`;
           try {
             planManager.createPlan([
-              { id, title: fallbackTitle, acceptanceCriteria: `Observable result for: ${fallbackTitle}` },
+              { id, title: fallbackTitle, acceptanceCriteria: `Inspect and produce an observable result for: ${fallbackTitle}` },
             ]);
-            updated = planManager.updateTask(id, status, args.evidence || args.notes);
+            updated = planManager.updateTask(id, status, args.notes || args.evidence);
             return {
               message: `Execution plan auto-initialized with step #${id} and updated to ${status}.`,
               task: updated,
@@ -271,14 +283,14 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
         }
 
         const existingTasks = planManager.getTasks();
-        // If task ID is not found, dynamically register it if under limit (Codex/Antigravity dynamic expansion)
-        if (existingTasks.length < planManager.getRequirements().maximumTasks && !existingTasks.some((t) => t.id === id)) {
+        // Dynamic expansion only for newly started steps (see recovery note above).
+        if (status === 'IN_PROGRESS' && existingTasks.length < planManager.getRequirements().maximumTasks && !existingTasks.some((t) => t.id === id)) {
           const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
             || (typeof args.notes === 'string' && args.notes.trim())
             || `Task #${id}`;
           try {
-            planManager.addTask({ id, title: fallbackTitle, acceptanceCriteria: `Observable result for: ${fallbackTitle}` });
-            updated = planManager.updateTask(id, status, args.evidence || args.notes);
+            planManager.addTask({ id, title: fallbackTitle, acceptanceCriteria: `Inspect and produce an observable result for: ${fallbackTitle}` });
+            updated = planManager.updateTask(id, status, args.notes || args.evidence);
             return {
               message: `Added and updated step #${id} to ${status}.`,
               task: updated,

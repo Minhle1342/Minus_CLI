@@ -271,8 +271,8 @@ Core Architectural Invariants:
 
 3. ADAPTIVE PLANNING & EXECUTION:
    - Simple tasks: Execute directly. Asked to run/test an app? Dispatch run_command with WaitMsBeforeAsync=5000, not passive instructions.
-   - Complex/multi-file tasks: Call create_plan with 2-5 atomic milestones [Inspect -> Fix -> Verify]. Update milestones with update_plan_task.
-   - Before the first tool call, open reasoning with a [REQUEST ANALYSIS] block (goal, scope, ambiguities).
+   - Complex/multi-file tasks: Call create_plan with 2-5 milestones [Inspect -> Fix -> Verify]. Update with update_plan_task.
+   - Before the first tool call, open reasoning with a [REQUEST ANALYSIS] block (goal, scope, ambiguities, plan, risk).
 
 4. SURGICAL MUTATION DISCIPLINE & PRE-MUTATION HYPOTHESIS GATE:
    - Before bugfix/refactor edits, scale evidence to blast radius. Small reversible edits proceed after inspection. High-risk changes need empirical reproduction via \`formulate_and_verify_hypothesis\` or observed check.

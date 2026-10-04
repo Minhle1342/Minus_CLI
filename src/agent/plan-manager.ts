@@ -460,6 +460,11 @@ export class PlanManager {
           `Task #${id} is blocked by dependencies: ${[...blocker.dependencyIds, ...blocker.failedDependencyIds].join(', ')}.`,
         );
       }
+      const running = this.tasks.filter((candidate) => candidate.status === 'IN_PROGRESS' && candidate.id !== id);
+      const conflict = running.find((candidate) => !this.canRunConcurrently(candidate, task));
+      if (conflict) {
+        throw new Error(`Task #${id} cannot run concurrently with active task #${conflict.id}; dependency or write-set conflict detected.`);
+      }
       task.status = 'IN_PROGRESS';
     } else if (task.status !== 'IN_PROGRESS') {
       throw new Error(`Task #${id} must be IN_PROGRESS before it can move to ${status}.`);
@@ -1045,11 +1050,6 @@ export class PlanManager {
 
   /** Attribute tool evidence to the most relevant running DAG node. */
   private selectEvidenceTask(toolName: string, args: Record<string, any>): PlanTask | undefined {
-    const active = this.tasks.filter((task) => task.status === 'IN_PROGRESS');
-    if (active.length === 1) return active[0];
-    if (active.length === 0) {
-      return this.getReadyTasks()[0] || this.tasks.find((task) => task.status === 'PENDING');
-    }
     const candidatePaths = normalizeStringList([
       args.path,
       args.fromPath,
@@ -1073,7 +1073,20 @@ export class PlanManager {
         + pathScore(task.readSet, 8)
         + task.symbols.reduce((total, symbol) => total + (candidateSymbols.some((candidate) => candidate.includes(symbol.toLowerCase())) ? 8 : 0), 0);
     };
-    return [...active].sort((left, right) => score(right) - score(left) || this.compareSchedulingPriority(left, right))[0];
+    const byRelevance = (left: PlanTask, right: PlanTask): number =>
+      score(right) - score(left) || this.compareSchedulingPriority(left, right);
+    const active = this.tasks.filter((task) => task.status === 'IN_PROGRESS');
+    if (active.length === 1) return active[0];
+    if (active.length === 0) {
+      // Live references only: getReadyTasks() returns clones, so evidence pushed
+      // onto one would be silently discarded. Score PENDING tasks by path/symbol
+      // overlap instead of blindly picking the first READY task.
+      const ready = this.tasks.filter((task) => task.status === 'PENDING' && this.isDependencySatisfied(task) && !task.permissionBlocker);
+      const pool = ready.length > 0 ? ready : this.tasks.filter((task) => task.status === 'PENDING');
+      if (pool.length === 0) return undefined;
+      return [...pool].sort(byRelevance)[0];
+    }
+    return [...active].sort(byRelevance)[0];
   }
 
   private hasDependencyPath(fromId: number, toId: number, seen = new Set<number>()): boolean {

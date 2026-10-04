@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
+import { validateSchemaValue } from '../tools/schema-validator.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
+import { computeRequestValueDigest } from '../session/session-invariants.js';
 import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
@@ -90,6 +92,7 @@ import {
   applyPhaseAuthority,
   applyPhaseLifecycle,
   invalidatePhaseOnMutation,
+  getPhaseTransitionRecoveryGuidance,
   recordImplementationCompleted,
   recordVerificationOutcome,
   requestPhaseTransition,
@@ -104,15 +107,16 @@ import {
 } from './reliable-tool-orchestration.js';
 import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
 import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1 } from './context-budget-manager.js';
+import { readCoverageReport, type FileCoverage } from './coverage-report-reader.js';
 import { buildFailureInvestigationBrief, type FailureInvestigationMutation } from './failure-investigation-mode.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   return isScratchPath(filePath);
 }
 
-function configuredEvidenceGateMode(): 'observe' | 'enforce' | undefined {
+function configuredEvidenceGateMode(): 'off' | 'observe' | 'enforce' | undefined {
   const mode = process.env.MINUS_EVIDENCE_GATE_MODE?.trim().toLowerCase();
-  return mode === 'observe' || mode === 'enforce' ? mode : undefined;
+  return mode === 'off' || mode === 'observe' || mode === 'enforce' ? mode : undefined;
 }
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
@@ -174,7 +178,7 @@ function detectAttachmentAnchors(text: string): string[] {
 
 /**
  * Extract the [REQUEST ANALYSIS] block the model opens its reasoning with
- * (goal, scope, ambiguities — see CORE_SYSTEM_PROMPT §3). Returns undefined
+ * (goal, scope, ambiguities, plan, risk — see CORE_SYSTEM_PROMPT §3). Returns undefined
  * when the model did not include one.
  */
 export function extractRequestAnalysis(reasoning: string | undefined | null): string | undefined {
@@ -183,6 +187,44 @@ export function extractRequestAnalysis(reasoning: string | undefined | null): st
   if (!match) return undefined;
   const block = match[1].trim();
   return block ? block : undefined;
+}
+
+export interface RequestAnalysisFields {
+  goal?: string;
+  scope?: string;
+  ambiguities?: string;
+  plan?: string;
+  risk?: string;
+}
+
+/**
+ * Parses a [REQUEST ANALYSIS] block into structured fields.
+ * Backward compatible: old 3-field blocks (goal/scope/ambiguities) still parse;
+ * missing plan/risk simply stay undefined.
+ */
+export function parseRequestAnalysisFields(block: string | undefined | null): RequestAnalysisFields {
+  if (!block?.trim()) return {};
+  const fields: RequestAnalysisFields = {};
+  let current: keyof RequestAnalysisFields | undefined;
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.trim();
+    const m = /^(goal|scope|ambiguit(?:y|ies)|plan|risk)\s*:\s*(.*)$/i.exec(line);
+    if (m) {
+      const key = m[1].toLowerCase();
+      const value = (m[2] ?? '').trim();
+      if (key.startsWith('goal')) { current = 'goal'; fields.goal = value; }
+      else if (key.startsWith('scope')) { current = 'scope'; fields.scope = value; }
+      else if (key.startsWith('ambig')) { current = 'ambiguities'; fields.ambiguities = value; }
+      else if (key.startsWith('plan')) { current = 'plan'; fields.plan = value; }
+      else if (key.startsWith('risk')) { current = 'risk'; fields.risk = value; }
+    } else if (current && line) {
+      fields[current] = ((fields[current] ?? '') + '\n' + line).trim();
+    }
+  }
+  for (const k of Object.keys(fields) as Array<keyof RequestAnalysisFields>) {
+    if (!fields[k]?.trim()) delete fields[k];
+  }
+  return fields;
 }
 
 export interface RuntimeHarnessProfile {
@@ -1423,9 +1465,12 @@ export class AgentLoop {
       // A transition request is a control primitive, not a retrieved task tool.
       // Keep it visible whenever the current coding phase can accept one so the
       // model never has to guess an unauthorized edit to advance its workflow.
-      if (
-        ['explore', 'plan'].includes(classification.phase)
-        && candidateProvider.get('request_phase_transition')
+      const canRequestPhaseTransition = ['explore', 'plan'].includes(classification.phase)
+        && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
+      if (!canRequestPhaseTransition) {
+        activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
+      } else if (
+        candidateProvider.get('request_phase_transition')
         && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
       ) {
         const transitionDeclaration = candidateProvider.getFunctionDeclarations()
@@ -1818,7 +1863,13 @@ export class AgentLoop {
       });
 
       // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
-      const rawReflection = this.reflectionEngine.getLastReflectionPrompt();
+      const phaseTransitionRecovery = this.lastToolExecution?.toolName === 'request_phase_transition'
+        ? this.lastToolExecution.result?._system_phase_transition_recovery
+        : undefined;
+      const rawReflection = [
+        phaseTransitionRecovery,
+        this.reflectionEngine.getLastReflectionPrompt(),
+      ].filter(Boolean).join('\n\n');
       let strategicPivotGuidance: string | undefined;
       if (consecutiveFails >= 2) {
         strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: ${consecutiveFails} consecutive failures provide feedback that the current approach is weak. Do not repeat the same action. Inspect the newest failure, compare it with the current hypothesis, run the smallest discriminating check, then revise or replace the hypothesis before another mutation.`;
@@ -2017,10 +2068,13 @@ export class AgentLoop {
         afterTokens: arbitration.stats.afterTokens,
       });
       const dynamicExecutionContext = arbitration.renderedContext;
+      // Single pre-compaction projection reused for footprint + budget input,
+      // so the pre-compaction digest below describes exactly what compaction consumed.
+      const preCompactionHistory = session.getHistory();
       let requestFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
-        history: session.getHistory(),
+        history: preCompactionHistory,
         dynamicContext: dynamicExecutionContext,
         maxInputTokens: activeTokenConfig.maxInputTokens,
         maxOutputTokens: activeTokenConfig.maxOutputTokens,
@@ -2036,7 +2090,7 @@ export class AgentLoop {
         model: activeModelName,
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
-        history: session.getHistory(),
+        history: preCompactionHistory,
         dynamicContext: dynamicExecutionContext,
         maxInputTokens: Math.max(1, activeTokenConfig.maxInputTokens || maxBudget),
         targetInputTokens: workingHistoryBudget,
@@ -2055,10 +2109,23 @@ export class AgentLoop {
         ...(contextPreparation.checkpointObservations || []),
         ...(compactionStats?.maskedObservations || []),
       ];
+      // Archive failures propagate here instead of vanishing in .catch(()=>{}):
+      // the outcome (counts or error) is durably recorded in the compaction
+      // state and surfaced to the operator. Compaction itself still proceeds —
+      // originals remain in the append-only session event log.
+      const archiveStatus: Record<string, unknown> = {};
+      let didCompactThisStep = false;
       if (observationsToArchive.length > 0) {
-        await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive).catch(() => {});
+        try {
+          archiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
+        } catch (error) {
+          const message = String((error as Error)?.message || error);
+          archiveStatus.maskedObservations = { error: message };
+          CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+        }
       }
       if (contextPreparation.changed && compactionStats) {
+        didCompactThisStep = true;
         try {
           const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
             mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
@@ -2071,12 +2138,18 @@ export class AgentLoop {
           });
         } catch {}
         if (compactionStats.archivedTurns?.length) {
-          await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns).catch(() => {});
+          try {
+            archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
+          } catch (error) {
+            const message = String((error as Error)?.message || error);
+            archiveStatus.archivedTurns = { error: message };
+            CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+          }
         }
         session.setHistory(
           contextPreparation.history,
           `context-budget-${contextPreparation.mode}`,
-          contextPreparation.state as unknown as Record<string, unknown> | undefined,
+          { ...(contextPreparation.state as unknown as Record<string, unknown> | undefined), archiveStatus } as unknown as Record<string, unknown> | undefined,
         );
         CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
         await this.persistSession(session);
@@ -2121,7 +2194,18 @@ export class AgentLoop {
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
         history: session.getHistory(),
-      }, { compactHistory: true });
+      }, {
+        compactHistory: true,
+        ...(didCompactThisStep ? {
+          compaction: {
+            preCompactionHistoryDigest: computeRequestValueDigest(preCompactionHistory),
+            preCompactionMessages: preCompactionHistory.length,
+            archivedTurns: compactionStats?.archivedTurns?.length ?? 0,
+            maskedObservations: compactionStats?.maskedObservations?.length ?? 0,
+            archiveStatus,
+          },
+        } : {}),
+      });
       session.assertRuntimeInvariants({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
       await this.persistSession(session);
       this.stepDynamicSuffixes.set(step, dynamicExecutionContext);
@@ -2745,28 +2829,63 @@ export class AgentLoop {
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else if (toolName === 'request_phase_transition') {
-            const transition = requestPhaseTransition(session, turn, classification, {
-              targetPhase: toolArgs.targetPhase,
-              rationale: toolArgs.rationale,
-              evidenceRefs: toolArgs.evidenceRefs,
-            }, {
-              hasPlan: this.planManager.hasPlan(),
-              evidenceSufficient: this.hypothesisTracker.getValidatedHypotheses().length > 0
-                || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+            const schema = this.toolProvider.get(toolName)?.parameters;
+            const validation = validateSchemaValue(toolArgs, schema as any, '$', {
+              rejectUnknownProperties: true,
             });
-            executionResult = {
-              toolName,
-              args: toolArgs,
-              durationMs: 0,
-              result: {
-                success: transition.accepted,
-                phase: transition.phase,
-                phaseVersion: transition.phaseVersion,
-                reason: transition.reason,
-                ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
-              },
-            };
-            phaseTransitionAcceptedInResponse = transition.accepted;
+            if (!validation.valid) {
+              const error = `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`;
+              const recovery = getPhaseTransitionRecoveryGuidance('INVALID_ARGS', error);
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                durationMs: 0,
+                result: {
+                  success: false,
+                  error,
+                  message: error,
+                  errorCode: 'INVALID_ARGS',
+                  validationErrors: validation.errors,
+                  reason: error,
+                  suggestion: recovery,
+                  retryable: true,
+                  _system_phase_transition_recovery: recovery,
+                },
+              };
+            } else {
+              const transition = requestPhaseTransition(session, turn, classification, {
+                targetPhase: toolArgs.targetPhase,
+                rationale: toolArgs.rationale,
+                evidenceRefs: toolArgs.evidenceRefs,
+              }, {
+                hasPlan: this.planManager.hasPlan(),
+                evidenceSufficient: this.hypothesisTracker.getValidatedHypotheses().length > 0
+                  || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+              });
+              const recovery = transition.accepted
+                ? undefined
+                : getPhaseTransitionRecoveryGuidance(transition.errorCode, transition.reason);
+              executionResult = {
+                toolName,
+                args: toolArgs,
+                durationMs: 0,
+                result: {
+                  success: transition.accepted,
+                  phase: transition.phase,
+                  phaseVersion: transition.phaseVersion,
+                  reason: transition.reason,
+                  ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
+                  ...(!transition.accepted ? {
+                    error: transition.reason,
+                    message: transition.reason,
+                    suggestion: recovery,
+                    retryable: true,
+                    _system_phase_transition_recovery: recovery,
+                  } : {}),
+                },
+              };
+              phaseTransitionAcceptedInResponse = transition.accepted;
+            }
           } else if (preexecutedReadResult) {
             executionResult = preexecutedReadResult;
           } else {
@@ -3094,12 +3213,36 @@ export class AgentLoop {
               && executionResult.result?.commandOutcome !== 'blocked_preflight'
               && typeof executionResult.result?.exitCode === 'number';
             if (commandExecuted) {
+              const cmdSuccess = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
+              // Coverage report (lcov/cobertura/…) when the repo produces one:
+              // read once after a green verification command; any failure to
+              // locate or parse it is fail-open (evaluator ignores absence).
+              let fileCoverage: FileCoverage[] | undefined;
+              let coverageSource: string | undefined;
+              if (cmdSuccess && isVerificationCommand(commandForAttribution)) {
+                try {
+                  const report = readCoverageReport(this._workspace.rootDir);
+                  if (report) {
+                    fileCoverage = report.files;
+                    coverageSource = report.source;
+                  }
+                } catch {
+                  // Fail-open: stdout parsing still applies without the report.
+                }
+              }
               this.verificationPolicy.recordVerification(
                 commandForAttribution,
-                !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0,
+                cmdSuccess,
                 String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
                 executionResult.result.exitCode,
-                { hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined },
+                {
+                  hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined,
+                  // Full tails (not the 240-char digest) so the coverage
+                  // evaluator can parse runner summaries and zero-test runs.
+                  stdout: typeof executionResult.result.stdout === 'string' ? executionResult.result.stdout.slice(-20000) : undefined,
+                  stderr: typeof executionResult.result.stderr === 'string' ? executionResult.result.stderr.slice(-20000) : undefined,
+                  ...(fileCoverage ? { fileCoverage, coverageSource } : {}),
+                },
               );
             }
             if (commandExecuted && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
@@ -3167,6 +3310,9 @@ export class AgentLoop {
                 passed,
                 String(executionResult.result?.logTail || '').slice(0, 240),
                 typeof completion.exitCode === 'number' ? completion.exitCode : undefined,
+                typeof executionResult.result?.logTail === 'string' && executionResult.result.logTail
+                  ? { stdout: executionResult.result.logTail.slice(-20000) }
+                  : undefined,
               );
               if (this.targetFilesModifiedInTurn.size > 0) {
                 for (const modifiedFile of this.targetFilesModifiedInTurn) {
