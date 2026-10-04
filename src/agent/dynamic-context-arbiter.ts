@@ -3,6 +3,8 @@ import { ExactTokenizer } from './exact-tokenizer.js';
 export interface DynamicContextInputs {
   /** P0.8: Instruction Hierarchy Recency Anchor (Strict System Invariants & Anti-Injection) */
   instructionHierarchyAnchor?: string;
+  /** P0.85: Per-turn user-facing response language, retained even under context pressure. */
+  responseLanguageDirective?: string;
   /** P0.9: Completion command after successful verification. */
   completionDirective?: string;
   /** P1: Chỉ dẫn công cụ kế tiếp từ ToolSynergyAdvisor (CRITICAL - Bảo toàn 100%) */
@@ -137,6 +139,13 @@ export class DynamicContextArbiter {
         name: 'Instruction Hierarchy Anchor (P0.8)',
         content: (inputs.instructionHierarchyAnchor || '').trim(),
         priority: 0.8,
+        allowTruncation: false,
+      },
+      {
+        key: 'responseLanguageDirective',
+        name: 'Response Language Directive (P0.85)',
+        content: (inputs.responseLanguageDirective || '').trim(),
+        priority: 0.85,
         allowTruncation: false,
       },
       {

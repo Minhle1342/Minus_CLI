@@ -68,7 +68,8 @@ export interface PreMutationGateContext {
   targetFiles?: string[];
   validatedTargetFiles?: string[];
   isTrivialEdit?: boolean;
-  evidenceGateMode?: 'observe' | 'enforce';
+  /** `off` skips only the Adaptive Pareto evidence block; other mutation guards still apply. */
+  evidenceGateMode?: 'off' | 'observe' | 'enforce';
   risk?: string;
   evidenceScore?: number;
   evidenceThreshold?: number;
@@ -662,7 +663,7 @@ export class ToolUseGuardian {
         || /^(?:\.?scratch|tests?)[\\/]/i.test(filePath)
         || /(?:^|[\\/])(?:scratch|throwaway)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(filePath)
       ));
-      if (!isMutationTool || !isEvidenceControlledTask || isTestOrReproFile) continue;
+      if (!isMutationTool || gateContext?.evidenceGateMode === 'off' || !isEvidenceControlledTask || isTestOrReproFile) continue;
 
       const normalizeTarget = (value: string): string => {
         if (!value) return '';

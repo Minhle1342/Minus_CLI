@@ -70,6 +70,7 @@ async function runMode(
 ): Promise<{
   finalAnswer: string;
   toolSequence: string[];
+  toolResults: Record<string, any>[];
   fileContent: string;
   failedToolResults: number;
   guardianInterventions: number;
@@ -155,6 +156,9 @@ async function runMode(
     const toolSequence = session.getEvents()
       .filter((event) => event.type === 'tool/call')
       .map((event) => String(event.data.toolName));
+    const toolResults = session.getEvents()
+      .filter((event) => event.type === 'tool/result')
+      .map((event) => event.data.result || {});
     const failedToolResults = session.getEvents()
       .filter((event) => event.type === 'tool/result' && event.data.result?.success === false).length;
     const decisions = session.getEvents()
@@ -163,6 +167,7 @@ async function runMode(
     return {
       finalAnswer,
       toolSequence,
+      toolResults,
       fileContent: await fs.readFile(path.join(root, 'sample.txt'), 'utf8'),
       failedToolResults,
       guardianInterventions: failedToolResults,
@@ -287,6 +292,30 @@ test('accepted phase transition blocks sibling calls and refreshes the model too
   assert.equal(result.requests[1].tools.includes('replace_text'), false, 'explore must not expose edit tools');
   assert.ok(result.requests[2].tools.includes('replace_text'), 'the fresh implement turn exposes edit tools');
   assert.ok(result.phaseEvents.includes('phase/transitionAccepted'));
+});
+
+test('rejected phase transition returns its reason and injects specific recovery guidance', async () => {
+  const result = await runMode('enforce', 'The test fails with an error in sample.txt.', 'enforce', false, [
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'invalid-transition', name: 'request_phase_transition', args: {
+      targetPhase: 'implement', rationale: '', evidenceRefs: [],
+    } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'sample.txt' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'transition-1', name: 'request_phase_transition', args: {
+      targetPhase: 'implement', rationale: 'Read the exact target and identified the bounded fix.', evidenceRefs: ['sample.txt', 'tool-result:read-1'],
+    } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'edit-1', name: 'replace_text', args: { path: 'sample.txt', oldText: 'before', newText: 'after' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'verify-1', name: 'run_command', args: { command: 'npm test' } }] },
+    { finishReason: 'tool_calls', toolCalls: [{ id: 'submit-1', name: 'submit_solution', args: {
+      summary: finalSummary, filesModified: ['sample.txt'], verificationEvidence: 'npm test passed',
+    } }] },
+  ], false);
+
+  const rejection = result.toolResults.find((toolResult) => toolResult.errorCode === 'INVALID_ARGS');
+  assert.ok(rejection, 'the invalid transition must be recorded as a structured tool failure');
+  assert.match(rejection.error, /Invalid arguments for tool "request_phase_transition"/);
+  assert.match(rejection._system_phase_transition_recovery, /Reissue request_phase_transition/);
+  assert.match(result.requests[1].dynamicContext, /Reissue request_phase_transition/);
+  assert.equal(result.fileContent, 'after');
 });
 
 test('a completed read refreshes evidence before a sibling transition, but editing waits for the new phase', async () => {

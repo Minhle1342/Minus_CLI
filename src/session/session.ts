@@ -24,6 +24,7 @@ export interface ImageAttachment {
 export type SessionEventType =
   | 'user/message'
   | 'assistant/message'
+  | 'assistant/reasoning'
   | 'tool/result'
   | 'turn/start'
   | 'turn/end'
@@ -172,6 +173,21 @@ export interface SessionEventData {
   snapshotId?: string;
   contextFingerprint?: string;
   compactionState?: Record<string, unknown>;
+  /**
+   * Model thought persisted outside the model-facing projection.
+   * `projectHistoryFromEvents` deliberately ignores this event type, so
+   * reasoning records never enter model context, request digests, or
+   * compaction input — persistence is purely additive to the event log.
+   */
+  reasoning?: {
+    thought: string;
+    truncated?: boolean;
+    fullChars?: number;
+    kind: 'failure' | 'high-risk' | 'debug' | 'intent';
+    step?: number;
+    turn?: number;
+    trigger?: string;
+  };
 }
 
 export interface SessionEvent {
@@ -209,6 +225,9 @@ function cloneJson<T>(value: T): T {
   return cloneJsonStrict(value, 'Session data', { omitUndefinedObjectProperties: true });
 }
 
+/** Hard cap for a single persisted thought; overflow is truncated with a flag. */
+export const MAX_REASONING_CHARS = 8192;
+
 function assertEvent(event: SessionEvent, expectedSeq: number): void {
   if (!event || event.seq !== expectedSeq || !event.id || !event.type || !event.createdAt) {
     throw new Error(`Invalid session event at sequence ${expectedSeq}.`);
@@ -217,6 +236,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
   if (![
     'user/message',
     'assistant/message',
+    'assistant/reasoning',
     'tool/result',
     'turn/start',
     'turn/end',
@@ -528,7 +548,38 @@ export class Session {
     this.append('memory/change', { memory: cloneJson(memory), reason });
   }
 
-  getMemoryRecords(): MemoryRecord[] {
+  /**
+   * Persist a model thought as a projection-excluded event.
+   * Never enters getHistory()/model context: `projectHistoryFromEvents`
+   * only projects user/assistant(message)/tool-result events.
+   * Caps stored text at MAX_REASONING_CHARS with an explicit flag.
+   */
+  addReasoning(
+    thought: string,
+    options: {
+      kind: 'failure' | 'high-risk' | 'debug' | 'intent';
+      step?: number;
+      turn?: number;
+      trigger?: string;
+      maxChars?: number;
+    },
+  ): SessionEvent | undefined {
+    const text = typeof thought === 'string' ? thought.trim() : '';
+    if (!text) return undefined;
+    const cap = Math.max(256, Math.floor(options.maxChars ?? MAX_REASONING_CHARS));
+    const truncated = text.length > cap;
+    const stored = truncated ? `${text.slice(0, cap)}\n…[TRUNCATED THOUGHT: ${text.length - cap} chars omitted]…` : text;
+    return this.append('assistant/reasoning', {
+      reasoning: {
+        thought: stored,
+        ...(truncated ? { truncated: true as const, fullChars: text.length } : {}),
+        kind: options.kind,
+        ...(options.step !== undefined ? { step: options.step } : {}),
+        ...(options.turn !== undefined ? { turn: options.turn } : {}),
+        ...(options.trigger ? { trigger: options.trigger.slice(0, 240) } : {}),
+      },
+    });
+  }  getMemoryRecords(): MemoryRecord[] {
     const records = new Map<string, MemoryRecord>();
     for (const event of this.eventLog) {
       if (event.type !== 'memory/change' || event.data.memory === undefined) continue;

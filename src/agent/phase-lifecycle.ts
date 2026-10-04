@@ -29,6 +29,28 @@ export interface PhaseTransitionDecision {
 
 const CODING_TASKS = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
+/** Produce actionable, model-facing recovery guidance for a rejected request. */
+export function getPhaseTransitionRecoveryGuidance(errorCode: string | undefined, reason: string): string {
+  switch (errorCode) {
+    case 'INVALID_ARGS':
+      return 'Reissue request_phase_transition with targetPhase "plan" or "implement", a non-empty rationale, and at least one string evidenceRefs entry naming an observed file, symbol, tool result, test output, or plan task.';
+    case 'PHASE_TRANSITION_EVIDENCE_REQUIRED':
+      return 'Inspect the relevant target or tool output first, then reissue request_phase_transition with a concrete rationale and at least one real evidenceRefs reference.';
+    case 'PHASE_TRANSITION_NOT_APPLICABLE':
+      return 'Do not request a workflow phase transition for this task class. Continue with the tools authorized for the current task instead.';
+    case 'PLAN_REQUIRED':
+      return 'Create and validate an execution plan before requesting the implement phase again.';
+    case 'EXPLORATION_EVIDENCE_REQUIRED':
+      return 'Gather fresh inspection or validated-hypothesis evidence for the exact target, then request implementation again.';
+    case 'INVALID_PHASE_TRANSITION':
+      return 'Check the current Harness-owned phase and request only a legal next transition: explore → plan, explore → implement, or plan → implement.';
+    case 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN':
+      return 'Wait for the Harness to return the refreshed phase and tool set, then make the next tool call in a new model response.';
+    default:
+      return `Review the rejection reason, gather any missing evidence, and do not repeat the same request unchanged. Rejection: ${reason}`;
+  }
+}
+
 function capabilitiesForPhase(classification: ClassificationDecision, phase: TaskPhase): Capability[] {
   const base: Capability[] = ['inspect', 'search', 'memory'];
   if (phase === 'explore') return base;

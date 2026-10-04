@@ -5,6 +5,7 @@ import { Session } from '../session/session.js';
 import {
   applyPhaseAuthority,
   applyPhaseLifecycle,
+  getPhaseTransitionRecoveryGuidance,
   getPhaseLifecycleState,
   invalidatePhaseOnMutation,
   recordExploreCompleted,
@@ -101,6 +102,25 @@ test('Harness accepts only evidence-backed model phase requests and owns the dur
     'phase/transitionAccepted',
     'phase/exploreCompleted',
   ]);
+});
+
+test('phase-transition rejections provide actionable recovery guidance', () => {
+  assert.match(
+    getPhaseTransitionRecoveryGuidance('PHASE_TRANSITION_EVIDENCE_REQUIRED', 'Evidence missing.'),
+    /concrete rationale.*evidenceRefs/i,
+  );
+  assert.match(
+    getPhaseTransitionRecoveryGuidance('PLAN_REQUIRED', 'Plan missing.'),
+    /Create and validate an execution plan/i,
+  );
+  assert.match(
+    getPhaseTransitionRecoveryGuidance('INVALID_PHASE_TRANSITION', 'Invalid phase.'),
+    /explore → plan.*plan → implement/i,
+  );
+  assert.match(
+    getPhaseTransitionRecoveryGuidance('INVALID_ARGS', 'Schema invalid.'),
+    /targetPhase.*evidenceRefs/i,
+  );
 });
 
 test('a later classifier result cannot silently advance an initialized phase', () => {

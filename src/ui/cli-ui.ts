@@ -147,6 +147,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/briefing', usage: '/briefing', description: 'Load and show the Context Agent / Guardian Handoff Summary Card', category: 'Context' },
   { command: '/explain-like-socrates', usage: '/explain-like-socrates <concept or question to explain>', description: 'Explain ideas/concepts in a Socrates-style dialogue, with step-by-step reasoning and simple metaphors', category: 'Exploration', aliases: ['/socrates'] },
   { command: '/clear', description: 'Clear the terminal screen', category: 'General' },
+  { command: '/update', usage: '/update [check|build]', description: 'Check workspace changes and update the CLI to the latest version', category: 'General' },
   { command: '/help', description: 'Show help', category: 'General', aliases: ['/?'] },
   { command: '/exit', description: 'Exit the program', category: 'General', aliases: ['/quit'] },
 ] as const;
@@ -1482,6 +1483,81 @@ export class CLI {
 
   static renderAutoCompactionNotice(savedTokens: number, remainingTokens: number): void {
     console.log(`  ${c.cyan}🧹 [Auto-Compacted]${c.reset} ${c.emerald}Saved ~${savedTokens.toLocaleString()} tokens${c.reset} ${c.slate}(History: ~${remainingTokens.toLocaleString()} tok)${c.reset}`);
+  }
+
+  static renderWorkspaceCheck(check: {
+    cliRoot: string;
+    isGitRepo: boolean;
+    gitAvailable: boolean;
+    branch?: string;
+    head?: string;
+    upstream?: string;
+    ahead: number;
+    behind: number;
+    dirty: boolean;
+    changes: Array<{ status: string; path: string }>;
+    version?: string;
+  }): void {
+    console.log(`\n  ${c.cyan}${c.bold}🔍 WORKSPACE CHANGES${c.reset} ${c.slate}${check.cliRoot}${c.reset}`);
+    if (!check.gitAvailable) {
+      console.log(`  ${c.crimson}✖ git is not available on PATH; cannot inspect changes.${c.reset}\n`);
+      return;
+    }
+    if (!check.isGitRepo) {
+      console.log(`  ${c.amber}⚠ Not a git work tree — nothing to compare.${c.reset}\n`);
+      return;
+    }
+    const where = `${check.branch || '(detached)'}${check.head ? ` @ ${check.head.slice(0, 8)}` : ''}${check.version ? ` · v${check.version}` : ''}`;
+    console.log(`  ${c.slate}Branch:${c.reset} ${c.bold}${where}${c.reset}`);
+    if (check.upstream) {
+      const sync = check.behind > 0
+        ? `${c.amber}${check.behind} behind${c.reset}`
+        : `${c.emerald}up to date${c.reset}`;
+      console.log(`  ${c.slate}Upstream:${c.reset} ${check.upstream} (${sync}${check.ahead > 0 ? `, ${c.cyan}${check.ahead} ahead${c.reset}` : ''})`);
+    } else {
+      console.log(`  ${c.slate}Upstream:${c.reset} ${c.amber}none — latest version cannot be determined${c.reset}`);
+    }
+    if (!check.dirty) {
+      console.log(`  ${c.emerald}✔ Working tree clean — no uncommitted changes.${c.reset}\n`);
+      return;
+    }
+    console.log(`  ${c.amber}⚠ ${check.changes.length} uncommitted change(s):${c.reset}`);
+    for (const change of check.changes.slice(0, 15)) {
+      console.log(`    ${c.brightCyan}${change.status}${c.reset} ${change.path}`);
+    }
+    if (check.changes.length > 15) {
+      console.log(`    ${c.slate}… and ${check.changes.length - 15} more${c.reset}`);
+    }
+    console.log('');
+  }
+
+  static renderCliUpdate(result: {
+    ok: boolean;
+    message: string;
+    steps: string[];
+    versionBefore?: string;
+    versionAfter?: string;
+    headBefore?: string;
+    headAfter?: string;
+    pulled: boolean;
+    installed: boolean;
+    built: boolean;
+  }): void {
+    const title = result.ok ? `${c.emerald}${c.bold}✔ CLI UPDATE${c.reset}` : `${c.crimson}${c.bold}✖ CLI UPDATE FAILED${c.reset}`;
+    console.log(`\n  ${title}`);
+    for (const step of result.steps) {
+      console.log(`    ${c.slate}•${c.reset} ${step}`);
+    }
+    if (result.headBefore || result.headAfter) {
+      const heads = `${(result.headBefore || '?').slice(0, 8)} → ${(result.headAfter || result.headBefore || '?').slice(0, 8)}`;
+      console.log(`  ${c.slate}Commit:${c.reset} ${heads}${result.pulled ? '' : ` ${c.slate}(unchanged)${c.reset}`}`);
+    }
+    if (result.versionBefore || result.versionAfter) {
+      console.log(`  ${c.slate}Version:${c.reset} v${result.versionBefore || '?'} → v${result.versionAfter || result.versionBefore || '?'}`);
+    }
+    const flags = [`pull:${result.pulled ? 'yes' : 'no'}`, `install:${result.installed ? 'yes' : 'no'}`, `build:${result.built ? 'yes' : 'no'}`];
+    console.log(`  ${c.slate}Steps:${c.reset} ${flags.join(' · ')}`);
+    console.log(`  ${result.ok ? c.emerald : c.crimson}${result.message}${c.reset}\n`);
   }
 
   static renderArchiveWarning(info: { scope: string; error: string }): void {

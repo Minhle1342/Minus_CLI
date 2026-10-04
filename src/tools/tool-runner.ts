@@ -298,7 +298,11 @@ export class ToolRunner {
           decisionId: context.decisionId,
         };
       }
-      this.budgetTracker.increment(context.turn);
+      // P2: shadow observations never consume the execution budget. Only real
+      // dispatches (wouldAllow) advance the per-turn call count.
+      if (shadowObservation.wouldAllow) {
+        this.budgetTracker.increment(context.turn);
+      }
     } else if (controlMode === 'enforce' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
       if (!context.decisionId || !context.allowedToolSetHash || hashAllowedToolSet(names) !== context.allowedToolSetHash) {

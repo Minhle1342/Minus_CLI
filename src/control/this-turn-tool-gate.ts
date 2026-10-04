@@ -3,6 +3,8 @@ import type { ToolDefinition } from '../tools/types.js';
 import type { ClassificationDecision, ControlRisk } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
 
+const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
+
 export interface ThisTurnToolDecision {
   id: string;
   classificationId: string;
@@ -102,8 +104,10 @@ export class ThisTurnToolGate {
       // Tool edit hoặc create luôn được phép ở tất cả các phase và control mode
       const isAlwaysAllowedEdit = EDIT_TOOL_NAMES.has(tool.name);
       // The model may ask the Harness to advance phase, but cannot expand its current tool authority.
-      const isPhaseTransitionRequest = tool.name === 'request_phase_transition'
-        && ['explore', 'plan'].includes(classification.phase);
+      const isPhaseTransitionTool = tool.name === 'request_phase_transition';
+      const isPhaseTransitionRequest = isPhaseTransitionTool
+        && ['explore', 'plan'].includes(classification.phase)
+        && PHASE_TRANSITION_TASK_CLASSES.has(classification.taskClass);
       const isVerificationRepairTool = classification.phase === 'verify'
         && EDIT_TOOL_NAMES.has(tool.name);
       const isCompletionTool = tool.name === 'submit_solution'
@@ -121,7 +125,7 @@ export class ThisTurnToolGate {
         || (classification.risk !== 'R0' || !descriptor.mutates)
         || isAlwaysAllowedEdit;
 
-      if (capabilityMatch && phaseMatch && riskMatch) {
+      if ((!isPhaseTransitionTool && capabilityMatch && phaseMatch && riskMatch) || isPhaseTransitionRequest) {
         allowed.push(tool);
       } else {
         denied.push(tool.name);

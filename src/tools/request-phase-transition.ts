@@ -15,11 +15,13 @@ export const requestPhaseTransitionTool: ToolDefinition = {
       },
       rationale: {
         type: Type.STRING,
+        minLength: 1 as any,
         description: 'Why the requested phase is appropriate now.',
       },
       evidenceRefs: {
         type: Type.ARRAY,
         items: { type: Type.STRING },
+        minItems: 1 as any,
         description: 'Observed tool-result, file, symbol, test-output, or plan-task references.',
       },
     },

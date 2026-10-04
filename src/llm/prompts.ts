@@ -32,6 +32,7 @@ import {
   SECTION_PHASE_VERIFY_GUIDANCE,
   SECTION_PHASE_RELEASE_GUIDANCE,
   resolvePhaseDynamicGuidance,
+  buildPhaseToolAuthorityDirective,
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
   type MonorepoKind,
@@ -66,6 +67,7 @@ export {
   SECTION_PHASE_VERIFY_GUIDANCE,
   SECTION_PHASE_RELEASE_GUIDANCE,
   resolvePhaseDynamicGuidance,
+  buildPhaseToolAuthorityDirective,
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
 };

@@ -284,6 +284,19 @@ test('guardian allows an inspected R3 target with a plan, but keeps the same edi
   assert.equal(guardian.preCallValidate('write_file', args, schema).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
 });
 
+test('Adaptive Pareto gate can be disabled without disabling other mutation guards', () => {
+  const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
+  guardian.setPreMutationGateContext({
+    taskClass: 'bugfix', hasValidatedHypothesis: false, risk: 'R3',
+    evidenceScore: 0, evidenceThreshold: 5, evidenceGateMode: 'off',
+  });
+
+  const result = guardian.preCallValidate('write_file', {
+    path: 'src/parser.ts', content: 'replacement',
+  });
+  assert.equal(result.valid, true);
+});
+
 test('patch evidence is checked for every parsed target, not the optional path', () => {
   const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
   guardian.setPreMutationGateContext({

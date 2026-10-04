@@ -17,6 +17,23 @@ import { validateSchemaValue } from './tools/schema-validator.js';
 import { applyPatchTool } from './tools/apply-patch.js';
 
 describe('Antigravity CLI UI & Input Bug Fixes', () => {
+  it('renders a structured rejection reason instead of Unknown error', () => {
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      CLI.renderToolResult('request_phase_transition', 0, {
+        success: false,
+        errorCode: 'PLAN_REQUIRED',
+        reason: 'Create and validate an execution plan before implementation.',
+      });
+    } finally {
+      console.log = originalLog;
+    }
+    assert.ok(lines.join('\n').includes('Create and validate an execution plan'));
+    assert.equal(lines.join('\n').includes('Unknown error'), false);
+  });
+
   describe('1. Visible Width & Unicode East-Asian / Emoji calculation', () => {
     it('should calculate accurate width for plain ASCII text', () => {
       assert.strictEqual(getVisibleWidth('Hello World'), 11);

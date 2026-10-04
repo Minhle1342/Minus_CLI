@@ -22,7 +22,7 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, buildPhaseToolAuthorityDirective, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
@@ -37,6 +37,7 @@ import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, cre
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
+import { shouldPersistReasoning } from './reasoning-persistence.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
 import { HypothesisTracker, type BlastRadiusRisk } from './hypothesis-tracker.js';
@@ -472,6 +473,31 @@ export class AgentLoop {
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
+  }
+
+  /**
+   * Persist a model thought as a projection-excluded session event.
+   * Reasoning records never enter getHistory()/model context — persistence
+   * is purely additive to the event log (no token cost). Selection follows
+   * shouldPersistReasoning: failure > high-risk > explicit debug mode.
+   */
+  private persistStepReasoning(
+    session: Session,
+    thought: string | undefined,
+    ctx: {
+      failure?: boolean;
+      failureTrigger?: string;
+      highRisk?: boolean;
+      highRiskTrigger?: string;
+      debugLogEnabled?: boolean;
+      step?: number;
+      turn?: number;
+    },
+  ): void {
+    const { step, turn, ...selection } = ctx;
+    const decision = shouldPersistReasoning({ thought: thought || '', ...selection });
+    if (!decision.persist || !decision.kind || !thought) return;
+    session.addReasoning(thought, { kind: decision.kind, step, turn, trigger: decision.trigger });
   }
 
   get collapsePreferences(): UICollapsePreferences {
@@ -1531,12 +1557,32 @@ export class AgentLoop {
         return true;
       });
       this.contextQualityEvaluator.recordToolRetrieval(visibleToolNames, expectedToolNames);
-      const activeToolSetHash = hashAllowedToolSet(visibleToolNames);
+      // P1: runtime authorization uses the gate allowlist + control pins, not the
+      // retrieval-pruned visible subset. Retrieval stays a soft relevance hint for
+      // the model; hard denial only applies to tools the gate never authorized
+      // (or to intentional hard locks below). This removes allowed-vs-visible
+      // desync that previously wasted a model step on TOOL_NOT_ALLOWED_THIS_TURN.
+      const reliableConstrainsScope = reliableToolOrchestrationMode === 'enforce'
+        && reliableRouteDecision.constrainSafe
+        && !reliableRouteDecision.failOpen;
+      let authorizedToolNames: string[];
+      if (hasSubmittedSolution) {
+        authorizedToolNames = [];
+      } else if (reliableConstrainsScope) {
+        authorizedToolNames = [...visibleToolNames];
+      } else {
+        const authorizedSet = new Set<string>(recommendedToolDecision.allowedToolNames);
+        for (const name of visibleToolNames) authorizedSet.add(name);
+        if (isPureInvestigation) authorizedSet.delete('submit_solution');
+        authorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
+        if (authorizedToolNames.length === 0) authorizedToolNames = [...visibleToolNames];
+      }
+      const activeToolSetHash = hashAllowedToolSet(authorizedToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
       const hasRuntimeToolScope = toolControlMode === 'enforce'
-        || (reliableToolOrchestrationMode === 'enforce' && reliableRouteDecision.constrainSafe && !reliableRouteDecision.failOpen);
+        || reliableConstrainsScope;
       const stepToolProvider = hasRuntimeToolScope
-        ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, visibleToolNames)
+        ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, authorizedToolNames)
         : this.toolProvider;
       const stepToolRunner = hasRuntimeToolScope
         ? this.toolRunner.createScoped(stepToolProvider)
@@ -1554,6 +1600,8 @@ export class AgentLoop {
               id: activeDecisionId,
               phaseVersion: classification.phaseVersion,
               visibleToolNames,
+              authorizedToolNames,
+              allowedToolNames: authorizedToolNames,
               allowedToolSetHash: activeToolSetHash,
             },
           },
@@ -1866,8 +1914,12 @@ export class AgentLoop {
       const phaseTransitionRecovery = this.lastToolExecution?.toolName === 'request_phase_transition'
         ? this.lastToolExecution.result?._system_phase_transition_recovery
         : undefined;
+      // P2: surface the cheap authorization-denial recovery on the next step
+      // without counting it as a consecutive failure.
+      const authorizationRecovery = this.lastToolExecution?.result?._system_tool_authorization_recovery;
       const rawReflection = [
         phaseTransitionRecovery,
+        authorizationRecovery,
         this.reflectionEngine.getLastReflectionPrompt(),
       ].filter(Boolean).join('\n\n');
       let strategicPivotGuidance: string | undefined;
@@ -1998,8 +2050,16 @@ export class AgentLoop {
       // Every model-visible dynamic block enters one arbiter. A preliminary pass
       // provides the footprint used by latency guidance; the final pass includes it.
       const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
+      // P0: phase/tool authority directive rides inside the non-truncatable P1.5
+      // phaseGuidance slot so the model always sees the exact authorized list.
+      const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
+        canRequestPhaseTransition,
+        hasSubmittedSolution,
+      });
+      const effectivePhaseGuidance = [phaseGuidance, phaseToolDirective].filter(Boolean).join('\n');
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
+        responseLanguageDirective: '[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.',
         completionDirective,
         advicePrompt: effectiveAdvicePrompt,
         testVerificationEncouragement,
@@ -2020,7 +2080,7 @@ export class AgentLoop {
         paretoGateReminder: ['bugfix', 'refactor', 'security'].includes(classification.taskClass)
           ? `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch). In explore/plan, request_phase_transition before editing and wait for the next model response. R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`
           : undefined,
-        phaseGuidance,
+        phaseGuidance: effectivePhaseGuidance,
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
         recalledTurnContext,
@@ -2380,6 +2440,9 @@ export class AgentLoop {
         reasoningContent: response.reasoningContent,
         toolCalls: response.toolCalls,
       });
+      // Case 4 — always-on intent line: one cheap sentence per step, kept
+      // outside the model projection for timeline review and retrieval.
+      session.addReasoning(stepSummary, { kind: 'intent', step, turn, trigger: 'step-summary' });
 
       if (!isSubagent && !this._collapsePreferences.compactSteps) {
         CLI.renderLLMThinking(stepSummary);
@@ -2401,6 +2464,11 @@ export class AgentLoop {
           step,
           turn: (session as any).turnsCount || 1,
         };
+        // Case 3 — explicit audit mode only (MINUS_REASONING_LOG=1):
+        // persist the full thought. Default off; routine thoughts stay ephemeral.
+        if (envFeatureEnabled('MINUS_REASONING_LOG', false)) {
+          this.persistStepReasoning(session, response.reasoningContent, { debugLogEnabled: true, step, turn });
+        }
         // The [REQUEST ANALYSIS] block is short, high-signal, and explicitly
         // user-facing: always display it, even when step output is compacted.
         const requestAnalysis = extractRequestAnalysis(response.reasoningContent);
@@ -2615,7 +2683,7 @@ export class AgentLoop {
                   controlMode: toolControlMode,
                   ...(toolControlMode !== 'off' ? {
                     decisionId: activeDecisionId,
-                    allowedToolNames: visibleToolNames,
+                    allowedToolNames: authorizedToolNames,
                     allowedToolSetHash: activeToolSetHash,
                     classificationPhase: classification.phase,
                     phaseVersion: classification.phaseVersion,
@@ -3075,7 +3143,7 @@ export class AgentLoop {
                   controlMode: toolControlMode,
                   ...(toolControlMode !== 'off' ? {
                     decisionId: activeDecisionId,
-                    allowedToolNames: visibleToolNames,
+                    allowedToolNames: authorizedToolNames,
                     allowedToolSetHash: activeToolSetHash,
                     classificationPhase: classification.phase,
                     phaseVersion: classification.phaseVersion,
@@ -3091,8 +3159,25 @@ export class AgentLoop {
               );
               executionResult = pipelinedOutcome.executionResult;
             }
-            if (executionResult.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN') {
+            if (executionResult.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN'
+              || executionResult.result?.errorCode === 'INVALID_TOOL_DECISION_BINDING') {
               this.toolControlTelemetry.recordDeniedCall();
+              // P2: attach cheap recovery carrying the authorized list. The next
+              // step surfaces it via authorizationRecovery + reflection prompt
+              // without failure-streak, budget, or cascade-freeze cost.
+              try {
+                const recoveryText = `🔧 [TOOL AUTHORIZATION RECOVERY]: Tool "${toolName}" is not authorized in phase "${classification.phase}". Authorized: [${authorizedToolNames.join(', ')}]. Visible to model: [${visibleToolNames.join(', ')}]. Pick the closest authorized tool; do not repeat the denied call unchanged.`;
+                if (executionResult.result && typeof executionResult.result === 'object') {
+                  if (Object.isExtensible(executionResult.result)) {
+                    (executionResult.result as any)._system_tool_authorization_recovery = recoveryText;
+                  } else {
+                    executionResult = {
+                      ...executionResult,
+                      result: { ...executionResult.result, _system_tool_authorization_recovery: recoveryText },
+                    };
+                  }
+                }
+              } catch { }
             }
           }
 
@@ -3195,6 +3280,17 @@ export class AgentLoop {
             const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
             if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
             else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
+            // Case 2 — high-risk mutation: persist the thought behind a
+            // HIGH/CRITICAL-blast or sensitive-path edit for audit/rollback.
+            const sensitiveTouched = mutatedFiles.some((f) => !isNonExecutableFile(f) && isSensitivePath(f));
+            if (blastRisk === 'CRITICAL' || blastRisk === 'HIGH' || sensitiveTouched) {
+              this.persistStepReasoning(session, this._latestReasoning?.thought, {
+                highRisk: true,
+                highRiskTrigger: `blast-${(blastRisk || 'sensitive-path').toLowerCase()}:${mutatedPath}`,
+                step,
+                turn,
+              });
+            }
             const blastConsumers = blast?.directConsumers || blast?.callers || [];
             if (Array.isArray(blastConsumers) && blastConsumers.length > 0) this.editTouchedCallers = true;
             hasSubmittedSolution = false;
@@ -3253,6 +3349,15 @@ export class AgentLoop {
                 } else {
                   this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedF, turn, 'Verification command failed');
                 }
+              }
+              // Case 1a — failed verification: keep the thought that led to it.
+              if (!isVerifOk) {
+                this.persistStepReasoning(session, this._latestReasoning?.thought, {
+                  failure: true,
+                  failureTrigger: `verification-failed:${commandForAttribution}`,
+                  step,
+                  turn,
+                });
               }
             }
             this.lastCommandExecutionState = {
@@ -3396,6 +3501,13 @@ export class AgentLoop {
                 0,
               );
             } else if (hStatus === 'refuted' || hStatus === 'falsified') {
+              // Case 1b — falsified hypothesis: keep the thought for post-mortem.
+              this.persistStepReasoning(session, this._latestReasoning?.thought, {
+                failure: true,
+                failureTrigger: `hypothesis-${hStatus}:${hId}`,
+                step,
+                turn,
+              });
               const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
                 hId,
                 this.hypothesisTracker,
@@ -4073,6 +4185,14 @@ export class AgentLoop {
                   : { allow: true });
 
       if (!finalAnswerDecision.allow) {
+        // Case 1c — completion-gate rejection: keep the thought that produced
+        // the rejected answer so the retry can diagnose, not guess.
+        this.persistStepReasoning(session, this._latestReasoning?.thought, {
+          failure: true,
+          failureTrigger: `gate-rejected:${finalAnswerDecision.reason || 'completion-gate'}`,
+          step,
+          turn,
+        });
         {
           consecutiveIncompleteFinals++;
           const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;

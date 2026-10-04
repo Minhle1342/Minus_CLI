@@ -600,3 +600,27 @@ export function resolvePhaseDynamicGuidance(
       return '';
   }
 }
+
+/**
+ * P0 phase/tool authority directive (dynamic tail, non-truncatable via P1.5).
+ * Tells the model exactly which tools are authorized this step so it never
+ * has to guess an unauthorized edit to advance its workflow. Keep it compact:
+ * a sorted tool list plus the legal advance mechanism for the current phase.
+ */
+export function buildPhaseToolAuthorityDirective(
+  phase: string,
+  visibleToolNames: readonly string[],
+  options?: { canRequestPhaseTransition?: boolean; hasSubmittedSolution?: boolean },
+): string {
+  const names = [...new Set(visibleToolNames)].sort();
+  if (options?.hasSubmittedSolution || names.length === 0) {
+    return `🔧 [PHASE TOOL AUTHORITY: ${phase}] No tools are authorized this step. Answer directly with text; do not call any tool.`;
+  }
+  const list = names.join(', ');
+  const advance = options?.canRequestPhaseTransition
+    ? ` To advance workflow, call request_phase_transition with rationale+evidenceRefs, then wait for the next turn before using the new phase tools.`
+    : phase === 'plan'
+      ? ` Use create_plan for milestones, then request_phase_transition to implement before editing.`
+      : ` Call ONLY tools from this list; do not hallucinate tool names outside it.`;
+  return `🔧 [PHASE TOOL AUTHORITY: ${phase}] Authorized this step (${names.length}): ${list}.${advance}`;
+}

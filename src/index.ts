@@ -55,6 +55,7 @@ import {
 } from './llm/token-config.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
 import type { OcrReviewService } from './review/open-code-review.js';
+import { checkWorkspaceChanges, findCliRoot, updateCli } from './tools/cli-updater.js';
 
 // Load biến môi trường từ file .env
 dotenv.config();
@@ -1399,6 +1400,31 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
       if (trimmed === '/tasks') {
         CLI.renderTasks(kernel.ctx.tasks.listTasks());
+        continue;
+      }
+
+      if (trimmed === '/update' || trimmed.startsWith('/update ')) {
+        const sub = trimmed
+          .replace(/^\/update\s*/i, '')
+          .trim()
+          .toLowerCase();
+        try {
+          const cliRoot = findCliRoot();
+          if (!cliRoot) {
+            console.log(`\n  ${c.crimson}✖ Cannot locate the CLI source tree (no mini-agent-loop package.json found upward).${c.reset}\n`);
+            continue;
+          }
+          if (sub === 'check' || sub === 'status') {
+            CLI.renderWorkspaceCheck(await checkWorkspaceChanges(cliRoot));
+            continue;
+          }
+          const check = await checkWorkspaceChanges(cliRoot);
+          CLI.renderWorkspaceCheck(check);
+          const result = await updateCli(cliRoot, { buildOnly: sub === 'build' });
+          CLI.renderCliUpdate(result);
+        } catch (error: any) {
+          console.log(`\n  ${c.crimson}✖ /update failed: ${error?.message || error}${c.reset}\n`);
+        }
         continue;
       }
 

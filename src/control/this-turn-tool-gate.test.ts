@@ -138,6 +138,13 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(readOnlyDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore phase');
   assert.ok(readOnlyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in pure read-only exploration');
 
+  const operationsDecision = gate.decide({ ...readOnlyClassification, taskClass: 'operations' }, registry.getAll());
+  assert.equal(
+    operationsDecision.allowedToolNames.includes('request_phase_transition'),
+    false,
+    'non-coding tasks must not advertise a coding-only phase transition request',
+  );
+
   // 3. Implement phase on feature
   const implementClassification: any = {
     id: 'class-test-implement',

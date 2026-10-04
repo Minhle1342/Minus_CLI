@@ -233,6 +233,29 @@ export class ReflectionEngine {
       'HOST_MEMORY_COMMIT_EXHAUSTED',
     ]);
 
+    // P2: authorization denials are harness routing feedback, not tool failures.
+    // Keep them cheap: no consecutive-failure increment, no signature-streak
+    // tracking, no cascade-freeze contribution. The recovery text carries the
+    // authorized list so the next step corrects course without a wasted retry.
+    if (result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN'
+      || result?.errorCode === 'INVALID_TOOL_DECISION_BINDING') {
+      const allowed = Array.isArray(result?.allowedTools) ? result.allowedTools.slice(0, 20) : [];
+      const recovery = [
+        `🔧 [TOOL AUTHORIZATION RECOVERY]: Tool "${toolName}" is not authorized in phase "${result?.phase || 'unknown'}".`,
+        allowed.length > 0
+          ? `Authorized this step: ${allowed.join(', ')}. Call ONLY a tool from this list.`
+          : `Call ONLY a model-visible tool from the current phase tool list.`,
+        `Do not repeat the denied call unchanged; pick the closest authorized tool or request_phase_transition with rationale+evidenceRefs when the workflow requires a new phase.`,
+      ].join(' ');
+      this.lastReflectionPrompt = recovery;
+      return {
+        isFailure: false,
+        consecutiveFailures: this.consecutiveFailures,
+        reflectionPrompt: recovery,
+        advice: `Authorization denied for ${toolName}; use an authorized tool.`,
+      };
+    }
+
     if (toolName === 'run_command' && isCommandOutcomeBlocked(result)) {
       return {
         isFailure: false,
