@@ -393,3 +393,139 @@ test('Bug 6 (Low): TurnMemoryRetriever retrieves masked observation across path 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('Auto-compact regression: emergency pass unions first-pass archives', async () => {
+  const history: any[] = [
+    { role: 'user', parts: [{ text: 'Primary objective' }] },
+    { role: 'model', parts: [{ text: 'Acknowledged' }] },
+  ];
+  for (let i = 1; i <= 11; i++) {
+    history.push({ role: 'user', parts: [{ text: `Turn ${i}: ${'user detail '.repeat(60)}` }] });
+    history.push({ role: 'model', parts: [{ text: `Decided implementation for turn ${i}. ${'assistant detail '.repeat(80)}` }] });
+  }
+  const manager = new ContextBudgetManager(new ContextCompactor({ preserveLastNTurns: 8 }), { mode: 'enforce' });
+  const result = await manager.prepareRequest({
+    provider: 'gemini', model: 'gemini-test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 1600, outputReserveTokens: 100,
+  });
+  const archived = (result.compactionStats?.archivedTurns || []).map((t) => t.turnNumber);
+  assert.ok(archived.includes(1), 'first-pass turn 1 must survive emergency union');
+  assert.ok(archived.includes(9), 'emergency turn 9 must be present');
+  assert.equal(new Set(archived).size, archived.length, 'no duplicate archived turns');
+  assert.equal(result.state?.archivedTurnIds.length, archived.length);
+});
+
+test('Auto-compact regression: repeated masking preserves verification exitCode', () => {
+  const compactor = new ContextCompactor({ preserveLastNToolResults: 1, maskOldObservationsBeyondN: 1 });
+  const pair = (id: string, response: any) => [
+    { role: 'model', parts: [{ functionCall: { id, name: 'run_command', args: { command: 'npm test' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id, name: 'run_command', response } }] },
+  ];
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Verify' }] }, ...pair('old', { exitCode: 0, stdout: 'verified '.repeat(100) }), ...pair('new', { exitCode: 0, stdout: 'ok' })];
+  const first = compactor.compact(history, { force: true });
+  const second = compactor.compact(first.messages, { force: true });
+  const secondResp = (second.messages[2]?.parts?.[0] as any)?.functionResponse?.response;
+  assert.equal(secondResp?.exitCode, 0);
+  assert.equal(secondResp?.status, 'masked');
+});
+
+test('Auto-compact regression: rolling summary retains cumulative decisions', () => {
+  const compactor = new ContextCompactor({ preserveLastNTurns: 1, enableObservationMasking: false });
+  const history: any[] = [
+    { role: 'user', parts: [{ text: 'Goal' }] },
+    { role: 'model', parts: [{ text: 'ok' }] },
+    { role: 'user', parts: [{ text: 'Inspect' }] },
+    { role: 'model', parts: [{ text: `Decided: ${'long prefix '.repeat(15)}KEEP_STRICT_VALIDATION_UNIQUE` }] },
+    { role: 'user', parts: [{ text: 'Continue' }] },
+    { role: 'model', parts: [{ text: 'ok' }] },
+  ];
+  const first = compactor.compact(history, { force: true, preserveLastNTurns: 1, enableRollingTurns: true });
+  assert.match(JSON.stringify(first.messages), /KEEP_STRICT_VALIDATION_UNIQUE/);
+  const extended = [...first.messages, { role: 'user', parts: [{ text: 'Next' }] }, { role: 'model', parts: [{ text: 'ok' }] }];
+  const second = compactor.compact(extended as any, { force: true, preserveLastNTurns: 1, enableRollingTurns: true });
+  assert.match(JSON.stringify(second.messages), /KEEP_STRICT_VALIDATION_UNIQUE/);
+});
+
+test('Auto-compact regression: calibration accounts for observed undercount', async () => {
+  const { CalibratedRequestTokenCounter } = await import('./context-budget-manager.js');
+  const counter = new CalibratedRequestTokenCounter();
+  const envelope: any = {
+    provider: 'gemini', model: 'gemini-cal-test', systemPrompt: 'system', tools: [],
+    history: [{ role: 'user', parts: [{ text: 'hello '.repeat(100) }] }],
+    maxInputTokens: 10000, outputReserveTokens: 100,
+  };
+  const initial = await counter.count(envelope);
+  counter.observe(envelope.model, initial.inputTokens, initial.inputTokens * 1.8);
+  const calibrated = await counter.count(envelope);
+  assert.ok(calibrated.upperBoundTokens >= initial.inputTokens * 1.8, `upper bound ${calibrated.upperBoundTokens} must cover observed 1.8x undercount`);
+  assert.equal(calibrated.source, 'calibrated');
+});
+
+test('Archive integrity: masked ids bind tool name + content hash, never message indices', () => {
+  const compactor = new ContextCompactor({ preserveLastNToolResults: 1, maskOldObservationsBeyondN: 1 });
+  const pairNoId = (stdout: string) => [
+    { role: 'model', parts: [{ functionCall: { name: 'run_command', args: {} } }] },
+    { role: 'user', parts: [{ functionResponse: { name: 'run_command', response: { exitCode: 0, stdout } } }] },
+  ];
+  const histA: any[] = [{ role: 'user', parts: [{ text: 't' }] }, ...pairNoId('FIRST'.repeat(300)), ...pairNoId('new-ok')];
+  const histB: any[] = [{ role: 'user', parts: [{ text: 't' }] }, ...pairNoId('SECOND'.repeat(300)), ...pairNoId('new-ok')];
+  const rA = compactor.compact(histA, { force: true });
+  const rB = compactor.compact(histB, { force: true });
+  const recA = (rA.stats.maskedObservations as any[])[0];
+  const recB = (rB.stats.maskedObservations as any[])[0];
+  assert.ok(recA && recB, 'both compactions must archive the old observation');
+  assert.notEqual(recA.id, recB.id, 'distinct payloads must not share an archive id');
+  assert.equal(recA.payloadHash?.length, 16);
+  const rAgain = compactor.compact(histA, { force: true });
+  assert.equal((rAgain.stats.maskedObservations as any[])[0]?.id, recA.id, 'same payload must map to the same id');
+});
+
+test('Archive integrity: same-id upsert keeps the fuller payload with version+1', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-archive-upsert-'));
+  try {
+    const retriever = new TurnMemoryRetriever(root);
+    const small: any = { id: 'tool-A', toolName: 'view_file', timestamp: new Date().toISOString(), originalPayload: { path: 'a', content: 'x'.repeat(5000) }, summary: 's', payloadHash: 'h-small', version: 1 };
+    const r1 = await retriever.archiveMaskedObservations([small]);
+    assert.deepEqual([r1.inserted, r1.updated, r1.skipped], [1, 0, 0]);
+    const rSame = await retriever.archiveMaskedObservations([{ ...small }]);
+    assert.equal(rSame.skipped, 1, 'identical re-archive must be an idempotent skip');
+    const fuller: any = { ...small, originalPayload: { path: 'a', content: 'FULL'.repeat(5000) }, payloadHash: 'h-full' };
+    const r2 = await retriever.archiveMaskedObservations([fuller]);
+    assert.equal(r2.updated, 1, 'same id + different content must upsert, not silently drop');
+    const kept = retriever.retrieveMaskedObservation('tool-A');
+    assert.ok(JSON.stringify(kept?.originalPayload).includes('FULL'), 'fuller payload must win');
+    assert.equal(kept?.version, 2);
+    assert.equal(kept?.supersedes, 'h-small');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Archive integrity: records without a stable id are rejected loudly', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-archive-reject-'));
+  try {
+    const retriever = new TurnMemoryRetriever(root);
+    await assert.rejects(retriever.archiveMaskedObservations([{ toolName: 'x' } as any]), /stable id/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Archive integrity: request headers form a verifiable digest chain', async () => {
+  const { assertSessionRuntimeInvariants, computeRequestDigest } = await import('../session/session-invariants.js');
+  const session = new Session(`chain-${Date.now()}`);
+  session.append('turn/start', { turn: 1 });
+  session.append('step/start', { turn: 1, step: 1 });
+  const h1 = session.recordRequestHeader({ turn: 1, step: 1, systemPrompt: 'p', tools: [], history: [] } as any, { compactHistory: true });
+  session.append('step/end', { turn: 1, step: 1 });
+  session.append('step/start', { turn: 1, step: 2 });
+  const h2 = session.recordRequestHeader({ turn: 1, step: 2, systemPrompt: 'p', tools: [], history: [] } as any, { compactHistory: true });
+  assert.equal((h2.data.requestHeader as any).previousDigest, (h1.data.requestHeader as any).digest);
+  session.assertRuntimeInvariants({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
+  const forged = session.getEvents().map((e) => JSON.parse(JSON.stringify(e)));
+  const lastHeader = (forged[forged.length - 1].data.requestHeader as any);
+  lastHeader.previousDigest = 'deadbeef';
+  const { digest: _dropped, ...rest } = lastHeader;
+  lastHeader.digest = computeRequestDigest(rest);
+  assert.throws(() => assertSessionRuntimeInvariants(forged as any, { allowOpenLifecycle: true }), /digest chain broken/);
+});

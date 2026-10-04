@@ -186,16 +186,23 @@ export class CalibratedRequestTokenCounter implements RequestTokenCounter {
         calibratedRatio = sorted[p90Index];
       }
     }
+    // Apply the observed systematic bias to the estimate itself, then keep a
+    // bounded uncertainty margin around that calibrated baseline. Previously
+    // only the margin used the observation (capped at +20%), so a steady 1.8x
+    // undercount kept reporting ~1.2x upper bounds.
+    const calibratedHistoryTokens = Math.ceil(historyTokens * calibratedRatio);
+    const calibratedNonHistoryTokens = Math.ceil(nonHistoryTokens * calibratedRatio);
+    const calibratedInputTokens = calibratedHistoryTokens + calibratedNonHistoryTokens;
     // Giới hạn sai số biên an toàn trong khoảng [0.05, 0.20] (tối đa 20% margin, không bùng nổ do outlier)
     const errorMarginRatio = Math.min(
       0.2,
       Math.max(0.05, calibratedRatio * 1.05 - 1),
     );
     return {
-      inputTokens,
-      upperBoundTokens: Math.ceil(inputTokens * (1 + errorMarginRatio)),
-      historyTokens,
-      nonHistoryTokens,
+      inputTokens: calibratedInputTokens,
+      upperBoundTokens: Math.ceil(calibratedInputTokens * (1 + errorMarginRatio)),
+      historyTokens: calibratedHistoryTokens,
+      nonHistoryTokens: calibratedNonHistoryTokens,
       source: ratios.length > 0 ? "calibrated" : "tokenizer",
       hardBound: false,
       errorMarginRatio,
@@ -496,7 +503,48 @@ export class ContextBudgetManager {
           emergencyAfter.upperBoundTokens <= usableInputTokens ||
           emergencyAfter.upperBoundTokens < finalAfter.upperBoundTokens
         ) {
-          finalSelected = emergencyCandidate;
+          // Preserve first-pass archives: emergency runs on already-compacted
+          // messages, so its stats alone omit earlier archived turns/masks.
+          // Union by stable ID, preferring the full original payload.
+          const mergedArchivedById = new Map<string, NonNullable<typeof selected.stats.archivedTurns>[number]>();
+          for (const turn of [...(selected.stats.archivedTurns || []), ...(emergencyCandidate.stats.archivedTurns || [])]) {
+            if (turn && !mergedArchivedById.has(turn.id)) mergedArchivedById.set(turn.id, turn);
+          }
+          const mergedMaskedById = new Map<string, NonNullable<typeof selected.stats.maskedObservations>[number]>();
+          const preferFull = (existing: { originalPayload?: unknown }, incoming: { originalPayload?: unknown }) => {
+            const sizeOf = (p: unknown) => {
+              try { return JSON.stringify(p ?? '').length; } catch { return 0; }
+            };
+            return sizeOf(incoming.originalPayload) > sizeOf(existing.originalPayload) ? incoming : existing;
+          };
+          for (const rec of [...(selected.stats.maskedObservations || []), ...(emergencyCandidate.stats.maskedObservations || [])]) {
+            if (!rec) continue;
+            const prev = mergedMaskedById.get(rec.id);
+            mergedMaskedById.set(rec.id, prev ? preferFull(prev, rec) as typeof prev : rec);
+          }
+          const mergedArchivedTurns = Array.from(mergedArchivedById.values());
+          const mergedMasked = Array.from(mergedMaskedById.values());
+          const mergedStrategies = Array.from(new Set([
+            ...(selected.stats.strategiesApplied || []),
+            ...(emergencyCandidate.stats.strategiesApplied || []),
+          ]));
+          finalSelected = {
+            messages: emergencyCandidate.messages,
+            stats: {
+              ...emergencyCandidate.stats,
+              originalTokens: selected.stats.originalTokens,
+              originalLength: selected.stats.originalLength,
+              compactedTokens: emergencyCandidate.stats.compactedTokens,
+              tokensSaved: Math.max(0, selected.stats.originalTokens - emergencyCandidate.stats.compactedTokens),
+              compactedLength: emergencyCandidate.stats.compactedLength,
+              charsSaved: Math.max(0, selected.stats.originalLength - emergencyCandidate.stats.compactedLength),
+              prunedPartsCount: (selected.stats.prunedPartsCount || 0) + (emergencyCandidate.stats.prunedPartsCount || 0),
+              prunedTurnsCount: (selected.stats.prunedTurnsCount || 0) + (emergencyCandidate.stats.prunedTurnsCount || 0),
+              archivedTurns: mergedArchivedTurns as typeof emergencyCandidate.stats.archivedTurns,
+              maskedObservations: mergedMasked as typeof emergencyCandidate.stats.maskedObservations,
+              strategiesApplied: [...mergedStrategies, 'emergency-archive-union'],
+            },
+          };
           finalAfter = emergencyAfter;
           withinBudget = emergencyAfter.upperBoundTokens <= usableInputTokens;
         }

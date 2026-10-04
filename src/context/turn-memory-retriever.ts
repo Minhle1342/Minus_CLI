@@ -25,6 +25,75 @@ export interface ArchivedTurnDocument {
   keyDecisions: string[];
   timestamp: string;
   vector?: number[];
+  /** Monotonic version per id; bumped when an upsert replaces content. */
+  version?: number;
+}
+
+/** Outcome of an archive call. Replaces silent first-write-wins drops with accountable counts. */
+export interface ArchiveWriteResult {
+  inserted: number;
+  /** Same id, different content: fuller payload kept, version bumped. */
+  updated: number;
+  /** Same id and identical content: idempotent no-op. */
+  skipped: number;
+  /** Ids evicted by memory caps during this call. */
+  evicted: string[];
+}
+
+/** sha256 (hex, 16 chars) of a payload for same-id/different-content detection. */
+export function hashArchivedPayload(payload: unknown): string {
+  try {
+    return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex').slice(0, 16);
+  } catch {
+    return 'unhashable';
+  }
+}
+
+function serializedPayloadSize(payload: unknown): number {
+  try {
+    return JSON.stringify(payload ?? '').length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Volatile fields excluded from same-id content comparison (embedding, clock, version). */
+function normalizeTurnForHash(turn: ArchivedTurnDocument): string {
+  const { vector: _v, timestamp: _t, version: _n, ...stable } = turn;
+  return JSON.stringify(stable);
+}
+
+/**
+ * RAM cap for oversized payloads (> 64KB). Truncation is explicit metadata
+ * (truncated + fullPayloadBytes), never silent: the full bytes remain durable
+ * in the append-only session event log.
+ */
+function optimizeMaskedRecord(rec: MaskedObservationRecord): MaskedObservationRecord {
+  let optimizedPayload = rec.originalPayload;
+  let truncated = false;
+  let fullPayloadBytes = 0;
+  if (typeof optimizedPayload === 'string' && optimizedPayload.length > 64 * 1024) {
+    fullPayloadBytes = optimizedPayload.length;
+    optimizedPayload = `${optimizedPayload.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY OBSERVATION: ${optimizedPayload.length} bytes]...\n${optimizedPayload.slice(-16 * 1024)}`;
+    truncated = true;
+  } else if (optimizedPayload && typeof optimizedPayload === 'object') {
+    const serialized = JSON.stringify(optimizedPayload);
+    if (serialized.length > 64 * 1024) {
+      fullPayloadBytes = serialized.length;
+      optimizedPayload = {
+        ...optimizedPayload,
+        content: typeof (optimizedPayload as any).content === 'string'
+          ? `${(optimizedPayload as any).content.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY CONTENT]...`
+          : (optimizedPayload as any).content,
+      };
+      truncated = true;
+    }
+  }
+  return {
+    ...rec,
+    originalPayload: optimizedPayload,
+    ...(truncated ? { truncated, fullPayloadBytes } : {}),
+  };
 }
 
 export interface RetrievalResult {
@@ -369,79 +438,123 @@ export class TurnMemoryRetriever {
   }
 
   /**
-   * Lưu trữ một hoặc nhiều turn cũ vào cơ sở dữ liệu trí nhớ
+   * Lưu trữ một hoặc nhiều turn cũ vào cơ sở dữ liệu trí nhớ.
+   * Upsert-versioned: cùng id + nội dung khác nhau thì giữ bản đầy đủ hơn
+   * (version+1) thay vì lặng lẽ bỏ bản ghi mới như first-write-wins trước đây.
    */
-  async archiveTurns(turns: ArchivedTurnDocument[]): Promise<void> {
+  async archiveTurns(turns: ArchivedTurnDocument[]): Promise<ArchiveWriteResult> {
     await this.init();
-    if (turns.length === 0) return;
+    const result: ArchiveWriteResult = { inserted: 0, updated: 0, skipped: 0, evicted: [] };
+    if (turns.length === 0) return result;
 
     const native = getNativeCore();
     const newDocs: ArchivedTurnDocument[] = [];
 
     for (const turn of turns) {
-      if (this.turnsMap.has(turn.id)) continue;
-
-      // Tính vector embedding qua Rust Native nếu khả dụng
-      let vector = turn.vector;
-      if (!vector && native && typeof native.rsGenerateSubwordEmbedding === 'function') {
-        try {
-          const textForEmbedding = `${turn.userPrompt} ${turn.assistantSummary} ${turn.filesTouched.join(' ')}`;
-          vector = native.rsGenerateSubwordEmbedding(textForEmbedding);
-        } catch {
-          // Bỏ qua nếu lỗi embedding
-        }
+      if (!turn || typeof turn.id !== 'string' || !turn.id) {
+        throw new Error('archiveTurns refused a turn without a stable id.');
       }
+      const existing = this.turnsMap.get(turn.id);
+      if (!existing) {
+        let vector = turn.vector;
+        if (!vector && native && typeof native.rsGenerateSubwordEmbedding === 'function') {
+          try {
+            const textForEmbedding = `${turn.userPrompt} ${turn.assistantSummary} ${turn.filesTouched.join(' ')}`;
+            vector = native.rsGenerateSubwordEmbedding(textForEmbedding);
+          } catch {
+            // Bỏ qua nếu lỗi embedding
+          }
+        }
 
-      const enrichedTurn: ArchivedTurnDocument = {
-        ...turn,
-        vector,
+        const enrichedTurn: ArchivedTurnDocument = {
+          ...turn,
+          vector,
+          version: turn.version ?? 1,
+        };
+
+        this.turnsMap.set(enrichedTurn.id, enrichedTurn);
+        newDocs.push(enrichedTurn);
+        result.inserted++;
+        continue;
+      }
+      if (normalizeTurnForHash(existing) === normalizeTurnForHash(turn)) {
+        result.skipped++;
+        continue;
+      }
+      // Cùng id nhưng nội dung khác: giữ bản đầy đủ hơn (serialized lớn hơn),
+      // version+1 và vẫn index lại để retrieval thấy bản mới nhất.
+      const keepIncoming = serializedPayloadSize(turn) >= serializedPayloadSize(existing);
+      const merged: ArchivedTurnDocument = {
+        ...(keepIncoming ? turn : existing),
+        id: turn.id,
+        vector: (keepIncoming ? turn.vector : existing.vector) ?? existing.vector ?? turn.vector,
+        version: (existing.version ?? 1) + 1,
       };
-
-      this.turnsMap.set(enrichedTurn.id, enrichedTurn);
-      newDocs.push(enrichedTurn);
+      this.turnsMap.set(merged.id, merged);
+      try { this.miniSearch.discard(merged.id); } catch { /* best-effort */ }
+      newDocs.push(merged);
+      result.updated++;
     }
 
     const { evictedTurns } = this.enforceMemoryCaps();
+    void evictedTurns;
     if (newDocs.length > 0) {
       this.bumpMemoryVersion();
       this.miniSearch.addAll(newDocs);
       await this.persist();
-    } else if (evictedTurns > 0) {
-      await this.persist();
+    } else if (result.skipped > 0) {
+      // Idempotent re-archive only; nothing changed, no persist needed.
     }
+    return result;
   }
 
   /**
    * Lưu trữ các observations đã bị mask vào bộ nhớ on-demand (tối ưu bộ nhớ RAM)
    */
-  async archiveMaskedObservations(records: MaskedObservationRecord[]): Promise<void> {
+  async archiveMaskedObservations(records: MaskedObservationRecord[]): Promise<ArchiveWriteResult> {
     await this.init();
-    if (!records || records.length === 0) return;
+    const result: ArchiveWriteResult = { inserted: 0, updated: 0, skipped: 0, evicted: [] };
+    if (!records || records.length === 0) return result;
 
-    let hasNew = false;
+    let changed = false;
     for (const rec of records) {
-      if (!this.maskedObservationsMap.has(rec.id)) {
-        // Tối ưu RAM: Cắt gọn payload khổng lồ (> 64KB) nếu là chuỗi dài hoặc object cồng kềnh
-        let optimizedPayload = rec.originalPayload;
-        if (typeof optimizedPayload === 'string' && optimizedPayload.length > 64 * 1024) {
-          optimizedPayload = `${optimizedPayload.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY OBSERVATION: ${optimizedPayload.length} bytes]...\n${optimizedPayload.slice(-16 * 1024)}`;
-        } else if (optimizedPayload && typeof optimizedPayload === 'object') {
-          const serialized = JSON.stringify(optimizedPayload);
-          if (serialized.length > 64 * 1024) {
-            optimizedPayload = {
-              ...optimizedPayload,
-              content: typeof (optimizedPayload as any).content === 'string'
-                ? `${(optimizedPayload as any).content.slice(0, 32 * 1024)}\n...[TRUNCATED IN-MEMORY CONTENT]...`
-                : (optimizedPayload as any).content,
-            };
-          }
-        }
-        this.maskedObservationsMap.set(rec.id, {
-          ...rec,
-          originalPayload: optimizedPayload,
-        });
-        hasNew = true;
+      if (!rec || typeof rec.id !== 'string' || !rec.id) {
+        throw new Error('archiveMaskedObservations refused a record without a stable id.');
       }
+      const incomingHash = rec.payloadHash ?? hashArchivedPayload(rec.originalPayload);
+      const existing = this.maskedObservationsMap.get(rec.id);
+      if (!existing) {
+        this.maskedObservationsMap.set(rec.id, optimizeMaskedRecord({
+          ...rec,
+          payloadHash: incomingHash,
+          version: rec.version ?? 1,
+        }));
+        changed = true;
+        result.inserted++;
+        continue;
+      }
+      const existingHash = existing.payloadHash ?? hashArchivedPayload(existing.originalPayload);
+      if (existingHash === incomingHash) {
+        result.skipped++;
+        continue;
+      }
+      // Cùng id nhưng payload khác (re-compaction của stub, native-vs-TS double
+      // record): giữ bản đầy đủ hơn, version+1, ghi rõ hash bị thay thế.
+      // Không bao giờ lặng lẽ bỏ bản ghi mới như first-write-wins trước đây.
+      const incomingSize = serializedPayloadSize(rec.originalPayload);
+      const existingSize = serializedPayloadSize(existing.originalPayload);
+      const keepIncoming = incomingSize >= existingSize;
+      const winner = keepIncoming ? rec : existing;
+      this.maskedObservationsMap.set(rec.id, optimizeMaskedRecord({
+        ...winner,
+        id: rec.id,
+        payloadHash: keepIncoming ? incomingHash : existingHash,
+        version: (existing.version ?? 1) + 1,
+        supersedes: keepIncoming ? existingHash : incomingHash,
+        timestamp: new Date().toISOString(),
+      }));
+      changed = true;
+      result.updated++;
     }
 
     // Giữ tối đa 40 observations gần nhất để tối ưu RAM (< 50MB)
@@ -451,21 +564,24 @@ export class TurnMemoryRetriever {
       const toRemove = keys.slice(0, keys.length - MAX_MASKED_IN_MEMORY);
       for (const k of toRemove) {
         this.maskedObservationsMap.delete(k);
+        result.evicted.push(k);
       }
+      changed = true;
     }
 
-    if (hasNew) {
+    if (changed) {
       this.bumpMemoryVersion();
       await this.persistMaskedObservations();
     }
+    return result;
   }
 
   private async persistMaskedObservations(): Promise<void> {
     try {
       const allDocs = Array.from(this.maskedObservationsMap.values());
       await fs.writeFile(this.maskedStorageFilePath, JSON.stringify(allDocs), 'utf8');
-    } catch {
-      // Không làm sập tiến trình nếu ghi file lỗi
+    } catch (error) {
+      throw new Error(`persistMaskedObservations failed for ${this.maskedStorageFilePath}: ${String((error as Error)?.message || error)}`);
     }
   }
 
@@ -488,6 +604,9 @@ export class TurnMemoryRetriever {
     ]);
     for (const record of this.maskedObservationsMap.values()) {
       if (record.id && targetVariants.has(record.id)) return record;
+      // Stable-id scheme stores `<toolCallId>#<contentHash>`; a bare tool-call
+      // id query must still resolve to its archived observation.
+      if (record.toolCallId && (record.toolCallId === trimmed || targetVariants.has(record.toolCallId))) return record;
       if (record.targetPath) {
         const recordVariants = [
           record.targetPath,
@@ -553,8 +672,8 @@ export class TurnMemoryRetriever {
     try {
       const allDocs = Array.from(this.turnsMap.values());
       await fs.writeFile(this.storageFilePath, JSON.stringify(allDocs, null, 2), 'utf8');
-    } catch {
-      // Không làm sập tiến trình chính nếu ghi file lỗi
+    } catch (error) {
+      throw new Error(`TurnMemoryRetriever.persist failed for ${this.storageFilePath}: ${String((error as Error)?.message || error)}`);
     }
   }
 

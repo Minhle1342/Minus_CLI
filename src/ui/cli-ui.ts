@@ -415,7 +415,7 @@ function getToolFailureDetail(result: Record<string, any>): string {
   const isGenericFailureText = (value: string) =>
     /^(?:the command completed with exit code \d+\.?|process exited with code \d+|command failed(?: with exit code \d+)?\.?|unknown error)$/i.test(value.trim());
 
-  for (const value of [result.error, result.message, result.diagnostic]) {
+  for (const value of [result.error, result.message, result.reason, result.diagnostic]) {
     if (typeof value === 'string' && value.trim() && !isGenericFailureText(value)) return value.trim();
   }
 
@@ -1482,6 +1482,10 @@ export class CLI {
 
   static renderAutoCompactionNotice(savedTokens: number, remainingTokens: number): void {
     console.log(`  ${c.cyan}🧹 [Auto-Compacted]${c.reset} ${c.emerald}Saved ~${savedTokens.toLocaleString()} tokens${c.reset} ${c.slate}(History: ~${remainingTokens.toLocaleString()} tok)${c.reset}`);
+  }
+
+  static renderArchiveWarning(info: { scope: string; error: string }): void {
+    console.log(`  ${c.brightYellow}⚠️ [Archive Degraded]${c.reset} ${c.slate}${info.scope} archive failed (${info.error}). Originals remain in the session event log; on-demand recall may be incomplete.${c.reset}`);
   }
 
   static renderContextBudgetExceededNotice(info: {

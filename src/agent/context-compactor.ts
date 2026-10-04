@@ -2,7 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { ContentPart, SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
-import { assertHistoryToolPairing } from '../session/session-invariants.js';
+import { assertHistoryToolPairing, computeRequestValueDigest } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
 import { nativeCompactHistory } from '../native/index.js';
@@ -32,6 +32,36 @@ export interface MaskedObservationRecord {
   timestamp: string;
   originalPayload: any;
   summary: string;
+  /** Stable tool-call id this record was masked from (empty when the source had none). */
+  toolCallId?: string;
+  /** sha256 (hex, 16 chars) of the archived original payload. Detects same-id/different-content collisions. */
+  payloadHash?: string;
+  /** Monotonic version per id; bumped on every upsert that replaces content. */
+  version?: number;
+  /** Payload hash this version replaced, if any (upsert chain). */
+  supersedes?: string;
+  /** True when originalPayload was truncated for the RAM cap; see fullPayloadBytes. */
+  truncated?: boolean;
+  /** Serialized byte size of the untruncated original payload. */
+  fullPayloadBytes?: number;
+}
+
+/**
+ * Stable content hash for archive identity. Keyed on the payload bytes (not on
+ * the message index), so the same tool result always maps to the same suffix
+ * across repeated compactions, and distinct payloads never share a fallback id.
+ */
+export function hashObservationPayload(payload: unknown): string {
+  try {
+    return computeRequestValueDigest(payload ?? null).slice(0, 16);
+  } catch {
+    return crypto.createHash('sha256').update(String(payload ?? '')).digest('hex').slice(0, 16);
+  }
+}
+
+function slugToolName(toolName: unknown): string {
+  const slug = String(toolName || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'unknown';
 }
 
 export interface CompactionStats {
@@ -91,12 +121,20 @@ function serializeHistory(messages: SessionMessage[]): string {
 function createMaskedObservationRecord(
   response: any,
   originalPayload: any,
-  fallbackId: string,
+  fallbackIdBase: string,
   summary: string,
 ): MaskedObservationRecord {
   const payload = originalPayload && typeof originalPayload === 'object' ? originalPayload as Record<string, any> : {};
+  const toolCallId = typeof response?.id === 'string' && response.id ? response.id : undefined;
+  const payloadHash = hashObservationPayload(originalPayload);
+  // Stable identity: prefer the durable tool-call id; otherwise bind the
+  // fallback to tool name + content hash. Never use message indices here —
+  // they shift after rolling compaction and across repeated compact() passes,
+  // mapping distinct payloads onto one archive key.
+  const id = toolCallId
+    ?? `${fallbackIdBase}-${slugToolName(response?.name)}-${payloadHash.slice(0, 12)}`;
   return {
-    id: response?.id || fallbackId,
+    id,
     toolName: response?.name || 'unknown',
     targetPath: payload.path || payload.filePath || payload.targetFile,
     command: payload.command,
@@ -104,6 +142,9 @@ function createMaskedObservationRecord(
     timestamp: new Date().toISOString(),
     originalPayload,
     summary,
+    ...(toolCallId ? { toolCallId } : {}),
+    payloadHash,
+    version: 1,
   };
 }
 
@@ -111,27 +152,41 @@ function collectNativeMaskedObservations(
   originalMessages: SessionMessage[],
   nativeMessages: SessionMessage[],
 ): MaskedObservationRecord[] {
-  const nativeResponses = new Map<string, unknown>();
-  nativeMessages.forEach((message, messageIndex) => {
-    (message.parts || []).forEach((part: any, partIndex) => {
+  // Match by stable tool-call id; id-less responses pair up in document order.
+  // Position keys (messageIndex:partIndex) are NOT stable across native
+  // rewrites, so they must never leak into archive identity.
+  const nativeById = new Map<string, unknown[]>();
+  const nativeWithoutId: unknown[] = [];
+  nativeMessages.forEach((message) => {
+    (message.parts || []).forEach((part: any) => {
       const response = part.functionResponse;
       if (!response) return;
-      nativeResponses.set(response.id || `${messageIndex}:${partIndex}`, response.response);
+      if (typeof response.id === 'string' && response.id) {
+        const list = nativeById.get(response.id) || [];
+        list.push(response.response);
+        nativeById.set(response.id, list);
+      } else {
+        nativeWithoutId.push(response.response);
+      }
     });
   });
 
   const records: MaskedObservationRecord[] = [];
-  originalMessages.forEach((message, messageIndex) => {
-    (message.parts || []).forEach((part: any, partIndex) => {
+  originalMessages.forEach((message) => {
+    (message.parts || []).forEach((part: any) => {
       const response = part.functionResponse;
       if (!response) return;
-      const key = response.id || `${messageIndex}:${partIndex}`;
-      const nativePayload = nativeResponses.get(key);
+      let nativePayload: unknown;
+      if (typeof response.id === 'string' && response.id) {
+        nativePayload = (nativeById.get(response.id) || []).shift();
+      } else {
+        nativePayload = nativeWithoutId.shift();
+      }
       if (JSON.stringify(response.response) === JSON.stringify(nativePayload)) return;
       records.push(createMaskedObservationRecord(
         response,
         response.response,
-        `native-observation-${messageIndex}-${partIndex}`,
+        'native-observation',
         '[NATIVE PRECOMPACTION: Full tool result archived for on-demand recall.]',
       ));
     });
@@ -244,13 +299,13 @@ export class ContextCompactor {
 
     if (observations.length < this.config.checkpointEveryNToolResults) return [];
     const cutoff = Math.max(0, observations.length - this.config.preserveLastNToolResults);
-    return observations.slice(0, cutoff).flatMap(({ response, messageIndex, partIndex }) => {
+    return observations.slice(0, cutoff).flatMap(({ response }) => {
       const payload = response.response as Record<string, any> | undefined;
       if (payload?.status === 'masked' || payload?.status === 'superseded') return [];
       return [createMaskedObservationRecord(
         response,
         response.response,
-        `turn-checkpoint-${messageIndex}-${partIndex}`,
+        'turn-checkpoint',
         '[WITHIN-TURN CHECKPOINT: Full tool result retained for on-demand recall.]',
       )];
     });
@@ -300,7 +355,7 @@ export class ContextCompactor {
         maskedObservations.push(createMaskedObservationRecord(
           part.functionResponse,
           response,
-          `hard-budget-observation-${prunedPartsCount}`,
+          'hard-budget-observation',
           '[HARD-BUDGET: Full tool result archived for on-demand recall.]',
         ));
         const rawLog = String(response?.stderr || response?.stdout || response?.error || '').trim();
@@ -493,11 +548,51 @@ export class ContextCompactor {
     messages: SessionMessage[],
     preserveLastNTurns: number
   ): { messages: SessionMessage[]; archivedTurns: ArchivedTurnDocument[]; prunedTurnsCount: number } {
-    const priorSynopsisLines = messages
+    const priorSynopsisTexts = messages
       .filter(isRollingSynopsisMessage)
       .flatMap((message) => message.parts || [])
-      .flatMap((part) => typeof part.text === 'string' ? part.text.split('\n') : [])
+      .map((part) => typeof part.text === 'string' ? part.text : '')
+      .filter(Boolean);
+    const priorSynopsisLines = priorSynopsisTexts
+      .flatMap((text) => text.split('\n'))
       .filter((line) => line.trimStart().startsWith('• Turn #'));
+    // Cumulative facts from previous generations: the chronological index alone
+    // cannot rebuild structured sections, so carry forward prior decisions,
+    // artifact trail entries, high-saliency traces and tool names.
+    const priorDecisions: string[] = [];
+    const priorArtifactLines: string[] = [];
+    const priorHighSaliency: string[] = [];
+    const priorTools: string[] = [];
+    for (const text of priorSynopsisTexts) {
+      const lines = text.split('\n');
+      let section = '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (/^##\s+2\./.test(trimmed)) { section = 'artifacts'; continue; }
+        if (/^##\s+3\./.test(trimmed)) { section = 'saliency'; continue; }
+        if (/^##\s+4\./.test(trimmed)) { section = 'decisions'; continue; }
+        if (/^##\s+5\./.test(trimmed)) { section = 'state'; continue; }
+        if (/^##\s+6\./.test(trimmed) || /^###\s+Chronological/.test(trimmed)) { section = ''; continue; }
+        if (/^##\s+1\./.test(trimmed)) { section = 'intent'; continue; }
+        if (!trimmed.startsWith('- ') && !trimmed.startsWith('• ')) {
+          if (trimmed.startsWith('- Tools executed:')) section = 'state';
+          continue;
+        }
+        const content = trimmed.replace(/^[-•]\s+/, '').trim();
+        if (!content) continue;
+        if (section === 'decisions' && !/follow the codebase technical standards/i.test(content)) {
+          priorDecisions.push(content);
+        } else if (section === 'artifacts' && !/no workspace files modified/i.test(content)) {
+          priorArtifactLines.push(line.trim());
+        } else if (section === 'saliency') {
+          priorHighSaliency.push(content.replace(/^\[FAILED[^\]]*\]:\s*/, '').trim() ? content : content);
+        }
+        const toolsMatch = trimmed.match(/^- Tools executed:\s*(.+)/);
+        if (toolsMatch && toolsMatch[1] && !/none/i.test(toolsMatch[1])) {
+          toolsMatch[1].split(',').map((s) => s.trim()).filter(Boolean).forEach((t) => priorTools.push(t));
+        }
+      }
+    }
     const sourceMessages = messages.filter((message) => !isRollingSynopsisMessage(message));
 
     const userTurnIndices: number[] = [];
@@ -555,10 +650,10 @@ export class ContextCompactor {
     }
 
     const allTouched = Array.from(new Set(archivedTurns.flatMap((t) => t.filesTouched)));
-    const allDecisions = Array.from(new Set(archivedTurns.flatMap((t) => t.keyDecisions))).slice(0, 10);
-    const allTools = Array.from(new Set(archivedTurns.flatMap((t) => t.toolsUsed)));
+    const allDecisions = Array.from(new Set([...priorDecisions, ...archivedTurns.flatMap((t) => t.keyDecisions)])).slice(0, 10);
+    const allTools = Array.from(new Set([...priorTools, ...archivedTurns.flatMap((t) => t.toolsUsed)]));
     const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
-    const allHighSaliency = Array.from(new Set(archivedTurns.flatMap((t) => t.highSaliencyTraces || []))).slice(0, 6);
+    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(0, 6);
 
     const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
     const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
@@ -582,6 +677,11 @@ export class ContextCompactor {
       readOnlyFiles.slice(0, 8).forEach((f) => {
         artifactLines.push(`- [READ-ONLY] ${f}`);
       });
+    }
+    // Carry forward artifact entries that only exist in the previous synopsis
+    // generation (e.g. read-only files whose turns were already summarized).
+    for (const prior of priorArtifactLines) {
+      if (!artifactLines.includes(prior)) artifactLines.push(prior);
     }
     if (artifactLines.length === 0) {
       artifactLines.push('- No workspace files modified or inspected in archived turns.');
@@ -795,7 +895,7 @@ export class ContextCompactor {
           if (isMutated) {
             prunedPartsCount++;
             const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" was modified in a later step. Please re-read the file if you need the latest content]`;
-            maskedObservations.push(createMaskedObservationRecord(resp, resp.response, `obs-${msgIdx}`, supersededMask));
+            maskedObservations.push(createMaskedObservationRecord(resp, resp.response, 'obs-superseded', supersededMask));
             return {
               functionResponse: {
                 name: resp.name,
@@ -807,6 +907,13 @@ export class ContextCompactor {
                 },
               },
             };
+          }
+
+          // Idempotent re-compaction: never re-mask an already compacted stub.
+          // A second compact() pass must preserve verification metadata
+          // (exitCode/command/status) and the recoverable original payload.
+          if (r.status === 'masked' || r.status === 'superseded') {
+            return part;
           }
 
           // Cơ chế 2: Dynamic Observation Masking cho các tool cũ ngoài cửa sổ N
@@ -862,7 +969,7 @@ export class ContextCompactor {
             maskedObservations.push(createMaskedObservationRecord(
               resp,
               resp.response,
-              `obs-${msgIdx}`,
+              'obs-masked',
               compressedPayload.observationMask || `Masked observation of ${resp.name}`,
             ));
 

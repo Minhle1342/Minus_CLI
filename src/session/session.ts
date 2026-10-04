@@ -301,14 +301,17 @@ export class Session {
   }
 
   recordRequestHeader(
-    input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq' | 'historyDigest' | 'historyMessages' | 'historyCharacters'> & { history: Content[] },
-    options: { compactHistory?: boolean } = {},
+    input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq' | 'historyDigest' | 'historyMessages' | 'historyCharacters' | 'previousDigest'> & { history: Content[] },
+    options: { compactHistory?: boolean; compaction?: RecordedRequestHeader['compaction'] } = {},
   ): SessionEvent {
     const cloned = cloneJson(input);
     const history = cloned.history || [];
+    const priorHeader = [...this.eventLog].reverse().find((event) => event.type === 'request/header' && event.data.requestHeader);
     const withoutDigest: Omit<RecordedRequestHeader, 'digest'> = {
       ...cloned,
       sourceEventSeq: this.seq,
+      ...(priorHeader?.data.requestHeader?.digest ? { previousDigest: priorHeader.data.requestHeader.digest } : {}),
+      ...(options.compaction ? { compaction: options.compaction } : {}),
     };
     if (options.compactHistory) {
       delete withoutDigest.history;
@@ -350,6 +353,18 @@ export class Session {
       if (!replayMatches) {
         throw new Error(`Invariant violation: request/header history cannot be reconstructed at seq ${event.seq}.`);
       }
+    }
+    // Hash-chain continuity over the full header sequence (not just the
+    // replay window): detects dropped or reordered request/header events,
+    // which is the visible signature of silent history/archive loss.
+    let chainedDigest: string | undefined;
+    for (const event of requestEvents) {
+      const header = event.data.requestHeader;
+      if (event.type !== 'request/header' || !header) continue;
+      if (header.previousDigest !== undefined && header.previousDigest !== chainedDigest) {
+        throw new Error(`Invariant violation: request/header digest chain broken at seq ${event.seq}.`);
+      }
+      chainedDigest = header.digest;
     }
   }
 

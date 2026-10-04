@@ -12,6 +12,20 @@ export interface RecordedRequestHeader {
   historyDigest?: string;
   historyMessages?: number;
   historyCharacters?: number;
+  /** Hash-linked chain: digest of the previous request/header event (absent on genesis). */
+  previousDigest?: string;
+  /**
+   * Compaction provenance for this step. Commits the pre-compaction history
+   * digest plus archive counts, so a later audit can detect silent archive
+   * loss: every masked/archived id must resolve in the memory retriever.
+   */
+  compaction?: {
+    preCompactionHistoryDigest: string;
+    preCompactionMessages: number;
+    archivedTurns: number;
+    maskedObservations: number;
+    archiveStatus?: unknown;
+  };
   sourceEventSeq: number;
   digest: string;
 }
@@ -63,6 +77,7 @@ export function assertSessionRuntimeInvariants(
   const calls = new Map<string, SessionEvent>();
   const results = new Set<string>();
   const requestSteps = new Set<string>();
+  let lastRequestDigest: string | undefined;
   let lastTurn = 0;
   const lastStepByTurn = new Map<number, number>();
 
@@ -108,6 +123,13 @@ export function assertSessionRuntimeInvariants(
       const { digest, ...withoutDigest } = event.data.requestHeader;
       if (computeRequestDigest(withoutDigest) !== digest) throw new Error(`Invariant violation: request/header digest mismatch at seq ${event.seq}.`);
       if (withoutDigest.sourceEventSeq !== event.seq - 1) throw new Error(`Invariant violation: request/header source boundary mismatch at seq ${event.seq}.`);
+      // Hash chain: each header commits to its predecessor. Lenient on legacy
+      // headers without previousDigest (written before the chain existed), but
+      // any header that claims a predecessor must link exactly.
+      if (withoutDigest.previousDigest !== undefined && withoutDigest.previousDigest !== lastRequestDigest) {
+        throw new Error(`Invariant violation: request/header digest chain broken at seq ${event.seq}.`);
+      }
+      lastRequestDigest = digest;
       if (!openStep || withoutDigest.turn !== openStep.turn || withoutDigest.step !== openStep.step) {
         throw new Error(`Invariant violation: request/header ${withoutDigest.turn}/${withoutDigest.step} is outside its open step.`);
       }
