@@ -1,5 +1,7 @@
 import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
 import { isSensitivePath, resolveVerifyTier } from '../agent/verify-tier-resolver.js';
+import { evaluateVerificationCoverage, type VerificationCoverage } from '../agent/verification-coverage.js';
+import type { FileCoverage } from '../agent/coverage-report-reader.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
 import type { ControlRisk } from '../control/classification-types.js';
 
@@ -21,6 +23,8 @@ export interface VerificationRecord {
   diffHash?: string;
   tier?: VerificationLadderTier;
   hasNewFailures?: boolean;
+  /** Edge-case coverage of the executed command; absent when unevaluable. */
+  coverage?: VerificationCoverage;
 }
 
 export function isScratchPath(filePath: string): boolean {
@@ -190,12 +194,32 @@ export class VerificationPolicy {
     success: boolean,
     digest?: string,
     exitCode?: number,
-    options?: { diffHash?: string; tier?: VerificationLadderTier; hasNewFailures?: boolean },
+    options?: { diffHash?: string; tier?: VerificationLadderTier; hasNewFailures?: boolean; stdout?: string; stderr?: string; fileCoverage?: FileCoverage[] | null; coverageSource?: string; coverageThreshold?: number },
   ): void {
     const isVerification = isVerificationCommand(command)
       || Boolean(options?.tier)
       || /\b(?:get_diagnostics|submit_solution)\b/i.test(command);
     const effectiveSuccess = success && isVerification && options?.hasNewFailures !== true;
+
+    const tier = options?.tier || this.inferTier(command);
+    // Edge-case coverage is evaluated from harness-measured state only
+    // (modified files, blast-impacted suites) — never LLM self-assessment.
+    // Unevaluable runs yield 'unknown' and change nothing (fail-open).
+    const coverage = isVerification
+      ? evaluateVerificationCoverage({
+        command,
+        success: effectiveSuccess,
+        stdout: options?.stdout,
+        stderr: options?.stderr,
+        tier,
+        tierExplicit: Boolean(options?.tier),
+        modifiedFiles: Array.from(this.modifiedFiles),
+        pendingSuites: Array.from(this.pendingTargetedTests),
+        fileCoverage: options?.fileCoverage,
+        coverageSource: options?.coverageSource,
+        coverageThreshold: options?.coverageThreshold,
+      })
+      : undefined;
 
     this.lastVerification = {
       command,
@@ -204,8 +228,9 @@ export class VerificationPolicy {
       exitCode,
       digest,
       diffHash: options?.diffHash,
-      tier: options?.tier || this.inferTier(command),
+      tier,
       hasNewFailures: options?.hasNewFailures,
+      ...(coverage ? { coverage } : {}),
     };
 
     this.verificationHistory.push(this.lastVerification);
@@ -288,6 +313,18 @@ export class VerificationPolicy {
       };
     }
 
+    // Proven-empty runs (exit 0 but 0 tests executed) are not verification,
+    // even though the shell reported success. Only the 'insufficient' verdict
+    // blocks; 'unknown' (unparseable output) stays fail-open.
+    if (mandatesVerification && this.lastVerification?.success && this.lastVerification.coverage?.verdict === 'insufficient') {
+      const detail = this.lastVerification.coverage.findings[0] || 'The command executed 0 tests.';
+      return {
+        allowed: false,
+        reason: `VERIFICATION_EMPTY: ${detail}`,
+        errorCode: 'VERIFICATION_EMPTY',
+      };
+    }
+
 
     if (mandatesVerification && this.lastVerification) {
       const tierRank: VerificationLadderTier[] = ['structural', 'diff', 'diagnostics', 'typecheck', 'targeted_test', 'full_test', 'build'];
@@ -309,7 +346,7 @@ export class VerificationPolicy {
       if (tierRank.indexOf(this.lastVerification.tier || 'structural') < tierRank.indexOf(minimum)) {
         return {
           allowed: false,
-          reason: `VERIFICATION_TIER_REQUIRED: Risk ${this.requiredRisk} requires ${minimum} or stronger evidence.`,
+          reason: `VERIFICATION_TIER_REQUIRED: Risk ${this.requiredRisk} requires ${minimum} or stronger evidence.${this.coverageGuidance()}`,
           errorCode: 'VERIFICATION_TIER_REQUIRED',
         };
       }
@@ -325,13 +362,20 @@ export class VerificationPolicy {
       if (!hasMatchingTest) {
         return {
           allowed: false,
-          reason: `IMPACTED_TESTS_REQUIRED: Blast radius identified impacted test suite(s): ${pendingList.slice(0, 3).join(', ')}. Execute the impacted tests or full test suite before completion.`,
+          reason: `IMPACTED_TESTS_REQUIRED: Blast radius identified impacted test suite(s): ${pendingList.slice(0, 3).join(', ')}. Execute the impacted tests or full test suite before completion.${this.coverageGuidance()}`,
           errorCode: 'IMPACTED_TESTS_REQUIRED',
         };
       }
     }
 
     return { allowed: true };
+  }
+
+  /** Coverage detail appended to gate rejections so the LLM knows what to run. */
+  private coverageGuidance(): string {
+    const coverage = this.lastVerification?.coverage;
+    if (!coverage || coverage.verdict === 'sufficient' || coverage.findings.length === 0) return '';
+    return ` Coverage: ${coverage.findings[0]}`;
   }
 
   getLastVerification(): VerificationRecord | undefined {
