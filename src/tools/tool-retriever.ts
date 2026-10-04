@@ -444,6 +444,7 @@ export class ToolRetriever {
     if (name.includes('memory') || name.includes('digest')) return 'memory';
     if (name.includes('repomix') || name.includes('pack') || name.includes('compress')) return 'repomix';
     if (name.includes('git') || name.includes('commit') || name.includes('push') || name.includes('diff')) return 'git';
+    if (name.includes('image')) return 'image_generation';
     if (name.startsWith('game_') || name.startsWith('unity_') || name.includes('tilemap') || name.includes('sprite') || name.includes('physics') || name.includes('prefab') || name.includes('scene')) return 'game_development';
     if (name.includes('approval')) return 'approval';
     if (name.includes('review')) return 'review';
@@ -519,6 +520,9 @@ export class ToolRetriever {
     }
     if (text.includes('plan') || text.includes('task') || text.includes('milestone') || text.includes('roadmap') || text.includes('kế hoạch')) {
       tags.add('plan planning task milestone roadmap step phase progress todo dag kế hoạch công việc');
+    }
+    if (text.includes('image') || text.includes('picture') || text.includes('banner') || text.includes('mockup') || text.includes('illustration') || text.includes('diagram') || text.includes('icon') || text.includes('nano banana') || text.includes('text-to-image')) {
+      tags.add('image generation generate picture photo banner mockup illustration diagram icon asset visual nano-banana text-to-image');
     }
 
     return Array.from(tags).join(' ');

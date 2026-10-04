@@ -461,6 +461,20 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
+    } else if (name === 'generate_image') {
+      // Nano Banana text-to-image: network call with cost, writes a new asset
+      // file into the workspace. Deletable afterwards, so reversible.
+      descriptor = {
+        name,
+        capabilities: ['network', 'execute'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else {
       descriptor = {
         name,

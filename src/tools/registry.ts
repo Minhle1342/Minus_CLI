@@ -19,6 +19,7 @@ import { getDiagnosticsTool } from './get-diagnostics.js';
 import { lspQueryTool } from './lsp-query.js';
 import { analyzeImpactTool } from './blast-radius.js';
 import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
+import { createGenerateImageTool } from './generate-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { runNodeScriptTool } from './run-node-script.js';
 import { createManageTaskTool } from './manage-task.js';
@@ -133,6 +134,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(lspQueryTool);
     this.register(analyzeImpactTool);
     this.register(inspectImageTool);
+    this.register(createGenerateImageTool());
     this.register(runCommandTool);
     this.register(runNodeScriptTool);
     this.register(webSearchTool);
@@ -170,6 +172,7 @@ export class ToolRegistry implements ToolProvider {
 
   attachSession(session: any): void {
     this.register(createInspectImageTool(() => session));
+    this.register(createGenerateImageTool(() => session));
     this.computerController.setSessionAccessor(() => session);
   }
 
