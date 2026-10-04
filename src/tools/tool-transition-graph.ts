@@ -16,6 +16,19 @@ export type ToolOutcomeState =
   | 'DIRTY_DIAGNOSTICS'
   | 'PASSED_TEST'
   | 'FAILED_TEST'
+  | 'HYPOTHESIS_VALIDATED'
+  | 'HYPOTHESIS_FORMULATED'
+  | 'HYPOTHESIS_FALSIFIED'
+  | 'PLAN_CREATED'
+  | 'PLAN_TASK_UPDATED'
+  | 'WEB_SEARCH_HIT'
+  | 'WEB_CONTENT_ACQUIRED'
+  | 'MEMORY_RECALLED'
+  | 'MEMORY_SAVED'
+  | 'DESIGN_REVIEW_COMPLETED'
+  | 'AGENT_TASK_ALLOCATED'
+  | 'SUBAGENT_QUALITY_VERIFIED'
+  | 'IMAGE_INSPECTED'
   | 'DISCOVERY_HIT'
   | 'SYMBOL_INSPECTED'
   | 'BACKGROUND_RUNNING'
@@ -48,7 +61,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   SUCCESS_MUTATION: {
-    primarySuccessors: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
+    primarySuccessors: ['verify_edit', 'get_diagnostics', 'run_command', 'get_symbol_context_360'],
     secondarySuccessors: ['analyze_impact', 'replace_text'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
@@ -78,8 +91,86 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   FAILED_TEST: {
-    primarySuccessors: ['get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
+    primarySuccessors: ['formulate_and_verify_hypothesis', 'get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
     secondarySuccessors: ['query_call_graph', 'inspect_symbol', 'replace_text'],
+    primaryBoost: 0.28,
+    secondaryBoost: 0.12,
+  },
+  HYPOTHESIS_VALIDATED: {
+    primarySuccessors: ['request_phase_transition', 'create_file', 'replace_text', 'apply_patch'],
+    secondarySuccessors: ['run_command', 'get_diagnostics'],
+    primaryBoost: 0.35,
+    secondaryBoost: 0.15,
+  },
+  HYPOTHESIS_FORMULATED: {
+    primarySuccessors: ['run_command', 'get_symbol_context_360', 'read_file'],
+    secondarySuccessors: ['search_codebase_fast', 'inspect_symbol'],
+    primaryBoost: 0.28,
+    secondaryBoost: 0.12,
+  },
+  HYPOTHESIS_FALSIFIED: {
+    primarySuccessors: ['formulate_and_verify_hypothesis', 'get_symbol_context_360', 'search_codebase_fast'],
+    secondarySuccessors: ['query_call_graph', 'read_file'],
+    primaryBoost: 0.30,
+    secondaryBoost: 0.12,
+  },
+  PLAN_CREATED: {
+    primarySuccessors: ['update_plan_task', 'read_file', 'search_codebase_fast'],
+    secondarySuccessors: ['formulate_and_verify_hypothesis', 'allocate_agent_task'],
+    primaryBoost: 0.28,
+    secondaryBoost: 0.12,
+  },
+  PLAN_TASK_UPDATED: {
+    primarySuccessors: ['read_file', 'replace_text', 'run_command'],
+    secondarySuccessors: ['submit_solution', 'update_plan_task', 'get_diagnostics'],
+    primaryBoost: 0.25,
+    secondaryBoost: 0.12,
+  },
+  WEB_SEARCH_HIT: {
+    primarySuccessors: ['web_fetch'],
+    secondarySuccessors: ['read_file', 'replace_text'],
+    primaryBoost: 0.35,
+    secondaryBoost: 0.15,
+  },
+  WEB_CONTENT_ACQUIRED: {
+    primarySuccessors: ['read_file', 'replace_text', 'create_file'],
+    secondarySuccessors: ['apply_patch', 'run_command'],
+    primaryBoost: 0.28,
+    secondaryBoost: 0.12,
+  },
+  MEMORY_RECALLED: {
+    primarySuccessors: ['verify_repository_memory', 'read_file', 'search_codebase_fast'],
+    secondarySuccessors: ['get_symbol_context_360', 'save_memory'],
+    primaryBoost: 0.25,
+    secondaryBoost: 0.12,
+  },
+  MEMORY_SAVED: {
+    primarySuccessors: ['read_file', 'create_plan', 'search_codebase_fast'],
+    secondarySuccessors: ['get_symbol_context_360'],
+    primaryBoost: 0.20,
+    secondaryBoost: 0.10,
+  },
+  DESIGN_REVIEW_COMPLETED: {
+    primarySuccessors: ['allocate_agent_task', 'create_plan', 'write_shared_context'],
+    secondarySuccessors: ['schedule_dag_parallel', 'read_file'],
+    primaryBoost: 0.30,
+    secondaryBoost: 0.12,
+  },
+  AGENT_TASK_ALLOCATED: {
+    primarySuccessors: ['verify_subagent_quality', 'read_shared_context', 'schedule_dag_parallel'],
+    secondarySuccessors: ['publish_agent_event', 'write_shared_context'],
+    primaryBoost: 0.30,
+    secondaryBoost: 0.15,
+  },
+  SUBAGENT_QUALITY_VERIFIED: {
+    primarySuccessors: ['write_shared_context', 'update_plan_task', 'submit_solution'],
+    secondarySuccessors: ['get_diagnostics', 'run_command'],
+    primaryBoost: 0.32,
+    secondaryBoost: 0.15,
+  },
+  IMAGE_INSPECTED: {
+    primarySuccessors: ['generate_image', 'replace_text', 'read_file'],
+    secondarySuccessors: ['create_file', 'write_file'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
@@ -142,6 +233,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
 const MUTATION_TOOLS = new Set([
   'apply_patch',
   'replace_text',
+  'verify_edit',
   'write_file',
   'create_file',
   'delete_file',
@@ -234,6 +326,53 @@ export class ToolTransitionGraph {
     // 8. Kiểm tra Phase Transition Tools
     if (lastToolName === 'request_phase_transition') {
       return (res?.accepted || res?.success) ? 'PHASE_TRANSITION_ACCEPTED' : 'GENERAL_ERROR';
+    }
+
+    // 9. Kiểm tra Hypothesis Verification Tools
+    if (lastToolName === 'formulate_and_verify_hypothesis') {
+      if (res?.status === 'validated' || res?.canProceedToImplement) return 'HYPOTHESIS_VALIDATED';
+      if (hasError || res?.status === 'falsified') return 'HYPOTHESIS_FALSIFIED';
+      return 'HYPOTHESIS_FORMULATED';
+    }
+
+    // 10. Kiểm tra Planning Tools
+    if (lastToolName === 'create_plan') {
+      return hasError ? 'GENERAL_ERROR' : 'PLAN_CREATED';
+    }
+    if (lastToolName === 'update_plan_task') {
+      return hasError ? 'GENERAL_ERROR' : 'PLAN_TASK_UPDATED';
+    }
+
+    // 11. Kiểm tra Web Research Tools
+    if (lastToolName === 'web_search') {
+      return hasError ? 'GENERAL_ERROR' : 'WEB_SEARCH_HIT';
+    }
+    if (lastToolName === 'web_fetch') {
+      return hasError ? 'GENERAL_ERROR' : 'WEB_CONTENT_ACQUIRED';
+    }
+
+    // 12. Kiểm tra Memory Tools
+    if (lastToolName === 'recall_repository_memory' || lastToolName === 'read_memory') {
+      return hasError ? 'GENERAL_ERROR' : 'MEMORY_RECALLED';
+    }
+    if (lastToolName === 'save_memory' || lastToolName === 'save_repository_memory' || lastToolName === 'verify_repository_memory') {
+      return hasError ? 'GENERAL_ERROR' : 'MEMORY_SAVED';
+    }
+
+    // 13. Kiểm tra Multi-Agent Coordination Tools
+    if (lastToolName === 'brainstorm_design') {
+      return hasError ? 'GENERAL_ERROR' : 'DESIGN_REVIEW_COMPLETED';
+    }
+    if (lastToolName === 'allocate_agent_task') {
+      return hasError ? 'GENERAL_ERROR' : 'AGENT_TASK_ALLOCATED';
+    }
+    if (lastToolName === 'verify_subagent_quality') {
+      return hasError ? 'GENERAL_ERROR' : 'SUBAGENT_QUALITY_VERIFIED';
+    }
+
+    // 14. Kiểm tra Multimodal Vision Tools
+    if (lastToolName === 'inspect_image') {
+      return hasError ? 'GENERAL_ERROR' : 'IMAGE_INSPECTED';
     }
 
     return hasError ? 'GENERAL_ERROR' : 'GENERAL_SUCCESS';

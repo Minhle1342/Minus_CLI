@@ -13,6 +13,7 @@ export interface SubmitSolutionArgs {
   rootCause?: string;
   filesModified?: string[];
   verificationEvidence?: string;
+  responseLanguage?: string;
   resolutionType?: ResolutionType;
   verificationMethod?: VerificationMethod;
 }
@@ -24,6 +25,7 @@ export interface SubmitSolutionResult {
   rootCause?: string;
   filesModified: string[];
   verificationEvidence: string;
+  responseLanguage?: string;
   resolutionType?: ResolutionType;
   verificationMethod?: VerificationMethod;
   groundingScore?: number;
@@ -48,7 +50,11 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       properties: {
         summary: {
           type: 'STRING',
-          description: 'A comprehensive summary of the implemented solution, files modified, and verified outcomes.',
+          description: 'A comprehensive summary of the implemented solution, files modified, and verified outcomes. MUST be written in the same natural language as the user\'s original prompt (see responseLanguage).',
+        },
+        responseLanguage: {
+          type: 'STRING',
+          description: 'The natural language of the user\'s original prompt as typed in the input box (e.g. "Vietnamese", "English", "Japanese"). The summary and the final answer to the user MUST be written in this language. Code, file paths and identifiers stay unchanged.',
         },
         resolutionType: {
           type: 'STRING',
@@ -82,6 +88,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       const rootCause = args.rootCause ? String(args.rootCause).trim() : undefined;
       const resolutionType = args.resolutionType as ResolutionType | undefined;
       const verificationMethod = args.verificationMethod as VerificationMethod | undefined;
+      const responseLanguage = args.responseLanguage ? String(args.responseLanguage).trim() || undefined : undefined;
 
       // Thẩm định bằng chứng thực nghiệm & Information Grounding qua SolutionGroundingAuditor
       const audit = SolutionGroundingAuditor.audit({
@@ -117,13 +124,14 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         rootCause,
         filesModified: audit.reconciledFilesModified,
         verificationEvidence,
+        responseLanguage,
         resolutionType,
         verificationMethod,
         groundingScore: audit.score,
         informationDensity: audit.informationDensity,
         timestamp,
         nextAction: 'final_answer',
-        message: 'Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final comprehensive answer and summary to the user in the EXACT SAME LANGUAGE as the user\'s original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Present your findings, file paths, code logic, and verification proof clearly and professionally. Do not emit generic stubs or English placeholders.',
+        message: `Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final comprehensive answer and summary to the user in the EXACT SAME LANGUAGE as the user's original request prompt${responseLanguage ? ` (${responseLanguage})` : ' (e.g. Vietnamese if the user asked in Vietnamese)'}. Present your findings, file paths, code logic, and verification proof clearly and professionally. Do not emit generic stubs or English placeholders.`,
       };
     },
   };

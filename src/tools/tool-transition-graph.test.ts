@@ -47,6 +47,22 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   // 4. Sau khi run_command test pass -> submit_solution được boost
   const boostTestPass = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 0 }, 'submit_solution');
   assert.ok(boostTestPass >= 0.3, 'submit_solution phải có prior boost khi test pass');
+
+  // 5. Sau khi web_search -> web_fetch được boost mạnh
+  const boostWebFetch = graph.getTransitionBoost('web_search', { success: true }, 'web_fetch');
+  assert.ok(boostWebFetch >= 0.35, 'web_fetch phải có prior boost >= 0.35 sau web_search');
+
+  // 6. Sau khi formulate_and_verify_hypothesis validated -> request_phase_transition được boost
+  const boostPhaseTrans = graph.getTransitionBoost('formulate_and_verify_hypothesis', { status: 'validated' }, 'request_phase_transition');
+  assert.ok(boostPhaseTrans >= 0.35, 'request_phase_transition phải có boost >= 0.35 khi hypothesis validated');
+
+  // 7. Sau khi create_plan -> update_plan_task được boost
+  const boostPlanTask = graph.getTransitionBoost('create_plan', { success: true }, 'update_plan_task');
+  assert.ok(boostPlanTask >= 0.25, 'update_plan_task phải có boost >= 0.25 sau create_plan');
+
+  // 8. Sau khi run_command test fail -> formulate_and_verify_hypothesis được boost
+  const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'formulate_and_verify_hypothesis');
+  assert.ok(boostHypothesisOnFail >= 0.25, 'formulate_and_verify_hypothesis phải được boost khi test fail');
 });
 
 test('ToolRetriever - Supports structured StepRetrievalQueryResult and Graph-Augmented RRF', () => {
