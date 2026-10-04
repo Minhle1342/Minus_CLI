@@ -3,6 +3,28 @@ import { Box, Text } from 'ink';
 import { TuiStepItem } from '../types.js';
 import { inkColors } from '../../tui-theme.js';
 
+/**
+ * Semantic thematic break — HTML <hr> equivalent for the Ink TUI.
+ * A horizontal rule between two content sections whose subject/scene changes.
+ * Rendered between steps to separate them visually.
+ * Never rendered inside the permission-request frame (PermissionPromptBox).
+ * Uses a top-border-only Box so Ink stretches the rule to the terminal width
+ * (no manual column math, no wrap overflow on narrow screens).
+ */
+export const StepThematicBreak: React.FC = () => {
+  return (
+    <Box
+      borderStyle="single"
+      borderTop
+      borderBottom={false}
+      borderLeft={false}
+      borderRight={false}
+      borderColor={inkColors.muted}
+      marginY={0}
+    />
+  );
+};
+
 export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /**
@@ -221,8 +243,8 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
   }
 
   return (
-    <Box flexDirection="column" marginY={0} paddingX={1}>
-      {visibleSteps.map((step) => {
+    <Box flexDirection="column" marginY={0} paddingX={1} gap={1}>
+      {visibleSteps.map((step, index) => {
         const args = (step && typeof step.args === 'object' && step.args !== null) ? step.args : {};
         const rawTarget = formatToolTargetWithLines(step.toolName, args);
         const displayTarget = rawTarget.length > 40 && (rawTarget.includes('/') || rawTarget.includes('\\') || rawTarget.includes(':'))
@@ -282,6 +304,8 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
                 <Text color={inkColors.danger}>└─ {errDetail}</Text>
               </Box>
             )}
+            {/* A semantic thematic break using HTML <hr>: a horizontal rule between two content sections whose subject or scene changes phía dưới tool call */}
+            <StepThematicBreak />
           </Box>
         );
       })}

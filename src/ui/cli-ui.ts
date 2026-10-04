@@ -1481,8 +1481,8 @@ export class CLI {
     console.log('');
   }
 
-  static renderAutoCompactionNotice(savedTokens: number, remainingTokens: number): void {
-    console.log(`  ${c.cyan}🧹 [Auto-Compacted]${c.reset} ${c.emerald}Saved ~${savedTokens.toLocaleString()} tokens${c.reset} ${c.slate}(History: ~${remainingTokens.toLocaleString()} tok)${c.reset}`);
+  static renderAutoCompactionNotice(_savedTokens: number, _remainingTokens: number): void {
+    // Ẩn [Auto-Compacted] khỏi TUI theo yêu cầu người dùng
   }
 
   static renderWorkspaceCheck(check: {
@@ -2242,7 +2242,13 @@ export class CLI {
   }
 
   static renderStepFooter(): void {
-    // Giảm thiểu khoảng trắng thừa giữa các step
+    // Semantic thematic break — HTML <hr> equivalent:
+    // horizontal rule between two content sections whose subject/scene changes.
+    // Printed after each step to separate steps on the classic CLI.
+    // Never rendered inside the permission-request frame (renderPermissionPrompt).
+    const width = getTerminalWidth();
+    const ruleWidth = Math.max(8, Math.min(width - 2, 80));
+    console.log(`  ${c.slate}${'─'.repeat(ruleWidth)}${c.reset}`);
   }
 
   static formatMarkdownTables(text: string, options: { width?: number; layout?: 'grid' | 'stacked' } = {}): string {

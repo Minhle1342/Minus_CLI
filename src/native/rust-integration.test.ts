@@ -3,9 +3,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { Type } from '@google/genai';
-import { getNativeCore } from './index.js';
+import { getNativeCore, nativeComputeStringHash } from './index.js';
 import { batchSubwordSimilarity } from './semantic-batch.js';
+import { computeRequestDigest, computeRequestValueDigest } from '../session/session-invariants.js';
+import { scoreVectorBatch, hashArchivedPayload } from '../context/turn-memory-retriever.js';
+import { hashObservationPayload } from '../agent/context-compactor.js';
 import { SemanticCodeIndex } from '../search/semantic-code-index.js';
 import { DeterministicCodeEmbeddingProvider } from '../search/embedding-provider.js';
 import { chunkCodeFile } from '../search/semantic-chunker.js';
@@ -136,4 +140,61 @@ test('Rust parser and reranker retain TypeScript fallbacks when native paths are
     delete process.env.MINUS_DISABLE_NATIVE_RUST_PARSER;
     delete process.env.MINUS_DISABLE_NATIVE_BATCH;
   }
+});
+
+test('nativeComputeStringHash produces deterministic sha256 identical to Node crypto', () => {
+  const samples = [
+    '',
+    'hello world',
+    '{"turn":1,"step":2,"tools":["read_file","apply_patch"]}',
+    'Tích hợp Rust cho cơ chế thuộc 2fb72dd',
+    JSON.stringify({ a: 1, b: [1, 2, 3], c: { d: 'test value' } }),
+  ];
+
+  for (const sample of samples) {
+    const expected = createHash('sha256').update(sample).digest('hex');
+    const actual = nativeComputeStringHash(sample);
+    assert.equal(actual, expected);
+  }
+});
+
+test('2fb72dd digest mechanisms (request digests, archive & observation hashes) remain consistent', () => {
+  const header = {
+    turn: 1,
+    step: 1,
+    systemPrompt: 'System instruction',
+    tools: ['read_file', 'submit_solution'],
+    sourceEventSeq: 0,
+  };
+  const requestDigest = computeRequestDigest(header);
+  assert.equal(typeof requestDigest, 'string');
+  assert.equal(requestDigest.length, 64);
+
+  const valDigest = computeRequestValueDigest({ history: [{ role: 'user', text: 'hello' }] });
+  assert.equal(typeof valDigest, 'string');
+  assert.equal(valDigest.length, 64);
+
+  const obsPayload = { stdout: 'done', exitCode: 0 };
+  const obsHash = hashObservationPayload(obsPayload);
+  assert.equal(typeof obsHash, 'string');
+  assert.equal(obsHash.length, 16);
+
+  const archiveHash = hashArchivedPayload(obsPayload);
+  assert.equal(typeof archiveHash, 'string');
+  assert.equal(archiveHash.length, 16);
+});
+
+test('scoreVectorBatch pure TypeScript fallback produces accurate cosine similarity scores', () => {
+  const emptyNative = {};
+  const query = [1, 0, 0];
+  const candidates: Array<[string, number[]]> = [
+    ['doc1', [1, 0, 0]],
+    ['doc2', [0, 1, 0]],
+    ['doc3', [0.7071, 0.7071, 0]],
+  ];
+  const scores = scoreVectorBatch(emptyNative, query, candidates);
+  assert.equal(scores.size, 3);
+  assert.ok(Math.abs((scores.get('doc1') ?? 0) - 1.0) < 1e-4);
+  assert.ok(Math.abs((scores.get('doc2') ?? 0) - 0.0) < 1e-4);
+  assert.ok(Math.abs((scores.get('doc3') ?? 0) - 0.7071) < 1e-3);
 });

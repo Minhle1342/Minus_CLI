@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 
@@ -224,6 +225,22 @@ export function isNativeAvailable(): boolean {
 export function getNativeVersion(): string | null {
   const core = getNativeCore();
   return core ? core.rsVersion() : null;
+}
+
+/**
+ * Tính toán mã băm SHA-256 siêu tốc của chuỗi văn bản bằng Rust Native Core (rsComputeStringHash)
+ * Tự động fallback sang crypto.createHash('sha256') thuần TypeScript nếu native vắng mặt.
+ */
+export function nativeComputeStringHash(content: string): string {
+  const core = getNativeCore();
+  if (core && typeof core.rsComputeStringHash === 'function') {
+    try {
+      return core.rsComputeStringHash(content);
+    } catch {
+      // Fallback sang TS
+    }
+  }
+  return crypto.createHash('sha256').update(content).digest('hex');
 }
 
 /**

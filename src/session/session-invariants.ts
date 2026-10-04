@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Content } from '@google/genai';
 import type { SessionEvent } from './session.js';
+import { nativeComputeStringHash } from '../native/index.js';
 
 export interface RecordedRequestHeader {
   turn: number;
@@ -38,11 +39,11 @@ function stableStringify(value: unknown): string {
 }
 
 export function computeRequestDigest(header: Omit<RecordedRequestHeader, 'digest'>): string {
-  return createHash('sha256').update(stableStringify(header)).digest('hex');
+  return nativeComputeStringHash(stableStringify(header));
 }
 
 export function computeRequestValueDigest(value: unknown): string {
-  return createHash('sha256').update(stableStringify(value)).digest('hex');
+  return nativeComputeStringHash(stableStringify(value));
 }
 
 export function assertHistoryToolPairing(messages: Content[]): void {

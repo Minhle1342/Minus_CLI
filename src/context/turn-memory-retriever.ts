@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import MiniSearch from 'minisearch';
-import { getNativeCore } from '../native/index.js';
+import { getNativeCore, nativeComputeStringHash } from '../native/index.js';
 import type { MaskedObservationRecord } from '../agent/context-compactor.js';
 import { LivingPlaybookManager } from './living-playbook.js';
 
@@ -43,7 +43,7 @@ export interface ArchiveWriteResult {
 /** sha256 (hex, 16 chars) of a payload for same-id/different-content detection. */
 export function hashArchivedPayload(payload: unknown): string {
   try {
-    return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex').slice(0, 16);
+    return nativeComputeStringHash(JSON.stringify(payload ?? null)).slice(0, 16);
   } catch {
     return 'unhashable';
   }
@@ -156,6 +156,25 @@ export function scoreVectorBatch(
         // Skip individual malformed vectors without failing retrieval.
       }
     }
+    return scores;
+  }
+
+  // Pure TypeScript fallback when native cosine scoring is not available
+  let normQ = 0;
+  for (let i = 0; i < query.length; i++) normQ += query[i] * query[i];
+  const sqrtQ = Math.sqrt(normQ);
+  if (sqrtQ === 0) return scores;
+
+  for (const [id, vector] of valid) {
+    let dot = 0;
+    let normV = 0;
+    for (let i = 0; i < query.length; i++) {
+      dot += query[i] * vector[i];
+      normV += vector[i] * vector[i];
+    }
+    const sqrtV = Math.sqrt(normV);
+    const sim = (sqrtQ * sqrtV === 0) ? 0 : dot / (sqrtQ * sqrtV);
+    scores.set(id, Math.max(0, Number.isFinite(sim) ? sim : 0));
   }
   return scores;
 }

@@ -5,7 +5,7 @@ import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing, computeRequestValueDigest } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
-import { nativeCompactHistory } from '../native/index.js';
+import { nativeCompactHistory, nativeComputeStringHash } from '../native/index.js';
 import type { ArchivedTurnDocument, FileDeltaRecord } from '../context/turn-memory-retriever.js';
 
 export interface CompactionConfig {
@@ -55,7 +55,7 @@ export function hashObservationPayload(payload: unknown): string {
   try {
     return computeRequestValueDigest(payload ?? null).slice(0, 16);
   } catch {
-    return crypto.createHash('sha256').update(String(payload ?? '')).digest('hex').slice(0, 16);
+    return nativeComputeStringHash(String(payload ?? '')).slice(0, 16);
   }
 }
 
