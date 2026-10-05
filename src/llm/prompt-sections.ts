@@ -395,27 +395,32 @@ export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
    - Web retrieval: Use search_web and read_url_content for third-party docs and APIs.`;
 
 export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
+   - codegraph_explore: 1-call semantic traversal (source + call paths + blast radius) for "how does X work", architectural flow, or surveying code. Call first when repo has .codegraph/ index.
+   - codegraph_search: Fast FTS5 keyword & symbol search in CodeGraph index.
+   - codegraph_impact / analyze_impact: Analyze blast radius and affected callers/exports before modifying code.
    - query_call_graph: Traverse callers/callees with depth 1-5 to trace symbol dependencies.
    - get_route_map: Discover endpoints, handlers, and middleware across Express, Next.js, Fastify, Hono, NestJS.
-   - get_symbol_context_360: Inspect symbol definition, signatures, callers, callees, and test files.
+   - get_symbol_context_360: 360-degree panorama: AST definition, signatures, callers, callees, referencing files, and related tests.
    - get_architecture_topology: Inspect layer boundaries and detect circular dependencies (A -> B -> C -> A).`;
 
 export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
-   - Playbook A (Architecture): get_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.
-   - Playbook B (Root Cause): get_diagnostics / inspect_symbol -> query_call_graph(callers) -> read_file.
+   - Playbook A (Architecture & Exploration): codegraph_explore / get_architecture_topology -> get_symbol_context_360 -> read_file.
+   - Playbook B (Root Cause): get_diagnostics / inspect_symbol -> query_call_graph(callers) / codegraph_explore -> read_file.
    - Playbook C (Mutation): get_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> test.
    - Playbook D (Long Tasks): run_command(WaitMsBeforeAsync=5000) -> manage_task -> schedule.
    - Playbook E (Subagents & Multi-Agent): brainstorm_design -> allocate_agent_task(checkAntiDuplication, fileScope) -> write_shared_context -> publish_agent_event -> wait_agent -> verify_subagent_quality.
-   - Playbook F (DAG Plan): create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`;
+   - Playbook F (DAG Plan): codegraph_impact / analyze_impact -> create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.
+   - Playbook V (Verification & Workspace Diff Audit): get_diagnostics -> build/typecheck -> targeted test -> run_command("git diff --stat") & run_command("git diff") -> submit_solution.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {
-  architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\nget_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.`,
-  rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nget_diagnostics / inspect_symbol -> query_call_graph(callers) -> read_file.`,
+  architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\ncodegraph_explore / get_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.`,
+  rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nget_diagnostics / inspect_symbol -> query_call_graph(callers) / codegraph_explore -> read_file.`,
   mutation: `[TOOL PLAYBOOK C - MUTATION]\nget_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> targeted test.`,
   longTask: `[TOOL PLAYBOOK D - LONG TASK / SERVER]\nrun_command(WaitMsBeforeAsync=5000) -> inspect startup logs -> manage_task if needed -> schedule; proactively launch servers in background instead of printing passive instructions.`,
   subagent: `[TOOL PLAYBOOK E - SUBAGENT]\nbrainstorm_design -> allocate_agent_task -> shared context/event -> wait_agent -> verify_subagent_quality.`,
-  dagPlan: `[TOOL PLAYBOOK F - DAG PLAN]\ncreate_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`,
+  dagPlan: `[TOOL PLAYBOOK F - DAG PLAN]\ncodegraph_impact / analyze_impact -> create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`,
+  verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nget_diagnostics -> run_command(npm run build / tsc) -> run_command(targeted test) -> run_command("git diff --stat") & run_command("git diff") -> submit_solution.`,
 } as const;
 
 export type ToolPlaybookPromptId = keyof typeof TOOL_PLAYBOOK_PROMPTS;
@@ -528,26 +533,50 @@ export const DEFAULT_PROMPT_SECTIONS = [
  */
 export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-ADAPTIVE INVESTIGATION)]:
 - Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
-- Primary Tools: get_symbol_context_360, inspect_symbol, query_call_graph, read_file, get_diagnostics.
-- Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, request_phase_transition to implement; wait for the next model response and tool set before editing.
+- Tool Strategy by Use Case:
+  * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
+  * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
+  * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
+  * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout; use \`get_diagnostics\` to capture baseline compiler errors.
+- Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, call \`request_phase_transition\` to plan or implement; wait for the next turn before editing.
 - Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
 
-export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
-- Goal: Break down complex, multi-file changes into 2-5 atomic milestones using \`create_plan\`.
-- Sequence: Inspect -> Surgical Fix -> Verification Ladder.
- - Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks. Request the implement phase before editing.`;
+export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION & IMPACT ASSESSMENT)]:
+- Goal: Analyze blast radius and module boundaries, then break down complex changes into 2-5 atomic milestones with \`create_plan\`.
+- Pre-Plan Impact & Architecture Exploration:
+  * Call \`codegraph_impact\` or \`analyze_impact\` to quantify caller blast radius and risk (LOW/MEDIUM/HIGH/CRITICAL) before planning modifications.
+  * Call \`get_architecture_topology\` to inspect module layer boundaries and prevent circular dependencies.
+  * Call \`codegraph_explore\` or \`get_symbol_context_360\` to clarify dependencies and interface contracts.
+  * Use \`search_text\` or \`read_file\` to confirm config or reference lines.
+- Milestone Structuring:
+  * Sequence: [Inspect / Isolate -> Surgical Mutation -> Verification Ladder & Diff Audit].
+  * Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.
+  * Transition: After plan is finalized, call \`request_phase_transition\` to implement before editing.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
- - Primary Tools: \`apply_patch\` (Unified Diff, each target must be inspected) or \`replace_file_content\` / \`replace_text\` (with expectedFileHash).
+- Primary Mutation Tools:
+  * Use \`apply_patch\` (Unified Diff --- a/... +++ b/...) for multi-file or multi-hunk edits (always inspect targets first).
+  * Use \`replace_text\` or \`replace_file_content\` with \`expectedFileHash\` and \`expectedOccurrences: 1\` for single-block edits.
+- In-Flight Safety & Coherence Anchors:
+  * Use \`get_symbol_context_360\` if you need to double-check a dependency's signature, callers, or related tests during implementation.
+  * Use \`get_diagnostics\` immediately after modifying each file to catch in-memory type/syntax errors before moving forward.
+  * Use \`read_file\` to refresh line numbers and verify clean state after a patch.
 - Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.`;
 
-export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER)]:
-- Goal: Empirically prove that changes resolve the issue without regressions.
-- Sequence: 1. In-memory diagnostics (\`get_diagnostics\`) -> 2. Typecheck/Build (\`tsc --noEmit\` / \`npm run build\` or custom build script from \`package.json\`) -> 3. Targeted test suite.
+export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER & DIFF AUDIT)]:
+- Goal: Empirically prove that changes resolve the issue without regressions, and thoroughly inspect the workspace diff.
+- Verification Ladder (Execute Step-by-Step):
+  1. In-memory diagnostics (\`get_diagnostics\`) - instant syntax/type check (0 errors required).
+  2. Typecheck / Build (\`run_command\` with \`npm run build\` or \`npx tsc --noEmit\`, or defined build script).
+  3. Targeted test suite (\`run_command\` running only tests affected by the mutation to avoid timeouts).
+  4. Workspace Diff & Cleanliness Audit (\`run_command\` with Git commands):
+     * Review full diff: \`run_command "git diff"\` to review exact changes line by line.
+     * Check summary & affected files: \`run_command "git diff --stat"\` to confirm only intended files changed.
+     * Inspect specific file hunk: \`run_command "git diff -U3 <file>"\` or \`run_command "git diff -- <file>"\`.
+     * Check working tree status: \`run_command "git status -s"\` to ensure no stray untracked files or leftover debug artifacts.
 - Custom Build & Script Discipline: If the project has a custom build command (non-standard npm run build/tsc), always inspect \`package.json\` (scripts section) or run \`get_diagnostics\` first before attempting a full regression test suite. Check available scripts in [PROJECT KNOWLEDGE BASE - WARM START MEMORY] or inspect \`package.json\`. Never guess non-existent scripts (e.g. running 'lint' when absent) and never use workspace flags (e.g. \`--workspace=<app>\`) unless the project is confirmed to be a Monorepo.
-- Completion Gate: For code changes, submit with concrete verification proof. For read-only analysis, answer directly when the findings are supported; reporting tools and test runs are optional unless requested.
-- Anti-Pattern: Never emit pseudo-completion stubs without running verification.`;
+- Completion Gate: Call \`submit_solution\` with verified empirical evidence (clean diagnostics + passing test exit code + verified clean git diff). Never emit pseudo-completion stubs without running verification.`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
 - Goal: Provide a clear, natural final summary matching the user's language.

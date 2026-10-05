@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CriticGate } from './critic-gate.js';
+import { CriticGate, filterErrorsToModifiedFiles } from './critic-gate.js';
 
 // ponytail: inspection requires a successful read result, so mocks pair each
 // read_file call with its result (unkeyed pairing matches by tool name).
@@ -77,7 +77,7 @@ test('CriticGate.evaluateExplorationSufficiency approves inspected target with r
   assert.equal(decision.reasons.length, 0);
 });
 
-test('CriticGate penalizes score when DomainIntentGuardian records test tampering', () => {
+test('CriticGate reports historical DomainIntentGuardian warnings without blocking this task', () => {
   const critic = new CriticGate();
   const mockSession = {
     getEvents: () => [
@@ -98,7 +98,7 @@ test('CriticGate penalizes score when DomainIntentGuardian records test tamperin
     gateMode: 'enforce',
   });
 
-  assert.equal(sufficiency.score, 70); // 100 - 30
+  assert.equal(sufficiency.score, 100);
   assert.match(sufficiency.reasons[0] || '', /test tampering attempt/);
 });
 
@@ -285,7 +285,7 @@ test('CriticGate still blocks when measured callers exist but are uninspected', 
   assert.equal(decision.score, 50);
   assert.ok(decision.reasons.some((r) => r.includes('CAUSAL_TRACE_INSUFFICIENT')));
 });
-test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on architecture/investigation queries', () => {
+test('Pillar E2: Exploration Exhaustion Gate is advisory by default and enforceable on request', () => {
   const critic = new CriticGate();
   const emptySession = {
     getEvents: () => [],
@@ -297,9 +297,16 @@ test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on 
     session: emptySession,
     finalAnswer: 'Hệ thống dùng mô hình microservices.',
   });
-  assert.equal(archDecision.allowed, false);
+  assert.equal(archDecision.allowed, true);
   assert.equal(archDecision.scorePenalty, 40);
   assert.ok(archDecision.reasons[0].includes('EXPLORATION_EXHAUSTED_ZERO_EVIDENCE'));
+
+  const enforced = critic.evaluateExplorationExhaustion({
+    userRequest: 'Giải thích kiến trúc và luồng xử lý của hệ thống',
+    session: emptySession,
+    gateMode: 'enforce',
+  });
+  assert.equal(enforced.allowed, false);
 
   // Single-file satisficing on defect investigation
   const singleFileSession = {
@@ -331,4 +338,13 @@ test('Pillar E2: Exploration Exhaustion Gate penalizes zero-evidence answers on 
   });
   assert.equal(thoroughDecision.allowed, true);
   assert.equal(thoroughDecision.scorePenalty, 0);
+});
+
+test('CriticGate does not match diagnostics from a different same-named file', () => {
+  const errors = [
+    { file: 'src/left/index.ts', message: 'bad' },
+    { file: 'src/right/index.ts', message: 'also bad' },
+  ];
+  assert.deepEqual(filterErrorsToModifiedFiles(errors, ['src/left/index.ts']), [errors[0]]);
+  assert.deepEqual(filterErrorsToModifiedFiles(errors, ['index.ts']), errors);
 });

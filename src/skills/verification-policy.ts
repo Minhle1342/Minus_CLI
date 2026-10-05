@@ -1,5 +1,5 @@
-import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
-import { isSensitivePath, resolveVerifyTier } from '../agent/verify-tier-resolver.js';
+import { execFileSync } from 'node:child_process';
+import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';import { isSensitivePath, resolveVerifyTier } from '../agent/verify-tier-resolver.js';
 import { evaluateVerificationCoverage, type VerificationCoverage } from '../agent/verification-coverage.js';
 import type { FileCoverage } from '../agent/coverage-report-reader.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
@@ -40,9 +40,35 @@ export function isScratchPath(filePath: string): boolean {
   );
 }
 
+/** Heuristic comment-line check across common languages: slash-slash, hash, dash-dash, percent, semicolon, quote, html, block and star lines. */
+function isCommentLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return true;
+  return /^(?:\/\/|#|--|%|;|"|<!--)/.test(t)
+    || /^\/\*/.test(t) || /^\*/.test(t) || /^\*\//.test(t) || /\*\/$/.test(t)
+    || /-->$/.test(t) || /^('''|""")/.test(t);
+}
+
+/**
+ * True when a replace-style edit changes only comments/blank lines.
+ * Compares code lines (comments + blanks stripped); order-sensitive.
+ * ponytail: line-based heuristic, not a parser — unknown syntax stays fail-closed (returns false).
+ */
+export function isCommentOnlyChange(oldText: string, newText: string): boolean {
+  // ponytail: collapse intra-line whitespace runs (formatter noise); single-vs-none
+  // spacing still differs, so `"a b"` vs `"ab"` stays fail-closed.
+  const codeLines = (text: string) => String(text || '').split(/\r?\n/).map((l) => l.trim().replace(/\s+/g, ' ')).filter((l) => !isCommentLine(l));
+  const a = codeLines(oldText);
+  const b = codeLines(newText);
+  return a.length === b.length && a.every((line, i) => line === b[i]);
+}
+
 export class VerificationPolicy {
   private hasUnverifiedModifications: boolean = false;
   private modifiedFiles: Set<string> = new Set();
+  private commentOnlyFiles: Set<string> = new Set();
+  private contentPreservedFiles: Set<string> = new Set();
+  private workspaceRoot?: string;
   private lastVerification?: VerificationRecord;
   private verificationHistory: VerificationRecord[] = [];
   private repairCycles: number = 0;
@@ -151,13 +177,19 @@ export class VerificationPolicy {
   /**
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
-  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string }): void {
+  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string; commentOnly?: boolean }): void {
     if (filePath) {
       this.modifiedFiles.add(filePath);
+      if (options?.commentOnly) this.commentOnlyFiles.add(filePath);
+      else {
+        this.commentOnlyFiles.delete(filePath);
+        this.contentPreservedFiles.delete(filePath);
+      }
     }
     const isNonExec = filePath ? isNonExecutableFile(filePath) : false;
     const isSensitiveCode = filePath ? (!isNonExec && isSensitivePath(filePath)) : false;
-    if (!filePath || !isNonExec || isSensitiveCode || ['R3', 'R4', 'R5'].includes(this.requiredRisk)) {
+    const isCommentBypass = Boolean(options?.commentOnly) && !isSensitiveCode;
+    if (!filePath || (!isNonExec && !isCommentBypass) || isSensitiveCode || ['R3', 'R4', 'R5'].includes(this.requiredRisk)) {
       this.hasUnverifiedModifications = true;
       this.lastVerification = undefined;
       this.verificationHistory = [];
@@ -186,6 +218,24 @@ export class VerificationPolicy {
     if (rank.indexOf(risk) > rank.indexOf(this.requiredRisk)) this.requiredRisk = risk;
   }
 
+  /** Workspace root for on-disk inert-change checks (net-zero diff, deleted scratch). No root = fail-closed. */
+  setWorkspaceRoot(root: string): void {
+    if (root?.trim()) this.workspaceRoot = root;
+  }
+
+  /**
+   * Pure rename: content identical by construction (fs.rename).
+   * ponytail: tracked-source deletion still shows in git, so both paths are marked
+   * inert-by-record instead of relying on the disk check.
+   */
+  recordContentPreservedMove(sourcePath?: string, targetPath?: string): void {
+    for (const f of [sourcePath, targetPath]) {
+      if (!f?.trim()) continue;
+      this.modifiedFiles.add(f);
+      this.contentPreservedFiles.add(f);
+    }
+  }
+
   /**
    * Ghi nhận kết quả chạy lệnh kiểm thử / verify (run_command)
    */
@@ -199,13 +249,15 @@ export class VerificationPolicy {
     const isVerification = isVerificationCommand(command)
       || Boolean(options?.tier)
       || /\b(?:get_diagnostics|submit_solution)\b/i.test(command);
-    const effectiveSuccess = success && isVerification && options?.hasNewFailures !== true;
+    // ponytail: single new standalone script run exit 0 counts as structural verification (R0 only, no pending suites).
+    const isTrivialDirectRun = !isVerification && success && this.isTrivialDirectRunCommand(command);
+    const effectiveSuccess = success && (isVerification || isTrivialDirectRun) && options?.hasNewFailures !== true;
 
-    const tier = options?.tier || this.inferTier(command);
+    const tier = options?.tier || (isTrivialDirectRun ? 'structural' : this.inferTier(command));
     // Edge-case coverage is evaluated from harness-measured state only
     // (modified files, blast-impacted suites) — never LLM self-assessment.
     // Unevaluable runs yield 'unknown' and change nothing (fail-open).
-    const coverage = isVerification
+    const coverage = (isVerification || isTrivialDirectRun)
       ? evaluateVerificationCoverage({
         command,
         success: effectiveSuccess,
@@ -281,19 +333,32 @@ export class VerificationPolicy {
   canComplete(
     activeSkillIds: string[] = [],
     measured?: { changedFileCount?: number; hasCallers?: boolean; blastRisk?: string; sensitivePathTouched?: boolean },
+    options?: { userExemptsTesting?: boolean },
   ): { allowed: boolean; reason?: string; errorCode?: string } {
     // Miễn trừ kiểm thử bắt buộc nếu toàn bộ các file đã can thiệp là file phi thực thi (docs/markdown/configs)
-    const hasOnlyNonExecutableModifications =
+    // hoặc chỉ sửa ghi chú/comment (không đổi code, không chạm sensitive path)
+    const hasOnlyBypassableModifications =
       this.modifiedFiles.size > 0 &&
       ['R0', 'R1', 'R2'].includes(this.requiredRisk) &&
-      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f));
+      Array.from(this.modifiedFiles).every((f) => isNonExecutableFile(f)
+        || (this.commentOnlyFiles.has(f) && !isSensitivePath(f)));
 
-    const mandatesVerification = (this.modifiedFiles.size > 0 && !hasOnlyNonExecutableModifications)
+    const mandatesVerification = (this.modifiedFiles.size > 0 && !hasOnlyBypassableModifications)
       || this.hasUnverifiedModifications
       || this.pendingTargetedTests.size > 0
       || activeSkillIds.some((id) => this.requiredSkills.has(id));
 
     if (!mandatesVerification) {
+      return { allowed: true };
+    }
+
+    // #1: user nói rõ "không cần test" — mirror CompletionEvidenceGate (fail-open theo ý định explicit).
+    if (options?.userExemptsTesting) {
+      return { allowed: true };
+    }
+
+    // #2/#3/#4: net-zero diff, scratch đã xóa, rename giữ nguyên nội dung.
+    if (this.hasOnlyInertChanges()) {
       return { allowed: true };
     }
 
@@ -389,6 +454,8 @@ export class VerificationPolicy {
   reset(): void {
     this.hasUnverifiedModifications = false;
     this.modifiedFiles.clear();
+    this.commentOnlyFiles.clear();
+    this.contentPreservedFiles.clear();
     this.lastVerification = undefined;
     this.verificationHistory = [];
     this.repairCycles = 0;
@@ -406,5 +473,48 @@ export class VerificationPolicy {
     if (/\b(?:tsc|typecheck|get_diagnostics)\b/i.test(command)) return 'typecheck';
     if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';
     return 'structural';
+  }
+
+  /**
+   * ponytail: single new standalone script run exit 0 counts as structural verification.
+   * Tight scope: exactly 1 modified file, R0, no pending suites, non-sensitive executable,
+   * command directly executes that file (python/node/tsx/bun/deno). Multi-file, R1+,
+   * sensitive-path and pending-suite cases still require a real test/build/lint/typecheck.
+   */
+  private isTrivialDirectRunCommand(command: string): boolean {
+    if (this.modifiedFiles.size !== 1 || this.requiredRisk !== 'R0' || this.pendingTargetedTests.size > 0) return false;
+    const file = Array.from(this.modifiedFiles)[0];
+    if (isNonExecutableFile(file) || isSensitivePath(file)) return false;
+    const base = file.replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+    if (!base || base.length < 3 || !command.toLowerCase().includes(base)) return false;
+    return /^((python3?(\.exe)?|node|tsx|ts-node|bun|deno)\b|npx\s+(tsx|ts-node)\b)/i.test(command.trim());
+  }
+
+  /**
+   * True when every tracked change is inert: docs/config, comment-only,
+   * content-preserved rename, or no on-disk delta (reverted edit, deleted
+   * scratch/untracked file). Disk check is lazy (only when record-level
+   * exemptions don't cover) and fail-closed: no root or git error = not inert.
+   * ponytail: git-ignored-but-existing files read as clean — acceptable, scratch
+   * output is ephemeral by design; product code lives in tracked files.
+   */
+  private hasOnlyInertChanges(): boolean {
+    if (this.modifiedFiles.size === 0 || !['R0', 'R1', 'R2'].includes(this.requiredRisk)) return false;
+    const files = Array.from(this.modifiedFiles);
+    const needsDiskCheck = files.filter((f) => !isNonExecutableFile(f)
+      && !(this.commentOnlyFiles.has(f) && !isSensitivePath(f))
+      && !this.contentPreservedFiles.has(f));
+    if (needsDiskCheck.length === 0) return true;
+    if (!this.workspaceRoot) return false;
+    try {
+      const out = execFileSync('git', ['status', '--porcelain', '--', ...needsDiskCheck], {
+        cwd: this.workspaceRoot,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      return String(out).trim() === '';
+    } catch {
+      return false;
+    }
   }
 }

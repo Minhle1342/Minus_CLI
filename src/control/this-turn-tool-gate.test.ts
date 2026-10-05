@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ClassificationEngine } from './classification-engine.js';
-import { ThisTurnToolGate } from './this-turn-tool-gate.js';
+import { ThisTurnToolGate, createToolSurface } from './this-turn-tool-gate.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
@@ -98,6 +98,54 @@ test('adaptive tool budget scales generously for hard tasks and large complexity
   const decisionCrit = gate.decide(criticalImplement, registry.getAll());
   // Previously was capped at 2! Now should be at least 14
   assert.ok(decisionCrit.maxToolCalls >= 14, `Expected maxToolCalls >= 14, got ${decisionCrit.maxToolCalls}`);
+});
+
+test('phase-specific exploration anchors stay visible after dynamic retrieval', () => {
+  const names = [
+    'read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore',
+    'get_symbol_context_360', 'get_diagnostics', 'codegraph_impact', 'analyze_impact',
+    'get_architecture_topology', 'run_command',
+  ];
+  const tools = names.map((name) => ({
+    name,
+    description: name,
+    parameters: { type: 'OBJECT', properties: {} },
+    execute: async () => ({}),
+  } as any));
+  const gate = new ThisTurnToolGate();
+  const decide = (phase: string) => gate.decide({
+    id: `class-anchor-${phase}`,
+    taskClass: 'bugfix',
+    phase,
+    complexity: 'small',
+    risk: 'R1',
+    requiredCapabilities: ['inspect', 'search'],
+    reversibility: 'reversible',
+  } as any, tools).phaseExploreToolAnchors;
+
+  assert.deepEqual(decide('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics']);
+  assert.deepEqual(decide('plan'), ['read_file', 'search_text', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology']);
+  assert.deepEqual(decide('implement'), ['read_file', 'get_symbol_context_360', 'get_diagnostics']);
+  assert.deepEqual(decide('verify'), ['read_file', 'get_diagnostics', 'run_command']);
+
+  const decision = gate.decide({
+    id: 'class-anchor-surface',
+    taskClass: 'bugfix',
+    phase: 'explore',
+    complexity: 'small',
+    risk: 'R1',
+    requiredCapabilities: ['inspect', 'search'],
+    reversibility: 'reversible',
+  } as any, tools);
+  assert.deepEqual(decision.toolSurface.authorizedToolNames, decision.allowedToolNames);
+  assert.deepEqual(decision.toolSurface.visibleToolNames, [...decision.phaseExploreToolAnchors].sort());
+});
+
+test('ToolSurface keeps LLM-visible tools inside the authorized allowlist', () => {
+  const surface = createToolSurface(['run_command', 'read_file'], ['read_file', 'missing_tool', 'read_file']);
+
+  assert.deepEqual(surface.authorizedToolNames, ['read_file', 'run_command']);
+  assert.deepEqual(surface.visibleToolNames, ['read_file']);
 });
 
 test('phase-based tool scoping supports Unified Agentic Loop for coding tasks and guards read-only exploration', () => {
