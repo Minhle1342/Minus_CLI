@@ -43,7 +43,7 @@ pub fn scan_and_digest_workspace_native(root_dir: &str, ignored_dirs: &[String])
         .filter_entry(|entry| {
             if entry.file_type().is_dir() {
                 let name = entry.file_name().to_string_lossy();
-                if ignored_dirs.iter().any(|ig| ig == &name) {
+                if ignored_dirs.iter().any(|ig| ig.as_str() == name.as_ref()) {
                     return false;
                 }
                 if name == ".git"
@@ -87,6 +87,7 @@ pub fn scan_and_digest_workspace_native(root_dir: &str, ignored_dirs: &[String])
                     // Skip hashing huge files > 50MB
                     format!("len:{}", len)
                 } else {
+                    // SAFETY: The file is opened read-only and memory-mapped solely for computing the SHA-256 digest without concurrent modifications.
                     match unsafe { Mmap::map(&file) } {
                         Ok(mmap) => {
                             let mut hasher = Sha256::new();
@@ -106,7 +107,7 @@ pub fn scan_and_digest_workspace_native(root_dir: &str, ignored_dirs: &[String])
     }
 
     // Sắp xếp deterministic theo relative path
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
     let mut top_hasher = Sha256::new();
     for (rel_path, file_hash) in entries {

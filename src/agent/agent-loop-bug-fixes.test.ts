@@ -246,4 +246,83 @@ describe('AgentLoop Bug Fixes Verification', () => {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
   });
+
+  it('KV Cache Fix: Tool declarations remain 100% byte-for-byte identical across turn steps', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kv-cache-test-'));
+    try {
+      const workspace = new Workspace(rootDir);
+      const toolSnapshots: string[] = [];
+
+      class ToolTrackingLLM {
+        calls = 0;
+        modelName = 'test-model';
+        getTokenConfig() { return { maxInputTokens: 8192, maxOutputTokens: 2048 }; }
+        async generateStream(_session: Session, tools: any[]): Promise<any> {
+          toolSnapshots.push(JSON.stringify(tools));
+          if (this.calls === 0) {
+            this.calls++;
+            return {
+              text: 'Reading file',
+              toolCalls: [{ id: 'call-1', name: 'read_file', args: { path: 'test.txt' } }],
+              finishReason: 'tool_calls',
+            };
+          }
+          if (this.calls === 1) {
+            this.calls++;
+            return {
+              text: 'Executing command',
+              toolCalls: [{ id: 'call-2', name: 'run_command', args: { command: 'echo ok' } }],
+              finishReason: 'tool_calls',
+            };
+          }
+          return {
+            text: 'Completed verification.',
+            toolCalls: [],
+            finishReason: 'stop',
+          };
+        }
+      }
+
+      await fs.writeFile(path.join(rootDir, 'test.txt'), 'hello world', 'utf8');
+      const llm = new ToolTrackingLLM();
+      const registry = new ToolRegistry();
+      registry.register({
+        name: 'read_file',
+        description: 'Read file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } } as any,
+        execute: async () => ({ success: true, content: 'hello' }),
+      });
+      registry.register({
+        name: 'run_command',
+        description: 'Run command',
+        parameters: { type: 'object', properties: { command: { type: 'string' } } } as any,
+        execute: async () => ({ success: true, exitCode: 0, stdout: 'ok' }),
+      });
+
+      const loop = new AgentLoop(llm as any, registry, {
+        workspace,
+        maxSteps: 5,
+        enableDynamicToolRetrieval: true,
+      });
+
+      const session = new Session('session-kv-cache-test');
+      session.addUserMessage('Please inspect test.txt and run verification.');
+
+      await loop.run(session);
+
+      assert.equal(toolSnapshots.length >= 3, true, 'At least 3 steps must have executed');
+      assert.equal(
+        toolSnapshots[0],
+        toolSnapshots[1],
+        'Step 1 and Step 2 tool declarations must be 100% byte-for-byte identical (KV Cache Prefix Invariance)',
+      );
+      assert.equal(
+        toolSnapshots[1],
+        toolSnapshots[2],
+        'Step 2 and Step 3 tool declarations must be 100% byte-for-byte identical (KV Cache Prefix Invariance)',
+      );
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });

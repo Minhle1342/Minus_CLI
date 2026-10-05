@@ -99,7 +99,17 @@ export const searchTextTool: ToolDefinition = {
       maxMatches: {
         type: Type.INTEGER,
         description:
-          "Maximum number of TOTAL results returned (default: 50, max: 200). This is a repo-wide hard cap, not per-file.",
+          "Maximum number of TOTAL results returned in one page (default: 50, max: 200).",
+      },
+      offset: {
+        type: Type.INTEGER,
+        description:
+          "Pagination offset (0-indexed). Use with maxMatches to page through results when truncated=true or hasMore=true without missing matches. Default: 0.",
+      },
+      perFileLimit: {
+        type: Type.INTEGER,
+        description:
+          "Diversity budget: maximum matches to return from any single file in this page. When total matches exceed maxMatches, prevents test or mock files from crowding out production code. Default: 3 when totalMatches > maxMatches, or 0 for unlimited.",
       },
     },
     required: ["query"],
@@ -120,6 +130,10 @@ export const searchTextTool: ToolDefinition = {
       HARD_LIMIT,
       Math.max(1, Number(args.maxMatches) || 50),
     );
+    const offset = Math.max(0, Number(args.offset) || 0);
+    const perFileLimit = args.perFileLimit !== undefined
+      ? Math.max(0, Number(args.perFileLimit) || 0)
+      : undefined;
 
     if (!rawQuery) {
       return {
@@ -147,7 +161,7 @@ export const searchTextTool: ToolDefinition = {
       filesWithMatchesOnly: outputMode === "files_with_matches",
       countOnly: outputMode === "count",
       showLineNumbers: true,
-      maxTotalMatches: maxMatches,
+      maxTotalMatches: Math.max(2000, (offset + maxMatches) * 4),
       globFilter: includeGlob ? [includeGlob] : undefined,
       targetPaths: [rawPath],
     };
@@ -163,6 +177,7 @@ export const searchTextTool: ToolDefinition = {
       try {
         const rgArgs: string[] = [
           "--line-number",
+          "--with-filename",
           "--no-heading",
           "--color",
           "never",
@@ -243,7 +258,7 @@ export const searchTextTool: ToolDefinition = {
     }
 
     // Chế độ 3: 'content' (Mặc định)
-    const matches: MatchItem[] = [];
+    const allMatches: MatchItem[] = [];
     const fileSummaryMap = new Map<string, number>();
 
     for (const line of lines) {
@@ -260,11 +275,11 @@ export const searchTextTool: ToolDefinition = {
         // Guard against NaN/Infinity from malformed line numbers
         const safeLine = Number.isFinite(lineNum) ? lineNum : 1;
 
-        matches.push({ file, line: safeLine, text });
+        allMatches.push({ file, line: safeLine, text });
         fileSummaryMap.set(file, (fileSummaryMap.get(file) || 0) + 1);
       } else {
         // Fallback nếu định dạng chỉ có file:text hoặc đơn dòng
-        matches.push({ file: rawPath, line: 1, text: line });
+        allMatches.push({ file: rawPath, line: 1, text: line });
       }
     }
 
@@ -272,15 +287,73 @@ export const searchTextTool: ToolDefinition = {
       fileSummaryMap.entries(),
     ).map(([file, matchCount]) => ({ file, matchCount }));
 
-    const isCapped = matches.length >= maxMatches;
-    const totalMatches = matches.length;
-    const returned = Math.min(totalMatches, maxMatches);
-    const isTruncated = totalMatches > maxMatches;
-    const truncatedMatches = isTruncated
-      ? matches.slice(0, maxMatches)
-      : matches;
+    // Saliency Scoring: ưu tiên tệp mã nguồn chính và các khai báo định nghĩa
+    function scoreMatch(m: MatchItem): number {
+      let score = 0;
+      const lowerFile = m.file.toLowerCase();
+      const isTestOrMock = /(?:^|\/)(?:tests?|__tests__|mocks?|fixtures?|temp|scratch|dist|build|docs?)\//i.test(lowerFile)
+        || /\.(?:test|spec)\.[a-z0-9]+$/i.test(lowerFile);
+      const isSource = /(?:^|\/)(?:src|lib|packages|core|app)\//i.test(lowerFile);
 
-    const formattedContent = truncatedMatches
+      if (isSource && !isTestOrMock) score += 25;
+      else if (isTestOrMock) score -= 30;
+
+      const trimmed = m.text.trim();
+      if (/^(?:export\s+|pub\s+)?(?:class|interface|type|function|def|fn|enum|struct|trait|const\s+[A-Z_0-9]+)\b/.test(trimmed)) {
+        score += 15;
+      } else if (/^(?:import|require|from|\/\/|\/\*|\*|#\s*include)\b/.test(trimmed)) {
+        score -= 5;
+      }
+      return score;
+    }
+
+    const totalMatches = allMatches.length;
+    const effectivePerFileLimit = perFileLimit !== undefined
+      ? perFileLimit
+      : (totalMatches > maxMatches && fileSummaryMap.size > 1 ? 3 : 0);
+
+    let orderedMatches = allMatches;
+    let diversityApplied = false;
+
+    if (effectivePerFileLimit > 0 && fileSummaryMap.size > 1 && totalMatches > maxMatches) {
+      diversityApplied = true;
+      // Giai đoạn 1: Chấm điểm saliency cho tất cả matches
+      const scored = allMatches.map((m, originalIdx) => ({
+        match: m,
+        score: scoreMatch(m),
+        originalIdx,
+      }));
+
+      // Sắp xếp theo score giảm dần (ưu tiên source code & declaration)
+      scored.sort((a, b) => b.score - a.score || a.match.file.localeCompare(b.match.file) || a.match.line - b.match.line);
+
+      // Giai đoạn 2: Phân bổ diversity quota
+      const primaryBucket: MatchItem[] = [];
+      const remainderBucket: MatchItem[] = [];
+      const fileCountMap = new Map<string, number>();
+
+      for (const item of scored) {
+        const count = fileCountMap.get(item.match.file) || 0;
+        if (count < effectivePerFileLimit) {
+          primaryBucket.push(item.match);
+          fileCountMap.set(item.match.file, count + 1);
+        } else {
+          remainderBucket.push(item.match);
+        }
+      }
+
+      orderedMatches = [...primaryBucket, ...remainderBucket];
+    }
+
+    // Giai đoạn 3: Phân trang (Pagination)
+    const pageMatches = orderedMatches.slice(offset, offset + maxMatches);
+    const returned = pageMatches.length;
+    const hasMore = (offset + returned) < totalMatches;
+    const nextOffset = hasMore ? offset + returned : undefined;
+    const isTruncated = hasMore || totalMatches > maxMatches;
+    const isCapped = isTruncated;
+
+    const formattedContent = pageMatches
       .map((m) => `${m.file}:${m.line}: ${m.text}`)
       .join("\n");
 
@@ -290,19 +363,25 @@ export const searchTextTool: ToolDefinition = {
       engine: engineUsed,
       isRegex,
       include: includeGlob,
+      offset,
       totalMatches,
       returned,
       truncated: isTruncated,
+      hasMore,
+      ...(nextOffset !== undefined ? { nextOffset } : {}),
+      ...(diversityApplied ? { diversityApplied: true, perFileLimit: effectivePerFileLimit } : {}),
       totalFiles: fileSummary.length,
       content:
         formattedContent || "No results matched the request.",
-      matches: truncatedMatches,
+      matches: pageMatches,
       fileSummary,
       isCapped,
       warning: isCapped
-        ? `[SEARCH_CAPPED]: Reached the maximum of ${maxMatches} results (${totalMatches} total matches). More results are not shown.`
+        ? `[SEARCH_CAPPED]: Showing ${returned} of ${totalMatches} total matches across ${fileSummary.length} files (offset: ${offset}${diversityApplied ? `, diversity limit: ${effectivePerFileLimit}/file` : ""}). More results are available.`
         : undefined,
-      suggestion: isCapped
+      suggestion: hasMore
+        ? `To inspect subsequent matches without missing code, call search_text with offset: ${nextOffset} (auto-compact will preserve context tokens).`
+        : isCapped
         ? 'Narrow the regex, or specify the "include" parameter (e.g. "*.ts") or a more specific "path".'
         : undefined,
     };

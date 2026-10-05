@@ -2248,7 +2248,7 @@ export class CLI {
     // Never rendered inside the permission-request frame (renderPermissionPrompt).
     const width = getTerminalWidth();
     const ruleWidth = Math.max(8, Math.min(width - 2, 80));
-    console.log(`  ${c.slate}${'─'.repeat(ruleWidth)}${c.reset}`);
+    console.log(`  ${c.white}${'─'.repeat(ruleWidth)}${c.reset}`);
   }
 
   static formatMarkdownTables(text: string, options: { width?: number; layout?: 'grid' | 'stacked' } = {}): string {

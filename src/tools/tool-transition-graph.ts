@@ -35,6 +35,9 @@ export type ToolOutcomeState =
   | 'OCC_CONFLICT'
   | 'EXPLORATION_SUFFICIENCY_BLOCKED'
   | 'REPRODUCTION_GATE_BLOCKED'
+  | 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED'
+  | 'COMPLETION_EVIDENCE_REQUIRED'
+  | 'TARGET_CONTENT_NOT_FOUND'
   | 'GRAPH_CONTEXT_ACQUIRED'
   | 'PHASE_TRANSITION_ACCEPTED'
   | 'GENERAL_SUCCESS'
@@ -204,6 +207,24 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
+  ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED: {
+    primarySuccessors: ['get_symbol_context_360', 'query_call_graph', 'read_file'],
+    secondarySuccessors: ['grep_search', 'search_codebase_fast', 'inspect_symbol'],
+    primaryBoost: 0.35,
+    secondaryBoost: 0.15,
+  },
+  COMPLETION_EVIDENCE_REQUIRED: {
+    primarySuccessors: ['run_command', 'get_diagnostics'],
+    secondarySuccessors: ['verify_edit', 'read_file'],
+    primaryBoost: 0.38,
+    secondaryBoost: 0.16,
+  },
+  TARGET_CONTENT_NOT_FOUND: {
+    primarySuccessors: ['read_file', 'view_file_outline'],
+    secondarySuccessors: ['inspect_symbol', 'replace_text'],
+    primaryBoost: 0.35,
+    secondaryBoost: 0.15,
+  },
   BACKGROUND_RUNNING: {
     primarySuccessors: ['schedule', 'manage_task'],
     secondarySuccessors: ['run_command'],
@@ -240,6 +261,7 @@ const MUTATION_TOOLS = new Set([
   'move_file',
   'write_to_file',
   'replace_file_content',
+  'multi_replace_file_content',
 ]);
 
 const DISCOVERY_TOOLS = new Set([
@@ -267,12 +289,35 @@ export class ToolTransitionGraph {
       (Array.isArray(res?.diagnostics) && res.diagnostics.length > 0)
     );
 
-    // 0. Kiểm tra Gate Block Reason Codes
+    // 0. Kiểm tra Gate Block Reason Codes & Error Codes
     if (res?.reasonCode === 'EXPLORATION_SUFFICIENCY_BLOCKED') {
       return 'EXPLORATION_SUFFICIENCY_BLOCKED';
     }
     if (res?.reasonCode === 'REPRODUCTION_GATE_BLOCKED') {
       return 'REPRODUCTION_GATE_BLOCKED';
+    }
+    if (res?.reasonCode === 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED') {
+      return 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED';
+    }
+    if (
+      res?.errorCode === 'COMPLETION_EVIDENCE_REQUIRED' ||
+      res?.reasonCode === 'COMPLETION_EVIDENCE_REQUIRED' ||
+      res?.errorCode === 'OCR_REVIEW_REQUIRED' ||
+      res?.reasonCode === 'OCR_REVIEW_REQUIRED'
+    ) {
+      return 'COMPLETION_EVIDENCE_REQUIRED';
+    }
+    if (
+      res?.reasonCode === 'TARGET_CONTENT_NOT_FOUND' ||
+      res?.reasonCode === 'AMBIGUOUS_REPLACEMENT' ||
+      res?.errorCode === 'AMBIGUOUS_REPLACEMENT' ||
+      res?.errorCode === 'TEXT_NOT_FOUND' ||
+      (res?.errorCode === 'PATCH_ERROR' && typeof res?.error === 'string' && res.error.includes('TargetContent not found'))
+    ) {
+      return 'TARGET_CONTENT_NOT_FOUND';
+    }
+    if (res?.errorCode === 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN') {
+      return 'PHASE_TRANSITION_ACCEPTED';
     }
 
     // 1. Kiểm tra OCC Conflict

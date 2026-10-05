@@ -32,6 +32,7 @@ pub use workspace::{
     vfs_commit_to_disk_native, vfs_create_session_native, vfs_delete_file_native,
     vfs_destroy_session_native, vfs_generate_diff_native, vfs_list_modified_native,
     vfs_read_file_native, vfs_write_file_native, RsVfsFileStatus,
+    scan_manifest_native, diff_manifests_native, RsManifestEntry, RsManifestDiff,
 };
 pub use code_graph::{RsCodeGraph, RsGraphEdge, RsGraphScore};
 pub use rust_code::{parse_rust_code_native, RsRustCode, RsRustRelation, RsRustSymbol};
@@ -77,7 +78,7 @@ impl Task for SearchCodebaseTask {
             self.is_regex,
             self.ignore_case,
             self.max_matches,
-            self.ignored_dirs.clone(),
+            &self.ignored_dirs,
         ))
     }
 
@@ -214,7 +215,7 @@ pub fn rs_search_codebase(
     max_matches: u32,
     ignored_dirs: Vec<String>,
 ) -> RsSearchResult {
-    search_codebase_native(&target_dir, &query, is_regex, ignore_case, max_matches, ignored_dirs)
+    search_codebase_native(&target_dir, &query, is_regex, ignore_case, max_matches, &ignored_dirs)
 }
 
 #[napi]
@@ -369,4 +370,14 @@ pub fn rs_extract_archive(
 #[napi]
 pub fn rs_scan_path_for_binaries(dirs: Vec<String>, file_names: Vec<String>) -> Vec<String> {
     scan_path_for_binaries_native(&dirs, &file_names)
+}
+
+#[napi]
+pub fn rs_scan_manifest(root_dir: String, ignored_dirs: Vec<String>) -> Vec<RsManifestEntry> {
+    scan_manifest_native(&root_dir, &ignored_dirs)
+}
+
+#[napi]
+pub fn rs_diff_manifests(before: Vec<RsManifestEntry>, after: Vec<RsManifestEntry>) -> Vec<RsManifestDiff> {
+    diff_manifests_native(before, after)
 }

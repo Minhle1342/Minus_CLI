@@ -1,0 +1,181 @@
+{
+  "catalog": {
+    "digest": "sha256-4e1577e6e9c59e385f4525ba62d3511db51eb10f895088628ddf21e9bbca1771",
+    "package": "agentic-awesome-skills",
+    "version": "18.14.0"
+  },
+  "catalogDigest": "sha256-4e1577e6e9c59e385f4525ba62d3511db51eb10f895088628ddf21e9bbca1771",
+  "catalogSchemaVersion": "2.0.0",
+  "coreVersion": "2.0.0",
+  "manifest": {
+    "catalog": {
+      "integrity": "sha256-4e1577e6e9c59e385f4525ba62d3511db51eb10f895088628ddf21e9bbca1771",
+      "package": "agentic-awesome-skills",
+      "version": "18.14.0"
+    },
+    "name": "minus-cli-core-stack",
+    "profile": {
+      "constraints": [
+        "Strict context window budgeting without blowing KV cache",
+        "Rust FFI native performance for AST parsing, hashing, and compression",
+        "Zero prompt bloat through on-demand MCP tool calling",
+        "Deterministic recovery gates for tool failures"
+      ],
+      "frameworks": [
+        "Ink (React for CLI)",
+        "napi-rs",
+        "MiniSearch",
+        "Google GenAI SDK"
+      ],
+      "goals": [
+        "Build high-performance AI agent loop with Gemini API in TypeScript and Rust",
+        "Maintain zero-bloat context budgeting and KV-cache friendly compaction",
+        "Enforce resilient tool transition graphs and runtime gatekeeper security",
+        "Benchmark and evaluate agent completion rates and latency regressions"
+      ],
+      "languages": [
+        "TypeScript",
+        "Rust",
+        "Node.js"
+      ],
+      "projectType": "Autonomous AI Coding Assistant CLI"
+    },
+    "schemaVersion": 2,
+    "skills": [
+      {
+        "id": "ai-agent-tool-routing"
+      },
+      {
+        "id": "agent-tool-builder"
+      },
+      {
+        "id": "ai-engineering-toolkit"
+      },
+      {
+        "id": "agent-memory-discipline"
+      },
+      {
+        "id": "agent-memory-systems"
+      },
+      {
+        "id": "ai-coding-agent-guardrails"
+      },
+      {
+        "id": "ai-code-generation-guardrails"
+      },
+      {
+        "id": "ai-agent-security"
+      },
+      {
+        "id": "agent-harness-fault-injection"
+      },
+      {
+        "id": "ai-agent-evaluation-benchmarking"
+      },
+      {
+        "id": "ai-prompt-regression-testing"
+      },
+      {
+        "id": "nodejs-best-practices"
+      },
+      {
+        "id": "nodejs-backend-patterns"
+      }
+    ],
+    "targets": [
+      {
+        "host": "claude",
+        "scope": "project"
+      },
+      {
+        "host": "codex",
+        "scope": "project"
+      }
+    ]
+  },
+  "manifestDigest": "sha256-4a9346b09ab687de014c2ebd7bedeb61b3f38f999e42514de05fb4fb1b7bd28e",
+  "ok": true,
+  "protocolVersion": "2025-06-18",
+  "selectedSkills": [
+    {
+      "category": "engineering",
+      "description": "Autonomous AI agent tool router register: schema registration, runtime parameter coercion, idempotency keys, and error recovery policies.",
+      "id": "ai-agent-tool-routing",
+      "name": "ai-agent-tool-routing"
+    },
+    {
+      "category": "ai-ml",
+      "description": "Tools are how AI agents interact with the world. A well-designed tool is the difference between an agent that works and one that hallucinates, fails silently, or costs 10x more tokens than necessary. This skill covers tool design from schema to error handling.",
+      "id": "agent-tool-builder",
+      "name": "agent-tool-builder"
+    },
+    {
+      "category": "data-ai",
+      "description": "6 production-ready AI engineering workflows: prompt evaluation (8-dimension scoring), context budget planning, RAG pipeline design, agent security audit (65-point checklist), eval harness building, and product sense coaching.",
+      "id": "ai-engineering-toolkit",
+      "name": "ai-engineering-toolkit"
+    },
+    {
+      "category": "memory",
+      "description": "Rules for when an agent should recall from long-term memory before acting and when it should save decisions, corrections and failures afterwards. Works with any memory backend.",
+      "id": "agent-memory-discipline",
+      "name": "agent-memory-discipline"
+    },
+    {
+      "category": "memory",
+      "description": "Memory is the cornerstone of intelligent agents. Without it, every interaction starts from zero. This skill covers the architecture of agent memory: short-term (context window), long-term (vector stores), and the cognitive architectures that organize them.",
+      "id": "agent-memory-systems",
+      "name": "agent-memory-systems"
+    },
+    {
+      "category": "security",
+      "description": "Secure AI coding agents (Claude Code, Cursor, Codex, Copilot) with permission boundaries, secret protection, code review gates, and safe sandbox configurations for team environments.",
+      "id": "ai-coding-agent-guardrails",
+      "name": "ai-coding-agent-guardrails"
+    },
+    {
+      "category": "engineering",
+      "description": "Autonomous AI code generation safety guardrail register: static AST analysis, forbidden import filters, and zero-day vulnerability checks.",
+      "id": "ai-code-generation-guardrails",
+      "name": "ai-code-generation-guardrails"
+    },
+    {
+      "category": "security",
+      "description": "Secure AI agents against prompt injection, tool abuse, and data exfiltration with defense-in-depth controls.",
+      "id": "ai-agent-security",
+      "name": "ai-agent-security"
+    },
+    {
+      "category": "development",
+      "description": "Use when an agent workflow needs deterministic recovery evidence for sandbox, MCP/tool, worker, checkpoint, memory, or orchestration failures.",
+      "id": "agent-harness-fault-injection",
+      "name": "agent-harness-fault-injection"
+    },
+    {
+      "category": "engineering",
+      "description": "Autonomous AI agent benchmark evaluation register: task completion rates, planning accuracy, tool invocation precision, and cost benchmarks.",
+      "id": "ai-agent-evaluation-benchmarking",
+      "name": "ai-agent-evaluation-benchmarking"
+    },
+    {
+      "category": "engineering",
+      "description": "Prompt engineering regression test matrix register: baseline outputs, semantic drift thresholds, judge evaluations, and golden dataset.",
+      "id": "ai-prompt-regression-testing",
+      "name": "ai-prompt-regression-testing"
+    },
+    {
+      "category": "architecture",
+      "description": "Node.js development principles and decision-making. Framework selection, async patterns, security, and architecture. Teaches thinking, not copying.",
+      "id": "nodejs-best-practices",
+      "name": "nodejs-best-practices"
+    },
+    {
+      "category": "backend",
+      "description": "Comprehensive guidance for building scalable, maintainable, and production-ready Node.js backend applications with modern frameworks, architectural patterns, and best practices.",
+      "id": "nodejs-backend-patterns",
+      "name": "nodejs-backend-patterns"
+    }
+  ],
+  "selectionSource": "agent",
+  "status": "composed"
+}

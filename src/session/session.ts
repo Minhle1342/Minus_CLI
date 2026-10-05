@@ -228,6 +228,34 @@ function cloneJson<T>(value: T): T {
 /** Hard cap for a single persisted thought; overflow is truncated with a flag. */
 export const MAX_REASONING_CHARS = 8192;
 
+/**
+ * A model-facing projected message annotated with the logical turn that
+ * produced it. `turn` comes from `turn/start` → `turn/end` lifecycle events —
+ * never from counting `user`-role messages — so system/injected prompts
+ * between turns attach to the turn they open instead of creating phantom
+ * turns. Synopsis placeholders carry no turn.
+ */
+export interface ProjectedMessageWithTurn {
+  message: Content;
+  turn?: number;
+  isSynopsis?: boolean;
+  sourceEventSeq: number;
+}
+
+const TURN_WINDOW_SYNOPSIS_MARKERS = [
+  '[ROLLING DIALOGUE SYNOPSIS',
+  '[TURN-WINDOW SYNOPSIS',
+];
+
+function isSynopsisContent(content: Content | undefined): boolean {
+  if (!content) return false;
+  for (const part of content.parts || []) {
+    const text = (part as any)?.text;
+    if (typeof text === 'string' && TURN_WINDOW_SYNOPSIS_MARKERS.some((m) => text.includes(m))) return true;
+  }
+  return false;
+}
+
 function assertEvent(event: SessionEvent, expectedSeq: number): void {
   if (!event || event.seq !== expectedSeq || !event.id || !event.type || !event.createdAt) {
     throw new Error(`Invalid session event at sequence ${expectedSeq}.`);
@@ -817,6 +845,12 @@ export class Session {
   /**
    * Replace the model-facing projection without deleting the raw history.
    * This is the first compaction seam; later phases can add typed policies.
+   *
+   * The `completed-turn-window` reason carries a turn manifest in
+   * `compactionState.turnWindow` ({ preservedTurns, archivedTurnNumbers,
+   * archivedTurnIds }). The manifest must reference only closed turns —
+   * never the open turn — so a later restart cannot mistake an archived
+   * placeholder for a live turn.
    */
   setHistory(
     newHistory: Content[],
@@ -824,6 +858,31 @@ export class Session {
     compactionState?: Record<string, unknown>,
   ): void {
     assertHistoryToolPairing(newHistory);
+    if (reason === 'completed-turn-window') {
+      const window = (compactionState as any)?.turnWindow as
+        | { preservedTurns?: unknown; archivedTurnNumbers?: unknown; archivedTurnIds?: unknown }
+        | undefined;
+      const preserved = Array.isArray(window?.preservedTurns) ? (window.preservedTurns as unknown[]) : undefined;
+      const archived = Array.isArray(window?.archivedTurnNumbers) ? (window.archivedTurnNumbers as unknown[]) : undefined;
+      if (!preserved || !archived) {
+        throw new Error('Invariant violation: completed-turn-window compaction requires a turnWindow manifest.');
+      }
+      const openTurn = this.getOpenTurn();
+      for (const turn of [...preserved, ...archived]) {
+        if (typeof turn !== 'number' || !Number.isInteger(turn)) {
+          throw new Error('Invariant violation: turnWindow manifest must list integer turn numbers.');
+        }
+        if (openTurn !== undefined && turn === openTurn) {
+          throw new Error(`Invariant violation: turnWindow manifest references open turn ${turn}.`);
+        }
+      }
+      const closed = new Set(this.getCompletedTurnNumbers());
+      for (const turn of [...preserved, ...archived] as number[]) {
+        if (!closed.has(turn)) {
+          throw new Error(`Invariant violation: turnWindow references turn ${turn} without a turn/end event.`);
+        }
+      }
+    }
     this.append('session/compaction', {
       messages: newHistory,
       reason,
@@ -885,6 +944,138 @@ export class Session {
     }
 
     return projected;
+  }
+
+  /**
+   * Turn-annotated replay of the projection. Mirrors
+   * `projectHistoryFromEvents` message-for-message (same order, same
+   * tool/call reconstruction) while tagging each message with the logical
+   * turn open when its event was recorded. A `user/message` arriving while
+   * no turn is open (the next prompt, queued between turns) is held pending
+   * and attached to the following `turn/start`, so pre-turn prompts never
+   * inflate the completed-turn count.
+   */
+  static projectHistoryWithTurns(events: SessionEvent[]): ProjectedMessageWithTurn[] {
+    const projected: ProjectedMessageWithTurn[] = [];
+    const toolCallsByAssistantSeq = new Map<number, SessionEvent[]>();
+
+    for (const event of events) {
+      if (event.type !== 'tool/call' || event.data.assistantSeq === undefined) continue;
+      const calls = toolCallsByAssistantSeq.get(event.data.assistantSeq) || [];
+      calls.push(event);
+      toolCallsByAssistantSeq.set(event.data.assistantSeq, calls);
+    }
+
+    let currentTurn: number | undefined;
+    let pendingPreTurn: number[] = [];
+
+    for (const event of events) {
+      if (event.type === 'turn/start' && event.data.turn !== undefined) {
+        currentTurn = event.data.turn;
+        for (const index of pendingPreTurn) {
+          projected[index].turn = currentTurn;
+        }
+        pendingPreTurn = [];
+        continue;
+      }
+      if (event.type === 'turn/end') {
+        if (currentTurn !== undefined && event.data.turn === currentTurn) {
+          currentTurn = undefined;
+        }
+        pendingPreTurn = [];
+        continue;
+      }
+      if (event.type === 'session/compaction') {
+        const messages = cloneJson(event.data.messages || []);
+        projected.length = 0;
+        for (const message of messages) {
+          projected.push({
+            message,
+            turn: undefined,
+            isSynopsis: isSynopsisContent(message),
+            sourceEventSeq: event.seq,
+          });
+        }
+        pendingPreTurn = [];
+        continue;
+      }
+
+      if ((event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result') && event.data.content) {
+        const content = cloneJson(event.data.content);
+
+        if (event.type === 'assistant/message') {
+          const parts = content.parts || [];
+          const existingCallIds = new Set(parts
+            .map((part: any) => part.functionCall?.id)
+            .filter(Boolean));
+
+          for (const callEvent of toolCallsByAssistantSeq.get(event.seq) || []) {
+            const callId = callEvent.data.toolCallId;
+            if (callId && existingCallIds.has(callId)) continue;
+            parts.push({
+              ...(callEvent.data.thoughtSignature
+                ? { thoughtSignature: callEvent.data.thoughtSignature }
+                : {}),
+              functionCall: {
+                name: callEvent.data.toolName || 'unknown_tool',
+                args: callEvent.data.args || {},
+                id: callId,
+              },
+            });
+            if (callId) existingCallIds.add(callId);
+          }
+          content.parts = parts;
+        }
+
+        const entry: ProjectedMessageWithTurn = {
+          message: content,
+          turn: currentTurn,
+          isSynopsis: false,
+          sourceEventSeq: event.seq,
+        };
+        projected.push(entry);
+        if (currentTurn === undefined && event.type === 'user/message') {
+          pendingPreTurn.push(projected.length - 1);
+        }
+      }
+    }
+
+    return projected;
+  }
+
+  /** Closed turn numbers in ascending order (every `turn/end`, any reason). */
+  getCompletedTurnNumbers(): number[] {
+    const completed: number[] = [];
+    let openTurn: number | undefined;
+    for (const event of this.eventLog) {
+      if (event.type === 'turn/start' && event.data.turn !== undefined) {
+        openTurn = event.data.turn;
+      } else if (event.type === 'turn/end' && event.data.turn !== undefined) {
+        if (openTurn !== undefined && event.data.turn === openTurn) {
+          openTurn = undefined;
+        }
+        if (!completed.includes(event.data.turn)) completed.push(event.data.turn);
+      }
+    }
+    return completed.sort((a, b) => a - b);
+  }
+
+  /** The currently open turn, if any. */
+  getOpenTurn(): number | undefined {
+    let openTurn: number | undefined;
+    for (const event of this.eventLog) {
+      if (event.type === 'turn/start' && event.data.turn !== undefined) {
+        openTurn = event.data.turn;
+      } else if (event.type === 'turn/end' && event.data.turn === openTurn) {
+        openTurn = undefined;
+      }
+    }
+    return openTurn;
+  }
+
+  /** Turn-annotated view of the current model-facing projection. */
+  getProjectionWithTurns(): ProjectedMessageWithTurn[] {
+    return Session.projectHistoryWithTurns(this.eventLog);
   }
 
   getHistory(): Content[] {

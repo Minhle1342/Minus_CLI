@@ -115,9 +115,13 @@ export class GeminiLLM {
       ...request?.tokenConfig,
     });
 
+    const sortedTools = tools.length > 0
+      ? [...tools].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+      : [];
+
     const generateConfig: any = {
       systemInstruction: request?.systemPrompt || this.systemPrompt,
-      tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+      tools: sortedTools.length > 0 ? [{ functionDeclarations: sortedTools }] : undefined,
       abortSignal: request?.signal,
     };
 
@@ -130,11 +134,11 @@ export class GeminiLLM {
       const cacheKey = createPromptCacheKey(stablePrompt, {
         provider: 'gemini',
         model: this.modelName,
-        toolSchemaVersion: hashToolDeclarations(tools),
+        toolSchemaVersion: hashToolDeclarations(sortedTools),
         policyVersion: 'provider-cache-v2',
       });
       try {
-        const cachedContentName = await this.resolveExplicitCache(cacheKey, stablePrompt, tools, request);
+        const cachedContentName = await this.resolveExplicitCache(cacheKey, stablePrompt, sortedTools, request);
         if (cachedContentName) {
           generateConfig.cachedContent = cachedContentName;
           delete generateConfig.systemInstruction;
@@ -468,7 +472,9 @@ export class GeminiLLM {
         displayName: cacheKey.slice(0, 128),
         ttl: `${ttlSeconds}s`,
         systemInstruction,
-        tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+        tools: tools.length > 0
+          ? [{ functionDeclarations: [...tools].sort((a, b) => (a.name || '').localeCompare(b.name || '')) }]
+          : undefined,
       },
     });
     if (!created.name) return undefined;

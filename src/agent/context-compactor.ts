@@ -15,6 +15,10 @@ export interface CompactionConfig {
   preservePrefixCache?: boolean;
   enableRollingTurnCompaction?: boolean;
   preserveLastNTurns?: number;
+  /** Compact whole completed turns at turn boundaries, independent of token budget. */
+  enableCompletedTurnCompaction?: boolean;
+  /** Full turns to preserve when compacting at turn boundaries. */
+  preserveCompletedTurns?: number;
   enableObservationMasking?: boolean;
   maskOldObservationsBeyondN?: number;
   /** Archive old tool observations without rewriting the model-facing history. */
@@ -93,6 +97,8 @@ export interface CompactionOptions {
   reinjectInvariants?: string;
   enableRollingTurns?: boolean;
   preserveLastNTurns?: number;
+  /** Completed-turn window size for boundary compaction (defaults to config). */
+  preserveCompletedTurns?: number;
   modelName?: string;
   mutatedFiles?: string[];
   cognitivePhase?: 'explore' | 'plan' | 'implement' | 'verify';
@@ -101,6 +107,26 @@ export interface CompactionOptions {
   enforceBudget?: boolean;
   /** Per-request context ceiling; overrides the long-lived compactor default. */
   maxInputTokens?: number;
+}
+
+/**
+ * One projected message with its lifecycle turn. Entries with
+ * `turn === undefined` are turn-agnostic (synopsis placeholders or prompts
+ * not yet attached to a turn) and are always preserved, never archived.
+ */
+export interface TurnWindowEntry {
+  message: SessionMessage;
+  turn?: number;
+  isSynopsis?: boolean;
+}
+
+export interface CompletedTurnWindowOptions {
+  /** Closed turn numbers, ascending. The open turn must never appear here. */
+  completedTurns: number[];
+  /** Currently open turn, if any — always excluded from compaction. */
+  openTurn?: number;
+  /** Full turns to preserve (defaults to config). */
+  preserveCompletedTurns?: number;
 }
 
 const ROLLING_SYNOPSIS_MARKER = '[ROLLING DIALOGUE SYNOPSIS';
@@ -233,6 +259,8 @@ export class ContextCompactor {
       preservePrefixCache: config?.preservePrefixCache ?? false,
       enableRollingTurnCompaction: config?.enableRollingTurnCompaction ?? true,
       preserveLastNTurns: config?.preserveLastNTurns ?? 8,
+      enableCompletedTurnCompaction: config?.enableCompletedTurnCompaction ?? true,
+      preserveCompletedTurns: config?.preserveCompletedTurns ?? 4,
       enableObservationMasking: config?.enableObservationMasking ?? true,
       maskOldObservationsBeyondN: config?.maskOldObservationsBeyondN ?? 3,
       checkpointEveryNToolResults: config?.checkpointEveryNToolResults ?? 12,
@@ -268,6 +296,12 @@ export class ContextCompactor {
     }
     if (config.preserveLastNTurns !== undefined) {
       this.config.preserveLastNTurns = config.preserveLastNTurns;
+    }
+    if (config.enableCompletedTurnCompaction !== undefined) {
+      this.config.enableCompletedTurnCompaction = config.enableCompletedTurnCompaction;
+    }
+    if (config.preserveCompletedTurns !== undefined) {
+      this.config.preserveCompletedTurns = config.preserveCompletedTurns;
     }
     if (config.enableObservationMasking !== undefined) {
       this.config.enableObservationMasking = config.enableObservationMasking;
@@ -743,6 +777,303 @@ export class ContextCompactor {
       messages: newMessages,
       archivedTurns,
       prunedTurnsCount: oldUserTurnIndices.length,
+    };
+  }
+
+  /**
+   * Cumulative facts carried by previous synopsis generations. The
+   * chronological index alone cannot rebuild structured sections, so prior
+   * decisions, artifact trail entries, high-saliency traces and tool names
+   * are forwarded into the next synopsis. Shared by rolling (step-path) and
+   * completed-turn-window (turn-boundary) compaction.
+   */
+  private parsePriorSynopsis(priorSynopsisTexts: string[]): {
+    priorSynopsisLines: string[];
+    priorDecisions: string[];
+    priorArtifactLines: string[];
+    priorHighSaliency: string[];
+    priorTools: string[];
+  } {
+    const priorSynopsisLines = priorSynopsisTexts
+      .flatMap((text) => text.split('\n'))
+      .filter((line) => line.trimStart().startsWith('• Turn #'));
+    const priorDecisions: string[] = [];
+    const priorArtifactLines: string[] = [];
+    const priorHighSaliency: string[] = [];
+    const priorTools: string[] = [];
+    for (const text of priorSynopsisTexts) {
+      const lines = text.split('\n');
+      let section = '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (/^##\s+2\./.test(trimmed)) { section = 'artifacts'; continue; }
+        if (/^##\s+3\./.test(trimmed)) { section = 'saliency'; continue; }
+        if (/^##\s+4\./.test(trimmed)) { section = 'decisions'; continue; }
+        if (/^##\s+5\./.test(trimmed)) { section = 'state'; continue; }
+        if (/^##\s+6\./.test(trimmed) || /^###\s+Chronological/.test(trimmed)) { section = ''; continue; }
+        if (/^##\s+1\./.test(trimmed)) { section = 'intent'; continue; }
+        if (!trimmed.startsWith('- ') && !trimmed.startsWith('• ')) {
+          if (trimmed.startsWith('- Tools executed:')) section = 'state';
+          continue;
+        }
+        const content = trimmed.replace(/^[-•]\s+/, '').trim();
+        if (!content) continue;
+        if (section === 'decisions' && !/follow the codebase technical standards/i.test(content)) {
+          priorDecisions.push(content);
+        } else if (section === 'artifacts' && !/no workspace files modified/i.test(content)) {
+          priorArtifactLines.push(line.trim());
+        } else if (section === 'saliency') {
+          priorHighSaliency.push(content.replace(/^\[FAILED[^\]]*\]:\s*/, '').trim() ? content : content);
+        }
+        const toolsMatch = trimmed.match(/^- Tools executed:\s*(.+)/);
+        if (toolsMatch && toolsMatch[1] && !/none/i.test(toolsMatch[1])) {
+          toolsMatch[1].split(',').map((s) => s.trim()).filter(Boolean).forEach((t) => priorTools.push(t));
+        }
+      }
+    }
+    return { priorSynopsisLines, priorDecisions, priorArtifactLines, priorHighSaliency, priorTools };
+  }
+
+  private parseArchivedTurnNumbers(synopsisLines: string[]): number[] {
+    const numbers: number[] = [];
+    for (const line of synopsisLines) {
+      const match = line.match(/• Turn #(\d+)/);
+      if (match) numbers.push(Number.parseInt(match[1], 10));
+    }
+    return numbers.filter((n) => Number.isInteger(n));
+  }
+
+  private extractWindowSessionIntent(
+    priorSynopsisTexts: string[],
+    oldestTurnMessages: SessionMessage[],
+    fallbackTurn: number,
+  ): string {
+    for (const text of priorSynopsisTexts) {
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (/^##\s+1\./.test(lines[i].trim()) && i + 1 < lines.length) {
+          const intent = lines[i + 1].trim();
+          if (intent) return intent.slice(0, 400);
+        }
+      }
+    }
+    const rawText = (oldestTurnMessages.flatMap((m) => m.parts || []).find((p) => p.text && !p.functionResponse)?.text || '').trim();
+    if (rawText.includes('[USER INSTRUCTION]:')) {
+      const parts = rawText.split('[USER INSTRUCTION]:');
+      return parts[parts.length - 1].trim().slice(0, 400) || `Turn #${fallbackTurn} request`;
+    }
+    if (rawText) {
+      return rawText
+        .replace(/^\[PROJECT KNOWLEDGE BASE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[SESSION \/ GOAL MEMORY[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[AUTONOMOUS GOAL MODE ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[DYNAMIC CONVERGENCE ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .replace(/^\[COGNITIVE SCAFFOLD ACTIVE[\s\S]*?(\n\n|$)/i, '')
+        .trim()
+        .slice(0, 400) || rawText.slice(0, 400);
+    }
+    return `Turn #${fallbackTurn} request`;
+  }
+
+  /**
+   * Compact whole completed turns at a turn boundary, keeping the newest
+   * `preserveCompletedTurns` turns fully intact. Unlike budget-driven
+   * rolling compaction (which fires per request and guesses turns from
+   * `user`-role messages), entries here carry lifecycle turn numbers from
+   * `Session.projectHistoryWithTurns`, so system/injected prompts never
+   * create phantom turns and only turns with a `turn/end` event are pruned.
+   * The open turn — when present — is always preserved untouched.
+   */
+  compactCompletedTurnWindow(
+    entries: TurnWindowEntry[],
+    options: CompletedTurnWindowOptions,
+  ): { messages: SessionMessage[]; stats: CompactionStats } {
+    const inputMessages = entries.map((entry) => entry.message);
+    const originalLength = getHistoryTotalChars(inputMessages);
+    const originalTokens = ContextCompactor.countHistoryTokens(inputMessages);
+    const noChange = (strategiesApplied: string[] = []): { messages: SessionMessage[]; stats: CompactionStats } => ({
+      messages: inputMessages,
+      stats: {
+        originalTokens,
+        compactedTokens: originalTokens,
+        tokensSaved: 0,
+        originalLength,
+        compactedLength: originalLength,
+        charsSaved: 0,
+        prunedPartsCount: 0,
+        prunedTurnsCount: 0,
+        requestOverheadTokens: 0,
+        outputReserveTokens: 0,
+        effectiveHistoryBudgetTokens: originalTokens,
+        archivedTurns: [],
+        withinBudget: true,
+        budgetOverflowTokens: 0,
+        strategiesApplied,
+      },
+    });
+
+    const preserve = Math.max(1, Math.floor(options.preserveCompletedTurns ?? this.config.preserveCompletedTurns ?? 4));
+    const completed = Array.from(new Set(options.completedTurns || [])).filter(
+      (turn) => Number.isInteger(turn) && turn !== options.openTurn,
+    ).sort((a, b) => a - b);
+    if (completed.length <= preserve) return noChange();
+
+    const priorSynopsisTexts = entries
+      .filter((entry) => entry.isSynopsis || isRollingSynopsisMessage(entry.message))
+      .flatMap((entry) => entry.message.parts || [])
+      .map((part: any) => typeof part.text === 'string' ? part.text : '')
+      .filter(Boolean);
+    const { priorSynopsisLines, priorDecisions, priorArtifactLines, priorHighSaliency, priorTools } =
+      this.parsePriorSynopsis(priorSynopsisTexts);
+    const alreadyArchived = new Set(this.parseArchivedTurnNumbers(priorSynopsisLines));
+
+    const messagesByTurn = new Map<number, SessionMessage[]>();
+    for (const entry of entries) {
+      if (entry.turn === undefined || entry.isSynopsis) continue;
+      const list = messagesByTurn.get(entry.turn) || [];
+      list.push(entry.message);
+      messagesByTurn.set(entry.turn, list);
+    }
+
+    // Oldest completed turns beyond the preserved tail. Turns with no
+    // messages left in the projection (already compacted earlier) or
+    // already represented in a prior synopsis are skipped — re-summarizing
+    // them would duplicate archive ids and chronological index lines.
+    const excessTurns = completed.slice(0, completed.length - preserve);
+    const prunableTurns = excessTurns.filter(
+      (turn) => (messagesByTurn.get(turn)?.length || 0) > 0 && !alreadyArchived.has(turn),
+    );
+    if (prunableTurns.length === 0) return noChange();
+
+    const archivedTurns: ArchivedTurnDocument[] = [];
+    const synopsisLines: string[] = [];
+    for (const turn of prunableTurns) {
+      const { synopsis, doc } = this.extractTurnSynopsis(messagesByTurn.get(turn) || [], turn);
+      archivedTurns.push(doc);
+      synopsisLines.push(synopsis);
+    }
+
+    const sessionIntent = this.extractWindowSessionIntent(priorSynopsisTexts, messagesByTurn.get(prunableTurns[0]) || [], prunableTurns[0]);
+    const allTouched = Array.from(new Set(archivedTurns.flatMap((t) => t.filesTouched)));
+    const allDecisions = Array.from(new Set([...priorDecisions, ...archivedTurns.flatMap((t) => t.keyDecisions)])).slice(0, 10);
+    const allTools = Array.from(new Set([...priorTools, ...archivedTurns.flatMap((t) => t.toolsUsed)]));
+    const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
+    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(0, 6);
+
+    const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
+    const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
+
+    const artifactLines: string[] = [];
+    if (mutatedDeltas.length > 0) {
+      const groupedMutations = new Map<string, { action: string; symbols: Set<string> }>();
+      for (const d of mutatedDeltas) {
+        if (!groupedMutations.has(d.path)) {
+          groupedMutations.set(d.path, { action: d.action, symbols: new Set() });
+        }
+        const entry = groupedMutations.get(d.path)!;
+        (d.modifiedSymbols || []).forEach((s) => entry.symbols.add(s));
+      }
+      groupedMutations.forEach((val, path) => {
+        const symbolStr = val.symbols.size > 0 ? ` (symbols: ${Array.from(val.symbols).join(', ')})` : '';
+        artifactLines.push(`- [${val.action.toUpperCase()}] ${path}${symbolStr}`);
+      });
+    }
+    if (readOnlyFiles.length > 0) {
+      readOnlyFiles.slice(0, 8).forEach((f) => {
+        artifactLines.push(`- [READ-ONLY] ${f}`);
+      });
+    }
+    for (const prior of priorArtifactLines) {
+      if (!artifactLines.includes(prior)) artifactLines.push(prior);
+    }
+    if (artifactLines.length === 0) {
+      artifactLines.push('- No workspace files modified or inspected in archived turns.');
+    }
+
+    const highSaliencySection = allHighSaliency.length > 0
+      ? [
+          ``,
+          `## 3. High-Saliency Traces & Repro Proof (Preserved)`,
+          ...allHighSaliency.map((trace) => `- ${trace}`),
+        ]
+      : [];
+
+    const archivedNumbers = [...this.parseArchivedTurnNumbers(priorSynopsisLines), ...prunableTurns].sort((a, b) => a - b);
+    const firstArchived = archivedNumbers[0];
+    const lastArchived = archivedNumbers[archivedNumbers.length - 1];
+    const turnRangeLabel = archivedNumbers.length === 1 ? `TURN ${firstArchived}` : `TURNS ${firstArchived} to ${lastArchived}`;
+    const structuredSummary = [
+      `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
+      `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
+      ``,
+      `## 1. Session Intent`,
+      sessionIntent,
+      ``,
+      `## 2. Artifact Trail (Files Modified & Inspected)`,
+      ...artifactLines,
+      ...highSaliencySection,
+      ``,
+      `## 4. Decisions Made`,
+      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
+      ``,
+      `## 5. Current State & Tools Executed`,
+      `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
+      `- Status: older exchange turns safely packaged with an immutable trace.`,
+      ``,
+      `## 6. Next Steps`,
+      `- Continue the task on files in the active sliding window.`,
+      ``,
+      `### Chronological Turn Index`,
+      ...[...priorSynopsisLines, ...synopsisLines],
+      `\n> (The system will automatically re-inject details if the user refers to the steps above)`
+    ].join('\n');
+
+    const prunedSet = new Set(prunableTurns);
+    const keptMessages: SessionMessage[] = [];
+    let insertAt = -1;
+    entries.forEach((entry, index) => {
+      const isPriorSynopsis = entry.isSynopsis || isRollingSynopsisMessage(entry.message);
+      const isPrunedTurn = entry.turn !== undefined && prunedSet.has(entry.turn);
+      if (isPriorSynopsis || isPrunedTurn) {
+        if (insertAt < 0) insertAt = keptMessages.length;
+        return;
+      }
+      keptMessages.push(entry.message);
+    });
+    const rollingSynopsisMessage: SessionMessage = {
+      role: 'user',
+      parts: [{ text: structuredSummary }],
+    };
+    if (insertAt < 0) {
+      keptMessages.unshift(rollingSynopsisMessage);
+    } else {
+      keptMessages.splice(insertAt, 0, rollingSynopsisMessage);
+    }
+
+    assertHistoryToolPairing(keptMessages);
+
+    const compactedLength = getHistoryTotalChars(keptMessages);
+    const finalTokens = ContextCompactor.countHistoryTokens(keptMessages);
+    return {
+      messages: keptMessages,
+      stats: {
+        originalTokens,
+        compactedTokens: finalTokens,
+        tokensSaved: Math.max(0, originalTokens - finalTokens),
+        originalLength,
+        compactedLength,
+        charsSaved: Math.max(0, originalLength - compactedLength),
+        prunedPartsCount: 0,
+        prunedTurnsCount: prunableTurns.length,
+        requestOverheadTokens: 0,
+        outputReserveTokens: 0,
+        effectiveHistoryBudgetTokens: originalTokens,
+        archivedTurns,
+        maskedObservations: [],
+        withinBudget: true,
+        budgetOverflowTokens: 0,
+        strategiesApplied: ['completed-turn-window-compaction'],
+      },
     };
   }
 

@@ -111,6 +111,7 @@ export class ReflectionEngine {
   private lastDetectiveReport?: ErrorDetectiveReport;
   private lastReflectionPrompt?: string;
   private lastErrorFingerprint?: string;
+  private lastRenderedDetectiveFingerprint?: string;
   private baselineErrorSignatures: Set<string> = new Set();
   private failureSignatureStreak: { signature: string; count: number } | undefined;
 
@@ -267,6 +268,7 @@ export class ReflectionEngine {
     if (toolName === 'run_command' && result.regressionEvidence?.classification === 'pre_existing_out_of_scope') {
       this.consecutiveFailures = 0;
       this.lastDetectiveReport = undefined;
+      this.lastRenderedDetectiveFingerprint = undefined;
       this.failureSignatureStreak = undefined;
       this.lastReflectionPrompt = '[VERIFIED BASELINE FAILURE]: The identical check already failed before this task edited code. Its diagnostic source is unchanged and outside the observed write set. Do not modify that unrelated file merely to make the global check green. Verification is still blocked; report the command and baseline evidence accurately.';
       return { isFailure: false, consecutiveFailures: 0, reflectionPrompt: this.lastReflectionPrompt,
@@ -297,6 +299,7 @@ export class ReflectionEngine {
         // Miễn trừ: Lệnh tìm kiếm / Git diff hoặc test ở pha tái hiện lỗi ban đầu không bị coi là failure nghiêm trọng
         isFailure = false;
         this.lastDetectiveReport = undefined;
+        this.lastRenderedDetectiveFingerprint = undefined;
         this.lastReflectionPrompt = undefined;
         return {
           isFailure: false,
@@ -469,6 +472,7 @@ export class ReflectionEngine {
         // Chỉ reset consecutiveFailures khi lệnh verification hoặc command đã chạy thành công
         this.consecutiveFailures = 0;
         this.lastErrorFingerprint = undefined;
+        this.lastRenderedDetectiveFingerprint = undefined;
         this.failureSignatureStreak = undefined;
       } else if (
         toolName === 'update_plan_task' &&
@@ -478,6 +482,7 @@ export class ReflectionEngine {
         // Reset khi task được đánh dấu hoàn thành
         this.consecutiveFailures = 0;
         this.lastErrorFingerprint = undefined;
+        this.lastRenderedDetectiveFingerprint = undefined;
         this.failureSignatureStreak = undefined;
       } else if (
         !PASSIVE_INSPECTION_TOOLS.has(toolName) &&
@@ -541,6 +546,20 @@ export class ReflectionEngine {
     return this.lastDetectiveReport;
   }
 
+  /**
+   * Dedupes the TUI `[ROOT CAUSE ANALYSIS]` block: returns true only when the
+   * report differs from the last one already rendered (compared by
+   * primaryDefect + location fingerprint). Repeat failures with an identical
+   * fingerprint skip re-rendering; the prompt-side reflectionPrompt is unaffected.
+   */
+  shouldRenderDetectiveReport(report: ErrorDetectiveReport | undefined): boolean {
+    if (!report?.primaryDefect) return false;
+    const fingerprint = `${report.primaryDefect}::${report.location || ''}`;
+    if (fingerprint === this.lastRenderedDetectiveFingerprint) return false;
+    this.lastRenderedDetectiveFingerprint = fingerprint;
+    return true;
+  }
+
   getLastReflectionPrompt(): string | undefined {
     return this.lastReflectionPrompt;
   }
@@ -575,6 +594,7 @@ export class ReflectionEngine {
     this.lastDetectiveReport = undefined;
     this.lastReflectionPrompt = undefined;
     this.lastErrorFingerprint = undefined;
+    this.lastRenderedDetectiveFingerprint = undefined;
     this.failureSignatureStreak = undefined;
   }
 }

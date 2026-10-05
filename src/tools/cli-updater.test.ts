@@ -7,6 +7,8 @@ import {
   checkWorkspaceChanges,
   findCliRoot,
   parseGitPorcelain,
+  resolveUpdateSource,
+  shortRepoLabel,
   updateCli,
   type ExecRunner,
 } from './cli-updater.js';
@@ -152,10 +154,28 @@ test('updateCli refuses to pull over uncommitted changes', async () => {
   }
 });
 
-test('updateCli pulls, reinstalls on manifest change, and rebuilds', async () => {
+test('resolveUpdateSource defaults to the owner develop branch', () => {
+  delete process.env.MINUS_UPDATE_REPO_URL;
+  delete process.env.MINUS_UPDATE_BRANCH;
+  assert.deepEqual(resolveUpdateSource(), {
+    repoUrl: 'https://github.com/Minhle1342/Minus_CLI.git',
+    branch: 'develop',
+  });
+  assert.equal(shortRepoLabel('https://github.com/Minhle1342/Minus_CLI.git'), 'Minhle1342/Minus_CLI');
+  assert.deepEqual(resolveUpdateSource({ branch: 'main' }).branch, 'main');
+  process.env.MINUS_UPDATE_BRANCH = 'release';
+  try {
+    assert.equal(resolveUpdateSource().branch, 'release');
+  } finally {
+    delete process.env.MINUS_UPDATE_BRANCH;
+  }
+});
+
+test('updateCli fast-forwards to the canonical develop and rebuilds', async () => {
   const dir = makeTempCli();
   const calls: string[] = [];
   let head = 'aaa111';
+  const canonicalFetch = 'git fetch https://github.com/Minhle1342/Minus_CLI.git develop';
   const result = await updateCli(
     dir,
     {},
@@ -174,10 +194,12 @@ test('updateCli pulls, reinstalls on manifest change, and rebuilds', async () =>
         case 'git rev-parse --abbrev-ref --symbolic-full-name @{u}':
           return { stdout: 'origin/develop\n', stderr: '' };
         case 'git rev-list --left-right --count HEAD...@{u}':
-          return { stdout: head === 'aaa111' ? '0\t2\n' : '0\t0\n', stderr: '' };
-        case 'git fetch origin':
+          return { stdout: '0\t0\n', stderr: '' };
+        case 'git rev-parse FETCH_HEAD':
+          return { stdout: 'bbb222\n', stderr: '' };
+        case 'git merge-base --is-ancestor HEAD FETCH_HEAD':
           return { stdout: '', stderr: '' };
-        case 'git pull --ff-only':
+        case 'git merge --ff-only FETCH_HEAD':
           head = 'bbb222';
           return { stdout: 'Fast-forwarded\n', stderr: '' };
         case 'git diff --name-only aaa111 bbb222':
@@ -189,6 +211,7 @@ test('updateCli pulls, reinstalls on manifest change, and rebuilds', async () =>
         case 'npm.cmd run build':
           return { stdout: 'built\n', stderr: '' };
         default:
+          if (key === canonicalFetch) return { stdout: '', stderr: '' };
           throw new Error(`unexpected command: ${key}`);
       }
     },
@@ -199,10 +222,61 @@ test('updateCli pulls, reinstalls on manifest change, and rebuilds', async () =>
     assert.equal(result.installed, true);
     assert.equal(result.built, true);
     assert.equal(result.headAfter, 'bbb222');
-    const pullIndex = calls.indexOf('git pull --ff-only');
+    assert.match(result.message, /Minhle1342\/Minus_CLI#develop/);
+    const fetchIndex = calls.indexOf(canonicalFetch);
+    const ffIndex = calls.indexOf('git merge --ff-only FETCH_HEAD');
     const installIndex = calls.findIndex((c) => c.endsWith(' install'));
     const buildIndex = calls.findIndex((c) => c.endsWith('run build'));
-    assert.ok(pullIndex >= 0 && installIndex > pullIndex && buildIndex > installIndex, 'order: pull, install, build');
+    assert.ok(fetchIndex >= 0 && ffIndex > fetchIndex && installIndex > ffIndex && buildIndex > installIndex, 'order: fetch, ff-merge, install, build');
+    assert.ok(!calls.some((c) => c.startsWith('git pull')), 'must not use branch-upstream pull');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('updateCli refuses when not on the tracked branch', async () => {
+  const dir = makeTempCli();
+  try {
+    const calls: string[] = [];
+    const result = await updateCli(
+      dir,
+      {},
+      async (cmd: string, args: string[]) => {
+        const key = `${cmd} ${args.join(' ')}`;
+        calls.push(key);
+        if (key === 'git rev-parse --abbrev-ref HEAD') return { stdout: 'feature-x\n', stderr: '' };
+        const table = CLEAN_GIT as Record<string, string>;
+        if (!(key in table)) throw new Error(`unexpected command: ${key}`);
+        return { stdout: table[key], stderr: '' };
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.message, /not on the tracked branch/);
+    assert.ok(!calls.some((c) => c.startsWith('git fetch')), 'must not fetch when refusing');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('updateCli refuses when local history diverged from canonical develop', async () => {
+  const dir = makeTempCli();
+  try {
+    const result = await updateCli(
+      dir,
+      {},
+      async (cmd: string, args: string[]) => {
+        const key = `${cmd} ${args.join(' ')}`;
+        if (key === 'git rev-parse --abbrev-ref HEAD') return { stdout: 'develop\n', stderr: '' };
+        if (key === 'git rev-parse FETCH_HEAD') return { stdout: 'bbb222\n', stderr: '' };
+        if (key === 'git merge-base --is-ancestor HEAD FETCH_HEAD') throw new Error('exit 1');
+        if (key === 'git fetch https://github.com/Minhle1342/Minus_CLI.git develop') return { stdout: '', stderr: '' };
+        const table = CLEAN_GIT as Record<string, string>;
+        if (!(key in table)) throw new Error(`unexpected command: ${key}`);
+        return { stdout: table[key], stderr: '' };
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.message, /diverged/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -218,7 +292,9 @@ test('updateCli rebuilds without pulling when already latest', async () => {
       async (cmd: string, args: string[]) => {
         const key = `${cmd} ${args.join(' ')}`;
         calls.push(key);
-        if (key === 'git fetch origin') return { stdout: '', stderr: '' };
+        if (key === 'git fetch https://github.com/Minhle1342/Minus_CLI.git develop') return { stdout: '', stderr: '' };
+        if (key === 'git rev-parse FETCH_HEAD') return { stdout: 'aaa111\n', stderr: '' };
+        if (key === 'git rev-parse --abbrev-ref HEAD') return { stdout: 'develop\n', stderr: '' };
         if (key.endsWith('run build')) return { stdout: 'built\n', stderr: '' };
         const table = CLEAN_GIT as Record<string, string>;
         if (!(key in table)) throw new Error(`unexpected command: ${key}`);

@@ -63,6 +63,22 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   // 8. Sau khi run_command test fail -> formulate_and_verify_hypothesis được boost
   const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'formulate_and_verify_hypothesis');
   assert.ok(boostHypothesisOnFail >= 0.25, 'formulate_and_verify_hypothesis phải được boost khi test fail');
+
+  // 9. Sau khi Anti-Fixation Circuit Breaker chặn (file bị freeze) -> get_symbol_context_360 được boost, cấm boost mutation tools
+  const boostFixationSymbol = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'get_symbol_context_360');
+  const boostFixationMutation = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'replace_text');
+  assert.ok(boostFixationSymbol >= 0.35, 'get_symbol_context_360 phải có boost >= 0.35 khi file bị circuit breaker freeze');
+  assert.strictEqual(boostFixationMutation, 0, 'replace_text tuyệt đối không được boost khi file đang bị freeze');
+
+  // 10. Sau khi Completion Evidence Gate chặn submit_solution -> run_command và get_diagnostics được boost
+  const boostEvidenceRunCmd = graph.getTransitionBoost('submit_solution', { errorCode: 'COMPLETION_EVIDENCE_REQUIRED' }, 'run_command');
+  const boostEvidenceDiag = graph.getTransitionBoost('submit_solution', { errorCode: 'COMPLETION_EVIDENCE_REQUIRED' }, 'get_diagnostics');
+  assert.ok(boostEvidenceRunCmd >= 0.35, 'run_command phải được boost để chạy kiểm thử xác thực');
+  assert.ok(boostEvidenceDiag >= 0.35, 'get_diagnostics phải được boost để kiểm tra lỗi code');
+
+  // 11. Sau khi ACI Guardrail hoặc replace_text báo TARGET_CONTENT_NOT_FOUND -> read_file được boost
+  const boostTargetRead = graph.getTransitionBoost('replace_text', { reasonCode: 'TARGET_CONTENT_NOT_FOUND' }, 'read_file');
+  assert.ok(boostTargetRead >= 0.35, 'read_file phải được boost khi target content không tìm thấy');
 });
 
 test('ToolRetriever - Supports structured StepRetrievalQueryResult and Graph-Augmented RRF', () => {

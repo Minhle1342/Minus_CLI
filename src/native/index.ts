@@ -177,6 +177,21 @@ interface NativeCoreModule {
   rsFindSymbolInFile?(filePath: string, symbolName: string, content?: string | null): NativeSymbolDefinition;
   rsExtractArchive?(archivePath: string, destDir: string, stripTopLevel: boolean): NativeExtractResult;
   rsScanPathForBinaries?(dirs: string[], fileNames: string[]): string[];
+  rsScanManifest?(rootDir: string, ignoredDirs: string[]): NativeManifestEntry[];
+  rsDiffManifests?(before: NativeManifestEntry[], after: NativeManifestEntry[]): NativeManifestDiff[];
+}
+
+export interface NativeManifestEntry {
+  relPath: string;
+  fingerprint: string;
+  sizeBytes: number;
+  mtimeMs: number;
+  kind: string;
+}
+
+export interface NativeManifestDiff {
+  relPath: string;
+  kind: string;
 }
 
 let nativeCore: NativeCoreModule | null = null;
@@ -783,6 +798,44 @@ export function nativeExtractArchive(
   if (core && typeof core.rsExtractArchive === 'function') {
     try {
       return core.rsExtractArchive(archivePath, destDir, stripTopLevel);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Bulk manifest scan via Rust (mmap/walkdir fast path).
+ * Returns null when native is absent — caller uses TS stat fallback.
+ */
+export function nativeScanManifest(
+  rootDir: string,
+  ignoredDirs: string[],
+): NativeManifestEntry[] | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsScanManifest === 'function') {
+    try {
+      return core.rsScanManifest(rootDir, ignoredDirs);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Pure Rust diff of two manifests (no per-file NAPI crossing).
+ * Returns null when native is absent — caller diffs in TS.
+ */
+export function nativeDiffManifests(
+  before: NativeManifestEntry[],
+  after: NativeManifestEntry[],
+): NativeManifestDiff[] | null {
+  const core = getNativeCore();
+  if (core && typeof core.rsDiffManifests === 'function') {
+    try {
+      return core.rsDiffManifests(before, after);
     } catch {
       return null;
     }

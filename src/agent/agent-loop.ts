@@ -469,7 +469,9 @@ export class AgentLoop {
   private cachedTurnNumber?: number;
   private cachedTurnToolDeclarations?: any[];
   private cachedTurnToolProviderSize?: number;
-  private cachedTurnToolFingerprint?: string;
+  private cachedTurnToolPhase?: string;
+  private cachedTurnToolPhaseVersion?: number;
+  private cachedHasPlan?: boolean;
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
@@ -1451,14 +1453,30 @@ export class AgentLoop {
           : candidateProvider.getAll().map((tool) => tool.name),
       });
       const activeStepQuery = retrievalState.query;
+      const stepCompletionState = getTurnCompletionState(session, turn);
+      const isPureInvestigation = !stepCompletionState.hasMutations
+        && !classification.requiredCapabilities.includes('edit')
+        && ['question', 'exploration'].includes(classification.taskClass)
+        && classification.phase !== 'explore';
+
+      const canRequestPhaseTransition = ['explore', 'plan'].includes(classification.phase)
+        && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
+
       let activeToolDeclarations: any[];
-      if (
+      if (hasSubmittedSolution) {
+        // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
+        activeToolDeclarations = [];
+      } else if (
         this.cachedTurnNumber === turn
         && this.cachedTurnToolDeclarations
         && this.cachedTurnToolProviderSize === providerSize
-        && this.cachedTurnToolFingerprint === retrievalState.fingerprint
+        && this.cachedTurnToolPhase === classification.phase
+        && this.cachedTurnToolPhaseVersion === classification.phaseVersion
+        && this.cachedHasPlan === this.planManager.hasPlan()
       ) {
-        activeToolDeclarations = this.cachedTurnToolDeclarations;
+        // KV Cache Preservation: Tái sử dụng 100% Tool Declarations cố định của phase trong turn này,
+        // ngăn chặn việc re-retrieval sau mỗi tool call làm thay đổi thứ tự/danh sách tool prefix token.
+        activeToolDeclarations = [...this.cachedTurnToolDeclarations];
       } else {
         activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
           ? candidateProvider.getRelevantTools({
@@ -1467,60 +1485,69 @@ export class AgentLoop {
               lexicalQuery: retrievalState.lexicalQuery,
               lastToolName: this.lastToolExecution?.toolName,
               lastToolResult: this.lastToolExecution?.result,
+              phase: classification.phase,
               codegraphIndexed: hasCodeGraphIndexSync(this._workspace.rootDir),
             })
           : candidateProvider.getFunctionDeclarations();
+
+        // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
+        // Khi yêu cầu là điều tra nguyên nhân / phân tích sự cố / khảo sát mà không có mutation,
+        // ẩn hoàn toàn submit_solution để LLM tập trung vào phân tích chi tiết hoặc gọi tool báo cáo chuyên biệt.
+        if (isPureInvestigation) {
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
+        }
+
+        // A transition request is a control primitive, not a retrieved task tool.
+        // Keep it visible whenever the current coding phase can accept one so the
+        // model never has to guess an unauthorized edit to advance its workflow.
+        if (!canRequestPhaseTransition) {
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
+        } else if (
+          candidateProvider.get('request_phase_transition')
+          && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
+        ) {
+          const transitionDeclaration = candidateProvider.getFunctionDeclarations()
+            .find((tool: any) => tool.name === 'request_phase_transition');
+          if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
+        }
+
+        if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
+          const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
+          if (!hasUpdatePlan) {
+            const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
+            if (updatePlanDecl) {
+              activeToolDeclarations.push(updatePlanDecl);
+            }
+          }
+        }
+
+        // Planning is opt-in, but once the user explicitly enters the plan
+        // phase, create_plan must be model-visible and runtime-authorized. Pin
+        // it after route filtering so declaration visibility and ToolScope stay
+        // aligned instead of producing an authorization loop.
+        if (classification.phase === 'plan' && candidateProvider.get('create_plan')
+          && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
+          const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
+            .find((tool: any) => tool.name === 'create_plan');
+          if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
+        }
+
+        // Canonical alphabetical sort: Đảm bảo thứ tự tool schemas luôn nhất quán tuyệt đối,
+        // bảo tồn nguyên vẹn KV Cache prefix qua từng step.
+        activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+
         this.cachedTurnNumber = turn;
-        this.cachedTurnToolDeclarations = activeToolDeclarations;
+        this.cachedTurnToolDeclarations = [...activeToolDeclarations];
         this.cachedTurnToolProviderSize = providerSize;
-        this.cachedTurnToolFingerprint = retrievalState.fingerprint;
-      }
-
-      // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
-      // Khi yêu cầu là điều tra nguyên nhân / phân tích sự cố / khảo sát mà không có mutation,
-      // ẩn hoàn toàn submit_solution để LLM tập trung vào phân tích chi tiết hoặc gọi tool báo cáo chuyên biệt.
-      const stepCompletionState = getTurnCompletionState(session, turn);
-      const isPureInvestigation = !stepCompletionState.hasMutations
-        && !classification.requiredCapabilities.includes('edit')
-        && ['question', 'exploration'].includes(classification.taskClass)
-        && classification.phase !== 'explore';
-      if (isPureInvestigation) {
-        activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
-      }
-
-      // A transition request is a control primitive, not a retrieved task tool.
-      // Keep it visible whenever the current coding phase can accept one so the
-      // model never has to guess an unauthorized edit to advance its workflow.
-      const canRequestPhaseTransition = ['explore', 'plan'].includes(classification.phase)
-        && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
-      if (!canRequestPhaseTransition) {
-        activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
-      } else if (
-        candidateProvider.get('request_phase_transition')
-        && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
-      ) {
-        const transitionDeclaration = candidateProvider.getFunctionDeclarations()
-          .find((tool: any) => tool.name === 'request_phase_transition');
-        if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
+        this.cachedTurnToolPhase = classification.phase;
+        this.cachedTurnToolPhaseVersion = classification.phaseVersion;
+        this.cachedHasPlan = this.planManager.hasPlan();
       }
 
       // Verification State tracking:
       const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
         && stepCompletionState.hasMutations
         && !hasSubmittedSolution;
-
-      // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
-      if (hasSubmittedSolution) {
-        activeToolDeclarations = [];
-      } else if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
-        const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
-        if (!hasUpdatePlan) {
-          const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
-          if (updatePlanDecl) {
-            activeToolDeclarations.push(updatePlanDecl);
-          }
-        }
-      }
 
       const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
       const reliableRouteDecision = decideReliableToolRoute({
@@ -1538,17 +1565,6 @@ export class AgentLoop {
         reliableRouteDecision,
         reliableToolOrchestrationMode,
       );
-
-      // Planning is opt-in, but once the user explicitly enters the plan
-      // phase, create_plan must be model-visible and runtime-authorized. Pin
-      // it after route filtering so declaration visibility and ToolScope stay
-      // aligned instead of producing an authorization loop.
-      if (classification.phase === 'plan' && candidateProvider.get('create_plan')
-        && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
-        const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
-          .find((tool: any) => tool.name === 'create_plan');
-        if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
-      }
 
       const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
@@ -3529,7 +3545,9 @@ export class AgentLoop {
 
           if (reflectionAnalysis.isFailure) {
             CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
-            if (reflectionAnalysis.detectiveReport) {
+            if (reflectionAnalysis.detectiveReport
+              && this.reflectionEngine.shouldRenderDetectiveReport(reflectionAnalysis.detectiveReport)) {
+              // Lược bỏ edge case lặp: cùng fingerprint (defect+location) thì không render lại khối RCA
               CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
             }
             this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
@@ -3867,9 +3885,9 @@ export class AgentLoop {
           reason: stepReason,
         });
 
-        if (!this._collapsePreferences.compactSteps) {
-          CLI.renderStepFooter();
-        }
+        // The divider is structural navigation, not step detail: keep it visible
+        // in compact mode so consecutive steps remain scannable.
+        CLI.renderStepFooter();
         this.kernel?.ctx.events.emit('step:after', step);
 
         if (strategyChangeRequired) {
@@ -4537,6 +4555,67 @@ export class AgentLoop {
     await this.sessionPersistence.save(session);
   }
 
+  /**
+   * Completed-turn window compaction: after a turn closes, keep the newest
+   * `preserveCompletedTurns` closed turns fully intact and summarize older
+   * ones into the rolling synopsis + turn archive. Budget-independent — it
+   * fires on turn count, not token pressure — and non-blocking: any failure
+   * (or an uncompactable state) leaves the closed turn and history untouched.
+   */
+  private async maybeCompactCompletedTurnWindow(session: Session): Promise<void> {
+    try {
+      const config = this.contextCompactor.getConfig();
+      if (config.enableCompletedTurnCompaction === false) return;
+      const preserve = Math.max(1, Math.floor(config.preserveCompletedTurns ?? 4));
+      if (session.getOpenTurn() !== undefined) return;
+      if (session.getPendingToolCalls().length > 0) return;
+      const completed = session.getCompletedTurnNumbers();
+      if (completed.length <= preserve) return;
+      const entries = session.getProjectionWithTurns().map((entry) => ({
+        message: entry.message,
+        turn: entry.turn,
+        isSynopsis: entry.isSynopsis,
+      }));
+      const result = this.contextCompactor.compactCompletedTurnWindow(entries, {
+        completedTurns: completed,
+        preserveCompletedTurns: preserve,
+      });
+      if (!result.stats.prunedTurnsCount || !result.stats.archivedTurns?.length) return;
+
+      const archiveStatus: Record<string, unknown> = {};
+      try {
+        archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(result.stats.archivedTurns);
+      } catch (error) {
+        const message = String((error as Error)?.message || error);
+        archiveStatus.archivedTurns = { error: message };
+        CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+      }
+
+      const previousState = [...session.getEvents()]
+        .reverse()
+        .find((event) => event.type === 'session/compaction' && event.data.compactionState)
+        ?.data.compactionState as CompactionStateV1 | undefined;
+      const archivedDocs = result.stats.archivedTurns;
+      const archivedIds = archivedDocs.map((doc) => doc.id);
+      const archivedTurnNumbers = archivedDocs.map((doc) => doc.turnNumber);
+      const preservedTurns = completed.slice(completed.length - preserve);
+      const mergedArchivedIds = Array.from(new Set([...(previousState?.archivedTurnIds || []), ...archivedIds]));
+      session.setHistory(result.messages, 'completed-turn-window', {
+        ...(previousState as unknown as Record<string, unknown> | undefined),
+        schemaVersion: 1,
+        generation: (previousState?.generation || 0) + 1,
+        sourceFingerprint: computeRequestValueDigest(result.messages),
+        archivedTurnIds: mergedArchivedIds,
+        archiveStatus,
+        turnWindow: { preservedTurns, archivedTurnNumbers, archivedTurnIds: archivedIds },
+      } as unknown as Record<string, unknown>);
+      CLI.renderAutoCompactionNotice(result.stats.tokensSaved, result.stats.compactedTokens);
+      await this.persistSession(session);
+    } catch {
+      // Non-blocking: turn completion must never fail because of compaction.
+    }
+  }
+
   private async drainInbox(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isRecoveryResume?: boolean }): Promise<void> {
     this.drainScheduled = false;
     this.drainingInbox = true;
@@ -4609,6 +4688,7 @@ export class AgentLoop {
     session.append('turn/end', { turn, reason });
     session.assertRuntimeInvariants();
     await this.persistSession(session);
+    await this.maybeCompactCompletedTurnWindow(session);
     if (reason === 'goal-completed' || reason === 'task-completed' || reason === 'completed' || (isGoalMode && reason === 'goal-stopped')) {
       void this.summarizeSessionEpisodic(session).catch(() => { });
 

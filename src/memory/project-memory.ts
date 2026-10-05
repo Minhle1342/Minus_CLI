@@ -124,6 +124,18 @@ export class ProjectMemoryManager {
         ...parsed,
         learnedInsights: (parsed.learnedInsights || []).map((item: LearnedInsight) => this.normalizeInsight(item)),
       };
+      // Project metadata is cached, but package scripts are an execution
+      // contract and may have been added after the first index. Merge the
+      // current manifest without replacing learned memory or other metadata.
+      const packageScripts = await this.readPackageScripts();
+      const missingScripts = Object.entries(packageScripts).filter(([name, command]) =>
+        this.memoryData.scripts[name] !== command,
+      );
+      if (missingScripts.length > 0) {
+        Object.assign(this.memoryData.scripts, Object.fromEntries(missingScripts));
+        this.memoryData.lastIndexed = new Date().toISOString();
+        await this.save();
+      }
     } catch {
       // Chưa có file -> Tự động quét và index workspace lần đầu
       await this.autoIndexWorkspace(workspace ?? new Workspace(this.workspaceDir));
@@ -146,6 +158,16 @@ export class ProjectMemoryManager {
     })));
 
     return this.memoryData;
+  }
+
+  private async readPackageScripts(): Promise<Record<string, string>> {
+    try {
+      const rawPkg = await fs.readFile(path.join(this.workspaceDir, 'package.json'), 'utf-8');
+      const scripts = JSON.parse(rawPkg).scripts;
+      return scripts && typeof scripts === 'object' ? scripts : {};
+    } catch {
+      return {};
+    }
   }
 
   /**

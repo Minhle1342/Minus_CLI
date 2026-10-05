@@ -123,6 +123,7 @@ pub fn batch_read_files_native(
             continue;
         }
 
+        // SAFETY: The file is opened read-only and memory-mapped for zero-copy bulk read operations.
         let mmap = match unsafe { Mmap::map(&file) } {
             Ok(m) => m,
             Err(e) => {

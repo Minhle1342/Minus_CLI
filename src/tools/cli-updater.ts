@@ -12,6 +12,26 @@ export type ExecRunner = (
 
 export const UPDATE_STEP_TIMEOUT_MS = 300_000;
 
+/** Canonical source of truth for CLI updates (overridable via env/options). */
+export const CANONICAL_REPO_URL = 'https://github.com/Minhle1342/Minus_CLI.git';
+export const CANONICAL_BRANCH = 'develop';
+
+export interface UpdateSource {
+  repoUrl: string;
+  branch: string;
+}
+
+export function resolveUpdateSource(options: { repoUrl?: string; branch?: string } = {}): UpdateSource {
+  const repoUrl = options.repoUrl?.trim() || process.env.MINUS_UPDATE_REPO_URL?.trim() || CANONICAL_REPO_URL;
+  const branch = options.branch?.trim() || process.env.MINUS_UPDATE_BRANCH?.trim() || CANONICAL_BRANCH;
+  return { repoUrl, branch };
+}
+
+export function shortRepoLabel(repoUrl: string): string {
+  const m = repoUrl.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/i);
+  return m ? m[1] : repoUrl;
+}
+
 export async function defaultExecRunner(
   cmd: string,
   args: string[],
@@ -177,6 +197,10 @@ export async function checkWorkspaceChanges(
 export interface CliUpdateOptions {
   /** Rebuild only (npm run build), skip fetch/pull/install. */
   buildOnly?: boolean;
+  /** Canonical repo URL to update from (default: the owner's repo, env MINUS_UPDATE_REPO_URL). */
+  repoUrl?: string;
+  /** Canonical branch to update to (default: develop, env MINUS_UPDATE_BRANCH). */
+  branch?: string;
 }
 
 export interface CliUpdateResult {
@@ -195,12 +219,13 @@ export interface CliUpdateResult {
 }
 
 /**
- * Update the CLI working tree to the latest upstream version.
+ * Update the CLI working tree to the canonical branch (owner's develop by
+ * default, overridable via options/env).
  *
- * Fail-closed order: refuse to pull over uncommitted changes (would risk a
- * merge conflict inside the tool the user is running), pull fast-forward
- * only, reinstall dependencies when package.json changed, then rebuild.
- * Every external failure is reported — never silently swallowed.
+ * Fail-closed order: refuse over uncommitted changes, require being on the
+ * tracked branch, fetch the canonical source, fast-forward only when local
+ * history is an ancestor, reinstall dependencies when manifests changed,
+ * then rebuild. Every external failure is reported — never silently swallowed.
  */
 export async function updateCli(
   cliRoot: string,
@@ -274,23 +299,47 @@ export async function updateCli(
     );
   }
 
-  if (!check.upstream) {
+  if (!options.buildOnly && !check.isGitRepo) {
+    return fail(`Not a git work tree (${cliRoot}); update via your installer instead of /update.`);
+  }
+
+  // Pin updates to the canonical branch (owner's develop by default), no
+  // matter which branch the user currently has checked out or what their
+  // fork's upstream points to. Merging foreign history into a different
+  // local branch would be wrong, so require being on the target branch.
+  const source = resolveUpdateSource(options);
+  const sourceLabel = `${shortRepoLabel(source.repoUrl)}#${source.branch}`;
+  let currentBranch: string | undefined;
+  try {
+    const name = (await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], cliRoot)).stdout.trim();
+    currentBranch = name && name !== 'HEAD' ? name : undefined;
+  } catch {
+    currentBranch = undefined;
+  }
+  if (currentBranch !== source.branch) {
     return fail(
-      `Branch ${check.branch || '(detached)'} has no upstream; cannot determine the latest version. Set one with \`git branch --set-upstream-to=<remote>/<branch>\`.`,
+      `Refusing to update: not on the tracked branch (current: ${currentBranch || 'detached HEAD'}, tracked: ${source.branch}).\nRun \`git checkout ${source.branch}\` first, or point /update elsewhere with MINUS_UPDATE_BRANCH.`,
       { versionBefore, headBefore, branch: check.branch },
     );
   }
 
-  steps.push(`Fetching ${check.upstream}…`);
+  steps.push(`Fetching ${sourceLabel}…`);
   try {
-    await run('git', ['fetch', 'origin'], cliRoot);
+    await run('git', ['fetch', source.repoUrl, source.branch], cliRoot);
   } catch (error: any) {
-    return fail(`git fetch failed: ${readableExecError(error)}`, { versionBefore, headBefore, branch: check.branch });
+    return fail(`git fetch failed for ${sourceLabel}: ${readableExecError(error)}`, { versionBefore, headBefore, branch: check.branch });
   }
 
-  const refreshed = await checkWorkspaceChanges(cliRoot, run);
-  if (refreshed.behind <= 0) {
-    steps.push('Already at the latest upstream commit; verifying the build is fresh.');
+  let targetHead: string;
+  try {
+    targetHead = (await run('git', ['rev-parse', 'FETCH_HEAD'], cliRoot)).stdout.trim();
+    if (!targetHead) throw new Error('empty FETCH_HEAD');
+  } catch (error: any) {
+    return fail(`Could not resolve the fetched ${sourceLabel}: ${readableExecError(error)}`, { versionBefore, headBefore, branch: check.branch });
+  }
+
+  if (headBefore && targetHead === headBefore) {
+    steps.push(`Already at the latest ${sourceLabel} commit; verifying the build is fresh.`);
     try {
       await run(npmCommand(), ['run', 'build'], cliRoot);
     } catch (error: any) {
@@ -307,22 +356,31 @@ export async function updateCli(
       versionBefore,
       versionAfter: readCliVersionLocal(cliRoot, versionBefore),
       headBefore,
-      headAfter: refreshed.head,
+      headAfter: targetHead,
       branch: check.branch,
       pulled: false,
       installed: false,
       built: true,
       steps,
-      message: `Already on the latest version${versionBefore ? ` (v${versionBefore})` : ''}; rebuilt to be safe.`,
+      message: `Already on the latest version${versionBefore ? ` (v${versionBefore})` : ''} of ${sourceLabel}; rebuilt to be safe.`,
     };
   }
 
-  steps.push(`Pulling ${refreshed.behind} commit(s) fast-forward only…`);
   try {
-    await run('git', ['pull', '--ff-only'], cliRoot);
+    await run('git', ['merge-base', '--is-ancestor', 'HEAD', 'FETCH_HEAD'], cliRoot);
+  } catch {
+    return fail(
+      `Local history has diverged from ${sourceLabel}; refusing to merge automatically.\nRebase or reset onto it manually, then re-run /update.`,
+      { versionBefore, headBefore, branch: check.branch },
+    );
+  }
+
+  steps.push(`Fast-forwarding to ${sourceLabel} @ ${targetHead.slice(0, 8)}…`);
+  try {
+    await run('git', ['merge', '--ff-only', 'FETCH_HEAD'], cliRoot);
   } catch (error: any) {
     return fail(
-      `git pull --ff-only failed (upstream may have diverged from local history): ${readableExecError(error)}`,
+      `Fast-forward to ${sourceLabel} failed: ${readableExecError(error)}`,
       { versionBefore, headBefore, branch: check.branch },
     );
   }
@@ -385,7 +443,7 @@ export async function updateCli(
     installed,
     built: true,
     steps,
-    message: `CLI updated${versionBefore || after.version ? ` from v${versionBefore || '?'} to v${after.version || versionBefore || '?'}` : ''} and rebuilt. Restart the CLI to run the new version.`,
+    message: `CLI updated to ${sourceLabel}${versionBefore || after.version ? ` (v${versionBefore || '?'} → v${after.version || versionBefore || '?'})` : ''} and rebuilt. Restart the CLI to run the new version.`,
   };
 }
 

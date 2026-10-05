@@ -19,7 +19,7 @@ export const StepThematicBreak: React.FC = () => {
       borderBottom={false}
       borderLeft={false}
       borderRight={false}
-      borderColor={inkColors.muted}
+      borderColor="white"
       marginY={0}
     />
   );

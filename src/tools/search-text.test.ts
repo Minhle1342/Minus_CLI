@@ -85,4 +85,69 @@ test('ToolRegistry - searchTextTool is registered and retrievable', () => {
   assert.ok((tool?.parameters as any)?.properties?.query, 'Tool schema should have query property');
   assert.ok((tool?.parameters as any)?.properties?.isRegex, 'Tool schema should have isRegex property');
   assert.ok((tool?.parameters as any)?.properties?.include, 'Tool schema should have include property');
+  assert.ok((tool?.parameters as any)?.properties?.offset, 'Tool schema should have offset property');
+  assert.ok((tool?.parameters as any)?.properties?.perFileLimit, 'Tool schema should have perFileLimit property');
 });
+
+test('searchTextTool - Offset Pagination & hasMore', async () => {
+  const workspace = new Workspace(process.cwd());
+  // Trang 1: lấy 2 kết quả
+  const page1 = await searchTextTool.execute(
+    {
+      query: 'function|const|let',
+      path: 'src/tools/search-text.ts',
+      maxMatches: 2,
+      offset: 0,
+      isRegex: true,
+    },
+    workspace
+  );
+
+  assert.equal(page1.returned, 2, 'Page 1 should return 2 matches');
+  assert.equal(page1.hasMore, true, 'hasMore should be true when more results exist');
+  assert.equal(page1.nextOffset, 2, 'nextOffset should point to 2');
+
+  // Trang 2: lấy 2 kết quả tiếp theo từ offset 2
+  const page2 = await searchTextTool.execute(
+    {
+      query: 'function|const|let',
+      path: 'src/tools/search-text.ts',
+      maxMatches: 2,
+      offset: page1.nextOffset,
+      isRegex: true,
+    },
+    workspace
+  );
+
+  assert.equal(page2.offset, 2, 'Page 2 offset should be 2');
+  assert.equal(page2.returned, 2, 'Page 2 should return 2 matches');
+  // Hai trang không được trùng lặp dòng kết quả
+  assert.notEqual(page1.matches[0].line, page2.matches[0].line, 'Page 1 and Page 2 should not have identical starting lines');
+});
+
+test('searchTextTool - Diversity Budgeting distributes matches across files', async () => {
+  const workspace = new Workspace(process.cwd());
+  const res = await searchTextTool.execute(
+    {
+      query: 'export',
+      path: 'src/tools',
+      maxMatches: 6,
+      perFileLimit: 2,
+      isRegex: true,
+    },
+    workspace
+  );
+
+  assert.ok(res.returned <= 6, 'Should not exceed maxMatches');
+  assert.equal(res.diversityApplied, true, 'diversityApplied flag should be true');
+
+  // Kiểm tra không có file nào vượt quá perFileLimit
+  const countsPerFile = new Map<string, number>();
+  for (const m of res.matches) {
+    countsPerFile.set(m.file, (countsPerFile.get(m.file) || 0) + 1);
+  }
+  for (const [file, count] of countsPerFile.entries()) {
+    assert.ok(count <= 2, `File ${file} should have at most 2 matches due to diversity budget (actual: ${count})`);
+  }
+});
+

@@ -78,7 +78,7 @@ pub fn search_codebase_native(
     is_regex: bool,
     ignore_case: bool,
     max_matches: u32,
-    ignored_dirs: Vec<String>,
+    ignored_dirs: &[String],
 ) -> RsSearchResult {
     let start_time = std::time::Instant::now();
     let mut matches = Vec::new();
@@ -107,7 +107,7 @@ pub fn search_codebase_native(
     let walker = WalkDir::new(target_dir).into_iter().filter_entry(|entry| {
         if entry.file_type().is_dir() {
             let name = entry.file_name().to_string_lossy();
-            if ignored_dirs.iter().any(|ig| ig == &name) {
+            if ignored_dirs.iter().any(|ig| ig.as_str() == name.as_ref()) {
                 return false;
             }
             if name == ".git" || name == "node_modules" || name == "dist" || name == "target" {
@@ -129,14 +129,24 @@ pub fn search_codebase_native(
         total_scanned += 1;
         let file_path = entry.path();
 
-        if let Some(ext) = file_path.extension() {
-            let ext_str = ext.to_string_lossy().to_lowercase();
-            if ["png", "jpg", "jpeg", "gif", "exe", "bin", "dll", "zip", "pdf", "node"].contains(&ext_str.as_str()) {
+        if let Some(ext) = file_path.extension().and_then(|s| s.to_str()) {
+            if ext.eq_ignore_ascii_case("png")
+                || ext.eq_ignore_ascii_case("jpg")
+                || ext.eq_ignore_ascii_case("jpeg")
+                || ext.eq_ignore_ascii_case("gif")
+                || ext.eq_ignore_ascii_case("exe")
+                || ext.eq_ignore_ascii_case("bin")
+                || ext.eq_ignore_ascii_case("dll")
+                || ext.eq_ignore_ascii_case("zip")
+                || ext.eq_ignore_ascii_case("pdf")
+                || ext.eq_ignore_ascii_case("node")
+            {
                 continue;
             }
         }
 
         if let Ok(file) = File::open(file_path) {
+            // SAFETY: The file is opened read-only and memory-mapped for regex pattern scanning without mutation.
             if let Ok(mmap) = unsafe { Mmap::map(&file) } {
                 if let Ok(content_str) = std::str::from_utf8(&mmap) {
                     for (idx, line) in content_str.lines().enumerate() {
@@ -216,7 +226,7 @@ pub fn search_codebase_native_bounded(
     let walker = WalkDir::new(target_dir).into_iter().filter_entry(|entry| {
         if entry.file_type().is_dir() {
             let name = entry.file_name().to_string_lossy();
-            if ignored_dirs.iter().any(|ig| ig == &name) {
+            if ignored_dirs.iter().any(|ig| ig.as_str() == name.as_ref()) {
                 return false;
             }
             if name == ".git" || name == "node_modules" || name == "dist" || name == "target" {
@@ -245,9 +255,18 @@ pub fn search_codebase_native_bounded(
 
         let file_path = entry.path();
 
-        if let Some(ext) = file_path.extension() {
-            let ext_str = ext.to_string_lossy().to_lowercase();
-            if ["png", "jpg", "jpeg", "gif", "exe", "bin", "dll", "zip", "pdf", "node"].contains(&ext_str.as_str()) {
+        if let Some(ext) = file_path.extension().and_then(|s| s.to_str()) {
+            if ext.eq_ignore_ascii_case("png")
+                || ext.eq_ignore_ascii_case("jpg")
+                || ext.eq_ignore_ascii_case("jpeg")
+                || ext.eq_ignore_ascii_case("gif")
+                || ext.eq_ignore_ascii_case("exe")
+                || ext.eq_ignore_ascii_case("bin")
+                || ext.eq_ignore_ascii_case("dll")
+                || ext.eq_ignore_ascii_case("zip")
+                || ext.eq_ignore_ascii_case("pdf")
+                || ext.eq_ignore_ascii_case("node")
+            {
                 continue;
             }
         }
