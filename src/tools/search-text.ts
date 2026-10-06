@@ -152,6 +152,13 @@ export const searchTextTool: ToolDefinition = {
       };
     }
 
+    // Xác định trần --max-count cho từng file để tối ưu I/O đĩa
+    // Nếu caller chỉ định perFileLimit > 0: dùng trực tiếp perFileLimit
+    // Nếu outputMode === 'content': giới hạn tối đa an toàn để tránh file khổng lồ làm nghẽn tiến trình rg
+    const effectivePerFileMaxCount = perFileLimit !== undefined && perFileLimit > 0
+      ? perFileLimit
+      : (outputMode === "content" ? Math.max(100, (offset + maxMatches) * 2) : undefined);
+
     const options: RgParsedOptions = {
       query: rawQuery,
       isRegex,
@@ -161,6 +168,7 @@ export const searchTextTool: ToolDefinition = {
       filesWithMatchesOnly: outputMode === "files_with_matches",
       countOnly: outputMode === "count",
       showLineNumbers: true,
+      maxCountPerFile: effectivePerFileMaxCount,
       maxTotalMatches: Math.max(2000, (offset + maxMatches) * 4),
       globFilter: includeGlob ? [includeGlob] : undefined,
       targetPaths: [rawPath],
@@ -189,7 +197,8 @@ export const searchTextTool: ToolDefinition = {
         if (outputMode === "files_with_matches")
           rgArgs.push("--files-with-matches");
         if (outputMode === "count") rgArgs.push("--count");
-        // NOTE: --max-count is per-file in rg; we enforce global cap post-process
+        if (effectivePerFileMaxCount !== undefined)
+          rgArgs.push("--max-count", String(effectivePerFileMaxCount));
         rgArgs.push(rawQuery);
         rgArgs.push(rawPath);
 
