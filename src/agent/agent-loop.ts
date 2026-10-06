@@ -1962,6 +1962,8 @@ export class AgentLoop {
       // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
       const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
         taskClass: classification.taskClass,
+        risk: classification.risk,
+        reversibility: classification.reversibility,
         hasValidatedHypothesis,
         hasSupportedHypothesis: supportedHypothesisCount > 0,
         evidenceSufficient: paretoEvidence.hasSufficientEvidence,
@@ -2098,13 +2100,17 @@ export class AgentLoop {
       // (khi LLM gọi các công cụ Edit chỉ 1 đến 2 lần thì không truyền khối prompt này)
       let testVerificationEncouragement: string | undefined;
       if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0) {
-        const [detectedCmd, detectedBuildCmd] = await Promise.all([
-          detectWorkspaceTestCommand(this._workspace.rootDir),
-          detectWorkspaceBuildCommand(this._workspace.rootDir),
-        ]);
-        const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
-        const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
-        testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".`;
+        if (classification.risk === 'R1') {
+          testVerificationEncouragement = `💡 [VERIFICATION RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. For localized R1 changes, run \`get_diagnostics\` to empirically verify type/syntax cleanliness before finishing the task or calling "submit_solution".`;
+        } else {
+          const [detectedCmd, detectedBuildCmd] = await Promise.all([
+            detectWorkspaceTestCommand(this._workspace.rootDir),
+            detectWorkspaceBuildCommand(this._workspace.rootDir),
+          ]);
+          const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
+          const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
+          testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".`;
+        }
       }
 
       // Every model-visible dynamic block enters one arbiter. A preliminary pass
@@ -2115,8 +2121,23 @@ export class AgentLoop {
       const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
         canRequestPhaseTransition,
         hasSubmittedSolution,
+        isReadOnly: classification.risk === 'R0' || classification.reversibility === 'read-only',
       });
       const effectivePhaseGuidance = [phaseGuidance, phaseToolDirective].filter(Boolean).join('\n');
+      let paretoGateReminder: string | undefined;
+      if (['bugfix', 'refactor', 'security'].includes(classification.taskClass)) {
+        const inTransitionPhase = ['explore', 'plan'].includes(classification.phase);
+        const transitionNotice = inTransitionPhase
+          ? ' In explore/plan, request_phase_transition before editing and wait for the next model response.'
+          : '';
+        if (classification.risk === 'R1') {
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file before editing.${transitionNotice}`;
+        } else if (classification.risk === 'R2') {
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file and run diagnostics before editing.${transitionNotice}`;
+        } else {
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch).${transitionNotice} R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`;
+        }
+      }
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
         responseLanguageDirective: '[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.',
@@ -2137,9 +2158,7 @@ export class AgentLoop {
         hypothesisContext,
         hypothesisGuidance,
         domainContractContext,
-        paretoGateReminder: ['bugfix', 'refactor', 'security'].includes(classification.taskClass)
-          ? `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch). In explore/plan, request_phase_transition before editing and wait for the next model response. R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`
-          : undefined,
+        paretoGateReminder,
         phaseGuidance: effectivePhaseGuidance,
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
@@ -2155,6 +2174,8 @@ export class AgentLoop {
         consecutiveFailures: consecutiveFails,
         retrievalQuery: activeStepQuery,
         existingHistoryContext: historyZeroText,
+        risk: classification.risk,
+        minRepoMapFloorTokens: (classification.risk === 'R3' || classification.taskClass === 'refactor') ? 350 : undefined,
       };
       const preliminaryArbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, arbitrationOptions);
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);

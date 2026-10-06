@@ -140,6 +140,12 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     || rawMessage.includes('premature end of stream')
     || rawMessage.includes('stream ended prematurely')
     || rawMessage.includes('econnreset')
+    || rawMessage.includes('econnrefused')
+    || rawMessage.includes('etimedout')
+    || rawMessage.includes('enotfound')
+    || rawMessage.includes('fetch failed')
+    || rawMessage.includes('socket hang up')
+    || rawMessage.includes('network error')
     || (typeof error?.status === 'string' && error.status.toUpperCase() === 'UNAVAILABLE');
 
   if (isServerError) {

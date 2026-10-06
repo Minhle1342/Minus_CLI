@@ -3,6 +3,7 @@ import {
   SECTION_TOOL_PLAYBOOKS,
   TOOL_PLAYBOOK_PROMPTS,
   type ToolPlaybookPromptId,
+  resolveVerifyPlaybookPrompt,
   GIT_WORKFLOW_PROMPTS,
   type GitWorkflowPromptId,
 } from '../llm/prompt-sections.js';
@@ -263,7 +264,9 @@ export class StepPromptPolicy {
     const includePlanContext = context.planRequired || (context.hasPlan && context.planIncomplete);
     if (includePlanContext) reasonCodes.push(context.planBlocked ? 'PLAN_BLOCKED_CONTEXT' : 'ACTIVE_PLAN_CONTEXT');
 
-    const targetPlaybookPrompt = selectedPlaybooks.map((id) => TOOL_PLAYBOOK_PROMPTS[id]).join('\n\n');
+    const targetPlaybookPrompt = selectedPlaybooks
+      .map((id) => (id === 'verifyDiff' ? resolveVerifyPlaybookPrompt(context.classification.risk) : TOOL_PLAYBOOK_PROMPTS[id]))
+      .join('\n\n');
     const targetGitPlaybookPrompt = selectedGitPlaybook ? GIT_WORKFLOW_PROMPTS[selectedGitPlaybook] : '';
     const beforeTokens = estimateTokens([
       SECTION_TOOL_PLAYBOOKS,

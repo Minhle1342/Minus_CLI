@@ -4,7 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { extractRequestAnalysis, AgentLoop } from './agent-loop.js';
-import { CORE_SYSTEM_PROMPT } from '../llm/prompt-sections.js';
+import {
+  CORE_SYSTEM_PROMPT,
+  resolvePhaseDynamicGuidance,
+  buildPhaseToolAuthorityDirective,
+  resolveVerifyPlaybookPrompt,
+  SECTION_PHASE_EXPLORE_READONLY_GUIDANCE,
+  SECTION_PHASE_EXPLORE_GUIDANCE,
+} from '../llm/prompt-sections.js';
 import { ContextCompactor } from './context-compactor.js';
 import { CLI } from '../ui/cli-ui.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -109,3 +116,40 @@ test('Loop displays the [REQUEST ANALYSIS] block fully on TUI', async () => {
     await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('resolvePhaseDynamicGuidance optimizes phase explore guidance specifically for R0 read-only fast path', () => {
+  const r0Guidance = resolvePhaseDynamicGuidance('explore', { risk: 'R0' });
+  assert.equal(r0Guidance, SECTION_PHASE_EXPLORE_READONLY_GUIDANCE);
+  assert.ok(!r0Guidance.includes('Inspect the exact target before editing'));
+  assert.ok(!r0Guidance.includes('planned R3 refactors'));
+  assert.match(r0Guidance, /zero mutation risk/);
+
+  const readOnlyGuidance = resolvePhaseDynamicGuidance('explore', { reversibility: 'read-only' });
+  assert.equal(readOnlyGuidance, SECTION_PHASE_EXPLORE_READONLY_GUIDANCE);
+});
+
+test('resolvePhaseDynamicGuidance tailors explore guidance for R1 and R2 without R3 reproduction noise', () => {
+  const r1Guidance = resolvePhaseDynamicGuidance('explore', { taskClass: 'bugfix', risk: 'R1' });
+  assert.ok(!r1Guidance.includes('High-risk bugfix/security changes need empirical reproduction'));
+  assert.ok(!r1Guidance.includes('planned R3 refactors'));
+  assert.ok(r1Guidance.includes('For localized changes, in-memory diagnostics or code inspection is sufficient'));
+
+  const r3Guidance = resolvePhaseDynamicGuidance('explore', { taskClass: 'bugfix', risk: 'R3' });
+  assert.ok(r3Guidance.includes('High-risk bugfix/security changes need empirical reproduction'));
+  assert.ok(r3Guidance.includes('planned R3 refactors may proceed after target inspection'));
+});
+
+test('resolveVerifyPlaybookPrompt provides risk-tiered verification playbooks', () => {
+  const r1Playbook = resolveVerifyPlaybookPrompt('R1');
+  assert.match(r1Playbook, /R1 DIAGNOSTICS/);
+  assert.ok(!r1Playbook.includes('run_command(npm run build'));
+
+  const r2Playbook = resolveVerifyPlaybookPrompt('R2');
+  assert.match(r2Playbook, /R2 TYPECHECK & DIFF/);
+  assert.ok(!r2Playbook.includes('run_command(targeted test)'));
+
+  const r3Playbook = resolveVerifyPlaybookPrompt('R3');
+  assert.match(r3Playbook, /DIFF AUDIT/);
+  assert.ok(r3Playbook.includes('run_command(targeted test)'));
+});
+

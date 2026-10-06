@@ -63,6 +63,10 @@ export interface DynamicContextArbiterOptions {
   retrievalQuery?: string;
   /** Văn bản ngữ cảnh lịch sử đã có (như Warm-Start ở history[0]) để khử trùng lặp chéo */
   existingHistoryContext?: string;
+  /** Mức rủi ro tác vụ để điều tiết tỷ trọng ngân sách (ví dụ R3 cần bảo toàn đồ thị kiến trúc) */
+  risk?: string;
+  /** Sàn token bảo vệ tối thiểu cho Graph Repository Map (P7) để tránh Context Inversion */
+  minRepoMapFloorTokens?: number;
 }
 
 export interface DynamicContextArbiterResult {
@@ -383,13 +387,18 @@ export class DynamicContextArbiter {
       const originalCost = ExactTokenizer.countTokens(content, modelName);
       const tokensNeededToSave = currentTotalTokens - budgetTokens;
 
-      if (!source.allowTruncation || originalCost <= tokensNeededToSave) {
+      // Sàn bảo vệ tối thiểu cho Graph Repository Map (P7) khi có minRepoMapFloorTokens (ví dụ R3/refactor)
+      const repoMapFloor = (source.key === 'repositoryContext' && optObj?.minRepoMapFloorTokens)
+        ? Math.min(originalCost, optObj.minRepoMapFloorTokens)
+        : 0;
+
+      if (!source.allowTruncation || (originalCost <= tokensNeededToSave && repoMapFloor === 0)) {
         // Loại bỏ hoàn toàn nguồn này
         included.delete(source.key);
         sourcesPruned.push(source.name);
       } else {
-        // Cắt tỉa từng phần theo ranh giới dòng
-        const targetTokens = originalCost - tokensNeededToSave;
+        // Cắt tỉa từng phần theo ranh giới dòng, đảm bảo không thấp hơn repoMapFloor
+        const targetTokens = Math.max(repoMapFloor, originalCost - tokensNeededToSave);
         const truncated = this.truncateToTokenBudget(
           source.content,
           Math.max(30, targetTokens),
@@ -399,6 +408,9 @@ export class DynamicContextArbiter {
 
         if (truncated) {
           included.set(source.key, truncated);
+          sourcesTruncated.push(source.name);
+        } else if (repoMapFloor > 0) {
+          included.set(source.key, source.content.split('\n').slice(0, 4).join('\n'));
           sourcesTruncated.push(source.name);
         } else {
           included.delete(source.key);
@@ -417,9 +429,12 @@ export class DynamicContextArbiter {
       const originalCost = ExactTokenizer.countTokens(content, modelName);
       const tokensNeededToSave = currentTotalTokens - budgetTokens;
 
-      // Invariant Protection: Sources with priority <= 1.5 (P0.8 - P1.5) must never be pruned to zero.
-      const isCriticalInvariant = source.priority <= 1.5;
-      const minFloorTokens = isCriticalInvariant ? Math.min(120, originalCost) : 0;
+      // Invariant Protection: Sources with priority <= 1.5 (P0.8 - P1.5) or guaranteed repo map floor must never be pruned to zero.
+      const isCriticalInvariant = source.priority <= 1.5
+        || (source.key === 'repositoryContext' && Boolean(optObj?.minRepoMapFloorTokens));
+      const minFloorTokens = (source.key === 'repositoryContext' && optObj?.minRepoMapFloorTokens)
+        ? Math.min(optObj.minRepoMapFloorTokens, originalCost)
+        : (isCriticalInvariant ? Math.min(120, originalCost) : 0);
 
       if (!isCriticalInvariant && originalCost <= tokensNeededToSave) {
         included.delete(source.key);

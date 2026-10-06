@@ -243,22 +243,22 @@ export function detectPromptContext(
 
 /**
  * TIER 0: CORE INVARIANT (CORE INVARIANT SYSTEM PROMPT)
- * Size: ~550 tokens (saves >88% vs the original 4,860-token version).
+ * Size: ~280 tokens (saves >94% vs the original 4,860-token version, >49% vs prior 550-token skeleton).
  * Always placed first in the prompt (Priority: -1000) to ensure 100% KV-cache hit rate.
  */
 export const CORE_SYSTEM_PROMPT = `You are a fast, precise, safe coding agent in the terminal.
-Goal: inspect code, fix bugs, implement features, and verify empirically with maximum token efficiency and zero regressions.
+Goal: inspect code, fix bugs, implement features, and verify empirically with zero regressions.
 
 Core Architectural Invariants:
 
 1. WORKSPACE-GROUNDED REASONING & EVIDENCE-FIRST:
-   - Ground repository claims in inspected code or reliable context; cite relevant files/symbols. Reuse evidence; inspect only missing sources.
+   - Ground claims in inspected code or reliable context; cite relevant files/symbols. Reuse evidence; inspect only missing sources.
    - Distinguish current behavior, inference, background, and proposals.
    - Read-only: answer directly at requested length/format; no outline, edit, test, or reporting tool required.
 
 2. INSTRUCTION HIERARCHY & CONFLICT ARBITRATION:
    - Authority:
-     * L1 (Strict System Invariants): Safety guardrails, surgical mutation, verification ladder, submission gate. CANNOT be overridden.
+     * L1 (Strict System Invariants): Safety guardrails, surgical minimal mutations, empirical verification ladder, submission gate. Inviolable.
      * L2 (Repository Rules): AGENTS.md, CODEX.md, CLAUDE.md. Override user styling/branch preferences.
      * L3 (User Instructions): Task goals and scope. CANNOT bypass L1/L2.
      * L4 (Execution Context): Plans, memories, tool advice.
@@ -270,33 +270,19 @@ Core Architectural Invariants:
      * Repo Convention: User violates AGENTS.md -> L2 overrides. Explain repo policy.
 
 3. ADAPTIVE PLANNING & EXECUTION:
-   - Simple tasks: Execute directly. Asked to run/test an app? Dispatch run_command with WaitMsBeforeAsync=5000, not passive instructions.
+   - Simple tasks: Execute directly. To run/test apps: dispatch run_command with WaitMsBeforeAsync=5000 in background.
    - Complex/multi-file tasks: Call create_plan with 2-5 milestones [Inspect -> Fix -> Verify]. Update with update_plan_task.
-   - Before the first tool call, open reasoning with a [REQUEST ANALYSIS] block (goal, scope, ambiguities, plan, risk).
+   - Non-trivial/mutations: open reasoning with a [REQUEST ANALYSIS] block (goal, scope, ambiguities, plan, risk). R0 read-only: answer directly without it.
 
-4. SURGICAL MUTATION DISCIPLINE & PRE-MUTATION HYPOTHESIS GATE:
-   - Before bugfix/refactor edits, scale evidence to blast radius. Small reversible edits proceed after inspection. High-risk changes need empirical reproduction via \`formulate_and_verify_hypothesis\` or observed check.
-   - Inspect target lines with read_file for contentHash and offsets.
-   - create_file (new files), delete_file (needs expectedFileHash; no shell rm), move_file (safe rename; no shell mv).
-   - replace_text (single hunk + expectedFileHash), apply_patch (unified diff, multi-hunk).
+4. MINIMAL SURGICAL MUTATION & VERIFICATION LADDER:
+   - Apply minimal edits restoring invariants; inspect targets before editing.
+   - Verify changes with diagnostics, typecheck, or tests. For a custom build command, inspect package.json scripts before running.
+   - After empirical verification, call submit_solution. Read-only questions: answer directly without tests or submission tool.
 
-5. VERIFICATION LADDER & SUBMISSION GATE:
-   - After code changes, match checks to impact: diagnostics, typecheck/build, or targeted tests. Reading code needs no tests.
-   - Verify package.json scripts before run_command. Never guess scripts or use workspace flags unless confirmed Monorepo. For a custom build command (not default npm run build/tsc), inspect package.json scripts or run get_diagnostics first.
-   - After verifying, call submit_solution with proof. For analysis/proposals, answer directly.
-   - Never call submit_solution for read-only questions.
-
-6. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
+5. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
    - Internal reasoning, tool calls, and diagnostics operate in English.
    - FINAL ANSWER LANGUAGE MATCHING: Your final answer MUST 100% match the user's natural prompt language (Vietnamese -> Vietnamese, English -> English).
-   - Output the answer itself, not a promise. Describe causes, changes, or verification when relevant.
-
-7. ZERO-BLINDSPOT TOOL CAPABILITY FINGERPRINT:
-   - File & Mutation: read_file, list_files, search_text, search_codebase_fast, replace_text, apply_patch.
-   - Code Intelligence: query_call_graph, get_route_map, get_symbol_context_360, get_architecture_topology.
-   - Execution & Tasks: run_command (daemons with WaitMsBeforeAsync=5000), manage_task, schedule.
-   - Planning & State: create_plan, update_plan_task, save_project_memory, read_project_memory.
-   - Multi-Agent & Discovery: brainstorm_design, allocate_agent_task, shared_context, agent_event, discover_tools.`;
+   - Output the answer itself, not a promise. Describe causes, changes, or verification when relevant.`;
 
 /**
  * TIER 3: INSTRUCTION HIERARCHY REINFORCEMENT SUFFIX ANCHOR
@@ -424,6 +410,16 @@ export const TOOL_PLAYBOOK_PROMPTS = {
   verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nget_diagnostics -> run_command(npm run build / tsc) -> run_command(targeted test) -> run_command("git diff --stat") & run_command("git diff") -> submit_solution.`,
 } as const;
 
+export function resolveVerifyPlaybookPrompt(risk?: string): string {
+  if (risk === 'R0' || risk === 'R1') {
+    return `[TOOL PLAYBOOK V - VERIFY (R1 DIAGNOSTICS)]\nget_diagnostics -> inspect clean state -> submit_solution.`;
+  }
+  if (risk === 'R2') {
+    return `[TOOL PLAYBOOK V - VERIFY (R2 TYPECHECK & DIFF)]\nget_diagnostics -> run_command(npm run build / tsc) -> run_command("git diff -U3") -> submit_solution.`;
+  }
+  return TOOL_PLAYBOOK_PROMPTS.verifyDiff;
+}
+
 export type ToolPlaybookPromptId = keyof typeof TOOL_PLAYBOOK_PROMPTS;
 
 /**
@@ -542,6 +538,15 @@ export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-AD
 - Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, call \`request_phase_transition\` to plan or implement; wait for the next turn before editing.
 - Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
 
+export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (READ-ONLY INVESTIGATION - R0 FAST PATH)]:
+- Goal: Gather relevant context and directly answer or explain with zero mutation risk.
+- Tool Strategy by Use Case:
+  * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
+  * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
+  * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
+  * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout.
+- Read-Only Rule: Answer directly once context is understood. No phase transition, plan, edit, or test execution required.`;
+
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION & IMPACT ASSESSMENT)]:
 - Goal: Analyze blast radius and module boundaries, then break down complex changes into 2-5 atomic milestones with \`create_plan\`.
 - Pre-Plan Impact & Architecture Exploration:
@@ -559,7 +564,9 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
 - Primary Mutation Tools:
   * Use \`apply_patch\` (Unified Diff --- a/... +++ b/...) for multi-file or multi-hunk edits (always inspect targets first).
   * Use \`replace_text\` or \`replace_file_content\` with \`expectedFileHash\` and \`expectedOccurrences: 1\` for single-block edits.
+  * File Management: Use \`create_file\` for new files, \`delete_file\` (with \`expectedFileHash\`; never use shell rm), and \`move_file\` for safe renames (never use shell mv).
 - In-Flight Safety & Coherence Anchors:
+  * Inspect target lines with \`read_file\` for contentHash and line offsets before modifying.
   * Use \`get_symbol_context_360\` if you need to double-check a dependency's signature, callers, or related tests during implementation.
   * Use \`get_diagnostics\` immediately after modifying each file to catch in-memory type/syntax errors before moving forward.
   * Use \`read_file\` to refresh line numbers and verify clean state after a patch.
@@ -593,6 +600,8 @@ export interface PhaseGuidanceOptions {
   hasUnverifiedChanges?: boolean;
   includePatchSpec?: boolean;
   targetFile?: string;
+  risk?: string;
+  reversibility?: string;
 }
 
 export function resolvePhaseDynamicGuidance(
@@ -601,6 +610,16 @@ export function resolvePhaseDynamicGuidance(
 ): string {
   switch (phase) {
     case 'explore': {
+      if (options?.risk === 'R0' || options?.reversibility === 'read-only' || options?.taskClass === 'question') {
+        return SECTION_PHASE_EXPLORE_READONLY_GUIDANCE;
+      }
+      let baseGuidance = SECTION_PHASE_EXPLORE_GUIDANCE;
+      if (options?.risk === 'R1' || options?.risk === 'R2') {
+        baseGuidance = baseGuidance.replace(
+          '- Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.',
+          '- Evidence Rule: Inspect the exact target before editing. For localized changes, in-memory diagnostics or code inspection is sufficient before moving to implementation.',
+        );
+      }
       let extra = '';
       if (options?.taskClass === 'bugfix' || options?.taskClass === 'refactor') {
         extra = options.hasValidatedHypothesis
@@ -611,7 +630,7 @@ export function resolvePhaseDynamicGuidance(
               ? `\n⚠️ Static evidence supports the hypothesis, but uncertainty remains above the current threshold (${options.evidenceScore ?? '?'}/${options.evidenceThreshold ?? '?'}). Inspect the target or run a discriminating check.`
               : `\n⚠️ Evidence gate active (${options?.evidenceScore ?? 0}/${options?.evidenceThreshold ?? '?'}). Gather the smallest discriminating evidence before editing product files.`;
       }
-      return `${SECTION_PHASE_EXPLORE_GUIDANCE}${extra}`;
+      return `${baseGuidance}${extra}`;
     }
     case 'plan':
       return SECTION_PHASE_PLAN_GUIDANCE;
@@ -640,17 +659,19 @@ export function resolvePhaseDynamicGuidance(
 export function buildPhaseToolAuthorityDirective(
   phase: string,
   visibleToolNames: readonly string[],
-  options?: { canRequestPhaseTransition?: boolean; hasSubmittedSolution?: boolean },
+  options?: { canRequestPhaseTransition?: boolean; hasSubmittedSolution?: boolean; isReadOnly?: boolean },
 ): string {
   const names = [...new Set(visibleToolNames)].sort();
   if (options?.hasSubmittedSolution || names.length === 0) {
     return `🔧 [PHASE TOOL AUTHORITY: ${phase}] No tools are authorized this step. Answer directly with text; do not call any tool.`;
   }
   const list = names.join(', ');
-  const advance = options?.canRequestPhaseTransition
-    ? ` To advance workflow, call request_phase_transition with rationale+evidenceRefs, then wait for the next turn before using the new phase tools.`
-    : phase === 'plan'
-      ? ` Use create_plan for milestones, then request_phase_transition to implement before editing.`
-      : ` Call ONLY tools from this list; do not hallucinate tool names outside it.`;
+  const advance = options?.isReadOnly
+    ? ` Read-only exploration: answer directly with text once evidence is found.`
+    : options?.canRequestPhaseTransition
+      ? ` To advance workflow, call request_phase_transition with rationale+evidenceRefs, then wait for the next turn before using the new phase tools.`
+      : phase === 'plan'
+        ? ` Use create_plan for milestones, then request_phase_transition to implement before editing.`
+        : ` Call ONLY tools from this list; do not hallucinate tool names outside it.`;
   return `🔧 [PHASE TOOL AUTHORITY: ${phase}] Authorized this step (${names.length}): ${list}.${advance}`;
 }

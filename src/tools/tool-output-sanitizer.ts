@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -20,14 +21,14 @@ export interface SanitizedToolOutputResult<T = Record<string, any>> {
 /**
  * Lấy ngưỡng dung lượng tối đa cho output của công cụ (bytes).
  * Ưu tiên biến môi trường MINUS_MAX_TOOL_OUTPUT_KB nếu có.
- * Mặc định: 12KB (12 * 1024 bytes) ~ 3.000 tokens, sweet-spot cho KV Caching.
+ * Mặc định: 64KB (64 * 1024 bytes) ~ 16.000 tokens, tránh cắt gọt file code thông thường.
  */
 export function getMaxToolOutputBytes(): number {
   const envKb = Number(process.env.MINUS_MAX_TOOL_OUTPUT_KB);
   if (Number.isFinite(envKb) && envKb > 0) {
     return Math.round(envKb * 1024);
   }
-  return 12 * 1024;
+  return 64 * 1024;
 }
 
 /**
@@ -46,7 +47,8 @@ export async function spillToolOutputToDisk(
     .trim()
     .replace(/[^a-zA-Z0-9_-]/g, '_')
     .slice(0, 30);
-  const fileName = `${Date.now()}_${safeSlug}_${Math.random().toString(36).slice(2, 6)}.log`;
+  const contentHash = crypto.createHash('sha256').update(rawContent).digest('hex').slice(0, 12);
+  const fileName = `${safeSlug}_${contentHash}.log`;
 
   // 1. Thử lưu vào workspace/.minus/logs/tool_outputs/
   if (workspaceRoot) {

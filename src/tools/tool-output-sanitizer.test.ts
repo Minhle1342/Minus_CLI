@@ -14,7 +14,7 @@ test('Tool Output Sanitizer: respects MINUS_MAX_TOOL_OUTPUT_KB env var', () => {
   const orig = process.env.MINUS_MAX_TOOL_OUTPUT_KB;
   try {
     delete process.env.MINUS_MAX_TOOL_OUTPUT_KB;
-    assert.equal(getMaxToolOutputBytes(), 12 * 1024);
+    assert.equal(getMaxToolOutputBytes(), 64 * 1024);
 
     process.env.MINUS_MAX_TOOL_OUTPUT_KB = '8';
     assert.equal(getMaxToolOutputBytes(), 8 * 1024);

@@ -88,8 +88,12 @@ export class ClassificationEngine {
         capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];
         reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
       } else {
-        phase = 'implement';
-        capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        phase = input.hasPlan || (risk === 'R3' && input.hasValidatedHypothesis) || complexity !== 'large' ? 'implement' : 'plan';
+        if (phase === 'plan') {
+          capabilities = ['inspect', 'search', 'plan', 'memory'];
+        } else {
+          capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+        }
         if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
           reasons.push('PARETO_EVIDENCE_FAST_PATH');
         }
