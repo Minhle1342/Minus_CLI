@@ -2629,7 +2629,15 @@ export class AgentLoop {
             : '__invalid_tool_call__',
           args: call?.args ?? call?.arguments ?? {},
         }));
-        const toolCallIds = normalizedToolCalls.map((call: any, callIndex: number) => (call as any).id || `call-${turn}-${step}-${callIndex}`);
+        const seenToolCallIds = new Set<string>();
+        const toolCallIds = normalizedToolCalls.map((call: any, callIndex: number) => {
+          let candidateId = (call as any).id || `call-${turn}-${step}-${callIndex}`;
+          if (seenToolCallIds.has(candidateId)) {
+            candidateId = `${candidateId}_${callIndex}`;
+          }
+          seenToolCallIds.add(candidateId);
+          return candidateId;
+        });
         const toolCallsWithIds = normalizedToolCalls.map((call: any, callIndex: number) => ({
           ...call,
           id: toolCallIds[callIndex],

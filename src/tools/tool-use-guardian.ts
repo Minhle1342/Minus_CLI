@@ -1139,6 +1139,41 @@ export class ToolUseGuardian {
             if (!coercedKeys.includes(key)) coercedKeys.push(key);
           }
         }
+
+        // Deep Object & Dictionary auto-coercion (e.g. expectedFileHashes map)
+        if (targetType === 'object' && prop.additionalProperties && typeof val === 'object' && val !== null && !Array.isArray(val)) {
+          const additionalType = (prop.additionalProperties.type || '').toLowerCase();
+          if (additionalType === 'string') {
+            let dictChanged = false;
+            const repairedDict: Record<string, string> = {};
+            for (const [subKey, subVal] of Object.entries<any>(val)) {
+              if (typeof subVal === 'string') {
+                repairedDict[subKey] = subVal;
+              } else if (Array.isArray(subVal) && subVal.length > 0 && typeof subVal[0] === 'string') {
+                repairedDict[subKey] = subVal[0];
+                dictChanged = true;
+              } else if (subVal && typeof subVal === 'object' && !Array.isArray(subVal)) {
+                const nestedCandidate = subVal.hash || subVal.contentHash || subVal.value || Object.values(subVal)[0];
+                if (typeof nestedCandidate === 'string') {
+                  repairedDict[subKey] = nestedCandidate;
+                  dictChanged = true;
+                }
+              }
+            }
+            if ('array' in val && !Array.isArray(val.array) && typeof val.array !== 'string') {
+              delete repairedDict.array;
+              dictChanged = true;
+            } else if ('array' in val && Array.isArray(val.array)) {
+              delete repairedDict.array;
+              dictChanged = true;
+            }
+            if (dictChanged) {
+              coerced[key] = repairedDict;
+              changed = true;
+              if (!coercedKeys.includes(key)) coercedKeys.push(key);
+            }
+          }
+        }
       }
     }
 

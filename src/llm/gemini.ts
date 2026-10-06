@@ -250,7 +250,22 @@ export class GeminiLLM {
 
         const functionCallParts = streamedParts.filter((part) => part.functionCall);
         const nonFunctionCallParts = streamedParts.filter((part) => !part.functionCall);
-        const normalizedFunctionCallParts = toolCalls.map((call, index) => {
+        const seenGeminiCallIds = new Set<string>();
+        const uniqueToolCalls = toolCalls.map((call, index) => {
+          let callId = (call as any).id;
+          if (callId && seenGeminiCallIds.has(callId)) {
+            callId = `${callId}_${index}`;
+          } else if (!callId) {
+            callId = `call_${Date.now()}_${index}`;
+          }
+          seenGeminiCallIds.add(callId);
+          return {
+            ...call,
+            id: callId,
+          };
+        });
+
+        const normalizedFunctionCallParts = uniqueToolCalls.map((call, index) => {
           const matchingIndex = functionCallParts.findIndex(
             (part) => part.functionCall?.name === call.name,
           );
@@ -274,6 +289,7 @@ export class GeminiLLM {
               ...sourcePart.functionCall,
               name: call.name,
               args: call.args || sourcePart.functionCall?.args || {},
+              id: call.id,
             },
           };
         }).filter(Boolean);
@@ -289,9 +305,9 @@ export class GeminiLLM {
         return {
           text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
           reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
-          toolCalls,
+          toolCalls: uniqueToolCalls,
           rawContent,
-          finishReason: normalizeGeminiFinishReason(rawFinishReason, toolCalls.length > 0),
+          finishReason: normalizeGeminiFinishReason(rawFinishReason, uniqueToolCalls.length > 0),
           rawFinishReason,
           usage: lastUsage,
         };

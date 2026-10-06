@@ -370,7 +370,8 @@ export function resolvePatchFormatSpec(targetFile?: string): string {
 - 1-Shot Example:
 ${oneShotExample}
 - Fuzz Matching: Fuzz 0-2 auto-resolved (line shifts, indentation tolerance, context reduction).
-- Fuzz 3 (FUZZY_CANDIDATE_FOUND): Returns advisory signal and does NOT mutate disk; call read_file for exact line matching.`;
+- Fuzz 3 (FUZZY_CANDIDATE_FOUND): Returns advisory signal and does NOT mutate disk; call read_file for exact line matching.
+- Optimistic Concurrency: If providing expectedFileHashes, pass a JSON object mapping relative file paths to contentHash strings, e.g. {"src/index.ts": "hash123"}. Never wrap hashes in an array.`;
 }
 
 export const SECTION_PATCH_FORMAT_SPEC = resolvePatchFormatSpec();
