@@ -25,7 +25,6 @@ const INSPECTION_TOOLS = new Set([
   'inspect_symbol',
   'find_references',
   'get_diagnostics',
-  'get_workspace_diff',
   'analyze_impact',
   'query_call_graph',
   'get_route_map',
@@ -96,7 +95,7 @@ export function isNonExecutableFile(filePath: string): boolean {
   const normalizedPath = (filePath || '').trim().toLowerCase();
   if (!normalizedPath) return false;
   return (
-    /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|json|jsonc|json5|ya?ml|toml|ini|xml|html?|css|scss|sass|less|map|lock|lockb|dockerignore|gitignore|gitattributes|editorconfig|npmignore)$/i.test(normalizedPath)
+    /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|json|jsonc|json5|ya?ml|toml|ini|xml|html?|css|scss|sass|less|map|lock|lockb|dockerignore|gitignore|gitattributes|editorconfig|npmignore|sql|graphql|gql|proto)$/i.test(normalizedPath)
     || /(?:^|[/\\])(?:\.env(?:\.[a-zA-Z0-9_-]+)?|\.gitignore|\.editorconfig|license|copying|notice|dockerfile|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(normalizedPath)
   );
 }
@@ -126,7 +125,13 @@ export function classifyToolEvidence(
     if (isScratchCommand(cmd)) {
       return ['reproduction'];
     }
-    return isVerificationCommand(cmd) ? ['verification'] : ['other'];
+    if (isVerificationCommand(cmd)) {
+      return ['verification'];
+    }
+    if (/\bgit\s+(?:status|diff|log|show|branch|tag)\b/i.test(cmd)) {
+      return ['inspection', 'git'];
+    }
+    return ['other'];
   }
   if (toolName === 'manage_task') {
     const completion = result.commandCompletion;
@@ -140,7 +145,7 @@ export function classifyToolEvidence(
     }
     return ['inspection'];
   }
-  if (toolName === 'git_status' || toolName === 'git_diff' || toolName === 'get_workspace_diff') {
+  if (toolName === 'git_status' || toolName === 'git_diff') {
     return ['inspection', 'git'];
   }
   if (toolName === 'git_command') {
@@ -247,7 +252,7 @@ export class CompletionEvidenceGate {
     // tool thất bại (vd: git clone 404) thì không đòi mutation. Vẫn giữ các
     // luật chống ảo giác verify/commit/push bên dưới.
     const isBlockedInvestigation = options.resolutionType === 'investigation_only' && failures.length > 0;
-    const effectiveCodeChangeRequired = (options.resolutionType === 'investigation_only' || isBlockedInvestigation) ? false : options.codeChangeRequired;
+    const effectiveCodeChangeRequired = isBlockedInvestigation ? false : options.codeChangeRequired;
 
     // Thu thập đường dẫn các file đã được chỉnh sửa
     const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));

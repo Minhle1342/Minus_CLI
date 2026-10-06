@@ -57,6 +57,9 @@ test('Preflight Guard: Allows legitimate non-interactive executions', () => {
     'node -e "console.log(process.cwd())"',
     'npm init -y',
     'git commit -m "fix(agent): guard against token waste"',
+    'vim --version',
+    'ssh -o BatchMode=yes git@github.com "git-upload-pack repo.git"',
+    'sftp -b batch.txt host',
   ];
 
   for (const cmd of allowedChecks) {
@@ -65,7 +68,7 @@ test('Preflight Guard: Allows legitimate non-interactive executions', () => {
   }
 });
 
-test('Preflight Guard: Blocks long-running dev servers if WaitMsBeforeAsync is missing', () => {
+test('Preflight Guard: Warns but allows possible long-running dev servers', () => {
   const devServerCmds = [
     'npm start',
     'npm run dev',
@@ -76,8 +79,8 @@ test('Preflight Guard: Blocks long-running dev servers if WaitMsBeforeAsync is m
 
   for (const cmd of devServerCmds) {
     const withoutWait = evaluateCommandPreflight(cmd, { mode: 'enforce' });
-    assert.equal(withoutWait.allowed, false);
-    assert.equal(withoutWait.errorCode, 'LONG_RUNNING_SERVER_REQUIRES_ASYNC');
+    assert.equal(withoutWait.allowed, true);
+    assert.match(withoutWait.reason || '', /OBSERVE.*long-running/i);
 
     // Allowed when waitMsBeforeAsync is provided
     const withWait = evaluateCommandPreflight(cmd, { waitMsBeforeAsync: 3000, mode: 'enforce' });
@@ -85,14 +88,14 @@ test('Preflight Guard: Blocks long-running dev servers if WaitMsBeforeAsync is m
   }
 });
 
-test('Preflight Guard: Prevents redundant idempotent test execution without code changes', () => {
+test('Preflight Guard: Warns but allows duplicate failed tests without tracked edits', () => {
   const testCmd = 'npm test';
 
   // Case 1: First test run (allowed)
   const firstRun = evaluateCommandPreflight(testCmd, { mode: 'enforce' });
   assert.equal(firstRun.allowed, true);
 
-  // Case 2: Second run immediately after failure with 0 files modified (BLOCKED)
+  // Case 2: Second run immediately after failure with 0 files modified (allowed for flaky/environmental failures)
   const rerunWithoutFix = evaluateCommandPreflight(testCmd, {
     mode: 'enforce',
     lastExecution: {
@@ -102,9 +105,8 @@ test('Preflight Guard: Prevents redundant idempotent test execution without code
       filesModifiedSince: 0,
     },
   });
-  assert.equal(rerunWithoutFix.allowed, false);
-  assert.equal(rerunWithoutFix.errorCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
-  assert.match(rerunWithoutFix.reason || '', /no source files have been modified since/);
+  assert.equal(rerunWithoutFix.allowed, true);
+  assert.match(rerunWithoutFix.reason || '', /OBSERVE.*duplicate/i);
 
   // Case 3: Test re-run AFTER a code mutation (ALLOWED)
   const rerunAfterFix = evaluateCommandPreflight(testCmd, {
@@ -186,24 +188,33 @@ test('Preflight Guard: Normalizes POSIX environment exports, which, and ls on Wi
   }
 });
 
-test('Preflight Guard: Blocks dangerous git clone into current workspace directory', () => {
+test('Preflight Guard: Blocks clone into a non-empty workspace but allows an empty root', async () => {
+  const os = await import('node:os');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-clone-preflight-'));
   const cloneCmds = [
     'git clone https://github.com/HKUDS/DeepCode .',
     'git clone https://github.com/HKUDS/DeepCode ./',
     'git.exe clone https://github.com/HKUDS/DeepCode .',
   ];
 
-  for (const cmd of cloneCmds) {
-    const result = evaluateCommandPreflight(cmd, { mode: 'enforce' });
-    assert.equal(result.allowed, false, `Expected "${cmd}" to be blocked.`);
-    assert.equal(result.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
-    assert.match(result.reason || '', /current directory/);
-    assert.match(result.suggestion || '', /DeepCode/);
-  }
+  try {
+    // Empty directory is a valid clone target.
+    assert.equal(evaluateCommandPreflight(cloneCmds[0], { mode: 'enforce', workspaceRoot: tempDir }).allowed, true);
+    await fs.writeFile(path.join(tempDir, 'package.json'), '{}');
+    for (const cmd of cloneCmds) {
+      const result = evaluateCommandPreflight(cmd, { mode: 'enforce', workspaceRoot: tempDir });
+      assert.equal(result.allowed, false, `Expected "${cmd}" to be blocked.`);
+      assert.equal(result.errorCode, 'GIT_CLONE_CURRENT_DIRECTORY_FORBIDDEN');
+      assert.match(result.reason || '', /current directory/);
+      assert.match(result.suggestion || '', /DeepCode/);
+    }
 
-  // Allowed when cloning into a subfolder
-  const safeClone = evaluateCommandPreflight('git clone https://github.com/HKUDS/DeepCode deepcode-repo', { mode: 'enforce' });
-  assert.equal(safeClone.allowed, true);
+    // Allowed when cloning into a subfolder
+    const safeClone = evaluateCommandPreflight('git clone https://github.com/HKUDS/DeepCode deepcode-repo', { mode: 'enforce', workspaceRoot: tempDir });
+    assert.equal(safeClone.allowed, true);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('Preflight Guard Benchmark: Latency and token preservation verification', () => {
@@ -232,7 +243,7 @@ test('Preflight Guard Benchmark: Latency and token preservation verification', (
   assert.ok(preflightLatencyMs < 1);
 });
 
-test('Preflight Guard: Blocks non-existent local binary and discovers sibling executable', async () => {
+test('Preflight Guard: Warns about non-existent host-local binary without blocking sandbox execution', async () => {
   const os = await import('node:os');
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-binary-preflight-'));
   try {
@@ -250,9 +261,8 @@ test('Preflight Guard: Blocks non-existent local binary and discovers sibling ex
       workspaceRoot: tempDir,
     });
 
-    assert.equal(res.allowed, false);
-    assert.equal(res.errorCode, 'LOCAL_EXECUTABLE_NOT_FOUND');
-    assert.match(res.reason || '', /does not exist on disk/);
+    assert.equal(res.allowed, true);
+    assert.match(res.reason || '', /OBSERVE.*does not exist on this host/);
     assert.match(res.reason || '', /bin[\\/]Debug[\\/]GitKeyTests\.exe/);
 
     // Khi chạy file thực sự tồn tại trong Debug -> ALLOWED
@@ -266,7 +276,7 @@ test('Preflight Guard: Blocks non-existent local binary and discovers sibling ex
   }
 });
 
-test('Preflight Guard: Blocks non-existent workspace and missing scripts in package.json', async () => {
+test('Preflight Guard: Warns about shallow workspace/script misses without blocking valid wrappers', async () => {
   const os = await import('node:os');
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-pkg-preflight-'));
   try {
@@ -283,24 +293,21 @@ test('Preflight Guard: Blocks non-existent workspace and missing scripts in pack
       'utf-8'
     );
 
-    // 1. LLM đoán mò chạy với --workspace=apps/web trong single-package repo -> Bị chặn
+    // 1. A wrapper may resolve the workspace elsewhere, so this is advisory.
     const wsResult = evaluateCommandPreflight('npm run lint --workspace=apps/web', {
       mode: 'enforce',
       workspaceRoot: tempDir,
     });
-    assert.equal(wsResult.allowed, false, 'Phải chặn lệnh chỉ định workspace ảo');
-    assert.equal(wsResult.errorCode, 'WORKSPACE_NOT_FOUND');
-    assert.match(wsResult.reason || '', /single-package/i);
-    assert.match(wsResult.reason || '', /apps\/web/);
+    assert.equal(wsResult.allowed, true);
+    assert.match(wsResult.reason || '', /OBSERVE.*workspace/i);
 
-    // 2. LLM chạy npm run lint (script không có trong package.json) -> Bị chặn
+    // 2. A package-manager wrapper may provide a script outside root package.json.
     const scriptResult = evaluateCommandPreflight('npm run lint', {
       mode: 'enforce',
       workspaceRoot: tempDir,
     });
-    assert.equal(scriptResult.allowed, false, 'Phải chặn script không tồn tại trong package.json');
-    assert.equal(scriptResult.errorCode, 'PACKAGE_SCRIPT_NOT_FOUND');
-    assert.match(scriptResult.reason || '', /Script "lint" is not defined/);
+    assert.equal(scriptResult.allowed, true);
+    assert.match(scriptResult.reason || '', /OBSERVE.*script/i);
     assert.match(wsResult.suggestion || '', /--workspace/);
 
     // 3. Chạy script hợp lệ đã định nghĩa -> ALLOWED

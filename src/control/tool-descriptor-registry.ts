@@ -31,7 +31,6 @@ export const READ_TOOL_NAMES = new Set([
   'read_compressed_code',
   'pack_codebase',
   'inspect_image',
-  'get_workspace_diff',
   'codegraph_explore',
   'codegraph_node',
   'codegraph_search',
@@ -72,8 +71,6 @@ export class ToolDescriptorRegistry {
         capabilities = ['inspect', 'verify'];
       } else if (name === 'lsp_query') {
         capabilities = ['inspect', 'search', 'verify'];
-      } else if (name === 'get_workspace_diff') {
-        capabilities = ['inspect', 'git-read', 'verify'];
       } else if (name === 'analyze_impact' || name === 'codegraph_impact') {
         capabilities = ['inspect', 'search', 'plan'];
       }

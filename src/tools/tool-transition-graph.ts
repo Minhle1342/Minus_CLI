@@ -52,8 +52,8 @@ export interface TransitionRule {
 
 const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   IDLE: {
-    primarySuccessors: ['search_codebase_fast', 'read_file', 'get_symbol_context_360'],
-    secondarySuccessors: ['inspect_symbol', 'list_files'],
+    primarySuccessors: ['codegraph_explore', 'search_codebase_fast', 'read_file', 'get_symbol_context_360'],
+    secondarySuccessors: ['codegraph_search', 'inspect_symbol', 'list_files'],
     primaryBoost: 0.15,
     secondaryBoost: 0.08,
   },
@@ -271,6 +271,8 @@ const DISCOVERY_TOOLS = new Set([
   'find_files',
   'read_compressed_code',
   'pack_codebase',
+  'codegraph_search',
+  'codegraph_explore',
 ]);
 
 export class ToolTransitionGraph {
@@ -331,7 +333,10 @@ export class ToolTransitionGraph {
     }
 
     // 2.1. Kiểm tra Graph Context Tools
-    if (['get_symbol_context_360', 'query_call_graph', 'get_route_map', 'analyze_impact'].includes(lastToolName)) {
+    if ([
+      'get_symbol_context_360', 'query_call_graph', 'get_route_map', 'analyze_impact', 'get_architecture_topology',
+      'codegraph_explore', 'codegraph_node', 'codegraph_search', 'codegraph_impact', 'codegraph_callers', 'codegraph_callees',
+    ].includes(lastToolName)) {
       return hasError ? 'GENERAL_ERROR' : 'GRAPH_CONTEXT_ACQUIRED';
     }
 

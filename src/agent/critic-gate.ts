@@ -1,7 +1,7 @@
 import type { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, getTurnCompletionState, type TurnCompletionState } from './completion-observations.js';
-import { CompletionEvidenceGate, isNonExecutableFile, isToolResultFailure, type CompletionEvidenceDecision } from './completion-evidence.js';
+import { CompletionEvidenceGate, isNonExecutableFile, isToolResultFailure, isUserExplicitlyExemptingTests, type CompletionEvidenceDecision } from './completion-evidence.js';
 import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
 import type { DiagnosticItem } from '../tools/typescript-service.js';
 import type { HypothesisTracker } from './hypothesis-tracker.js';
@@ -151,12 +151,11 @@ function normalizeDiagPath(p: string): string {
 export function filterErrorsToModifiedFiles<T extends { file: string }>(errors: T[], modifiedFiles: Iterable<string>): T[] {
   const targets = new Set([...modifiedFiles].map(normalizeDiagPath).filter(Boolean));
   if (targets.size === 0) return [...errors];
-  const baseOf = (p: string) => p.split('/').pop() || p;
   return errors.filter((e) => {
     const ef = normalizeDiagPath(e.file);
     if (!ef) return false;
     for (const t of targets) {
-      if (ef === t || baseOf(ef) === baseOf(t) || ef.endsWith(`/${t}`) || t.endsWith(`/${ef}`)) return true;
+      if (ef === t || ef.endsWith(`/${t}`) || t.endsWith(`/${ef}`)) return true;
     }
     return false;
   });
@@ -248,7 +247,10 @@ export class CriticGate {
       );
     }
 
-    const allowed = scorePenalty < 30;
+    // ponytail: architecture intent detection is heuristic; default completion
+    // flow keeps this advisory. Callers that explicitly opt into enforce retain
+    // the old rejection threshold.
+    const allowed = params.gateMode !== 'enforce' || scorePenalty < 30;
     return {
       allowed,
       scorePenalty,
@@ -354,15 +356,13 @@ export class CriticGate {
     if (params.domainGuardian) {
       const audit = params.domainGuardian.getAuditSummary();
       if (audit.blockedTamperAttempts > 0) {
-        score -= 30;
         reasons.push(
-          `Domain Intent Guardian blocked ${audit.blockedTamperAttempts} test tampering attempt(s).`,
+          `ADVISORY: Domain Intent Guardian previously blocked ${audit.blockedTamperAttempts} test tampering attempt(s).`,
         );
       }
       if (audit.consecutiveDriftWarnings > 1) {
-        score -= 20;
         reasons.push(
-          `Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`,
+          `ADVISORY: Domain Intent Guardian previously detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`,
         );
       }
     }
@@ -499,6 +499,7 @@ export class CriticGate {
       && Array.from(targetFiles).every((file) => isNonExecutableFile(file) && !isSensitivePath(file));
     if (measuredTier.level !== 'LOW' && targetFiles.size > 0 && !allDocsOnly
       && !hasSubmittedSolution
+      && !isUserExplicitlyExemptingTests(userRequest)
       && !this.evidenceGate.hasVerifiedPassingTest(session, turn)) {
       highImpactUnverified = true;
       reasons.push(`[MEASURED HIGH-IMPACT VERIFICATION REQUIRED]: ${measuredTier.reasons.join('; ')}. No passing automated test observed in-session after the last mutation — run the test suite before completing.`);
@@ -510,7 +511,7 @@ export class CriticGate {
     }
 
     // 3. Thẩm định trạng thái Hypothesis
-    if (hypothesisTracker) {
+    if (targetFiles.size > 0 && hypothesisTracker) {
       const active = hypothesisTracker.getActiveHypothesis();
       if (active && active.status === 'testing') {
         score -= 20;
@@ -522,12 +523,10 @@ export class CriticGate {
     if (domainGuardian) {
       const audit = domainGuardian.getAuditSummary();
       if (audit.blockedTamperAttempts > 0) {
-        score -= 30;
-        reasons.push(`Domain Intent Guardian detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
+        reasons.push(`ADVISORY: Domain Intent Guardian previously detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
       }
       if (audit.consecutiveDriftWarnings > 1) {
-        score -= 20;
-        reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
+        reasons.push(`ADVISORY: Domain Intent Guardian previously detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
       }
     }
 
@@ -690,7 +689,7 @@ export class CriticGate {
     }
 
     // 3. Thẩm định trạng thái Hypothesis
-    if (hypothesisTracker) {
+    if (targetFiles.size > 0 && hypothesisTracker) {
       const active = hypothesisTracker.getActiveHypothesis();
       if (active && active.status === 'testing') {
         score -= 20;
@@ -702,12 +701,10 @@ export class CriticGate {
     if (domainGuardian) {
       const audit = domainGuardian.getAuditSummary();
       if (audit.blockedTamperAttempts > 0) {
-        score -= 30;
-        reasons.push(`Domain Intent Guardian detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
+        reasons.push(`ADVISORY: Domain Intent Guardian previously detected ${audit.blockedTamperAttempts} blocked test tampering attempt(s).`);
       }
       if (audit.consecutiveDriftWarnings > 1) {
-        score -= 20;
-        reasons.push(`Domain Intent Guardian detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
+        reasons.push(`ADVISORY: Domain Intent Guardian previously detected ${audit.consecutiveDriftWarnings} consecutive goal drift warnings.`);
       }
     }
 
@@ -731,8 +728,10 @@ export class CriticGate {
       exhaustionBlocked = !exhaustion.allowed && turnHasToolCalls;
     }
 
-    // Ngưỡng score theo risk (LOW 60 / MEDIUM 70 / HIGH-CRITICAL 80), thiếu risk giữ ngưỡng cũ 80.
-    const { level: riskLevel, threshold: scoreThreshold } = resolveCriticScoreThreshold(params.risk);
+    // Match sync evaluation: HIGH/CRITICAL use evidence invariants, not a
+    // second risk-dependent score threshold that rejects the same session.
+    const scoreThreshold = 60;
+    const riskLevel = 'invariant-gated';
     const approved = lspErrors.length === 0 && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
 
     const auditRecord = this.auditLedger.record({

@@ -5,6 +5,15 @@ import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool
 
 const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
+/** Small phase-specific exploration anchors pinned after relevance retrieval. */
+const PHASE_EXPLORE_TOOL_ANCHORS: Record<string, readonly string[]> = {
+  explore: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics'],
+  plan: ['read_file', 'search_text', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
+  implement: ['read_file', 'get_symbol_context_360', 'get_diagnostics'],
+  verify: ['read_file', 'get_diagnostics', 'run_command'],
+  release: [],
+};
+
 export interface ThisTurnToolDecision {
   id: string;
   classificationId: string;
@@ -14,8 +23,29 @@ export interface ThisTurnToolDecision {
   schemaTokensBefore: number;
   schemaTokensAfter: number;
   approvalToolNames: string[];
+  /** Explore/read schemas pinned for the current phase, when registered. */
+  phaseExploreToolAnchors: string[];
   maxToolCalls: number;
   reasonCodes: string[];
+  toolSurface: ToolSurface;
+}
+
+/** The hard runtime allowlist and the soft LLM schema subset for one step. */
+export interface ToolSurface {
+  authorizedToolNames: string[];
+  visibleToolNames: string[];
+}
+
+export function createToolSurface(
+  authorizedToolNames: readonly string[],
+  visibleToolNames: readonly string[] = [],
+): ToolSurface {
+  const authorized = [...new Set(authorizedToolNames)].sort();
+  const allowed = new Set(authorized);
+  return {
+    authorizedToolNames: authorized,
+    visibleToolNames: [...new Set(visibleToolNames)].filter((name) => allowed.has(name)).sort(),
+  };
 }
 
 export function hashAllowedToolSet(names: readonly string[]): string {
@@ -140,6 +170,8 @@ export class ThisTurnToolGate {
       .filter((tool) => this.descriptors.describe(tool).requiresApproval)
       .map((tool) => tool.name)
       .sort();
+    const phaseExploreToolAnchors = (PHASE_EXPLORE_TOOL_ANCHORS[classification.phase] || [])
+      .filter((name) => names.includes(name));
 
     const maxToolCalls = calculateAdaptiveToolBudget(classification);
 
@@ -152,8 +184,10 @@ export class ThisTurnToolGate {
       schemaTokensBefore: before,
       schemaTokensAfter: after,
       approvalToolNames,
+      phaseExploreToolAnchors,
       maxToolCalls,
       reasonCodes: denied.length ? ['PHASE_CAPABILITY_REDUCTION'] : ['FULL_TOOLSET_REQUIRED'],
+      toolSurface: createToolSurface(names, phaseExploreToolAnchors),
     };
   }
 }

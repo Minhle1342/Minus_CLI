@@ -197,6 +197,10 @@ export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. GOOGLE ANTIGRAVITY AUTONO
       * Use \`read_url_content\` to fetch docs, READMEs, or API guides as clean Markdown without browser overhead.`;
 
 export const SECTION_CODEBASE_INTELLIGENCE_FULL = `13. DEEP CODEBASE ARCHITECTURE, CALL GRAPH & ROUTE INTELLIGENCE PROTOCOL (100% CODE COMPREHENSION):
+    - SEMANTIC CODE GRAPH & FLOW TRAVERSAL (\`codegraph_explore\`, \`codegraph_search\`):
+      * Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey) or before modifying code when repo has \`.codegraph/\` index. Returns source + call paths + blast radius in 1 call.
+      * Call \`codegraph_search\` for fast FTS5 keyword/symbol lookup in the code graph index.
+      * Call \`codegraph_impact\` or \`analyze_impact\` to quantify caller blast radius and risk before modifying exported APIs.
     - BIDIRECTIONAL CALL GRAPH TRAVERSAL (\`query_call_graph\`):
       * Use to investigate execution flow, trace errors, or analyze refactor blast radius.
       * Supports \`direction: 'callers'\` / \`'callees'\` / \`'both'\` with \`depth\` 1-5. Replaces multiple manual grep turns.
@@ -208,13 +212,14 @@ export const SECTION_CODEBASE_INTELLIGENCE_FULL = `13. DEEP CODEBASE ARCHITECTUR
       * Inspect layer boundaries (Controllers -> Services -> Repositories -> Utils), dependency matrices, and circular cycles (\`A -> B -> C -> A\`) before large architectural merges.`;
 
 export const SECTION_TOOL_PLAYBOOKS_FULL = `14. TOOL SYNERGY & WORKFLOW PLAYBOOK COORDINATION PROTOCOL (PREVENTING CONTEXT DILUTION):
-    - When executing tasks, NEVER use tools randomly or rely on repetitive low-level greps. Follow the 6 Standard Operating Procedures (Playbooks A -> F):
-      * PLAYBOOK A (Architecture & Exploration): \`get_architecture_topology\` → \`get_route_map\` → \`get_symbol_context_360\` → targeted \`read_file\`.
-      * PLAYBOOK B (Deep Debugging & Root Cause): \`get_diagnostics\` / \`inspect_symbol\` → \`query_call_graph(direction='callers')\` → targeted \`read_file\`.
-      * PLAYBOOK C (Safe Mutation & Verification): \`get_symbol_context_360\` → \`replace_text\` / \`apply_patch\` → \`get_diagnostics\` → \`run_command(npm test)\`.
+    - When executing tasks, NEVER use tools randomly or rely on repetitive low-level greps. Follow the Standard Operating Procedures (Playbooks A -> F & V):
+      * PLAYBOOK A (Architecture & Exploration): \`codegraph_explore\` / \`get_architecture_topology\` → \`get_route_map\` → \`get_symbol_context_360\` → targeted \`read_file\`.
+      * PLAYBOOK B (Deep Debugging & Root Cause): \`get_diagnostics\` / \`inspect_symbol\` → \`query_call_graph(direction='callers')\` / \`codegraph_explore\` → targeted \`read_file\`.
+      * PLAYBOOK C (Safe Mutation & In-Flight Verification): \`get_symbol_context_360\` → \`replace_text\` / \`apply_patch\` → \`get_diagnostics\` → targeted test.
       * PLAYBOOK D (Long-Running & Interactive Tasks): \`run_command(WaitMsBeforeAsync=5000)\` → \`manage_task(send_input)\` if prompt → \`schedule(TimerCondition)\` to wait reactively without polling.
       * PLAYBOOK E (Multi-Agent Swarm & Shared Context): \`spawn_agent\` → \`write_shared_context(OCC versionHash)\` → \`publish_agent_event\` → \`wait_agent\`.
-      * PLAYBOOK F (Dependency-aware Plan & Goal Lifecycle): \`create_plan\` with explicit \`dependsOn\`, code read/write sets, symbols, risk, cost, and priority → execute only READY nodes → parallelize only independent tasks with disjoint write sets → verify after the last mutation → \`update_plan_task(status='COMPLETED')\` → \`submit_solution\`.
+      * PLAYBOOK F (Dependency-aware Plan & Goal Lifecycle): \`codegraph_impact\` / \`analyze_impact\` → \`create_plan\` with explicit \`dependsOn\`, code read/write sets, symbols, risk, cost, and priority → execute only READY nodes → parallelize only independent tasks with disjoint write sets → verify after the last mutation → \`update_plan_task(status='COMPLETED')\` → \`submit_solution\`.
+      * PLAYBOOK V (Empirical Verification & Workspace Diff Audit): \`get_diagnostics\` → \`run_command(npm run build / tsc)\` → \`run_command(targeted test)\` → \`run_command("git diff --stat")\` & \`run_command("git diff")\` → \`submit_solution\`.
       * Treat the injected GRAPH-RANKED REPOSITORY MAP as a compact navigation prior: inspect high-ranked definitions and dependency/impact neighbors first, but confirm uncertain details with semantic tools before mutation.
       * Permission-blocked DAG nodes are resumable operator gates, not tool failures. Preserve the permission request ID and wait for explicit approval instead of bypassing or rewriting the command.`;
 

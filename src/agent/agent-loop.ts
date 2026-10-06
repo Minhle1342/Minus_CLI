@@ -36,7 +36,7 @@ import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInv
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
-import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
+import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
 import { shouldPersistReasoning } from './reasoning-persistence.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
@@ -58,7 +58,8 @@ import { GraphRankedRepositoryMap } from './graph-ranked-repository-map.js';
 import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
 import { ClassificationEngine } from '../control/classification-engine.js';
 import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
-import { ThisTurnToolGate, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
@@ -403,6 +404,7 @@ export class AgentLoop {
       this.circuitBreakerRetriesBySession.set(sessionId, count);
     }
   }
+  private circuitBreakerTrippedTools = new Set<string>();
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
@@ -539,6 +541,7 @@ export class AgentLoop {
       this.repositoryMemory = this.kernel.ctx.repositoryMemory;
       this.effectLedger = new EffectLedger();
       this.verificationPolicy = this.kernel.ctx.verification || new VerificationPolicy();
+      this.verificationPolicy.setWorkspaceRoot(this._workspace.rootDir);
       this.criticGate = this.kernel.ctx.critic || new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
@@ -586,6 +589,7 @@ export class AgentLoop {
       this.repositoryMemory = new CitationValidatedRepositoryMemory(this._workspace);
       this.effectLedger = new EffectLedger();
       this.verificationPolicy = new VerificationPolicy();
+      this.verificationPolicy.setWorkspaceRoot(this._workspace.rootDir);
       this.criticGate = new CriticGate(this.completionEvidenceGate);
       this.speculativeManager = new SpeculativeBranchManager(this._workspace.rootDir);
       this.workspaceVerifier = new WorkspaceStateVerifier(this._workspace);
@@ -673,6 +677,7 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
+    this.verificationPolicy.setWorkspaceRoot(workspace.rootDir);
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
@@ -1012,6 +1017,7 @@ export class AgentLoop {
     this.cognitiveHarness.reset();
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.circuitBreakerTrippedTools.clear();
     this.editTouchedCallers = false;
     this.maxEditBlastRisk = undefined;
     this.lastMutationForInvestigation = undefined;
@@ -1430,9 +1436,10 @@ export class AgentLoop {
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase);
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
+      const gateToolSurface = recommendedToolDecision.toolSurface;
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
       const candidateProvider = toolControlMode === 'enforce'
-        ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, recommendedToolDecision.allowedToolNames)
+        ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, gateToolSurface.authorizedToolNames)
         : this.toolProvider;
       const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
         && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
@@ -1449,7 +1456,7 @@ export class AgentLoop {
         lastToolName: this.lastToolExecution?.toolName,
         lastToolResult: this.lastToolExecution?.result,
         allowedToolNames: toolControlMode === 'enforce'
-          ? recommendedToolDecision.allowedToolNames
+          ? gateToolSurface.authorizedToolNames
           : candidateProvider.getAll().map((tool) => tool.name),
       });
       const activeStepQuery = retrievalState.query;
@@ -1497,6 +1504,12 @@ export class AgentLoop {
           activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
         }
 
+        // In explore and plan phases under enforce mode, edit tools are withheld from model-visible schemas
+        // until the agent transitions to implement phase, preventing premature edits.
+        if (toolControlMode === 'enforce' && ['explore', 'plan'].includes(classification.phase)) {
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => !EDIT_TOOL_NAMES.has(tool.name));
+        }
+
         // A transition request is a control primitive, not a retrieved task tool.
         // Keep it visible whenever the current coding phase can accept one so the
         // model never has to guess an unauthorized edit to advance its workflow.
@@ -1519,17 +1532,41 @@ export class AgentLoop {
               activeToolDeclarations.push(updatePlanDecl);
             }
           }
+          // One-way state transition: Once a plan exists, hide create_plan so the model
+          // updates existing tasks with update_plan_task instead of overwriting the whole plan.
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'create_plan');
         }
 
         // Planning is opt-in, but once the user explicitly enters the plan
-        // phase, create_plan must be model-visible and runtime-authorized. Pin
+        // phase without an existing plan, create_plan must be model-visible and runtime-authorized. Pin
         // it after route filtering so declaration visibility and ToolScope stay
         // aligned instead of producing an authorization loop.
-        if (classification.phase === 'plan' && candidateProvider.get('create_plan')
+        if (classification.phase === 'plan' && !this.planManager.hasPlan() && candidateProvider.get('create_plan')
           && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
           const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
             .find((tool: any) => tool.name === 'create_plan');
           if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
+        }
+
+        // Keep a small, phase-appropriate exploration set visible even when
+        // relevance retrieval ranks it below task-specific tools.
+        if (gateToolSurface.visibleToolNames.length > 0) {
+          const declarationsByName = new Map(
+            candidateProvider.getFunctionDeclarations().map((tool: any) => [tool.name, tool]),
+          );
+          for (const name of gateToolSurface.visibleToolNames) {
+            const declaration = declarationsByName.get(name);
+            if (declaration && !activeToolDeclarations.some((tool: any) => tool.name === name)) {
+              activeToolDeclarations.push(declaration);
+            }
+          }
+        }
+
+        // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
+        if (this.circuitBreakerTrippedTools.size > 0) {
+          activeToolDeclarations = activeToolDeclarations.filter(
+            (tool: any) => !this.circuitBreakerTrippedTools.has(tool.name),
+          );
         }
 
         // Canonical alphabetical sort: Đảm bảo thứ tự tool schemas luôn nhất quán tuyệt đối,
@@ -1566,13 +1603,13 @@ export class AgentLoop {
         reliableToolOrchestrationMode,
       );
 
-      const visibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
-      const expectedToolNames = recommendedToolDecision.allowedToolNames.filter((name) => {
+      const retrievedVisibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
+      const expectedToolNames = gateToolSurface.authorizedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;
         if (isPureInvestigation && name === 'submit_solution') return false;
         return true;
       });
-      this.contextQualityEvaluator.recordToolRetrieval(visibleToolNames, expectedToolNames);
+      this.contextQualityEvaluator.recordToolRetrieval(retrievedVisibleToolNames, expectedToolNames);
       // P1: runtime authorization uses the gate allowlist + control pins, not the
       // retrieval-pruned visible subset. Retrieval stays a soft relevance hint for
       // the model; hard denial only applies to tools the gate never authorized
@@ -1581,18 +1618,20 @@ export class AgentLoop {
       const reliableConstrainsScope = reliableToolOrchestrationMode === 'enforce'
         && reliableRouteDecision.constrainSafe
         && !reliableRouteDecision.failOpen;
-      let authorizedToolNames: string[];
+      let runtimeAuthorizedToolNames: string[];
       if (hasSubmittedSolution) {
-        authorizedToolNames = [];
+        runtimeAuthorizedToolNames = [];
       } else if (reliableConstrainsScope) {
-        authorizedToolNames = [...visibleToolNames];
+        runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
       } else {
-        const authorizedSet = new Set<string>(recommendedToolDecision.allowedToolNames);
-        for (const name of visibleToolNames) authorizedSet.add(name);
+        const authorizedSet = new Set<string>(gateToolSurface.authorizedToolNames);
+        for (const name of retrievedVisibleToolNames) authorizedSet.add(name);
         if (isPureInvestigation) authorizedSet.delete('submit_solution');
-        authorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
-        if (authorizedToolNames.length === 0) authorizedToolNames = [...visibleToolNames];
+        runtimeAuthorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
+        if (runtimeAuthorizedToolNames.length === 0) runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
       }
+      const toolSurface = createToolSurface(runtimeAuthorizedToolNames, retrievedVisibleToolNames);
+      const { authorizedToolNames: authorizedToolNames, visibleToolNames } = toolSurface;
       const activeToolSetHash = hashAllowedToolSet(authorizedToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
       const hasRuntimeToolScope = toolControlMode === 'enforce'
@@ -1613,6 +1652,7 @@ export class AgentLoop {
             paretoEvidence,
             toolDecision: {
               ...recommendedToolDecision,
+              toolSurface,
               id: activeDecisionId,
               phaseVersion: classification.phaseVersion,
               visibleToolNames,
@@ -2995,7 +3035,7 @@ export class AgentLoop {
                 hasCallers: this.editTouchedCallers,
                 blastRisk: this.maxEditBlastRisk,
                 sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
-              })
+              }, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) })
               : undefined;
 
             let ocrCompletion: OcrGateDecision = {
@@ -3289,10 +3329,27 @@ export class AgentLoop {
             for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
             const mutatedPath = mutatedFiles[0] || '';
             const blast = executionResult.result?.blastRadius;
+            // ponytail: replace_text carrying only comment/note changes bypasses the test gate.
+            const oldBlock = toolName === 'replace_text'
+              ? String(toolArgs?.oldText ?? toolArgs?.old_text ?? toolArgs?.TargetContent ?? toolArgs?.targetContent ?? toolArgs?.searchContent ?? toolArgs?.searchText ?? '')
+              : '';
+            const newBlock = toolName === 'replace_text'
+              ? String(toolArgs?.newText ?? toolArgs?.new_text ?? toolArgs?.ReplacementContent ?? toolArgs?.replacementContent ?? toolArgs?.replaceWith ?? '')
+              : '';
+            const commentOnlyEdit = toolName === 'replace_text' && Boolean(newBlock)
+              && isCommentOnlyChange(oldBlock, newBlock);
             this.verificationPolicy.recordModification(mutatedPath, {
               impactedTestSuites: blast?.impactedTestSuites,
               risk: blast?.risk,
+              commentOnly: commentOnlyEdit,
             });
+            // ponytail: move_file is fs.rename — content identical by construction.
+            if (toolName === 'move_file' && !isToolResultFailure(executionResult.result)) {
+              this.verificationPolicy.recordContentPreservedMove(
+                String(toolArgs?.sourcePath || ''),
+                String(toolArgs?.targetPath || ''),
+              );
+            }
             const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
             if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
             else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
@@ -3802,6 +3859,15 @@ export class AgentLoop {
             result: executionResult.result,
             guardianDiagnosis: executionResult.guardianDiagnosis,
           };
+          // Tool-level circuit breaker: track external tools that failed due to rate limits or quota exhaustion
+          const execError = String(executionResult.result?.error || executionResult.result?.message || executionResult.result?.stderr || '');
+          const isToolRateLimited = executionResult.result?.errorCode === 'RATE_LIMIT_EXCEEDED'
+            || executionResult.result?.errorCode === 'QUOTA_EXCEEDED'
+            || executionResult.result?.errorCode === 'RESOURCE_EXHAUSTED'
+            || /\b(?:429\s+Too\s+Many\s+Requests|rate\s*limit|quota\s*exceeded|resource_exhausted)\b/i.test(execError);
+          if (isToolRateLimited) {
+            this.circuitBreakerTrippedTools.add(toolName);
+          }
           if (readPartition && partitionStartIndex !== undefined) {
             readBatchToolDurationMs.set(
               partitionStartIndex,
@@ -4129,7 +4195,7 @@ export class AgentLoop {
       }
       const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM || (!hasCodeMutations && !codeChangeRequired))
         ? { allowed: true }
-        : this.verificationPolicy.canComplete(activeSkills);
+        : this.verificationPolicy.canComplete(activeSkills, undefined, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) });
       const criticDecision = (isSubagent || isMockLLM)
         ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
         : this.criticGate.evaluate({
@@ -4804,7 +4870,7 @@ export class AgentLoop {
     signal: AbortSignal,
   ): AgentLoop {
     const childRegistry = new ToolRegistry();
-    const forbidden = new Set(['delegate_agent', 'spawn_agent', 'get_agent_result', 'wait_agent', 'stop_agent', 'resume_agent']);
+    const forbidden = new Set(['delegate_agent', 'spawn_agent', 'get_agent_result', 'wait_agent', 'stop_agent', 'resume_agent', 'allocate_agent_task', 'schedule_dag_parallel', 'verify_subagent_quality', 'brainstorm_design']);
     for (const tool of this.toolRegistry.getAll()) {
       if (!forbidden.has(tool.name)) childRegistry.register(tool);
     }

@@ -230,9 +230,12 @@ export function evaluateCommandPreflight(
 
   const raw = command.trim();
   const { normalizedCommand, extractedEnv } = normalizeWindowsCommand(raw);
+  const nonInteractiveRemote = /^(?:ssh\b.*(?:-o\s*batchmode=yes|-obatchmode=yes)|sftp\b.*\s-b\b|ftp\b.*\s-n\b)/i.test(normalizedCommand);
+  const versionOrHelpProbe = /^(?:vim|vi|nano|pico|emacs|less|more|man)\b.*(?:--version|--help|\s-h)\b/i.test(normalizedCommand);
 
   // 1. Chặn lệnh tương tác treo (REPL, vim, nano, npm init)
   for (const item of INTERACTIVE_COMMAND_PATTERNS) {
+    if (nonInteractiveRemote || versionOrHelpProbe) continue;
     if (item.pattern.test(normalizedCommand)) {
       if (mode === 'observe') {
         return {
@@ -251,27 +254,21 @@ export function evaluateCommandPreflight(
     }
   }
 
-  // 2. Chặn server dài hạn nếu không cấu hình WaitMsBeforeAsync
+  // 2. Cảnh báo server dài hạn nếu không cấu hình WaitMsBeforeAsync.
   const isDevServer = DEV_SERVER_PATTERNS.some((p) => p.test(normalizedCommand));
   const hasWaitMs = typeof options?.waitMsBeforeAsync === 'number' && options.waitMsBeforeAsync > 0;
   if (isDevServer && !hasWaitMs) {
-    if (mode === 'observe') {
-      return {
-        allowed: true,
-        normalizedCommand,
-        extractedEnv,
-        reason: '[OBSERVE] Detected long-running dev server command.',
-      };
-    }
     return {
-      allowed: false,
-      errorCode: 'LONG_RUNNING_SERVER_REQUIRES_ASYNC',
-      reason: `Command "${normalizedCommand}" starts a server or continuous watch process that hangs the agent if run synchronously.`,
+      allowed: true,
+      normalizedCommand,
+      extractedEnv,
+      // ponytail: name-based server detection is inherently uncertain; use task timeout/background dispatch if it actually runs long.
+      reason: '[OBSERVE] Possible long-running dev server command; WaitMsBeforeAsync is recommended.',
       suggestion: 'Add the WaitMsBeforeAsync parameter (e.g. 3000ms) to automatically move the command to a Background Task.',
     };
   }
 
-  // 3. Chặn vòng lặp chạy lại test vô ích khi chưa sửa code
+  // 3. Cảnh báo vòng lặp chạy lại test khi chưa sửa code (flaky/environment retries are valid).
   if (isTestCommand(normalizedCommand) && options?.lastExecution) {
     const last = options.lastExecution;
     const sameCmd = last.command && last.command.trim().toLowerCase() === normalizedCommand.toLowerCase();
@@ -279,18 +276,11 @@ export function evaluateCommandPreflight(
     const noModifications = options.lastExecution.filesModifiedSince === 0;
 
     if (sameCmd && wasFailed && noModifications) {
-      if (mode === 'observe') {
-        return {
-          allowed: true,
-          normalizedCommand,
-          extractedEnv,
-          reason: '[OBSERVE] Detected duplicate test re-run with no source modifications.',
-        };
-      }
       return {
-        allowed: false,
-        errorCode: 'IDEMPOTENT_TEST_EXECUTION_BLOCKED',
-        reason: `Test command "${normalizedCommand}" just failed in the previous step and no source files have been modified since.`,
+        allowed: true,
+        normalizedCommand,
+        extractedEnv,
+        reason: '[OBSERVE] Duplicate failed test re-run with no tracked source modifications.',
         suggestion: 'Analyze the failure cause, read the source with "read_file" and fix the bug with "replace_text" before re-running tests.',
       };
     }
@@ -299,7 +289,11 @@ export function evaluateCommandPreflight(
   // 4. Chặn 'git clone <url> .' vào thư mục hiện tại vì chắc chắn thất bại khi workspace đã có mã nguồn
   // và tránh rủi ro ghi đè / xung đột với kho lưu trữ git hiện tại của dự án.
   const gitCloneDotMatch = normalizedCommand.match(/^git(?:\.exe)?\s+clone(?:\s+[^\s]+)*\s+([^\s]+)\s+(?:\.|\.\/|\\|\.\\)\s*$/i);
-  if (gitCloneDotMatch) {
+  let workspaceIsNonEmpty = false;
+  if (options?.workspaceRoot) {
+    try { workspaceIsNonEmpty = fs.readdirSync(options.workspaceRoot).length > 0; } catch { /* Unknown workspace state stays allow. */ }
+  }
+  if (gitCloneDotMatch && workspaceIsNonEmpty) {
     const repoUrl = gitCloneDotMatch[1];
     const repoName = repoUrl.replace(/\.git$/i, '').split(/[/:\\]/).pop() || 'external-repo';
     if (mode === 'observe') {
@@ -318,7 +312,7 @@ export function evaluateCommandPreflight(
     };
   }
 
-  // 5. Chặn gọi file thực thi nội bộ ảo (hallucinated local binary/script) khi không tồn tại trên đĩa
+  // 5. Cảnh báo executable nội bộ không có trên host (it may exist in a sandbox/runtime mount).
   if (options?.workspaceRoot) {
     const candidatePath = extractLocalCandidatePath(normalizedCommand);
     if (candidatePath) {
@@ -351,19 +345,11 @@ export function evaluateCommandPreflight(
           }
         } catch {}
 
-        if (mode === 'observe') {
-          return {
-            allowed: true,
-            normalizedCommand,
-            extractedEnv,
-            reason: `[OBSERVE] Executable "${candidatePath}" does not exist on disk.`,
-          };
-        }
-
         return {
-          allowed: false,
-          errorCode: 'LOCAL_EXECUTABLE_NOT_FOUND',
-          reason: `Executable "${candidatePath}" does not exist on disk in the workspace directory.${siblingSuggestion}`,
+          allowed: true,
+          normalizedCommand,
+          extractedEnv,
+          reason: `[OBSERVE] Executable "${candidatePath}" does not exist on this host.${siblingSuggestion}`,
           suggestion: siblingSuggestion
             ? `Check the actual executable or build configuration (e.g. run the Debug build instead of Release, or rebuild before running). Use the "list_files" tool to inspect the output directory.`
             : `Binary or script "${candidatePath}" has not been built or does not exist. Build the project first or use "list_files" to verify the exact path.`,
@@ -372,7 +358,7 @@ export function evaluateCommandPreflight(
     }
   }
 
-  // 6. Chặn workspace hoặc package script không tồn tại trong package.json
+  // 6. Cảnh báo workspace hoặc package script không tồn tại trong package.json (wrappers may resolve them elsewhere).
   if (options?.workspaceRoot) {
     const pkgCmd = extractPackageCommand(normalizedCommand);
     if (pkgCmd) {
@@ -425,20 +411,11 @@ export function evaluateCommandPreflight(
         }
 
         if (!matchingWorkspaceFound) {
-          if (mode === 'observe') {
-            return {
-              allowed: true,
-              normalizedCommand,
-              extractedEnv,
-              reason: `[OBSERVE] Workspace "${wsName}" does not exist on disk or in the package.json configuration.`,
-            };
-          }
           return {
-            allowed: false,
-            errorCode: 'WORKSPACE_NOT_FOUND',
-            reason: hasWorkspacesConfig
-              ? `Workspace "${wsName}" does not exist in the Monorepo configuration and no matching package directory was found on disk.`
-              : `The current project is single-package (package.json has no "workspaces" config) and no "${wsName}" directory exists.`,
+            allowed: true,
+            normalizedCommand,
+            extractedEnv,
+            reason: `[OBSERVE] Workspace "${wsName}" was not found by the shallow workspace scan.`,
             suggestion: hasWorkspacesConfig
               ? `Use the "list_files" tool to inspect the monorepo directories (e.g. apps/ or packages/) to find the correct workspace name.`
               : `Drop the --workspace flag and run the command directly (e.g. "${pkgCmd.manager} ${pkgCmd.isRun ? 'run ' : ''}${pkgCmd.scriptName || 'test'}").`,
@@ -459,18 +436,11 @@ export function evaluateCommandPreflight(
         const scripts = targetPkg.scripts || {};
         if (!scripts[pkgCmd.scriptName]) {
           const available = Object.keys(scripts);
-          if (mode === 'observe') {
-            return {
-              allowed: true,
-              normalizedCommand,
-              extractedEnv,
-              reason: `[OBSERVE] Script "${pkgCmd.scriptName}" is missing from package.json.`,
-            };
-          }
           return {
-            allowed: false,
-            errorCode: 'PACKAGE_SCRIPT_NOT_FOUND',
-            reason: `Script "${pkgCmd.scriptName}" is not defined in ${pkgCmd.workspaceName ? `workspace "${pkgCmd.workspaceName}" ` : ''}package.json.`,
+            allowed: true,
+            normalizedCommand,
+            extractedEnv,
+            reason: `[OBSERVE] Script "${pkgCmd.scriptName}" is missing from the inspected package.json.`,
             suggestion: available.length > 0
               ? `Available scripts in package.json: ${available.slice(0, 10).join(', ')}. Pick a suitable script or check package.json again.`
               : `package.json defines no scripts. Check package.json again.`,

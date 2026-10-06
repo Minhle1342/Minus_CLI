@@ -98,7 +98,7 @@ test('critic clears the measured penalty after a passing test', () => {
   assert.ok(!decision.reasons.some((reason) => reason.includes('MEASURED HIGH-IMPACT')), decision.reasons.join('\n'));
 });
 
-test('critic hard-rejects a zero-inspection architecture answer instead of passing on score', () => {
+test('critic keeps zero-inspection architecture evidence advisory by default', () => {
   const session = new Session();
   session.append('turn/start', { turn: 1 });
   // Tools were available and used, yet nothing was inspected.
@@ -111,8 +111,25 @@ test('critic hard-rejects a zero-inspection architecture answer instead of passi
     userRequest: 'Explain the parser architecture',
     turn: 1,
   });
-  assert.equal(decision.approved, false);
+  assert.equal(decision.approved, true);
   assert.ok(decision.reasons.some((reason) => reason.includes('EXPLORATION_EXHAUSTED_ZERO_EVIDENCE')), decision.reasons.join('\n'));
+});
+
+test('critic honors an explicit user request to skip tests for high-impact edits', () => {
+  const session = new Session();
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['a.ts'] });
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['b.ts'] });
+  record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['c.ts'] });
+  const decision = new CriticGate().evaluate({
+    finalAnswer: 'Updated all three modules as requested.',
+    session,
+    workspace: {} as any,
+    userRequest: 'Fix these files, no testing required.',
+    turn: 1,
+    risk: 'R2',
+  });
+  assert.equal(decision.approved, true, decision.reasons.join('\n'));
+  assert.ok(!decision.reasons.some((reason) => reason.includes('MEASURED HIGH-IMPACT')), decision.reasons.join('\n'));
 });
 
 test('docs-only edits share the test exemption across critic and auditor', () => {

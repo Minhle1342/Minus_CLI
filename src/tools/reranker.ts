@@ -180,12 +180,15 @@ export class LocalCrossEncoderReranker {
     }
 
     // Code intelligence & architecture intent
-    if (/\b(?:caller|callee|graph|topology|architecture|dependency|symbol|route|impact|blast|trace)\b/i.test(query)) {
-      if (['get_symbol_context_360', 'query_call_graph', 'get_route_map', 'analyze_impact', 'get_architecture_topology'].includes(toolName)) boost += 0.40;
+    if (/\b(?:caller|callee|graph|topology|architecture|dependency|symbol|route|impact|blast|trace|codegraph)\b/i.test(query)) {
+      if ([
+        'get_symbol_context_360', 'query_call_graph', 'get_route_map', 'analyze_impact', 'get_architecture_topology',
+        'codegraph_explore', 'codegraph_node', 'codegraph_search', 'codegraph_impact', 'codegraph_callers', 'codegraph_callees',
+      ].includes(toolName)) boost += 0.40;
     }
 
-    // Diagnostics & testing intent
-    if (/\b(?:test|spec|verify|diagnostic|error|fail|failing|check)\b/i.test(query)) {
+    // Diagnostics, testing & workspace diff review intent
+    if (/\b(?:test|spec|verify|diagnostic|error|fail|failing|check|diff|workspace)\b/i.test(query)) {
       if (['get_diagnostics', 'run_command', 'verify_edit'].includes(toolName)) boost += 0.35;
     }
 
