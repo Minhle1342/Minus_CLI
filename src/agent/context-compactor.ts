@@ -1025,7 +1025,8 @@ export class ContextCompactor {
       ``,
       `### Chronological Turn Index`,
       ...[...priorSynopsisLines, ...synopsisLines],
-      `\n> (The system will automatically re-inject details if the user refers to the steps above)`
+      `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+      `> (The system will automatically re-inject details if the user refers to the steps above)`
     ].join('\n');
 
     const prunedSet = new Set(prunableTurns);
@@ -1334,7 +1335,7 @@ export class ContextCompactor {
               totalLines: outline.totalLines,
               semanticOutline: outline.summary,
               symbols: topSymbols,
-              hint: '[Content compressed into a semantic outline. Use read_file with startLine/endLine for details]',
+              hint: '[Content compressed into semantic outline. Symbol line numbers reflect snapshot state; always inspect with view_file/read_file before modifying]',
             };
           }
           // Case B: Log chạy lệnh dài -> Giữ Header + Tail của Stack Trace (Phase 2 Hierarchical Pruning)

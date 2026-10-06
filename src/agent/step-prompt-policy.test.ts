@@ -117,7 +117,7 @@ const matrix: MatrixCase[] = [
       harnessProfileName: 'strict-verification',
       hasValidatedHypothesis: true,
     }),
-    playbooks: ['rootCause'],
+    playbooks: ['rootCause', 'verifyDiff'],
     harness: true,
   },
   {

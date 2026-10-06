@@ -1435,7 +1435,10 @@ export class AgentLoop {
 
       this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase);
       this.verificationPolicy.setRequiredRisk(classification.risk);
-      const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll());
+      const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
+        workspaceDir: this._workspace.rootDir,
+        userRequest: turnUserRequest,
+      });
       const gateToolSurface = recommendedToolDecision.toolSurface;
       this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
       const candidateProvider = toolControlMode === 'enforce'
@@ -1935,7 +1938,7 @@ export class AgentLoop {
         try {
           recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
             topK: 2,
-            minScore: 0.55,
+            minScore: 0.65,
             activeFiles: [
               ...(activeTask?.readSet || []),
               ...(activeTask?.writeSet || []),

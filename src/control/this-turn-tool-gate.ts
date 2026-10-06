@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { ToolDefinition } from '../tools/types.js';
 import type { ClassificationDecision, ControlRisk } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
+import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
+import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 
 const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
@@ -118,10 +120,21 @@ export function calculateAdaptiveToolBudget(classification: ClassificationDecisi
   return Math.min(Math.max(budget, 5), 36);
 }
 
+export interface ThisTurnToolGateOptions {
+  workspaceDir?: string;
+  userRequest?: string;
+  hasCodeGraph?: boolean;
+  isArchitectureQuery?: boolean;
+}
+
 export class ThisTurnToolGate {
   constructor(private readonly descriptors = new ToolDescriptorRegistry()) {}
 
-  decide(classification: ClassificationDecision, tools: ToolDefinition[]): ThisTurnToolDecision {
+  decide(
+    classification: ClassificationDecision,
+    tools: ToolDefinition[],
+    options?: ThisTurnToolGateOptions,
+  ): ThisTurnToolDecision {
     const required = new Set(classification.requiredCapabilities);
     const allowed: ToolDefinition[] = [];
     const denied: string[] = [];
@@ -170,8 +183,16 @@ export class ThisTurnToolGate {
       .filter((tool) => this.descriptors.describe(tool).requiresApproval)
       .map((tool) => tool.name)
       .sort();
-    const phaseExploreToolAnchors = (PHASE_EXPLORE_TOOL_ANCHORS[classification.phase] || [])
-      .filter((name) => names.includes(name));
+    const hasCodeGraph = options?.hasCodeGraph ?? (options?.workspaceDir ? hasCodeGraphIndexSync(options.workspaceDir) : false);
+    const isArchitectureQuery = options?.isArchitectureQuery ?? (options?.userRequest ? detectArchitectureAnalysisIntent(options.userRequest).isArchitectureQuery : false);
+    const allowCodeGraphAnchors = hasCodeGraph || isArchitectureQuery;
+
+    const baseAnchors = PHASE_EXPLORE_TOOL_ANCHORS[classification.phase] || [];
+    const filteredAnchors = allowCodeGraphAnchors
+      ? baseAnchors
+      : baseAnchors.filter((name) => !name.startsWith('codegraph_'));
+
+    const phaseExploreToolAnchors = filteredAnchors.filter((name) => names.includes(name));
 
     const maxToolCalls = calculateAdaptiveToolBudget(classification);
 

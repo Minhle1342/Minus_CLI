@@ -709,7 +709,7 @@ export class TurnMemoryRetriever {
     }
 
     const topK = options?.topK ?? 2;
-    const minScore = options?.minScore ?? 0.55;
+    const minScore = options?.minScore ?? 0.65;
 
     // 1. Tìm kiếm BM25 qua MiniSearch
     const bm25Hits = this.miniSearch.search(query);
@@ -794,7 +794,7 @@ export class TurnMemoryRetriever {
 
     const lines: string[] = [
       `🧠 [SELECTIVELY RECALLED EPISODIC MEMORY - PAST TURNS]:`,
-      `> Context retrieved selectively from previously compacted turns based on high semantic affinity:`,
+      `> Historical background from prior completed turns (for reference only; do not confuse with current user goal):`,
     ];
 
     for (const res of results) {
@@ -942,7 +942,7 @@ export class TurnMemoryRetriever {
     const memoKey = JSON.stringify({
       q: query,
       topK: options?.topK ?? 2,
-      minScore: options?.minScore ?? 0.60,
+      minScore: options?.minScore ?? 0.65,
       files: [...(options?.activeFiles || [])].sort(),
       pv: this.livingPlaybook.getVersion(),
     });

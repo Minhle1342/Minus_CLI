@@ -155,6 +155,9 @@ export class StepPromptPolicy {
       ) {
         selectedPlaybooks.push('dagPlan');
       }
+      if (context.classification.phase === 'verify') {
+        selectedPlaybooks.push('verifyDiff');
+      }
     }
 
     // Attachment neighborhood: @-attached files are anchors — force dependency/blast-radius
