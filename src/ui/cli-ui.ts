@@ -2145,7 +2145,12 @@ export class CLI {
     let telemetryStr = '';
     if (typeof opts.tokens === 'number' && opts.tokens > 0) {
       const tokStr = opts.tokens >= 1000 ? `${(opts.tokens / 1000).toFixed(1)}k tok` : `${opts.tokens} tok`;
-      telemetryStr = ` ${c.dim}· ${tokStr}${c.reset}`;
+      if (typeof opts.cachedTokens === 'number' && opts.cachedTokens > 0) {
+        const cachePct = Math.min(100, Math.round((opts.cachedTokens / opts.tokens) * 100));
+        telemetryStr = ` ${c.dim}· ${tokStr} (${c.emerald}${cachePct}% cached${c.dim})${c.reset}`;
+      } else {
+        telemetryStr = ` ${c.dim}· ${tokStr}${c.reset}`;
+      }
     }
 
     const toolName = truncateToTerminalWidth(opts.toolName, Math.max(3, Math.floor(width / 3)));

@@ -72,6 +72,7 @@ import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
+import { sanitizeToolResultPayload } from '../tools/tool-output-sanitizer.js';
 import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
@@ -3804,7 +3805,12 @@ export class AgentLoop {
               : {}),
           };
 
-          session.addToolResultWithId(toolName, payloadToRecord, toolCallId);
+          const sanitizedPayloadToRecord = await sanitizeToolResultPayload(
+            toolName,
+            payloadToRecord,
+            { workspaceRoot: this._workspace?.rootDir },
+          );
+          session.addToolResultWithId(toolName, sanitizedPayloadToRecord, toolCallId);
           if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
             && mutationBeforeCommand && !mutationBeforeCommand.hasMutations
             && typeof executionResult.result?.exitCode === 'number') {
