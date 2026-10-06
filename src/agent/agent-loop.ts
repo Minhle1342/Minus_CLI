@@ -35,7 +35,7 @@ import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-r
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
-import { CompletionEvidenceGate, extractCommandString, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
+import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath } from '../skills/verification-policy.js';
 import { shouldPersistReasoning } from './reasoning-persistence.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
@@ -2980,7 +2980,7 @@ export class AgentLoop {
               || getTurnCompletionState(session, turn).hasMutations
               || this.verificationPolicy.hasPendingModifications()
               || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0));
-            let completionEvidence = toolName === 'submit_solution'
+            let completionEvidence = toolName === 'submit_solution' && isCompletionEvidenceGateEnabled()
               ? this.completionEvidenceGate.evaluate(String(toolArgs.summary || ''), session, {
                 turn,
                 codeChangeRequired: originalCodeChangeRequired,
@@ -3075,7 +3075,7 @@ export class AgentLoop {
 
             const submitGateBlocked = toolName === 'submit_solution' && (
               policyCompletion?.allowed !== true
-              || completionEvidence?.allow !== true
+              || (isCompletionEvidenceGateEnabled() && completionEvidence?.allow !== true)
               || !ocrCompletion.allow
             );
             if (submitGateBlocked) {
@@ -4114,7 +4114,7 @@ export class AgentLoop {
           filesModified: Array.from(this.targetFilesModifiedInTurn),
           workspace: this._workspace,
         });
-      const evidenceDecision = (isSubagent || isMockLLM)
+      const evidenceDecision = (isSubagent || isMockLLM || !isCompletionEvidenceGateEnabled())
         ? { allow: true, reasons: [] }
         : this.completionEvidenceGate.evaluate(finalAnswer, session, {
           turn,

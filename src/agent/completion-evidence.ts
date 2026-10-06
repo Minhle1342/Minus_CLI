@@ -165,6 +165,21 @@ export interface CompletionEvidenceDecision {
   recovery?: 'revise-answer' | 'inspect-evidence' | 'execute-task' | 'verify-changes';
 }
 
+/**
+ * Kill-switch for the CompletionEvidenceGate (the [SYSTEM EVIDENCE GATE] block).
+ * `MINUS_COMPLETION_EVIDENCE_GATE=off|0|false|disabled` bypasses both the
+ * final-answer check and the submit_solution check. Any other value (or unset)
+ * keeps the gate active. Other safeguards (VerificationPolicy, CriticGate,
+ * FinalAnswerGuard) are unaffected.
+ */
+export function isCompletionEvidenceGateEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.MINUS_COMPLETION_EVIDENCE_GATE?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return true;
+  return !(raw === 'off' || raw === '0' || raw === 'false' || raw === 'no' || raw === 'disabled');
+}
+
 interface ObservedExecution {
   call: SessionEvent;
   result: SessionEvent;

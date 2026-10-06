@@ -2885,6 +2885,26 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Independent Dream agent uses mistral/codestral-latest with a strict validated JSON contract',
   );
 
+  let malformedDreamAttempts = 0;
+  const malformedDreamProbe = new CodestralDreamAgent({
+    apiKey: 'test-only-key',
+    fetchImpl: (async () => {
+      malformedDreamAttempts++;
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Unable to provide a JSON response.' } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch,
+  });
+  const malformedDreamResult = await malformedDreamProbe.propose({
+    evidence: mockDream.lastInput?.evidence || [],
+    existingMemory: [],
+    maxProposals: 2,
+  });
+  assert(
+    malformedDreamAttempts === 2 && malformedDreamResult.length === 0,
+    'Dream retries malformed Codestral JSON once and safely skips proposals when it remains invalid',
+  );
+
   const dreamApplied = await dreamManager.run({ mode: 'apply', force: true });
   const learnedPackageRule = dreamMemory.retrieve('pnpm package', { minConfidence: 0.7 }).find((item) => item.key === 'package_manager');
   const protectedRule = dreamMemory.retrieve('protected release', { includeContested: true }).find((item) => item.key === 'protected_package_rule');

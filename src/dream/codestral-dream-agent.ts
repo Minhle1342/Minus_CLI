@@ -5,6 +5,8 @@ type FetchLike = typeof fetch;
 
 const CATEGORIES = new Set(['convention', 'architecture', 'gotcha', 'rule', 'insight']);
 
+class InvalidDreamResponseError extends Error {}
+
 function parseJsonObject(raw: string): any {
   const unfenced = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
   try {
@@ -12,9 +14,17 @@ function parseJsonObject(raw: string): any {
   } catch {
     const start = unfenced.indexOf('{');
     const end = unfenced.lastIndexOf('}');
-    if (start < 0 || end <= start) throw new Error('Codestral Dream returned non-JSON output.');
-    return JSON.parse(unfenced.slice(start, end + 1));
+    if (start < 0 || end <= start) throw new InvalidDreamResponseError('Codestral Dream returned non-JSON output.');
+    try {
+      return JSON.parse(unfenced.slice(start, end + 1));
+    } catch {
+      throw new InvalidDreamResponseError('Codestral Dream returned malformed JSON output.');
+    }
   }
+}
+
+function isJsonParseError(error: unknown): boolean {
+  return error instanceof InvalidDreamResponseError;
 }
 
 function canonicalKey(value: unknown): string {
@@ -51,32 +61,41 @@ Extract only durable, reusable project knowledge. Exclude transient task state, 
 Every proposal must cite evidenceIds from the supplied evidence. Prefer verified tool/audit evidence or repeated human evidence.
 Return only a JSON object: {"proposals":[{"action":"remember|forget","key":"snake_case","insight":"...","category":"convention|architecture|gotcha|rule|insight","confidence":0.0,"evidenceIds":["..."],"tags":["..."],"reason":"..."}]}.
 Use forget only for demonstrably stale/false existing memory. Maximum ${input.maxProposals} proposals.`;
-    const response = await this.fetchImpl(this.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        temperature: 0.1,
-        max_tokens: 3500,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: JSON.stringify(input) },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Codestral Dream request failed (${response.status}): ${errorText.slice(0, 300)}`);
+    let parsed: any;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await this.fetchImpl(this.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          temperature: 0.1,
+          max_tokens: 3500,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: JSON.stringify(input) },
+          ],
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Codestral Dream request failed (${response.status}): ${errorText.slice(0, 300)}`);
+      }
+      const payload = await response.json() as any;
+      const raw = payload?.choices?.[0]?.message?.content;
+      if (typeof raw !== 'string') throw new Error('Codestral Dream response did not contain message content.');
+      try {
+        parsed = parseJsonObject(raw);
+        break;
+      } catch (error) {
+        if (!isJsonParseError(error)) throw error;
+        if (attempt === 1) return [];
+      }
     }
-    const payload = await response.json() as any;
-    const raw = payload?.choices?.[0]?.message?.content;
-    if (typeof raw !== 'string') throw new Error('Codestral Dream response did not contain message content.');
-    const parsed = parseJsonObject(raw);
     const allowedEvidence = new Set(input.evidence.map((item) => item.id));
     const proposals = Array.isArray(parsed?.proposals) ? parsed.proposals : [];
     return proposals.slice(0, input.maxProposals).flatMap((item: any) => {
