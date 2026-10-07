@@ -82,7 +82,7 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
         cacheHitRate={state.tokens.cacheHitRate}
       />
 
-      {/* 3. Live Reasoning Box (System 2 CoT) */}
+      {/* 3. Live Reasoning Box (System 2 CoT & LLM Reconnecting State) */}
       <LiveReasoningBox
         reasoning={state.liveReasoning}
         isCollapsed={state.isReasoningCollapsed}
@@ -91,6 +91,7 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
         thinkingStartedAt={state.thinkingStartedAt}
         isAborting={state.isAborting}
         reasoningInterrupted={state.reasoningInterrupted}
+        retryInfo={state.retryInfo}
       />
 
       {/* 4. Reactive Step Stream (One-Liner Log) */}
@@ -98,16 +99,6 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
 
       {/* 5. Active Diff View (if inspecting a patch or mutation) */}
       {state.activeDiff && <DiffPreviewBox diff={state.activeDiff} />}
-
-      {/* 6. Retry Information Banner (Exponential Backoff Feedback) */}
-      {state.retryInfo && (
-        <Box paddingX={1} marginY={0}>
-          <Text color={inkColors.warning}>
-            Đang thử lại {state.retryInfo.attempt}/{state.retryInfo.maxRetries} sau {(state.retryInfo.delayMs / 1000).toFixed(1)}s
-            {state.retryInfo.message ? ` (${state.retryInfo.message})` : ''}
-          </Text>
-        </Box>
-      )}
 
       {/* 7. Aborting Indicator Banner */}
       {state.isAborting && (

@@ -64,6 +64,12 @@ export interface KernelEvents {
     step: number;
     endedAt: number;
   }) => void;
+  'model:retry': (payload: {
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    message?: string;
+  } | null) => void;
   'model:token': (token: string) => void;
   'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
   'model:request_telemetry': (telemetry: {

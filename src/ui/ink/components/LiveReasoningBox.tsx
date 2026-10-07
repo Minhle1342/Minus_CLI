@@ -12,6 +12,12 @@ interface LiveReasoningBoxProps {
   thinkingStartedAt?: number | null;
   isAborting?: boolean;
   reasoningInterrupted?: boolean;
+  retryInfo?: {
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    message?: string;
+  } | null;
 }
 
 export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
@@ -22,7 +28,27 @@ export const LiveReasoningBox: React.FC<LiveReasoningBoxProps> = ({
   thinkingStartedAt,
   isAborting = false,
   reasoningInterrupted = false,
+  retryInfo,
 }) => {
+  const isRetrying = status === 'retrying' || Boolean(retryInfo);
+
+  if (isRetrying) {
+    const attempt = retryInfo?.attempt ?? 1;
+    const maxRetries = retryInfo?.maxRetries ?? 3;
+    const delaySec = retryInfo?.delayMs ? (retryInfo.delayMs / 1000).toFixed(1) : undefined;
+    const delayText = delaySec ? ` sau ${delaySec}s` : '';
+    const msg = retryInfo?.message ? ` (${retryInfo.message})` : '';
+
+    return (
+      <Box paddingX={1} marginY={0} gap={1}>
+        <Text color="yellow" bold>🔄 Đang thử kết nối lại với LLM:</Text>
+        <Text color="yellow">
+          {`lần ${attempt}/${maxRetries}${delayText}${msg}…`}
+        </Text>
+      </Box>
+    );
+  }
+
   const hasReasoning = Boolean(reasoning && reasoning.trim().length > 0);
 
   if (!hasReasoning && !(isThinking && status === 'thinking') && !reasoningInterrupted) {

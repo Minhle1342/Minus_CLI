@@ -166,7 +166,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       if (state.isAborting) return state;
       return {
         ...state,
-        status: 'thinking',
+        status: state.retryInfo ? 'retrying' : 'thinking',
         isThinking: true,
         thinkingStartedAt: action.startedAt,
         liveReasoning: '',
@@ -187,6 +187,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       const boundedReasoning = combined.length > 4000 ? combined.slice(-3500) : combined;
       return {
         ...state,
+        status: 'thinking',
+        retryInfo: null,
         liveReasoning: boundedReasoning,
       };
     }
@@ -285,6 +287,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         retryInfo: action.retryInfo,
+        status: action.retryInfo
+          ? 'retrying'
+          : (state.isThinking ? 'thinking' : (state.status === 'retrying' ? 'thinking' : state.status)),
       };
     default:
       return state;
@@ -366,6 +371,9 @@ export class TuiStore extends EventEmitter {
 
     const onModelThought = (thought: string) => {
       if (this.state.isAborting || this.state.reasoningInterrupted) return;
+      if (this.state.status === 'retrying' || this.state.retryInfo) {
+        this.dispatch({ type: 'RETRY_UPDATE', retryInfo: null });
+      }
       batcher.push(thought);
     };
 

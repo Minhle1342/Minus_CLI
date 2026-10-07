@@ -1216,6 +1216,47 @@ export class CLI {
       process.stdout.write('\r\x1b[2K');
     }
     this.thinkingSpinnerVisible = false;
+    this.clearModelRetry();
+  }
+
+  private static retryBannerVisible = false;
+
+  static renderModelRetry(payload: { attempt: number; maxRetries: number; delayMs: number; message?: string }): void {
+    if (this.thinkingSpinnerTimer) {
+      clearInterval(this.thinkingSpinnerTimer);
+      this.thinkingSpinnerTimer = undefined;
+    }
+    const delaySec = (payload.delayMs / 1000).toFixed(1);
+    const msg = payload.message ? ` (${payload.message})` : '';
+    const line = `  ${c.yellow}🔄 Đang thử kết nối lại với LLM${c.reset} ${c.mutedText}(lần ${payload.attempt}/${payload.maxRetries} sau ${delaySec}s${msg})${c.reset}`;
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r\x1b[2K${line}`);
+    } else {
+      console.log(line);
+    }
+    this.retryBannerVisible = true;
+  }
+
+  static clearModelRetry(): void {
+    if (!this.retryBannerVisible) return;
+    if (process.stdout.isTTY) {
+      process.stdout.write('\r\x1b[2K');
+    }
+    this.retryBannerVisible = false;
+    if (this.thinkingSpinnerVisible && !this.thinkingSpinnerTimer) {
+      const render = () => {
+        const elapsed = ((Date.now() - this.thinkingSpinnerStartedAt) / 1000).toFixed(1);
+        const frame = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][this.thinkingSpinnerFrame];
+        const line = `  ${c.purple}${frame}${c.reset} ${c.yellow}Thinking${c.reset} ${c.mutedText}(${elapsed}s)${c.reset}`;
+        if (process.stdout.isTTY) {
+          process.stdout.write(`\r\x1b[2K${line}`);
+        }
+        this.thinkingSpinnerFrame = (this.thinkingSpinnerFrame + 1) % 10;
+      };
+      if (process.stdout.isTTY) {
+        this.thinkingSpinnerTimer = setInterval(render, 80);
+      }
+    }
   }
 
   private static toolDotTimer?: ReturnType<typeof setInterval>;

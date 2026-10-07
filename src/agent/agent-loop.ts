@@ -2481,6 +2481,9 @@ export class AgentLoop {
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
         signal: options?.signal,
         allowedFunctionNames: visibleToolNames,
+        onRetry: (retryPayload: any) => {
+          this.kernel?.ctx.events.emit('model:retry', retryPayload);
+        },
       };
       const requestStartedAt = Date.now();
       let firstTokenAt: number | undefined;
@@ -2520,7 +2523,13 @@ export class AgentLoop {
       try {
         if (typeof this.llm.generateStream === 'function') {
           response = await this.llm.generateStream(session, activeToolDeclarations, {
+            onRetry: (retryPayload: any) => {
+              this.kernel?.ctx.events.emit('model:retry', retryPayload);
+            },
             onThoughtToken: (token: string) => {
+              if (firstTokenAt === undefined) {
+                this.kernel?.ctx.events.emit('model:retry', null);
+              }
               firstTokenAt ??= Date.now();
               this.kernel?.ctx.events.emit('model:thought', token);
               accumulatedThought += token;
@@ -2547,6 +2556,9 @@ export class AgentLoop {
               }
             },
             onContentToken: (token: string) => {
+              if (firstTokenAt === undefined) {
+                this.kernel?.ctx.events.emit('model:retry', null);
+              }
               firstTokenAt ??= Date.now();
               this.kernel?.ctx.events.emit('model:token', token);
             },
@@ -2573,6 +2585,7 @@ export class AgentLoop {
           response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
         }
       } finally {
+        this.kernel?.ctx.events.emit('model:retry', null);
         this.kernel?.ctx.events.emit('model:thinking:end', {
           agentId: this.agentId,
           turn,

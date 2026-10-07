@@ -98,4 +98,70 @@ describe('Ink reasoning cancellation UX', () => {
     assert.equal(pending.status, 'error');
     assert.equal(pending.reasoningInterrupted, false, 'a failed turn must not claim successful cancellation');
   });
+
+  it('distinctly separates thinking state and reconnecting retry state on TUI', () => {
+    const events = new EventEmitter();
+    const store = new TuiStore();
+    const unbind = store.bindKernel({ ctx: { events } } as any);
+
+    try {
+      events.emit('step:before', 1, 3);
+      events.emit('model:thinking:start', { startedAt: Date.now() });
+
+      // 1. Thinking state: chưa có token, đang hiển thị spinner Thinking
+      assert.equal(store.getState().status, 'thinking');
+      assert.equal(store.getState().isThinking, true);
+      assert.equal(store.getState().retryInfo, null);
+      let rendered = visibleText(LiveReasoningBox({
+        reasoning: '',
+        isCollapsed: false,
+        status: store.getState().status,
+        isThinking: store.getState().isThinking,
+        retryInfo: store.getState().retryInfo,
+      }));
+      assert.match(rendered, /Thinking:/);
+      assert.doesNotMatch(rendered, /Đang thử kết nối lại/);
+
+      // 2. Retrying state: LLM gặp lỗi mạng/rate limit và bắt đầu retry kết nối lại
+      events.emit('model:retry', {
+        attempt: 1,
+        maxRetries: 3,
+        delayMs: 2000,
+        message: 'Rate limit exceeded',
+      });
+
+      assert.equal(store.getState().status, 'retrying');
+      assert.ok(store.getState().retryInfo);
+      assert.equal(store.getState().retryInfo?.attempt, 1);
+      rendered = visibleText(LiveReasoningBox({
+        reasoning: '',
+        isCollapsed: false,
+        status: store.getState().status,
+        isThinking: store.getState().isThinking,
+        retryInfo: store.getState().retryInfo,
+      }));
+      // Phải hiển thị rõ đang thử kết nối lại và KHÔNG hiển thị Thinking
+      assert.match(rendered, /Đang thử kết nối lại với LLM/);
+      assert.match(rendered, /lần 1\/3 sau 2\.0s/);
+      assert.doesNotMatch(rendered, /Thinking:/);
+
+      // 3. Reconnect thành công: nhận được token suy nghĩ đầu tiên
+      events.emit('model:thought', 'Model is now thinking after successful reconnect.');
+      assert.equal(store.getState().status, 'thinking');
+      assert.equal(store.getState().retryInfo, null);
+      events.emit('model:thinking:end');
+      rendered = visibleText(LiveReasoningBox({
+        reasoning: store.getState().liveReasoning,
+        isCollapsed: false,
+        status: store.getState().status,
+        isThinking: store.getState().isThinking,
+        retryInfo: store.getState().retryInfo,
+      }));
+      assert.match(rendered, /REASONING TRACE/);
+      assert.match(rendered, /Model is now thinking/);
+      assert.doesNotMatch(rendered, /Đang thử kết nối lại/);
+    } finally {
+      unbind();
+    }
+  });
 });

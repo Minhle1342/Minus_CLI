@@ -1,6 +1,6 @@
 import { LLMUsage } from '../../llm/gemini.js';
 
-export type AgentUIStatus = 'idle' | 'thinking' | 'executing_tool' | 'completed' | 'error';
+export type AgentUIStatus = 'idle' | 'thinking' | 'retrying' | 'executing_tool' | 'completed' | 'error';
 export type UIWorkflowPhase = 'EXPLORE' | 'IMPLEMENT' | 'VERIFY' | 'RELEASE' | 'IDLE';
 
 export interface TuiStepItem {

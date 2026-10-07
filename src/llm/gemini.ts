@@ -10,6 +10,7 @@ export interface StreamCallbacks {
   onThoughtToken?: (token: string) => void;
   onContentToken?: (token: string) => void;
   onToolCallEarly?: (toolCall: { id?: string; name: string; args: Record<string, any> }) => void;
+  onRetry?: (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string }) => void;
 }
 
 export interface LLMUsage {
@@ -41,6 +42,7 @@ export interface LLMRequestOptions {
   stepSuffixes?: Map<number, string> | Record<number, string>;
   allowedFunctionNames?: string[];
   functionCallingMode?: 'AUTO' | 'ANY' | 'NONE';
+  onRetry?: (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string }) => void;
 }
 
 export type LLMFinishReason =
@@ -364,6 +366,16 @@ export class GeminiLLM {
         maxDelayMs: 12000,
         jitterMs: 500,
         signal: request?.signal,
+        onRetry: (attempt, delayMs, classified) => {
+          const payload = {
+            attempt,
+            maxRetries: 3,
+            delayMs,
+            message: classified?.message,
+          };
+          callbacks?.onRetry?.(payload);
+          request?.onRetry?.(payload);
+        },
       },
     );
     try {

@@ -651,8 +651,16 @@ async function main() {
   const onModelThinkingEnd = ({ agentId }: { agentId: string }) => {
     if (interactiveAgentIds.has(agentId)) CLI.stopThinkingSpinner();
   };
+  const onModelRetry = (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string } | null) => {
+    if (payload) {
+      CLI.renderModelRetry(payload);
+    } else {
+      CLI.clearModelRetry();
+    }
+  };
   kernel.ctx.events.on('model:thinking:start', onModelThinkingStart);
   kernel.ctx.events.on('model:thinking:end', onModelThinkingEnd);
+  kernel.ctx.events.on('model:retry', onModelRetry);
 
   let sessionCount = 0;
 
@@ -3109,7 +3117,9 @@ ${planPrompt}`;
   } finally {
     kernel.ctx.events.off('model:thinking:start', onModelThinkingStart);
     kernel.ctx.events.off('model:thinking:end', onModelThinkingEnd);
+    kernel.ctx.events.off('model:retry', onModelRetry);
     CLI.stopThinkingSpinner();
+    CLI.clearModelRetry();
     input.removeListener('keypress', handleInputKeypress);
     slashHints.dispose();
     rl.close();
