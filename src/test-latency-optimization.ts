@@ -6,7 +6,7 @@ import { LatencyOrchestrator, resolveModelLatencyProfile } from './agent/latency
 import { ContextCompactor } from './agent/context-compactor.js';
 import { AgentLoop } from './agent/agent-loop.js';
 import { DynamicContextCache } from './agent/dynamic-context-cache.js';
-import { PipelinedToolDispatcher } from './agent/pipelined-tool-dispatcher.js';
+import { PipelinedToolDispatcher, extractThoughtPaths, predictObservationCandidates } from './agent/pipelined-tool-dispatcher.js';
 import { partitionToolCalls, type ScheduledToolCall } from './agent/tool-execution-scheduler.js';
 import { AnthropicLLM } from './llm/anthropic.js';
 import { GeminiLLM } from './llm/gemini.js';
@@ -466,6 +466,58 @@ async function main(): Promise<void> {
   assert.equal(awaited.executionResult.result.success, true);
   assert.equal(awaited.executionResult.result.content, 'mock content from src/main.ts');
   assert(pipelinedDispatcher.getTelemetry().pipelinedHits >= 1, 'telemetry should track pipelined hits');
+
+  // 6.1. Test PASTE (Pattern-Aware Speculative Tool Pre-Execution)
+  // Test thought-stream path extraction
+  const extractedPaths = extractThoughtPaths('Let me inspect src/cli.ts and then read file "package.json" to verify dependencies.');
+  assert(extractedPaths.includes('src/cli.ts'), 'extractThoughtPaths should extract src/cli.ts');
+  assert(extractedPaths.includes('package.json'), 'extractThoughtPaths should extract package.json');
+
+  // Test inter-step observation candidate prediction
+  const observationCandidates = predictObservationCandidates('grep_search', {
+    matches: [
+      { file: 'src/cli.ts', line: 10 },
+      { file: 'src/cli.ts', line: 25 },
+      { file: 'package.json', line: 1 },
+    ],
+  });
+  assert.equal(observationCandidates.length, 2);
+  assert.equal(observationCandidates[0].toolName, 'read_file');
+  assert.equal(observationCandidates[0].args.path, 'src/cli.ts');
+
+  // Test speculative dispatch and instant hit
+  const specDispatched = pipelinedDispatcher.dispatchSpeculative(
+    'read_file',
+    { path: 'package.json' },
+    stepToolRunner,
+    { sessionId: 'test', turn: 1 },
+    'thought-stream-intent',
+  );
+  assert.equal(specDispatched, true, 'read_file package.json should be speculatively dispatched');
+
+  // Wait a small moment to allow background execution
+  await new Promise((r) => setTimeout(r, 25));
+
+  // Actual LLM tool execution matches prediction -> 0ms speculative hit
+  const specAwaited = await pipelinedDispatcher.awaitOrExecute(
+    'read_file',
+    { path: 'package.json' },
+    stepToolRunner,
+    { sessionId: 'test', turn: 1 },
+  );
+  assert.equal(specAwaited.wasPipelined, true, 'speculative execution should be marked as pipelined');
+  assert(pipelinedDispatcher.getTelemetry().speculativeHits >= 1, 'speculative hits must be tracked in telemetry');
+
+  // Test speculative miss cleanup (Zero side-effects)
+  pipelinedDispatcher.dispatchSpeculative(
+    'read_file',
+    { path: 'unused-speculative-file.ts' },
+    stepToolRunner,
+    { sessionId: 'test', turn: 1 },
+    'inter-step-pattern',
+  );
+  pipelinedDispatcher.cancelUnmatchedSpeculative();
+  assert(pipelinedDispatcher.getTelemetry().speculativeMisses >= 1, 'unmatched speculative tasks must be cleanly discarded');
 
   // 7. Test Speculative Diagnostics in CodeSyntaxValidator
   const tempSpecDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-spec-diag-'));

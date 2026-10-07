@@ -68,7 +68,7 @@ import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
 import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
-import { PipelinedToolDispatcher } from './pipelined-tool-dispatcher.js';
+import { PipelinedToolDispatcher, extractThoughtPaths, predictObservationCandidates } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
@@ -2370,12 +2370,61 @@ export class AgentLoop {
         step,
         startedAt: requestStartedAt,
       });
+
+      // PASTE: Inter-Step Pattern Prediction
+      if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+        const speculativeCandidates = predictObservationCandidates(
+          this.lastToolExecution?.toolName,
+          this.lastToolExecution?.result,
+          this._workspace.rootDir,
+        );
+        for (const candidate of speculativeCandidates) {
+          this.pipelinedDispatcher.dispatchSpeculative(
+            candidate.toolName,
+            candidate.args,
+            this.toolRunner,
+            {
+              sessionId: session.id,
+              agentId: this.agentId,
+              turn,
+              userRequest: turnUserRequest,
+              signal: options?.signal,
+            },
+            candidate.source,
+          );
+        }
+      }
+
+      let accumulatedThought = '';
+      let thoughtTokenCount = 0;
       try {
         if (typeof this.llm.generateStream === 'function') {
           response = await this.llm.generateStream(session, activeToolDeclarations, {
             onThoughtToken: (token: string) => {
               firstTokenAt ??= Date.now();
               this.kernel?.ctx.events.emit('model:thought', token);
+              accumulatedThought += token;
+              thoughtTokenCount++;
+              if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
+                if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+                  const candidatePaths = extractThoughtPaths(accumulatedThought, this._workspace.rootDir);
+                  for (const candidatePath of candidatePaths) {
+                    this.pipelinedDispatcher.dispatchSpeculative(
+                      'read_file',
+                      { path: candidatePath },
+                      this.toolRunner,
+                      {
+                        sessionId: session.id,
+                        agentId: this.agentId,
+                        turn,
+                        userRequest: turnUserRequest,
+                        signal: options?.signal,
+                      },
+                      'thought-stream-intent',
+                    );
+                  }
+                }
+              }
             },
             onContentToken: (token: string) => {
               firstTokenAt ??= Date.now();
