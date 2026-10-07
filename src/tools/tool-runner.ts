@@ -397,9 +397,10 @@ export class ToolRunner {
     const guardianPreCheck = this.guardian.preCallValidate(toolName, args, tool.parameters);
     if (!guardianPreCheck.valid) {
       const errRes = { error: guardianPreCheck.error, errorCode: guardianPreCheck.errorCode || 'INVALID_ARGS' };
-      // Chính sách từ chối (Policy Denial / Pre-Mutation Gate / Post-Submission Gate) KHÔNG tính vào chỉ số lỗi kỹ thuật của công cụ
-      const isPolicyDenial = guardianPreCheck.errorCode === 'UNVERIFIED_MUTATION_BLOCKED'
-        || guardianPreCheck.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED';
+      // Policy denial (Post-Submission Gate) is not counted as a technical tool error.
+      // Process/cognition gates (UNVERIFIED_MUTATION / CASCADE / REPRODUCTION / WEAK_SUMMARY)
+      // are now non-blocking Strong Advisories, so they never reach this branch.
+      const isPolicyDenial = guardianPreCheck.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED';
       const diagnosis = isPolicyDenial
         ? classifyToolFailure(toolName, errRes.error, errRes)
         : this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);

@@ -46,6 +46,14 @@ export interface StepPromptPolicyContext {
   hasAttachments?: boolean;
   harnessProfileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
   candidates: StepPromptCandidates;
+  /** Dynamic Strong Advisory signals (downgraded from hard blocks). */
+  cascadeFrozen?: boolean;
+  cascadeReason?: string;
+  evidenceScore?: number;
+  evidenceThreshold?: number;
+  evidenceReasons?: string[];
+  reproductionEnforced?: boolean;
+  hasPostFixPass?: boolean;
 }
 
 export interface StepPromptDecision {
@@ -62,6 +70,8 @@ export interface StepPromptDecision {
   advicePrompt: string;
   harnessGuidance: string;
   scaffoldPrompt: string;
+  /** Dynamic non-blocking Strong Advisory (always injected when non-empty, any mode). */
+  strongAdvisoryPrompt: string;
   estimatedTokensBefore: number;
   estimatedTokensAfter: number;
   estimatedTokensSaved: number;
@@ -84,6 +94,55 @@ function stringifyResult(result: unknown): string {
 
 function isMutationTool(toolName?: string): boolean {
   return Boolean(toolName && /^(?:apply_patch|replace_text|replace_file_content|multi_replace_file_content|write_file|write_to_file|create_file|delete_file|move_file)$/.test(toolName));
+}
+
+const STRONG_ADVISORY_HEADER = '[STRONG ADVISORY — ACTION GUIDELINE (non-blocking, tool still executes)]';
+
+function extractCarriedAdvisories(lastToolResult: unknown): string[] {
+  if (!lastToolResult || typeof lastToolResult !== 'object') return [];
+  const rec = lastToolResult as Record<string, unknown>;
+  const warnings = (rec as { _guardian_warnings?: unknown })._guardian_warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings
+    .filter((w): w is string => typeof w === 'string')
+    .filter((w) => w.includes('STRONG ADVISORY'))
+    .slice(-2);
+}
+
+/** Dynamic Strong Advisory for CASCADE + UNVERIFIED_MUTATION (plus reproduction carry-forward). Only emit what is currently missing. */
+function buildStrongAdvisoryPrompt(context: StepPromptPolicyContext): { text: string; codes: string[] } {
+  if (context.hasSubmittedSolution) return { text: '', codes: [] };
+  const blocks: string[] = [];
+  const codes: string[] = [];
+  for (const carried of extractCarriedAdvisories(context.lastToolResult)) {
+    blocks.push(carried);
+    codes.push('CARRIED_GUARDIAN_ADVISORY');
+  }
+  if (context.cascadeFrozen) {
+    const detail = context.cascadeReason ? ` ${context.cascadeReason}.` : '';
+    blocks.push(
+      `${STRONG_ADVISORY_HEADER}\n[CASCADE_REPAIR_ADVISORY]: Repeated fixes keep failing on the same error signature.${detail} Stop editing blindly — revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to get a genuinely new signal. Recommended: update_plan_task first, mutate after.`,
+    );
+    codes.push('CASCADE_REPAIR_ADVISORY');
+  }
+  const evidenceTask = ['bugfix', 'refactor', 'security'].includes(String(context.classification.taskClass));
+  const score = context.evidenceScore ?? 0;
+  const threshold = Math.max(1, context.evidenceThreshold ?? 3);
+  if (evidenceTask && !context.hasValidatedHypothesis && score < threshold) {
+    const reasons = context.evidenceReasons?.length ? ` Current evidence: ${context.evidenceReasons.join(', ')}.` : '';
+    blocks.push(
+      `${STRONG_ADVISORY_HEADER}\n[UNVERIFIED_MUTATION_ADVISORY]: Evidence is still thin (${score}/${threshold}, risk ${context.classification.risk}) — read the exact target and run formulate_and_verify_hypothesis before broad edits.${reasons} Recommended: read_file the target before mutating.`,
+    );
+    codes.push('UNVERIFIED_MUTATION_ADVISORY');
+  }
+  if (context.reproductionEnforced && !context.hasPostFixPass && context.classification.taskClass === 'bugfix') {
+    blocks.push(
+      `${STRONG_ADVISORY_HEADER}\n[REPRODUCTION_VERIFICATION_ADVISORY]: Bugfix has no post-fix PASS yet. Run the reproduction test and prove PASS before submit_solution; if the infra is broken, state the reason explicitly in the summary. Recommended: run_command (reproduction test).`,
+    );
+    codes.push('REPRODUCTION_VERIFICATION_ADVISORY');
+  }
+  if (blocks.length === 0) return { text: '', codes: [] };
+  return { text: blocks.join('\n\n'), codes: [...new Set(codes)] };
 }
 
 export function resolveStepPromptGatingMode(
@@ -264,6 +323,11 @@ export class StepPromptPolicy {
     const includePlanContext = context.planRequired || (context.hasPlan && context.planIncomplete);
     if (includePlanContext) reasonCodes.push(context.planBlocked ? 'PLAN_BLOCKED_CONTEXT' : 'ACTIVE_PLAN_CONTEXT');
 
+    const strongAdvisory = buildStrongAdvisoryPrompt(context);
+    if (strongAdvisory.text) {
+      for (const code of strongAdvisory.codes) reasonCodes.push(`STRONG_ADVISORY_${code}`);
+    }
+
     const targetPlaybookPrompt = selectedPlaybooks
       .map((id) => (id === 'verifyDiff' ? resolveVerifyPlaybookPrompt(context.classification.risk) : TOOL_PLAYBOOK_PROMPTS[id]))
       .join('\n\n');
@@ -282,6 +346,7 @@ export class StepPromptPolicy {
       includeAdvice ? context.candidates.advicePrompt : '',
       includeHarnessGuidance ? context.candidates.harnessGuidance : '',
       includeScaffold ? context.candidates.scaffoldPrompt : '',
+      strongAdvisory.text,
     ]);
     const injectedAfterTokens = useLegacyInjection ? beforeTokens : targetAfterTokens;
     const reportedAfterTokens = mode === 'off' || conservativeFallback
@@ -311,6 +376,7 @@ export class StepPromptPolicy {
       scaffoldPrompt: useLegacyInjection
         ? (context.candidates.legacyScaffoldPrompt || '')
         : includeScaffold ? context.candidates.scaffoldPrompt : '',
+      strongAdvisoryPrompt: strongAdvisory.text,
       estimatedTokensBefore: beforeTokens,
       estimatedTokensAfter: reportedAfterTokens,
       estimatedTokensSaved: Math.max(0, beforeTokens - reportedAfterTokens),

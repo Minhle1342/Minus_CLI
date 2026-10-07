@@ -102,6 +102,70 @@ export interface GuardianPreCallResult {
   reason?: string;
   isUnreliable?: boolean;
   suggestedAlternative?: string;
+  /** Non-blocking Strong Advisory codes (downgraded from hard blocks). */
+  advisoryCodes?: string[];
+}
+
+/**
+ * Strong Advisory (non-blocking) — strong action guideline.
+ * 4 process/cognition gates have been downgraded from hard block to advisory in prompt + tool warning:
+ * UNVERIFIED_MUTATION / CASCADE_REPAIR / REPRODUCTION_VERIFICATION / WEAK_SUBMISSION_SUMMARY.
+ * Safety gates (PAYLOAD_TOO_LARGE, POST_SUBMISSION, catastrophic deletion, push to main, sandbox) stay hard block.
+ */
+export const STRONG_ADVISORY_HEADER = '[STRONG ADVISORY — ACTION GUIDELINE (non-blocking, tool still executes)]';
+
+export type StrongAdvisoryCode =
+  | 'UNVERIFIED_MUTATION_ADVISORY'
+  | 'CASCADE_REPAIR_ADVISORY'
+  | 'REPRODUCTION_VERIFICATION_ADVISORY'
+  | 'WEAK_SUBMISSION_SUMMARY_ADVISORY';
+
+export function formatStrongAdvisory(code: StrongAdvisoryCode, body: string, remediation?: string): string {
+  const rem = remediation ? ` Recommended: ${remediation}.` : '';
+  return `${STRONG_ADVISORY_HEADER}\n[${code}]: ${body}.${rem}`;
+}
+
+/**
+ * Build dynamic Strong Advisory items from PreMutationGateContext (no specific tool call needed).
+ * Used for per-step contextual prompt — only emit currently missing items, no spam.
+ */
+export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[] {
+  if (!gate) return [];
+  const items: string[] = [];
+  if (gate.cascadeFrozen) {
+    const detail = gate.cascadeReason ? ` ${gate.cascadeReason}.` : '';
+    items.push(formatStrongAdvisory(
+      'CASCADE_REPAIR_ADVISORY',
+      `Repeated fixes keep failing on the same error signature.${detail} Stop editing blindly — revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to get a genuinely new signal`,
+      'run "update_plan_task" first, mutate after',
+    ));
+  }
+  const reproEnforced = Boolean(gate.reproductionStatus?.enforceReproductionPass);
+  if (reproEnforced && !gate.reproductionStatus?.hasPostFixPass) {
+    items.push(formatStrongAdvisory(
+      'REPRODUCTION_VERIFICATION_ADVISORY',
+      'Bugfix has no post-fix PASS yet. Run the reproduction test and prove PASS before submit_solution; if the infra is broken, state the reason explicitly in the summary',
+      'run_command (reproduction test)',
+    ));
+  }
+  const evidenceTask = Boolean(
+    gate.isBugfixTask || gate.taskIntent === 'bugfix'
+    || gate.taskClass === 'bugfix' || gate.taskClass === 'refactor' || gate.taskClass === 'security',
+  );
+  if (evidenceTask && gate.evidenceGateMode !== 'off' && !gate.hasValidatedHypothesis) {
+    const score = gate.evidenceScore ?? 0;
+    const threshold = Math.max(1, gate.evidenceThreshold ?? 3);
+    const risk = gate.risk || 'R2';
+    if (score < threshold) {
+      const reasons = gate.evidenceReasons?.length ? ` Current evidence: ${gate.evidenceReasons.join(', ')}.` : '';
+      items.push(formatStrongAdvisory(
+        'UNVERIFIED_MUTATION_ADVISORY',
+        `Evidence is still thin (${score}/${threshold}, risk ${risk}) — read the exact target and run formulate_and_verify_hypothesis before broad edits.${reasons}`,
+        'read_file the target before mutating',
+      ));
+    }
+  }
+  return items;
 }
 
 export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
@@ -491,7 +555,10 @@ export class ToolUseGuardian {
       };
     }
 
-    // 2b. Tool-Use Guardian: Semantic check for submit_solution summary (Reject pseudo-completion stubs)
+    // 2b. Tool-Use Guardian: Semantic check for submit_solution summary (downgraded: Strong Advisory, non-blocking)
+    // Collect advisories instead of hard blocking — the tool still runs, advisories flow into warnings + contextual prompt.
+    const strongAdvisories: string[] = [];
+    const advisoryCodes: StrongAdvisoryCode[] = [];
     if (toolName === 'submit_solution' && typeof args.summary === 'string') {
       const summary = args.summary.trim();
       const normalizedSummary = normalizeForMatching(summary);
@@ -508,17 +575,12 @@ export class ToolUseGuardian {
 
       const isPseudoClaim = !hasSubstance && (isEvasivePhrase || (!hasActionVerb && summary.length < 140));
       if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
-        const errorMsg = 'Tool "submit_solution" rejected by Tool-Use Guardian: the "summary" field contains only a hollow completion notice ("Answer provided...") with no root-cause analysis, source location, or concrete solution. Put all technical findings into summary or answer the user in detail.';
-        return {
-          valid: false,
-          allowed: false,
-          coercedArgs: args,
-          wasCoerced: false,
-          coercedKeys: [],
-          error: errorMsg,
-          errorCode: 'INVALID_SUMMARY_CONTENT',
-          reason: errorMsg,
-        };
+        strongAdvisories.push(formatStrongAdvisory(
+          'WEAK_SUBMISSION_SUMMARY_ADVISORY',
+          'The submit_solution summary is still hollow ("Answer provided...") — missing root cause, code location, and concrete fix. Add the technical findings to the summary',
+          'add root-cause + filesModified + evidence',
+        ));
+        advisoryCodes.push('WEAK_SUBMISSION_SUMMARY_ADVISORY');
       }
 
       // SWE-Reasoner Execution-Verified Gating (Phase 1):
@@ -543,18 +605,12 @@ export class ToolUseGuardian {
         !isNonCodeTask &&
         !userExempted
       ) {
-        const errorMsg = 'Tool "submit_solution" blocked by the Reproduction Verification Gate (SWE-Reasoner): bugfix tasks require execution proof that the bug-reproduction test passes after the fix (post-fix PASS). Run the verification test before submitting the solution.';
-        return {
-          valid: false,
-          allowed: false,
-          coercedArgs: args,
-          wasCoerced: false,
-          coercedKeys: [],
-          error: errorMsg,
-          errorCode: 'REPRODUCTION_VERIFICATION_REQUIRED',
-          reason: errorMsg,
-          suggestedAlternative: 'run_command',
-        };
+        strongAdvisories.push(formatStrongAdvisory(
+          'REPRODUCTION_VERIFICATION_ADVISORY',
+          'Bugfix has no post-fix PASS evidence yet. Run the reproduction test before submit_solution; if the infra is broken, state the reason explicitly in the summary',
+          'run_command (reproduction test)',
+        ));
+        advisoryCodes.push('REPRODUCTION_VERIFICATION_ADVISORY');
       }
     }
 
@@ -634,26 +690,18 @@ export class ToolUseGuardian {
     const targetPaths = patchFiles.length
       ? patchFiles.map((file) => file.newPath || file.oldPath || '')
       : [targetPath];
-    let evidenceGateWarning: string | undefined;
 
-    // 2c(iii). Cascade-repair freeze: ≥3 consecutive failures on ONE error
-    // signature means flailing, not exploration. Mutations stay locked until
-    // the agent pivots (new signature, verified success, re-plan). Read and
-    // verification tools remain available to gather a new signal.
+    // 2c(iii). Cascade-repair freeze (downgraded: Strong Advisory, non-blocking).
+    // ≥3 consecutive failures on ONE error signature means flailing, not exploration.
+    // Tool still executes; the advisory guides the model to pivot via re-plan/diagnostics.
     if (isMutationTool && gateContext?.cascadeFrozen) {
       const detail = gateContext.cascadeReason ? ` ${gateContext.cascadeReason}.` : '';
-      const errorMsg = `[CASCADE_REPAIR_FROZEN]: Mutation tools are locked because repeated fixes keep failing on the same error.${detail} Stop editing blindly: revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to obtain a genuinely different signal before mutating again.`;
-      return {
-        valid: false,
-        allowed: false,
-        coercedArgs: args,
-        wasCoerced: false,
-        coercedKeys: [],
-        error: errorMsg,
-        errorCode: 'CASCADE_REPAIR_FROZEN',
-        reason: errorMsg,
-        suggestedAlternative: 'update_plan_task',
-      };
+      strongAdvisories.push(formatStrongAdvisory(
+        'CASCADE_REPAIR_ADVISORY',
+        `Repeated fixes keep failing on the same error.${detail} Stop editing blindly: revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to obtain a genuinely different signal before mutating again`,
+        'update_plan_task',
+      ));
+      advisoryCodes.push('CASCADE_REPAIR_ADVISORY');
     }
 
     for (const filePath of targetPaths) {
@@ -701,22 +749,13 @@ export class ToolUseGuardian {
       const reasons = gateContext?.evidenceReasons?.length
         ? ` Current evidence: ${gateContext.evidenceReasons.join(', ')}.`
         : '';
-      const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Adaptive Pareto gate blocks "${toolName}" because uncertainty is still high relative to the cost of error (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need ${missing}.${reasons}`;
-      if (gateContext?.evidenceGateMode === 'observe') {
-        evidenceGateWarning = `[EVIDENCE_GATE_OBSERVE]: ${errorMsg}`;
-        break;
-      }
-      return {
-        valid: false,
-        allowed: false,
-        coercedArgs: args,
-        wasCoerced: false,
-        coercedKeys: [],
-        error: errorMsg,
-        errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
-        reason: errorMsg,
-        suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
-      };
+      // Downgraded: Strong Advisory, non-blocking (both 'enforce' and 'observe' only warn; 'off' skips).
+      strongAdvisories.push(formatStrongAdvisory(
+        'UNVERIFIED_MUTATION_ADVISORY',
+        `Adaptive Pareto: uncertainty is still high relative to the cost of error for "${toolName}" (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need to ${missing}.${reasons}`,
+        targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+      ));
+      advisoryCodes.push('UNVERIFIED_MUTATION_ADVISORY');
     }
 
     // 3. Tự động ép kiểu (Auto-coercion) cho schema không khớp phổ biến
@@ -730,9 +769,10 @@ export class ToolUseGuardian {
       coercedKeys,
       isUnreliable: stats.isUnreliable,
       suggestedAlternative,
+      ...(advisoryCodes.length > 0 ? { advisoryCodes: [...advisoryCodes] } : {}),
       warning: [
         hugeRewriteWarning,
-        evidenceGateWarning,
+        ...strongAdvisories,
         stats.isUnreliable
           ? `[GUARDIAN ADVISORY] Tool "${toolName}" has failed ${stats.consecutiveFailures} consecutive times (${stats.lastFailureCategory}). Consider alternative: "${suggestedAlternative}".`
           : undefined,

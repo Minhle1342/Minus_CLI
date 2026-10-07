@@ -231,9 +231,9 @@ test('guardian allows a small inspected edit but requires empirical evidence at 
     path: 'src/parser.ts',
     content: 'replacement',
   });
-  assert.equal(highRiskBlocked.valid, false);
-  assert.equal(highRiskBlocked.errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
-  assert.match(highRiskBlocked.error || '', /high-risk changes/);
+  assert.equal(highRiskBlocked.valid, true);
+  assert.ok(highRiskBlocked.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
+  assert.match(highRiskBlocked.warning || '', /high-risk changes/);
 
   guardian.setPreMutationGateContext({
     taskClass: 'bugfix',
@@ -263,10 +263,11 @@ test('guardian allows a small inspected edit but requires empirical evidence at 
     path: 'src/unrelated.ts',
     content: 'replacement',
   });
-  assert.equal(unrelatedTarget.valid, false, 'empirical evidence for one target cannot authorize another file');
+  assert.equal(unrelatedTarget.valid, true, 'empirical evidence gap is now advisory, not a block');
+  assert.ok(unrelatedTarget.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
 });
 
-test('guardian allows an inspected R3 target with a plan, but keeps the same edit blocked without it', () => {
+test('guardian allows an inspected R3 target with a plan, and advises (non-blocking) without it', () => {
   const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
   const args = { path: 'src/parser.ts', content: 'replacement' };
   const schema = { type: 'OBJECT', properties: { path: { type: 'STRING' }, content: { type: 'STRING' } } };
@@ -281,7 +282,9 @@ test('guardian allows an inspected R3 target with a plan, but keeps the same edi
     taskClass: 'refactor', hasValidatedHypothesis: false, hasPlan: false, risk: 'R3',
     evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
   });
-  assert.equal(guardian.preCallValidate('write_file', args, schema).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
+  const advised = guardian.preCallValidate('write_file', args, schema);
+  assert.equal(advised.valid, true);
+  assert.ok(advised.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
 });
 
 test('Adaptive Pareto gate can be disabled without disabling other mutation guards', () => {
@@ -308,8 +311,9 @@ test('patch evidence is checked for every parsed target, not the optional path',
   const mixed = guardian.preCallValidate('apply_patch', {
     path: 'src/parser.ts', patch: `${filePatch('src/parser.ts')}\n${filePatch('src/other.ts')}`,
   });
-  assert.equal(mixed.errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
-  assert.match(mixed.error || '', /src\/other\.ts/);
+  assert.equal(mixed.valid, true);
+  assert.ok(mixed.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
+  assert.match(mixed.warning || '', /src\/other\.ts/);
   assert.equal(guardian.preCallValidate('apply_patch', {
     patch: `${filePatch('tests/parser.test.ts')}\n${filePatch('src/parser.ts')}`,
   }).valid, true);
@@ -318,15 +322,17 @@ test('patch evidence is checked for every parsed target, not the optional path',
   }).valid, true);
 });
 
-test('a plan alone cannot bypass R3 reproduction for bugfixes', () => {
+test('a plan alone still emits an advisory for R3 bugfixes with thin evidence', () => {
   const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
   guardian.setPreMutationGateContext({
     taskClass: 'bugfix', hasValidatedHypothesis: false, hasPlan: true, risk: 'R3',
     evidenceScore: 0, evidenceThreshold: 5, inspectedFiles: ['src/parser.ts'],
   });
-  assert.equal(guardian.preCallValidate('write_file', {
+  const res = guardian.preCallValidate('write_file', {
     path: 'src/parser.ts', content: 'replacement',
-  }).errorCode, 'UNVERIFIED_MUTATION_BLOCKED');
+  });
+  assert.equal(res.valid, true);
+  assert.ok(res.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
 });
 
 test('hypothesis tool distinguishes static support from empirical validation', async () => {

@@ -87,6 +87,7 @@ import {
   type ReadSnapshot,
 } from './read-batch-snapshot.js';
 import { ContextQualityEvaluator } from './context-quality-evaluator.js';
+import { ExactTokenizer } from './exact-tokenizer.js';
 import { StepPromptPolicy, resolveStepPromptGatingMode } from './step-prompt-policy.js';
 import { assessParetoEvidence } from './pareto-evidence-policy.js';
 import { buildPhaseContextHandoff } from './phase-context-handoff.js';
@@ -1749,6 +1750,18 @@ export class AgentLoop {
         )).length,
         hasAttachments: hasAttachmentAnchors,
         harnessProfileName: harnessProfile.profileName,
+        cascadeFrozen: this.cascadeFreeze !== undefined,
+        cascadeReason: this.cascadeFreeze
+          ? `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}`
+          : undefined,
+        evidenceScore: paretoEvidence.score,
+        evidenceThreshold: paretoEvidence.threshold,
+        evidenceReasons: paretoEvidence.reasons,
+        reproductionEnforced: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn) === false
+          && classification.taskClass === 'bugfix'
+          && (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce'
+            || configuredEvidenceGateMode() === 'enforce'),
+        hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
         candidates: {
           legacyPlanContext,
           stepPlanContext,
@@ -2155,6 +2168,7 @@ export class AgentLoop {
         advicePrompt: effectiveAdvicePrompt,
         testVerificationEncouragement,
         reflectionContext,
+        strongAdvisory: promptDecision.strongAdvisoryPrompt,
         cognitiveScaffold: effectiveScaffoldText,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
         gitPlaybook: promptDecision.gitPlaybookPrompt,
@@ -2187,13 +2201,29 @@ export class AgentLoop {
         risk: classification.risk,
         minRepoMapFloorTokens: (classification.risk === 'R3' || classification.taskClass === 'refactor') ? 350 : undefined,
       };
-      const preliminaryArbitration = this.dynamicContextArbiter.arbitrate(arbitrationInputs, arbitrationOptions);
+      // Single-pass arbitration (KV-cache stable): arbitrate once without latency
+      // guidance, reserving headroom for it when it will certainly be appended
+      // (step > 1). The guidance is appended verbatim instead of re-arbitrating
+      // the whole context, so the dynamic prefix stays byte-identical and the
+      // second full arbitrate (dedup + recounts) is skipped.
+      const LATENCY_GUIDANCE_RESERVE_TOKENS = 150;
+      const latencyGuidanceReserved = step > 1;
+      const baseArbitration = this.dynamicContextArbiter.arbitrate(
+        arbitrationInputs,
+        latencyGuidanceReserved
+          ? { ...arbitrationOptions, maxBudgetTokens: Math.max(300, dynamicBudgetTokens - LATENCY_GUIDANCE_RESERVE_TOKENS) }
+          : arbitrationOptions,
+      );
+      // One history projection per step: getHistory() rebuilds + clones the full
+      // event log, so capture once and reuse for footprint + budget input.
+      // No session appends affecting the projection happen before the request.
+      const preCompactionHistory = session.getHistory();
       const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
       const preliminaryFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
-        history: session.getHistory(),
-        dynamicContext: preliminaryArbitration.renderedContext,
+        history: preCompactionHistory,
+        dynamicContext: baseArbitration.renderedContext,
         maxInputTokens: activeTokenConfig.maxInputTokens,
         maxOutputTokens: activeTokenConfig.maxOutputTokens,
       });
@@ -2210,18 +2240,41 @@ export class AgentLoop {
               && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
           })
         : undefined;
-      const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
-      const arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
+      let arbitration = baseArbitration;
+      let dynamicExecutionContext = baseArbitration.renderedContext;
+      if (latencyGuidance) {
+        if (!latencyGuidanceReserved) {
+          // Rare path (step 1 under high pressure, no reserve): fall back to a
+          // second budgeted pass so the guidance still fits without overflow.
+          const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
+          arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
+          dynamicExecutionContext = arbitration.renderedContext;
+        } else {
+          dynamicExecutionContext = baseArbitration.renderedContext
+            ? `${baseArbitration.renderedContext}\n\n${latencyGuidance}`
+            : latencyGuidance;
+          const guidanceTokens = ExactTokenizer.countTokens(latencyGuidance, activeModelName);
+          arbitration = {
+            ...baseArbitration,
+            renderedContext: dynamicExecutionContext,
+            totalTokens: baseArbitration.totalTokens + guidanceTokens,
+            sourcesIncluded: [...baseArbitration.sourcesIncluded, 'Latency Guidance (P1.49)'],
+            stats: {
+              ...baseArbitration.stats,
+              afterTokens: baseArbitration.stats.afterTokens + guidanceTokens,
+            },
+          };
+        }
+      }
       this.contextQualityEvaluator.recordContextArbitration({
-        sourceCount: Object.values(finalArbitrationInputs).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
+        sourceCount: Object.values({ ...arbitrationInputs, latencyGuidance }).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
         retainedSourceCount: arbitration.sourcesIncluded.length,
         beforeTokens: arbitration.stats.beforeTokens,
         afterTokens: arbitration.stats.afterTokens,
       });
-      const dynamicExecutionContext = arbitration.renderedContext;
-      // Single pre-compaction projection reused for footprint + budget input,
-      // so the pre-compaction digest below describes exactly what compaction consumed.
-      const preCompactionHistory = session.getHistory();
+      // The pre-compaction projection captured above is reused for footprint +
+      // budget input, so the pre-compaction digest below describes exactly
+      // what compaction consumed.
       let requestFootprint = this.latencyOrchestrator.estimateRequest({
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
@@ -2260,41 +2313,96 @@ export class AgentLoop {
         ...(contextPreparation.checkpointObservations || []),
         ...(compactionStats?.maskedObservations || []),
       ];
-      // Archive failures propagate here instead of vanishing in .catch(()=>{}):
-      // the outcome (counts or error) is durably recorded in the compaction
-      // state and surfaced to the operator. Compaction itself still proceeds —
-      // originals remain in the append-only session event log.
+      // Archive + guardian persistence (KV-cache safe). The synchronous
+      // extraction prefix inside protectPreCompaction runs immediately at
+      // invocation, so the background task is launched BEFORE setHistory to
+      // snapshot pre-compaction state. Disk I/O then overlaps the request
+      // path instead of blocking it. context/snapshot events never enter the
+      // model history projection, so late arrival cannot break prefix cache
+      // or replay invariants; originals remain in the append-only event log.
+      // Opt out with MINUS_BG_GUARDIAN=off.
       const archiveStatus: Record<string, unknown> = {};
       let didCompactThisStep = false;
-      if (observationsToArchive.length > 0) {
-        try {
-          archiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
-        } catch (error) {
-          const message = String((error as Error)?.message || error);
-          archiveStatus.maskedObservations = { error: message };
-          CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+      const backgroundGuardianEnabled = process.env.MINUS_BG_GUARDIAN !== 'off';
+      let guardianTask: Promise<void> | undefined;
+      if (!backgroundGuardianEnabled) {
+        if (observationsToArchive.length > 0) {
+          try {
+            archiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
+          } catch (error) {
+            const message = String((error as Error)?.message || error);
+            archiveStatus.maskedObservations = { error: message };
+            CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+          }
         }
       }
       if (contextPreparation.changed && compactionStats) {
         didCompactThisStep = true;
-        try {
-          const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
-            mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-            projectPhase: `Turn ${turn} ${classification.phase}`,
-          });
-          session.append('context/snapshot', {
-            reason: 'Context Guardian captured evidence before whole-request compaction.',
-            snapshotId: guardianResult.snapshotId,
-            contextFingerprint: contextPreparation.state?.sourceFingerprint,
-          });
-        } catch {}
-        if (compactionStats.archivedTurns?.length) {
+        if (backgroundGuardianEnabled) {
+          // Launch BEFORE setHistory: the synchronous extraction prefix inside
+          // protectPreCompaction runs immediately at invocation, snapshotting
+          // pre-compaction state, while saveSnapshot + archive I/O overlap the
+          // request path in the background.
+          let guardianPromise: ReturnType<ContextGuardian['protectPreCompaction']> | undefined;
           try {
-            archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
-          } catch (error) {
-            const message = String((error as Error)?.message || error);
-            archiveStatus.archivedTurns = { error: message };
-            CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+            guardianPromise = this.contextGuardian.protectPreCompaction(session, {
+              mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+              projectPhase: `Turn ${turn} ${classification.phase}`,
+            });
+          } catch {}
+          guardianTask = (async () => {
+            const bgArchiveStatus: Record<string, unknown> = {};
+            if (observationsToArchive.length > 0) {
+              try {
+                bgArchiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
+              } catch (error) {
+                const message = String((error as Error)?.message || error);
+                bgArchiveStatus.maskedObservations = { error: message };
+                CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+              }
+            }
+            try {
+              const guardianResult = guardianPromise ? await guardianPromise : undefined;
+              if (guardianResult) {
+                if (compactionStats.archivedTurns?.length) {
+                  try {
+                    bgArchiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
+                  } catch (error) {
+                    const message = String((error as Error)?.message || error);
+                    bgArchiveStatus.archivedTurns = { error: message };
+                    CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+                  }
+                }
+                session.append('context/snapshot', {
+                  reason: 'Context Guardian captured evidence before whole-request compaction.',
+                  snapshotId: guardianResult.snapshotId,
+                  contextFingerprint: contextPreparation.state?.sourceFingerprint,
+                  archiveStatus: bgArchiveStatus,
+                });
+              }
+            } catch {}
+          })().catch(() => {});
+          archiveStatus.deferred = true;
+        } else {
+          try {
+            const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
+              mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+              projectPhase: `Turn ${turn} ${classification.phase}`,
+            });
+            session.append('context/snapshot', {
+              reason: 'Context Guardian captured evidence before whole-request compaction.',
+              snapshotId: guardianResult.snapshotId,
+              contextFingerprint: contextPreparation.state?.sourceFingerprint,
+            });
+          } catch {}
+          if (compactionStats.archivedTurns?.length) {
+            try {
+              archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
+            } catch (error) {
+              const message = String((error as Error)?.message || error);
+              archiveStatus.archivedTurns = { error: message };
+              CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+            }
           }
         }
         session.setHistory(
@@ -2344,7 +2452,9 @@ export class AgentLoop {
         step,
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
-        history: session.getHistory(),
+        // Reuse the pre-compaction projection when history was not replaced;
+        // identical content, skips a full event-log rebuild + clone.
+        history: didCompactThisStep ? session.getHistory() : preCompactionHistory,
       }, {
         compactHistory: true,
         ...(didCompactThisStep ? {

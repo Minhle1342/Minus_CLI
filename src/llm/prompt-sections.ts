@@ -611,6 +611,27 @@ export function resolvePhaseDynamicGuidance(
   phase: TaskPhase | string,
   options?: PhaseGuidanceOptions,
 ): string {
+  const cacheKey = JSON.stringify([
+    phase,
+    options?.taskClass, options?.risk, options?.reversibility,
+    options?.hasValidatedHypothesis, options?.hasSupportedHypothesis,
+    options?.evidenceSufficient, options?.evidenceScore, options?.evidenceThreshold,
+    options?.hasUnverifiedChanges, options?.includePatchSpec, options?.targetFile,
+  ]);
+  const cached = phaseGuidanceCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const resolved = resolvePhaseDynamicGuidanceUncached(phase, options);
+  if (phaseGuidanceCache.size >= 200) phaseGuidanceCache.clear();
+  phaseGuidanceCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+const phaseGuidanceCache = new Map<string, string>();
+
+function resolvePhaseDynamicGuidanceUncached(
+  phase: TaskPhase | string,
+  options?: PhaseGuidanceOptions,
+): string {
   switch (phase) {
     case 'explore': {
       if (options?.risk === 'R0' || options?.reversibility === 'read-only' || options?.taskClass === 'question') {
@@ -664,7 +685,25 @@ export function buildPhaseToolAuthorityDirective(
   visibleToolNames: readonly string[],
   options?: { canRequestPhaseTransition?: boolean; hasSubmittedSolution?: boolean; isReadOnly?: boolean },
 ): string {
+  // visibleToolNames is already sorted at the call site path; sort a copy for a
+  // stable cache key without mutating the caller's array.
   const names = [...new Set(visibleToolNames)].sort();
+  const cacheKey = `${phase}|${names.join(',')}|${options?.canRequestPhaseTransition ? 1 : 0}${options?.hasSubmittedSolution ? 1 : 0}${options?.isReadOnly ? 1 : 0}`;
+  const cached = phaseAuthorityCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const resolved = buildPhaseToolAuthorityDirectiveUncached(phase, names, options);
+  if (phaseAuthorityCache.size >= 200) phaseAuthorityCache.clear();
+  phaseAuthorityCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+const phaseAuthorityCache = new Map<string, string>();
+
+function buildPhaseToolAuthorityDirectiveUncached(
+  phase: string,
+  names: string[],
+  options?: { canRequestPhaseTransition?: boolean; hasSubmittedSolution?: boolean; isReadOnly?: boolean },
+): string {
   if (options?.hasSubmittedSolution || names.length === 0) {
     return `🔧 [PHASE TOOL AUTHORITY: ${phase}] No tools are authorized this step. Answer directly with text; do not call any tool.`;
   }

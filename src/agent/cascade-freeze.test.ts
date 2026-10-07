@@ -42,7 +42,7 @@ test('verified success clears the streak', () => {
   assert.equal(engine.getSameSignatureFailStreak(), undefined);
 });
 
-test('guardian freezes mutations while cascade is latched', () => {
+test('guardian advises (non-blocking) while cascade is latched', () => {
   const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
   const frozen = guardian.preCallValidate(
     'replace_text',
@@ -50,8 +50,9 @@ test('guardian freezes mutations while cascade is latched', () => {
     undefined,
     { preMutationGate: { hasValidatedHypothesis: false, cascadeFrozen: true, cascadeReason: '3 consecutive failures share one error signature' } },
   );
-  assert.equal(frozen.allowed, false);
-  assert.equal(frozen.errorCode, 'CASCADE_REPAIR_FROZEN');
+  assert.equal(frozen.valid, true);
+  assert.ok(frozen.advisoryCodes?.includes('CASCADE_REPAIR_ADVISORY'));
+  assert.match(frozen.warning || '', /CASCADE_REPAIR_ADVISORY/);
 });
 
 test('guardian allows mutations when no cascade is latched', () => {

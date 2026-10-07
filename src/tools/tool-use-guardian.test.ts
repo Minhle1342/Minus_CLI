@@ -109,7 +109,7 @@ test('tool-use-guardian: observe mode allows low-evidence mutations with a sessi
   });
   const result = guardian.preCallValidate('write_file', { path: 'src/fix.ts', content: 'change' });
   assert.equal(result.valid, true);
-  assert.match(result.warning || '', /EVIDENCE_GATE_OBSERVE/);
+  assert.match(result.warning || '', /UNVERIFIED_MUTATION_ADVISORY/);
 });
 
 test('tool-use-guardian: pre-call validation coerces TargetContent/ReplacementContent aliases on replace_text', () => {
@@ -142,7 +142,7 @@ test('tool-use-guardian: pre-call validation coerces TargetContent/ReplacementCo
   assert.equal('ReplacementContent' in validation.coercedArgs, false);
 });
 
-test('tool-use-guardian: Reproduction Gate blocks submit_solution on unverified bugfix when enforceReproductionPass is active', () => {
+test('tool-use-guardian: Reproduction Gate advises (non-blocking) submit_solution on unverified bugfix when enforceReproductionPass is active', () => {
   const guardian = new ToolUseGuardian();
   guardian.setPreMutationGateContext({
     isBugfixTask: true,
@@ -158,9 +158,9 @@ test('tool-use-guardian: Reproduction Gate blocks submit_solution on unverified 
     filesModified: ['src/services/UserService.ts'],
   });
 
-  assert.equal(res.valid, false);
-  assert.equal(res.errorCode, 'REPRODUCTION_VERIFICATION_REQUIRED');
-  assert.equal(res.suggestedAlternative, 'run_command');
+  assert.equal(res.valid, true);
+  assert.ok(res.advisoryCodes?.includes('REPRODUCTION_VERIFICATION_ADVISORY'));
+  assert.match(res.warning || '', /REPRODUCTION_VERIFICATION_ADVISORY/);
 });
 
 test('tool-use-guardian: Reproduction Gate allows submit_solution when hasPostFixPass is true', () => {

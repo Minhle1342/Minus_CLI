@@ -19,6 +19,8 @@ export interface DynamicContextInputs {
   gitPlaybook?: string;
   /** P1.4: Step-relevant textual guidance from the active runtime harness profile. */
   harnessGuidance?: string;
+  /** P1.15: Dynamic non-blocking Strong Advisory downgraded from hard blocks (CASCADE/UNVERIFIED/REPRO). Never truncated. */
+  strongAdvisory?: string;
   /** P1.44: Distilled Epistemic Verdict từ EpistemicInvestigationEngine (Thesis vs Antithesis + Monte Carlo Rollout) */
   epistemicVerdictContext?: string;
   /** P1.45: Hypothesis state and action constraints. */
@@ -172,6 +174,13 @@ export class DynamicContextArbiter {
         content: (inputs.reflectionContext || '').trim(),
         priority: 1.1,
         allowTruncation: false, // P1.1 Phản tư lỗi không bao giờ bị cắt
+      },
+      {
+        key: 'strongAdvisory',
+        name: 'Strong Advisory (P1.15)',
+        content: (inputs.strongAdvisory || '').trim(),
+        priority: 1.15,
+        allowTruncation: false,
       },
       {
         key: 'cognitiveScaffold',

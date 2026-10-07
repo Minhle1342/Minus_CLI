@@ -172,6 +172,7 @@ export interface SessionEventData {
   };
   snapshotId?: string;
   contextFingerprint?: string;
+  archiveStatus?: Record<string, unknown>;
   compactionState?: Record<string, unknown>;
   parallelToolExecution?: {
     batchCount: number;

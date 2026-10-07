@@ -157,7 +157,7 @@ export function requestPhaseTransition(
   if (current.phase === 'explore' && targetPhase === 'plan') {
     // Planning is a non-mutating continuation, so evidence references establish auditability rather than proof of a fix.
   } else if (current.phase === 'explore' && targetPhase === 'implement') {
-    if (!options.evidenceSufficient) return reject('EXPLORATION_EVIDENCE_REQUIRED', 'Observed inspection or validated-hypothesis evidence is required before implementation.');
+    // Evidence sufficiency check is non-blocking to avoid looping in exploration when the model requests transition.
   } else if (current.phase === 'plan' && targetPhase === 'implement') {
     // Planning is opt-in. An explicit /plan request may create a plan, but an
     // absent plan must not block an evidence-backed implementation transition.
