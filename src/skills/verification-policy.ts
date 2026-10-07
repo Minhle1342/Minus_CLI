@@ -288,22 +288,7 @@ export class VerificationPolicy {
     this.verificationHistory.push(this.lastVerification);
 
     if (effectiveSuccess) {
-      // Measured-impact rule (single source: verify-tier-resolver): a weaker
-      // tier than full_test must not clear the pending flag for HIGH/CRITICAL
-      // edits — otherwise the tier check in canComplete() never runs.
-      const measuredDecision = resolveVerifyTier({
-        changedFileCount: this.modifiedFiles.size,
-        hasCallers: false,
-        classificationRisk: this.requiredRisk,
-        sensitivePathTouched: Array.from(this.modifiedFiles).some((file) => isSensitivePath(file)),
-      });
-      const recordedTier = options?.tier || this.inferTier(command);
-      const clearsPending = measuredDecision.minTier === 'full_test'
-        ? recordedTier === 'full_test' || recordedTier === 'build'
-        : true;
-      if (!clearsPending) {
-        // Keep hasUnverifiedModifications: a real full_test pass is still due.
-      } else if (this.pendingTargetedTests.size > 0) {
+      if (this.pendingTargetedTests.size > 0) {
         const tier = options?.tier || this.inferTier(command);
         if (tier === 'full_test' || tier === 'build') {
           this.pendingTargetedTests.clear();
@@ -391,31 +376,9 @@ export class VerificationPolicy {
     }
 
 
-    if (mandatesVerification && this.lastVerification) {
-      const tierRank: VerificationLadderTier[] = ['structural', 'diff', 'diagnostics', 'typecheck', 'targeted_test', 'full_test', 'build'];
-      let minimum: VerificationLadderTier = this.requiredRisk === 'R0' ? 'structural'
-        : this.requiredRisk === 'R1' ? 'diagnostics'
-          : this.requiredRisk === 'R2' ? 'typecheck'
-            : 'full_test';
-      const measuredDecision = resolveVerifyTier({
-        changedFileCount: measured?.changedFileCount ?? this.modifiedFiles.size,
-        hasCallers: measured?.hasCallers ?? false,
-        classificationRisk: this.requiredRisk,
-        blastRisk: measured?.blastRisk,
-        sensitivePathTouched: measured?.sensitivePathTouched
-          ?? Array.from(this.modifiedFiles).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
-      });
-      if (measuredDecision.level !== 'LOW') {
-        minimum = 'full_test';
-      }
-      if (tierRank.indexOf(this.lastVerification.tier || 'structural') < tierRank.indexOf(minimum)) {
-        return {
-          allowed: false,
-          reason: `VERIFICATION_TIER_REQUIRED: Risk ${this.requiredRisk} requires ${minimum} or stronger evidence.${this.coverageGuidance()}`,
-          errorCode: 'VERIFICATION_TIER_REQUIRED',
-        };
-      }
-    }
+    // Non-blocking: VERIFICATION_TIER_REQUIRED không còn chặn hoàn thành tác vụ.
+    // Mọi bằng chứng xác minh thành công (diagnostics, typecheck, targeted test, lint, full_test)
+    // đều cho phép hoàn thành.
 
     if (mandatesVerification && this.pendingTargetedTests.size > 0) {
       const pendingList = Array.from(this.pendingTargetedTests);

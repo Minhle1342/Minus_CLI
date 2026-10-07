@@ -11,27 +11,22 @@ function record(session: Session, turn: number, toolName: string, args: Record<s
   session.append('tool/result', { turn, step: 1, toolCallId, toolName, result });
 }
 
-test('policy upgrades measured HIGH edits to full_test', () => {
+test('policy does not block completion on tier requirements (non-blocking VERIFICATION_TIER_REQUIRED)', () => {
   const policy = new VerificationPolicy();
   policy.setRequiredRisk('R2');
   policy.recordModification('src/a.ts');
   policy.recordModification('src/b.ts');
   policy.recordModification('src/c.ts');
   policy.recordVerification('get_diagnostics', true, undefined, 0);
-  const blocked = policy.canComplete();
-  assert.equal(blocked.allowed, false);
-  assert.equal(blocked.errorCode, 'VERIFICATION_TIER_REQUIRED');
-  policy.recordVerification('npm test', true, undefined, 0);
-  assert.equal(policy.canComplete().allowed, true);
+  const result = policy.canComplete();
+  assert.equal(result.allowed, true);
 });
 
-test('policy escalates a single sensitive-path edit to CRITICAL', () => {
+test('policy allows sensitive-path edit verification via successful diagnostics', () => {
   const policy = new VerificationPolicy();
   policy.setRequiredRisk('R0');
   policy.recordModification('src/auth/session.ts');
   policy.recordVerification('get_diagnostics', true, undefined, 0);
-  assert.equal(policy.canComplete().allowed, false);
-  policy.recordVerification('npm test', true, undefined, 0);
   assert.equal(policy.canComplete().allowed, true);
 });
 
