@@ -2705,6 +2705,10 @@ export class AgentLoop {
         let userDeniedPermission: { toolName: string; detail: string } | undefined;
         let postSubmissionBlocked = false;
         let phaseTransitionAcceptedInResponse = false;
+        let parallelBatchCount = 0;
+        let parallelTotalTools = 0;
+        let parallelDurationMs = 0;
+        let parallelSavedMs = 0;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
         for (const [callIndex, call] of normalizedToolCalls.entries()) {
@@ -2763,25 +2767,32 @@ export class AgentLoop {
                 ? await snapshotReadTargets(this._workspace.rootDir, snapshotTargets).catch(() => undefined)
                 : undefined;
               if (snapshotBefore) readBatchSnapshotBefore.set(callIndex, snapshotBefore);
-              const settled = await Promise.allSettled(readPartition.calls.map((scheduled) => (
-                stepToolRunner.run(scheduled.name, scheduled.args, {
-                  sessionId: session.id,
-                  agentId: this.agentId,
-                  turn,
-                  userRequest: turnUserRequest,
-                  signal: options?.signal,
-                  controlMode: toolControlMode,
-                  ...(toolControlMode !== 'off' ? {
-                    decisionId: activeDecisionId,
-                    allowedToolNames: authorizedToolNames,
-                    allowedToolSetHash: activeToolSetHash,
-                    classificationPhase: classification.phase,
-                    phaseVersion: classification.phaseVersion,
-                    classificationRisk: classification.risk,
-                    maxToolCalls: recommendedToolDecision.maxToolCalls,
-                  } : {}),
-                })
-              )));
+              const settled = await Promise.allSettled(readPartition.calls.map(async (scheduled) => {
+                const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+                  scheduled.name,
+                  scheduled.args as Record<string, unknown>,
+                  stepToolRunner,
+                  {
+                    sessionId: session.id,
+                    agentId: this.agentId,
+                    turn,
+                    userRequest: turnUserRequest,
+                    signal: options?.signal,
+                    controlMode: toolControlMode,
+                    ...(toolControlMode !== 'off' ? {
+                      decisionId: activeDecisionId,
+                      allowedToolNames: authorizedToolNames,
+                      allowedToolSetHash: activeToolSetHash,
+                      classificationPhase: classification.phase,
+                      phaseVersion: classification.phaseVersion,
+                      classificationRisk: classification.risk,
+                      maxToolCalls: recommendedToolDecision.maxToolCalls,
+                    } : {}),
+                  },
+                  scheduled.id,
+                );
+                return pipelinedOutcome.executionResult;
+              }));
               readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
               const batchSnapshotBefore = readBatchSnapshotBefore.get(callIndex);
               if (batchSnapshotBefore) {
@@ -3941,6 +3952,13 @@ export class AgentLoop {
             };
             session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
             this.kernel?.ctx.events.emit('tools:batch', batchTelemetry);
+            if (readPartition.mode === 'concurrent-read' && readPartition.calls.length > 1) {
+              parallelBatchCount++;
+              parallelTotalTools += readPartition.calls.length;
+              parallelDurationMs += measuredBatchDurationMs;
+              parallelSavedMs += batchTelemetry.savedMs;
+              CLI.renderParallelBatchSummary(readPartition.calls.length, measuredBatchDurationMs, batchTelemetry.savedMs);
+            }
           }
           if (effect) {
             const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
@@ -3983,7 +4001,18 @@ export class AgentLoop {
         consecutiveNoProgressStrategyChanges = strategyChangeRequired
           ? consecutiveNoProgressStrategyChanges + 1
           : 0;
-        session.append('step/end', { turn, step, reason: stepReason });
+        const parallelToolExecution = parallelBatchCount > 0 ? {
+          batchCount: parallelBatchCount,
+          totalTools: parallelTotalTools,
+          durationMs: parallelDurationMs,
+          savedMs: parallelSavedMs,
+        } : undefined;
+        session.append('step/end', {
+          turn,
+          step,
+          reason: stepReason,
+          ...(parallelToolExecution ? { parallelToolExecution } : {}),
+        });
         await this.persistSession(session);
         await this.agentHooks.run('agent/after-step', {
           ...hookContext,

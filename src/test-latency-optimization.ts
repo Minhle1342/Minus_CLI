@@ -217,6 +217,13 @@ async function main(): Promise<void> {
       event.type === 'control/decision' && event.data.controlDecision?.mode === 'read-tool-batch'
     ));
     assert.equal(batchDecision?.data.controlDecision?.executionMode, 'concurrent-read');
+    const stepEndEvent = session.getEventsAfter(0).find((event) => (
+      event.type === 'step/end' && event.data.parallelToolExecution
+    ));
+    assert(stepEndEvent?.data.parallelToolExecution, 'step/end event contains parallelToolExecution telemetry');
+    assert.equal(stepEndEvent?.data.parallelToolExecution?.totalTools, 4);
+    assert.equal(stepEndEvent?.data.parallelToolExecution?.batchCount, 1);
+    assert(stepEndEvent?.data.parallelToolExecution?.savedMs >= 0);
     console.log(JSON.stringify({
       benchmark: 'concurrent-read-tools',
       tools: timing.length,

@@ -173,6 +173,12 @@ export interface SessionEventData {
   snapshotId?: string;
   contextFingerprint?: string;
   compactionState?: Record<string, unknown>;
+  parallelToolExecution?: {
+    batchCount: number;
+    totalTools: number;
+    durationMs: number;
+    savedMs: number;
+  };
   /**
    * Model thought persisted outside the model-facing projection.
    * `projectHistoryFromEvents` deliberately ignores this event type, so

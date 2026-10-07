@@ -2172,6 +2172,14 @@ export class CLI {
     }
   }
 
+  /**
+   * Hiển thị tóm tắt trực quan sau khi hoàn tất lô công cụ đọc song song
+   */
+  static renderParallelBatchSummary(count: number, durationMs: number, savedMs: number): void {
+    const savedStr = savedMs > 0 ? ` ${c.emerald}(saved ~${savedMs}ms)${c.reset}` : '';
+    console.log(`  ${c.dim}⚡ Executed ${count} read tools in parallel in ${durationMs}ms${savedStr}${c.reset}`);
+  }
+
   static renderCtrlOToggleToast(isCompact: boolean): void {
     console.log(`  ${c.slate}[Ctrl+O] Compact Mode: ${isCompact ? 'ON' : 'OFF'}${c.reset}`);
   }
