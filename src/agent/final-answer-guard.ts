@@ -12,6 +12,7 @@ export type FinalAnswerGuardRejectionReason =
   | 'unverified-architecture-claims'
   | 'insufficient-analysis-answer'
   | 'curt-final-answer'
+  | 'system-prompt-echo'
   | 'insecure-code-confidence';
 
 export interface FinalAnswerGuardDecision {
@@ -97,8 +98,71 @@ export function isCompletionStub(answer: string): boolean {
     || /^(?:(?:da|vua)\s+)?(?:cung cap|tra loi|giai thich|bao cao|trinh bay)\s+(?:cau tra loi\s+)?(?:chi tiet|chinh xac|day du)(?:\s+va\s+(?:chinh xac|day du))?(?:\s+bang tieng viet)?(?:\s+(?:cho|ve)\s+[^:;.!?]+)?$/.test(text);
 }
 
-const CAPABILITY_DENIAL_PATTERNS = [
-  /\b(?:i am|im|were|we are)?\s*(?:unable|not able)\s+to\b/,
+/**
+ * Machine-generated system markers that must never surface in a user-facing
+ * final answer. If the model echoes them (common after [SYSTEM ...] guard
+ * re-prompts or per-step [RESPONSE LANGUAGE]/[STRONG ADVISORY] injections),
+ * the echo is stripped before render and pure-echo answers are rejected.
+ */
+const SYSTEM_PROMPT_ECHO_MARKERS = [
+  '[SYSTEM ',
+  '[STRONG ADVISORY',
+  '[RESPONSE LANGUAGE]',
+  '[INVESTIGATION SCOPE',
+  '[ATTACHMENT NEIGHBORHOOD',
+  '[PRE-MUTATION GATE]',
+  '[EVIDENCE_GATE_OBSERVE]',
+  '[UNVERIFIED_MUTATION',
+  '[CASCADE_REPAIR_',
+  '[REPRODUCTION_VERIFICATION_',
+  '[WEAK_SUBMISSION_SUMMARY_',
+  '[VERIFICATION LADDER',
+  '[COGNITIVE SCAFFOLD',
+  '[HARNESS PROFILE]',
+  '[STEP EXECUTION PLAN]',
+  '[DYNAMIC EXECUTION PLAN]',
+  '[NEXT ACTION ADVICE]',
+  '[ADAPTIVE SOFT LATENCY',
+  '[PHASE TOOL AUTHORITY',
+  '[SYSTEM COMPLETION RECOVERY',
+  '[SYSTEM EVIDENCE GATE]',
+];
+
+/** A paragraph counts as leaked prompt iff its first non-blank line carries a system marker. */
+function escapeEchoMarker(marker: string): string {
+  return marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const SYSTEM_ECHO_PARAGRAPH_PATTERN = new RegExp(
+  '^(?:' + SYSTEM_PROMPT_ECHO_MARKERS.map(escapeEchoMarker).join('|') + ')[^\\n]*(?:\\n(?!\\n)[^\\n]*)*',
+  'gmi',
+);
+
+/** Strip leaked system-prompt paragraphs; never touches user content or code fences' inner meaning. */
+export function stripSystemPromptEcho(answer: string): string {
+  if (!answer || !answer.includes('[')) return answer;
+  const stripped = answer
+    .replace(SYSTEM_ECHO_PARAGRAPH_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return stripped;
+}
+
+/**
+ * Pure-echo answers (nothing substantive left after stripping, or a system
+ * block leads the answer) must be revised, not shown on the TUI.
+ */
+export function isSystemPromptEcho(answer: string): boolean {
+  if (!answer || !answer.includes('[')) return false;
+  const trimmed = answer.trim();
+  if (SYSTEM_PROMPT_ECHO_MARKERS.some((m) => trimmed.toUpperCase().startsWith(m))) return true;
+  const stripped = stripSystemPromptEcho(answer);
+  if (!stripped) return true;
+  if (isCompletionStub(stripped)) return true;
+  return stripped.length * 3 < trimmed.length;
+}
+
+const CAPABILITY_DENIAL_PATTERNS = [  /\b(?:i am|im|were|we are)?\s*(?:unable|not able)\s+to\b/,
   /\b(?:i|we)\s+(?:cannot|cant|dont have|do not have|lack)\b/,
   /\b(?:khong the|khong co|thieu)\b/,
 ];
@@ -152,6 +216,17 @@ export class FinalAnswerGuard {
     }
 
     const normalized = normalizeForMatching(answer);
+    if (isSystemPromptEcho(answer)) {
+      return {
+        allow: false,
+        reason: 'system-prompt-echo',
+        recovery: 'revise-answer',
+        continuationPrompt: [
+          '[SYSTEM FINAL ANSWER GUARD]: Your previous response quoted system instructions or prompt blocks (e.g. [SYSTEM ...], [STRONG ADVISORY], [RESPONSE LANGUAGE]) instead of answering the user.',
+          'Answer in your own words with the findings, root cause, and evidence. Never restate system directives, guard messages, or scaffold blocks.',
+        ].join('\n'),
+      };
+    }
     const promisesFutureToolWork = hasUnfulfilledDeferredPromise(answer);
     if (promisesFutureToolWork || isCompletionStub(answer)) {
       const failureContext = this.latestFailure

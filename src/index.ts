@@ -3065,8 +3065,14 @@ ${planPrompt}`;
         break;
       }
 
-      // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
-      const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace);
+      // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh.
+      // Truyền context gần đây để bỏ nội dung attach trùng (file không đổi giữa các turn).
+      const recentContextTexts = activeSession
+        ? activeSession.getHistory().slice(-6).map((msg) =>
+          (msg.parts || []).map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n').slice(0, 12000),
+        )
+        : [];
+      const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(trimmed, workspace, { recentContextTexts });
       if (attachmentResult.hasAttachments) {
         CLI.renderAttachmentSummary(attachmentResult.attachments, attachmentResult.relatedFiles);
       }

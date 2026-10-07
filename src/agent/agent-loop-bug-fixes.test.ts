@@ -7,6 +7,7 @@ import { AgentLoop } from './agent-loop.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
+import { CLI } from '../ui/cli-ui.js';
 
 class ScriptedCompletionLLM {
   calls = 0;
@@ -322,6 +323,66 @@ describe('AgentLoop Bug Fixes Verification', () => {
         'Step 2 and Step 3 tool declarations must be 100% byte-for-byte identical (KV Cache Prefix Invariance)',
       );
     } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('Fix 8: Compact mode renders each concurrent read once (no duplicate tool lines)', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'compact-dup-test-'));
+    const origRenderToolCall = CLI.renderToolCall;
+    const origOneLiner = CLI.renderCompactOneLiner;
+    const origDotSpinner = CLI.startToolDotSpinner;
+    const origStopDotSpinner = CLI.stopToolDotSpinner;
+    try {
+      const workspace = new Workspace(rootDir);
+      const llm = new ScriptedCompletionLLM([
+        {
+          text: '',
+          toolCalls: [
+            { id: 'call-a', name: 'read_file', args: { path: 'a.ts' } },
+            { id: 'call-b', name: 'read_file', args: { path: 'b.ts' } },
+          ],
+        },
+        { text: 'Both files inspected.', toolCalls: [] },
+      ]);
+      const registry = new ToolRegistry();
+      registry.register({
+        name: 'read_file',
+        description: 'Read file',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        } as any,
+        execute: async (args: any) => ({ content: `content of ${args.path}` }),
+      });
+      const loop = new AgentLoop(llm as any, registry, {
+        workspace,
+        enableConcurrentReadTools: true,
+        maxSteps: 3,
+      });
+      loop.setCollapsePreferences({ compactSteps: true });
+
+      let renderToolCallCount = 0;
+      let oneLinerCount = 0;
+      (CLI as any).renderToolCall = () => { renderToolCallCount++; };
+      (CLI as any).renderCompactOneLiner = () => { oneLinerCount++; };
+      (CLI as any).startToolDotSpinner = () => {};
+      (CLI as any).stopToolDotSpinner = () => {};
+
+      const session = new Session('session-compact-dup-test');
+      session.addUserMessage('Read both files.');
+      await loop.run(session);
+
+      const toolResults = session.getEvents().filter((e) => e.type === 'tool/result');
+      assert.equal(toolResults.length, 2, 'both parallel reads must complete');
+      assert.equal(renderToolCallCount, 0, 'compact mode must not emit verbose call lines for concurrent reads');
+      assert.equal(oneLinerCount, 2, 'compact mode must emit exactly one line per concurrent read');
+    } finally {
+      (CLI as any).renderToolCall = origRenderToolCall;
+      (CLI as any).renderCompactOneLiner = origOneLiner;
+      (CLI as any).startToolDotSpinner = origDotSpinner;
+      (CLI as any).stopToolDotSpinner = origStopDotSpinner;
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
   });

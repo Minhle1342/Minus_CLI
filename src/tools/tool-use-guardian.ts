@@ -102,6 +102,9 @@ export interface GuardianPreCallResult {
   reason?: string;
   isUnreliable?: boolean;
   suggestedAlternative?: string;
+  suggestedTool?: string;
+  suggestedArgs?: Record<string, any>;
+  guardianDiagnosis?: ToolFailureDiagnosis;
   /** Non-blocking Strong Advisory codes (downgraded from hard blocks). */
   advisoryCodes?: string[];
 }
@@ -749,7 +752,39 @@ export class ToolUseGuardian {
       const reasons = gateContext?.evidenceReasons?.length
         ? ` Current evidence: ${gateContext.evidenceReasons.join(', ')}.`
         : '';
-      // Downgraded: Strong Advisory, non-blocking (both 'enforce' and 'observe' only warn; 'off' skips).
+      const shouldBlock = gateContext?.evidenceGateMode === 'enforce'
+        || gateContext?.phase === 'explore'
+        || (!targetInspected && !targetEmpiricallyValidated && (gateContext?.phase !== undefined || gateContext?.isBugfixTask !== undefined));
+
+      if (shouldBlock && gateContext?.evidenceGateMode !== 'observe') {
+        const errorMsg = `[UNVERIFIED_MUTATION_BLOCKED]: Adaptive Pareto gate blocks "${toolName}" because uncertainty is still high relative to the cost of error (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need to ${missing}.${reasons}`;
+        return {
+          valid: false,
+          allowed: false,
+          coercedArgs: args || {},
+          wasCoerced: false,
+          coercedKeys: [],
+          error: errorMsg,
+          errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
+          reason: errorMsg,
+          suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+          suggestedTool: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+          suggestedArgs: targetInspected ? undefined : { path: filePath },
+          guardianDiagnosis: {
+            category: 'PRE_MUTATION_GATE_BLOCKED',
+            message: errorMsg,
+            isRetryable: true,
+            maxRetries: 0,
+            backoffMs: 0,
+            recoveryAction: targetInspected
+              ? 'Formulate and verify hypothesis first'
+              : `Call read_file("${filePath}") first to inspect target lines, verify indentation, and obtain current contentHash.`,
+            suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+          },
+        };
+      }
+
+      // Strong Advisory, non-blocking when only empirical gap exists on inspected target in non-explore phase
       strongAdvisories.push(formatStrongAdvisory(
         'UNVERIFIED_MUTATION_ADVISORY',
         `Adaptive Pareto: uncertainty is still high relative to the cost of error for "${toolName}" (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need to ${missing}.${reasons}`,

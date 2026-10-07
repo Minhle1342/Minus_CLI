@@ -145,9 +145,11 @@ test('expands 2-hop neighborhood around @-attached anchors with scope directive'
     const byPath = new Map((result.relatedFiles || []).map((item) => [item.path, item]));
     assert.equal(byPath.get('beta.ts')?.hop, 1, 'direct import is hop-1');
     assert.equal(byPath.get('beta.ts')?.reason, 'import');
-    assert.equal(byPath.get('delta.ts')?.hop, 1, 'importer / sibling is hop-1');
+    assert.equal(byPath.get('delta.ts')?.hop, 1, 'importer is hop-1');
+    assert.equal(byPath.get('delta.ts')?.reason, 'imported-by');
     assert.equal(byPath.get('gamma.ts')?.hop, 2, 'import of hop-1 is hop-2');
     assert.equal(byPath.has('zeta.ts'), false, 'unrelated file must not enter the neighborhood');
+    assert.ok(![...byPath.values()].some((item) => (item.reason as string) === 'same-dir'), 'same-dir siblings must not enter the neighborhood');
 
     assert.match(result.expandedPrompt, /\[Attachment Neighborhood - 2-hop Investigation Scope\]/);
     assert.match(result.expandedPrompt, /ATTACHMENT ANCHOR RULE/);
@@ -194,6 +196,68 @@ test('MINUS_ATTACH_EXPAND=off disables neighborhood expansion', async () => {
       if (previous === undefined) delete process.env.MINUS_ATTACH_EXPAND;
       else process.env.MINUS_ATTACH_EXPAND = previous;
     }
+  });
+});
+
+test('dedups unchanged re-attached files against recent context', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'note.ts'), `export const note = 1;\n`);
+    const first = await PromptAttachmentProcessor.resolveAndAttach('Review @note.ts', workspace);
+    assert.match(first.expandedPrompt, /\[Attached File: note\.ts \(\d+ lines • [\d.]+ KB • sha:[0-9a-f]{8}\)\]/);
+
+    const second = await PromptAttachmentProcessor.resolveAndAttach('Review again @note.ts', workspace, {
+      recentContextTexts: [first.expandedPrompt],
+    });
+    assert.match(second.expandedPrompt, /unchanged since earlier context/);
+    assert.ok(!second.expandedPrompt.includes('export const note'), 'full content must not repeat');
+    // Anchor header stays compatible with agent-loop detectAttachmentAnchors.
+    const anchors: string[] = [];
+    const re = /\[Attached (?:Binary )?File: (.+?) \(\d+(?:\.\d+)? (?:lines|KB)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(second.expandedPrompt)) !== null) anchors.push(m[1].trim());
+    assert.deepEqual(anchors, ['note.ts']);
+    assert.deepEqual(second.anchorPaths, ['note.ts']);
+  });
+});
+
+test('re-attaches fully when the file changed since recent context', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'note.ts'), `export const note = 1;\n`);
+    const first = await PromptAttachmentProcessor.resolveAndAttach('Review @note.ts', workspace);
+    await writeFile(path.join(root, 'note.ts'), `export const note = 2;\nexport const extra = 3;\n`);
+    const second = await PromptAttachmentProcessor.resolveAndAttach('Review again @note.ts', workspace, {
+      recentContextTexts: [first.expandedPrompt],
+    });
+    assert.ok(!second.expandedPrompt.includes('unchanged since earlier context'));
+    assert.ok(second.expandedPrompt.includes('export const extra'));
+  });
+});
+
+test('downgrades full files to AST slice instead of skipping at the token cap', async () => {
+  await withWorkspace(async (workspace, root) => {
+    // 5 files x ~7.4KB: under the 64KB source gate but over the ~12k token cap
+    // unless the last file downgrades to a slice (each is under auto-slice thresholds).
+    const names = Array.from({ length: 5 }, (_, i) => `big-${i}.ts`);
+    await Promise.all(names.map((file, i) =>
+      writeFile(path.join(root, file), `// file ${i}\n` + `export const v${i} = '${'y'.repeat(50)}';\n`.repeat(100)),
+    ));
+    const result = await PromptAttachmentProcessor.resolveAndAttach(names.map((n) => `@${n}`).join(' '), workspace);
+    assert.equal(result.attachments.length, 5);
+    assert.ok(
+      result.attachments.some((a) => (a.preview || '').includes('cap-downgrade')),
+      `expected a cap-downgraded slice, got previews: ${result.attachments.map((a) => a.preview).join(' | ')}`,
+    );
+  });
+});
+
+test('caches importer scans across repeated attachments', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'alpha.ts'), `import { beta } from './beta.js';\nexport const alpha = 1;\n`);
+    await writeFile(path.join(root, 'beta.ts'), `export const beta = 2;\n`);
+    const first = await PromptAttachmentProcessor.resolveAndAttach('Fix bug in @alpha.ts', workspace);
+    const second = await PromptAttachmentProcessor.resolveAndAttach('Fix bug in @alpha.ts', workspace);
+    assert.deepEqual(second.relatedFiles, first.relatedFiles);
+    assert.deepEqual(second.anchorPaths, first.anchorPaths);
   });
 });
 

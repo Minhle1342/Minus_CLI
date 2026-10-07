@@ -259,7 +259,7 @@ export class CognitiveHarness {
         ...scaffold.negativeGate,
       ],
       executionTopology: [
-        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, same-dir siblings, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / grep_search / analyze_impact before concluding.',
+        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / grep_search / analyze_impact before concluding.',
         ...scaffold.executionTopology,
       ],
     };
@@ -688,7 +688,7 @@ export class CognitiveHarness {
     if (scaffold.phase === 'plan') {
       lines.push(`⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) — Outline execution via create_plan / update_plan_task. When ready to implement, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'explore') {
-      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) — Inspect files and gather evidence first. When ready to create or edit files, call request_phase_transition(targetPhase: 'implement').`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE — Inspect files and gather evidence first. Mutation tools are locked. When ready to create or edit files, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'verify') {
       lines.push(`⚠️ [PHASE GOVERNANCE]: VERIFY MODE — run tests and verify diagnostics; avoid new features or unrelated changes.`);
     }
@@ -728,7 +728,7 @@ export class CognitiveHarness {
     const phaseBanner = scaffold.phase === 'plan'
       ? `   - ⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) - Outline via create_plan; call request_phase_transition('implement') to begin coding.`
       : scaffold.phase === 'explore'
-      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) - Inspect first; call request_phase_transition('implement') to unlock editing.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE - Mutation tools locked. Inspect code & establish baseline test (RED) first; call request_phase_transition('implement') to begin editing.`
       : scaffold.phase === 'verify'
       ? `   - ⚠️ [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
       : '';

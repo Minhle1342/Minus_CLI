@@ -46,6 +46,7 @@ export class SessionPersistence {
   readonly sessionsDir: string;
   private saveQueues = new Map<string, Promise<void>>();
   private persistedState = new Map<string, PersistedSessionState>();
+  private ensuredDirs = new Set<string>();
 
   constructor(workspaceDir: string) {
     this.sessionsDir = path.join(path.resolve(workspaceDir), '.codingagent', 'sessions');
@@ -73,9 +74,16 @@ export class SessionPersistence {
   }
 
   private async saveInternal(session: Session): Promise<void> {
-    await fs.mkdir(this.sessionsDir, { recursive: true });
+    if (!this.ensuredDirs.has(this.sessionsDir)) {
+      await fs.mkdir(this.sessionsDir, { recursive: true });
+      this.ensuredDirs.add(this.sessionsDir);
+    }
     const filePath = this.getSessionPath(session.id);
     let state = this.persistedState.get(session.id);
+    // Fast path for no-op saves (persist is called several times per step):
+    // no new events means nothing to append; the size guard re-runs on the
+    // next real save, where an external modification is still detected.
+    if (state && session.seq === state.persistedSeq) return;
     if (state) {
       try {
         const stat = await fs.stat(filePath);
@@ -186,25 +194,28 @@ export class SessionPersistence {
 
     for (const sessionId of sessionIds) {
       try {
-        const parsed = await this.readFile(this.getSessionPath(sessionId));
-        if (!parsed || parsed.events.length === 0) continue;
+        const scanned = await this.readSessionScan(this.getSessionPath(sessionId), ['goal/change', 'plan/change', 'turn/end']);
+        if (!scanned || (!scanned.latestEvent && scanned.wanted.length === 0)) continue;
+        const goalEvents = scanned.wanted.filter((e) => e.type === 'goal/change' && e.data.goal);
+        const planEvents = scanned.wanted.filter((e) => e.type === 'plan/change' && Array.isArray(e.data.plan));
+        const turnEndEvents = scanned.wanted.filter((e) => e.type === 'turn/end');
+        const latestEvent = scanned.latestEvent;
 
-        const latestEvent = parsed.events.at(-1);
-        const updatedAt = latestEvent?.createdAt || parsed.header.createdAt;
+        const updatedAt = latestEvent?.createdAt || scanned.header.createdAt;
 
         // Check goal
-        const goalEvent = parsed.events.filter((e) => e.type === 'goal/change' && e.data.goal).at(-1);
+        const goalEvent = goalEvents.at(-1);
         let goalState = goalEvent?.data.goal;
 
         // Check plan
-        const planEvent = parsed.events.filter((e) => e.type === 'plan/change' && Array.isArray(e.data.plan)).at(-1);
+        const planEvent = planEvents.at(-1);
         const tasks = planEvent?.data.plan || [];
         const hasPlan = tasks.length > 0;
         const incompleteTask = tasks.find((t: any) => !['COMPLETED', 'FAILED', 'SKIPPED'].includes(t.status));
         const isAllPlanCompleted = hasPlan && !incompleteTask;
 
         // Check if there was an open turn or interrupted turn
-        const lastTurnEnd = parsed.events.filter((e) => e.type === 'turn/end').at(-1);
+        const lastTurnEnd = turnEndEvents.at(-1);
         const wasTurnCompleted = lastTurnEnd?.data.reason === 'completed';
         const wasInterrupted = lastTurnEnd?.data.reason === 'interrupted' || (latestEvent?.type !== 'turn/end' && !wasTurnCompleted);
 
@@ -303,14 +314,15 @@ export class SessionPersistence {
         const stat = await fs.stat(filePath);
         sessionTime = stat.mtimeMs;
 
-        // Đọc header hoặc sự kiện cuối cùng để xác định mốc hoạt động thực tế
-        const parsed = await this.readFile(filePath);
-        if (parsed) {
-          const lastEventTime = parsed.events.at(-1)?.createdAt
-            ? new Date(parsed.events.at(-1)!.createdAt).getTime()
+        // Đọc header hoặc sự kiện cuối cùng để xác định mốc hoạt động thực tế.
+        // Tail-read: chỉ đọc dòng đầu + dòng cuối thay vì parse toàn file.
+        const tail = await this.readSessionTail(filePath);
+        if (tail) {
+          const lastEventTime = tail.lastEvent?.createdAt
+            ? new Date(tail.lastEvent.createdAt).getTime()
             : 0;
-          const headerTime = parsed.header.createdAt
-            ? new Date(parsed.header.createdAt).getTime()
+          const headerTime = tail.header.createdAt
+            ? new Date(tail.header.createdAt).getTime()
             : 0;
           sessionTime = Math.max(sessionTime, lastEventTime, headerTime);
         }
@@ -363,6 +375,104 @@ export class SessionPersistence {
       }
     }
     return results;
+  }
+
+  /**
+   * Cheap header + last-event read for long sessions: two small ranged reads
+   * instead of parsing the whole file. Falls back to a full read when the
+   * file is tiny or the tail chunk does not end on a line boundary.
+   */
+  private async readSessionTail(
+    filePath: string,
+  ): Promise<{ header: SessionFileHeader; lastEvent?: SessionEvent; fileSize: number } | undefined> {
+    let handle: fs.FileHandle | undefined;
+    try {
+      handle = await fs.open(filePath, 'r');
+      const stat = await handle.stat();
+      const fileSize = stat.size;
+      if (fileSize === 0) return undefined;
+      const headLen = Math.min(fileSize, 8192);
+      const headBuf = Buffer.alloc(headLen);
+      await handle.read(headBuf, 0, headLen, 0);
+      const headText = headBuf.toString('utf8');
+      const newlineAt = headText.indexOf('\n');
+      if (newlineAt === -1) return this.readFile(filePath).then((full) => full && { header: full.header, lastEvent: full.events.at(-1), fileSize: full.fileSize });
+      const header = JSON.parse(headText.slice(0, newlineAt)) as SessionFileHeader;
+      if (header.kind !== 'session' || header.version !== 1 || !header.id || !header.createdAt) {
+        throw new Error(`Malformed session header in ${filePath}.`);
+      }
+      const tailLen = Math.min(fileSize, 65536);
+      const tailBuf = Buffer.alloc(tailLen);
+      await handle.read(tailBuf, 0, tailLen, fileSize - tailLen);
+      const tailLines = tailBuf.toString('utf8').split(/\r?\n/).filter(Boolean);
+      const lastLine = tailLines.at(-1);
+      if (!lastLine) return { header, lastEvent: undefined, fileSize };
+      let lastEvent: SessionEvent | undefined;
+      try {
+        const parsed = JSON.parse(lastLine) as SessionEvent;
+        // When the chunk starts mid-line the first tail line is partial, but
+        // the last line is complete because the writer always ends with \n.
+        // A header-shaped last line means a header-only file.
+        lastEvent = (parsed as { kind?: string }).kind === 'session' ? undefined : parsed;
+      } catch {
+        return this.readFile(filePath).then((full) => full && { header: full.header, lastEvent: full.events.at(-1), fileSize: full.fileSize });
+      }
+      return { header, lastEvent, fileSize };
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return undefined;
+      throw error;
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+  }
+
+  /**
+   * Single-pass scan returning only events of the wanted types plus the latest
+   * event. Lines of other types (the bulk: tool calls/results) are skipped by
+   * substring pre-filter before JSON.parse.
+   */
+  private async readSessionScan(
+    filePath: string,
+    wantedTypes: string[],
+  ): Promise<{ header: SessionFileHeader; wanted: SessionEvent[]; latestEvent?: SessionEvent; fileSize: number } | undefined> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, 'utf8');
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    if (lines.length === 0) return undefined;
+    const header = JSON.parse(lines[0]) as SessionFileHeader;
+    if (header.kind !== 'session' || header.version !== 1 || !header.id || !header.createdAt) {
+      throw new Error(`Malformed session header in ${filePath}.`);
+    }
+    const markers = wantedTypes.map((t) => `"${t}"`);
+    const wanted: SessionEvent[] = [];
+    let latestEvent: SessionEvent | undefined;
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (i === lines.length - 1) {
+        try {
+          latestEvent = JSON.parse(line) as SessionEvent;
+        } catch {
+          latestEvent = undefined;
+        }
+      }
+      let maybe = false;
+      for (const marker of markers) {
+        if (line.includes(marker)) { maybe = true; break; }
+      }
+      if (!maybe) continue;
+      try {
+        const event = JSON.parse(line) as SessionEvent;
+        if (wantedTypes.includes(event.type)) wanted.push(event);
+      } catch {
+        // Skip malformed lines; sequence validation happens on load.
+      }
+    }
+    return { header, wanted, latestEvent, fileSize: Buffer.byteLength(raw, 'utf8') };
   }
 
   private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[]; fileSize: number } | undefined> {

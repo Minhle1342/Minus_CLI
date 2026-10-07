@@ -1,6 +1,6 @@
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, observedMutationFiles } from './completion-observations.js';
-import { normalizeForMatching } from './final-answer-guard.js';
+import { FinalAnswerGuard, normalizeForMatching } from './final-answer-guard.js';
 import { verifyHighMinFiles } from './verify-tier-resolver.js';
 import {
   CompletionEvidenceGate,
@@ -184,6 +184,32 @@ export class SolutionGroundingAuditor {
     const reconciledFilesModified = Array.from(
       new Set([...declaredFiles, ...sessionMutatedFiles]),
     );
+
+    // Read-only answers have no action/entity or minimum-length quota. Use the
+    // same quality and turn-scoped evidence checks as final-answer delivery.
+    // Actual mutations (even labelled investigation_only) retain the edit path.
+    if (reconciledFilesModified.length === 0 && options.userRequest) {
+      const quality = new FinalAnswerGuard().evaluate(summary, {
+        userRequest: options.userRequest,
+        workspace: options.workspaceRoot ? { rootDir: options.workspaceRoot } : undefined,
+      });
+      const evidence = options.session
+        ? new CompletionEvidenceGate().evaluate(summary, options.session, {
+          turn: options.turn, userRequest: options.userRequest, codeChangeRequired: false,
+        })
+        : undefined;
+      const allowed = quality.allow && evidence?.allow !== false;
+      return {
+        allowed,
+        score: allowed ? 100 : 10,
+        reconciledFilesModified,
+        reasons: allowed ? [] : [quality.continuationPrompt || evidence?.continuationPrompt || 'Provide the concrete answer backed by observed evidence.'],
+        errorCode: allowed ? undefined : 'INVALID_SUMMARY_CONTENT',
+        suggestion: allowed ? undefined : 'Put the actual answer in summary; correct unsupported claims without inventing edits or tests.',
+        informationDensity: density,
+        extractedEntities: entities,
+      };
+    }
 
     // 4b. Đối chiếu phương pháp verify với mức ảnh hưởng đã đo:
     // Thay đổi từ ngưỡng HIGH (>= 3 file code) trở lên không được nộp bằng kiểm tra

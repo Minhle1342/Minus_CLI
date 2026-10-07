@@ -151,7 +151,7 @@ export class ToolDescriptorRegistry {
       descriptor = {
         name,
         capabilities: ['complete', 'inspect'],
-        phases: ['explore', 'implement', 'verify', 'release'],
+        phases: ALL_PHASES,
         minimumRisk: 'R0',
         mutates: false,
         reversible: true,

@@ -44,13 +44,13 @@ export interface SubmitSolutionResult {
 export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
   return {
     name: 'submit_solution',
-    description: 'Explicitly submit the finalized solution and empirical verification proof for the current task or goal. PRECONDITION: after your last code edit you must have run a real verification command (test suite such as npm test / pytest / jest, build, lint, typecheck, get_diagnostics, or python -m py_compile for standalone scripts) and seen it pass — running the script you just created (e.g. "python regex.py") does NOT count as verification and the call will be rejected with VERIFICATION_FAILED. Call this tool only when that verification has executed successfully.',
+    description: 'Submit the actual final answer as the last tool call for the current task, including every read-only question, explanation, review, and investigation. For read-only tasks, put the answer itself in summary; use resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless verification actually occurred. No edit or test is required for read-only answers. A report or plain-text answer does not replace successful submission. For tasks with code changes, run a real verification command after the last edit (test/build/lint/typecheck/get_diagnostics); merely running the script you created does not count. After successful submission, call no further tools.',
     parameters: {
       type: 'OBJECT',
       properties: {
         summary: {
           type: 'STRING',
-          description: 'A comprehensive summary of the implemented solution, files modified, and verified outcomes. MUST be written in the same natural language as the user\'s original prompt (see responseLanguage).',
+          description: 'The actual user-facing answer at the requested level of detail, not a status stub. For read-only tasks include findings and uncertainty without inventing edits or test results. For changes include the outcome and observed verification. Use the same natural language as the user\'s original prompt.',
         },
         responseLanguage: {
           type: 'STRING',
@@ -73,7 +73,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         },
         verificationEvidence: {
           type: 'STRING',
-          description: 'Required in practice. The exact verification command you executed AFTER your last edit (e.g. "npm test", "pytest test_regex.py", "get_diagnostics"). The gate checks the session for this command — a command you never ran, or merely running the script you created, will be rejected.',
+          description: 'Optional for read-only answers; omit if no verification occurred. For code changes, give the exact verification command executed after the last edit. Never claim a command you did not run or treat merely running the created script as test verification.',
         },
         rootCause: {
           type: 'STRING',
@@ -84,7 +84,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
     } as any,
     execute: async (args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<SubmitSolutionResult> => {
       const summary = (args.summary || '').trim();
-      const verificationEvidence = (args.verificationEvidence || '').trim() || 'Verified via inspection and direct validation';
+      const verificationEvidence = (args.verificationEvidence || '').trim();
       const rootCause = args.rootCause ? String(args.rootCause).trim() : undefined;
       const resolutionType = args.resolutionType as ResolutionType | undefined;
       const verificationMethod = args.verificationMethod as VerificationMethod | undefined;
@@ -131,7 +131,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         informationDensity: audit.informationDensity,
         timestamp,
         nextAction: 'final_answer',
-        message: `Solution successfully submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Immediately output your final comprehensive answer and summary to the user in the EXACT SAME LANGUAGE as the user's original request prompt${responseLanguage ? ` (${responseLanguage})` : ' (e.g. Vietnamese if the user asked in Vietnamese)'}. Present your findings, file paths, code logic, and verification proof clearly and professionally. Do not emit generic stubs or English placeholders.`,
+        message: `Final answer successfully submitted. The task is now COMPLETE. You MUST NOT call any further tools. Return the submitted answer at the requested level of detail in the EXACT SAME LANGUAGE as the user's original request${responseLanguage ? ` (${responseLanguage})` : ''}. Include only findings and verification actually established; do not invent code changes, tests, or root causes.`,
       };
     },
   };

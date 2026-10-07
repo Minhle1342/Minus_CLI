@@ -17,7 +17,7 @@ import { nativeBatchReadFilesAsync } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Primary workspace file and source-code reader, returning a contentHash for safe edits. When the path is a directory, it lists child files and directories. Prefer "symbol" to retrieve a declaration in one call: TypeScript/JavaScript uses the compiler AST and Python uses indentation boundaries. Also supports startLine/endLine (or offset/limit, up to 800 lines), outlineOnly, and truncates extremely long lines (>2,000 characters) to protect the context window.',
+  description: 'Primary workspace file reader, returning a contentHash for safe edits. Choose scope before reading: (1) Known declaration: use symbol; omit line boundaries. (2) Known location from search, a stack trace, or outline: supply both startLine and endLine (or offset and limit), covering only the relevant block and nearby context. (3) Unknown location in a large/unknown file: use outlineOnly or search first; do not read every page to locate code. (4) Omit scope only for a small file whose entire content is needed, a directory listing, or an initial bounded preview. hasMore is availability metadata, not an instruction to read the whole file. Stop once evidence is sufficient; reuse already-read content. Line reads allow up to 800 lines; lines over 2,000 characters are truncated. Unscoped files over 350 lines or 200KB return a 120-line preview plus outline. TS/JS symbol extraction uses the compiler AST; Python uses indentation boundaries.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -27,27 +27,27 @@ export const readFileTool: ToolDefinition = {
       },
       startLine: {
         type: Type.INTEGER,
-        description: 'Optional 1-based starting line. Reading 150–300 lines per call is recommended; the maximum is 800 lines per call.',
+        description: 'Optional 1-based inclusive starting line. For a known code location, pair with endLine to bound the relevant block; prefer a focused range, not startLine=1 by habit. Omit with symbol, outlineOnly, directory listings, or a small file needed in full. Maximum 800 lines per call.',
       },
       endLine: {
         type: Type.INTEGER,
-        description: 'Optional 1-based ending line. If omitted for a large file (>350 lines), the next 250 lines are read by default.',
+        description: 'Optional 1-based inclusive ending line. Pair with startLine when reading a known location; select only the relevant block and nearby context. startLine alone defaults to 250 lines on files over 350 lines, but may read to EOF on smaller files. Omit with symbol or outlineOnly.',
       },
       offset: {
         type: Type.INTEGER,
-        description: 'Compatibility alias for startLine (1-based; defaults to 1).',
+        description: 'Compatibility alias for startLine (1-based). Pair with limit for a bounded read; do not mix alias pairs unnecessarily.',
       },
       limit: {
         type: Type.INTEGER,
-        description: 'Compatibility alias for the maximum number of lines to read (250 by default for large files; 800 maximum).',
+        description: 'Number of lines to read, paired with offset (or startLine) as an alternative to startLine/endLine. Read only the needed block; maximum 800 lines.',
       },
       outlineOnly: {
         type: Type.BOOLEAN,
-        description: 'When true, return only an outline of functions, classes, and interfaces with line numbers to save tokens; works for files larger than 200 KB.',
+        description: 'Use when the target location is unknown: return declarations with line numbers without their bodies. Then choose symbol or a focused startLine/endLine range. Omit startLine and endLine in this mode; works for files larger than 200KB.',
       },
       symbol: {
         type: Type.STRING,
-        description: 'Prefer this when the symbol is known: use either a simple name ("runQueryPipeline") or a qualified name ("AgentLoop.runInternal"). TS/JS uses the compiler AST and Python uses an indentation parser. For ambiguous simple names, the tool returns qualified names for recovery.',
+        description: 'Prefer when the declaration name is known: simple name ("runQueryPipeline") or qualified name ("AgentLoop.runInternal"). Omit startLine and endLine in this mode. TS/JS uses the compiler AST; Python uses indentation. Ambiguous names return qualified names for recovery.',
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,
@@ -99,16 +99,9 @@ export const readFileTool: ToolDefinition = {
         };
       }
 
-      // Giới hạn kích thước khi đọc TOÀN BỘ file mà không chỉ định phạm vi (unscoped read) để chống tràn context token LLM (tối đa 200KB)
-      if (!hasExplicitScope && stat.size > 200 * 1024) {
-        return {
-          path: rawPath,
-          error: `File too large (${Math.round(stat.size / 1024)}KB). Maximum full-read size is 200KB to prevent context-token overflow.`,
-          errorCode: 'FILE_TOO_LARGE',
-          fileSizeBytes: stat.size,
-          suggestion: `Read in parts with the "startLine" and "endLine" parameters (or "offset" and "limit"), or use "outlineOnly: true" to view the function/class structure, or use "symbol: <symbol_name>" to extract only the function/class body you need.`,
-        };
-      }
+      // File >200KB đọc unscoped: tự động hạ cấp sang windowed view (120 dòng đầu
+      // + AST outline) thay vì báo lỗi cứng — tiết kiệm 1 round-trip retry của model.
+      const forceAutoWindow = !hasExplicitScope && stat.size > 200 * 1024;
 
       let fileContent: string;
       let contentHash: string;
@@ -152,6 +145,7 @@ export const readFileTool: ToolDefinition = {
             : undefined,
           contentHash,
           eol,
+          readScopeGuidance: 'Choose a relevant symbol from this outline, or pass both startLine and endLine around the target location. Do not read every declaration or page; stop when evidence is sufficient.',
         };
       }
 
@@ -190,6 +184,9 @@ export const readFileTool: ToolDefinition = {
             lineNumbersIncluded: includeLineNumbers,
             hasTruncatedLines: symbolTruncatedCount > 0,
             truncatedLinesCount: symbolTruncatedCount > 0 ? symbolTruncatedCount : undefined,
+            readScopeGuidance: sliced.complete
+              ? 'Complete declaration returned. No additional line range is needed unless relevant surrounding context is missing; reuse this content.'
+              : 'Declaration may be incomplete. Read only missing context with both startLine and endLine, or refine the symbol name.',
           };
         } else {
           // Khi không tìm thấy symbol, trích xuất outline để gợi ý các symbol khả dụng cho LLM tự phục hồi (Tool Design Error Recovery)
@@ -233,8 +230,9 @@ export const readFileTool: ToolDefinition = {
       const rawLimit = args.limit !== undefined ? Math.max(1, Number(args.limit)) : undefined;
 
       // Nếu file lớn (> 350 dòng) và không chỉ định bất kỳ khoảng dòng/symbol/limit nào:
-      // Tự động kích hoạt Windowing 120 dòng đầu + AST Outline (SWE-agent & Cursor standard)
-      const isUnscopedLargeFile = rawStart === undefined && args.endLine === undefined && rawLimit === undefined && !args.symbol && !args.outlineOnly && totalLines > 350;
+      // Tự động kích hoạt Windowing 120 dòng đầu + AST Outline (SWE-agent & Cursor standard).
+      // File >200KB đọc unscoped cũng đi chung đường này (forceAutoWindow) kể cả khi ít dòng.
+      const isUnscopedLargeFile = rawStart === undefined && args.endLine === undefined && rawLimit === undefined && !args.symbol && !args.outlineOnly && (totalLines > 350 || forceAutoWindow);
 
       const MAX_LINE_RANGE = 800;
       let endLine: number;
@@ -298,8 +296,20 @@ export const readFileTool: ToolDefinition = {
           offset: nextStart,
           limit: nextEnd - nextStart + 1,
         };
-        paginationSuggestion = `To continue reading the next part (lines ${nextStart} to ${nextEnd}), call: read_file(path="${rawPath}", startLine=${nextStart}, endLine=${nextEnd})`;
+        paginationSuggestion = `Only if the next part is needed for the task, call: read_file(path="${rawPath}", startLine=${nextStart}, endLine=${nextEnd}). Otherwise stop or jump directly to the relevant symbol/range; hasMore does not require reading to EOF.`;
       }
+
+      // Carried by the existing harness advisory channel; never rejects a read
+      // or changes the model-facing stable system-prompt prefix per step.
+      const hasRangeStart = args.startLine !== undefined || args.offset !== undefined;
+      const hasRangeEnd = args.endLine !== undefined || args.limit !== undefined;
+      const needsScopeAdvisory = isUnscopedLargeFile || hasRangeStart !== hasRangeEnd;
+      const scopeAdvisory = '[STRONG ADVISORY — READ SCOPE (non-blocking, tool still executes)]: '
+        + (isUnscopedLargeFile ? 'This is a preview, not the full file. ' : 'Only one line-range boundary was supplied. ')
+        + 'For a known location, pass both startLine and endLine (or offset and limit) around the relevant block. '
+        + 'For a known declaration, use symbol without line boundaries; for an unknown location, use outlineOnly or search first. '
+        + 'Omit scope only for a small file needed in full, a directory listing, or an initial bounded preview. '
+        + 'Do not read all pages merely because hasMore is true; stop once evidence is sufficient.';
 
       return {
         path: rawPath,
@@ -312,6 +322,10 @@ export const readFileTool: ToolDefinition = {
         nextStartLine: nextPage?.startLine,
         nextPage,
         paginationSuggestion,
+        readScopeGuidance: hasMore || hasRangeStart || hasRangeEnd || isUnscopedLargeFile
+          ? 'Stop when evidence is sufficient. Read another focused symbol/range only if relevant context is still missing; hasMore does not mean read every page.'
+          : 'A small file was returned in full. Omit line boundaries only when the whole file is needed; otherwise prefer symbol or both startLine and endLine.',
+        _guardian_warnings: needsScopeAdvisory ? [scopeAdvisory] : undefined,
         hasTruncatedLines: rangeTruncatedCount > 0,
         truncatedLinesCount: rangeTruncatedCount > 0 ? rangeTruncatedCount : undefined,
         contentHash,
@@ -321,7 +335,9 @@ export const readFileTool: ToolDefinition = {
         symbolsCount: outline?.symbols?.length,
         outline: outline?.symbols?.slice(0, 30),
         notice: isUnscopedLargeFile
-          ? `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). The first 120 lines and AST Symbol Outline are shown to protect the context window. To read other sections, pass startLine/endLine or symbol.`
+          ? (forceAutoWindow && totalLines <= 350
+            ? `[AUTO_DEGRADED VIEW]: File "${rawPath}" is ${Math.round(stat.size / 1024)}KB (> 200KB full-read budget). Showing the first ${endLine} lines and AST Symbol Outline instead of full content to protect the context window. To read other sections, pass startLine/endLine, symbol, or outlineOnly.`
+            : `[WINDOWED FILE VIEW]: File "${rawPath}" has ${totalLines} lines (> 350). The first 120 lines and AST Symbol Outline are shown to protect the context window. To read other sections, pass startLine/endLine or symbol.`)
           : autoWindowNotice,
       };
     } catch (err: any) {

@@ -522,7 +522,9 @@ export class TurnMemoryRetriever {
       this.miniSearch.addAll(newDocs);
       await this.persist();
     } else if (result.skipped > 0) {
-      // Idempotent re-archive only; nothing changed, no persist needed.
+      // A previous write may have failed after updating RAM. Retry durability
+      // even for identical records before acknowledging the archive.
+      await this.persist();
     }
     return result;
   }
@@ -588,7 +590,7 @@ export class TurnMemoryRetriever {
       changed = true;
     }
 
-    if (changed) {
+    if (changed || result.skipped > 0) {
       this.bumpMemoryVersion();
       await this.persistMaskedObservations();
     }

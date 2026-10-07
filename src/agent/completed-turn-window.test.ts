@@ -177,7 +177,7 @@ describe('Completed-turn window compaction', () => {
     }, /open turn 3/);
   });
 
-  it('AgentLoop compacts automatically after the 5th turn', async () => {
+  it('AgentLoop leaves five short turns intact without token pressure', async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'turn-window-loop-'));
     try {
       class ScriptedLLM {
@@ -198,12 +198,9 @@ describe('Completed-turn window compaction', () => {
       const compactions = session.getEvents().filter(
         (e) => e.type === 'session/compaction' && (e.data as any).reason === 'completed-turn-window',
       );
-      assert.ok(compactions.length >= 1, 'expected a completed-turn-window compaction event');
-      const manifest = (compactions[compactions.length - 1].data as any).compactionState?.turnWindow;
-      assert.deepEqual(manifest?.preservedTurns, [2, 3, 4, 5]);
-      assert.deepEqual(manifest?.archivedTurnNumbers, [1]);
-      assert.match(JSON.stringify(session.getHistory()), /ROLLING DIALOGUE SYNOPSIS/);
-      assert.ok(loop.turnMemoryRetriever.getArchivedTurnCount() >= 1);
+      assert.equal(compactions.length, 0);
+      assert.doesNotMatch(JSON.stringify(session.getHistory()), /ROLLING DIALOGUE SYNOPSIS/);
+      assert.equal(loop.turnMemoryRetriever.getArchivedTurnCount(), 0);
       session.assertRuntimeInvariants();
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});

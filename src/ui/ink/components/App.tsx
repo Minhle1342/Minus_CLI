@@ -11,6 +11,7 @@ import { PermissionPromptBox } from './PermissionPromptBox.js';
 import { InputPromptBar } from './InputPromptBar.js';
 import { CLI } from '../../cli-ui.js';
 import { inkColors } from '../../tui-theme.js';
+import { compactionStatus, formatCompactionStatus } from '../../compaction-status.js';
 
 interface AppProps {
   store: TuiStore;
@@ -20,6 +21,8 @@ interface AppProps {
 
 export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
   const [state, setState] = useState<TuiState>(store.getState());
+  const [compaction, setCompaction] = useState(compactionStatus.get());
+  useEffect(() => compactionStatus.subscribe(setCompaction), []);
   const { columns } = useWindowSize();
   // The final-answer box has two border cells and two horizontal padding cells.
   const answerWidth = Math.max(1, (columns || 80) - 4);
@@ -96,6 +99,13 @@ export const App: React.FC<AppProps> = ({ store, onSubmitPrompt, onAbort }) => {
 
       {/* 4. Reactive Step Stream (One-Liner Log) */}
       <StepStream steps={state.steps} maxVisible={10} />
+      {compaction && (
+        <Box height={1} flexShrink={0}>
+          <Text wrap="truncate-end" color={compaction.state === 'failed' ? inkColors.danger : compaction.state === 'completed' ? 'green' : 'yellow'}>
+            {formatCompactionStatus(compaction)}
+          </Text>
+        </Box>
+      )}
 
       {/* 5. Active Diff View (if inspecting a patch or mutation) */}
       {state.activeDiff && <DiffPreviewBox diff={state.activeDiff} />}

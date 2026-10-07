@@ -5,11 +5,15 @@ import type { EvidenceKind } from '../agent/completion-evidence.js';
 import {
   assertHistoryToolPairing,
   assertSessionRuntimeInvariants,
+  assertSessionRuntimeInvariantsIncremental,
   computeRequestDigest,
   computeRequestValueDigest,
+  createInvariantCheckCursor,
+  type InvariantCheckCursor,
   type RecordedRequestHeader,
 } from './session-invariants.js';
 import { cloneJsonStrict } from '../tools/schema-validator.js';
+import { getHistoryTotalChars } from './message-metrics.js';
 
 export type SessionMessage = Content;
 export type ContentPart = any;
@@ -316,6 +320,10 @@ export class Session {
   readonly id: string;
   readonly createdAt: string;
   private readonly eventLog: SessionEvent[];
+  /** Resumable invariant cursor + replay marks for long sessions (memory-only, never persisted). */
+  private invariantCursor?: InvariantCheckCursor;
+  private lastReplayVerifiedSeq = 0;
+  private lastRecordedHeaderSeq = 0;
 
   constructor(
     id: string = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -361,25 +369,86 @@ export class Session {
   ): SessionEvent {
     const cloned = cloneJson(input);
     const history = cloned.history || [];
-    const priorHeader = [...this.eventLog].reverse().find((event) => event.type === 'request/header' && event.data.requestHeader);
+    const priorHeader = this.findLatestEventOfType('request/header', (event) => Boolean(event.data.requestHeader));
+    const priorDigest = priorHeader?.data.requestHeader?.digest;
     const withoutDigest: Omit<RecordedRequestHeader, 'digest'> = {
       ...cloned,
       sourceEventSeq: this.seq,
-      ...(priorHeader?.data.requestHeader?.digest ? { previousDigest: priorHeader.data.requestHeader.digest } : {}),
+      ...(priorDigest ? { previousDigest: priorDigest } : {}),
       ...(options.compaction ? { compaction: options.compaction } : {}),
     };
     if (options.compactHistory) {
       delete withoutDigest.history;
       withoutDigest.historyDigest = computeRequestValueDigest(history);
       withoutDigest.historyMessages = history.length;
-      withoutDigest.historyCharacters = JSON.stringify(history).length;
+      // Cached per-message char walk instead of a full JSON.stringify alloc.
+      withoutDigest.historyCharacters = getHistoryTotalChars(history);
     }
-    return this.append('request/header', {
+    const recorded = this.append('request/header', {
       requestHeader: {
         ...withoutDigest,
         digest: computeRequestDigest(withoutDigest),
       },
     });
+    this.lastRecordedHeaderSeq = recorded.seq;
+    return recorded;
+  }
+
+  /**
+   * Incremental variant of assertRuntimeInvariants for long sessions: verifies
+   * only events appended since the previous check (the log is append-only) and
+   * replays at most the headers that arrived since the last replay. Headers
+   * recorded by this instance from the live projection are verified at write
+   * time, so their replay is skipped by construction.
+   */
+  assertRuntimeInvariantsIncremental(options?: {
+    allowOpenLifecycle?: boolean;
+    allowPendingToolCalls?: boolean;
+    verifyRequestReplay?: 'all' | 'latest' | 'none';
+  }): void {
+    assertSessionRuntimeInvariantsIncremental(this.eventLog, this.invariantCursor ??= createInvariantCheckCursor(), options);
+    const replayMode = options?.verifyRequestReplay ?? 'latest';
+    if (replayMode !== 'none') {
+      const freshHeaders: SessionEvent[] = [];
+      for (let index = this.eventLog.length - 1; index >= this.lastReplayVerifiedSeq; index--) {
+        const event = this.eventLog[index];
+        if (event.type === 'request/header' && event.data.requestHeader) {
+          freshHeaders.push(event);
+          if (replayMode === 'latest') break;
+        }
+      }
+      for (let i = freshHeaders.length - 1; i >= 0; i--) {
+        const event = freshHeaders[i];
+        const header = event.data.requestHeader;
+        if (!header) continue;
+        if (event.seq === this.lastRecordedHeaderSeq) continue;
+        const historyAtBoundary = Session.projectHistoryFromEvents(
+          this.eventLog.slice(0, header.sourceEventSeq),
+        );
+        const { digest, ...withoutDigest } = header;
+        const replayMatches = header.historyDigest
+          ? computeRequestValueDigest(historyAtBoundary) === header.historyDigest
+          : computeRequestDigest({ ...withoutDigest, history: historyAtBoundary }) === digest;
+        if (!replayMatches) {
+          throw new Error(`Invariant violation: request/header history cannot be reconstructed at seq ${event.seq}.`);
+        }
+      }
+      this.lastReplayVerifiedSeq = this.eventLog.length;
+    }
+  }
+
+  /** Latest event of a type without cloning the whole log (long-session scan). */
+  findLatestEventOfType(
+    type: SessionEventType,
+    predicate?: (event: SessionEvent) => boolean,
+  ): SessionEvent | undefined {
+    for (let index = this.eventLog.length - 1; index >= 0; index--) {
+      const event = this.eventLog[index];
+      if (event.type === type && (!predicate || predicate(event))) {
+        return cloneJson(event);
+      }
+    }
+    return undefined;
   }
 
   assertRuntimeInvariants(options?: {

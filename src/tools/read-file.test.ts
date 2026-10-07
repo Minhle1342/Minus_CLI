@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { readFileTool } from './read-file.js';
 import { Workspace } from '../workspace/workspace.js';
+import { StepPromptPolicy, type StepPromptPolicyContext } from '../agent/step-prompt-policy.js';
 
 test('readFileTool - Directory Listing Fallback', async () => {
   const workspace = new Workspace(process.cwd());
@@ -96,4 +97,90 @@ test('readFileTool - Preserve existing superior features: fuzzy suggestion on ty
   assert.equal(res.errorCode, 'FILE_NOT_FOUND', 'Should return FILE_NOT_FOUND error');
   assert.ok(Array.isArray(res.suggestions), 'Should provide typo suggestions');
   assert.ok(res.suggestions.some((s: string) => s.includes('read-file.ts')), 'Should suggest read-file.ts');
+});
+
+test('readFileTool schema explains when to supply both line boundaries and when to omit them', () => {
+  assert.ok(readFileTool.parameters);
+  const properties = readFileTool.parameters.properties!;
+  assert.match(readFileTool.description, /both startLine and endLine/);
+  assert.match(readFileTool.description, /small file/);
+  assert.match(readFileTool.description, /hasMore.*not.*read/i);
+  assert.match(properties.startLine.description!, /endLine/);
+  assert.match(properties.endLine.description!, /startLine/);
+  assert.match(properties.symbol.description!, /Omit.*startLine.*endLine/i);
+  assert.match(properties.outlineOnly.description!, /Omit.*startLine.*endLine/i);
+});
+
+test('readFileTool carries non-blocking scope advice without encouraging exhaustive pagination', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'read-scope-guidance-'));
+  try {
+    const workspace = new Workspace(root);
+    await fs.writeFile(path.join(root, 'large.ts'), [
+      'export function target() { return 42; }',
+      ...Array.from({ length: 499 }, (_, i) => `// filler ${i}`),
+    ].join('\n'));
+    await fs.writeFile(path.join(root, 'small.json'), '{"enabled":true}');
+
+    const preview = await readFileTool.execute({ path: 'large.ts' }, workspace);
+    assert.equal(preview.error, undefined);
+    assert.equal(preview.endLine, 120);
+    assert.equal(preview.hasMore, true);
+    assert.match(preview._guardian_warnings[0], /STRONG ADVISORY/);
+    assert.match(preview._guardian_warnings[0], /both startLine and endLine/);
+    const context: StepPromptPolicyContext = {
+      activeStepQuery: 'Find the relevant declaration',
+      fingerprint: 'read-scope-test',
+      classification: {
+        id: 'read-scope', version: 1, taskClass: 'question', phase: 'explore',
+        complexity: 'small', externality: 'local', reversibility: 'read-only', risk: 'R0',
+        requiredCapabilities: ['inspect'], confidence: 0.95, fastPath: false,
+        reasonCodes: [], createdAt: '2026-10-07T00:00:00.000Z',
+      },
+      hasPlan: false, planRequired: false, planIncomplete: false, planBlocked: false,
+      readyTaskCount: 0, visibleToolNames: ['read_file'], consecutiveFailures: 0,
+      hasValidatedHypothesis: false, hasSubmittedSolution: false, hasVerifiedTests: false,
+      activeAgentCount: 0, harnessProfileName: 'balanced-default',
+      lastToolName: 'read_file', lastToolResult: preview,
+      candidates: {
+        legacyPlanContext: '', stepPlanContext: '', advicePrompt: '',
+        harnessGuidance: '', scaffoldPrompt: '',
+      },
+    };
+    for (const mode of ['off', 'shadow', 'enforce'] as const) {
+      const decision = new StepPromptPolicy().decide(context, mode);
+      assert.ok(decision.reasonCodes.includes('STRONG_ADVISORY_CARRIED_GUARDIAN_ADVISORY'));
+      assert.match(decision.strongAdvisoryPrompt, /READ SCOPE/);
+    }
+    assert.match(preview.paginationSuggestion, /Only if.*needed/);
+    assert.match(preview.paginationSuggestion, /startLine=121, endLine=240/);
+
+    const startOnly = await readFileTool.execute({ path: 'large.ts', startLine: 200 }, workspace);
+    assert.equal(startOnly.endLine, 449); // Compatibility: advisory, not rejection.
+    assert.match(startOnly._guardian_warnings[0], /both startLine and endLine/);
+    const endOnly = await readFileTool.execute({ path: 'large.ts', endLine: 10 }, workspace);
+    assert.match(endOnly._guardian_warnings[0], /both startLine and endLine/);
+
+    for (const args of [{ startLine: 200, endLine: 210 }, { offset: 200, limit: 11 }]) {
+      const scoped = await readFileTool.execute({ path: 'large.ts', ...args }, workspace);
+      assert.equal(scoped.linesCount, 11);
+      assert.equal(scoped._guardian_warnings, undefined);
+      assert.match(scoped.readScopeGuidance, /Stop.*sufficient/);
+      assert.equal(scoped.contentHash, preview.contentHash);
+    }
+
+    const outline = await readFileTool.execute({ path: 'large.ts', outlineOnly: true }, workspace);
+    assert.match(outline.readScopeGuidance, /symbol/);
+    assert.match(outline.readScopeGuidance, /both startLine and endLine/);
+    const symbol = await readFileTool.execute({ path: 'large.ts', symbol: 'target' }, workspace);
+    assert.equal(symbol.completeDeclaration, true);
+    assert.equal(symbol._guardian_warnings, undefined);
+    assert.match(symbol.readScopeGuidance, /No.*line range.*needed/);
+    const full = await readFileTool.execute({ path: 'small.json' }, workspace);
+    assert.equal(full.error, undefined);
+    assert.equal(full.hasMore, false);
+    assert.equal(full._guardian_warnings, undefined);
+    assert.match(full.readScopeGuidance, /small file/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

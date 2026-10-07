@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { FinalAnswerGuard, verifyWorkspaceGrounding, detectAnalysisOrInvestigationIntent, hasUnfulfilledDeferredPromise } from './final-answer-guard.js';
+import { FinalAnswerGuard, verifyWorkspaceGrounding, detectAnalysisOrInvestigationIntent, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
 import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
 import { CompletionEvidenceGate, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
@@ -179,35 +179,39 @@ class ScriptedCompletionLLM {
   }
 }
 
-test('AgentLoop returns a concise answer directly without reporting or verification tools', async () => {
+test('AgentLoop requires submission of a concise answer without reporting or verification tools', async () => {
   assert.notEqual(process.env.NODE_ENV, 'test', 'This test must exercise real completion gates');
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-loop-'));
   try {
     const workspace = new Workspace(rootDir);
-    const llm = new ScriptedCompletionLLM([{ text: 'AgentLoop coordinates tools and completion.', toolCalls: [] }]);
+    const answer = 'AgentLoop coordinates tools and completion.';
+    const llm = new ScriptedCompletionLLM([
+      { text: answer, toolCalls: [] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary: answer, resolutionType: 'investigation_only' } }] },
+    ]);
     const session = new Session();
     session.addUserMessage('Explain the architecture in one sentence.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 3, workspace });
     assert.equal(await loop.run(session), 'AgentLoop coordinates tools and completion.');
-    assert.equal(llm.calls, 1);
-    assert.equal(session.getEvents().some((event) => event.type === 'tool/call'), false);
+    assert.equal(llm.calls, 2);
+    assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), ['submit_solution']);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
-test('AgentLoop repairs unsupported execution claims by rewriting without forcing a tool', async () => {
+test('AgentLoop repairs unsupported execution claims and submits without forcing verification', async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-recovery-'));
   try {
     const workspace = new Workspace(rootDir);
     const llm = new ScriptedCompletionLLM([
       { text: 'I ran tests and they passed.', toolCalls: [] },
-      { text: 'The explanation is based on source inspection; tests have not been run.', toolCalls: [] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary: 'The explanation is based on source inspection; tests have not been run.', resolutionType: 'investigation_only' } }] },
     ]);
     const session = new Session();
     session.addUserMessage('Explain the architecture briefly.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
     assert.match(await loop.run(session), /tests have not been run/);
     assert.equal(llm.calls, 2);
-    assert.match(llm.prompts[1], /No tool call is required/);
+    assert.match(llm.prompts[1], /call submit_solution/);
     assert.doesNotMatch(llm.prompts[1], /MANDATORY TOOL CALL REQUIRED/);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
@@ -236,13 +240,14 @@ test('a recorded report is a fallback, not a replacement for a newer answer', as
       const llm = new ScriptedCompletionLLM([
         { toolCalls: [{ name: 'report_investigation_findings', args: { userFacingReport: report } }] },
         { text: latest, toolCalls: [] },
+        { toolCalls: [{ name: 'submit_solution', args: { summary: latest || report.trim(), resolutionType: 'investigation_only' } }] },
       ]);
       const session = new Session();
       session.addUserMessage('Explain the entry point briefly.');
       const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
       assert.equal(await loop.run(session), latest || report.trim());
-      assert.equal(llm.calls, 2);
-      assert.equal(session.getEvents().filter((event) => event.type === 'tool/call').length, 1);
+      assert.equal(llm.calls, 3);
+      assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings', 'submit_solution']);
     }
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
@@ -254,14 +259,14 @@ test('a recorded report cannot bypass evidence checks on an empty model response
     const llm = new ScriptedCompletionLLM([
       { toolCalls: [{ name: 'report_investigation_findings', args: { userFacingReport: 'I ran tests and they passed.' } }] },
       { text: '', toolCalls: [] },
-      { text: 'Tests have not been run. The report contained an unsupported verification claim.', toolCalls: [] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary: 'Tests have not been run. The report contained an unsupported verification claim.', resolutionType: 'investigation_only' } }] },
     ]);
     const session = new Session();
     session.addUserMessage('Explain the entry point briefly.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 5, workspace });
     assert.match(await loop.run(session), /^Tests have not been run/);
     assert.equal(llm.calls, 3);
-    assert.match(llm.prompts[2], /No tool call is required/);
+    assert.match(llm.prompts[2], /call submit_solution/);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
@@ -278,7 +283,7 @@ test('a new read-only turn is independent of past mutations and verification ski
     session.append('turn/end', { turn: 1 });
     session.recordSkillDecision({ skillId: 'verification-before-completion', version: '1.0.0', reason: 'Previous editing turn', timestamp: new Date().toISOString(), decision: 'activated' });
     session.addUserMessage('Explain why a string cannot be assigned to a number; read only.');
-    const llm = new ScriptedCompletionLLM([{ text: 'The string conflicts with the declared number type.', toolCalls: [] }]);
+    const llm = new ScriptedCompletionLLM([{ toolCalls: [{ name: 'submit_solution', args: { summary: 'The string conflicts with the declared number type.', resolutionType: 'investigation_only' } }] }]);
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 3, workspace });
     assert.equal(await loop.run(session), 'The string conflicts with the declared number type.');
     assert.equal(llm.calls, 1);
@@ -318,7 +323,7 @@ test('exploration tasks with cause investigation and expository introductions co
     ].join('\n\n');
 
     const llm = new ScriptedCompletionLLM([
-      { text: substantiveAnswer, toolCalls: [] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary: substantiveAnswer, resolutionType: 'investigation_only' } }] },
     ]);
     const session = new Session();
     session.addUserMessage('Nguyên nhân khiến TUI hiển thị cảnh báo này và cơ chế vận hành?');
@@ -386,4 +391,28 @@ test('P4 Scratch Isolation: scratch script classified as reproduction, does not 
   record(session, 1, 'run_command', { CommandLine: 'npm test' }, { success: true, exitCode: 0, stdout: '1 passed' });
   const decisionAfterRepoTest = gate.evaluate('Fixed and verified with npm test.', session, { turn: 1, taskClass: 'bugfix' });
   assert.equal(decisionAfterRepoTest.allow, true, 'Real repo test suite satisfies verification requirement');
+});
+
+test('system-prompt echo is rejected and stripped before TUI render', () => {
+  const guard = new FinalAnswerGuard();
+
+  const pureEcho = '[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified. Output your final comprehensive response now.';
+  assert.equal(isSystemPromptEcho(pureEcho), true);
+  const echoDecision = guard.evaluate(pureEcho, {});
+  assert.equal(echoDecision.allow, false);
+  assert.equal(echoDecision.reason, 'system-prompt-echo');
+  assert.match(echoDecision.continuationPrompt || '', /Never restate system directives/);
+
+  const leadingEcho = '[RESPONSE LANGUAGE]: Respond in Vietnamese.\n\nRoot cause: null guard in parser.ts. Verified with npm test.';
+  assert.equal(isSystemPromptEcho(leadingEcho), true);
+
+  const embeddedAdvisory = 'Root cause: null guard in parser.ts, fixed and verified with npm test.\n\n[STRONG ADVISORY — ACTION GUIDELINE (non-blocking, tool still executes)]\n[CASCADE_REPAIR_ADVISORY]: Repeated fixes keep failing.';
+  const stripped = stripSystemPromptEcho(embeddedAdvisory);
+  assert.ok(!stripped.includes('[STRONG ADVISORY'), 'advisory block must be stripped');
+  assert.ok(stripped.includes('Root cause: null guard'), 'substantive content must survive');
+  assert.equal(isSystemPromptEcho(embeddedAdvisory), false, 'substantive answer with trailing echo is sanitized, not rejected');
+
+  const clean = 'Root cause: null guard in parser.ts. Fixed in commit abc123 and verified with npm test (12 passed).';
+  assert.equal(isSystemPromptEcho(clean), false);
+  assert.equal(stripSystemPromptEcho(clean), clean);
 });

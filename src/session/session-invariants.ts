@@ -73,53 +73,88 @@ export function assertSessionRuntimeInvariants(
   events: SessionEvent[],
   options: { allowOpenLifecycle?: boolean; allowPendingToolCalls?: boolean } = {},
 ): void {
-  let openTurn: number | undefined;
-  let openStep: { turn: number; step: number } | undefined;
-  const calls = new Map<string, SessionEvent>();
-  const results = new Set<string>();
-  const requestSteps = new Set<string>();
-  let lastRequestDigest: string | undefined;
-  let lastTurn = 0;
-  const lastStepByTurn = new Map<number, number>();
+  const cursor = createInvariantCheckCursor();
+  assertSessionRuntimeInvariantsIncremental(events, cursor, options);
+}
 
-  for (let index = 0; index < events.length; index++) {
+/**
+ * Resumable validator state for long sessions. The event log is append-only,
+ * so a Session can verify only the events appended since the last check
+ * instead of re-scanning from genesis on every step.
+ */
+export interface InvariantCheckCursor {
+  verifiedSeq: number;
+  openTurn?: number;
+  openStep?: { turn: number; step: number };
+  calls: Map<string, SessionEvent>;
+  results: Set<string>;
+  requestSteps: Set<string>;
+  lastRequestDigest?: string;
+  lastTurn: number;
+  lastStepByTurn: Map<number, number>;
+}
+
+export function createInvariantCheckCursor(): InvariantCheckCursor {
+  return {
+    verifiedSeq: 0,
+    calls: new Map(),
+    results: new Set(),
+    requestSteps: new Set(),
+    lastTurn: 0,
+    lastStepByTurn: new Map(),
+  };
+}
+
+/**
+ * Verifies events[cursor.verifiedSeq..] and advances the cursor. Callers must
+ * guarantee the already-verified prefix is unchanged (true for Session, whose
+ * event log is append-only). Identical semantics to
+ * assertSessionRuntimeInvariants for the verified range.
+ */
+export function assertSessionRuntimeInvariantsIncremental(
+  events: SessionEvent[],
+  cursor: InvariantCheckCursor,
+  options: { allowOpenLifecycle?: boolean; allowPendingToolCalls?: boolean } = {},
+): void {
+  const start = Math.max(0, Math.min(cursor.verifiedSeq, events.length));
+  for (let index = start; index < events.length; index++) {
     const event = events[index];
     if (event.seq !== index + 1) throw new Error(`Invariant violation: non-contiguous event seq at ${event.seq}.`);
     if (event.type === 'turn/start') {
-      if (openTurn !== undefined) throw new Error(`Invariant violation: turn ${openTurn} was not closed before turn ${event.data.turn}.`);
-      if (!event.data.turn || event.data.turn <= lastTurn) throw new Error(`Invariant violation: turn/start ${event.data.turn} is not monotonic.`);
-      openTurn = event.data.turn;
-      lastTurn = event.data.turn;
+      if (cursor.openTurn !== undefined) throw new Error(`Invariant violation: turn ${cursor.openTurn} was not closed before turn ${event.data.turn}.`);
+      if (!event.data.turn || event.data.turn <= cursor.lastTurn) throw new Error(`Invariant violation: turn/start ${event.data.turn} is not monotonic.`);
+      cursor.openTurn = event.data.turn;
+      cursor.lastTurn = event.data.turn;
     } else if (event.type === 'turn/end') {
-      if (openTurn !== event.data.turn) throw new Error(`Invariant violation: turn/end ${event.data.turn} does not match open turn ${openTurn}.`);
-      if (openStep) throw new Error(`Invariant violation: turn ${openTurn} ended with step ${openStep.step} still open.`);
-      openTurn = undefined;
+      if (cursor.openTurn !== event.data.turn) throw new Error(`Invariant violation: turn/end ${event.data.turn} does not match open turn ${cursor.openTurn}.`);
+      if (cursor.openStep) throw new Error(`Invariant violation: turn ${cursor.openTurn} ended with step ${cursor.openStep.step} still open.`);
+      cursor.openTurn = undefined;
     } else if (event.type === 'step/start') {
-      if (openTurn !== event.data.turn || openStep) throw new Error(`Invariant violation: invalid step/start ${event.data.turn}/${event.data.step}.`);
-      const previousStep = lastStepByTurn.get(event.data.turn!) || 0;
+      if (cursor.openTurn !== event.data.turn || cursor.openStep) throw new Error(`Invariant violation: invalid step/start ${event.data.turn}/${event.data.step}.`);
+      const previousStep = cursor.lastStepByTurn.get(event.data.turn!) || 0;
       if (!event.data.step || event.data.step !== previousStep + 1) {
         throw new Error(`Invariant violation: step/start ${event.data.turn}/${event.data.step} is not sequential.`);
       }
-      openStep = { turn: event.data.turn!, step: event.data.step! };
-      lastStepByTurn.set(event.data.turn!, event.data.step!);
+      cursor.openStep = { turn: event.data.turn!, step: event.data.step! };
+      cursor.lastStepByTurn.set(event.data.turn!, event.data.step!);
     } else if (event.type === 'step/end') {
-      if (!openStep || openStep.turn !== event.data.turn || openStep.step !== event.data.step) {
+      if (!cursor.openStep || cursor.openStep.turn !== event.data.turn || cursor.openStep.step !== event.data.step) {
         throw new Error(`Invariant violation: step/end ${event.data.turn}/${event.data.step} has no matching open step.`);
       }
-      openStep = undefined;
+      cursor.openStep = undefined;
     } else if (event.type === 'tool/call' && event.data.toolCallId) {
-      if (!openStep || event.data.turn !== openStep.turn || event.data.step !== openStep.step) {
+      if (!cursor.openStep || event.data.turn !== cursor.openStep.turn || event.data.step !== cursor.openStep.step) {
         throw new Error(`Invariant violation: tool/call ${event.data.toolCallId} is outside its declared open step.`);
       }
-      if (calls.has(event.data.toolCallId)) throw new Error(`Invariant violation: duplicate tool/call id ${event.data.toolCallId}.`);
-      calls.set(event.data.toolCallId, event);
+      if (cursor.calls.has(event.data.toolCallId)) throw new Error(`Invariant violation: duplicate tool/call id ${event.data.toolCallId}.`);
+      cursor.calls.set(event.data.toolCallId, event);
     } else if (event.type === 'tool/result' && event.data.toolCallId) {
-      if (!calls.has(event.data.toolCallId)) throw new Error(`Invariant violation: orphan tool/result id ${event.data.toolCallId}.`);
-      if (results.has(event.data.toolCallId)) throw new Error(`Invariant violation: duplicate tool/result id ${event.data.toolCallId}.`);
-      if (event.data.toolName && event.data.toolName !== calls.get(event.data.toolCallId)?.data.toolName) {
+      if (!cursor.calls.has(event.data.toolCallId)) throw new Error(`Invariant violation: orphan tool/result id ${event.data.toolCallId}.`);
+      if (cursor.results.has(event.data.toolCallId)) throw new Error(`Invariant violation: duplicate tool/result id ${event.data.toolCallId}.`);
+      if (event.data.toolName && event.data.toolName !== cursor.calls.get(event.data.toolCallId)?.data.toolName) {
         throw new Error(`Invariant violation: tool/result ${event.data.toolCallId} does not match its tool/call name.`);
       }
-      results.add(event.data.toolCallId);
+      cursor.results.add(event.data.toolCallId);
     } else if (event.type === 'request/header' && event.data.requestHeader) {
       const { digest, ...withoutDigest } = event.data.requestHeader;
       if (computeRequestDigest(withoutDigest) !== digest) throw new Error(`Invariant violation: request/header digest mismatch at seq ${event.seq}.`);
@@ -127,25 +162,26 @@ export function assertSessionRuntimeInvariants(
       // Hash chain: each header commits to its predecessor. Lenient on legacy
       // headers without previousDigest (written before the chain existed), but
       // any header that claims a predecessor must link exactly.
-      if (withoutDigest.previousDigest !== undefined && withoutDigest.previousDigest !== lastRequestDigest) {
+      if (withoutDigest.previousDigest !== undefined && withoutDigest.previousDigest !== cursor.lastRequestDigest) {
         throw new Error(`Invariant violation: request/header digest chain broken at seq ${event.seq}.`);
       }
-      lastRequestDigest = digest;
-      if (!openStep || withoutDigest.turn !== openStep.turn || withoutDigest.step !== openStep.step) {
+      cursor.lastRequestDigest = digest;
+      if (!cursor.openStep || withoutDigest.turn !== cursor.openStep.turn || withoutDigest.step !== cursor.openStep.step) {
         throw new Error(`Invariant violation: request/header ${withoutDigest.turn}/${withoutDigest.step} is outside its open step.`);
       }
       const requestStep = `${withoutDigest.turn}:${withoutDigest.step}`;
-      if (requestSteps.has(requestStep)) throw new Error(`Invariant violation: duplicate request/header for step ${requestStep}.`);
-      requestSteps.add(requestStep);
+      if (cursor.requestSteps.has(requestStep)) throw new Error(`Invariant violation: duplicate request/header for step ${requestStep}.`);
+      cursor.requestSteps.add(requestStep);
     }
   }
+  cursor.verifiedSeq = events.length;
 
-  if (!options.allowOpenLifecycle && (openTurn !== undefined || openStep)) {
+  if (!options.allowOpenLifecycle && (cursor.openTurn !== undefined || cursor.openStep)) {
     throw new Error('Invariant violation: session lifecycle is not closed.');
   }
   if (!options.allowPendingToolCalls) {
-    for (const callId of calls.keys()) {
-      if (!results.has(callId)) throw new Error(`Invariant violation: tool/call ${callId} has no durable result.`);
+    for (const callId of cursor.calls.keys()) {
+      if (!cursor.results.has(callId)) throw new Error(`Invariant violation: tool/call ${callId} has no durable result.`);
     }
   }
 }

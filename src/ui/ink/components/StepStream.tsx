@@ -273,7 +273,8 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
           statusElement = <Text color={inkColors.success}>✔ OK</Text>;
         }
 
-        const durationStr = step.durationMs > 0 ? ` (${step.durationMs}ms)` : '';
+        const durationStr = step.status === 'running' ? ''
+          : formatToolCompletionMetadata(step.toolName, args, step.result || {}, step.durationMs);
         const tokStr = step.tokens && step.tokens > 0
           ? ` · ${step.tokens >= 1000 ? `${(step.tokens / 1000).toFixed(1)}k tok` : `${step.tokens} tok`}`
           : '';
@@ -312,3 +313,4 @@ export const StepStream: React.FC<StepStreamProps> = ({ steps, maxVisible = 12 }
     </Box>
   );
 };
+import { formatToolCompletionMetadata } from '../../tool-line-range.js';

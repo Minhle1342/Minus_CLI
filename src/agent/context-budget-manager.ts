@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { resolveRequestBudget } from './request-budget.js';
 import type { Content, FunctionDeclaration } from "@google/genai";
 import { ExactTokenizer } from "./exact-tokenizer.js";
 import {
@@ -97,6 +98,8 @@ export interface ContextPrepareOptions extends Omit<
   "requestOverheadTokens" | "outputReserveTokens" | "modelName"
 > {
   previousState?: CompactionStateV1;
+  /** UI-only signal, emitted only when candidate compaction actually begins. */
+  onCompactionStart?: () => void;
   /** Consider an early compaction at a durable phase boundary only when savings justify losing the cache prefix. */
   phaseTransition?: { minHistoryTokens?: number; minSavingsTokens?: number; minSavingsRatio?: number };
 }
@@ -361,6 +364,7 @@ function buildState(
 }
 
 export class ContextBudgetManager {
+  private rejectedCandidateKey?: string;
   readonly mode: ContextManagementMode;
   readonly triggerRatio: number;
   readonly counter: RequestTokenCounter;
@@ -382,18 +386,7 @@ export class ContextBudgetManager {
     options: ContextPrepareOptions = {},
   ): Promise<ContextPreparationResult> {
     const before = await this.counter.count(envelope);
-    const usableInputTokens = Math.max(
-      0,
-      envelope.maxInputTokens - envelope.outputReserveTokens,
-    );
-    const targetInputTokens = Math.min(
-      envelope.maxInputTokens,
-      Math.max(1, envelope.targetInputTokens ?? envelope.maxInputTokens),
-    );
-    const targetUsableInputTokens = Math.max(
-      0,
-      targetInputTokens - envelope.outputReserveTokens,
-    );
+    const { usableInputTokens, targetUsableInputTokens } = resolveRequestBudget(envelope);
     const budgetPressure =
       before.upperBoundTokens >
       Math.floor(targetUsableInputTokens * this.triggerRatio);
@@ -418,7 +411,22 @@ export class ContextBudgetManager {
       };
     }
 
-    const { previousState, phaseTransition, ...compactionOptions } = options;
+    // A bounded, content-based negative cache. Recount the request first so a
+    // calibration/budget/config/pinning change cannot reuse an obsolete verdict.
+    const candidateKey = crypto.createHash('sha256').update(JSON.stringify({
+      envelope, options: { ...options, onCompactionStart: undefined },
+      config: this.compactor.getConfig(), count: before, mode: this.mode,
+    })).digest('hex');
+    if (candidateKey === this.rejectedCandidateKey) {
+      const enforce = this.mode === 'enforce' || (this.mode === 'auto' && isKnownProvider(envelope.provider));
+      return { mode: this.mode, history: envelope.history, changed: false,
+        before, after: before, checkpointObservations,
+        withinBudget: before.upperBoundTokens <= usableInputTokens,
+        ...(enforce && before.upperBoundTokens > usableInputTokens
+          ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}) };
+    }
+    options.onCompactionStart?.();
+    const { previousState, phaseTransition, onCompactionStart, ...compactionOptions } = options;
     const baseOptions: CompactionOptions = {
       ...compactionOptions,
       force: true,
@@ -457,6 +465,7 @@ export class ContextBudgetManager {
       Math.ceil(before.historyTokens * (phaseTransition?.minSavingsRatio ?? 0.2)),
     );
     if (!budgetPressure && phaseSavings < minimumPhaseSavings) {
+      this.rejectedCandidateKey = candidateKey;
       return {
         mode: this.mode,
         history: envelope.history,
@@ -477,7 +486,7 @@ export class ContextBudgetManager {
 
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
-    if (!withinBudget && envelope.history.length > 2) {
+    if (!withinBudget && envelope.history.length > 2 && !options.protectActiveTurn) {
       const emergencyBudgetTokens = Math.max(
         1,
         usableInputTokens - before.nonHistoryTokens,
@@ -551,10 +560,24 @@ export class ContextBudgetManager {
       }
     }
 
+    const tokensSaved = before.upperBoundTokens - finalAfter.upperBoundTokens;
+    const materialSavings = tokensSaved >= 512 && tokensSaved / Math.max(1, before.upperBoundTokens) >= 0.1;
+    if (tokensSaved <= 0 || (before.upperBoundTokens <= usableInputTokens && !materialSavings)) {
+      this.rejectedCandidateKey = candidateKey;
+      return {
+        mode: this.mode, history: envelope.history, changed: false,
+        before, after: before, checkpointObservations,
+        compactionStats: finalSelected.stats,
+        withinBudget: before.upperBoundTokens <= usableInputTokens,
+        ...(effectiveMode === 'enforce' && before.upperBoundTokens > usableInputTokens
+          ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}),
+      };
+    }
+    this.rejectedCandidateKey = undefined;
     return {
       mode: this.mode,
       history: finalSelected.messages,
-      changed: finalSelected.stats.charsSaved > 0,
+      changed: finalSelected.stats.charsSaved > 0 && finalAfter.upperBoundTokens < before.upperBoundTokens,
       before,
       after: finalAfter,
       candidateAfter,

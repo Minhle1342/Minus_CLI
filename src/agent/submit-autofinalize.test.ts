@@ -108,6 +108,7 @@ test('blocked post-submit call finalizes from the submitted summary instead of l
               resolutionType: 'investigation_only',
             },
           },
+          { id: 'call-read', name: 'read_file', args: { path: 'README.md' } },
         ],
       },
       { text: '', toolCalls: [{ id: 'call-read', name: 'read_file', args: { path: 'README.md' } }] },
@@ -130,7 +131,7 @@ test('blocked post-submit call finalizes from the submitted summary instead of l
     session.addUserMessage('Investigate why login crashes.');
     const result = await loop.run(session);
     assert.match(String(result), /authenticate reads session\.token/);
-    assert.equal(llm.calls, 2, 'exactly one retry before the blocked-call fallback finalizes');
+    assert.equal(llm.calls, 1, 'read-only submission finalizes without a redundant provider call');
     assert.equal(readFileExecuted, false, 'blocked read_file must never execute');
     const blocked = session
       .getEvents()

@@ -17,7 +17,7 @@ class OrchestrationFollowingLLM {
     { toolCalls: [{ id: 'context-1', name: 'get_symbol_context_360', args: { symbol: 'Service.run', path: 'src/service.ts' } }] },
     { toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'src/service.ts', symbol: 'Service.run' } }] },
     { toolCalls: [{ id: 'impact-1', name: 'analyze_impact', args: { target: 'Service.run', direction: 'upstream' } }] },
-    { text: 'Service.run validates the input before returning it; its caller and targeted test were identified from graph context.', toolCalls: [] },
+    { toolCalls: [{ id: 'submit-1', name: 'submit_solution', args: { summary: 'Service.run validates the input before returning it; its caller and targeted test were identified from graph context.', resolutionType: 'investigation_only' } }] },
   ];
 
   getTokenConfig(): Record<string, number> {
@@ -91,6 +91,7 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       'get_symbol_context_360',
       'read_file',
       'analyze_impact',
+      'submit_solution',
     ]);
     assert.match(answer, /Service\.run/);
     assert.equal(llm.requests[1].includes('search_codebase_fast'), false);

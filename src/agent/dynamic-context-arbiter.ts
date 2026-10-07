@@ -19,6 +19,8 @@ export interface DynamicContextInputs {
   gitPlaybook?: string;
   /** P1.4: Step-relevant textual guidance from the active runtime harness profile. */
   harnessGuidance?: string;
+  /** P1.43: GitNexus Warm-Start Topo-Map (Aider Repo Map Pattern) */
+  warmStartTopoMap?: string;
   /** P1.15: Dynamic non-blocking Strong Advisory downgraded from hard blocks (CASCADE/UNVERIFIED/REPRO). Never truncated. */
   strongAdvisory?: string;
   /** P1.44: Distilled Epistemic Verdict từ EpistemicInvestigationEngine (Thesis vs Antithesis + Monte Carlo Rollout) */
@@ -208,6 +210,13 @@ export class DynamicContextArbiter {
         name: 'Harness Guidance (P1.4)',
         content: (inputs.harnessGuidance || '').trim(),
         priority: 1.4,
+        allowTruncation: false,
+      },
+      {
+        key: 'warmStartTopoMap',
+        name: 'Workspace Topology Warm-Start (P1.43)',
+        content: (inputs.warmStartTopoMap || '').trim(),
+        priority: 1.43,
         allowTruncation: false,
       },
       {

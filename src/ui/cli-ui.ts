@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { compactionStatus, formatCompactionStatus, type CompactionStatus } from './compaction-status.js';
 import { Workspace } from '../workspace/workspace.js';
 import { FileMentionEngine, AttachedItemSummary, RelatedFileInfo } from '../workspace/file-attachment.js';
 import { TreeScanResult, TreeNode, getFileExtensionBadge } from '../workspace/tree-explorer.js';
@@ -1522,8 +1523,30 @@ export class CLI {
     console.log('');
   }
 
-  static renderAutoCompactionNotice(_savedTokens: number, _remainingTokens: number): void {
-    // Ẩn [Auto-Compacted] khỏi TUI theo yêu cầu người dùng
+  static startCompaction(scope: 'turn' | 'step'): void {
+    this.stopToolDotSpinner();
+    this.stopThinkingSpinner();
+    const status: CompactionStatus = { scope, state: 'running' };
+    compactionStatus.set(status);
+    if (!compactionStatus.hasListeners() && process.stdout.isTTY) {
+      process.stdout.write(`\r\x1b[2K${c.amber}${truncateToTerminalWidth(formatCompactionStatus(status), Math.max(1, getTerminalWidth() - 1))}${c.reset}`);
+    }
+  }
+
+  static finishCompaction(state: 'completed' | 'skipped' | 'failed', savedTokens?: number, remainingTokens?: number): void {
+    const previous = compactionStatus.get();
+    if (previous?.state !== 'running') return;
+    const status: CompactionStatus = { scope: previous.scope, state, savedTokens, remainingTokens };
+    compactionStatus.set(status);
+    if (!compactionStatus.hasListeners()) {
+      const color = state === 'completed' ? c.emerald : state === 'failed' ? c.crimson : c.slate;
+      const line = truncateToTerminalWidth(formatCompactionStatus(status), Math.max(1, getTerminalWidth() - 1));
+      process.stdout.write(`${process.stdout.isTTY ? '\r\x1b[2K' : ''}${color}${line}${c.reset}\n`);
+    }
+  }
+
+  static renderAutoCompactionNotice(savedTokens: number, remainingTokens: number): void {
+    this.finishCompaction('completed', savedTokens, remainingTokens);
   }
 
   static renderWorkspaceCheck(check: {
@@ -2164,7 +2187,8 @@ export class CLI {
     const dot = `${isError ? c.crimson : c.emerald}●${c.reset}`;
     const rawTarget = opts.args.path || opts.args.filePath || opts.args.targetFile
       || opts.args.command || opts.args.query || opts.args.statement || opts.args.summary || '';
-    const duration = opts.durationMs > 0 ? ` ${c.slate}(${opts.durationMs}ms)${c.reset}` : '';
+    const metadata = formatToolCompletionMetadata(opts.toolName, opts.args, opts.result, opts.durationMs);
+    const duration = metadata ? `${c.slate}${metadata}${c.reset}` : '';
 
     let statusBadge = '';
     if (isError) {
@@ -2865,3 +2889,4 @@ export const renderDockerStatus = CLI.renderDockerStatus.bind(CLI);
 export const renderDockerToggleNotice = CLI.renderDockerToggleNotice.bind(CLI);
 export const renderDockerStartupPrompt = CLI.renderDockerStartupPrompt.bind(CLI);
 export const promptDockerStartupChoice = CLI.promptDockerStartupChoice.bind(CLI);
+import { formatToolCompletionMetadata } from './tool-line-range.js';

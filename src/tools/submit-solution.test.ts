@@ -30,7 +30,7 @@ test('submit_solution: executes successfully when verificationEvidence is omitte
 
   assert.equal(result.success, true);
   assert.equal(result.submitted, true);
-  assert.equal(result.verificationEvidence, 'Verified via inspection and direct validation');
+  assert.equal(result.verificationEvidence, '', 'omitted evidence must not fabricate verification');
   assert.deepEqual(result.filesModified, ['src/tools/command-preflight-guard.ts']);
   assert.equal(result.nextAction, 'final_answer');
 });

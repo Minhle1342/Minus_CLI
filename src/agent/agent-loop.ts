@@ -7,6 +7,7 @@ import { validateSchemaValue } from '../tools/schema-validator.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
 import { computeRequestValueDigest } from '../session/session-invariants.js';
+import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy } from './completed-turn-compaction-policy.js';
 import { AgentLoopOptions } from './types.js';
 import { CheckpointManager } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
@@ -32,7 +33,7 @@ import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, type FinalAnswerGuardDecision } from './final-answer-guard.js';
+import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
@@ -73,6 +74,7 @@ import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { sanitizeToolResultPayload } from '../tools/tool-output-sanitizer.js';
+import { generateWarmStartTopology } from './warm-start-topomap.js';
 import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand, detectWorkspaceIntegrationTestCommand, touchesIntegrationLayer } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
@@ -110,7 +112,9 @@ import {
   type TrajectoryStep,
 } from './reliable-tool-orchestration.js';
 import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
-import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1 } from './context-budget-manager.js';
+import { ContextBudgetManager, resolveContextManagementMode, type CompactionStateV1, type ModelRequestEnvelope } from './context-budget-manager.js';
+import { resolveRequestBudget } from './request-budget.js';
+import { selectReplacedObservationIds } from './observation-retention-policy.js';
 import { readCoverageReport, type FileCoverage } from './coverage-report-reader.js';
 import { buildFailureInvestigationBrief, type FailureInvestigationMutation } from './failure-investigation-mode.js';
 
@@ -352,6 +356,8 @@ export class AgentLoop {
   readonly maxSteps: number;
   readonly checkpointManager: CheckpointManager;
   readonly contextCompactor: ContextCompactor;
+  private lastRequestEnvelope?: { sessionId: string; envelope: Omit<ModelRequestEnvelope, 'history'> };
+  private rejectedTurnCandidateKey?: string;
   readonly contextGuardian: ContextGuardian;
   readonly contextAgent: ContextAgent;
   readonly turnMemoryRetriever: TurnMemoryRetriever;
@@ -407,6 +413,7 @@ export class AgentLoop {
     }
   }
   private circuitBreakerTrippedTools = new Set<string>();
+  private sessionInspectedFiles = new Set<string>();
   private activeSession?: Session;
   private loopOptions?: AgentLoopOptions;
   readonly toolAdvisor = new ToolSynergyAdvisor();
@@ -1033,6 +1040,13 @@ export class AgentLoop {
       request: retrievalUserRequest,
       hasPlan: this.planManager.hasPlan(),
     });
+    const isReadOnlyAnswerTask = isReadOnlyRequest(retrievalUserRequest)
+      || initialTurnClassification.reversibility === 'read-only'
+      || (!initialTurnClassification.requiredCapabilities.includes('edit')
+        && !initialTurnClassification.requiredCapabilities.includes('git-write')
+        && !initialTurnClassification.reasonCodes.some(reason => [
+          'WORKSPACE_MUTATION_INTENT', 'REFACTOR_INTENT', 'PARETO_UNCERTAINTY_REQUIRES_EVIDENCE',
+        ].includes(reason)));
     const taskComplexity = calculateTaskComplexity(retrievalUserRequest, initialTurnClassification.taskClass);
     const effectiveMaxSteps = Number.isFinite(baseMaxSteps)
       ? (baseMaxSteps > 5 ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor)) : baseMaxSteps)
@@ -1368,7 +1382,10 @@ export class AgentLoop {
         evidenceScore: paretoEvidence.score,
         evidenceThreshold: paretoEvidence.threshold,
         evidenceReasons: paretoEvidence.reasons,
-        inspectedFiles: paretoEvidence.inspectedFiles,
+        inspectedFiles: Array.from(new Set([
+          ...(paretoEvidence.inspectedFiles || []),
+          ...this.sessionInspectedFiles,
+        ])),
         hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
         hasSubmittedSolution,
         cascadeFrozen: this.cascadeFreeze !== undefined,
@@ -1466,10 +1483,6 @@ export class AgentLoop {
       });
       const activeStepQuery = retrievalState.query;
       const stepCompletionState = getTurnCompletionState(session, turn);
-      const isPureInvestigation = !stepCompletionState.hasMutations
-        && !classification.requiredCapabilities.includes('edit')
-        && ['question', 'exploration'].includes(classification.taskClass)
-        && classification.phase !== 'explore';
 
       const canRequestPhaseTransition = ['explore', 'plan'].includes(classification.phase)
         && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
@@ -1502,16 +1515,10 @@ export class AgentLoop {
             })
           : candidateProvider.getFunctionDeclarations();
 
-        // Intent-Aware Tool Scoping (Cơ chế 1 - Claude Code & Cursor Pattern):
-        // Khi yêu cầu là điều tra nguyên nhân / phân tích sự cố / khảo sát mà không có mutation,
-        // ẩn hoàn toàn submit_solution để LLM tập trung vào phân tích chi tiết hoặc gọi tool báo cáo chuyên biệt.
-        if (isPureInvestigation) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'submit_solution');
-        }
-
-        // In explore and plan phases under enforce mode, edit tools are withheld from model-visible schemas
-        // until the agent transitions to implement phase, preventing premature edits.
-        if (toolControlMode === 'enforce' && ['explore', 'plan'].includes(classification.phase)) {
+        // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
+        // In explore and plan phases, mutation tools are withheld from model-visible schemas so LLM physically cannot mutate
+        // before requesting a phase transition to implement.
+        if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
           activeToolDeclarations = activeToolDeclarations.filter((tool: any) => !EDIT_TOOL_NAMES.has(tool.name));
         }
 
@@ -1567,6 +1574,11 @@ export class AgentLoop {
           }
         }
 
+        // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
+        if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => !EDIT_TOOL_NAMES.has(tool.name));
+        }
+
         // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
         if (this.circuitBreakerTrippedTools.size > 0) {
           activeToolDeclarations = activeToolDeclarations.filter(
@@ -1608,10 +1620,20 @@ export class AgentLoop {
         reliableToolOrchestrationMode,
       );
 
+      // Completion is a control primitive, not an optional relevance match.
+      // Pin the same declaration on every pre-submission step (cache-stable),
+      // including read-only investigation and plan phases.
+      if (!hasSubmittedSolution && candidateProvider.get('submit_solution')
+        && !activeToolDeclarations.some((tool: any) => tool.name === 'submit_solution')) {
+        const declaration = candidateProvider.getFunctionDeclarations()
+          .find((tool: any) => tool.name === 'submit_solution');
+        if (declaration) activeToolDeclarations.push(declaration);
+        activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+      }
+
       const retrievedVisibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const expectedToolNames = gateToolSurface.authorizedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;
-        if (isPureInvestigation && name === 'submit_solution') return false;
         return true;
       });
       this.contextQualityEvaluator.recordToolRetrieval(retrievedVisibleToolNames, expectedToolNames);
@@ -1631,7 +1653,6 @@ export class AgentLoop {
       } else {
         const authorizedSet = new Set<string>(gateToolSurface.authorizedToolNames);
         for (const name of retrievedVisibleToolNames) authorizedSet.add(name);
-        if (isPureInvestigation) authorizedSet.delete('submit_solution');
         runtimeAuthorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
         if (runtimeAuthorizedToolNames.length === 0) runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
       }
@@ -2020,6 +2041,8 @@ export class AgentLoop {
       let completionDirective: string | undefined;
       if (hasVerifiedTests) {
         completionDirective = `🎯 [VERIFICATION SUCCESSFUL]: All unit test checks passed with Exit Code 0. Code modifications are empirically verified. Do NOT make any more code changes. Call "submit_solution" immediately to conclude the task.`;
+      } else if (isReadOnlyAnswerTask && !stepCompletionState.hasMutations && !hasSubmittedSolution) {
+        completionDirective = '[STRONG ADVISORY — READ-ONLY SUBMIT]: When the answer is ready, call submit_solution as the final tool with the actual user-facing answer in summary, resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless actual verification occurred. No code edit or test is required. report_investigation_findings and plain text do not replace submission. After successful submission, call no further tools; return the submitted answer in the user\'s language.';
       }
 
       // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
@@ -2161,6 +2184,23 @@ export class AgentLoop {
           paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch).${transitionNotice} R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`;
         }
       }
+      let warmStartTopoMap: string | undefined;
+      if (step === 1 && !this._collapsePreferences.compactSteps) {
+        try {
+          const topoResult = await generateWarmStartTopology({
+            workspaceRootDir: this._workspace.rootDir,
+            userPrompt: turnUserRequest,
+            maxFiles: 4,
+            maxTokens: 220,
+          });
+          if (topoResult.rendered) {
+            warmStartTopoMap = topoResult.rendered;
+          }
+        } catch {
+          // Graceful fallback
+        }
+      }
+
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
         responseLanguageDirective: '[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.',
@@ -2170,6 +2210,7 @@ export class AgentLoop {
         reflectionContext,
         strongAdvisory: promptDecision.strongAdvisoryPrompt,
         cognitiveScaffold: effectiveScaffoldText,
+        warmStartTopoMap,
         toolPlaybooks: promptDecision.toolPlaybookPrompt,
         gitPlaybook: promptDecision.gitPlaybookPrompt,
         harnessGuidance: [
@@ -2285,11 +2326,11 @@ export class AgentLoop {
       });
 
       // Budget the complete serialized request once all dynamic inputs are known.
-      const previousCompactionState = [...session.getEvents()]
-        .reverse()
-        .find((event) => event.type === 'session/compaction' && event.data.compactionState)
-        ?.data.compactionState as CompactionStateV1 | undefined;
-      const contextPreparation = await this.contextBudgetManager.prepareRequest({
+      const previousCompactionState = session.findLatestEventOfType(
+        'session/compaction',
+        (event) => Boolean(event.data.compactionState),
+      )?.data.compactionState as CompactionStateV1 | undefined;
+      const requestEnvelope: ModelRequestEnvelope = {
         provider: this.llm?.constructor?.name || 'unknown',
         model: activeModelName,
         systemPrompt: assembledSystemPrompt,
@@ -2299,16 +2340,30 @@ export class AgentLoop {
         maxInputTokens: Math.max(1, activeTokenConfig.maxInputTokens || maxBudget),
         targetInputTokens: workingHistoryBudget,
         outputReserveTokens: Math.max(0, activeTokenConfig.maxOutputTokens || 0),
-      }, {
+      };
+      const { history: _requestHistory, ...requestMetadata } = requestEnvelope;
+      this.lastRequestEnvelope = { sessionId: session.id, envelope: requestMetadata };
+      const contextPreparation = await this.contextBudgetManager.prepareRequest(requestEnvelope, {
         mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
         cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
         enableObservationMasking: true,
+        protectActiveTurn: true,
+        replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
+        protectedMessages: session.getProjectionWithTurns()
+          .filter((entry) => entry.turn === turn).map((entry) => entry.message),
+        protectedPaths: [
+          ...(this.planManager.getActiveTask()?.readSet || []),
+          ...(this.planManager.getActiveTask()?.writeSet || []),
+          ...this.targetFilesModifiedInTurn,
+        ],
         previousState: previousCompactionState,
+        onCompactionStart: () => CLI.startCompaction('step'),
         ...(phaseJustChanged && phaseHandoff && arbitration.sourcesIncluded.includes('Phase Handoff (P1.5)')
           ? { phaseTransition: {} }
           : {}),
       });
       const compactionStats = contextPreparation.compactionStats;
+      if (!contextPreparation.changed) CLI.finishCompaction(contextPreparation.failureReason ? 'failed' : 'skipped');
       const observationsToArchive = [
         ...(contextPreparation.checkpointObservations || []),
         ...(compactionStats?.maskedObservations || []),
@@ -2323,7 +2378,9 @@ export class AgentLoop {
       // Opt out with MINUS_BG_GUARDIAN=off.
       const archiveStatus: Record<string, unknown> = {};
       let didCompactThisStep = false;
-      const backgroundGuardianEnabled = process.env.MINUS_BG_GUARDIAN !== 'off';
+      // Archive-only checkpoints may overlap the request; destructive history
+      // replacement must wait for durable archives and the original event log.
+      const backgroundGuardianEnabled = !contextPreparation.changed && process.env.MINUS_BG_GUARDIAN !== 'off';
       let guardianTask: Promise<void> | undefined;
       if (!backgroundGuardianEnabled) {
         if (observationsToArchive.length > 0) {
@@ -2333,10 +2390,12 @@ export class AgentLoop {
             const message = String((error as Error)?.message || error);
             archiveStatus.maskedObservations = { error: message };
             CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+            if (contextPreparation.changed) throw error;
           }
         }
       }
       if (contextPreparation.changed && compactionStats) {
+        await this.persistSession(session);
         didCompactThisStep = true;
         if (backgroundGuardianEnabled) {
           // Launch BEFORE setHistory: the synchronous extraction prefix inside
@@ -2402,6 +2461,7 @@ export class AgentLoop {
               const message = String((error as Error)?.message || error);
               archiveStatus.archivedTurns = { error: message };
               CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+              throw error;
             }
           }
         }
@@ -2410,8 +2470,8 @@ export class AgentLoop {
           `context-budget-${contextPreparation.mode}`,
           { ...(contextPreparation.state as unknown as Record<string, unknown> | undefined), archiveStatus } as unknown as Record<string, unknown> | undefined,
         );
-        CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
         await this.persistSession(session);
+        CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
         requestFootprint = this.latencyOrchestrator.estimateRequest({
           systemPrompt: assembledSystemPrompt,
           tools: activeToolDeclarations,
@@ -2427,7 +2487,7 @@ export class AgentLoop {
         const hardwareLimit = modelProfile?.maxSupportedInputTokens || 128000;
         const actualEstimatedInput = contextPreparation.after.inputTokens;
 
-        if (actualEstimatedInput < hardwareLimit) {
+        if (actualEstimatedInput < hardwareLimit && didCompactThisStep) {
           // Context chỉ vượt qua mức budget cấu hình mềm của người dùng (ví dụ: gói /token low 16K)
           // nhưng vẫn hoàn toàn nằm trong giới hạn chịu tải thực tế của Provider.
           // Tự động duy trì thực thi, cảnh báo nhẹ để không làm gián đoạn turn của người dùng.
@@ -2467,7 +2527,7 @@ export class AgentLoop {
           },
         } : {}),
       });
-      session.assertRuntimeInvariants({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
+      session.assertRuntimeInvariantsIncremental({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
       await this.persistSession(session);
       this.stepDynamicSuffixes.set(step, dynamicExecutionContext);
       const requestOptions: LLMRequestOptions = {
@@ -2935,7 +2995,15 @@ export class AgentLoop {
                   thoughtSignature: responseFunctionCallParts[scheduled.index]?.thoughtSignature,
                 });
                 this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
-                CLI.renderToolCall(scheduled.name, scheduled.args);
+                // Mirror the sequential path below: in compact mode the completion
+                // one-liner (renderCompactOneLiner) already shows each tool, so
+                // emitting the verbose call line here would render every
+                // parallel tool twice.
+                if (!this._collapsePreferences.compactSteps) {
+                  CLI.renderToolCall(scheduled.name, scheduled.args);
+                } else {
+                  CLI.startToolDotSpinner(scheduled.name, scheduled.args);
+                }
               }
 
               const batchStartedAt = Date.now();
@@ -4091,6 +4159,20 @@ export class AgentLoop {
             result: executionResult.result,
             guardianDiagnosis: executionResult.guardianDiagnosis,
           };
+          if (
+            ['read_file', 'view_file', 'read_compressed_code'].includes(toolName)
+            && executionResult.result
+            && !executionResult.result.error
+            && executionResult.result.success !== false
+          ) {
+            const inspectedTarget = String(
+              toolArgs?.path || toolArgs?.filePath || toolArgs?.file_path || executionResult.result.path || ''
+            ).trim();
+            if (inspectedTarget) {
+              const normalized = inspectedTarget.replace(/\\/g, '/').toLowerCase();
+              this.sessionInspectedFiles.add(normalized);
+            }
+          }
           // Tool-level circuit breaker: track external tools that failed due to rate limits or quota exhaustion
           const execError = String(executionResult.result?.error || executionResult.result?.message || executionResult.result?.stderr || '');
           const isToolRateLimited = executionResult.result?.errorCode === 'RATE_LIMIT_EXCEEDED'
@@ -4236,14 +4318,15 @@ export class AgentLoop {
         const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
         const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
           ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
+        const isReadOnlySubmission = !getTurnCompletionState(session, turn).hasMutations;
         if (
-          !isArchQuery
+          (!isArchQuery || isReadOnlySubmission)
           && hasSubmittedSolution
           && submittedSolutionSummary
-          && (isSummarySufficient || postSubmissionBlocked)
+          && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked)
           && enableSubmitAutoFinalization
         ) {
-          const finalAnswer = submittedSolutionSummary!;
+          const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
           CLI.renderModelAction('final_answer');
           await CLI.renderFinalAnswer(finalAnswer);
           this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
@@ -4518,6 +4601,17 @@ export class AgentLoop {
                   }
                   : { allow: true });
 
+      // Apply to every answer-only completion, not just requests recognized by
+      // the intent classifier (e.g. a diagnosis may also advertise edit tools).
+      const requiresReadOnlySubmission = !hasCodeMutations && !codeChangeRequired && !hasSubmittedSolution;
+      if (finalAnswerDecision.allow && requiresReadOnlySubmission) {
+        finalAnswerDecision = {
+          allow: false,
+          reason: 'submission-required',
+          continuationPrompt: '[STRONG ADVISORY — READ-ONLY SUBMIT]: Call submit_solution as the final tool with the answer itself in summary before returning a final answer. No code edit or test is required. A report or direct text is not a successful submission.',
+        };
+      }
+
       if (!finalAnswerDecision.allow) {
         // Case 1c — completion-gate rejection: keep the thought that produced
         // the rejected answer so the retry can diagnose, not guess.
@@ -4533,7 +4627,9 @@ export class AgentLoop {
           this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
           const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt();
 
-          const actionMandate = buildCompletionRecoveryPrompt({
+          const actionMandate = requiresReadOnlySubmission
+            ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
+            : buildCompletionRecoveryPrompt({
             reason: finalAnswerDecision.reason,
             recovery: finalAnswerDecision.recovery,
             hasSubmittedSolution,
@@ -4578,6 +4674,15 @@ export class AgentLoop {
       }
       consecutiveIncompleteFinals = 0;
       this.adaptiveReasoning.reset();
+
+      // Strip echoed system-prompt paragraphs before the answer reaches the
+      // TUI, session history, and downstream consumers. The guard above
+      // already evaluated the raw text, so pure-echo answers were rejected
+      // for revision before this point.
+      const sanitizedFinalAnswer = stripSystemPromptEcho(finalAnswer);
+      if (sanitizedFinalAnswer && sanitizedFinalAnswer !== finalAnswer) {
+        finalAnswer = sanitizedFinalAnswer;
+      }
 
       if (ocrDecision.allow && ocrDecision.advisoryFindings.length > 0) {
         finalAnswer = [
@@ -4644,6 +4749,7 @@ export class AgentLoop {
 
     return timeoutMessage;
     } finally {
+      CLI.finishCompaction('failed');
       if (options?.signal) {
         options.signal.removeEventListener('abort', onAbort);
       }
@@ -4874,8 +4980,8 @@ export class AgentLoop {
   /**
    * Completed-turn window compaction: after a turn closes, keep the newest
    * `preserveCompletedTurns` closed turns fully intact and summarize older
-   * ones into the rolling synopsis + turn archive. Budget-independent — it
-   * fires on turn count, not token pressure — and non-blocking: any failure
+   * ones into the rolling synopsis + turn archive only under history-token
+   * pressure with material savings. Non-blocking: any failure
    * (or an uncompactable state) leaves the closed turn and history untouched.
    */
   private async maybeCompactCompletedTurnWindow(session: Session): Promise<void> {
@@ -4892,11 +4998,40 @@ export class AgentLoop {
         turn: entry.turn,
         isSynopsis: entry.isSynopsis,
       }));
+      const policy = resolveCompletedTurnCompactionPolicy();
+      const tokenConfig = this.getTokenConfig();
+      const configuredMaxInput = tokenConfig?.maxInputTokens;
+      const maxInputTokens = Number.isFinite(configuredMaxInput) && configuredMaxInput! > 0
+        ? configuredMaxInput! : config.maxTotalHistoryTokens;
+      const historyTokens = ContextCompactor.countHistoryTokens(entries.map((entry) => entry.message));
+      const metadata = this.lastRequestEnvelope?.sessionId === session.id ? this.lastRequestEnvelope.envelope : undefined;
+      const envelope = metadata ? { ...metadata, maxInputTokens,
+        outputReserveTokens: tokenConfig?.maxOutputTokens ?? metadata.outputReserveTokens,
+        history: entries.map((entry) => entry.message) } : undefined;
+      const before = envelope ? await this.contextBudgetManager.counter.count(envelope) : undefined;
+      const budget = resolveRequestBudget(envelope || {
+        maxInputTokens, outputReserveTokens: tokenConfig?.maxOutputTokens || 0,
+      });
+      if (!hasCompletedTurnPressure(before?.upperBoundTokens ?? historyTokens, budget.targetUsableInputTokens, policy)) return;
+      const turnKey = computeRequestValueDigest({ sessionId: session.id, entries, envelope, budget,
+        config, policy, plan: this.planManager.getTaskGraph(), count: before,
+        completionReason: session.findLatestEventOfType('turn/end')?.data.reason });
+      if (this.rejectedTurnCandidateKey === turnKey) return;
+      CLI.startCompaction('turn');
       const result = this.contextCompactor.compactCompletedTurnWindow(entries, {
         completedTurns: completed,
         preserveCompletedTurns: preserve,
+        plan: this.planManager.getTaskGraph(),
+        completionReason: session.findLatestEventOfType('turn/end')?.data.reason,
       });
-      if (!result.stats.prunedTurnsCount || !result.stats.archivedTurns?.length) return;
+      const after = envelope ? await this.contextBudgetManager.counter.count({ ...envelope, history: result.messages }) : undefined;
+      if (!result.stats.prunedTurnsCount || !result.stats.archivedTurns?.length
+        || !hasMaterialCompletedTurnSavings(before?.upperBoundTokens ?? result.stats.originalTokens,
+          after?.upperBoundTokens ?? result.stats.compactedTokens, policy)) {
+        this.rejectedTurnCandidateKey = turnKey;
+        return;
+      }
+      this.rejectedTurnCandidateKey = undefined;
 
       const archiveStatus: Record<string, unknown> = {};
       try {
@@ -4905,12 +5040,15 @@ export class AgentLoop {
         const message = String((error as Error)?.message || error);
         archiveStatus.archivedTurns = { error: message };
         CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+        CLI.finishCompaction('failed');
+        // Never replace recoverable history when its archive was not accepted.
+        return;
       }
 
-      const previousState = [...session.getEvents()]
-        .reverse()
-        .find((event) => event.type === 'session/compaction' && event.data.compactionState)
-        ?.data.compactionState as CompactionStateV1 | undefined;
+      const previousState = session.findLatestEventOfType(
+        'session/compaction',
+        (event) => Boolean(event.data.compactionState),
+      )?.data.compactionState as CompactionStateV1 | undefined;
       const archivedDocs = result.stats.archivedTurns;
       const archivedIds = archivedDocs.map((doc) => doc.id);
       const archivedTurnNumbers = archivedDocs.map((doc) => doc.turnNumber);
@@ -4925,10 +5063,13 @@ export class AgentLoop {
         archiveStatus,
         turnWindow: { preservedTurns, archivedTurnNumbers, archivedTurnIds: archivedIds },
       } as unknown as Record<string, unknown>);
-      CLI.renderAutoCompactionNotice(result.stats.tokensSaved, result.stats.compactedTokens);
       await this.persistSession(session);
+      CLI.renderAutoCompactionNotice(result.stats.tokensSaved, result.stats.compactedTokens);
     } catch {
+      CLI.finishCompaction('failed');
       // Non-blocking: turn completion must never fail because of compaction.
+    } finally {
+      CLI.finishCompaction('skipped');
     }
   }
 

@@ -1,8 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { Workspace } from './workspace.js';
 import { SemanticSlicer } from '../agent/semantic-slicer.js';
+import { ExactTokenizer } from '../agent/exact-tokenizer.js';
 
 export interface WorkspaceEntryInfo {
   relativePath: string;
@@ -34,7 +36,7 @@ export interface AttachedItemSummary {
   preview?: string;
 }
 
-export type RelatedFileReason = 'import' | 'imported-by' | 'same-dir' | 'dir-top-ranked';
+export type RelatedFileReason = 'import' | 'imported-by' | 'dir-top-ranked';
 
 export interface RelatedFileInfo {
   path: string;
@@ -354,12 +356,65 @@ const MAX_SCAN_FILE_BYTES = 64 * 1024;
 const MAX_RELATED_OUTLINE_SYMBOLS = 12;
 const MAX_NEIGHBORHOOD_CHARS = 8000;
 
+/** Short content fingerprint for re-attach dedup (8 hex chars of sha256). */
+function shortContentHash(content: string | Buffer): string {
+  return crypto.createHash('sha256').update(content).digest('hex').slice(0, 8);
+}
+
+/** Exact token estimate for attachment budgeting (LRU-cached inside ExactTokenizer). */
+function estimateAttachTokens(text: string, modelHint = 'gemini-2.5-flash'): number {
+  if (!text) return 0;
+  return ExactTokenizer.countTokens(text, modelHint);
+}
+
+interface AttachScanCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+/**
+ * Bounded scan caches for @-attach expansion (importer hits, outlines, entry
+ * listings). Keyed by workspace + path + file version (mtimeMs:size), so edited
+ * files invalidate automatically. Staleness only affects hint suggestions
+ * (fail-open), never correctness of attached anchor content.
+ */
+const attachScanCache = new Map<string, AttachScanCacheEntry<unknown>>();
+const ATTACH_SCAN_CACHE_TTL_MS = 30_000;
+const ATTACH_SCAN_CACHE_MAX = 500;
+
+function attachCacheGet<T>(key: string): T | undefined {
+  const entry = attachScanCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    attachScanCache.delete(key);
+    return undefined;
+  }
+  return entry.value as T;
+}
+
+function attachCacheSet(key: string, value: unknown): void {
+  if (attachScanCache.size >= ATTACH_SCAN_CACHE_MAX) {
+    const oldest = attachScanCache.keys().next();
+    if (!oldest.done) attachScanCache.delete(oldest.value);
+  }
+  attachScanCache.set(key, { value, expiresAt: Date.now() + ATTACH_SCAN_CACHE_TTL_MS });
+}
+
+async function fileVersionKey(safeAbs: string): Promise<string | undefined> {
+  try {
+    const stat = await fsp.stat(safeAbs);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * PromptAttachmentProcessor - Tự động bóc tách các file/thư mục được @mention và đính kèm vào context
  *
  * Quy ước anchor: file được @mention là ĐIỂM NEO (anchor), không phải toàn bộ sự thật.
  * Khi MINUS_ATTACH_EXPAND=on (mặc định), processor tự động mở rộng vùng điều tra 2-hop:
- * hop-1 = file anchor import + file import anchor + sibling cùng thư mục (+ top-ranked files nếu anchor là thư mục),
+ * hop-1 = file anchor import + file import anchor (+ top-ranked files nếu anchor là thư mục),
  * hop-2 = file mà hop-1 import. LLM bị bắt buộc kiểm tra neighborhood trước khi kết luận/sửa code.
  */
 export class PromptAttachmentProcessor {
@@ -378,7 +433,7 @@ export class PromptAttachmentProcessor {
     'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth.',
     'MANDATORY expansion before concluding root cause or editing code:',
     '1. Read the anchor file(s).',
-    '2. Inspect HOP-1 files (direct imports, importers, same-dir siblings, dir top-ranked files).',
+    '2. Inspect HOP-1 files (direct imports, importers, dir top-ranked files).',
     '3. Inspect HOP-2 files (files related to hop-1) with read_file / grep_search / analyze_impact.',
     'FORBIDDEN: concluding root cause or applying fixes based on anchor content alone without checking callers/dependencies.',
   ].join('\n');
@@ -521,11 +576,33 @@ export class PromptAttachmentProcessor {
   private static async findImporters(anchorRel: string, workspace: Workspace): Promise<string[]> {
     const base = path.basename(anchorRel).replace(/\.[^.]+$/, '');
     if (!base || base.length < 2) return [];
+    const resultCacheKey = `importers::${workspace.rootDir}::${anchorRel}`;
+    try {
+      const anchorSafe = workspace.resolveSafePath(anchorRel);
+      const version = await fileVersionKey(anchorSafe);
+      const cachedResult = attachCacheGet<string[]>(`${resultCacheKey}::${version ?? 'noversion'}`);
+      if (cachedResult) return [...cachedResult];
+      const found = await this.scanImporters(anchorRel, base, workspace);
+      attachCacheSet(`${resultCacheKey}::${version ?? 'noversion'}`, found);
+      return [...found];
+    } catch {
+      return this.scanImporters(anchorRel, base, workspace).catch((): string[] => []);
+    }
+  }
+
+  private static async scanImporters(anchorRel: string, base: string, workspace: Workspace): Promise<string[]> {
     const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const importLine = new RegExp(`(?:import|require|from)\\s*[^\\n]*?${escaped}`, 'i');
     let entries: WorkspaceEntryInfo[];
     try {
-      entries = FileMentionEngine.listWorkspaceEntries(workspace);
+      const entriesCacheKey = `entries::${workspace.rootDir}`;
+      const cachedEntries = attachCacheGet<WorkspaceEntryInfo[]>(entriesCacheKey);
+      if (cachedEntries) {
+        entries = cachedEntries;
+      } else {
+        entries = FileMentionEngine.listWorkspaceEntries(workspace);
+        attachCacheSet(entriesCacheKey, entries);
+      }
     } catch {
       return [];
     }
@@ -595,26 +672,10 @@ export class PromptAttachmentProcessor {
           }
         }
       }
-      // Hop-1b: sibling cùng thư mục (tối đa 3 file code).
-      try {
-        const dirAbs = path.dirname(workspace.resolveSafePath(anchor));
-        const entries = await fsp.readdir(dirAbs, { withFileTypes: true });
-        const siblings = entries
-          .filter((e) => e.isFile() && ATTACH_CODE_EXTENSIONS.has(path.extname(e.name).toLowerCase()))
-          .map((e) => e.name)
-          .sort()
-          .slice(0, 3);
-        for (const name of siblings) {
-          if (hop1Count >= MAX_RELATED_HOP1) break;
-          const rel = workspace.toRelativePath(path.join(dirAbs, name));
-          if (rel !== anchor && addRelated(rel, 1, 'same-dir', anchor)) {
-            hop1Paths.push(rel);
-            hop1Count++;
-          }
-        }
-      } catch {
-        // Bỏ qua khi không đọc được thư mục chứa anchor.
-      }
+      // Hop-1b removed: same-dir sibling suggestions no longer enter the LLM
+      // context on @-attach. Only the anchor plus real graph relations
+      // (imports / importers) are suggested; the model reads siblings itself
+      // via read_file only if needed.
       // Hop-1c: file import anchor (callers ngược).
       if (hop1Count < MAX_RELATED_HOP1) {
         const importers = await this.findImporters(anchor, workspace).catch((): string[] => []);
@@ -681,17 +742,30 @@ export class PromptAttachmentProcessor {
       try {
         if (workspace.isBinaryFile(item.path)) continue;
         const safe = workspace.resolveSafePath(item.path);
+        const version = await fileVersionKey(safe);
+        if (version) {
+          const outlineCacheKey = `outline::${workspace.rootDir}::${item.path}::${version}`;
+          const cachedOutline = attachCacheGet<string>(outlineCacheKey);
+          if (cachedOutline !== undefined) {
+            if (cachedOutline) outlineLines.push(cachedOutline);
+            continue;
+          }
+        }
         const stat = await fsp.stat(safe);
         if (stat.size > MAX_SCAN_FILE_BYTES) continue;
         const content = await fsp.readFile(safe, 'utf8');
         const outline = SemanticSlicer.extractOutline(item.path, content);
-        if (outline.symbols.length === 0) continue;
-        outlineLines.push(
+        if (outline.symbols.length === 0) {
+          if (version) attachCacheSet(`outline::${workspace.rootDir}::${item.path}::${version}`, '');
+          continue;
+        }
+        const rendered =
           `### ${item.path} (hop-${item.hop} • ${item.reason})\n`
           + outline.symbols.slice(0, MAX_RELATED_OUTLINE_SYMBOLS)
             .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
-            .join('\n'),
-        );
+            .join('\n');
+        if (version) attachCacheSet(`outline::${workspace.rootDir}::${item.path}::${version}`, rendered);
+        outlineLines.push(rendered);
       } catch {
         // Bỏ qua file liên quan không đọc được — danh sách path phía trên vẫn đủ để LLM tự inspect.
       }
@@ -707,16 +781,71 @@ export class PromptAttachmentProcessor {
       : block;
   }
 
+  /** Dựng block nội dung file kèm fingerprint sha để dedup re-attach. */
+  private static buildFileContextBlock(
+    relPath: string,
+    content: string,
+    sizeBytes: number,
+    forceSlice: boolean,
+  ): { block: string; isSliced: boolean; lineCount: number; sha: string } {
+    const lines = content.split(/\r?\n/);
+    const lineCount = lines.length;
+    const ext = path.extname(relPath).replace(/^\./, '') || 'text';
+    const sha = shortContentHash(content);
+    let renderedContent = content;
+    let isSliced = false;
+
+    // Nếu file quá dài (> 350 dòng hoặc > 14KB), tự động áp dụng Semantic AST Slicing (Cursor Standard).
+    // forceSlice dùng khi block full vượt trần token: hạ cấp xuống outline thay vì skip hẳn.
+    if (forceSlice || lineCount > 350 || sizeBytes > 14000) {
+      const outline = SemanticSlicer.extractOutline(relPath, content);
+      if (outline.symbols.length > 0) {
+        isSliced = true;
+        const headLines = lines.slice(0, 45).join('\n');
+        const topSymbols = outline.symbols.slice(0, 25);
+        let symbolOutlineLines = topSymbols
+          .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
+          .join('\n');
+        if (outline.symbols.length > 25) {
+          symbolOutlineLines += `\n  - ... (+${outline.symbols.length - 25} other symbols in this file)`;
+        }
+
+        renderedContent = `${headLines}\n\n// ... [SEMANTIC AST SLICE: File is large (${lineCount} lines • ${(sizeBytes / 1024).toFixed(1)} KB)] ...\n// Structural symbols index (showing ${topSymbols.length}/${outline.symbols.length}):\n${symbolOutlineLines}\n\n// [NOTE]: Use tool read_file with startLine/endLine if a specific function implementation is required.`;
+      } else if (forceSlice) {
+        // Fallback khi không trích được symbol: cắt head 60 dòng, luôn nhỏ hơn bản full.
+        isSliced = true;
+        const headLines = lines.slice(0, 60).join('\n');
+        renderedContent = `${headLines}\n\n// ... [TRUNCATED: showing first 60 of ${lineCount} lines • ${(sizeBytes / 1024).toFixed(1)} KB] ...\n// [NOTE]: Use tool read_file with startLine/endLine if a specific section is required.`;
+      }
+    }
+
+    const block = `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(sizeBytes / 1024).toFixed(1)} KB • sha:${sha}${isSliced ? ' • Semantic AST Sliced' : ''})]\n\`\`\`${ext}\n${renderedContent}\n\`\`\`\n---`;
+    return { block, isSliced, lineCount, sha };
+  }
+
+  /** True khi file đã attach trước đó với cùng nội dung (tìm marker + sha trong context gần đây). */
+  private static isUnchangedSinceRecentContext(kind: 'file' | 'binary' | 'dir', relPath: string, fingerprint: string, recentCombined: string): boolean {
+    if (!recentCombined) return false;
+    const marker = kind === 'file'
+      ? `[Attached File: ${relPath} (`
+      : kind === 'binary'
+        ? `[Attached Binary File: ${relPath} (`
+        : `[Attached Directory: ${relPath}/ (`;
+    return recentCombined.includes(marker) && recentCombined.includes(fingerprint);
+  }
+
   /**
    * Đọc và đính kèm nội dung của tất cả các file / thư mục được nhắc tới vào user prompt
    */
   static async resolveAndAttach(
     userPrompt: string,
     workspace: Workspace,
-    options?: { expansionEnabled?: boolean },
+    options?: { expansionEnabled?: boolean; recentContextTexts?: string[] },
   ): Promise<AttachmentResult> {
     const mentionedPaths = this.extractMentionedPaths(userPrompt);
     const expansionEnabled = options?.expansionEnabled ?? this.isAttachmentExpansionEnabled();
+    // Gộp recent context thành một chuỗi để kiểm tra re-attach (giới hạn 64k chars).
+    const recentCombined = (options?.recentContextTexts || []).join('\n').slice(-64_000);
 
     if (mentionedPaths.length === 0) {
       return {
@@ -762,54 +891,57 @@ export class PromptAttachmentProcessor {
           const isBinary = workspace.isBinaryFile(relPath);
           if (!isBinary && !anchorFiles.includes(relPath)) anchorFiles.push(relPath);
           if (isBinary) {
+            const fingerprint = `mtime:${stat.mtimeMs}`;
+            const unchanged = this.isUnchangedSinceRecentContext('binary', relPath, fingerprint, recentCombined);
             attachment = {
               path: relPath,
               type: 'file',
               sizeBytes: stat.size,
-              preview: '[Binary File]',
+              preview: unchanged ? '[Unchanged — see earlier context]' : '[Binary File]',
             };
-            contextBlock = `\n---\n[Attached Binary File: ${relPath} (${(stat.size / 1024).toFixed(1)} KB)]\n---`;
+            contextBlock = unchanged
+              ? `\n---\n[Attached Binary File: ${relPath} (${(stat.size / 1024).toFixed(1)} KB • unchanged since earlier context, ${fingerprint})]\n---`
+              : `\n---\n[Attached Binary File: ${relPath} (${(stat.size / 1024).toFixed(1)} KB • ${fingerprint})]\n---`;
           } else {
             const content = await fsp.readFile(safePath, 'utf8');
-            const lines = content.split(/\r?\n/);
-            const lineCount = lines.length;
-            const ext = path.extname(relPath).replace(/^\./, '') || 'text';
-
-            let renderedContent = content;
-            let isSliced = false;
-
-            // Nếu file quá dài (> 350 dòng hoặc > 14KB), tự động áp dụng Semantic AST Slicing (Cursor Standard)
-            if (lineCount > 350 || stat.size > 14000) {
-              const outline = SemanticSlicer.extractOutline(relPath, content);
-              if (outline.symbols.length > 0) {
-                isSliced = true;
-                const headLines = lines.slice(0, 45).join('\n');
-                const topSymbols = outline.symbols.slice(0, 25);
-                let symbolOutlineLines = topSymbols
-                  .map((s) => `  - [${s.kind}] ${s.name} (Lines ${s.startLine}-${s.endLine}): ${s.signature}`)
-                  .join('\n');
-                if (outline.symbols.length > 25) {
-                  symbolOutlineLines += `\n  - ... (+${outline.symbols.length - 25} other symbols in this file)`;
+            const built = this.buildFileContextBlock(relPath, content, stat.size, false);
+            const fingerprint = `sha:${built.sha}`;
+            if (this.isUnchangedSinceRecentContext('file', relPath, fingerprint, recentCombined)) {
+              attachment = {
+                path: relPath,
+                type: 'file',
+                sizeBytes: stat.size,
+                lineCount: built.lineCount,
+                preview: '[Unchanged — see earlier context]',
+              };
+              contextBlock = `\n---\n[Attached File: ${relPath} (${built.lineCount} lines • unchanged since earlier context, ${fingerprint})]\n---`;
+            } else {
+              // Hạ cấp xuống AST slice khi block full vượt trần token, thay vì skip hẳn.
+              let candidate = built.block;
+              if (!built.isSliced && attachedContextTokens + estimateAttachTokens(candidate) > this.MAX_CONTEXT_TOKENS) {
+                const downgraded = this.buildFileContextBlock(relPath, content, stat.size, true);
+                if (downgraded.isSliced && estimateAttachTokens(downgraded.block) < estimateAttachTokens(candidate)) {
+                  candidate = downgraded.block;
                 }
-
-                renderedContent = `${headLines}\n\n// ... [SEMANTIC AST SLICE: File is large (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB)] ...\n// Structural symbols index (showing ${topSymbols.length}/${outline.symbols.length}):\n${symbolOutlineLines}\n\n// [NOTE]: Use tool read_file with startLine/endLine if a specific function implementation is required.`;
               }
+              attachment = {
+                path: relPath,
+                type: 'file',
+                sizeBytes: stat.size,
+                lineCount: built.lineCount,
+                preview: candidate === built.block
+                  ? (built.isSliced ? `[AST Sliced: ${built.lineCount} lines]` : undefined)
+                  : `[AST Sliced (cap-downgrade): ${built.lineCount} lines]`,
+              };
+              contextBlock = candidate;
             }
-
-            attachment = {
-              path: relPath,
-              type: 'file',
-              sizeBytes: stat.size,
-              lineCount,
-              preview: isSliced ? `[AST Sliced: ${lineCount} lines]` : undefined,
-            };
-            contextBlock = `\n---\n[Attached File: ${relPath} (${lineCount} lines • ${(stat.size / 1024).toFixed(1)} KB${isSliced ? ' • Semantic AST Sliced' : ''})]\n\`\`\`${ext}\n${renderedContent}\n\`\`\`\n---`;
           }
         } else if (stat.isDirectory()) {
           // Nếu là thư mục, tạo sơ đồ cây thư mục (Directory Tree)
           const treeListing = await this.renderDirectoryTree(safePath, workspace, 3);
           const entries = await fsp.readdir(safePath);
           const fileCount = entries.length;
+          const treeSha = shortContentHash(treeListing);
 
           attachment = {
             path: relPath,
@@ -817,7 +949,11 @@ export class PromptAttachmentProcessor {
             sizeBytes: stat.size,
             fileCount,
           };
-          contextBlock = `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries)]\n\`\`\`\n${treeListing}\n\`\`\`\n---`;
+          if (this.isUnchangedSinceRecentContext('dir', relPath, `sha:${treeSha}`, recentCombined)) {
+            contextBlock = `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries • unchanged since earlier context, sha:${treeSha})]\n---`;
+          } else {
+            contextBlock = `\n---\n[Attached Directory: ${relPath}/ (${fileCount} entries • sha:${treeSha})]\n\`\`\`\n${treeListing}\n\`\`\`\n---`;
+          }
           if (!attachedDirs.includes(relPath)) attachedDirs.push(relPath);
           if (expansionEnabled) {
             const topRanked = await this.collectTopRankedFilesInDir(safePath, workspace).catch((): string[] => []);
@@ -831,7 +967,7 @@ export class PromptAttachmentProcessor {
           continue;
         }
 
-        const estimatedTokens = Math.ceil(Buffer.byteLength(contextBlock, 'utf8') / 4);
+        const estimatedTokens = estimateAttachTokens(contextBlock);
         if (attachedContextTokens + estimatedTokens > this.MAX_CONTEXT_TOKENS) {
           skippedAttachments.push({ path: relPath, reason: 'context_token_limit' });
           continue;
@@ -878,13 +1014,13 @@ export class PromptAttachmentProcessor {
         }
         const neighborhoodBlock = await this.renderNeighborhoodBlock(blockAnchors, relatedFiles, workspace);
         if (neighborhoodBlock) {
-          const estimatedTokens = Math.ceil(Buffer.byteLength(neighborhoodBlock, 'utf8') / 4);
+          const estimatedTokens = estimateAttachTokens(neighborhoodBlock);
           if (attachedContextTokens + estimatedTokens <= this.MAX_CONTEXT_TOKENS) {
             attachedContextBlocks.push(neighborhoodBlock);
             attachedContextTokens += estimatedTokens;
           } else {
             const compactBlock = this.renderCompactNeighborhoodBlock(blockAnchors, relatedFiles);
-            const compactTokens = Math.ceil(Buffer.byteLength(compactBlock, 'utf8') / 4);
+            const compactTokens = estimateAttachTokens(compactBlock);
             if (attachedContextTokens + compactTokens <= this.MAX_CONTEXT_TOKENS) {
               attachedContextBlocks.push(compactBlock);
               attachedContextTokens += compactTokens;

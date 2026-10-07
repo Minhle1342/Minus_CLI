@@ -6,7 +6,9 @@ import { assertHistoryToolPairing, computeRequestValueDigest } from '../session/
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
 import { nativeCompactHistory, nativeComputeStringHash } from '../native/index.js';
-import type { ArchivedTurnDocument, FileDeltaRecord } from '../context/turn-memory-retriever.js';
+import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
+import { collectCompactionEvidence, renderCompactionTaskState } from './compaction-evidence.js';
+import type { PlanTaskGraph } from './plan-manager.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -90,6 +92,12 @@ export interface CompactionStats {
 }
 
 export interface CompactionOptions {
+  /** Preserve the current request and all evidence collected for it verbatim. */
+  protectActiveTurn?: boolean;
+  protectedMessages?: SessionMessage[];
+  protectedPaths?: string[];
+  /** Explicit replacements established by the observation retention policy. */
+  replacedObservationIds?: string[];
   force?: boolean;
   requestOverheadTokens?: number;
   outputReserveTokens?: number;
@@ -127,6 +135,9 @@ export interface CompletedTurnWindowOptions {
   openTurn?: number;
   /** Full turns to preserve (defaults to config). */
   preserveCompletedTurns?: number;
+  /** Authoritative live plan, not inferred from assistant narration. */
+  plan?: PlanTaskGraph;
+  completionReason?: string;
 }
 
 const ROLLING_SYNOPSIS_MARKER = '[ROLLING DIALOGUE SYNOPSIS';
@@ -478,9 +489,9 @@ export class ContextCompactor {
     let userPrompt = '';
     const assistantThoughts: string[] = [];
     const toolsUsed: string[] = [];
-    const filesTouched: string[] = [];
-    const fileDeltas: FileDeltaRecord[] = [];
-    const highSaliencyTraces: string[] = [];
+    const evidence = collectCompactionEvidence(turnMessages);
+    const { filesTouched, fileDeltas } = evidence;
+    const highSaliencyTraces = evidence.traces;
     const keyDecisions: string[] = [];
 
     for (const msg of turnMessages) {
@@ -494,13 +505,6 @@ export class ContextCompactor {
             }
             userPrompt += (userPrompt ? ' ' : '') + textSegment;
           }
-          if (p.functionResponse && isVerificationOrFailure(p.functionResponse)) {
-            const resp = p.functionResponse.response as Record<string, any> | undefined;
-            const errSummary = resp?.error || resp?.message || (resp?.exitCode !== undefined && resp.exitCode !== 0 ? `Exit code ${resp.exitCode}` : undefined);
-            if (errSummary) {
-              highSaliencyTraces.push(`[FAILED ${p.functionResponse.name}]: ${String(errSummary).slice(0, 160)}`);
-            }
-          }
         }
       } else if (msg.role === 'model') {
         for (const p of msg.parts || []) {
@@ -511,22 +515,6 @@ export class ContextCompactor {
             const toolName = p.functionCall.name || '';
             if (toolName) {
               toolsUsed.push(toolName);
-            }
-            const args = p.functionCall.args as Record<string, any> | undefined;
-            const pathArg = args?.path || args?.filePath || args?.targetFile;
-            if (pathArg && typeof pathArg === 'string') {
-              filesTouched.push(pathArg);
-              if (toolName.includes('create_file')) {
-                fileDeltas.push({ path: pathArg, action: 'created', summary: 'File created' });
-              } else if (toolName.includes('delete_file')) {
-                fileDeltas.push({ path: pathArg, action: 'deleted', summary: 'File deleted' });
-              } else if (toolName.includes('replace_text') || toolName.includes('apply_patch') || toolName.includes('write_file') || toolName.includes('replace_file_content')) {
-                const sym = args?.symbol ? [String(args.symbol)] : undefined;
-                fileDeltas.push({ path: pathArg, action: 'modified', modifiedSymbols: sym, summary: `Modified via ${toolName}` });
-              } else {
-                const sym = args?.symbol ? [String(args.symbol)] : undefined;
-                fileDeltas.push({ path: pathArg, action: 'read', modifiedSymbols: sym, summary: sym ? `Read symbol ${args.symbol}` : 'Read file' });
-              }
             }
           }
         }
@@ -563,7 +551,7 @@ export class ContextCompactor {
       toolsUsed: uniqueTools,
       filesTouched: uniqueFiles,
       fileDeltas,
-      highSaliencyTraces: Array.from(new Set(highSaliencyTraces)).slice(0, 5),
+      highSaliencyTraces: Array.from(new Set(highSaliencyTraces)).slice(-12),
       keyDecisions: uniqueDecisions,
       timestamp: new Date().toISOString(),
     };
@@ -958,7 +946,7 @@ export class ContextCompactor {
     const allDecisions = Array.from(new Set([...priorDecisions, ...archivedTurns.flatMap((t) => t.keyDecisions)])).slice(0, 10);
     const allTools = Array.from(new Set([...priorTools, ...archivedTurns.flatMap((t) => t.toolsUsed)]));
     const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
-    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(0, 6);
+    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(-12);
 
     const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
     const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
@@ -1002,6 +990,7 @@ export class ContextCompactor {
     const firstArchived = archivedNumbers[0];
     const lastArchived = archivedNumbers[archivedNumbers.length - 1];
     const turnRangeLabel = archivedNumbers.length === 1 ? `TURN ${firstArchived}` : `TURNS ${firstArchived} to ${lastArchived}`;
+    const taskState = renderCompactionTaskState(options.plan, options.completionReason);
     const structuredSummary = [
       `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
       `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
@@ -1018,10 +1007,11 @@ export class ContextCompactor {
       ``,
       `## 5. Current State & Tools Executed`,
       `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
-      `- Status: older exchange turns safely packaged with an immutable trace.`,
+      ...taskState.state,
+      `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
       ``,
       `## 6. Next Steps`,
-      `- Continue the task on files in the active sliding window.`,
+      ...taskState.nextSteps,
       ``,
       `### Chronological Turn Index`,
       ...[...priorSynopsisLines, ...synopsisLines],
@@ -1130,10 +1120,26 @@ export class ContextCompactor {
 
     // 1.5. Kỹ thuật Rolling Turn Compaction: Thu gọn các cặp Turn (User - Assistant) quá cũ theo cửa sổ trượt
     let workingMessages = messages;
+    let activeTurnStart = 0;
+    messages.forEach((message, index) => {
+      if (message.role === 'user' && !message.parts?.some((part) => part.functionResponse)
+        && !isRollingSynopsisMessage(message)) activeTurnStart = index;
+    });
+    const protectedMessages = new Set(options?.protectActiveTurn
+      ? messages.slice(Math.max(0, activeTurnStart)) : []);
+    for (const message of options?.protectedMessages || []) protectedMessages.add(message);
+    const replacedObservationIds = new Set(options?.replacedObservationIds || []);
+    // Unpin only a response-only message whose every observation has a known
+    // replacement. User instructions and mixed messages remain protected.
+    for (const message of protectedMessages) {
+      if (message.parts?.length && message.parts.every((part) => part.functionResponse?.id
+        && replacedObservationIds.has(part.functionResponse.id))) protectedMessages.delete(message);
+    }
+    const protectedPaths = new Set((options?.protectedPaths || []).flatMap(normalizeFilePathVariants));
     const hasVerificationCommand = messages.some((message) => message.parts?.some(
       (part) => part.functionResponse?.name === 'run_command',
     ));
-    if (!hasVerificationCommand && originalLength >= this.config.nativePrecompactionThresholdChars) {
+    if (!options?.protectActiveTurn && !hasVerificationCommand && originalLength >= this.config.nativePrecompactionThresholdChars) {
       const serialized = serializeHistory(messages);
       const nativeResult = nativeCompactHistory(
         serialized,
@@ -1157,7 +1163,8 @@ export class ContextCompactor {
     const shouldRunRollingTurns = options?.enableRollingTurns ?? this.config.enableRollingTurnCompaction;
     const preserveTurns = options?.preserveLastNTurns ?? this.config.preserveLastNTurns;
 
-    if (shouldRunRollingTurns && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
+    if (shouldRunRollingTurns && protectedPaths.size === 0 && !options?.protectedMessages?.length
+      && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
       const rollingResult = this.applyRollingTurnCompaction(workingMessages, preserveTurns);
       workingMessages = rollingResult.messages;
       archivedTurns = rollingResult.archivedTurns;
@@ -1169,9 +1176,7 @@ export class ContextCompactor {
       (options?.mutatedFiles || []).flatMap((f) => normalizeFilePathVariants(f))
     );
 
-    let effectivePreserveLastN = options?.cognitivePhase === 'explore'
-      ? Math.min(this.config.preserveLastNToolResults, 2)
-      : this.config.preserveLastNToolResults;
+    let effectivePreserveLastN = this.config.preserveLastNToolResults;
 
     const isObservationMaskingActive = options?.enableObservationMasking ?? this.config.enableObservationMasking;
     if (isObservationMaskingActive) {
@@ -1192,19 +1197,12 @@ export class ContextCompactor {
 
     // 3. Tiến hành Adaptive Context Pruning (Saliency-Aware Observation Masking & Superseded Deduplication)
     const compactedMessages: SessionMessage[] = workingMessages.map((msg, msgIdx) => {
+      if (protectedMessages.has(msg)) return msg;
       const isOldToolResult = cutoffIndex >= 0
         && msgIdx < cutoffIndex
         && msg.parts?.some((p) => p.functionResponse);
 
-      const isLowSaliencyEager = (options?.cognitivePhase === 'implement' || options?.cognitivePhase === 'verify')
-        && toolResultIndices.length > 1
-        && msgIdx < toolResultIndices[toolResultIndices.length - 1]
-        && msg.parts?.some((p: any) => {
-          const name = String(p.functionResponse?.name || '').toLowerCase();
-          return name.includes('list_files') || name.includes('search_') || name.includes('pack_codebase') || name.includes('read_compressed');
-        });
-
-      if (!isOldToolResult && !isLowSaliencyEager) {
+      if (!isOldToolResult) {
         return msg;
       }
 
@@ -1219,12 +1217,19 @@ export class ContextCompactor {
         if (typeof resp.response === 'object' && resp.response !== null) {
           const r = resp.response as Record<string, any>;
           const rawFilePath = r.path || r.filePath || r.targetFile;
+          const hasReplacement = Boolean(resp.id && replacedObservationIds.has(resp.id));
+          if (!hasReplacement && rawFilePath && normalizeFilePathVariants(String(rawFilePath)).some((value) => protectedPaths.has(value))) return part;
+          // Unresolved failures and command verification are not stale merely
+          // because they are old or refer to a subsequently mutated file.
+          if (options?.protectActiveTurn && (r.success === false
+            || (typeof r.exitCode === 'number' && r.exitCode !== 0)
+            || (resp.name === 'run_command' && !hasReplacement))) return part;
           const isMutated = Boolean(
             rawFilePath && normalizeFilePathVariants(String(rawFilePath)).some((v) => mutatedFilesNormalized.has(v))
           );
 
           // Cơ chế 1: Superseded State Deduplication (Khử trạng thái cũ của file đã bị sửa)
-          if (isMutated) {
+          if (isMutated && typeof r.content === 'string') {
             prunedPartsCount++;
             const supersededMask = `[SUPERSEDED BY RECENT MUTATION: File "${rawFilePath}" was modified in a later step. Please re-read the file if you need the latest content]`;
             maskedObservations.push(createMaskedObservationRecord(resp, resp.response, 'obs-superseded', supersededMask));
@@ -1235,6 +1240,7 @@ export class ContextCompactor {
                 response: {
                   path: rawFilePath,
                   status: 'superseded',
+                  archiveId: maskedObservations[maskedObservations.length - 1].id,
                   observationMask: supersededMask,
                 },
               },
@@ -1270,6 +1276,7 @@ export class ContextCompactor {
               if (r.exitCode === 0) {
                 compressedPayload = {
                   exitCode: 0,
+                  command: r.command,
                   status: 'masked',
                   observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). Long log (${rawLog.length} chars) hidden]`,
                 };
@@ -1304,6 +1311,7 @@ export class ContextCompactor {
               'obs-masked',
               compressedPayload.observationMask || `Masked observation of ${resp.name}`,
             ));
+            compressedPayload.archiveId = maskedObservations[maskedObservations.length - 1].id;
 
             return {
               functionResponse: {
@@ -1419,7 +1427,7 @@ export class ContextCompactor {
       compactedLength += options.reinjectInvariants.length + 65;
     }
 
-    const hardBudgetResult = options?.enforceBudget
+    const hardBudgetResult = options?.enforceBudget && !options.protectActiveTurn
       ? this.enforceHardBudget(compactedMessages, effectiveHistoryBudgetTokens, options.modelName)
       : { messages: compactedMessages, strategies: [] as string[], prunedPartsCount: 0, maskedObservations: [] as MaskedObservationRecord[] };
     compactedMessages.splice(0, compactedMessages.length, ...hardBudgetResult.messages);

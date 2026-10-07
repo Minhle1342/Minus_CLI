@@ -2407,10 +2407,13 @@ export async function calculateTotal(items: any[]): Promise<number> {
   const readSymbolRes = await readFileTool.execute({ path: 'src/agent/agent-loop.ts', symbol: 'AgentLoop' }, workspace);
   assert(readSymbolRes.content?.includes('class AgentLoop') === true, 'read_file symbol trích xuất thành công class AgentLoop');
 
-  // Test read_file tối ưu hóa trên File lớn > 200KB (src/test-suite.ts ~501KB)
+  // Test read_file auto-degrade trên File lớn > 200KB (src/test-suite.ts ~501KB):
+  // unscoped read không còn báo lỗi cứng mà trả windowed view (120 dòng đầu + outline).
   const readUnscopedLarge = await readFileTool.execute({ path: 'src/test-suite.ts' }, workspace);
-  assert(readUnscopedLarge.errorCode === 'FILE_TOO_LARGE', 'read_file từ chối đọc unscoped trên file > 200KB để chống tràn token');
-  assert(typeof readUnscopedLarge.suggestion === 'string', 'read_file cung cấp suggestion hướng dẫn LLM cách đọc từng phần');
+  assert(!readUnscopedLarge.error && !readUnscopedLarge.errorCode, 'read_file auto-degrade thay vì FILE_TOO_LARGE trên file > 200KB');
+  assert(typeof readUnscopedLarge.notice === 'string' && readUnscopedLarge.notice.includes('WINDOWED FILE VIEW'), 'read_file gắn notice WINDOWED FILE VIEW khi auto-degrade');
+  assert(readUnscopedLarge.endLine === 120 && readUnscopedLarge.hasMore === true, 'auto-degrade window đúng 120 dòng đầu và báo hasMore');
+  assert(Array.isArray(readUnscopedLarge.outline), 'auto-degrade kèm AST outline');
 
   const readRangeLarge = await readFileTool.execute({ path: 'src/test-suite.ts', startLine: 1, endLine: 30 }, workspace);
   assert(readRangeLarge.startLine === 1 && readRangeLarge.endLine === 30, 'read_file hỗ trợ đọc dải dòng trên file lớn > 200KB');
