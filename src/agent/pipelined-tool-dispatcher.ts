@@ -9,12 +9,12 @@ export interface PipelinedDispatchTelemetry {
   speculativeDiagnosticsHits: number;
 }
 
+import { CONCURRENT_READ_ONLY_TOOLS } from './tool-execution-scheduler.js';
+
 export const SAFE_READ_ONLY_TOOLS = new Set([
-  'read_file',
+  ...CONCURRENT_READ_ONLY_TOOLS,
   'find_by_name',
   'grep_search',
-  'inspect_symbol',
-  'get_diagnostics',
   'read_image',
   'list_dir',
 ]);

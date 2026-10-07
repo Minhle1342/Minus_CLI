@@ -35,23 +35,38 @@ export function isConcurrentReadOnlyTool(name: string): boolean {
   return CONCURRENT_READ_ONLY_TOOLS.has(name);
 }
 
+export const DEFAULT_MAX_CONCURRENT_READS = 6;
+
 /**
  * Groups only consecutive, explicitly allow-listed reads. Any mutation,
  * command, network call, or unknown tool forms its own sequential barrier.
+ * Large read batches are partitioned into bounded chunks (maxConcurrency)
+ * to avoid resource exhaustion.
  */
 export function partitionToolCalls(
   calls: ScheduledToolCall[],
   concurrentReadsEnabled: boolean,
+  maxConcurrency: number = DEFAULT_MAX_CONCURRENT_READS,
 ): ToolCallPartition[] {
   const partitions: ToolCallPartition[] = [];
   let pendingReads: ScheduledToolCall[] = [];
 
   const flushReads = (): void => {
     if (pendingReads.length === 0) return;
-    partitions.push({
-      mode: concurrentReadsEnabled && pendingReads.length > 1 ? 'concurrent-read' : 'sequential-read',
-      calls: pendingReads,
-    });
+    if (concurrentReadsEnabled && pendingReads.length > 1) {
+      for (let i = 0; i < pendingReads.length; i += maxConcurrency) {
+        const chunk = pendingReads.slice(i, i + maxConcurrency);
+        partitions.push({
+          mode: chunk.length > 1 ? 'concurrent-read' : 'sequential-read',
+          calls: chunk,
+        });
+      }
+    } else {
+      partitions.push({
+        mode: 'sequential-read',
+        calls: pendingReads,
+      });
+    }
     pendingReads = [];
   };
 
