@@ -39,6 +39,7 @@ export interface LLMRequestOptions {
   turn?: number;
   step?: number;
   stepSuffixes?: Map<number, string> | Record<number, string>;
+  allowedFunctionNames?: string[];
 }
 
 export type LLMFinishReason =
@@ -124,6 +125,28 @@ export class GeminiLLM {
       tools: sortedTools.length > 0 ? [{ functionDeclarations: sortedTools }] : undefined,
       abortSignal: request?.signal,
     };
+
+    if (request?.allowedFunctionNames !== undefined) {
+      if (request.allowedFunctionNames.length === 0) {
+        generateConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: 'NONE',
+          },
+        };
+      } else {
+        const allowed = request.allowedFunctionNames.filter((name) =>
+          sortedTools.some((t) => t.name === name),
+        );
+        if (allowed.length > 0) {
+          generateConfig.toolConfig = {
+            functionCallingConfig: {
+              mode: 'AUTO',
+              allowedFunctionNames: allowed,
+            },
+          };
+        }
+      }
+    }
 
     if (
       request?.enablePromptCaching !== false

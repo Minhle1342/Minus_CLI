@@ -4,6 +4,19 @@ export const CONCURRENT_READ_ONLY_TOOLS = new Set([
   'search_text',
   'inspect_symbol',
   'get_diagnostics',
+  'query_call_graph',
+  'get_route_map',
+  'get_symbol_context_360',
+  'get_architecture_topology',
+  'find_references',
+  'lsp_query',
+  'read_url_content',
+  'search_web',
+  'codegraph_explore',
+  'codegraph_search',
+  'codegraph_impact',
+  'search_codebase_fast',
+  'read_compressed_code',
 ]);
 
 export interface ScheduledToolCall {

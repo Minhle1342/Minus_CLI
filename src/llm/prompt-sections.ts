@@ -272,6 +272,7 @@ Core Architectural Invariants:
 3. ADAPTIVE PLANNING & EXECUTION:
    - Simple tasks: Execute directly. To run/test apps: dispatch run_command with WaitMsBeforeAsync=5000 in background.
    - Complex/multi-file tasks: Call create_plan with 2-5 milestones [Inspect -> Fix -> Verify]. Update with update_plan_task.
+   - Parallel inspection: Emit multiple read-only tool calls (read_file, search_text, inspect_symbol) in one turn to inspect concurrently.
    - Non-trivial/mutations: open reasoning with a [REQUEST ANALYSIS] block (goal, scope, ambiguities, plan, risk). R0 read-only: answer directly without it.
 
 4. MINIMAL SURGICAL MUTATION & VERIFICATION LADDER:
@@ -535,6 +536,7 @@ export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-AD
   * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
   * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
   * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout; use \`get_diagnostics\` to capture baseline compiler errors.
+  * Parallel Inspection: Emit multiple read-only tool calls (read_file, search_text, inspect_symbol, get_diagnostics) in a single turn to run them concurrently in parallel.
 - Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, call \`request_phase_transition\` to plan or implement; wait for the next turn before editing.
 - Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
 
@@ -545,6 +547,7 @@ export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (RE
   * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
   * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
   * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout.
+  * Parallel Inspection: Emit multiple read-only tool calls in a single turn to execute them concurrently in parallel.
 - Read-Only Rule: Answer directly once context is understood. No phase transition, plan, edit, or test execution required.`;
 
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION & IMPACT ASSESSMENT)]:

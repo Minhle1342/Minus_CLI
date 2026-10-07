@@ -2360,6 +2360,7 @@ export class AgentLoop {
         promptCacheKey: session.id,
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
         signal: options?.signal,
+        allowedFunctionNames: visibleToolNames,
       };
       const requestStartedAt = Date.now();
       let firstTokenAt: number | undefined;
