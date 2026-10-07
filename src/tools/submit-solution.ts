@@ -2,6 +2,7 @@ import type { ToolRegistry } from './registry.js';
 import type { ToolDefinition } from './types.js';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
+import { withObservedSubmissionMetadata } from '../agent/submission-readiness.js';
 import {
   SolutionGroundingAuditor,
   type ResolutionType,
@@ -83,6 +84,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       required: ['summary'],
     } as any,
     execute: async (args: Record<string, any>, workspace: Workspace, context?: ToolExecutionContext): Promise<SubmitSolutionResult> => {
+      args = withObservedSubmissionMetadata(args as SubmitSolutionArgs, (context as any)?.session, context?.turn);
       const summary = (args.summary || '').trim();
       const verificationEvidence = (args.verificationEvidence || '').trim();
       const rootCause = args.rootCause ? String(args.rootCause).trim() : undefined;

@@ -103,6 +103,11 @@ export class AnthropicLLM {
       tools: tools.length > 0 ? this.convertTools(tools, cacheControl) : undefined,
       temperature: 0.2,
     };
+    if (request?.functionCallingMode === 'ANY' && request.allowedFunctionNames?.length === 1) {
+      const name = request.allowedFunctionNames[0];
+      if (!tools.some(tool => tool.name === name)) throw new Error(`Forced tool is not declared: ${name}`);
+      body.tool_choice = { type: 'tool', name, disable_parallel_tool_use: true };
+    }
 
     if (request?.signal?.aborted) {
       return {

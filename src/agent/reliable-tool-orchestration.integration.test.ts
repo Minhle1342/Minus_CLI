@@ -139,6 +139,8 @@ class GuardrailTestingLLM {
     { toolCalls: [{ id: 'test-2', name: 'run_command', args: { command: 'npm test -- --filter=service' } }] },
     // 7. Final completion after successful verification
     { text: 'Bug successfully reproduced, patched, and verified.', toolCalls: [] },
+    // 8. The validated draft must be submitted, not returned directly.
+    { toolCalls: [{ id: 'submit-fix', name: 'submit_solution', args: { summary: 'Bug successfully reproduced, patched, and verified.' } }] },
   ];
 
   getTokenConfig(): Record<string, number> {
@@ -206,7 +208,15 @@ test('AgentLoop enforces ACI guardrails against prohibited commands and Reproduc
     });
 
     const llm = new GuardrailTestingLLM();
-    const loop = new AgentLoop(llm, registry, {
+    const requestOptions: any[] = [];
+    const loop = new AgentLoop({
+      modelName: llm.modelName,
+      getTokenConfig: () => llm.getTokenConfig(),
+      generate: async (session: Session, tools: any[], request: any) => {
+        requestOptions.push(request);
+        return llm.generate(session, tools);
+      },
+    }, registry, {
       workspace: new Workspace(root),
       maxSteps: 10,
       toolControlMode: 'off',
@@ -238,6 +248,11 @@ test('AgentLoop enforces ACI guardrails against prohibited commands and Reproduc
     assert.equal(mutationExecuted, true);
     // Call 6 (verification test) passed!
     assert.equal(toolEvents[5].data.result?.exitCode, 0);
+    assert.equal(toolEvents[6].data.toolName, 'submit_solution');
+    assert.equal(toolEvents[6].data.result?.submitted, true);
+    assert.equal(requestOptions.length, 8, 'readiness adds no separate LLM judge');
+    assert.equal(requestOptions[7].functionCallingMode, 'ANY');
+    assert.deepEqual(requestOptions[7].allowedFunctionNames, ['submit_solution']);
   } finally {
     if (origAci === undefined) delete process.env.MINUS_ACI_GUARDRAILS;
     else process.env.MINUS_ACI_GUARDRAILS = origAci;

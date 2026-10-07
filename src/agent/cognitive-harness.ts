@@ -688,7 +688,7 @@ export class CognitiveHarness {
     if (scaffold.phase === 'plan') {
       lines.push(`⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) — Outline execution via create_plan / update_plan_task. When ready to implement, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'explore') {
-      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE — Inspect files and gather evidence first. Mutation tools are locked. When ready to create or edit files, call request_phase_transition(targetPhase: 'implement').`);
+      lines.push(`⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) — Inspect files and gather evidence first. Follow runtime tool permissions. When ready to create or edit files, call request_phase_transition(targetPhase: 'implement').`);
     } else if (scaffold.phase === 'verify') {
       lines.push(`⚠️ [PHASE GOVERNANCE]: VERIFY MODE — run tests and verify diagnostics; avoid new features or unrelated changes.`);
     }
@@ -728,7 +728,7 @@ export class CognitiveHarness {
     const phaseBanner = scaffold.phase === 'plan'
       ? `   - ⚠️ [PHASE GOVERNANCE]: PLAN MODE (advisory) - Outline via create_plan; call request_phase_transition('implement') to begin coding.`
       : scaffold.phase === 'explore'
-      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE - Mutation tools locked. Inspect code & establish baseline test (RED) first; call request_phase_transition('implement') to begin editing.`
+      ? `   - ⚠️ [PHASE GOVERNANCE]: EXPLORE MODE (advisory) - Inspect code & establish baseline evidence first; follow runtime tool permissions and call request_phase_transition('implement') when ready to edit.`
       : scaffold.phase === 'verify'
       ? `   - ⚠️ [PHASE GOVERNANCE]: VERIFY MODE - Test execution active. Minimal regression fixes only.`
       : '';

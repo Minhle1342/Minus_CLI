@@ -6,6 +6,7 @@ import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { validateSchemaValue } from '../tools/schema-validator.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
+import { evaluateSubmission, SubmissionReadiness } from './submission-readiness.js';
 import { computeRequestValueDigest } from '../session/session-invariants.js';
 import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy } from './completed-turn-compaction-policy.js';
 import { AgentLoopOptions } from './types.js';
@@ -1067,7 +1068,20 @@ export class AgentLoop {
     let consecutiveIncompleteFinishes = 0;
     let consecutiveNoProgressStrategyChanges = 0;
     let hasSubmittedSolution = false;
+    const submissionReadiness = new SubmissionReadiness();
+    const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
+      userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
+      planBlocker: this.planManager.getCompletionBlocker(),
+      activeAgents: this.agentRegistry.list().filter(agent => agent.id !== this.agentId
+        && ['running', 'waiting'].includes(agent.status)).length });
+    const submissionCodeChangeRequired = () => (initialTurnClassification.phase !== 'explore' && initialTurnClassification.requiredCapabilities.includes('edit'))
+      || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
+      || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
+      || getTurnCompletionState(session, turn).hasMutations
+      || this.verificationPolicy.hasPendingModifications()
+      || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0);
     let submittedSolutionSummary: string | undefined;
+    let submittedValidatedDraft = false;
     let hasReportedFindings = false;
     let reportedFindingsMarkdown: string | undefined;
     let previousClassification: ClassificationDecision | undefined;
@@ -1235,6 +1249,7 @@ export class AgentLoop {
       // Check if user submitted a queued steering message while the loop was executing
       const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
       if (steerItem) {
+        submissionReadiness.clear();
         claimedSteerItems.push(steerItem);
         const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
         session.addUserMessage(steerPrompt, steerItem.source, steerItem.id);
@@ -1631,7 +1646,12 @@ export class AgentLoop {
         activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
       }
 
-      const retrievedVisibleToolNames = activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
+      const readySubmission = !hasSubmittedSolution && candidateProvider.get('submit_solution')
+        ? submissionReadiness.current(submissionSnapshot()) : undefined;
+      // Keep declarations cache-stable; expose only submit through tool choice
+      // and enforce the identical runtime scope, including control mode off.
+      const retrievedVisibleToolNames = readySubmission ? ['submit_solution']
+        : activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
       const expectedToolNames = gateToolSurface.authorizedToolNames.filter((name) => {
         if (hasSubmittedSolution) return false;
         return true;
@@ -1648,7 +1668,7 @@ export class AgentLoop {
       let runtimeAuthorizedToolNames: string[];
       if (hasSubmittedSolution) {
         runtimeAuthorizedToolNames = [];
-      } else if (reliableConstrainsScope) {
+      } else if (readySubmission || reliableConstrainsScope) {
         runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
       } else {
         const authorizedSet = new Set<string>(gateToolSurface.authorizedToolNames);
@@ -1661,7 +1681,7 @@ export class AgentLoop {
       const activeToolSetHash = hashAllowedToolSet(authorizedToolNames);
       const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
       const hasRuntimeToolScope = toolControlMode === 'enforce'
-        || reliableConstrainsScope;
+        || reliableConstrainsScope || Boolean(readySubmission);
       const stepToolProvider = hasRuntimeToolScope
         ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, authorizedToolNames)
         : this.toolProvider;
@@ -2039,7 +2059,10 @@ export class AgentLoop {
 
       // Phase 4: Auto-Convergence Directive when all verification tests passed
       let completionDirective: string | undefined;
-      if (hasVerifiedTests) {
+      if (readySubmission) {
+        const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
+        completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
+      } else if (hasVerifiedTests) {
         completionDirective = `🎯 [VERIFICATION SUCCESSFUL]: All unit test checks passed with Exit Code 0. Code modifications are empirically verified. Do NOT make any more code changes. Call "submit_solution" immediately to conclude the task.`;
       } else if (isReadOnlyAnswerTask && !stepCompletionState.hasMutations && !hasSubmittedSolution) {
         completionDirective = '[STRONG ADVISORY — READ-ONLY SUBMIT]: When the answer is ready, call submit_solution as the final tool with the actual user-facing answer in summary, resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless actual verification occurred. No code edit or test is required. report_investigation_findings and plain text do not replace submission. After successful submission, call no further tools; return the submitted answer in the user\'s language.';
@@ -2541,6 +2564,7 @@ export class AgentLoop {
         enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
         signal: options?.signal,
         allowedFunctionNames: visibleToolNames,
+        ...(readySubmission ? { functionCallingMode: 'ANY' as const } : {}),
         onRetry: (retryPayload: any) => {
           this.kernel?.ctx.events.emit('model:retry', retryPayload);
         },
@@ -2555,7 +2579,7 @@ export class AgentLoop {
       });
 
       // PASTE: Inter-Step Pattern Prediction
-      if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+      if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
         const speculativeCandidates = predictObservationCandidates(
           this.lastToolExecution?.toolName,
           this.lastToolExecution?.result,
@@ -2595,7 +2619,7 @@ export class AgentLoop {
               accumulatedThought += token;
               thoughtTokenCount++;
               if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
-                if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+                if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
                   const candidatePaths = extractThoughtPaths(accumulatedThought, this._workspace.rootDir);
                   for (const candidatePath of candidatePaths) {
                     this.pipelinedDispatcher.dispatchSpeculative(
@@ -2623,7 +2647,7 @@ export class AgentLoop {
               this.kernel?.ctx.events.emit('model:token', token);
             },
             onToolCallEarly: (earlyCall: any) => {
-              if (this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+              if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
                 const runContext = {
                   sessionId: session.id,
                   agentId: this.agentId,
@@ -2929,7 +2953,7 @@ export class AgentLoop {
           ?? envFeatureEnabled('MINUS_CONCURRENT_READ_TOOLS');
         const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
           ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
-        const toolPartitions = partitionToolCalls(scheduledToolCalls, concurrentReadsEnabled);
+        const toolPartitions = partitionToolCalls(scheduledToolCalls, concurrentReadsEnabled && !readySubmission);
         const readPartitionByIndex = new Map<number, ToolCallPartition>();
         for (const partition of toolPartitions) {
           if (partition.mode === 'sequential') continue;
@@ -2963,6 +2987,7 @@ export class AgentLoop {
 
           if (
             readPartition?.mode === 'concurrent-read'
+            && !readySubmission
             && partitionStartIndex === callIndex
             && !startedConcurrentPartitions.has(callIndex)
           ) {
@@ -3180,6 +3205,7 @@ export class AgentLoop {
                 ? { reversible: false, checkpoint: true }
                 : { reversible: true, checkpoint: true };
           }
+          if (readySubmission) sideEffect = undefined;
           const effect = sideEffect
             ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible)
             : undefined;
@@ -3247,6 +3273,13 @@ export class AgentLoop {
               message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
+          } else if (readySubmission && toolName !== 'submit_solution') {
+            // ToolRunner deliberately permits root-registry recovery. A
+            // completion lock must be stricter and precede every dispatch.
+            executionResult = { toolName, args: toolArgs, durationMs: 0, result: {
+              success: false, errorCode: 'READY_TO_SUBMIT_TOOL_BLOCKED',
+              error: 'The answer passed completion preflight. Only submit_solution is callable now.',
+            } };
           } else if (toolName === 'request_phase_transition') {
             const schema = this.toolProvider.get(toolName)?.parameters;
             const validation = validateSchemaValue(toolArgs, schema as any, '$', {
@@ -3309,29 +3342,20 @@ export class AgentLoop {
             executionResult = preexecutedReadResult;
           } else {
             // Chạy tool qua pipeline an toàn
-            const originalCodeChangeRequired = (initialTurnClassification.phase !== 'explore' && initialTurnClassification.requiredCapabilities.includes('edit'))
-              || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
-              || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
-              || getTurnCompletionState(session, turn).hasMutations
-              || this.verificationPolicy.hasPendingModifications()
-              || Boolean(this.planManager.getTasks().some((task: any) => (task.writeSet || []).length > 0));
-            let completionEvidence = toolName === 'submit_solution' && isCompletionEvidenceGateEnabled()
-              ? this.completionEvidenceGate.evaluate(String(toolArgs.summary || ''), session, {
-                turn,
-                codeChangeRequired: originalCodeChangeRequired,
-                userRequest: turnUserRequest,
-                taskClass: classification.taskClass,
-                resolutionType: typeof toolArgs.resolutionType === 'string' ? toolArgs.resolutionType : undefined,
-              })
-              : undefined;
-            let policyCompletion = toolName === 'submit_solution'
-              ? this.verificationPolicy.canComplete([], {
+            const originalCodeChangeRequired = submissionCodeChangeRequired();
+            const submissionCheck = toolName === 'submit_solution' ? evaluateSubmission({ ...toolArgs, summary: String(toolArgs.summary || '') }, {
+              session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
+              codeChangeRequired: originalCodeChangeRequired, taskClass: classification.taskClass,
+              verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
+              evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
                 changedFileCount: this.targetFilesModifiedInTurn.size,
                 hasCallers: this.editTouchedCallers,
                 blastRisk: this.maxEditBlastRisk,
                 sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
-              }, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) })
-              : undefined;
+              },
+            }) : undefined;
+            let completionEvidence = submissionCheck?.evidence;
+            let policyCompletion = submissionCheck?.verification;
 
             let ocrCompletion: OcrGateDecision = {
               allow: true,
@@ -3408,16 +3432,23 @@ export class AgentLoop {
               ? this.cognitiveHarness.fileFixationTracker.isFrozen(targetFilePath, turn)
               : { frozen: false };
 
+            const readinessInvalidated = toolName === 'submit_solution' && Boolean(readySubmission)
+              && !submissionReadiness.current(submissionSnapshot(), true);
             const submitGateBlocked = toolName === 'submit_solution' && (
-              policyCompletion?.allowed !== true
+              readinessInvalidated
+              || submissionCheck?.audit.allowed === false
+              || policyCompletion?.allowed !== true
               || (isCompletionEvidenceGateEnabled() && completionEvidence?.allow !== true)
               || !ocrCompletion.allow
             );
             if (submitGateBlocked) {
-              const error = !ocrCompletion.allow
+              const error = readinessInvalidated
+                ? 'Completion evidence, task scope or tracked artifacts changed while generating submission. Re-check the current task before submitting.'
+                : !ocrCompletion.allow
                 ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
                 : policyCompletion?.reason
                   || completionEvidence?.continuationPrompt
+                  || submissionCheck?.audit.reasons.join('\n')
                   || 'Completion evidence is incomplete.';
               executionResult = {
                 toolName,
@@ -3425,7 +3456,10 @@ export class AgentLoop {
                 result: {
                   success: false,
                   error,
-                  errorCode: !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED' : 'COMPLETION_EVIDENCE_REQUIRED',
+                  errorCode: readinessInvalidated ? 'SUBMISSION_READINESS_INVALIDATED'
+                    : !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED'
+                    : submissionCheck?.audit.allowed === false ? submissionCheck.audit.errorCode : 'COMPLETION_EVIDENCE_REQUIRED',
+                  submitted: false,
                   retryable: true,
                   ocrRunId: ocrCompletion.run?.runId,
                   ocrArtifact: ocrCompletion.run?.artifactRef,
@@ -3830,10 +3864,12 @@ export class AgentLoop {
               { tier: 'full_test' },
             );
           }
+          if (toolName === 'submit_solution') submissionReadiness.clear();
           if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
             hasSubmittedSolution = true;
             this.cleanupEphemeralScratchFiles();
             const summaryText = String(toolArgs.summary || '').trim();
+            submittedValidatedDraft = Boolean(readySubmission && summaryText === readySubmission.summary.trim());
             const rootCauseText = toolArgs.rootCause ? String(toolArgs.rootCause).trim() : '';
             const filesModifiedList = Array.isArray(toolArgs.filesModified)
               ? toolArgs.filesModified.map((f: any) => String(f).trim()).filter(Boolean)
@@ -4320,10 +4356,10 @@ export class AgentLoop {
           ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
         const isReadOnlySubmission = !getTurnCompletionState(session, turn).hasMutations;
         if (
-          (!isArchQuery || isReadOnlySubmission)
+          (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
           && hasSubmittedSolution
           && submittedSolutionSummary
-          && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked)
+          && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked || submittedValidatedDraft)
           && enableSubmitAutoFinalization
         ) {
           const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
@@ -4604,11 +4640,29 @@ export class AgentLoop {
       // Apply to every answer-only completion, not just requests recognized by
       // the intent classifier (e.g. a diagnosis may also advertise edit tools).
       const requiresReadOnlySubmission = !hasCodeMutations && !codeChangeRequired && !hasSubmittedSolution;
-      if (finalAnswerDecision.allow && requiresReadOnlySubmission) {
-        finalAnswerDecision = {
+      const requiresSubmission = requiresReadOnlySubmission || (!hasSubmittedSolution && !isSubagent && !isMockLLM);
+      if (finalAnswerDecision.allow && requiresSubmission) {
+        const candidate = evaluateSubmission({ summary: finalAnswer }, {
+          session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
+          codeChangeRequired: submissionCodeChangeRequired(), taskClass: classification.taskClass,
+          verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
+          evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
+            changedFileCount: this.targetFilesModifiedInTurn.size, hasCallers: this.editTouchedCallers,
+            blastRisk: this.maxEditBlastRisk,
+            sensitivePathTouched: completionState.filesModified.some(file => !isNonExecutableFile(file) && isSensitivePath(file)),
+          },
+        });
+        submissionReadiness.arm(candidate.payload, submissionSnapshot(), candidate.allowed);
+        finalAnswerDecision = candidate.allowed ? {
           allow: false,
           reason: 'submission-required',
-          continuationPrompt: '[STRONG ADVISORY — READ-ONLY SUBMIT]: Call submit_solution as the final tool with the answer itself in summary before returning a final answer. No code edit or test is required. A report or direct text is not a successful submission.',
+          continuationPrompt: '[SUBMISSION REQUIRED]: Call submit_solution alone as the final tool with the actual answer in summary. Use observed verification for edits; read-only answers require no edits or tests.',
+        } : {
+          allow: false,
+          reason: 'submission-preflight-rejected',
+          recovery: candidate.evidence?.recovery || (!candidate.verification.allowed ? 'verify-changes' : 'revise-answer'),
+          continuationPrompt: candidate.evidence?.continuationPrompt || candidate.verification.reason
+            || candidate.audit.reasons.join('\n'),
         };
       }
 

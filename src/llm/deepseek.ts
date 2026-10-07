@@ -501,6 +501,14 @@ export class DeepseekLLM {
       },
       ...openAIPromptCacheFields(this.baseURL, promptCacheKey, request),
     };
+    // Use the portable named-function choice, not provider-specific allowed_tools.
+    // The full schema stays stable for cache reuse.
+    if (request?.functionCallingMode === 'ANY' && request.allowedFunctionNames?.length === 1) {
+      const name = request.allowedFunctionNames[0];
+      if (!tools.some(tool => tool.name === name)) throw new Error(`Forced tool is not declared: ${name}`);
+      requestBody.tool_choice = { type: 'function', function: { name } };
+      requestBody.parallel_tool_calls = false;
+    }
 
     const effectiveTokenConfig = resolveTokenConfig(this.modelName, {
       ...this.tokenConfig,
