@@ -5,7 +5,7 @@ import { Session } from '../session/session.js';
 import { partitionToolCalls, type ScheduledToolCall } from '../agent/tool-execution-scheduler.js';
 
 describe('Dynamic Tool Masking & Parallel Inspection', () => {
-  it('configures toolConfig.functionCallingConfig with AUTO and allowedFunctionNames', async () => {
+  it('configures toolConfig.functionCallingConfig with AUTO mode and omits allowedFunctionNames in AUTO', async () => {
     const llm = new GeminiLLM('dummy-key');
     let capturedConfig: any;
     (llm as any).client = {
@@ -34,6 +34,43 @@ describe('Dynamic Tool Masking & Parallel Inspection', () => {
 
     assert.ok(capturedConfig.toolConfig, 'toolConfig must be defined');
     assert.equal(capturedConfig.toolConfig.functionCallingConfig.mode, 'AUTO');
+    assert.equal(
+      capturedConfig.toolConfig.functionCallingConfig.allowedFunctionNames,
+      undefined,
+      'allowedFunctionNames must NOT be set in AUTO mode per Gemini API rules',
+    );
+  });
+
+  it('configures toolConfig with ANY and allowedFunctionNames when functionCallingMode is ANY', async () => {
+    const llm = new GeminiLLM('dummy-key');
+    let capturedConfig: any;
+    (llm as any).client = {
+      models: {
+        generateContentStream: async ({ config }: any) => {
+          capturedConfig = config;
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield { text: () => 'done', functionCalls: [] };
+            },
+          };
+        },
+      },
+    };
+
+    const session = new Session('masking-any-test');
+    const tools: any[] = [
+      { name: 'read_file', description: 'Read file' },
+      { name: 'replace_text', description: 'Edit file' },
+      { name: 'submit_solution', description: 'Submit' },
+    ];
+
+    await llm.generateStream(session, tools, undefined, {
+      functionCallingMode: 'ANY',
+      allowedFunctionNames: ['read_file'],
+    });
+
+    assert.ok(capturedConfig.toolConfig, 'toolConfig must be defined');
+    assert.equal(capturedConfig.toolConfig.functionCallingConfig.mode, 'ANY');
     assert.deepEqual(capturedConfig.toolConfig.functionCallingConfig.allowedFunctionNames, ['read_file']);
   });
 

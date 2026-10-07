@@ -40,6 +40,7 @@ export interface LLMRequestOptions {
   step?: number;
   stepSuffixes?: Map<number, string> | Record<number, string>;
   allowedFunctionNames?: string[];
+  functionCallingMode?: 'AUTO' | 'ANY' | 'NONE';
 }
 
 export type LLMFinishReason =
@@ -126,25 +127,47 @@ export class GeminiLLM {
       abortSignal: request?.signal,
     };
 
-    if (request?.allowedFunctionNames !== undefined) {
-      if (request.allowedFunctionNames.length === 0) {
+    if (sortedTools.length > 0) {
+      const functionCallingMode = request?.functionCallingMode;
+
+      if (
+        functionCallingMode === 'NONE' ||
+        (request?.allowedFunctionNames !== undefined && request.allowedFunctionNames.length === 0)
+      ) {
         generateConfig.toolConfig = {
           functionCallingConfig: {
             mode: 'NONE',
           },
         };
-      } else {
-        const allowed = request.allowedFunctionNames.filter((name) =>
-          sortedTools.some((t) => t.name === name),
-        );
-        if (allowed.length > 0) {
-          generateConfig.toolConfig = {
-            functionCallingConfig: {
-              mode: 'AUTO',
-              allowedFunctionNames: allowed,
-            },
-          };
-        }
+      } else if (functionCallingMode === 'ANY') {
+        const allowed = request?.allowedFunctionNames
+          ? request.allowedFunctionNames.filter((name) =>
+              sortedTools.some((t) => t.name === name),
+            )
+          : undefined;
+        generateConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: 'ANY',
+            ...(allowed && allowed.length > 0 ? { allowedFunctionNames: allowed } : {}),
+          },
+        };
+      } else if (functionCallingMode === 'AUTO') {
+        generateConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: 'AUTO',
+          },
+        };
+      } else if (request?.allowedFunctionNames !== undefined) {
+        // Gemini API constraint: allowed_function_names can ONLY be specified when mode is ANY.
+        // Specifying allowedFunctionNames with mode AUTO causes 400 INVALID_ARGUMENT:
+        // "Please set allowed_function_names only when function calling mode is ANY."
+        // We set mode AUTO without allowedFunctionNames to satisfy the Gemini schema,
+        // while ToolControlGuardian and system prompt enforce runtime authorization.
+        generateConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: 'AUTO',
+          },
+        };
       }
     }
 
