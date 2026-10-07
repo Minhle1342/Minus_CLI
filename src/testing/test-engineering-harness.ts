@@ -710,3 +710,157 @@ export async function detectWorkspaceTestCommand(workspaceRoot: string): Promise
   return undefined;
 }
 
+/**
+ * Tự động phát hiện lệnh Integration / E2E test cho workspace (Node.js, Python, Go, Rust, Java, .NET).
+ * Trả về undefined nếu không phát hiện lệnh hoặc thư mục test integration nào.
+ */
+export async function detectWorkspaceIntegrationTestCommand(workspaceRoot: string): Promise<string | undefined> {
+  if (process.env.MINUS_INTEGRATION_TEST_COMMAND?.trim()) {
+    return process.env.MINUS_INTEGRATION_TEST_COMMAND.trim();
+  }
+
+  const root = path.resolve(workspaceRoot);
+
+  // 1. Kiểm tra Node.js / TypeScript (package.json scripts)
+  try {
+    let pm = 'npm';
+    const [hasPnpmLock, hasYarnLock, hasBunLock] = await Promise.all([
+      fs.stat(path.join(root, 'pnpm-lock.yaml')).catch(() => null),
+      fs.stat(path.join(root, 'yarn.lock')).catch(() => null),
+      fs.stat(path.join(root, 'bun.lockb')).catch(() => null) || fs.stat(path.join(root, 'bun.lock')).catch(() => null),
+    ]);
+
+    if (hasPnpmLock) pm = 'pnpm';
+    else if (hasBunLock) pm = 'bun';
+    else if (hasYarnLock) pm = 'yarn';
+
+    const pkgPath = path.join(root, 'package.json');
+    const pkgContent = await fs.readFile(pkgPath, 'utf-8').catch(() => null);
+    if (pkgContent) {
+      let pkg: any = {};
+      try { pkg = JSON.parse(pkgContent); } catch {}
+
+      if (typeof pkg.packageManager === 'string') {
+        if (pkg.packageManager.startsWith('pnpm')) pm = 'pnpm';
+        else if (pkg.packageManager.startsWith('yarn')) pm = 'yarn';
+        else if (pkg.packageManager.startsWith('bun')) pm = 'bun';
+      }
+
+      if (pkg.scripts) {
+        const candidateScripts = [
+          'test:integration',
+          'test:e2e',
+          'test:int',
+          'integration:test',
+          'integration-test',
+          'integration',
+          'e2e',
+          'test:it',
+          'test:system',
+          'cypress:run',
+          'playwright:test',
+        ];
+        for (const script of candidateScripts) {
+          if (pkg.scripts[script]) {
+            return `${pm} run ${script}`;
+          }
+        }
+      }
+    }
+
+    // Quét Monorepo workspaces
+    const workspaceDirs = ['apps', 'packages', 'services', 'modules'];
+    for (const parentDir of workspaceDirs) {
+      try {
+        const parentPath = path.join(root, parentDir);
+        const entries = await fs.readdir(parentPath, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const subPkgPath = path.join(parentPath, entry.name, 'package.json');
+            const subPkgContent = await fs.readFile(subPkgPath, 'utf-8').catch(() => null);
+            if (subPkgContent) {
+              const subPkg = JSON.parse(subPkgContent);
+              if (subPkg.scripts) {
+                if (subPkg.scripts['test:integration']) return `${pm} --filter ${subPkg.name || entry.name} run test:integration`;
+                if (subPkg.scripts['test:e2e']) return `${pm} --filter ${subPkg.name || entry.name} run test:e2e`;
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // 2. Python (pytest integration tests directory hoặc marker)
+  try {
+    const [hasPyIntegrationTests, hasPyE2eTests] = await Promise.all([
+      fs.stat(path.join(root, 'tests', 'integration')).catch(() => null)
+        || fs.stat(path.join(root, 'test', 'integration')).catch(() => null),
+      fs.stat(path.join(root, 'tests', 'e2e')).catch(() => null)
+        || fs.stat(path.join(root, 'test', 'e2e')).catch(() => null),
+    ]);
+
+    const hasPyproject = await fs.readFile(path.join(root, 'pyproject.toml'), 'utf-8').catch(() => null);
+    const prefix = (hasPyproject && hasPyproject.includes('[tool.poetry]')) ? 'poetry run ' : '';
+
+    if (hasPyIntegrationTests) return `${prefix}pytest tests/integration`;
+    if (hasPyE2eTests) return `${prefix}pytest tests/e2e`;
+  } catch {}
+
+  // 3. Go (integration test tag hoặc thư mục test/integration)
+  try {
+    const hasGo = await fs.stat(path.join(root, 'go.mod')).catch(() => null);
+    if (hasGo) {
+      const hasGoIntegrationDir = await fs.stat(path.join(root, 'test', 'integration')).catch(() => null)
+        || await fs.stat(path.join(root, 'tests', 'integration')).catch(() => null);
+      if (hasGoIntegrationDir) return 'go test ./test/integration/...';
+    }
+  } catch {}
+
+  // 4. Rust / Cargo (tests/integration.rs hoặc tests/integration/)
+  try {
+    const hasCargo = await fs.stat(path.join(root, 'Cargo.toml')).catch(() => null);
+    if (hasCargo) {
+      const [hasIntegrationFile, hasIntegrationDir] = await Promise.all([
+        fs.stat(path.join(root, 'tests', 'integration.rs')).catch(() => null),
+        fs.stat(path.join(root, 'tests', 'integration')).catch(() => null),
+      ]);
+      if (hasIntegrationFile || hasIntegrationDir) return 'cargo test --test integration';
+    }
+  } catch {}
+
+  // 5. Java / Kotlin (Maven verify / Gradle integrationTest)
+  try {
+    const [hasPom, hasGradle] = await Promise.all([
+      fs.stat(path.join(root, 'pom.xml')).catch(() => null),
+      fs.stat(path.join(root, 'build.gradle')).catch(() => null) || fs.stat(path.join(root, 'build.gradle.kts')).catch(() => null),
+    ]);
+    if (hasPom) return 'mvn verify';
+    if (hasGradle) return 'gradle integrationTest';
+  } catch {}
+
+  // 6. .NET (Integration test projects)
+  try {
+    const rootFiles = await fs.readdir(root).catch(() => []);
+    if (rootFiles.some((f) => /integration.*tests?\.csproj$/i.test(f))) {
+      return 'dotnet test --filter Category=Integration';
+    }
+  } catch {}
+
+  return undefined;
+}
+
+/**
+ * Kiểm tra xem danh sách các tệp được chỉnh sửa có chạm vào tầng tích hợp (API, routes, controllers, services, db, server...) hay không.
+ */
+export function touchesIntegrationLayer(filePaths: Iterable<string>): boolean {
+  const integrationPattern = /(?:^|[\\/])(?:api|routes?|controllers?|services?|server|models?|db|database|endpoints?|handlers?|middleware|gateway|clients?|integrations?|e2e)[\\/.]/i;
+  for (const file of filePaths) {
+    if (integrationPattern.test(file.replace(/\\/g, '/'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+

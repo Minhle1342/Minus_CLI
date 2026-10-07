@@ -73,7 +73,7 @@ import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { sanitizeToolResultPayload } from '../tools/tool-output-sanitizer.js';
-import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from '../testing/test-engineering-harness.js';
+import { detectWorkspaceTestCommand, detectWorkspaceBuildCommand, detectWorkspaceIntegrationTestCommand, touchesIntegrationLayer } from '../testing/test-engineering-harness.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { StepRetrievalQueryBuilder } from './step-retrieval-query-builder.js';
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
@@ -2103,13 +2103,23 @@ export class AgentLoop {
         if (classification.risk === 'R1') {
           testVerificationEncouragement = `💡 [VERIFICATION RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. For localized R1 changes, run \`get_diagnostics\` to empirically verify type/syntax cleanliness before finishing the task or calling "submit_solution".`;
         } else {
-          const [detectedCmd, detectedBuildCmd] = await Promise.all([
+          const [detectedCmd, detectedBuildCmd, detectedIntegrationCmd] = await Promise.all([
             detectWorkspaceTestCommand(this._workspace.rootDir),
             detectWorkspaceBuildCommand(this._workspace.rootDir),
+            detectWorkspaceIntegrationTestCommand(this._workspace.rootDir),
           ]);
           const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
           const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
-          testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".`;
+          const touchesIntegration = touchesIntegrationLayer(this.targetFilesModifiedInTurn);
+
+          let integrationGuidance = '';
+          if (detectedIntegrationCmd) {
+            integrationGuidance = `\n🔗 [INTEGRATION TEST RECOMMENDED]: Workspace contains an integration/E2E test suite (\`${detectedIntegrationCmd}\`). Since your changes touch multi-component or integration layers, run this command via "run_command" to empirically verify cross-service/module integrity before calling "submit_solution".`;
+          } else if (touchesIntegration) {
+            integrationGuidance = `\n🔗 [INTEGRATION VERIFICATION RECOMMENDED]: Your modifications touch integration components (API/routes/database/server/service). Please perform an integration-level verification: run an end-to-end verification script, or start the service in background via "run_command" (with WaitMsBeforeAsync=5000) and probe endpoints (using curl or a test probe) to prove integration correctness before calling "submit_solution".`;
+          }
+
+          testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".${integrationGuidance}`;
         }
       }
 
