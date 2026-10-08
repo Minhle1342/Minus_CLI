@@ -16,6 +16,7 @@ export interface WorkflowTransition {
   reason?: string;
 }
 
+/** Legacy advisory catalog only. It does not authorize operations or track the runtime task phase. */
 export class SuperpowersWorkflowMap {
   private currentPhase: WorkflowPhase = 'brainstorming';
   private history: { phase: WorkflowPhase; timestamp: string; reason?: string }[] = [

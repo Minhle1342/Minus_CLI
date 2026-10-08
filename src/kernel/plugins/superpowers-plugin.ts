@@ -42,6 +42,7 @@ export class SuperpowersPlugin implements AgentPlugin {
   private ocrReview?: OcrReviewService;
   private verificationPolicy = new VerificationPolicy();
   private workflowMap = new SuperpowersWorkflowMap();
+  private registeredSkillSections = new Set<string>();
   private onWorkspaceChanged?: (oldPath: string, newPath: string) => void;
   private onToolAfter?: (
     toolName: string,
@@ -108,7 +109,16 @@ export class SuperpowersPlugin implements AgentPlugin {
           hookCtx.session.recordSkillDecision(decision);
         }
 
-        // Nạp các section của skill vào System Prompt
+        // Replace this plugin's turn-scoped skill set; inactive skills must not
+        // continue directing later requests through the persistent assembler.
+        for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
+        this.registeredSkillSections.clear();
+        const activeIds = new Set(activation.activeSkills.map(skill => skill.id));
+        for (const previous of hookCtx.session.getActiveSkillDecisions()) {
+          if (!activeIds.has(previous.skillId)) hookCtx.session.recordSkillDecision({
+            ...previous, decision: 'disabled', reason: 'Not applicable to the current turn', timestamp: new Date().toISOString(),
+          });
+        }
         for (const section of activation.promptSections) {
           ctx.systemPrompt.unregister(section.name);
           ctx.systemPrompt.register({
@@ -116,6 +126,7 @@ export class SuperpowersPlugin implements AgentPlugin {
             content: section.content,
             priority: section.priority,
           });
+          this.registeredSkillSections.add(section.name);
         }
 
         return { allow: true };
@@ -149,6 +160,7 @@ export class SuperpowersPlugin implements AgentPlugin {
     (ctx as any).reviews = this.reviewManager;
     (ctx as any).ocrReview = this.ocrReview;
     (ctx as any).verification = this.verificationPolicy;
+    // Legacy advisory map; phase authority belongs to the main phase controller.
     (ctx as any).workflow = this.workflowMap;
   }
 
@@ -162,6 +174,8 @@ export class SuperpowersPlugin implements AgentPlugin {
       this.onToolAfter = undefined;
     }
     ctx.agentHooks.unregister('superpowers-activator');
+    for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
+    this.registeredSkillSections.clear();
   }
 
   getSkillRegistry(): SkillRegistry {

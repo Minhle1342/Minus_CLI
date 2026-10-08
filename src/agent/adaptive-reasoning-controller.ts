@@ -79,13 +79,15 @@ export class AdaptiveReasoningController {
     };
   }
 
-  getGuidancePrompt(): string {
+  getGuidancePrompt(options?: { submissionOnly?: boolean }): string {
     if (this.rejectionCount === 0) return '';
 
     return [
-      `🧠 [ADAPTIVE REASONING ESCALATED TO "${this.currentTier.toUpperCase()}" (${this.getBudget()} tokens)]:`,
+      `🧠 [ADAPTIVE REASONING ESCALATED TO "${this.currentTier.toUpperCase()}"]:`,
       `Your previous solution attempt was rejected by verification gates (${this.rejectionCount} rejection(s)).`,
-      `Engage deep System 2 chain-of-thought analysis to diagnose the failure, inspect error logs, and rigorously verify before resubmitting.`,
+      options?.submissionOnly
+        ? 'Correct the submission contract using existing evidence. Inspect only missing evidence; do not introduce edits or tests for a submission-only rejection.'
+        : 'Reassess the specific rejection using observed evidence and inspect only what is missing before resubmitting. This guidance does not change the provider thinking budget or authorize new operations.',
     ].join('\n');
   }
 }

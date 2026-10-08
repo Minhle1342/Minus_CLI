@@ -47,12 +47,14 @@ describe('playwright-mcp browser automation', () => {
     assert.ok(decls.some((d) => d.name?.startsWith('browser_')));
   });
 
-  it('permission risk: navigate=MEDIUM, type/click=HIGH', async () => {
+  it('headless browser network and interaction calls require approval', async () => {
     const pm = new PermissionManager('ask_sensitive');
     const nav = await pm.checkPermission('browser_navigate', { url: 'https://example.com' });
-    assert.equal(nav.allowed, true); // MEDIUM + handler-less headless still needs explicit? navigate is MEDIUM -> allowed
+    assert.equal(nav.allowed, false);
+    assert.equal(nav.errorCode, 'APPROVAL_REQUIRED');
     const type = await pm.checkPermission('browser_type', { text: 'hi' });
-    assert.equal(type.allowed, true);
+    assert.equal(type.allowed, false);
+    assert.equal(type.errorCode, 'APPROVAL_REQUIRED');
   });
 
   it('playbook H_BROWSER guides snapshot after navigate', () => {

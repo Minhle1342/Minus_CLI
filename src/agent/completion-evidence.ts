@@ -251,7 +251,16 @@ export class CompletionEvidenceGate {
     // Ngoại lệ blocker ngoài tầm kiểm soát: investigation_only kèm quan sát
     // tool thất bại (vd: git clone 404) thì không đòi mutation. Vẫn giữ các
     // luật chống ảo giác verify/commit/push bên dưới.
-    const isBlockedInvestigation = options.resolutionType === 'investigation_only' && failures.length > 0;
+    const externalBlockers = failures.filter(item => {
+      if (item.toolName !== 'run_command') return false;
+      const payload = item.payload;
+      if (payload.preflightCode === 'DEV_BINARY_NOT_FOUND' && payload.processStarted === false) return true;
+      if (isCommandOutcomeBlocked(payload) || payload.processStarted !== true || typeof payload.exitCode !== 'number' || payload.exitCode === 0) return false;
+      if (/POLICY|PERMISSION|APPROVAL|PHASE|VALIDATION|SCHEMA|EVIDENCE|SUBMISSION|GUARD/i.test(String(payload.errorCode || ''))) return false;
+      const diagnostic = [payload.error, payload.stderr, payload.stdout].filter(value => typeof value === 'string').join('\n');
+      return /repository (?:not found|does not exist)|could not resolve host|unable to access.*(?:404|403|401)|authentication failed|connection (?:refused|timed out)|network is unreachable|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|command not found|is not recognized as (?:an internal|the name)|no such file or directory/i.test(diagnostic);
+    });
+    const isBlockedInvestigation = options.resolutionType === 'investigation_only' && externalBlockers.length > 0;
     const effectiveCodeChangeRequired = isBlockedInvestigation ? false : options.codeChangeRequired;
 
     // Thu thập đường dẫn các file đã được chỉnh sửa
@@ -291,6 +300,10 @@ export class CompletionEvidenceGate {
       .toLowerCase();
 
     const sentences = normalized.split(/(?<=[.!?;\n])\s+/).map((s) => s.trim()).filter(Boolean);
+    if (isBlockedInvestigation && options.codeChangeRequired && mutations.length === 0 && sentences.some(sentence => {
+      const asserted = /\b(?:task|request|implementation|work|fix|change)\s+(?:(?:is|was|has been)\s+)?(?:complete|completed|done|finished|resolved)\b|\b(?:i|we)\s+(?:have\s+)?(?:completed|finished|implemented|fixed)\b|\bda\s+hoan\s+(?:tat|thanh)\s+(?:yeu cau|cong viec|task)\b/.test(sentence);
+      return asserted && !/\b(?:not|never|cannot|unable|chua|khong)\b/.test(sentence);
+    })) reasons.push('An external blocker permits an honest incomplete investigation report, not a claim that the requested code change was completed.');
 
     // 1. First-person verification assertion (Ưu tiên bắt buộc chứng cứ khi Agent tự nhận ở ngôi thứ nhất)
     const claimsFirstPersonVerification = sentences.some((sentence) => {

@@ -20,6 +20,13 @@ export class AdaptiveComputeController {
   private defaultTier: ReasoningTier;
   private rejectionCount = 0;
   private transitions: ReasoningTransition[] = [];
+  // No pressure has been observed until evaluatePressure supplies a snapshot.
+  private lastPressure: ReasoningPressure = {
+    taskRisk: 0, uncertainty: 0, blastRadius: 0, failureCount: 0,
+    stagnationScore: 0, hypothesisEntropy: 0, verificationFailures: 0,
+  };
+  private lastPressureFingerprint?: string;
+  private evaluatedObservationIds = new Set<string>();
 
   constructor(defaultTier: ReasoningTier = 1) {
     this.defaultTier = defaultTier;
@@ -45,7 +52,27 @@ export class AdaptiveComputeController {
   /**
    * Evaluates if reasoning should escalate or de-escalate based on live pressure.
    */
-  evaluatePressure(pressure: ReasoningPressure): EscalationDecision {
+  evaluatePressure(pressure: ReasoningPressure, observation: {
+    observationId?: string;
+    verificationSucceeded?: boolean;
+  } = {}): EscalationDecision {
+    const fingerprint = JSON.stringify([
+      pressure.taskRisk, pressure.uncertainty, pressure.blastRadius, pressure.failureCount,
+      pressure.stagnationScore, pressure.hypothesisEntropy, pressure.verificationFailures,
+      observation.verificationSucceeded === true,
+    ]);
+    const observationId = observation.observationId?.trim();
+    const duplicate = observationId
+      ? this.evaluatedObservationIds.has(observationId)
+      : fingerprint === this.lastPressureFingerprint;
+    if (duplicate) {
+      return { action: 'MAINTAIN', newTier: this.currentTier,
+        newStrategy: this.getCurrentStrategy(), tokenBudget: this.getTokenBudget(),
+        reason: 'No new reasoning-pressure observation; current tier maintained.' };
+    }
+    if (observationId) this.evaluatedObservationIds.add(observationId);
+    this.lastPressureFingerprint = fingerprint;
+    this.lastPressure = { ...pressure };
     // Check escalation criteria
     const highPressure =
       pressure.failureCount >= 2 ||
@@ -76,7 +103,8 @@ export class AdaptiveComputeController {
       pressure.failureCount === 0 &&
       pressure.stagnationScore === 0 &&
       pressure.verificationFailures === 0 &&
-      this.currentTier > this.defaultTier;
+      this.currentTier > this.defaultTier &&
+      observation.verificationSucceeded === true;
 
     if (lowPressure) {
       const prevTier = (this.currentTier - 1) as ReasoningTier;
@@ -124,19 +152,16 @@ export class AdaptiveComputeController {
   reset(): void {
     this.currentTier = this.defaultTier;
     this.rejectionCount = 0;
+    this.transitions = [];
+    this.lastPressure = { taskRisk: 0, uncertainty: 0, blastRadius: 0, failureCount: 0,
+      stagnationScore: 0, hypothesisEntropy: 0, verificationFailures: 0 };
+    this.lastPressureFingerprint = undefined;
+    this.evaluatedObservationIds.clear();
   }
 
   getState(): ReasoningState {
     return {
-      pressure: {
-        taskRisk: 0.4,
-        uncertainty: 0.5,
-        blastRadius: 0.3,
-        failureCount: this.rejectionCount,
-        stagnationScore: 0,
-        hypothesisEntropy: 0,
-        verificationFailures: this.rejectionCount,
-      },
+      pressure: { ...this.lastPressure },
       currentTier: this.currentTier,
       currentStrategy: this.getCurrentStrategy(),
       tokenBudget: this.getTokenBudget(),

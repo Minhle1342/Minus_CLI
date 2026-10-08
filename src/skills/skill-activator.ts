@@ -124,6 +124,26 @@ export class SkillActivator {
       const explicitlyEnabled = context.manualOverrides?.enabled?.includes(skill.id);
       const isAutoActivate = skill.autoActivate === true;
 
+      const request = context.userRequest || '';
+      // Git scope gates precede generic tags and cannot be bypassed by "git".
+      if (skill.id === 'finishing-a-development-branch') {
+        const intent = detectExplicitGitMutationIntent(request);
+        if (intent.stage || intent.commit || intent.push) candidateSkills.push(skill);
+        continue;
+      }
+      if (skill.id === 'using-git-worktrees') {
+        if (explicitlyEnabled || /\b(?:worktree|worktrees)\b/i.test(request)) candidateSkills.push(skill);
+        continue;
+      }
+      const planningIds = ['writing-plans', 'planning-with-files', 'concise-planning', 'brainstorming'];
+      if (planningIds.includes(skill.id)) {
+        const explicitPlanning = planningIds.filter(id => request.toLowerCase().includes(id));
+        const selected = explicitPlanning.length ? explicitPlanning.includes(skill.id)
+          : detectPlanningIntent(request).isPlanning && skill.id === 'writing-plans';
+        if (explicitlyEnabled || selected) candidateSkills.push(skill);
+        continue;
+      }
+
       // Cơ chế Intent-Gated đặc biệt: game-development và unity-ai-game-creator CHỈ được nạp khi có yêu cầu lập trình game
       const isGatedGameSkill = skill.id === 'game-development' || skill.id === 'unity-ai-game-creator';
       if (isGatedGameSkill) {
@@ -197,86 +217,37 @@ export class SkillActivator {
     const activeSkills: SkillManifest[] = [];
     const activeSkillIds = new Set<string>();
 
-    for (const skill of candidateSkills) {
-      // 3.1 Kiểm tra capability yêu cầu
-      if (skill.requiredCapabilities && skill.requiredCapabilities.length > 0 && this.capabilityCatalog) {
-        const missingCapabilities = skill.requiredCapabilities.filter(
-          (cap) => !this.capabilityCatalog!.hasCapability(cap)
-        );
-        if (missingCapabilities.length > 0) {
-          decisions.push({
-            skillId: skill.id,
-            version: skill.version,
-            decision: 'incompatible',
-            reason: `Missing required capabilities: ${missingCapabilities.join(', ')}`,
-            timestamp,
-            contentHash: skill.contentHash,
-          });
-          continue;
-        }
+    const resolve = (skill: SkillManifest, visiting: Set<string>): string | undefined => {
+      if (activeSkillIds.has(skill.id)) return undefined;
+      if (context.manualOverrides?.disabled?.includes(skill.id)) return `Disabled prerequisite ${skill.id}`;
+      if (visiting.has(skill.id)) return `Cyclic prerequisite ${skill.id}`;
+      const available = this.capabilityCatalog ? new Set(this.capabilityCatalog.list().map(cap => cap.name))
+        : context.availableCapabilities ? new Set(context.availableCapabilities) : undefined;
+      const missing = skill.requiredCapabilities?.filter(cap => available && !available.has(cap)) || [];
+      if (missing.length) return `Missing required capabilities: ${missing.join(', ')}`;
+      if (activeSkills.some(other => skill.conflicts?.includes(other.id) || other.conflicts?.includes(skill.id))) return 'Conflicts with higher priority active skill(s)';
+      visiting.add(skill.id);
+      for (const id of skill.requires || []) {
+        const dependency = this.registry.get(id);
+        if (!dependency) return `Missing prerequisite ${id}`;
+        const failure = resolve(dependency, visiting);
+        if (failure) return failure;
       }
-
-      // 3.2 Kiểm tra xung đột (Conflicts)
-      if (skill.conflicts && skill.conflicts.length > 0) {
-        const hasConflict = skill.conflicts.some((c) => activeSkillIds.has(c));
-        if (hasConflict) {
-          decisions.push({
-            skillId: skill.id,
-            version: skill.version,
-            decision: 'rejected',
-            reason: `Conflicts with higher priority active skill(s)`,
-            timestamp,
-            contentHash: skill.contentHash,
-          });
-          continue;
-        }
-      }
-
-      // 3.3 Kiểm tra điều kiện phụ thuộc (Requires)
-      if (skill.requires && skill.requires.length > 0) {
-        const missingRequires = skill.requires.filter((reqId) => {
-          if (activeSkillIds.has(reqId)) return false;
-          // Thử kích hoạt dependency nếu có trong registry
-          const dep = this.registry.get(reqId);
-          if (dep && !activeSkillIds.has(dep.id)) {
-            activeSkills.push(dep);
-            activeSkillIds.add(dep.id);
-            decisions.push({
-              skillId: dep.id,
-              version: dep.version,
-              decision: 'activated',
-              reason: `Auto-activated as requirement for ${skill.id}`,
-              timestamp,
-              contentHash: dep.contentHash,
-            });
-            return false;
-          }
-          return true;
-        });
-
-        if (missingRequires.length > 0) {
-          decisions.push({
-            skillId: skill.id,
-            version: skill.version,
-            decision: 'rejected',
-            reason: `Missing prerequisite skill(s): ${missingRequires.join(', ')}`,
-            timestamp,
-            contentHash: skill.contentHash,
-          });
-          continue;
-        }
-      }
-
+      visiting.delete(skill.id);
+      if (activeSkills.some(other => skill.conflicts?.includes(other.id) || other.conflicts?.includes(skill.id))) return 'Conflicts with prerequisite skill(s)';
       activeSkills.push(skill);
       activeSkillIds.add(skill.id);
-      decisions.push({
-        skillId: skill.id,
-        version: skill.version,
-        decision: 'activated',
-        reason: 'Passed all policy and dependency checks',
-        timestamp,
-        contentHash: skill.contentHash,
-      });
+      return undefined;
+    };
+    for (const skill of candidateSkills) {
+      const snapshot = activeSkills.length;
+      const failure = resolve(skill, new Set());
+      if (failure) {
+        for (const removed of activeSkills.splice(snapshot)) activeSkillIds.delete(removed.id);
+        decisions.push({skillId: skill.id, version: skill.version, decision: 'rejected', reason: failure, timestamp, contentHash: skill.contentHash});
+        continue;
+      }
+      for (const added of activeSkills.slice(snapshot)) decisions.push({skillId: added.id, version: added.version, decision: 'activated', reason: 'Passed scope, capability, dependency and conflict checks', timestamp, contentHash: added.contentHash});
     }
 
     // 4. Tạo Prompt Sections từ các skill được kích hoạt

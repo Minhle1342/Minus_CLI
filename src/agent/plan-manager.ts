@@ -1,5 +1,6 @@
 import { Session } from '../session/session.js';
-import { classifyToolEvidence, type EvidenceKind, isToolResultFailure } from './completion-evidence.js';
+import { classifyToolEvidence, type EvidenceKind, isToolResultFailure, extractCommandString } from './completion-evidence.js';
+import { observedMutationFiles } from './completion-observations.js';
 import { isCommandOutcomeBlocked } from '../tools/command-outcome.js';
 
 export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
@@ -13,6 +14,8 @@ export interface PlanEvidence {
   recordedAt: string;
   seq?: number;
   permissionRequestId?: string;
+  command?: string;
+  files?: string[];
 }
 
 export type PlanTaskRisk = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -381,6 +384,8 @@ export class PlanManager {
       ? 'blocked'
       : isToolResultFailure(result) ? 'failure' : 'success';
     const kinds = classifyToolEvidence(toolName, args, result);
+    const command = extractCommandString(args, result);
+    if (toolName === 'run_command' && kinds.length > 0 && outcome === 'success' && result.processStarted !== false && /\bgit\s+(?:add|commit|push|checkout|switch|fetch|pull|merge|rebase|revert|restore|stash)\b/i.test(command) && !kinds.includes('git')) kinds.push('git');
     if (kinds.includes('mutation') && outcome === 'success') {
       this.lastMutationSeq = this.evidenceSeq;
       activeTask.lastMutationSeq = this.evidenceSeq;
@@ -403,6 +408,9 @@ export class PlanManager {
         summary: summarizeToolResult(result, outcome),
         recordedAt: new Date().toISOString(),
         seq: this.evidenceSeq,
+        command: extractCommandString(args, result),
+        files: kind === 'mutation' ? observedMutationFiles(toolName, args, result)
+          : [args.path || args.filePath || args.AbsolutePath || result.path].filter(Boolean).map(String),
         ...(permission?.requestId ? { permissionRequestId: permission.requestId } : {}),
       });
     }
@@ -649,7 +657,7 @@ export class PlanManager {
    */
   completeTaskWithEvidence(
     taskId: number,
-    evidence?: Partial<PlanEvidence> | PlanEvidence,
+    evidence?: Partial<PlanEvidence> | PlanEvidence | Array<Partial<PlanEvidence>>,
     notes?: string,
   ): { completedTask: PlanTask; newlyReadyTaskIds: number[] } {
     const task = this.tasks.find((t) => t.id === taskId);
@@ -661,18 +669,26 @@ export class PlanManager {
     }
 
     // Ghi nhận evidence nếu có
-    if (evidence) {
+    for (const item of (Array.isArray(evidence) ? evidence : evidence ? [evidence] : [])) {
       const recorded: PlanEvidence = {
-        toolName: evidence.toolName || 'dag-scheduler',
-        kind: evidence.kind || 'verification',
-        outcome: evidence.outcome || 'success',
-        summary: evidence.summary || `Task #${taskId} executed successfully`,
-        recordedAt: evidence.recordedAt || new Date().toISOString(),
+        toolName: item.toolName || 'dag-scheduler',
+        kind: item.kind || 'verification',
+        outcome: item.outcome || 'success',
+        summary: item.summary || `Task #${taskId} executed successfully`,
+        recordedAt: item.recordedAt || new Date().toISOString(),
         seq: ++this.evidenceSeq,
-        ...(evidence.permissionRequestId ? { permissionRequestId: evidence.permissionRequestId } : {}),
+        command: item.command,
+        files: item.files,
+        ...(item.permissionRequestId ? { permissionRequestId: item.permissionRequestId } : {}),
       };
       task.evidence.push(recorded);
+      if (recorded.kind === 'mutation' && recorded.outcome === 'success') {
+        task.lastMutationSeq = recorded.seq || 0;
+        this.lastMutationSeq = task.lastMutationSeq;
+      }
     }
+
+    if (!this.hasRequiredEvidence(task)) throw new Error(`Task #${taskId} cannot be completed without matching successful task-scoped ${this.requiredEvidenceKind(task)} evidence.`);
 
     // Xác định các task có dependencies được thỏa mãn trước khi hoàn tất task hiện tại
     const previouslySatisfiedIds = new Set(
@@ -934,22 +950,28 @@ export class PlanManager {
     const required = this.requiredEvidenceKind(task);
     if (required === 'any') return true;
 
+    const anchors = required === 'mutation' ? task.writeSet : required === 'inspection' ? task.readSet : [];
+    const coveredFiles = task.evidence.filter(item => item.outcome === 'success' && item.kind === required).flatMap(item => item.files || []);
+    if (!anchors.every(anchor => coveredFiles.some(file => {
+      const target = file.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+      const expected = anchor.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '').toLowerCase();
+      return target === expected || target.startsWith(`${expected}/`);
+    }))) return false;
+
     // 1. Kiểm tra trực tiếp trên task
-    const hasDirect = task.evidence.some((item) => {
+    return task.evidence.some((item) => {
       if (item.outcome !== 'success' || item.kind !== required) return false;
       if (required === 'verification') return (item.seq || 0) > Math.max(task.lastMutationSeq, this.lastMutationSeq);
+      if (required === 'git') {
+        const text = normalizeComparableText(`${task.title} ${task.acceptanceCriteria}`);
+        const operation = /\b(commit|push|stage|add|branch|checkout|switch|fetch|pull|merge|rebase|status|diff|log)\b/.exec(text)?.[1];
+        if (operation) {
+          const expected = operation === 'stage' ? 'add' : operation;
+          if (!new RegExp(`\\bgit\\s+${expected}\\b`, 'i').test(item.command || '') && item.toolName !== `git_${expected}`) return false;
+        }
+      }
       return true;
     });
-    if (hasDirect) return true;
-
-    // 2. Fallback: Kiểm tra xem bằng chứng đã được ghi nhận trong bất kỳ task nào của session chưa
-    return this.tasks.some((t) =>
-      t.evidence.some((item) => {
-        if (item.outcome !== 'success' || item.kind !== required) return false;
-        if (required === 'verification') return (item.seq || 0) > Math.max(task.lastMutationSeq, this.lastMutationSeq);
-        return true;
-      }),
-    );
   }
 
   private validateGraph(tasks: PlanTask[]): void {

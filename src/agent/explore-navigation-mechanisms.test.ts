@@ -19,8 +19,8 @@ test('Mechanism 1 (Pre-Mutation Inspection Barrier): blocks mutation when target
 
   const blocked = guardian.preCallValidate('replace_text', {
     path: 'src/core.ts',
-    oldText: 'const a = 1;',
-    newText: 'const a = 2;',
+    oldText: 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;',
+    newText: 'const a = 2;\nconst b = 3;\nconst c = 4;\nconst d = 5;',
   });
 
   assert.equal(blocked.valid, false, 'Mutating uninspected file must be blocked');
@@ -128,4 +128,10 @@ test('Mechanism 3 (Warm-Start Topo-Map): extracts entities from user prompt and 
   assert.ok(topo.rendered.includes('[WORKSPACE TOPOLOGY WARM-START'), 'Must have topology header');
   assert.ok(topo.matchedFiles.length > 0, 'Must match at least one relevant file');
   assert.ok(topo.estimatedTokens <= 250, 'Must stay within token budget');
+});
+
+test('trivial measurable R2 edits bypass inspection evidence, with phase authority enforced by runner', () => {
+ const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
+ guardian.setPreMutationGateContext({ taskClass: 'bugfix', phase: 'implement', risk: 'R2', hasValidatedHypothesis: false, inspectedFiles: [] });
+ assert.equal(guardian.preCallValidate('replace_text', { path: 'src/core.ts', oldText: 'const a = 1;', newText: 'const a = 2;' }).valid, true);
 });

@@ -4,6 +4,9 @@ import { SubagentManager, SubagentOptions, SubagentHandle } from './subagent-man
 import type { PlanManager, PlanTask, PlanEvidence } from './plan-manager.js';
 import type { AgentEventBus } from './agent-event-bus.js';
 import { BENCHMARK_SPECIALISTS } from './benchmark-agents.js';
+import type { Session } from '../session/session.js';
+import { collectCompletionObservations, observedMutationFiles, toolResultFailed } from './completion-observations.js';
+import { classifyToolEvidence, extractCommandString } from './completion-evidence.js';
 import { nativeComputeSemanticSimilarity } from '../native/index.js';
 import { VirtualWorkspace } from '../workspace/virtual-workspace.js';
 
@@ -40,6 +43,8 @@ export interface DagExecutionOptions {
     modifiedFiles?: string[];
     diffText?: string;
     commandRecords?: Array<{ command: string; exitCode: number }>;
+    evidenceSession?: Session;
+    evidenceStartSeq?: number;
     error?: string;
   }>;
   qualityGate?: QualityGateOptions;
@@ -964,6 +969,7 @@ export class AgentOrchestrator {
     const startTime = Date.now();
     const maxBatches = options?.maxBatches ?? 50;
     const taskResults = new Map<number, { success: boolean; agentId: string; output?: string; error?: string }>();
+    const consumedEvidence = new WeakMap<Session, number>();
     let batchesExecuted = 0;
 
     while (batchesExecuted < maxBatches && !this.planManager.isAllTasksCompleted()) {
@@ -972,7 +978,7 @@ export class AgentOrchestrator {
         allowImplicitParallel: options?.allowImplicitParallel ?? true,
         autoStartBatch: true,
         acquireFileLocks: true,
-        dispatchToSubagents: true,
+        dispatchToSubagents: !options?.taskWorker,
       });
 
       if (scheduleResult.dispatchedTasks.length === 0) {
@@ -994,11 +1000,11 @@ export class AgentOrchestrator {
             modifiedFiles?: string[];
             diffText?: string;
             commandRecords?: Array<{ command: string; exitCode: number }>;
+            evidenceSession?: Session;
+            evidenceStartSeq?: number;
             error?: string;
           } = {
-            success: true,
-            output: `Task #${task.id} executed successfully.`,
-            modifiedFiles: task.writeSet,
+            success: false,
             diffText: undefined,
             commandRecords: undefined,
             error: undefined,
@@ -1006,6 +1012,10 @@ export class AgentOrchestrator {
 
           if (options?.taskWorker) {
             workerOutput = await options.taskWorker(task, agentId);
+          } else if (this.subagentManager) {
+            const handle = await this.subagentManager.waitFor(agentId);
+            workerOutput = { success: handle.status === 'completed', output: handle.answer,
+              error: handle.error, evidenceSession: this.subagentManager.getExecutionSession(agentId) };
           }
 
           let passedQuality = workerOutput.success;
@@ -1027,14 +1037,30 @@ export class AgentOrchestrator {
           const durationMs = Date.now() - taskStart;
 
           if (passedQuality) {
+            if (options?.taskWorker && (!Number.isSafeInteger(workerOutput.evidenceStartSeq) || (workerOutput.evidenceStartSeq ?? -1) < 0)) {
+              throw new Error(`Task #${task.id} custom worker must provide its pre-execution evidenceStartSeq.`);
+            }
+            const evidenceFence = Math.max(workerOutput.evidenceStartSeq ?? 0,
+              workerOutput.evidenceSession ? consumedEvidence.get(workerOutput.evidenceSession) ?? 0 : 0);
+            const childTurn = workerOutput.evidenceSession?.getOpenTurn()
+              ?? workerOutput.evidenceSession?.getCompletedTurnNumbers().at(-1);
+            const observed = workerOutput.evidenceSession
+              ? collectCompletionObservations(workerOutput.evidenceSession, childTurn).filter(item => item.call.seq > evidenceFence) : [];
+            const evidence: Array<Partial<PlanEvidence>> = observed.flatMap(item => {
+              const kinds = classifyToolEvidence(item.toolName, item.args, item.payload);
+              const command = extractCommandString(item.args, item.payload);
+              if (item.toolName === 'run_command' && kinds.length > 0 && !toolResultFailed(item.payload) && item.payload.processStarted !== false && /\bgit\s+(?:add|commit|push|branch|checkout|switch|fetch|pull|merge|rebase)\b/i.test(command) && !kinds.includes('git')) kinds.push('git');
+              return kinds.map(kind => ({ toolName: item.toolName, kind,
+                outcome: toolResultFailed(item.payload) ? 'failure' as const : 'success' as const,
+                command, files: kind === 'mutation' ? observedMutationFiles(item.toolName, item.args, item.payload)
+                  : [item.args.path, item.args.filePath, item.args.AbsolutePath, item.payload.path].filter((file): file is string => typeof file === 'string'),
+                summary: `Observed ${item.toolName} result #${item.result.seq}` }));
+            });
+            if (evidence.length === 0) throw new Error(`Task #${task.id} has no observed tool evidence.`);
+            if (workerOutput.evidenceSession) consumedEvidence.set(workerOutput.evidenceSession, workerOutput.evidenceSession.seq);
             this.planManager!.completeTaskWithEvidence(
               task.id,
-              {
-                toolName: 'dag-scheduler',
-                kind: 'verification',
-                outcome: 'success',
-                summary: workerOutput.output || `Task #${task.id} verified`,
-              },
+              evidence,
               workerOutput.output,
             );
             this.fileLockManager.release(agentId);

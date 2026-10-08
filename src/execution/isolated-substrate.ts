@@ -65,14 +65,15 @@ export class IsolatedExecutionSubstrate implements IExecutionSubstrate {
     }
 
     // 2. Làm sạch biến môi trường
-    const sanitizedEnv = options.env
-      ? this.policyEngine.sanitizeEnvironment(options.env)
-      : undefined;
+    const sanitizedEnv = this.policyEngine.sanitizeEnvironment(
+      options.isolatedEnv ? { ...options.env } : { ...process.env, ...options.env },
+    );
 
     // 3. Chuyển tiếp thực thi tới Inner Substrate
     return this.innerSubstrate.exec(evalResult.sanitizedCommand || command, {
       ...options,
       env: sanitizedEnv,
+      isolatedEnv: true,
     });
   }
 

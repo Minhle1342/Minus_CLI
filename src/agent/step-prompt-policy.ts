@@ -1,4 +1,6 @@
 import type { ClassificationDecision, TaskPhase } from '../control/classification-types.js';
+import type { CompletionObservation } from './completion-observations.js';
+import { resolveGitWorkflow, gitWorkflowGuidance, type GitWorkflowState } from './git-workflow.js';
 import {
   SECTION_TOOL_PLAYBOOKS,
   TOOL_PLAYBOOK_PROMPTS,
@@ -22,6 +24,12 @@ export interface StepPromptCandidates {
 
 export interface StepPromptPolicyContext {
   activeStepQuery: string;
+  /** Human request only; generated plan steps do not authorize Git mutations. */
+  userRequest?: string;
+  gitWorkflowObservations?: readonly CompletionObservation[];
+  gitWorkflowMayEdit?: boolean;
+  gitWorkflowImplementationRequested?: boolean;
+  gitWorkflowImplementationReady?: boolean;
   fingerprint: string;
   failureSignature?: string;
   classification: ClassificationDecision;
@@ -63,6 +71,7 @@ export interface StepPromptDecision {
   reasonCodes: string[];
   selectedPlaybooks: ToolPlaybookPromptId[];
   selectedGitPlaybook?: GitWorkflowPromptId;
+  gitWorkflow?: GitWorkflowState;
   includeStaticToolPlaybooks: boolean;
   toolPlaybookPrompt: string;
   gitPlaybookPrompt: string;
@@ -128,7 +137,7 @@ function buildStrongAdvisoryPrompt(context: StepPromptPolicyContext): { text: st
   const evidenceTask = ['bugfix', 'refactor', 'security'].includes(String(context.classification.taskClass));
   const score = context.evidenceScore ?? 0;
   const threshold = Math.max(1, context.evidenceThreshold ?? 3);
-  if (evidenceTask && !context.hasValidatedHypothesis && score < threshold) {
+  if (evidenceTask && !context.hasValidatedHypothesis && context.paretoEvidenceSufficient !== true && score < threshold) {
     const reasons = context.evidenceReasons?.length ? ` Current evidence: ${context.evidenceReasons.join(', ')}.` : '';
     blocks.push(
       `${STRONG_ADVISORY_HEADER}\n[UNVERIFIED_MUTATION_ADVISORY]: Evidence is still thin (${score}/${threshold}, risk ${context.classification.risk}) — read the exact target and run formulate_and_verify_hypothesis before broad edits.${reasons} Recommended: read_file the target before mutating.`,
@@ -233,49 +242,16 @@ export class StepPromptPolicy {
       reasonCodes.push('ATTACHMENT_NEIGHBORHOOD');
     }
 
-    let selectedGitPlaybook: GitWorkflowPromptId | undefined;
-
-    // Gating conditions for Git Workflows:
-    // Only inject at most 1 relevant playbook when specific intent/phase matches.
-    // Default is 0 tokens (undefined / empty).
-    if (!context.hasSubmittedSolution) {
-      // 1. Rollback & Stash (Highest priority when handling failure/revert)
-      if (
-        context.consecutiveFailures >= 2
-        || /\b(rollback|revert|restore|stash|hoàn tác|hủy thay đổi)\b/i.test(lower)
-      ) {
-        selectedGitPlaybook = 'gitRollback';
-      }
-      // 2. PR Enhancement (When explicitly dealing with PR review, PR preparation or release phase with PR intent)
-      else if (
-        /\b(pull request|\bpr\b|create pr|enhance pr|review pr|mô tả pr|pr-enhance)\b/i.test(lower)
-        || (context.classification.phase === 'release' && /\b(pr|pull request|review)\b/i.test(lower))
-      ) {
-        selectedGitPlaybook = 'gitPrEnhance';
-      }
-      // 3. Atomic Staging & Commit (When tests are verified or query explicitly requests commit/stage)
-      else if (
-        (/\b(git commit|commit changes|stage files|đóng gói commit|tạo commit|git add)\b/i.test(lower)
-          || (context.hasVerifiedTests && context.classification.phase === 'verify'))
-        && context.consecutiveFailures === 0
-      ) {
-        selectedGitPlaybook = 'gitCommit';
-      }
-      // 4. Branch Isolation (When planning new work and branch is mentioned or plan required with branch intent)
-      else if (
-        (context.classification.phase === 'plan' || context.classification.phase === 'explore')
-        && /\b(branch|nhánh|checkout -b|isolate branch|feature branch|tạo nhánh)\b/i.test(lower)
-      ) {
-        selectedGitPlaybook = 'gitBranch';
-      }
-      // 5. Baseline Inspection (When exploring repo state or query asks for git status/diff)
-      else if (
-        (context.classification.phase === 'explore' || !context.lastToolName)
-        && /\b(git status|git diff|working tree|uncommitted|baseline|trạng thái git|kiểm tra git)\b/i.test(lower)
-      ) {
-        selectedGitPlaybook = 'gitInspect';
-      }
-    }
+    const gitWorkflow = context.hasSubmittedSolution ? undefined : resolveGitWorkflow({
+      userRequest: context.userRequest ?? '',
+      observations: context.gitWorkflowObservations ?? [],
+      mayEdit: context.gitWorkflowMayEdit ?? (capabilities.has('edit') && context.classification.reversibility !== 'read-only'),
+      implementationRequested: context.gitWorkflowImplementationRequested,
+      implementationReady: context.gitWorkflowImplementationReady ?? (!context.planBlocked && !context.planIncomplete),
+    });
+    const selectedGitPlaybook: GitWorkflowPromptId | undefined = gitWorkflow?.playbook
+      ?? (!context.hasSubmittedSolution && !gitWorkflow && /(?:\bgit\s+(?:status|diff|log|show|blame|rev-parse|reflog|ls-files|branch\s+(?:-a|-v|--show-current)|stash\s+(?:list|show))\b|working tree|uncommitted|baseline|trạng thái git|kiểm tra git)/i.test(lower) ? 'gitInspect' : undefined);
+    if (gitWorkflow) reasonCodes.push(`GIT_WORKFLOW_${gitWorkflow.stage.toUpperCase()}`);
 
     if (selectedGitPlaybook) {
       reasonCodes.push(`GIT_PLAYBOOK_${selectedGitPlaybook.toUpperCase()}`);
@@ -331,7 +307,10 @@ export class StepPromptPolicy {
     const targetPlaybookPrompt = selectedPlaybooks
       .map((id) => (id === 'verifyDiff' ? resolveVerifyPlaybookPrompt(context.classification.risk) : TOOL_PLAYBOOK_PROMPTS[id]))
       .join('\n\n');
-    const targetGitPlaybookPrompt = selectedGitPlaybook ? GIT_WORKFLOW_PROMPTS[selectedGitPlaybook] : '';
+    const targetGitPlaybookPrompt = [
+      gitWorkflow ? gitWorkflowGuidance(gitWorkflow) : '',
+      selectedGitPlaybook ? GIT_WORKFLOW_PROMPTS[selectedGitPlaybook] : '',
+    ].filter(Boolean).join('\n\n');
     const beforeTokens = estimateTokens([
       SECTION_TOOL_PLAYBOOKS,
       context.candidates.legacyPlanContext,
@@ -352,7 +331,7 @@ export class StepPromptPolicy {
     const reportedAfterTokens = mode === 'off' || conservativeFallback
       ? beforeTokens
       : targetAfterTokens;
-    const gitPlaybookPrompt = mode === 'off' || conservativeFallback ? '' : targetGitPlaybookPrompt;
+    const gitPlaybookPrompt = useLegacyInjection ? '' : targetGitPlaybookPrompt;
 
     return {
       requestedMode: mode,
@@ -361,6 +340,7 @@ export class StepPromptPolicy {
       reasonCodes,
       selectedPlaybooks,
       selectedGitPlaybook,
+      gitWorkflow,
       includeStaticToolPlaybooks: useLegacyInjection,
       toolPlaybookPrompt: useLegacyInjection ? '' : targetPlaybookPrompt,
       gitPlaybookPrompt,

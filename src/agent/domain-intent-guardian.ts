@@ -13,6 +13,9 @@
 
 import { isMutationTool } from '../tools/diff-generator.js';
 import { isScratchPath } from '../skills/verification-policy.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { isUserExplicitlyExemptingTests } from './completion-evidence.js';
 
 export interface DomainIntentContract {
   coreGoal: string;
@@ -54,7 +57,8 @@ export class DomainIntentGuardian {
     const lower = (userRequest || '').toLowerCase();
 
     // 1. Nhận diện quyền sửa file test hoặc bổ sung kiểm thử
-    const explicitlyAllowsTestModification =
+    const forbidsTests = isUserExplicitlyExemptingTests(userRequest) || /(?:do not|don't|must not|never|không|khong|đừng|dung)\s+(?:modify|change|edit|delete|update|fix|write|add|create|sửa|sua|đổi|doi|xóa|xoa|viết|viet|thêm|them|tạo|tao)\s+(?:existing\s+|các\s+|cac\s+)?(?:tests?|kiểm thử|kiem thu)/iu.test(userRequest);
+    const explicitlyAllowsTestModification = !forbidsTests && (
       lower.includes('update test') ||
       lower.includes('fix test') ||
       lower.includes('sửa test') ||
@@ -63,22 +67,12 @@ export class DomainIntentGuardian {
       lower.includes('add test') ||
       lower.includes('create test') ||
       lower.includes('new test') ||
-      lower.includes('test-suite') ||
-      lower.includes('test suite') ||
-      lower.includes('unit test') ||
-      lower.includes('unit-test') ||
-      lower.includes('kiểm thử') ||
-      lower.includes('kiem thu') ||
-      lower.includes('bài test') ||
-      lower.includes('test case') ||
-      lower.includes('testcase') ||
       lower.includes('bổ sung test') ||
       lower.includes('thêm test') ||
       lower.includes('tạo test') ||
       lower.includes('đồng bộ test') ||
-      lower.includes('thực thi cải tiến') ||
       lower.includes('tdd') ||
-      lower.includes('spec');
+      lower.includes('tdd'));
 
     // 2. Trích xuất Non-Negotiable Constraints
     const constraints: string[] = [];
@@ -135,7 +129,7 @@ export class DomainIntentGuardian {
       nonNegotiableConstraints: constraints,
       domainInvariants: invariants,
       allowTestFileModification: explicitlyAllowsTestModification,
-      prohibitedMutations: explicitlyAllowsTestModification ? [] : ['test files'],
+      prohibitedMutations: forbidsTests ? ['all test files'] : explicitlyAllowsTestModification ? [] : ['existing test files'],
       isFrozen: true,
       createdAt: Date.now(),
     };
@@ -168,23 +162,37 @@ export class DomainIntentGuardian {
   public observeToolCall(toolCall: {
     toolName: string;
     args: Record<string, any>;
-  }): DriftIntervention | null {
+  }, options?: { workspaceRoot?: string }): DriftIntervention | null {
     if (!this.contract) return null;
     const { toolName, args } = toolCall;
 
     // 1. Kiểm tra Test Tampering khi sửa đổi file
     if (isMutationTool(toolName)) {
-      const targetPath = (args.TargetFile || args.AbsolutePath || args.path || args.target_path || args.file_path || '').toString();
+      const targetPath = (args.TargetFile || args.AbsolutePath || args.path || args.filePath || args.target_path || args.file_path || '').toString();
+      const patchPaths = String(args.patch || args.Patch || args.patchText || '').split(/\r?\n/)
+        .flatMap(line => /^\*\*\* (?:Add|Update|Delete) File: (.+)$/.exec(line)?.slice(1) || []);
+      const targets = [targetPath, args.sourcePath, args.destinationPath, args.oldPath, args.newPath, ...patchPaths].filter(Boolean).map(String);
 
       // Cho phép tự do tạo scratch tests để thử nghiệm
-      const isScratch = isScratchPath(targetPath);
-      if (targetPath && !isScratch && this.isTestFile(targetPath) && !this.contract.allowTestFileModification) {
+      const testTargets = targets.filter(target => !isScratchPath(target) && this.isTestFile(target));
+      const forbidden = testTargets[0];
+      // New regression tests are permitted; existing assertions need explicit
+      // authorization. Creating tests must never disguise replacing old tests.
+      const createsNewTest = Boolean(forbidden && ['create_file', 'write_file', 'write_to_file'].includes(toolName)
+        && options?.workspaceRoot && testTargets.every(target => {
+          const absolute = path.resolve(options.workspaceRoot!, target);
+          const relative = path.relative(options.workspaceRoot!, absolute);
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+          try { fs.lstatSync(absolute); return false; }
+          catch (error: any) { return error?.code === 'ENOENT'; }
+        })) && !this.contract.prohibitedMutations.includes('all test files');
+      if (forbidden && !createsNewTest && !this.contract.allowTestFileModification) {
         this.blockedTamperAttempts++;
         return {
           type: 'TEST_TAMPERING',
           severity: 'BLOCKING',
-          message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] You are attempting to modify test file '${targetPath}'. The original business requirement does not allow modifying the test suite to force a pass.`,
-          courseCorrectionGuidance: `Stop editing test files! Fix the actual business-logic source code in src/ to satisfy the test assertions.`,
+          message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] You are attempting to modify existing test file '${forbidden}' without authorization. Preserve existing assertions; add an independent regression test or request explicit scope to change this test.`,
+          courseCorrectionGuidance: `Preserve existing assertions. Fix production logic and add an independent regression test where appropriate.`,
         };
       }
     }
@@ -262,7 +270,7 @@ export class DomainIntentGuardian {
     }
 
     if (!this.contract.allowTestFileModification) {
-      lines.push(`• Strict Anti-Tampering: Modifying existing test files is FORBIDDEN. Fix the business logic, not the tests.`);
+      lines.push(`• Preserve existing test assertions; modifying existing tests needs explicit authorization. Independent new regression tests may be added within task scope.`);
     }
 
     return lines.join('\n');

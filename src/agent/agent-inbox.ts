@@ -47,6 +47,9 @@ export class AgentInbox {
       resolve = resolvePromise;
       reject = rejectPromise;
     });
+    // Fire-and-forget steering is supported. Keep the original promise rejected
+    // for consumers while observing an otherwise orphaned cancellation/failure.
+    void promise.catch(() => {});
     const item: AgentInboxItem = {
       id: options.id || `input-${Date.now()}-${this.sequence++}`,
       sessionId,

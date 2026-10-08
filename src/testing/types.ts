@@ -51,5 +51,7 @@ export interface TestHarnessOptions {
   bindEvidenceToGates?: boolean;
   /** Gắn kết với giả thuyết đang được kiểm tra (Hypothesis ID) */
   hypothesisId?: string;
+  /** A reproduction may validate a hypothesis by failing as predicted. */
+  expectedOutcome?: 'pass' | 'fail';
   signal?: AbortSignal;
 }

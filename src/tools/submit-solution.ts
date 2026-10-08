@@ -3,11 +3,13 @@ import type { ToolDefinition } from './types.js';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
 import { withObservedSubmissionMetadata } from '../agent/submission-readiness.js';
+import { isCompletionEvidenceGateEnabled } from '../agent/completion-evidence.js';
 import {
   SolutionGroundingAuditor,
   type ResolutionType,
   type VerificationMethod,
 } from '../agent/solution-grounding-auditor.js';
+import { formatSubmitSolutionTable } from '../ui/tea/styles/table.js';
 
 export interface SubmitSolutionArgs {
   summary: string;
@@ -34,6 +36,8 @@ export interface SubmitSolutionResult {
   timestamp: string;
   nextAction?: string;
   message: string;
+  table?: string;
+  formattedTable?: string;
 }
 
 /**
@@ -78,7 +82,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         },
         rootCause: {
           type: 'STRING',
-          description: 'Optional. Explanation of the root cause identified during debugging or investigation.',
+          description: 'Optional. Explanation of the root cause identified during debugging. For read-only answers, put relevant findings directly in summary; a separate rootCause section is not displayed.',
         },
       },
       required: ['summary'],
@@ -105,6 +109,7 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         turn: context?.turn,
         workspaceRoot: workspace.rootDir,
         userRequest: context?.userRequest,
+        evidenceEnabled: isCompletionEvidenceGateEnabled(),
       });
 
       if (!audit.allowed) {
@@ -118,13 +123,24 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
       }
 
       const timestamp = new Date().toISOString();
+      const filesModified = audit.reconciledFilesModified;
+      const formattedTable = formatSubmitSolutionTable({
+        summary,
+        rootCause,
+        filesModified,
+        verificationEvidence,
+        resolutionType,
+        verificationMethod,
+        groundingScore: audit.score,
+        informationDensity: audit.informationDensity,
+      });
 
       return {
         success: true,
         submitted: true,
         summary,
         rootCause,
-        filesModified: audit.reconciledFilesModified,
+        filesModified,
         verificationEvidence,
         responseLanguage,
         resolutionType,
@@ -134,6 +150,8 @@ export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
         timestamp,
         nextAction: 'final_answer',
         message: `Final answer successfully submitted. The task is now COMPLETE. You MUST NOT call any further tools. Return the submitted answer at the requested level of detail in the EXACT SAME LANGUAGE as the user's original request${responseLanguage ? ` (${responseLanguage})` : ''}. Include only findings and verification actually established; do not invent code changes, tests, or root causes.`,
+        table: formattedTable,
+        formattedTable,
       };
     },
   };

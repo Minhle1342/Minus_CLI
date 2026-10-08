@@ -37,6 +37,9 @@ export interface SubmissionCheckContext {
   verificationPolicy: VerificationPolicy;
   evidenceGate: CompletionEvidenceGate;
   evidenceEnabled: boolean;
+  planBlocker?: string;
+  activeAgents?: number;
+  evaluateCritic?: (summary: string, evidence?: ReturnType<CompletionEvidenceGate['evaluate']>) => { approved: boolean; reasons?: string[]; critiquePrompt?: string };
   measured?: Parameters<VerificationPolicy['canComplete']>[1];
 }
 
@@ -52,9 +55,13 @@ export function evaluateSubmission(payload: SubmitSolutionPayload, context: Subm
   });
   const audit = SolutionGroundingAuditor.audit(normalized, {
     session: context.session, turn: context.turn, userRequest: context.userRequest, workspaceRoot: context.workspaceRoot,
+    evidenceEnabled: context.evidenceEnabled,
   });
-  return { payload: normalized, evidence, verification, audit,
-    allowed: verification.allowed && evidence?.allow !== false && audit.allowed };
+  const critic = context.evaluateCritic?.(normalized.summary, evidence);
+  const blockers = [context.planBlocker, (context.activeAgents || 0) > 0 ? 'Active agents must finish before submission.' : undefined,
+    context.session.getPendingInputs().length > 0 ? 'Pending user input must be handled before submission.' : undefined].filter(Boolean) as string[];
+  return { payload: normalized, evidence, verification, audit, critic, blockers,
+    allowed: blockers.length === 0 && critic?.approved !== false && verification.allowed && evidence?.allow !== false && audit.allowed };
 }
 
 export interface SubmissionSnapshot {

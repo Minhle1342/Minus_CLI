@@ -9,7 +9,9 @@
  * 4. Trajectory Backtracking: Nhận diện lỗi định vị sai khi test fail >= 3 lần sau mutation và kích hoạt quay đầu
  */
 
-import { isVerificationCommand } from './completion-evidence.js';
+import { extractCommandString, isVerificationCommand } from './completion-evidence.js';
+import { hasObservedMutation, toolResultFailed } from './completion-observations.js';
+import { classifyCommandOutcome } from '../tools/command-outcome.js';
 
 export type DevelopmentPhase = 'EXPLORATION' | 'FAULT_LOCALIZATION' | 'PATCH_GENERATION_AND_VERIFY';
 
@@ -223,16 +225,19 @@ export class ProcessFailureDetector {
     result: Record<string, any>;
   }): ProcessFailureIntervention | null {
     const { toolName, args, result } = observation;
+    // Approval/preflight and in-flight results do not establish execution outcomes.
+    if (result.processStarted === false || result.commandOutcome === 'blocked_preflight'
+      || ['running', 'pending', 'queued', 'starting'].includes(String(result.status || '').toLowerCase())) return null;
 
     // 1. Nhận diện chuyển phase sang Mutation
-    if (MUTATION_TOOLS.has(toolName)) {
+    if (hasObservedMutation(toolName, result)) {
       this.hasMutatedCode = true;
       this.currentPhase = 'PATCH_GENERATION_AND_VERIFY';
       this.consecutiveDriftingSteps = 0; // Reset drift khi đã bắt đầu sửa code
     }
 
     // 2. Kiểm tra Relevance Drift ở giai đoạn Exploration / Localization
-    if (INSPECTION_TOOLS.has(toolName)) {
+    if (INSPECTION_TOOLS.has(toolName) && !toolResultFailed(result)) {
       const inspectedTarget = (args.TargetFile || args.AbsolutePath || args.path || args.Query || args.query || '').toString().toLowerCase();
       if (inspectedTarget) {
         this.inspectedFiles.push(inspectedTarget);
@@ -248,7 +253,7 @@ export class ProcessFailureDetector {
             type: 'RELEVANCE_DRIFT',
             phase: this.currentPhase,
             message: `[PROCESS-LEVEL FAILURE: RELEVANCE DRIFT] The system detected 4 consecutive survey operations on files outside the core scope of the problem.`,
-            suggestedAction: `Stop broad surveying. Use the GitNexus call graph or grep the exact error symbols to locate the right module to change.`,
+            suggestedAction: `Consider narrowing inspection to the requested scope using the call graph or exact error symbols; continue only actions the user has authorized.`,
           };
         }
       } else {
@@ -257,11 +262,17 @@ export class ProcessFailureDetector {
     }
 
     // 3. Kiểm tra Trajectory Backtracking sau Mutation (Fault Localization Failure)
-    if (this.hasMutatedCode && (toolName === 'run_command' || toolName === 'execute_command')) {
-      const cmd = (args.CommandLine || args.command || '').toString();
-      if (isVerificationCommand(cmd)) {
-        const exitCode = result.exitCode ?? (result.success === false ? 1 : 0);
-        if (exitCode !== 0) {
+    const completion = toolName === 'manage_task' && (result.action || args.action) === 'status'
+      && result.commandCompletion?.completed === true && result.commandCompletion?.terminalStatus === 'completed'
+      ? result.commandCompletion : undefined;
+    const verificationResult = completion || result;
+    const cmd = completion?.command || extractCommandString(args, result);
+    const isVerification = toolName === 'run_test_suite'
+      || (['run_command', 'execute_command'].includes(toolName) || completion) && isVerificationCommand(cmd);
+    if (this.hasMutatedCode && isVerification && verificationResult.processStarted !== false
+      && typeof verificationResult.exitCode === 'number' && Number.isFinite(verificationResult.exitCode)) {
+      const outcome = classifyCommandOutcome(cmd, verificationResult);
+      if (outcome === 'failed_unexpected' || (toolName === 'run_test_suite' && result.isPassed === false)) {
           this.postMutationTestFailures++;
           if (this.postMutationTestFailures >= 3) {
             // Chuyển sang giả thuyết tiếp theo nếu có
@@ -273,22 +284,21 @@ export class ProcessFailureDetector {
             return {
               type: 'LOCALIZATION_FAILURE_BACKTRACK',
               phase: this.currentPhase,
-              message: `[PROCESS-LEVEL FAILURE: LOCALIZATION FAILURE DETECTED] You edited code but tests still failed ${this.postMutationTestFailures} times in a row. Per SWE-Reasoner (arXiv:2503.23803), this signals wrong root-cause localization (Fault Localization Failure), not a mere syntax error.`,
+              message: `[PROCESS ADVISORY: REPEATED VERIFICATION FAILURES] After observed edits, ${this.postMutationTestFailures} terminal verification checks failed. Inspect their actual output before deciding whether to revise the hypothesis.`,
               suggestedAction: nextHypo
-                ? `Prune the current branch and backtrack. Switch to the next hypothesis: '${nextHypo.targetFile}' (${nextHypo.description}).`
-                : `Stop editing the current file. Revert unverified code and re-create an isolated reproduction test in scratch/ to re-identify the root cause.`,
+                ? `Consider the next hypothesis: '${nextHypo.targetFile}' (${nextHypo.description}), using read-only inspection first. Preserve user changes and stay within the authorized task scope.`
+                : `Inspect the failing verification output and reassess the hypothesis. Preserve user changes; obtain authorization before adding tests or changing task scope.`,
             };
           }
-        } else {
+        } else if (outcome === 'succeeded' && !toolResultFailed(verificationResult)) {
           // Test passed thành công!
           this.postMutationTestFailures = 0;
         }
-      }
     }
 
     // 4. Kiểm tra Fuzzy Semantic Failure Loop (Kẹt vòng lặp sửa sai mù quáng)
     if (MUTATION_TOOLS.has(toolName)) {
-      const isMutationFailure = result.error !== undefined || result.success === false || result.status === 'error';
+      const isMutationFailure = toolResultFailed(result) || result.status === 'error';
       const targetFile = (args.TargetFile || args.path || args.filePath || args.targetFile || '').toString();
       const contentSnippet = (
         args.TargetContent ||
@@ -313,7 +323,7 @@ export class ProcessFailureDetector {
               phase: this.currentPhase,
               similarity: sim,
               message: `[PROCESS-LEVEL FAILURE: SEMANTIC FAILURE LOOP DETECTED] The system detected that recent interventions are semantically highly similar (${Math.round(sim * 100)}%) but all failed. You are stuck in a micro-patching loop.`,
-              suggestedAction: `Stop trying similar syntax variants on file '${targetFile || 'current'}'. Roll back and pivot strategy to a structurally different approach, or write an isolated reproduction test in scratch/.`,
+              suggestedAction: `Inspect why similar edits to '${targetFile || 'current'}' failed before choosing another approach. Preserve user changes and keep any new edits or tests within the user's authorization.`,
             };
           }
         }

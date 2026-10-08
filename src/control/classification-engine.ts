@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest, normalizeRequestIntentText } from './request-intent.js';
+import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT } from './request-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
@@ -22,7 +22,7 @@ export interface ClassificationInput {
 
 const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
 
-const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
+const mutationIntent = MUTATION_INTENT;
 const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
 const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
 const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
@@ -33,7 +33,9 @@ const planningIntent = /(?:^|\s)\/plan(?:\s|$)|\[planning mode request\]|\b(?:wr
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
     const rawPrompt = input.request || input.userPrompt || input.prompt || '';
-    const text = [rawPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
+    // Quoted documents/commands are data, not authorization for execution or edits.
+    const intentPrompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
+    const text = [intentPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
     const normalizedText = normalizeRequestIntentText(text);
     const reasons: string[] = [];
     let taskClass: TaskClass = 'question';
@@ -49,13 +51,18 @@ export class ClassificationEngine {
       phase = 'plan';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
       reasons.push('EXPLICIT_PLANNING_INTENT');
-    } else if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
+    } else if (isReadOnlyRequest(intentPrompt) && !input.hasUnverifiedChanges) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
     } else if (releaseIntent.test(normalizedText)) {
       taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
+    } else if (/^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:(?:run|execute|chay|thuc thi|test|verify|lint|typecheck|bien dich)\b|build\s+(?:the\s+)?(?:project|repo|repository|package)\b)/i.test(normalizeRequestIntentText(intentPrompt))
+      && !normalizeRequestIntentText(intentPrompt).split(/\b(?:and then|then|and|sau do|roi|va)\b/).slice(1).some(part => MUTATION_INTENT.test(part))) {
+      taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
+      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
+      reasons.push('EXPLICIT_EXECUTION_INTENT');
     } else if (
       (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
       || (input.previous?.phase === 'verify' && ['run_command', 'run_test_suite', 'run_node_script', 'get_diagnostics'].includes(input.lastToolName || '') && !input.lastToolFailed)

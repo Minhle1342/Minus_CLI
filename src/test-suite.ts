@@ -13,9 +13,6 @@ import { searchTextTool } from './tools/search-text.js';
 import { replaceTextTool } from './tools/replace-text.js';
 import { applyPatchTool } from './tools/apply-patch.js';
 import { writeFileTool } from './tools/write-file.js';
-import { writeToFileTool } from './tools/write-to-file.js';
-import { replaceFileContentTool } from './tools/replace-file-content.js';
-import { multiReplaceFileContentTool } from './tools/multi-replace-file-content.js';
 import { createFileTool } from './tools/create-file.js';
 import { deleteFileTool } from './tools/delete-file.js';
 import { moveFileTool } from './tools/move-file.js';
@@ -47,11 +44,8 @@ import { GeminiLLM, ensureBase64ThoughtSignature } from './llm/gemini.js';
 import { FallbackRouterLLM } from './llm/fallback-router.js';
 import { CheckpointManager } from './workspace/checkpoint.js';
 import {
-  TokenConfig,
   getModelTokenProfile,
   resolveTokenConfig,
-  TokenPresetTier,
-  TOKEN_TIER_DEFINITIONS,
   getPresetTokenConfig,
   resolveOutputTokensPreset,
   resolveInputTokensPreset,
@@ -73,7 +67,6 @@ import {
   FinalAnswerGuard,
   detectArchitectureAnalysisIntent,
   verifyWorkspaceGrounding,
-  stripMarkdownFormattingForGuard,
   hasUnfulfilledDeferredPromise,
 } from './agent/final-answer-guard.js';
 import { CompletionEvidenceGate, classifyToolEvidence, isNonExecutableFile } from './agent/completion-evidence.js';
@@ -154,10 +147,10 @@ import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming
 import { CodebaseIntelligenceService, isUtilityNoiseSymbol } from './tools/codebase-intelligence.js';
 import { enrichLocationWithSnippet } from './lsp/lsp-manager.js';
 import { CodeSyntaxValidator } from './workspace/syntax-diagnostics.js';
-import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
-import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
-import { getSymbolContext360Tool, createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
-import { getArchitectureTopologyTool, createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
+import { createQueryCallGraphTool } from './tools/query-call-graph.js';
+import { createGetRouteMapTool } from './tools/get-route-map.js';
+import { createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
+import { createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
 import { ToolSynergyAdvisor } from './agent/tool-synergy-advisor.js';
 import { ToolRetriever } from './tools/tool-retriever.js';
 import { StepRetrievalQueryBuilder } from './agent/step-retrieval-query-builder.js';
@@ -179,24 +172,18 @@ import { SuperpowersWorkflowMap } from './skills/workflow-map.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
-import { findPackageScriptFailure } from './sandbox/command-diagnostics.js';
 import { TestEngineeringHarness, detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from './testing/test-engineering-harness.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
 import { loadLspConfig } from './lsp/config.js';
 import { disposeLspManager, resolveLspSpawnInvocation } from './lsp/lsp-manager.js';
-import { WorktreeManager } from './workspace/worktree-manager.js';
 import { ApprovalManager } from './agent/approval-manager.js';
 import { ReviewManager } from './agent/review-manager.js';
-import { SuperpowersPlugin } from './kernel/plugins/superpowers-plugin.js';
 import { createGitTools } from './tools/git-tools.js';
 import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
 import { classifyGitCommand, detectExplicitGitCommandNames } from './tools/git-command-policy.js';
 import {
   CORE_SYSTEM_PROMPT,
-  SECTION_UNITY_GAME_DEV,
-  SECTION_COMPUTER_USE,
-  SECTION_ARCHITECTURE_ANALYSIS,
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
   CODING_AGENT_SYSTEM_PROMPT,
@@ -229,6 +216,10 @@ function assert(condition: boolean, message: string) {
 }
 
 async function runUnitTests() {
+  const submittedMockAnswer = (summary: string) => ({
+    toolCalls: [{ name: 'submit_solution', args: { summary } }],
+    finishReason: 'stop',
+  });
   const workspace = new Workspace(process.cwd());
   const registry = new ToolRegistry();
   const runner = new ToolRunner(registry, workspace);
@@ -968,7 +959,7 @@ async function runUnitTests() {
     }, workspace.rootDir);
     assert(patchDiff === samplePatch, 'apply_patch chuẩn hóa bỏ code block markdown');
 
-    try { await fs.unlink(workspace.resolveSafePath(testDiffFile)); } catch {}
+    try { await fs.unlink(workspace.resolveSafePath(testDiffFile)); } catch { }
   }
 
   // Test 3.9.4: Kiểm tra CLI.renderDiffView hiển thị màu đỏ cho dòng cũ và màu xanh cho dòng mới
@@ -1045,7 +1036,7 @@ async function runUnitTests() {
     const output = autoApprovedLogs.join('\n');
     assert(output.includes('AUTO-APPROVED IN SESSION'), 'Khi approve_all_session, hệ thống thông báo auto-approved kèm Diff View');
     assert(output.includes('+hello session updated'), 'Diff View trong chế độ approve_all_session in đúng dòng mới');
-    try { await fs.unlink(workspace.resolveSafePath('test_auto_diff.txt')); } catch {}
+    try { await fs.unlink(workspace.resolveSafePath('test_auto_diff.txt')); } catch { }
   }
 
   // Test 3.10: Kiểm thử PatchEngine & Unified Diff với Fuzz Matching (Codex CLI Standard)
@@ -1165,7 +1156,7 @@ async function runUnitTests() {
 
   const turnGate = new ThisTurnToolGate();
   const gatedDecision = turnGate.decide(exploreDecision, registry.getAll());
-  assert(gatedDecision.allowedToolNames.includes('apply_patch') && gatedDecision.allowedToolNames.includes('read_file'), 'ThisTurnToolGate preserves dedicated edit tools alongside read tools in explore phase');
+  assert(!gatedDecision.allowedToolNames.includes('apply_patch') && gatedDecision.allowedToolNames.includes('read_file'), 'ThisTurnToolGate restricts explore phase to inspection tools');
   assert(gatedDecision.allowedToolNames.includes('discover_tools'), 'Explore phase preserves progressive tool discovery alongside dedicated edit tools');
   const boundScope = registry.createScope('bound-turn', gatedDecision.allowedToolNames);
   const boundRunner = new ToolRunner(boundScope, workspace);
@@ -1262,9 +1253,9 @@ async function runUnitTests() {
         return { toolCalls: [{ name: 'read_file', args: { path: 'package.json' } }] };
       }
       if (this.turn === 2) {
-        return { toolCalls: [{ name: 'run_command', args: { command: 'node -v' } }] };
+        return { toolCalls: [{ name: 'run_command', args: { command: 'git status --short' } }] };
       }
-      return { text: 'Nhiệm vụ hoàn thành xuất sắc!', toolCalls: [] };
+      return submittedMockAnswer('Nhiệm vụ hoàn thành xuất sắc!');
     }
   }
 
@@ -1556,7 +1547,7 @@ async function runUnitTests() {
       this.calls++;
       return this.calls === 1
         ? { toolCalls: [{ name: '', args: {} }] }
-        : { text: 'Đã khôi phục sau tool call không hợp lệ.', toolCalls: [] };
+        : submittedMockAnswer('Đã khôi phục sau tool call không hợp lệ.');
     }
   }
   const invalidToolLoop = new AgentLoop(new MockInvalidToolCallLLM(), registry, { maxSteps: 3, workspace });
@@ -1585,17 +1576,13 @@ async function runUnitTests() {
           rawFinishReason: 'length',
         };
       }
-      return {
-        text: 'Đã tiếp tục sau giới hạn token và hoàn tất câu trả lời.',
-        toolCalls: [],
-        finishReason: 'stop',
-      };
+      return submittedMockAnswer('Đã tiếp tục sau giới hạn token và hoàn tất câu trả lời.');
     }
   }
   const maxTokensRecoveryLLM = new MockMaxTokensRecoveryLLM();
   const maxTokensRecoveryLoop = new AgentLoop(maxTokensRecoveryLLM, registry, { maxSteps: 3, workspace });
   const maxTokensRecoverySession = new Session('max-tokens-recovery-session');
-  maxTokensRecoverySession.addUserMessage('Thực hiện yêu cầu dài và báo cáo đầy đủ');
+  maxTokensRecoverySession.addUserMessage('Giải thích yêu cầu dài và báo cáo đầy đủ; chỉ đọc, không sửa code');
   const maxTokensRecoveryResult = await maxTokensRecoveryLoop.run(maxTokensRecoverySession);
   assert(
     maxTokensRecoveryLLM.calls === 2
@@ -1606,7 +1593,7 @@ async function runUnitTests() {
     'AgentLoop tiếp tục cùng turn khi provider kết thúc vì max tokens',
   );
   assert(
-    !maxTokensRecoverySession.getEvents().some((event) => event.type === 'tool/call'),
+    !maxTokensRecoverySession.getEvents().some((event) => event.type === 'tool/call' && event.data.toolName === 'read_file'),
     'AgentLoop không thực thi tool call nằm trong response bị cắt bởi max tokens',
   );
 
@@ -1672,7 +1659,7 @@ async function runUnitTests() {
     async generate(): Promise<any> {
       this.calls++;
       if (this.calls >= 6) {
-        return { text: 'Pivoted to direct answer after receiving advisory.', toolCalls: [] };
+        return submittedMockAnswer('Pivoted to direct answer after receiving advisory.');
       }
       return {
         toolCalls: [{ name: 'search_codebase_fast', args: { query: 'AgentLoop', limit: 5 } }],
@@ -1780,7 +1767,7 @@ async function runUnitTests() {
   }
   const cancelledBatchLoop = new AgentLoop(new MockCancelledBatchLLM(), cancellationRegistry, { maxSteps: 3, workspace, toolControlMode: 'shadow' });
   const cancelledBatchSession = new Session('cancelled-tool-batch-session');
-  cancelledBatchSession.addUserMessage('Cancel the batch after its first tool.');
+  cancelledBatchSession.addUserMessage('Execute the batch and cancel after its first tool.');
   const cancelledBatchResult = await cancelledBatchLoop.run(cancelledBatchSession, {
     signal: cancellationController.signal,
   });
@@ -1894,7 +1881,7 @@ async function runUnitTests() {
 
   class MockFinalLLM {
     async generate(): Promise<any> {
-      return { text: 'Đã tiếp tục input pending.', toolCalls: [] };
+      return submittedMockAnswer('Đã tiếp tục input pending.');
     }
   }
   const pendingInputSession = new Session('pending-input-replay');
@@ -1944,8 +1931,8 @@ async function runUnitTests() {
   );
   assert(
     recoveredOnlySession.getDiagnostics().openTurns.length === 0
-      && recoveredOnlySession.getDiagnostics().openSteps.length === 0
-      && recoveredOnlySession.getPendingToolCalls().length === 0,
+    && recoveredOnlySession.getDiagnostics().openSteps.length === 0
+    && recoveredOnlySession.getPendingToolCalls().length === 0,
     'Recovery resume đóng lifecycle và không để lại tool call dangling',
   );
 
@@ -1990,20 +1977,26 @@ async function runUnitTests() {
   console.log('🧪 7. KIỂM THỬ CHECKPOINT MANAGER & SHADOW ROLLBACK (/undo)');
   console.log('========================================');
 
-  const cpManager = new CheckpointManager(workspace.rootDir);
+  const checkpointFixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-checkpoint-fixture-'));
+  await fs.writeFile(path.join(checkpointFixtureDir, 'owned.txt'), 'user baseline');
+  const cpManager = new CheckpointManager(checkpointFixtureDir);
   await cpManager.init();
 
-  const cp1 = await cpManager.createCheckpoint('Before test edit 1');
+  const cp1 = await cpManager.createCheckpoint('Before test edit 1', { files: ['owned.txt'] });
   assert(cp1 !== null && cp1.index === 1, 'CheckpointManager tạo snapshot #1 thành công');
   assert(cpManager.getHistory().length === 1, 'Lịch sử lưu đúng 1 checkpoint');
 
-  const cp2 = await cpManager.createCheckpoint('Before test edit 2');
+  const cp2 = await cpManager.createCheckpoint('Before test edit 2', { files: ['owned.txt'] });
   assert(cp2 !== null && cp2.index === 2, 'CheckpointManager tạo snapshot #2 thành công');
   assert(cpManager.getHistory().length === 2, 'Lịch sử lưu đúng 2 checkpoints');
 
+  await fs.writeFile(path.join(checkpointFixtureDir, 'owned.txt'), 'harness edit');
+  await cpManager.recordMutation(['owned.txt']);
   const rollbackRes = await cpManager.rollbackLast();
   assert(rollbackRes.success === true, 'Rollback hoàn tác checkpoint gần nhất thành công');
   assert(cpManager.getHistory().length === 1, 'Sau rollback, checkpoint stack giảm đi 1');
+  assert(await fs.readFile(path.join(checkpointFixtureDir, 'owned.txt'), 'utf8') === 'user baseline', 'Rollback preserves the exact pre-existing user content');
+  await fs.rm(checkpointFixtureDir, { recursive: true, force: true });
 
   console.log('\n========================================');
   console.log('🧪 8. KIỂM THỬ CONTEXT COMPACTOR & TOKEN BUDGETING');
@@ -2294,7 +2287,7 @@ async function runUnitTests() {
           }],
         };
       }
-      return { text: 'Completed every execution-plan step with observed tool evidence.', toolCalls: [] };
+      return submittedMockAnswer('Completed every execution-plan step with observed tool evidence.');
     }
   }
 
@@ -3893,7 +3886,7 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
       const lastMsg = history[history.length - 1];
       const hasNote = lastMsg.parts?.some((p: any) => p.text?.includes('[SYSTEM NOTE]'));
       if (hasNote) {
-        return { text: 'Tôi đã tiếp tục xử lý và hoàn thành nhiệm vụ thành công!', toolCalls: [] };
+        return submittedMockAnswer('Tôi đã tiếp tục xử lý và hoàn thành nhiệm vụ thành công!');
       }
       return { text: 'Không nhận được prompt khôi phục', toolCalls: [] };
     }
@@ -3921,10 +3914,9 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
         message.parts?.some((part: any) => part.text?.includes('[SYSTEM FINAL ANSWER GUARD]')),
       );
       return {
-        text: hasGuardNote
-          ? 'Không còn đường chạy an toàn: COMMAND_NOT_FOUND (exit 127). Cần cài .NET SDK hoặc chọn image .NET trước khi có thể chạy test.'
-          : 'Guard note was not recorded.',
-        toolCalls: [],
+        ...submittedMockAnswer(hasGuardNote
+          ? 'Chưa chạy test API hoặc đo performance. Chưa có tool result để kết luận môi trường thiếu .NET SDK.'
+          : 'Guard note was not recorded.'),
       };
     }
   }
@@ -3936,11 +3928,12 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
   const deferredFinalResult = await deferredFinalLoop.run(deferredFinalSession);
   assert(
     deferredFinalLLM.calls === 2
-    && deferredFinalResult.includes('COMMAND_NOT_FOUND')
+    && deferredFinalResult.includes('Chưa chạy test API')
+    && !deferredFinalResult.includes('COMMAND_NOT_FOUND')
     && deferredFinalSession.getEvents().some(
       (event) => event.type === 'step/end' && event.data.reason === 'incomplete-final-answer',
     ),
-    'AgentLoop từ chối Final Answer hứa làm sau, re-prompt và chỉ kết thúc bằng kết quả hoặc blocker thực',
+    'AgentLoop re-prompts an unsubmitted answer and accepts an honest account without inventing a tool failure',
   );
 
   class MockGitRefusalRecoveryLLM {
@@ -3956,16 +3949,7 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
       const hasCapabilityGuard = session.getHistory().some((message) =>
         message.parts?.some((part: any) => part.text?.includes('[SYSTEM CAPABILITY GUARD]')),
       );
-      if (this.calls === 2 && hasCapabilityGuard) {
-        return {
-          text: '',
-          toolCalls: [
-            { name: 'git_commit', args: { message: 'test: capability recovery' } },
-            { name: 'git_push', args: { remote: 'origin', branch: 'develop' } },
-          ],
-        };
-      }
-      return { text: 'Đã commit và push lên nhánh develop.', toolCalls: [] };
+      return submittedMockAnswer('Chưa commit hoặc push lên develop. Chưa có kết quả tool thực tế chứng minh các thao tác Git đã hoàn tất.');
     }
   }
 
@@ -4003,12 +3987,13 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
   gitRecoverySession.addUserMessage('commit và push code mới lên nhánh develop');
   const gitRecoveryResult = await gitRecoveryLoop.run(gitRecoverySession);
   assert(
-    gitRecoveryLLM.calls === 3
-    && gitRecoveryResult.includes('Đã commit và push')
+    gitRecoveryLLM.calls === 2
+    && gitRecoveryResult.includes('Chưa commit hoặc push')
+    && !gitRecoverySession.getEvents().some((event) => event.type === 'tool/call' && ['git_commit', 'git_push'].includes(event.data.toolName || ''))
     && gitRecoverySession.getEvents().some(
       (event) => event.type === 'step/end' && event.data.reason === 'incomplete-final-answer',
     ),
-    'AgentLoop không chấp nhận false refusal và buộc LLM dùng git_commit/git_push đang khả dụng',
+    'Completion reports the absence of real Git observations rather than treating a mock claim as completed Git work',
   );
 
   // 2. Kiểm thử khi LLM trả về System 2 Reasoning nhưng chưa phát sinh hành động
@@ -6050,7 +6035,7 @@ Always write tests first!`;
 
   const rollbackOutcome = await rollbackOrchestrator.rollbackOnFalsifiedHypothesis('H1', hypothesisTracker);
   assert(typeof rollbackOutcome.rolledBack === 'boolean', 'rollbackOnFalsifiedHypothesis thực thi an toàn');
-  assert(Boolean(rollbackOutcome.guidancePrompt?.includes('[AUTOMATIC ROLLBACK EXECUTED')), 'rollbackOutcome sinh prompt hướng dẫn clean slate');
+  assert(!rollbackOutcome.rolledBack && Boolean(rollbackOutcome.guidancePrompt?.includes('[ROLLBACK NOT PERFORMED]')), 'Checkpoint không có scoped snapshot không được báo đã phục hồi');
 
   // 30.5. AdaptiveReasoningController
   const reasoningController = new AdaptiveReasoningController('medium');
@@ -6811,8 +6796,8 @@ Always write tests first!`;
   });
   assert(
     failedToolState.failureSignature.length > 0
-      && failedToolState.discoveredFiles.includes('src/auth/service.ts')
-      && failedToolState.discoveredSymbols.includes('AuthService.refreshToken'),
+    && failedToolState.discoveredFiles.includes('src/auth/service.ts')
+    && failedToolState.discoveredSymbols.includes('AuthService.refreshToken'),
     'Step retrieval query thu nhận failure signature cùng file/symbol mới phát hiện từ tool evidence',
   );
   assert(
@@ -6835,12 +6820,12 @@ Always write tests first!`;
     retrievalQuery: 'auth token interceptor refresh',
   });
   assert(
-    queryAwareResult.renderedContext.indexOf('P1_KEEP_EXACT') < queryAwareResult.renderedContext.indexOf('P2_KEEP_EXACT'),
-    'Question-aware arbitration bảo toàn thứ tự P1 trước P2',
+    queryAwareResult.renderedContext.indexOf('P2_KEEP_EXACT') < queryAwareResult.renderedContext.indexOf('P1_KEEP_EXACT'),
+    'Question-aware arbitration giữ phạm vi kế hoạch trước lời khuyên có thể thay thế',
   );
   assert(
     queryAwareResult.renderedContext.indexOf('Auth token interceptor refresh evidence')
-      < queryAwareResult.renderedContext.indexOf('CSS animation unrelated evidence'),
+    < queryAwareResult.renderedContext.indexOf('CSS animation unrelated evidence'),
     'Question-aware arbitration đưa evidence liên quan lên trước trong P3-P7',
   );
 
@@ -7014,10 +6999,7 @@ Always write tests first!`;
         };
       } else {
         // Step 2: Agent nhìn thấy tin nhắn bẻ lái trong contents và đưa ra câu trả lời cuối cùng
-        return {
-          text: 'Đã nhận được chỉ đạo bẻ lái của người dùng. Hệ thống chuyển sang phân tích kiến trúc thành công.',
-          rawContent: { role: 'model', parts: [{ text: 'Đã nhận được chỉ đạo bẻ lái của người dùng. Hệ thống chuyển sang phân tích kiến trúc thành công.' }] },
-        };
+        return submittedMockAnswer('Đã nhận được chỉ đạo bẻ lái của người dùng. Hệ thống chuyển sang phân tích kiến trúc thành công.');
       }
     }
   }
@@ -7125,7 +7107,7 @@ Always write tests first!`;
   assert(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'), 'Core prompt bảo toàn quy tắc Language Matching');
   assert(CORE_SYSTEM_PROMPT.includes('custom build command'), 'Core prompt hướng dẫn kiểm tra custom build command');
   assert(SECTION_VERIFICATION_LADDER_FULL.includes('CUSTOM BUILD & SCRIPT DISCIPLINE'), 'SECTION_VERIFICATION_LADDER_FULL chứa quy định custom build command');
-  assert(SECTION_PHASE_VERIFY_GUIDANCE.includes('Custom Build & Script Discipline'), 'SECTION_PHASE_VERIFY_GUIDANCE chứa quy định custom build command');
+  assert(SECTION_PHASE_VERIFY_GUIDANCE.includes('Inspect defined scripts') && SECTION_PHASE_VERIFY_GUIDANCE.includes('Respect the user'), 'VERIFY guidance kiểm tra script và giữ phạm vi kiểm chứng người dùng');
 
   // 39.2. Progressive Disclosure & Context-Aware Assembly
   const customAssembler = new PromptAssembler();
@@ -7369,7 +7351,7 @@ Always write tests first!`;
   const gitToolsTest = createGitTools(workspace);
   const gitAddDef = gitToolsTest.find((t) => t.name === 'git_add')!;
   assert(gitAddDef !== undefined, 'git_add tool được định nghĩa trong GitTools');
-  
+
   // Kiểm tra Schema Validation trực tiếp chấp nhận files, file, path
   const filesValidation = validateSchemaValue({ files: ['src/index.ts'] }, gitAddDef.parameters as any, '$', { rejectUnknownProperties: true });
   assert(filesValidation.valid === true, 'Schema git_add chấp nhận tham số files');
@@ -7475,7 +7457,7 @@ Always write tests first!`;
   const postSubmitAdvisor = new ToolSynergyAdvisor();
 
   // Test 1: ToolSynergyAdvisor kích hoạt Playbook POST_SUBMISSION khi vừa gọi submit_solution
-  const adviceSubmit = postSubmitAdvisor.advise({ lastToolName: 'submit_solution' });
+  const adviceSubmit = postSubmitAdvisor.advise({ lastToolName: 'submit_solution', lastToolResult: { submitted: true } });
   assert(adviceSubmit.playbook === 'POST_SUBMISSION', 'ToolSynergyAdvisor chuyển sang playbook POST_SUBMISSION khi vừa gọi submit_solution');
   assert(adviceSubmit.suggestedTools.length === 0, 'POST_SUBMISSION không gợi ý bất kỳ công cụ nào (suggestedTools = [])');
 
@@ -7485,7 +7467,7 @@ Always write tests first!`;
   assert(adviceAfterSubmit.suggestedTools.length === 0, 'POST_SUBMISSION khóa toàn bộ suggestedTools');
 
   // Test 3: formatAdvicePrompt hiển thị rõ ràng hướng dẫn chốt Final Answer
-  const postSubmitAdvicePrompt = postSubmitAdvisor.formatAdvicePrompt({ lastToolName: 'submit_solution' });
+  const postSubmitAdvicePrompt = postSubmitAdvisor.formatAdvicePrompt({ lastToolName: 'submit_solution', lastToolResult: { submitted: true } });
   assert(postSubmitAdvicePrompt.includes('[TOOL PLAYBOOK GUIDANCE - POST_SUBMISSION]'), 'formatAdvicePrompt chứa header POST_SUBMISSION');
   assert(postSubmitAdvicePrompt.includes('(None - Conclude with Final Answer)'), 'formatAdvicePrompt hiển thị rõ ràng (None - Conclude with Final Answer)');
 
@@ -7576,8 +7558,8 @@ Always write tests first!`;
   assert(briefing.includes('CONTEXT GUARDIAN: TRANSITION BRIEFING'), 'Tiêu đề Transition Briefing chuẩn xác');
   assert(briefing.includes('Current State'), 'Chứa mục Trạng Thái Hiện Tại');
   assert(briefing.includes('Critical Architectural Decisions'), 'Chứa mục Quyết Định Kiến Trúc Trọng Yếu');
-  assert(briefing.includes('NO AUTOMATED BROWSER TESTING'), 'Chứa cảnh báo bất biến No Browser Subagent');
-  assert(briefing.includes('NO AUTO PUSH TO MAIN'), 'Chứa cảnh báo bất biến No Push Main');
+  assert(!briefing.includes('NO AUTOMATED BROWSER TESTING'), 'Briefing không tự tạo giới hạn browser');
+  assert(briefing.includes('Historical evidence only') && briefing.includes('does not authorize'), 'Briefing giữ bằng chứng lịch sử và không tự cấp quyền Git');
 
   // 41.4. ContextGuardian: Lưu trữ bền vững 3 tầng (Fase 3 & Pre-Compaction Protection)
   const preCompactResult = await guardianInstance.protectPreCompaction(guardianSession, {
@@ -7645,7 +7627,7 @@ Always write tests first!`;
   const registry42 = new AgentRegistry();
   registry42.register('agent-fe-1', 'Frontend React Developer');
   registry42.advertiseCapabilities('agent-fe-1', ['frontend', 'react', 'tailwind']);
-  
+
   registry42.register('agent-be-1', 'Backend Go Engineer');
   registry42.advertiseCapabilities('agent-be-1', ['backend', 'go', 'grpc', 'postgres']);
 
@@ -7768,7 +7750,7 @@ Always write tests first!`;
   // Kiểm thử Tool allocate_agent_task
   multiKernel.ctx.agents.register('agent-sec-1', 'Security Auditor');
   multiKernel.ctx.agents.advertiseCapabilities('agent-sec-1', ['security', 'audit']);
-  
+
   const allocateTool = multiKernel.ctx.tools.get('allocate_agent_task')!;
   const allocRes = await allocateTool.execute({
     objective: 'Audit access control policies',
@@ -7899,11 +7881,7 @@ Always write tests first!`;
       if (cbCalls <= 2) {
         throw new Error('Resource exhausted: rate limit exceeded. Please retry in 0.1s');
       }
-      return {
-        text: 'Nhiệm vụ đã hoàn thành xuất sắc!',
-        toolCalls: [],
-        finishReason: 'stop',
-      };
+      return submittedMockAnswer('Nhiệm vụ đã hoàn thành xuất sắc!');
     }
   }
 
@@ -7968,11 +7946,7 @@ Always write tests first!`;
         (err as any).status = 'UNAVAILABLE';
         throw err;
       }
-      return {
-        text: 'Nhiệm vụ vượt qua 503 thành công!',
-        toolCalls: [],
-        finishReason: 'stop',
-      };
+      return submittedMockAnswer('Nhiệm vụ vượt qua 503 thành công!');
     }
   }
 
@@ -8738,7 +8712,7 @@ Always write tests first!`;
   const committedBullets = await aceCurator.commitDeltas(aceDeltas);
   assert(committedBullets.length >= 1, 'PlaybookCurator cam kết thành công delta updates vào Living Playbook');
 
-  await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => { });
 
   console.log('\n========================================');
   console.log('🧪 52. KIỂM THỬ DOMAIN INTENT & SEMANTIC MISUNDERSTANDING GUARDIAN (Wink & SCAFFOLD-CEGIS)');
@@ -8780,7 +8754,7 @@ Always write tests first!`;
     'SCAFFOLD-CEGIS Test Tampering Auditor chặn đứng hành vi sửa đổi file test khi chỉ có yêu cầu sửa logic mã nguồn',
   );
   assert(
-    Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('Fix the actual business-logic source code')),
+    Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('Preserve existing assertions') && tamperIntervention?.courseCorrectionGuidance?.includes('Fix production logic')),
     'Hướng dẫn chỉnh hướng yêu cầu Agent tập trung sửa mã nguồn thay vì sửa test case để ép pass',
   );
 
@@ -8954,7 +8928,7 @@ Always write tests first!`;
     'Node cấp 1 được đánh dấu depth: 1 chính xác',
   );
 
-  await fs.rm(deepLspDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(deepLspDir, { recursive: true, force: true }).catch(() => { });
 
   console.log('\n========================================');
   console.log('🧪 54. KIỂM THỬ PERSISTENT SEMANTIC & EPISODIC MEMORY (ExpeRepair, CTIM-Rover, DreamBench-SWE & SWE-Bench-CL)');
@@ -9108,7 +9082,7 @@ Always write tests first!`;
     'retrieveContextSnippet tự động lồng ghép khối Dual-Memory Guidance có cấu trúc',
   );
 
-  await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => { });
 
   // =========================================================================
   // 🧪 55. KIỂM THỬ ĐỒ THỊ ĐA TÁC TỬ DAG PARALLEL SCHEDULER (PlanManager & AgentOrchestrator)
@@ -9172,6 +9146,7 @@ Always write tests first!`;
     kind: 'inspection',
     outcome: 'success',
     summary: 'Architecture analyzed',
+    files: dagPlanMgr.getTasks()[0].readSet,
   });
   assert(
     completeT1.newlyReadyTaskIds.includes(2) && completeT1.newlyReadyTaskIds.includes(3),
@@ -9198,6 +9173,7 @@ Always write tests first!`;
   const completeT2 = dagPlanMgr.completeTaskWithEvidence(2, {
     toolName: 'write_file',
     kind: 'mutation',
+    files: ['src/db/repository.ts'],
     outcome: 'success',
   });
   assert(
@@ -9210,6 +9186,7 @@ Always write tests first!`;
   const completeT3 = dagPlanMgr.completeTaskWithEvidence(3, {
     toolName: 'write_file',
     kind: 'mutation',
+    files: ['src/api/routes.ts'],
     outcome: 'success',
   });
   assert(
@@ -9413,11 +9390,15 @@ Always write tests first!`;
 
   const dagSummary = await orchestrator55.executeFullDag({
     maxConcurrency: 2,
-    taskWorker: async (task) => ({
-      success: true,
-      output: `Task #${task.id} executed successfully.`,
-      modifiedFiles: task.writeSet,
-    }),
+    taskWorker: async (task) => {
+      const child = new Session();
+      for (const file of task.writeSet) {
+        const callId = `dag-${task.id}-${file}`;
+        child.append('tool/call', { toolName: 'write_file', toolCallId: callId, args: { path: file } });
+        child.append('tool/result', { toolName: 'write_file', toolCallId: callId, result: { success: true, filesModified: [file] } });
+      }
+      return { success: true, output: `Task #${task.id} executed successfully.`, modifiedFiles: task.writeSet, evidenceSession: child, evidenceStartSeq: 0 };
+    },
     qualityGate: {
       requireFilesModified: true,
     },
@@ -9630,8 +9611,8 @@ Always write tests first!`;
     assert(bareDrive === 'C:' + path.sep, 'Path resolution: bare drive letter appended with path separator');
 
   } finally {
-    await fs.rm(wsTestDir1, { recursive: true, force: true }).catch(() => {});
-    await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(wsTestDir1, { recursive: true, force: true }).catch(() => { });
+    await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => { });
   }
 
   // ==============================================================
@@ -9750,7 +9731,7 @@ Always write tests first!`;
     assert(Boolean(reflReplace.reflectionPrompt && reflReplace.reflectionPrompt.includes('nested/widget.html')), 'ReflectionEngine: Prompt tự vấn chứa đường dẫn file tương tự gợi ý cho replace_text');
 
   } finally {
-    await fs.rm(mutationTempDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(mutationTempDir, { recursive: true, force: true }).catch(() => { });
   }
 
   console.log(`\n========================================`);

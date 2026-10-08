@@ -141,6 +141,7 @@ export class SolutionGroundingAuditor {
       turn?: number;
       workspaceRoot?: string;
       userRequest?: string;
+      evidenceEnabled?: boolean;
     } = {},
   ): GroundingAuditResult {
     const summary = (payload.summary || '').trim();
@@ -193,7 +194,7 @@ export class SolutionGroundingAuditor {
         userRequest: options.userRequest,
         workspace: options.workspaceRoot ? { rootDir: options.workspaceRoot } : undefined,
       });
-      const evidence = options.session
+      const evidence = options.session && options.evidenceEnabled !== false
         ? new CompletionEvidenceGate().evaluate(summary, options.session, {
           turn: options.turn, userRequest: options.userRequest, codeChangeRequired: false,
         })

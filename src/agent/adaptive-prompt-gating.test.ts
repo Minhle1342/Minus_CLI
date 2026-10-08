@@ -49,15 +49,16 @@ test('DynamicContextArbiter clears memoryPrompt completely when all items are du
   assert.equal(result.sourcesIncluded.includes('Project Memory (P4)'), false);
 });
 
-test('DynamicContextArbiter enforces its budget when protected guidance alone overflows it', () => {
+test('DynamicContextArbiter protects task scope before replaceable advice under pressure', () => {
   const arbiter = new DynamicContextArbiter(40);
   const result = arbiter.arbitrate({
+    rawPlanContext: '[ACTIVE PLAN] Edit only sample.ts.',
     advicePrompt: ['[ADVICE]', ...Array.from({ length: 80 }, (_, index) => `Keep instruction ${index}.`)].join('\n'),
     cognitiveScaffold: ['[SCAFFOLD]', ...Array.from({ length: 40 }, (_, index) => `Check invariant ${index}.`)].join('\n'),
   }, { maxBudgetTokens: 40 });
 
   assert.ok(result.totalTokens <= 40, `hard cap exceeded: ${result.totalTokens}`);
-  assert.ok(result.renderedContext.includes('[ADVICE]'), 'highest-priority guidance is retained first');
+  assert.ok(result.renderedContext.includes('[ACTIVE PLAN] Edit only sample.ts.'), 'active scope is retained before advisory instructions');
   assert.ok(result.sourcesPruned.length > 0 || result.sourcesTruncated.length > 0, 'overflow is reduced');
 });
 

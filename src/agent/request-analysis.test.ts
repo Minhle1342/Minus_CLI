@@ -150,6 +150,8 @@ test('resolveVerifyPlaybookPrompt provides risk-tiered verification playbooks', 
 
   const r3Playbook = resolveVerifyPlaybookPrompt('R3');
   assert.match(r3Playbook, /DIFF AUDIT/);
-  assert.ok(r3Playbook.includes('run_command(targeted test)'));
+  assert.match(r3Playbook, /active verification contract/);
+  assert.ok(r3Playbook.includes('required diagnostics/build/targeted evidence within user scope'));
+  assert.match(r3Playbook, /Do not infer permission to execute tests excluded by the user/);
 });
 

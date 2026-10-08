@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { parseShellAst } from '../security/shell-ast-parser.js';
+import { classifyGitCommand } from '../tools/git-command-policy.js';
 
 export type SandboxPolicyMode = 'strict' | 'workspace-write' | 'ephemeral-scratch' | 'unrestricted';
 
@@ -111,10 +113,28 @@ export class SandboxPolicyEngine {
       return { allowed: true, riskLevel: 'WORKSPACE_MUTATION', sanitizedCommand: trimmed };
     }
 
-    // 3. Phân loại Read-Only
-    const isReadOnly = SAFE_READ_ONLY_PREFIXES.some(
-      (prefix) => trimmed === prefix || trimmed.startsWith(prefix + ' ')
-    );
+    // Containment applies to reads as well as writes, before any early admission.
+    if (cwd && !this.isPathContained(path.resolve(this.workspaceRoot, cwd))) {
+      return { allowed: false, riskLevel: 'UNAUTHORIZED_ESCAPE', reason: `Working directory "${cwd}" is outside the workspace.` };
+    }
+
+    const analysis = parseShellAst(trimmed);
+    const isReadOnly = !analysis.error && !analysis.complex && analysis.commands.length > 0
+      && analysis.commands.every((command) => {
+        if (command.redirects.length || command.assignments.length) return false;
+        const executable = command.executable.toLowerCase();
+        const args = command.args;
+        if (executable === 'git' || executable === 'git.exe') {
+          // Global config, external diff drivers and output files can change effects.
+          if (!args.length || args[0].startsWith('-') || args.some(arg => /^--(?:output|ext-diff|textconv|exec-path)(?:=|$)/i.test(arg))) return false;
+          return classifyGitCommand(args[0], args.slice(1)).risk === 'read';
+        }
+        if (executable === 'env' || executable === 'printenv') return args.length === 0;
+        if (executable === 'find' && args.some(arg => /^-(?:delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf)$/.test(arg))) return false;
+        if (['rg', 'ripgrep'].includes(executable) && args.some(arg => /^--pre(?:=|$)/.test(arg))) return false;
+        // Exclude script interpreters and executable lookup wrappers.
+        return SAFE_READ_ONLY_PREFIXES.some(prefix => !prefix.includes(' ') && prefix.toLowerCase() === executable);
+      });
 
     if (isReadOnly) {
       return { allowed: true, riskLevel: 'SAFE_READ_ONLY', sanitizedCommand: trimmed };
@@ -163,7 +183,7 @@ export class SandboxPolicyEngine {
     ]);
 
     for (const [key, value] of Object.entries(rawEnv)) {
-      if (value !== undefined && !blockedKeys.has(key)) {
+      if (value !== undefined && !blockedKeys.has(key.toUpperCase())) {
         sanitized[key] = value;
       }
     }

@@ -198,6 +198,10 @@ export function requestPhaseTransition(
     phaseTransition: { fromPhase: current.phase, targetPhase, phaseVersion: current.version, evidenceRefs, reason: rationale || 'missing rationale' },
   });
   if (!rationale || evidenceRefs.length === 0) return reject('PHASE_TRANSITION_EVIDENCE_REQUIRED', 'A rationale and at least one evidence reference are required.');
+  if (targetPhase === 'implement' && classification.reasonCodes?.some(reason =>
+    reason === 'READ_ONLY_EXPLANATION_OR_PROPOSAL' || reason === 'EXPLICIT_PLANNING_INTENT')) {
+    return reject('USER_SCOPE_TRANSITION_DENIED', 'The user requested inspection or a planning deliverable. Implementation requires a new user instruction authorizing that work.');
+  }
   if (!CODING_TASKS.has(classification.taskClass)) return reject('PHASE_TRANSITION_NOT_APPLICABLE', 'Only coding tasks can request a phase transition.');
   if (current.phase === 'explore' && targetPhase === 'plan') {
     // Planning is a non-mutating continuation, so evidence references establish auditability rather than proof of a fix.

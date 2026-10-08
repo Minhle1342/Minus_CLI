@@ -23,26 +23,32 @@ export class AcceptancePolicy {
         const hasDeferred = hasUnfulfilledDeferredPromise(trimmed) || isCompletionStub(trimmed);
         if (hasDeferred) {
           violations.push(
-            'Deferred action promise detected in response ("I will modify..."). You must execute the necessary tool immediately rather than promising to do it later.',
+            'Provide the actual answer or continue only the user-authorized work still needed; do not substitute a status stub or deferred promise.',
           );
         }
       }
     }
 
     // 2. Unresolved compiler/syntax errors
-    if (params.diagnostics.errors.length > 0) {
+    const normalized = (file: string) => file.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+    const changed = new Set(params.changedFiles.map(file => normalized(file.path)));
+    const targeted = (items: DiagnosticSnapshot['errors']) => items.filter(item => changed.has(normalized(item.file)));
+    const errors = targeted(params.diagnostics.errors);
+    const syntaxErrors = targeted(params.diagnostics.syntaxErrors);
+    const unresolvedImports = targeted(params.diagnostics.unresolvedImports);
+    if (errors.length > 0) {
       violations.push(
-        `Found ${params.diagnostics.errors.length} unresolved compiler error(s).`,
+        `Found ${errors.length} unresolved compiler error(s) in changed files.`,
       );
     }
-    if (params.diagnostics.syntaxErrors.length > 0) {
+    if (syntaxErrors.length > 0) {
       violations.push(
-        `Found ${params.diagnostics.syntaxErrors.length} syntax error(s).`,
+        `Found ${syntaxErrors.length} syntax error(s) in changed files.`,
       );
     }
-    if (params.diagnostics.unresolvedImports.length > 0) {
+    if (unresolvedImports.length > 0) {
       violations.push(
-        `Found ${params.diagnostics.unresolvedImports.length} missing import / undefined name error(s).`,
+        `Found ${unresolvedImports.length} missing import / undefined name error(s) in changed files.`,
       );
     }
 

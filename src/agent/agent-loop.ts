@@ -795,11 +795,32 @@ export class AgentLoop {
     const targetSession = session || this.activeSession;
     if (targetSession) this.effectLedger.bindSession(targetSession);
     const result = await this.checkpointManager.rollbackLast();
-    if (result.success && result.checkpoint && targetSession) {
-      this.effectLedger.rollbackByCheckpoint(result.checkpoint.id);
-      await this.persistSession(targetSession);
+    if (result.restoredFiles?.length && targetSession) {
+      await this.recordWorkspaceRestoration(targetSession, result.restoredFiles, result.success ? result.checkpoint?.id : undefined);
     }
     return result;
+  }
+
+  private async recordWorkspaceRestoration(session: Session, restoredFiles: string[], checkpointId?: string, turn = session.getOpenTurn()): Promise<void> {
+    if (restoredFiles.length === 0) return;
+    const toolCallId = `workspace-restore-${session.seq + 1}`;
+    session.append('tool/call', { turn, toolName: 'workspace_restore', toolCallId, args: { checkpointId, targetFiles: restoredFiles } });
+    const result = { success: true, mutationApplied: true, filesModified: restoredFiles, restoredFiles };
+    session.append('tool/result', { turn, toolName: 'workspace_restore', toolCallId, result });
+    this.effectLedger.bindSession(session);
+    if (checkpointId) this.effectLedger.rollbackByCheckpoint(checkpointId);
+    for (const file of restoredFiles) {
+      this.verificationPolicy.recordModification(file);
+      this.targetFilesModifiedInTurn.add(file);
+      this.repositoryMap.invalidate(file);
+    }
+    this.dynamicContextCache.invalidate();
+    disposeSharedTypeScriptService();
+    this.lastCommandExecutionState = undefined;
+    this.lastMutationForInvestigation = undefined;
+    this.planManager.recordToolEvidence('workspace_restore', { targetFiles: restoredFiles }, result);
+    this.rollbackOrchestrator.resetGreenCheckpoint();
+    await this.persistSession(session);
   }
 
   private async runInternalWithCircuitBreakerRetry(
@@ -1094,6 +1115,7 @@ export class AgentLoop {
     let hasSubmittedSolution = false;
     const submissionReadiness = new SubmissionReadiness();
     let turnMutationCheckpointId: string | undefined;
+    this.rollbackOrchestrator.resetGreenCheckpoint();
     const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
       userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
       planBlocker: this.planManager.getCompletionBlocker(),
@@ -2214,7 +2236,8 @@ export class AgentLoop {
       // Khối prompt khuyến khích LLM chạy lệnh test thông qua run_command trong các trường hợp cần thiết
       // (khi LLM gọi các công cụ Edit chỉ 1 đến 2 lần thì không truyền khối prompt này)
       let testVerificationEncouragement: string | undefined;
-      if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0) {
+      if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0
+        && !isUserExplicitlyExemptingTests(turnUserRequest)) {
         if (classification.risk === 'R1') {
           testVerificationEncouragement = `💡 [VERIFICATION RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. For localized R1 changes, run \`get_diagnostics\` to empirically verify type/syntax cleanliness before finishing the task or calling "submit_solution".`;
         } else {
@@ -2228,13 +2251,13 @@ export class AgentLoop {
           const touchesIntegration = touchesIntegrationLayer(this.targetFilesModifiedInTurn);
 
           let integrationGuidance = '';
-          if (detectedIntegrationCmd) {
-            integrationGuidance = `\n🔗 [INTEGRATION TEST RECOMMENDED]: Workspace contains an integration/E2E test suite (\`${detectedIntegrationCmd}\`). Since your changes touch multi-component or integration layers, run this command via "run_command" to empirically verify cross-service/module integrity before calling "submit_solution".`;
+          if (detectedIntegrationCmd && touchesIntegration) {
+            integrationGuidance = `\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration layers. If needed by the current verification contract and user scope, the workspace offers \`${detectedIntegrationCmd}\`. Select the relevant checks and report the results actually observed.`;
           } else if (touchesIntegration) {
-            integrationGuidance = `\n🔗 [INTEGRATION VERIFICATION RECOMMENDED]: Your modifications touch integration components (API/routes/database/server/service). Please perform an integration-level verification: run an end-to-end verification script, or start the service in background via "run_command" (with WaitMsBeforeAsync=5000) and probe endpoints (using curl or a test probe) to prove integration correctness before calling "submit_solution".`;
+            integrationGuidance = '\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration components. Choose a relevant check within the user scope when required by the current verification contract; do not start services or claim cross-service correctness without authorization and observed results.';
           }
 
-          testVerificationEncouragement = `💡 [VERIFICATION LADDER RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. Per the Verification Ladder: if the project has a project-specific build command (not "npm run build" or "tsc"), check \`package.json\` (scripts section) or run \`get_diagnostics\` before running the full test suite. You are encouraged to run static type-checking/build${buildHint} or the project's tests via the "run_command" tool${cmdHint} to empirically verify the changes and ensure no regressions before finishing the task or calling "submit_solution".${integrationGuidance}`;
+          testVerificationEncouragement = `[VERIFICATION OPTIONS]: You have made ${this.editToolCallsInTurn} source-code edits. Follow the current verification contract and user scope. Available checks include static diagnostics/build${buildHint} or relevant project tests${cmdHint}; their availability does not require a full test suite. Report only verification actually performed.${integrationGuidance}`;
         }
       }
 
@@ -3061,7 +3084,7 @@ export class AgentLoop {
                     summary: submittedSolutionSummary || 'Task completed and submitted.',
                     nextAction: 'final_answer',
                     errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
-                    message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
+                    message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
                   },
                 });
               }
@@ -3264,9 +3287,9 @@ export class AgentLoop {
             toolArgs, classification.phase, this._workspace.rootDir);
           const mutationPaths = scopedMutationTargets(toolName, toolArgs);
           const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
-            this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }))
+            this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }, { workspaceRoot: this._workspace.rootDir }))
             .find(intervention => intervention?.severity === 'BLOCKING');
-          if ((toolControlMode !== 'off' && !phaseEffect.allowed) || domainBlock) {
+          if (!phaseEffect.allowed || domainBlock) {
             const blockedResult = { success: false, processStarted: false,
               errorCode: domainBlock ? 'DOMAIN_INTENT_BLOCKED' : 'PHASE_TOOL_EFFECT_BLOCKED',
               error: domainBlock?.message || phaseEffect.reason, retryable: true };
@@ -3370,7 +3393,7 @@ export class AgentLoop {
               summary: submittedSolutionSummary || 'Task completed and submitted.',
               nextAction: 'final_answer',
               errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
-              message: 'Solution has already been submitted and verified. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
+              message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
             };
             executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
           } else if (readySubmission && toolName !== 'submit_solution') {
@@ -4019,7 +4042,8 @@ export class AgentLoop {
                 hId,
                 this.hypothesisTracker,
               ).catch(() => undefined);
-              if (rollbackOutcome?.rolledBack && executionResult.result && typeof executionResult.result === 'object') {
+              if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
+              if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
                 try {
                   if (Object.isExtensible(executionResult.result)) {
                     executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
@@ -4068,7 +4092,8 @@ export class AgentLoop {
                 activeHypothesis.id,
                 this.hypothesisTracker,
               ).catch(() => undefined);
-              if (rollbackOutcome?.rolledBack && executionResult.result && typeof executionResult.result === 'object') {
+              if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
+              if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
                 try {
                   if (Object.isExtensible(executionResult.result)) {
                     executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
@@ -4530,7 +4555,7 @@ export class AgentLoop {
                 : 'Model produced System 2 reasoning but no tool_calls yet. Automatically activating Continuation Protocol...',
             );
             const noteText = hasSubmittedSolution
-              ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
+              ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
               : '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.';
             session.addUserMessage(noteText);
             await this.persistSession(session);
@@ -4542,7 +4567,7 @@ export class AgentLoop {
                 : 'Model returned an empty response. Automatically activating Continuation Protocol to continue the task...',
             );
             const noteText = hasSubmittedSolution
-              ? `[SYSTEM QUALITY DIRECTIVE]: The solution has already been verified and submitted via submit_solution. Do NOT call any further tools. Output your final comprehensive response to the user now in the EXACT SAME LANGUAGE as the user's original request prompt (e.g. Vietnamese if the user asked in Vietnamese). Detail the root cause, files modified with exact paths, code changes, and test verification proof clearly. Do NOT return empty text, placeholder stubs, or robotic confirmation.`
+              ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
               : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
             session.addUserMessage(noteText);
             await this.persistSession(session);
@@ -4619,7 +4644,7 @@ export class AgentLoop {
           this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
           CLI.renderReflectionAlert(
             consecutivePlanCompletionRejects,
-            `[Auto-Reconciliation]: Automatically reconciled remaining Plan tasks as complete because the model provided a substantive answer. Proceeding to the Completion Gate.`,
+            `[Auto-Reconciliation]: Non-required remaining Plan tasks were marked SKIPPED after a substantive answer. Skipped tasks are not verified completions; required tasks still need their observed evidence. Proceeding to the Completion Gate.`,
           );
         } else {
           const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;

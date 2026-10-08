@@ -30,7 +30,9 @@ test('composer draws whole grapheme at cursor and no terminal control commands f
   [model] = update({ type: 'compose', text: '👩‍💻中文' }, model);
   model.composer.cursorOffset = 0;
   const rendered = composerView(model.composer, 80, 2).join('\n');
-  assert.ok(rendered.includes('\x1b[7m👩‍💻\x1b[0m'));
+  // P1 cursor: underline + cyan cell (not a reverse-only block).
+  assert.ok(rendered.includes('\x1b[4m'));
+  assert.ok(rendered.includes('👩‍💻'));
   assert.ok(displayWidth(rendered) <= 80);
   assert.equal(stripTerminalControls('\x1b]0;evil\x07hello\x1b[2J'), 'hello');
 });
@@ -83,4 +85,23 @@ test('tool errors and output remain available in expandable transcript', () => {
   [model] = update({ type: 'kernel', event: 'tool:after', args: ['run_command', { error: 'TS2307 missing module', output: 'compiler output' }, 12, {}] }, model);
   assert.match(model.viewport.entries.at(-1)!.text, /TS2307 missing module/);
   assert.match(model.viewport.entries.at(-1)!.text, /compiler output/);
+});
+
+test('permission answers navigate options with arrows and confirm with enter', () => {
+  const permission = { toolName: 'write_file', target: 'a.ts', summary: 'Write file', riskLevel: 'high', category: 'file_write' };
+  let model = createRootModel();
+  [model] = update({ type: 'question', prompt: 'Allow?', active: true, permission }, model);
+  assert.equal(model.question.selected, 0);
+  [model] = update({ type: 'key', key: 'down', now: 1 }, model);
+  [model] = update({ type: 'key', key: 'down', now: 2 }, model);
+  assert.equal(model.question.selected, 2);
+  const [, commands] = update({ type: 'key', key: 'enter', now: 3 }, model);
+  assert.deepEqual(commands, [{ type: 'answer', text: 'n' }]);
+  // Letter shortcuts jump the highlight without confirming; composer stays isolated.
+  [model] = update({ type: 'question', prompt: 'Allow?', active: true, permission }, model);
+  [model] = update({ type: 'key', key: 'text', text: 'a', now: 4 }, model);
+  assert.equal(model.question.selected, 1);
+  assert.equal(model.composer.value, '');
+  const [, answers] = update({ type: 'key', key: 'enter', now: 5 }, model);
+  assert.deepEqual(answers, [{ type: 'answer', text: 'a' }]);
 });

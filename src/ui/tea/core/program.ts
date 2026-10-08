@@ -47,17 +47,17 @@ export class Program {
     } catch (error) { this.stop(); throw error; }
   }
   private enter(): void {
-    this.options.output.write('\x1b[?1049h\x1b[?25l\x1b[?2004h' + (this.options.mouse ? '\x1b[?1000h\x1b[?1006h' : ''));
+    this.options.output.write('\x1b[?1049h\x1b[?25l\x1b[?2004h' + (this.options.mouse ? '\x1b[?1000h\x1b[?1002h\x1b[?1006h' : ''));
     this.options.input.setRawMode?.(true); this.options.input.on('data', this.onData); this.options.input.resume();
     this.timer = setInterval(() => {
-      if (this.model.status.busy || this.model.leaderUntil) this.send({ type: 'tick', now: Date.now() });
+      if (this.model.status.busy || this.model.leaderUntil || this.model.status.noticeUntil || this.model.status.stoppingUntil) this.send({ type: 'tick', now: Date.now() });
       this.render();
     }, 1000 / 60);
   }
   private leave(): void {
     clearInterval(this.timer); clearTimeout(this.escapeTimer); this.options.input.off('data', this.onData);
     try { this.options.input.setRawMode?.(this.wasRaw); } finally {
-      this.options.output.write((this.options.mouse ? '\x1b[?1000l\x1b[?1006l' : '') + '\x1b[?2004l\x1b[?25h\x1b[?1049l');
+      this.options.output.write((this.options.mouse ? '\x1b[?1002l\x1b[?1000l\x1b[?1006l' : '') + '\x1b[?2004l\x1b[?25h\x1b[?1049l');
     }
   }
   send(msg: Msg): void {
