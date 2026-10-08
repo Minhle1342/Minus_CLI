@@ -413,7 +413,7 @@ export class CriticGate {
     completionState?: TurnCompletionState;
     evidenceDecision?: CompletionEvidenceDecision;
     risk?: string;
-  }): CriticEvaluation {
+  }, recordAudit = true): CriticEvaluation {
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
@@ -557,7 +557,7 @@ export class CriticGate {
     const scoreThreshold = 60;
     const approved = lspErrors.length === 0 && !highImpactUnverified && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
 
-    const auditRecord = this.auditLedger.record({
+    const auditRecord = recordAudit ? this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,
       summary: finalAnswer.slice(0, 300),
       filesModified: Array.from(targetFiles),
@@ -567,7 +567,7 @@ export class CriticGate {
       lspDiagnosticsCount: lspErrors.length,
       status: approved ? 'APPROVED' : 'REJECTED',
       reasons: reasons.length > 0 ? reasons : undefined,
-    }, session);
+    }, session) : undefined;
 
     let critiquePrompt: string | undefined;
     if (!approved) {
@@ -622,7 +622,7 @@ export class CriticGate {
   }): Promise<CriticEvaluation> {
     // The runtime and async API share the same verdict; async validation adds
     // language syntax diagnostics without dropping synchronous invariants.
-    const sharedDecision = this.evaluate(params);
+    const sharedDecision = this.evaluate(params, false);
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];

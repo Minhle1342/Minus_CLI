@@ -41,8 +41,8 @@ test('Prompt Engineering Mũi nhọn 1: getProjectDigest với Task-Conditioned 
 
   // Test 1b: Truyền query liên quan đến test -> script 'test' được đẩy lên đầu
   const testDigest = memory.getProjectDigest({ query: 'chạy kiểm thử unit test cho dự án' });
-  const testFirstPart = testDigest.split('\n').find((l) => l.startsWith('- Lệnh khả dụng:'));
-  assert.ok(testFirstPart, 'Phải có dòng Lệnh khả dụng');
+  const testFirstPart = testDigest.split('\n').find((l) => l.startsWith('- Available commands:'));
+  assert.ok(testFirstPart, 'Phải có dòng Available commands');
   assert.ok(testFirstPart.includes('"test": vitest run'), 'Script test phải có trong danh sách');
   assert.ok(testFirstPart.indexOf('"test":') < testFirstPart.indexOf('"build":'), 'Script test phải xếp trước build khi query hỏi về test');
 

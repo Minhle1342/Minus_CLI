@@ -40,6 +40,10 @@ export class HypothesisRollbackOrchestrator {
     return this.lastGreenCheckpoint;
   }
 
+  resetGreenCheckpoint(): void {
+    this.lastGreenCheckpoint = undefined;
+  }
+
   /**
    * Orchestrate rollback when a hypothesis is falsified
    */
@@ -71,6 +75,7 @@ export class HypothesisRollbackOrchestrator {
 
     if (this.lastGreenCheckpoint) {
       const outcome = await this.checkpointManager.rollbackToTaskCheckpoint(this.lastGreenCheckpoint.id).catch(() => ({ success: false }));
+      restoredFiles = 'restoredFiles' in outcome ? outcome.restoredFiles as string[] : undefined;
       if (outcome.success) {
         rolledBack = true;
         restoredCheckpoint = this.lastGreenCheckpoint;
@@ -83,6 +88,7 @@ export class HypothesisRollbackOrchestrator {
       const latest = this.checkpointManager.getLastCheckpoint();
       if (latest) {
         const outcome = await this.checkpointManager.rollbackLast().catch(() => ({ success: false }));
+        restoredFiles = 'restoredFiles' in outcome ? outcome.restoredFiles as string[] : undefined;
         if (outcome.success) {
           rolledBack = true;
           restoredCheckpoint = latest;
@@ -94,10 +100,10 @@ export class HypothesisRollbackOrchestrator {
     }
 
     const guidancePrompt = [
-      rolledBack ? '[SCOPED ROLLBACK COMPLETED]:' : '[ROLLBACK NOT PERFORMED]:',
+      rolledBack ? '[SCOPED ROLLBACK COMPLETED]:' : restoredFiles?.length ? '[SCOPED ROLLBACK PARTIALLY RESTORED]:' : '[ROLLBACK NOT PERFORMED]:',
       `Hypothesis [${hypothesisId}] was falsified by empirical test verification.`,
       restoredCheckpoint
-        ? `The workspace has been safely restored to clean checkpoint: "${restoredCheckpoint.description}" (${restoredCheckpoint.id}).`
+        ? `The scoped files were restored to checkpoint: "${restoredCheckpoint.description}" (${restoredCheckpoint.id}).`
         : failureReason,
       `👉 NEXT STEP: Formulate a distinct, new hypothesis. Do NOT repeat the falsified approach.`,
     ].join('\n');

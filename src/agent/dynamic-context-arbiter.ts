@@ -348,7 +348,7 @@ export class DynamicContextArbiter {
 
     const immutableKeys = new Set<keyof DynamicContextInputs>([
       'phaseToolAuthority', 'instructionHierarchyAnchor', 'responseLanguageDirective',
-      'completionDirective', 'rawPlanContext', 'hypothesisContext', 'hypothesisGuidance', 'domainContractContext',
+      'completionDirective', 'rawPlanContext', 'hypothesisContext', 'hypothesisGuidance', 'domainContractContext', 'phaseHandoff',
     ]);
     // Active scope and evidence precede replaceable advice. Guidance duplication
     // must not evict the user's acceptance criteria or authorized tool list.

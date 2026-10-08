@@ -100,7 +100,7 @@ test('Agent loop ends the turn (no workaround attempts) after explicit user deni
     pm.setPromptHandler(async () => 'reject');
 
     const session = new Session('session-deny-loop');
-    session.addUserMessage('Clean up the temp directory.');
+    session.addUserMessage('Execute the temp directory cleanup command once.');
     const result = await loop.run(session);
 
     assert.match(String(result), /turn ended, awaiting your direction/i);

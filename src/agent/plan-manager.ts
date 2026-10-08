@@ -385,7 +385,7 @@ export class PlanManager {
       : isToolResultFailure(result) ? 'failure' : 'success';
     const kinds = classifyToolEvidence(toolName, args, result);
     const command = extractCommandString(args, result);
-    if (toolName === 'run_command' && /\bgit\s+(?:add|commit|push|checkout|switch|fetch|pull|merge|rebase|revert|restore|stash)\b/i.test(command) && !kinds.includes('git')) kinds.push('git');
+    if (toolName === 'run_command' && kinds.length > 0 && outcome === 'success' && result.processStarted !== false && /\bgit\s+(?:add|commit|push|checkout|switch|fetch|pull|merge|rebase|revert|restore|stash)\b/i.test(command) && !kinds.includes('git')) kinds.push('git');
     if (kinds.includes('mutation') && outcome === 'success') {
       this.lastMutationSeq = this.evidenceSeq;
       activeTask.lastMutationSeq = this.evidenceSeq;
@@ -657,7 +657,7 @@ export class PlanManager {
    */
   completeTaskWithEvidence(
     taskId: number,
-    evidence?: Partial<PlanEvidence> | PlanEvidence,
+    evidence?: Partial<PlanEvidence> | PlanEvidence | Array<Partial<PlanEvidence>>,
     notes?: string,
   ): { completedTask: PlanTask; newlyReadyTaskIds: number[] } {
     const task = this.tasks.find((t) => t.id === taskId);
@@ -669,19 +669,23 @@ export class PlanManager {
     }
 
     // Ghi nhận evidence nếu có
-    if (evidence) {
+    for (const item of (Array.isArray(evidence) ? evidence : evidence ? [evidence] : [])) {
       const recorded: PlanEvidence = {
-        toolName: evidence.toolName || 'dag-scheduler',
-        kind: evidence.kind || 'verification',
-        outcome: evidence.outcome || 'success',
-        summary: evidence.summary || `Task #${taskId} executed successfully`,
-        recordedAt: evidence.recordedAt || new Date().toISOString(),
+        toolName: item.toolName || 'dag-scheduler',
+        kind: item.kind || 'verification',
+        outcome: item.outcome || 'success',
+        summary: item.summary || `Task #${taskId} executed successfully`,
+        recordedAt: item.recordedAt || new Date().toISOString(),
         seq: ++this.evidenceSeq,
-        command: evidence.command,
-        files: evidence.files,
-        ...(evidence.permissionRequestId ? { permissionRequestId: evidence.permissionRequestId } : {}),
+        command: item.command,
+        files: item.files,
+        ...(item.permissionRequestId ? { permissionRequestId: item.permissionRequestId } : {}),
       };
       task.evidence.push(recorded);
+      if (recorded.kind === 'mutation' && recorded.outcome === 'success') {
+        task.lastMutationSeq = recorded.seq || 0;
+        this.lastMutationSeq = task.lastMutationSeq;
+      }
     }
 
     if (!this.hasRequiredEvidence(task)) throw new Error(`Task #${taskId} cannot be completed without matching successful task-scoped ${this.requiredEvidenceKind(task)} evidence.`);

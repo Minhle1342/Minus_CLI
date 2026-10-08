@@ -2,6 +2,8 @@
 
 ## Phạm vi và phương pháp
 
+Phần audit dưới đây ghi nhận trạng thái trước sửa. Kết quả triển khai tiếp theo được ghi ở cuối tài liệu; các đường dẫn và số dòng lịch sử không đại diện cho bản sửa hiện tại.
+
 Theo yêu cầu, ba subagent phân tích độc lập: (1) quyền, classification, phase; (2) prompt, skills, context; (3) verification, evidence, completion. Agent chính đối chiếu Git workflow, domain contract, loop guards và rollback. Đây là phân tích source, không sửa implementation, không chạy tests hoặc thử thao tác phá hủy.
 
 GitNexus repository `Minus_CLI` chậm một commit. Refresh bằng `.gitnexus/run.cjs analyze --index-only` thất bại ở bước kiểm tra identity của analyzer. Dùng graph để định vị/call paths và CodeGraph để đọc source working tree hiện tại. Vì vậy line numbers bên dưới thuộc working tree tại thời điểm audit, không phải index cũ. Những thay đổi chưa commit có sẵn được giữ nguyên.
@@ -311,3 +313,39 @@ Nguồn API phụ: [evidence-driven-control-plane.ts:43](C:/Users/Admin/Download
 6. Prompt budget giữ authority/active task/evidence, hạ và dedup advice; hoàn thiện shadow/config semantics.
 
 Các hướng sửa ở đây là đề xuất sau audit; chưa triển khai. Một đợt sửa nên chia nhỏ theo nhóm, dùng impact trước symbol edit, rồi chạy các scenario regression khi người dùng yêu cầu kiểm tra.
+
+
+## Triển khai trong worktree riêng — 2026-10-08
+
+Worktree: `C:/Users/Admin/.codex/worktrees/policy-consistency-isolated/MinusCLI`, từ HEAD `670909ffc95e3339c2bdf79aae898043ebe5ecd4`. Các thay đổi chưa commit có sẵn đã được giữ lại khi chuyển sang worktree. Những cập nhật TUI có sẵn không được tính là sửa policy của đợt này.
+
+| Findings | Implementation hiện tại |
+|---|---|
+| A1–A6 | Dùng effect parser cho phase/read-only; allowlist không có broad bypass; always_ask không có approval channel từ chối; phase fold theo thứ tự; recovery dùng request_phase_transition; mixed/execution intent giữ scope của yêu cầu gốc. |
+| P1–P4, P6, P8–P10 | Xóa skill cũ mỗi turn, dependency activation nguyên tử với một planning owner; inspect Git không kích hoạt finishing; shadow chỉ telemetry; advice chỉ suy thành công từ outcome terminal; guidance không tự cấp quyền rollback hoặc Git mutation. |
+| P5, P7 | Verification theo contract/risk và miễn test của người dùng; phase authority, handoff, plan/evidence ưu tiên hơn advice và được giữ nguyên khi soft budget overflow. Integration advice cần file thay đổi thực sự chạm integration. |
+| C1–C5 | Dùng shared submission evaluation cho tool/plaintext; reset impacted tests mỗi turn; giữ nghĩa verification đã quan sát; evidence-off được tôn trọng; critic async chỉ ghi một audit. |
+| C6–C9 | Plan evidence gắn task/kind/operation/path; DAG chờ child thật và lấy paired observations có fence; reproduction gắn command, hypothesis, mutation version và thứ tự; expected failure không tự rollback. |
+| G1–G3 | PR inspection luôn được phép đọc; fetch/pull prerequisites trước branch/implementation khi được yêu cầu; branch actions tuần tự, chỉ tiến bước bằng kết quả tool thành công trong user scope. |
+| R1–R3 | Checkpoint bytes theo file thuộc phạm vi, giữ user dirt; rollback thất bại một phần trả lại prefix thực sự phục hồi và invalidates verification; domain test scope xét phủ định trước effect; loop detector dùng outcome/content thực tế. |
+| S1–S4 | Sandbox xét AST/CWD/arguments, merged env được lọc; reasoning guidance không tuyên bố cấp compute budget; submission-only recovery không ép điều tra sâu. |
+| API phụ | EDCP completion/acceptance đồng bộ các invariants cần thiết; AdaptiveCompute lưu pressure thực tế, dedup observations, reset history và chỉ de-escalate khi verification thực sự thành công. Chưa nối EDCP thành runtime governor mới. |
+
+Bổ sung từ tests/review: xử lý promise steering không được await; loại JSON/claim completion khỏi bằng chứng DAG; không dùng failed submit/phase/policy validation làm external blocker; lời nhắc sau submit chỉ yêu cầu findings và verification đã thiết lập.
+
+### Giới hạn được giữ rõ
+
+- Skill content tùy chỉnh không bị cắt tùy ý. Critical context có thể vượt soft budget; telemetry báo overflow, không diễn đạt thành thêm ngân sách provider.
+- EDCP và các API declarative chưa có wiring production vẫn là API, không được quảng cáo như cơ chế đang kiểm soát AgentLoop.
+- Mock test providers vẫn có miễn một số final checks dành riêng cho fixtures; provider production đi qua submission/evidence checks.
+- Graph có giới hạn suy luận dynamic dispatch/process enumeration. UNKNOWN được xác minh thêm bằng source; không diễn giải caller set rỗng thành an toàn.
+
+### Kiểm chứng
+
+- `npm test`: 1.661 passed, 0 failed, exit 0 (`.gitnexus/policy-final-npm-test.log`).
+- Toàn bộ `src/**/*.test.ts[x]` bằng Node test runner: 869 tests, 857 passed, 12 skipped, 0 failed, exit 0 (`.gitnexus/policy-final-node-tests-verified.log`). Các test bị skip không được tính là đã xác minh.
+- `npm run build`: exit 0 (`.gitnexus/policy-final-build-verified.log`).
+- `git diff --check`: exit 0; có cảnh báo chuyển LF/CRLF của Git, không có lỗi whitespace (`.gitnexus/policy-final-diff-check.log`).
+- GitNexus final receipts: `.gitnexus/policy-release-status.json`, `.gitnexus/policy-release-detect-changes.log`. Các receipt ghi HEAD, identity schema 4, content drift, incomplete reasons và phạm vi thay đổi; đọc kết quả thực tế tại các file này.
+
+Các regression mới đã chạy RED trước sửa và GREEN sau sửa theo từng batch. Full suites được chạy lại sau khi ba subagent giữ writes. Fixture clone 404 được sửa để phản ánh đúng tool thực thi, cặp call/result, terminal outcome và chỉ mô tả thao tác thực tế đã gọi.

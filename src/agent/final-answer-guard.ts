@@ -318,8 +318,8 @@ export class FinalAnswerGuard {
       recovery: 'execute-task',
       continuationPrompt: [
         '[SYSTEM CAPABILITY GUARD]: Your previous answer denied access to Git tools or permissions without attempting the user-authorized operation.',
-        `The following requested tools are available and untried: ${untriedTools.join(', ')}.`,
-        'Continue now: inspect status/diff, verify changes, then call the dedicated Git tools requested by the user.',
+        `The following requested Git operations have an available, untried execution path: ${untriedTools.join(', ')}.`,
+        'Continue only the user-authorized Git operation using an available tool; when dedicated tools are absent, use run_command with the corresponding git command. Inspect relevant state and preserve unrelated changes.',
         'Only report a credential, remote, branch-protection, or repository blocker after a relevant tool returns that concrete failure.',
       ].join('\n'),
     };

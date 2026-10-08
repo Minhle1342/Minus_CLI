@@ -33,7 +33,9 @@ const planningIntent = /(?:^|\s)\/plan(?:\s|$)|\[planning mode request\]|\b(?:wr
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
     const rawPrompt = input.request || input.userPrompt || input.prompt || '';
-    const text = [rawPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
+    // Quoted documents/commands are data, not authorization for execution or edits.
+    const intentPrompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
+    const text = [intentPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
     const normalizedText = normalizeRequestIntentText(text);
     const reasons: string[] = [];
     let taskClass: TaskClass = 'question';
@@ -49,13 +51,18 @@ export class ClassificationEngine {
       phase = 'plan';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
       reasons.push('EXPLICIT_PLANNING_INTENT');
-    } else if (isReadOnlyRequest(rawPrompt) && !input.hasUnverifiedChanges) {
+    } else if (isReadOnlyRequest(intentPrompt) && !input.hasUnverifiedChanges) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
     } else if (releaseIntent.test(normalizedText)) {
       taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
+    } else if (/^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:(?:run|execute|chay|thuc thi|test|verify|lint|typecheck|bien dich)\b|build\s+(?:the\s+)?(?:project|repo|repository|package)\b)/i.test(normalizeRequestIntentText(intentPrompt))
+      && !normalizeRequestIntentText(intentPrompt).split(/\b(?:and then|then|and|sau do|roi|va)\b/).slice(1).some(part => MUTATION_INTENT.test(part))) {
+      taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
+      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
+      reasons.push('EXPLICIT_EXECUTION_INTENT');
     } else if (
       (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
       || (input.previous?.phase === 'verify' && ['run_command', 'run_test_suite', 'run_node_script', 'get_diagnostics'].includes(input.lastToolName || '') && !input.lastToolFailed)

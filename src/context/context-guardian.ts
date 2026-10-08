@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Session, SessionMessage } from '../session/session.js';
+import { collectCompletionObservations, hasObservedMutation, observedMutationFiles, toolResultFailed } from '../agent/completion-observations.js';
 
 export type PriorityLevel = 'P0' | 'P1' | 'P2';
 
@@ -126,7 +127,7 @@ export class ContextGuardian {
   }): ExtractedCriticalContext {
     const history = session.getHistory();
     const mutatedFilesSet = new Set<string>(additionalContext?.mutatedFiles || []);
-    const workingCommandsSet = new Set<string>(additionalContext?.workingCommands || []);
+    const workingCommandsSet = new Set<string>();
     const technicalDecisions: TechnicalDecision[] = [];
     const taskState: TaskStateItem[] = [];
     const appliedFixes: AppliedFix[] = [];
@@ -138,46 +139,29 @@ export class ContextGuardian {
     const openQuestions: string[] = [];
     const attemptHistory: string[] = [];
 
-    // Derive verified commands from paired session events. A command name alone
-    // is never evidence that it succeeded.
-    const commandCalls = new Map<string, string>();
-    for (const event of session.getEvents()) {
-      if (event.type === 'tool/call' && event.data.toolCallId && event.data.toolName === 'run_command') {
-        const command = String(event.data.args?.command || '').trim();
-        if (command) commandCalls.set(event.data.toolCallId, command);
+    // Historical outcomes require a consumable call/result pair, never an attempted
+    // invocation or a command name supplied without an observed completion.
+    for (const observation of collectCompletionObservations(session)) {
+      const { toolName, args, payload: result } = observation;
+      const status = String(result.status || '').toLowerCase();
+      if ((observation.result.data.toolName && observation.result.data.toolName !== toolName)
+        || toolResultFailed(result) || result.success === false || result.error || result.errorCode
+        || result.processStarted === false || result.dryRun === true || result.background === true
+        || result.commandOutcome === 'blocked_preflight'
+        || result.masked === true || result.superseded === true
+        || ['running', 'pending', 'background', 'started'].includes(status)) continue;
+      if (hasObservedMutation(toolName, result)) {
+        for (const file of observedMutationFiles(toolName, args, result)) mutatedFilesSet.add(file);
       }
-      if (event.type === 'tool/result' && event.data.toolCallId) {
-        const command = commandCalls.get(event.data.toolCallId);
-        const result = event.data.result as Record<string, any> | undefined;
-        const succeeded = result?.exitCode === 0 || result?.success === true;
-        if (command && succeeded) workingCommandsSet.add(command);
+      if (toolName === 'run_command' && result.exitCode === 0) {
+        const command = String(args.command || '').trim();
+        if (command) workingCommandsSet.add(command);
       }
     }
 
     // 1. Quét tin nhắn trong history để thu thập tool calls, tool responses, và assistant outputs
     for (const msg of history) {
       for (const part of (msg.parts || [])) {
-        // Thu thập file mutations từ tool calls
-        if (part.functionCall) {
-          const fn = String(part.functionCall.name || '');
-          const args = (part.functionCall.args as Record<string, any>) || {};
-
-          if (fn && ['replace_text', 'write_file', 'create_file', 'apply_patch', 'delete_file'].includes(fn)) {
-            const targetPath = String(args.path || args.filePath || '').trim();
-            if (targetPath) {
-              mutatedFilesSet.add(targetPath);
-              codeMutations.push({
-                path: targetPath,
-                nature: fn === 'delete_file' ? 'DELETED' : (fn === 'create_file' ? 'CREATED' : 'MODIFIED'),
-                rationale: `Applied via ${fn}`,
-              });
-            }
-          }
-
-          // Verification commands are recorded only after a paired successful
-          // tool/result event, handled above.
-        }
-
         // Thu thập error resolutions từ tool results
         if (part.functionResponse) {
           const resp = part.functionResponse.response as any;
@@ -200,7 +184,7 @@ export class ContextGuardian {
                   technicalDecisions.push({
                     topic: 'Architecture & Design Pattern',
                     decision: clean.slice(0, 180),
-                    rationale: 'Established to guarantee stability, prevent regressions, and enhance maintainability',
+                    rationale: 'Historical statement; rationale and current applicability require revalidation',
                     affectedFiles: Array.from(mutatedFilesSet).slice(0, 5),
                   });
                   break;
@@ -211,12 +195,7 @@ export class ContextGuardian {
 
           // Phát hiện bug fixes
           if (text.includes('Đã sửa') || text.includes('Fixed') || text.includes('Sửa lỗi') || text.includes('Root Cause') || text.includes('Nguyên nhân gốc')) {
-            appliedFixes.push({
-              symptom: 'Detected incompatibility or test failure',
-              rootCause: 'Caused by incorrect assumptions about data or parameter configuration',
-              exactSolution: text.slice(0, 250),
-              affectedFiles: Array.from(mutatedFilesSet).slice(0, 3),
-            });
+            attemptHistory.push(`Unverified historical fix statement: ${text.slice(0, 250)}`);
           }
 
           // Phát hiện convention / pattern
@@ -241,7 +220,7 @@ export class ContextGuardian {
     return {
       projectId: path.basename(this.workspaceDir),
       timestamp: new Date().toISOString(),
-      phase: additionalContext?.projectPhase || 'Implementation & Verification',
+      phase: additionalContext?.projectPhase || 'Unspecified historical phase',
       p0: {
         technicalDecisions,
         taskState,
@@ -256,10 +235,7 @@ export class ContextGuardian {
       },
       p1: {
         discoveredPatterns,
-        componentDependencies: [
-          'src/context/context-guardian.ts depends on Session and Workspace',
-          'src/agent/agent-loop.ts integrates ContextGuardian at the compactor trigger step',
-        ],
+        componentDependencies,
         userPreferences,
         projectContext: {
           keyFiles: Array.from(mutatedFilesSet),

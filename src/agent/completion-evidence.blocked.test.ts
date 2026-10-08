@@ -6,10 +6,10 @@ import { CompletionEvidenceGate } from './completion-evidence.js';
 function failedCloneSession(): Session {
   const s = new Session('test-blocked-404');
   s.append('turn/start', { turn: 1 } as any);
-  s.append('tool/call', { turn: 1, toolName: 'run_node_script', toolCallId: 'c1', args: {} } as any);
+  s.append('tool/call', { turn: 1, toolName: 'run_command', toolCallId: 'c1', args: { command: 'git clone https://github.com/example/missing-repo.git' } } as any);
   s.append('tool/result', {
-    turn: 1, toolName: 'run_node_script', toolCallId: 'c1',
-    result: { success: false, exitCode: 1, error: "remote: Repository not found. fatal: repository not found", stderr: 'Repository not found' },
+    turn: 1, toolName: 'run_command', toolCallId: 'c1',
+    result: { success: false, processStarted: true, commandOutcome: 'failed_unexpected', exitCode: 1, error: "remote: Repository not found. fatal: repository not found", stderr: 'Repository not found' },
   } as any);
   return s;
 }
@@ -27,7 +27,7 @@ describe('completion gate blocked investigation (repo 404)', () => {
     const s = failedCloneSession();
     const gate = new CompletionEvidenceGate();
     const d = gate.evaluate(
-      'Kho luu tru khong ton tai (404 Not Found). Da thu git clone va ls-remote deu that bai do repository not found, khong the tiep tuc.',
+      'Da thu git clone; lenh that bai voi Repository not found. Chua sua code vi chua truy cap duoc kho luu tru.',
       s,
       { turn: 1, codeChangeRequired: true, taskClass: 'feature', resolutionType: 'investigation_only' },
     );

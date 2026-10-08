@@ -10,6 +10,13 @@ import {
 
 const policy = new StepPromptPolicy();
 
+function inspectedBaseline() {
+  return ['git status', 'git diff', 'git diff --cached'].map((command, index) => ({
+    toolName: 'run_command', args: { command }, call: { seq: index * 2 + 1 },
+    result: { seq: index * 2 + 2 }, payload: { exitCode: 0, success: true, processStarted: true },
+  })) as any;
+}
+
 function makeClassification(overrides: Partial<ClassificationDecision> = {}): ClassificationDecision {
   return {
     id: 'classification-test',
@@ -86,19 +93,24 @@ test('Git gating: Baseline inspection is triggered in explore phase with git sta
 
 test('Git gating: Branch isolation is triggered in plan phase with branch intent', () => {
   const ctx = makeContext({
+    userRequest: 'please create branch feature/login',
+    gitWorkflowObservations: inspectedBaseline(),
     activeStepQuery: 'Tạo branch mới để isolate tính năng đăng nhập và checkout -b feature/login',
     classification: makeClassification({ phase: 'plan' }),
   });
   const decision = policy.decide(ctx, 'enforce');
 
   assert.equal(decision.selectedGitPlaybook, 'gitBranch');
-  assert.equal(decision.gitPlaybookPrompt, GIT_WORKFLOW_PROMPTS.gitBranch);
+  assert.ok(decision.gitPlaybookPrompt.endsWith(GIT_WORKFLOW_PROMPTS.gitBranch));
+  assert.match(decision.gitPlaybookPrompt, /Current stage: Branch/);
   assert.ok(decision.gitPlaybookPrompt.includes('git checkout -b'));
   assert.ok(decision.reasonCodes.includes('GIT_PLAYBOOK_GITBRANCH'));
 });
 
-test('Git gating: Atomic staging & commit is triggered when tests are verified', () => {
+test('Git gating: Atomic staging & commit requires explicit scope and observed stage', () => {
   const ctx = makeContext({
+    userRequest: 'please git commit',
+    gitWorkflowObservations: inspectedBaseline(),
     activeStepQuery: 'Tất cả test đã pass, chuẩn bị đóng gói commit',
     classification: makeClassification({ phase: 'verify' }),
     hasVerifiedTests: true,
@@ -107,7 +119,8 @@ test('Git gating: Atomic staging & commit is triggered when tests are verified',
   const decision = policy.decide(ctx, 'enforce');
 
   assert.equal(decision.selectedGitPlaybook, 'gitCommit');
-  assert.equal(decision.gitPlaybookPrompt, GIT_WORKFLOW_PROMPTS.gitCommit);
+  assert.ok(decision.gitPlaybookPrompt.endsWith(GIT_WORKFLOW_PROMPTS.gitCommit));
+  assert.match(decision.gitPlaybookPrompt, /Current stage: Commit/);
   assert.ok(decision.gitPlaybookPrompt.includes('git add <file1> <file2>'));
   assert.ok(decision.gitPlaybookPrompt.includes('NEVER use `git add .`'));
   assert.ok(decision.reasonCodes.includes('GIT_PLAYBOOK_GITCOMMIT'));
@@ -115,6 +128,8 @@ test('Git gating: Atomic staging & commit is triggered when tests are verified',
 
 test('Git gating: PR enhancement playbook is triggered for PR review and enhancement queries', () => {
   const ctx = makeContext({
+    userRequest: 'please prepare PR description',
+    gitWorkflowObservations: inspectedBaseline(),
     activeStepQuery: 'Tạo mô tả PR chi tiết với verification proof và risk assessment /git-pr-workflows-pr-enhance',
     classification: makeClassification({ phase: 'verify' }),
     hasVerifiedTests: true,
@@ -122,7 +137,8 @@ test('Git gating: PR enhancement playbook is triggered for PR review and enhance
   const decision = policy.decide(ctx, 'enforce');
 
   assert.equal(decision.selectedGitPlaybook, 'gitPrEnhance');
-  assert.equal(decision.gitPlaybookPrompt, GIT_WORKFLOW_PROMPTS.gitPrEnhance);
+  assert.ok(decision.gitPlaybookPrompt.endsWith(GIT_WORKFLOW_PROMPTS.gitPrEnhance));
+  assert.match(decision.gitPlaybookPrompt, /Current stage: PR/);
   assert.ok(decision.gitPlaybookPrompt.includes('Structured PR Description'));
   assert.ok(decision.gitPlaybookPrompt.includes('Review Checklist'));
   assert.ok(decision.gitPlaybookPrompt.includes('Verification Evidence'));
@@ -131,20 +147,19 @@ test('Git gating: PR enhancement playbook is triggered for PR review and enhance
   assert.ok(decision.reasonCodes.includes('GIT_PLAYBOOK_GITPRENHANCE'));
 });
 
-test('Git gating: Safe rollback & stash is triggered on consecutive failures or revert query', () => {
+test('Git gating: failures do not authorize rollback; explicit restore scope does', () => {
   const ctxFails = makeContext({
     activeStepQuery: 'Kiểm tra lỗi build',
     classification: makeClassification({ phase: 'implement' }),
     consecutiveFailures: 2,
   });
   const decisionFails = policy.decide(ctxFails, 'enforce');
-  assert.equal(decisionFails.selectedGitPlaybook, 'gitRollback');
-  assert.equal(decisionFails.gitPlaybookPrompt, GIT_WORKFLOW_PROMPTS.gitRollback);
-  assert.ok(decisionFails.gitPlaybookPrompt.includes('git restore <path>'));
-  assert.ok(decisionFails.gitPlaybookPrompt.includes('NEVER execute destructive `git reset --hard`'));
-  assert.ok(decisionFails.reasonCodes.includes('GIT_PLAYBOOK_GITROLLBACK'));
+  assert.equal(decisionFails.selectedGitPlaybook, undefined);
+  assert.equal(decisionFails.gitPlaybookPrompt, '');
 
   const ctxRevert = makeContext({
+    userRequest: 'please git restore src/a.ts',
+    gitWorkflowObservations: inspectedBaseline(),
     activeStepQuery: 'Lỗi nặng quá, cần rollback hoặc stash lại thay đổi',
     classification: makeClassification({ phase: 'implement' }),
     consecutiveFailures: 0,

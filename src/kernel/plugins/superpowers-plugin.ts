@@ -174,6 +174,8 @@ export class SuperpowersPlugin implements AgentPlugin {
       this.onToolAfter = undefined;
     }
     ctx.agentHooks.unregister('superpowers-activator');
+    for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
+    this.registeredSkillSections.clear();
   }
 
   getSkillRegistry(): SkillRegistry {

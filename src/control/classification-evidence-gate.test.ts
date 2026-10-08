@@ -10,12 +10,12 @@ test('R2 bugfix skips the evidence gate and goes straight to implement', () => {
   assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
 });
 
-test('R3 work without an explicit planning request goes to implement', () => {
+test('R3 large work requires a plan before implementation', () => {
   const engine = new ClassificationEngine();
   const decision = engine.classify({ request: 'Refactor the authentication system architecture across all modules' });
   assert.equal(decision.taskClass, 'refactor');
   assert.equal(decision.risk, 'R3');
-  assert.equal(decision.phase, 'implement');
+  assert.equal(decision.phase, 'plan');
   assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
 });
 

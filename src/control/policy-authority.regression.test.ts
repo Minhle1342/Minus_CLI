@@ -12,6 +12,46 @@ import { applyPhaseAuthority, recordImplementationCompleted, recordVerificationO
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 import { IsolatedExecutionSubstrate } from '../execution/isolated-substrate.js';
 import { checkPhaseToolEffect } from './phase-tool-effects.js';
+import { requestPhaseTransition } from '../agent/phase-lifecycle.js';
+
+test('Git inspection is exposed but readonly permission and phase still deny Git writes', async () => {
+  const registry = new ToolRegistry();
+  const tool = { name: 'git_command', description: 'fixture', parameters: {} as any, execute: async () => ({}) };
+  const classification = new ClassificationEngine().classify({ request: 'Review the changes' });
+  assert.ok(new ThisTurnToolGate().decide(classification, [tool]).allowedToolNames.includes('git_command'));
+  const permission = new PermissionManager('read_only');
+  assert.equal((await permission.checkPermission('git_command', { subcommand: 'status', args: ['--short'] })).allowed, true);
+  assert.equal((await permission.checkPermission('git_command', { subcommand: 'commit', args: ['-m', 'change'] })).allowed, false);
+});
+
+test('explicit execution has execution phase while planning and explanation retain readonly scope', () => {
+  const engine = new ClassificationEngine();
+  for (const request of ['Run once', 'Execute the batch', 'Run npm test', 'Build the project', 'Chạy script này', 'Run test that prints "do not edit code"']) {
+    const classification = engine.classify({ request });
+    assert.equal(classification.phase, 'verify', request);
+    assert.ok(classification.requiredCapabilities.includes('execute'));
+    assert.equal(classification.requiredCapabilities.includes('edit'), false);
+  }
+  for (const request of ['Explain how to run npm test', 'Review this README: "Run npm test"', "Don't edit code, don't run npm test", 'Read-only: run npm test', 'Make a plan to run tests']) {
+    assert.ok(['explore', 'plan'].includes(engine.classify({ request }).phase), request);
+  }
+});
+
+test('readonly or planning deliverables cannot authorize implementation by phase request', async () => {
+  for (const request of ['Review this function', 'Make a plan to fix this function']) {
+    const session = new Session();
+    const classification = new ClassificationEngine().classify({ request });
+    const decision = requestPhaseTransition(session, 1, classification, { targetPhase: 'implement', rationale: 'ready', evidenceRefs: ['src/a.ts'] }, { hasPlan: true, evidenceSufficient: true });
+    assert.equal(decision.accepted, false, request);
+  }
+  let executions = 0;
+  const registry = new ToolRegistry();
+  registry.register({ name: 'replace_text', description: 'fixture', parameters: { type: 'OBJECT' } as any, execute: async () => { executions++; return {}; } });
+  const runner = new ToolRunner(registry, new Workspace(process.cwd()), new PermissionManager('auto_approve'));
+  const result = await runner.run('replace_text', {}, { classificationPhase: 'implement', userRequest: 'Read-only: inspect this function' });
+  assert.equal(result.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
+  assert.equal(executions, 0);
+});
 
 test('universal runner guards actual command effects in planning and exploration', async () => {
   let executions = 0;
@@ -35,7 +75,7 @@ test('read-only effects deny execution alternatives while retaining inspection a
   for (const name of ['run_node_script', 'run_test_suite', 'write_to_file', 'start_background_task', 'browser_click', 'unknown_plugin_effect']) {
     assert.equal((await permission.checkPermission(name, {})).allowed, false, name);
   }
-  for (const name of ['read_file', 'codegraph_explore', 'create_plan', 'submit_solution']) {
+  for (const name of ['read_file', 'codegraph_explore', 'create_plan', 'submit_solution', 'browser_screenshot', 'browser_wait']) {
     assert.equal((await permission.checkPermission(name, {})).allowed, true, name);
   }
   assert.equal((await permission.checkPermission('run_command', { command: 'git status -s' })).allowed, true);

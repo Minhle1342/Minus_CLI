@@ -6,6 +6,8 @@ import type { PermissionManager } from '../security/permission-manager.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
+import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
+import { isReadOnlyRequest } from '../control/request-intent.js';
 import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
 
@@ -441,6 +443,22 @@ export class ToolRunner {
         durationMs: Date.now() - startTime,
         guardianDiagnosis: diagnosis,
       };
+    }
+
+    // Phase authority applies to every dispatch path, including speculative calls.
+    const scopedRequest = context?.userRequest?.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ') || '';
+    const readOnlyScope = Boolean(scopedRequest && isReadOnlyRequest(scopedRequest));
+    if (context?.classificationPhase || readOnlyScope) {
+      const effect = checkPhaseToolEffect(tool, executionArgs, readOnlyScope ? 'explore' : context!.classificationPhase!, this.workspace.rootDir);
+      if (!effect.allowed) {
+        return {
+          toolName, args: executionArgs,
+          result: { success: false, processStarted: false, errorCode: 'PHASE_TOOL_EFFECT_BLOCKED',
+            error: effect.reason, retryable: true },
+          durationMs: Date.now() - startTime,
+          shadowObservation,
+        };
+      }
     }
 
     // Stage 3: Workspace & Safety Policy Check

@@ -67,7 +67,7 @@ test('read-only exploration can inspect Git history through guarded run_command'
   const mutationAttempt = await runner.run('run_command', {
     command: 'npm install package-that-must-not-run',
   }, context);
-  assert.equal(mutationAttempt.result.errorCode, 'APPROVAL_REQUIRED');
+  assert.equal(mutationAttempt.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
 });
 
 test('adaptive tool budget scales generously for hard tasks and large complexity', () => {

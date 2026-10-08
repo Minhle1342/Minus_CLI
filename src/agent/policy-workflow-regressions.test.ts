@@ -40,6 +40,16 @@ test('fetch alone still uses Sync and unauthorized fetch remains blocked', () =>
   assert.match(checkGitWorkflowCall(workflow(request, []), request, 'run_command', { command: 'git fetch origin' })!, /outside/);
 });
 
+test('explicit pull can complete a remote prerequisite before implementation', () => {
+  const request = 'please git pull origin then fix the code and git commit';
+  const state = workflow(request, baseline, true);
+  assert.equal(state.stage, 'Inspect');
+  assert.ok(state.pending.includes('pull'));
+  assert.equal(checkGitWorkflowCall(state, request, 'run_command', { command: 'git pull origin' }), undefined);
+  assert.equal(workflow(request, [...baseline, outcome(8, 'git pull origin')], true).stage, 'Implement');
+  assert.equal(workflow(request, [...baseline, outcome(8, 'git pull origin', { exitCode: 1, success: false })], true).stage, 'Inspect');
+});
+
 test('multiple branch actions require their own ordered successful outcomes', () => {
   const request = 'please create branch feature/new then delete branch obsolete';
   const first = workflow(request);

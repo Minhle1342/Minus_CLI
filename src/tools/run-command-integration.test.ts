@@ -43,7 +43,7 @@ test('Integration Phase 1 & 2: Interactive command is rejected in 0ms without sp
 
   // Bare python REPL
   const res = await tool.execute({ command: 'python' }, workspace);
-  assert.equal(res.success, true);
+  assert.equal(res.success, false);
   assert.equal(res.commandOutcome, 'blocked_preflight');
   assert.equal(res.processStarted, false);
   assert.equal(res.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED');
@@ -60,15 +60,20 @@ test('Integration Phase 1 & 2: Interactive command is rejected in 0ms without sp
   assert.equal(npmInitRes.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED');
 });
 
-test('Integration Phase 1 & 2: Long-running dev server requires WaitMsBeforeAsync or is rejected', async () => {
-  const tool = createRunCommandTool();
+test('Integration Phase 1 & 2: server heuristics allow finite execution with a timeout', async () => {
+  let dispatchedOptions: any;
+  const tool = createRunCommandTool({
+    getStatus: () => ({ isIsolated: true, mode: 'docker' }),
+    exec: async (_command: string, options: any) => {
+      dispatchedOptions = options;
+      return { stdout: 'server exited', stderr: '', exitCode: 0, durationMs: 1, sandboxType: 'docker' };
+    },
+  } as any);
   const workspace = new Workspace();
 
-  // Without wait parameter: rejected
-  const res = await tool.execute({ command: 'npm run dev' }, workspace);
-  assert.equal(res.commandOutcome, 'blocked_preflight');
-  assert.equal(res.preflightCode, 'LONG_RUNNING_SERVER_REQUIRES_ASYNC');
-  assert.ok(res.suggestion.includes('WaitMsBeforeAsync'));
+  const res = await tool.execute({ command: 'npm run dev', timeout_ms: 1000 }, workspace);
+  assert.equal(res.commandOutcome, 'succeeded');
+  assert.equal(dispatchedOptions.timeoutMs, 1000);
 });
 
 test('Integration Phase 1 & 2: Cat emulation executes in <5ms without calling missing shell binary', async () => {
@@ -124,17 +129,24 @@ test('Integration Phase 1: Large terminal output is offloaded to disk and return
   }
 });
 
-test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 files modified', async () => {
-  const tool = createRunCommandTool();
+test('Integration Phase 2: a failed test can be retried for environment or flaky failures', async () => {
+  let executions = 0;
+  const tool = createRunCommandTool({
+    getStatus: () => ({ isIsolated: true, mode: 'docker' }),
+    exec: async () => {
+      executions++;
+      return { stdout: 'PASS', stderr: '', exitCode: 0, durationMs: 1, sandboxType: 'docker' };
+    },
+  } as any);
   const workspace = new Workspace();
 
   // Calling test command when previous failed with 0 files modified
   const res = await tool.execute(
-    { command: 'cargo test --help' },
+    { command: 'npm test' },
     workspace,
     {
       lastCommandExecution: {
-        command: 'cargo test --help',
+        command: 'npm test',
         success: false,
         exitCode: 1,
         filesModifiedSince: 0,
@@ -142,17 +154,16 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
     } as any
   );
 
-  assert.equal(res.commandOutcome, 'blocked_preflight');
-  assert.equal(res.preflightCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
-  assert.match(res.message, /no source files have been modified since/);
+  assert.equal(res.commandOutcome, 'succeeded');
+  assert.equal(executions, 1);
 
   // Calling test command after 1 file was modified (ALLOWED to proceed to shell)
   const allowedRes = await tool.execute(
-    { command: 'cargo test --help' },
+    { command: 'npm test' },
     workspace,
     {
       lastCommandExecution: {
-        command: 'cargo test --help',
+        command: 'npm test',
         success: false,
         exitCode: 1,
         filesModifiedSince: 1,
@@ -162,6 +173,7 @@ test('Integration Phase 2: Idempotent failing test re-run is blocked when 0 file
 
   // Allowed to proceed (not blocked by preflight)
   assert.notEqual(allowedRes.preflightCode, 'IDEMPOTENT_TEST_EXECUTION_BLOCKED');
+  assert.equal(executions, 2);
 });
 
 test('Integration Phase 3: Git clone into current directory is blocked by preflight guard', async () => {

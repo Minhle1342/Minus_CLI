@@ -1,3 +1,4 @@
+import { AdaptiveComputeController } from '../control-plane/reasoning/adaptive-compute-controller.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SkillRegistry } from '../skills/skill-registry.js';
@@ -11,6 +12,7 @@ import { resolvePhaseDynamicGuidance, CORE_SYSTEM_PROMPT } from '../llm/prompt-s
 import { SuperpowersPlugin } from '../kernel/plugins/superpowers-plugin.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { StepPromptPolicy } from './step-prompt-policy.js';
+import { FinalAnswerGuard } from './final-answer-guard.js';
 import { ContextGuardian } from '../context/context-guardian.js';
 
 test('inspection Git intent never activates finishing or worktree skills', () => {
@@ -153,4 +155,87 @@ test('successful verification advice preserves remaining workflow and read-only 
   assert.doesNotMatch(checked.guidance, /submit_solution.*immediately|empirical proof of correctness/);
   const submitted = advisor.advise({hasSubmittedSolution:true,lastToolResult:{submitted:true,resolutionType:'investigation_only'}});
   assert.doesNotMatch(submitted.guidance, /verified with empirical evidence/);
+});
+
+
+test('guardian requires paired completed outcomes rather than attempts or success prose', () => {
+  const session = new Session();
+  session.addModelMessage({functionCalls:[{id:'attempt',name:'write_file',args:{path:'attempt.ts'}}]});
+  const observe = (id: string, name: string, args: any, result: any) => {
+    session.append('tool/call', {toolCallId:id,toolName:name,args});
+    session.addToolResultWithId(name,result,id);
+  };
+  observe('failed','write_file',{path:'failed.ts'},{success:false,error:'denied'});
+  observe('good','write_file',{path:'good.ts'},{success:true});
+  observe('background','run_command',{command:'npm test'},{success:true,status:'running',exitCode:0});
+  observe('blocked','run_command',{command:'npm run build'},{success:true,exitCode:0,processStarted:false});
+  observe('dry','run_command',{command:'npm run lint'},{success:true,exitCode:0,dryRun:true});
+  observe('async','run_command',{command:'npm run async'},{success:true,exitCode:0,background:true});
+  observe('noop','write_file',{path:'noop.ts'},{success:true,noChanges:true});
+  observe('passed','run_command',{command:'tsc --noEmit'},{success:true,exitCode:0});
+  session.addModelMessage({text:'Fixed: Root Cause was wrong parameters.'});
+  const data = new ContextGuardian().extractCriticalContext(session,{workingCommands:['unobserved command']});
+  assert.deepEqual(data.p0.codeMutations.map(item=>item.path),['good.ts']);
+  assert.deepEqual(data.p0.workingCommands,['tsc --noEmit']);
+  assert.deepEqual(data.p0.appliedFixes,[]);
+  assert.ok(data.p2.attemptHistory.some(item=>item.includes('Fixed: Root Cause')));
+});
+
+test('guardian rejects mismatched and cross-turn observations', () => {
+  const session = new Session();
+  session.append('tool/call',{toolCallId:'mismatch',toolName:'write_file',args:{path:'wrong.ts'}});
+  session.addToolResultWithId('read_file',{success:true},'mismatch');
+  session.append('tool/call',{toolCallId:'stale',toolName:'run_command',args:{command:'npm test'}});
+  session.append('turn/start',{turn:2});
+  session.addToolResultWithId('run_command',{success:true,exitCode:0},'stale');
+  const data = new ContextGuardian().extractCriticalContext(session);
+  assert.deepEqual(data.p0.codeMutations,[]);
+  assert.deepEqual(data.p0.workingCommands,[]);
+});
+
+test('plugin dispose removes owned skills while preserving unrelated prompt sections', async () => {
+  const plugin = new SuperpowersPlugin();
+  const assembler = new PromptAssembler();
+  assembler.register({id:'unrelated',content:'Preserve this section',priority:1});
+  let hook: any;
+  const ctx = {workspace:{rootDir:process.cwd()},tools:{register(){}},events:{on(){},off(){}},
+    agentHooks:{register(_name:string,hooks:any){hook=hooks['agent/turn-start'];},unregister(){}},systemPrompt:assembler};
+  await plugin.apply(ctx as any);
+  const session = new Session();
+  session.addUserMessage('Create a plan for this feature');
+  await hook({session});
+  assert.ok(assembler.list().some(id=>id.includes('writing-plans')));
+  plugin.dispose(ctx as any);
+  assert.deepEqual(assembler.list(),['unrelated']);
+});
+
+test('Git capability recovery uses the available shell without expanding authorization', () => {
+  const result = new FinalAnswerGuard().evaluate('I cannot access git tools to commit changes.',
+    {userRequest:'Commit these changes',availableToolNames:['run_command']});
+  assert.equal(result.reason,'unverified-capability-denial');
+  assert.match(result.continuationPrompt || '',/run_command/);
+  assert.match(result.continuationPrompt || '',/user-authorized/);
+  assert.doesNotMatch(result.continuationPrompt || '',/call the dedicated Git tools/);
+});
+
+
+test('latent adaptive compute reports observed pressure and deduplicates reevaluation', () => {
+  const controller = new AdaptiveComputeController();
+  assert.equal(controller.getState().pressure.taskRisk,0);
+  const pressure = {taskRisk:.8,uncertainty:.2,blastRadius:.1,failureCount:0,stagnationScore:0,hypothesisEntropy:0,verificationFailures:0};
+  assert.equal(controller.evaluatePressure(pressure).action,'ESCALATE');
+  assert.equal(controller.evaluatePressure({...pressure}).action,'MAINTAIN');
+  assert.deepEqual(controller.getState().pressure,pressure);
+  assert.equal(controller.evaluatePressure(pressure,{observationId:'new-risk-observation'}).action,'ESCALATE');
+  assert.equal(controller.evaluatePressure(pressure,{observationId:'new-risk-observation'}).action,'MAINTAIN');
+  const low = {...pressure,taskRisk:0};
+  assert.equal(controller.evaluatePressure(low).action,'MAINTAIN');
+  assert.equal(controller.evaluatePressure(low,{observationId:'verified-1',verificationSucceeded:true}).action,'DEESCALATE');
+  assert.equal(controller.evaluatePressure(low,{observationId:'verified-1',verificationSucceeded:true}).action,'MAINTAIN');
+  const observed = controller.getState();observed.pressure.taskRisk=1;
+  assert.equal(controller.getState().pressure.taskRisk,0);
+  controller.reset();
+  assert.equal(controller.getCurrentTier(),1);
+  assert.deepEqual(controller.getState().transitions,[]);
+  assert.equal(controller.getState().pressure.uncertainty,0);
 });

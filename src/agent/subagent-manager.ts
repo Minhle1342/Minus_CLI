@@ -35,7 +35,7 @@ export type SubagentFactory = (
  * the parent session event log, so completion survives process boundaries.
  */
 export class SubagentManager {
-  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController }>();
+  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session }>();
   private completionListeners = new Map<string, Array<(handle: SubagentHandle) => void>>();
   private counter = 0;
   private boundSession?: Session;
@@ -213,6 +213,10 @@ export class SubagentManager {
     return entry ? { ...entry.handle } : undefined;
   }
 
+  getExecutionSession(id: string): Session | undefined {
+    return this.handles.get(id)?.executionSession;
+  }
+
   list(): SubagentHandle[] {
     return Array.from(this.handles.values()).map(({ handle }) => ({ ...handle }));
   }
@@ -270,6 +274,8 @@ export class SubagentManager {
   }
 
   private launch(handle: SubagentHandle, session: Session, options: SubagentOptions, controller: AbortController): void {
+    const entry = this.handles.get(handle.id);
+    if (entry) entry.executionSession = session;
     let loop: AgentLoop;
     try {
       loop = this.factory(handle.id, session, options, controller.signal);

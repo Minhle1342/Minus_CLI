@@ -121,7 +121,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
 
     const result = await runner.run('write_file', { path: 'src/observed.ts', content: 'export {};' });
     assert.equal(result.result.success, true);
-    assert.match(result.result._guardian_warnings?.[0] || '', /EVIDENCE_GATE_OBSERVE/);
+    assert.match(result.result._guardian_warnings?.[0] || '', /UNVERIFIED_MUTATION_ADVISORY/);
   });
 
   it('3. Stage 0 cung cấp Actionable Guidance và Guardian Diagnosis khi bị từ chối quyền theo phase', async () => {
@@ -152,9 +152,9 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     const res = await runner.run('deploy_production', { target: 'prod' }, ctx);
     assert.equal(res.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
     assert.match(res.result.error, /phase "plan"/);
-    assert.match(res.result.error, /create_plan/);
+    assert.match(res.result.error, /request_phase_transition/);
     assert.equal(res.guardianDiagnosis?.category, 'AUTHORIZATION_DENIED');
-    assert.match(String(res.guardianDiagnosis?.recoveryAction), /create_plan/);
+    assert.match(String(res.guardianDiagnosis?.recoveryAction), /request_phase_transition/);
   });
 
   it('4. Stage 3 rà soát an ninh cho mọi alias đường dẫn (filePath, file, path)', async () => {
@@ -252,7 +252,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
       decisionId: 'decision-3-modes',
       allowedToolNames: allowed,
       allowedToolSetHash: hash,
-      classificationPhase: 'plan',
+      classificationPhase: 'implement',
       turn: 1,
     };
 
@@ -317,7 +317,7 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     assert.match(attackRes.result._untrusted_context?.warning, /QUARANTINED/);
   });
 
-  it('9. Stage 0 Graceful Bypass cho phép update_plan_task thực thi mượt mà ngay cả khi không có trong allowlist turn', async () => {
+  it('9. Stage 0 denies update_plan_task outside the bound allowlist', async () => {
     const { PlanManager } = await import('../agent/plan-manager.js');
     const planManager = new PlanManager();
     planManager.createPlan([{ id: 1, title: 'Verify changes', acceptanceCriteria: 'Tests pass' }]);
@@ -337,11 +337,11 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
       controlMode: 'enforce',
     });
 
-    assert.equal(res.result.task?.status, 'COMPLETED');
-    assert.equal(res.result.errorCode, undefined, 'Không bị ném lỗi TOOL_NOT_ALLOWED_THIS_TURN');
+    assert.equal(res.result.task, undefined);
+    assert.equal(res.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
   });
 
-  it('10. Scoped ToolRunner cho phép replace_text và mutation tools thực thi mượt mà qua rootRegistry fallback ngay cả khi bị lọc khỏi ToolScope allowlist', async () => {
+  it('10. Scoped ToolRunner denies root mutation tools outside the bound allowlist', async () => {
     const fs = await import('node:fs');
     const os = await import('node:os');
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-toolrunner-test-'));
@@ -378,10 +378,10 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
         },
       );
 
-      assert.equal(res.result.errorCode, undefined, 'Không bị ném lỗi TOOL_NOT_ALLOWED_THIS_TURN');
-      assert.equal(res.result.success, true, 'replace_text thực thi thành công qua rootRegistry fallback');
+      assert.equal(res.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
+      assert.notEqual(res.result.success, true);
       const updatedContent = fs.readFileSync(absPath, 'utf8');
-      assert.match(updatedContent, /color: blue;/);
+      assert.equal(updatedContent, '.button { color: red; }');
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

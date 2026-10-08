@@ -109,7 +109,7 @@ export class ToolDescriptorRegistry {
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'run_command') {
+    } else if (name === 'run_command' || name === 'git_command') {
       // run_command hỗ trợ tra cứu chẩn đoán an toàn ở R0 (git log, status, inspect) và thực thi lệnh
       descriptor = {
         name,
@@ -444,7 +444,7 @@ export class ToolDescriptorRegistry {
         schemaCost: this.cost(tool),
       };
     } else if (name.startsWith('browser_')) {
-      const mutates = !['browser_snapshot', 'browser_take_screenshot', 'browser_console_messages', 'browser_network_requests', 'browser_tabs', 'browser_navigate', 'browser_wait_for'].includes(name);
+      const mutates = !['browser_snapshot', 'browser_take_screenshot', 'browser_screenshot', 'browser_console_messages', 'browser_network_requests', 'browser_tabs', 'browser_navigate', 'browser_wait_for', 'browser_wait'].includes(name);
       descriptor = {
         name,
         capabilities: ['inspect', 'execute', 'network'],

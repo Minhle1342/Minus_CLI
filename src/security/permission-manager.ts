@@ -4,6 +4,7 @@ import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
 import { CLI } from '../ui/cli-ui.js';
 import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
+import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 
 export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
@@ -140,7 +141,9 @@ export class PermissionManager {
       const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
       const safeCommand = toolName === 'run_command'
         && new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'strict').evaluateCommand(command, args.cwd).allowed;
-      if ((toolName === 'run_command' && !safeCommand) || toolName === 'run_test_suite' || descriptor.mutates) {
+      const unsafeGit = toolName === 'git_command' && !checkPhaseToolEffect(
+        { name: toolName } as any, args, 'explore', this.workspaceRoot || process.cwd()).allowed;
+      if ((toolName === 'run_command' && !safeCommand) || unsafeGit || toolName === 'run_test_suite' || descriptor.mutates) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',

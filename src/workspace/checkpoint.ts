@@ -85,19 +85,24 @@ export class CheckpointManager {
   private async applyRollback(target: Checkpoint): Promise<RollbackResult> {
     const snapshot = this.snapshots.get(target.id);
     if (!snapshot || snapshot.before.size === 0) return { success: false, message: 'Checkpoint has no scoped file snapshot; no files were restored.' };
+    const restoredFiles: string[] = [];
     try {
       for (const [file] of snapshot.before) if (!this.same(await this.readState(file), snapshot.owned.get(file)!)) return { success: false, message: `Rollback refused: ${file} changed outside the recorded mutation. User changes were preserved.` };
-      const restoredFiles: string[] = [];
       for (const [file, state] of snapshot.before) {
         if (!this.same(await this.readState(file), snapshot.owned.get(file)!)) throw new Error(`Concurrent external change: ${file}`);
         const absolute = path.join(this.workspaceDir, file);
         if (state.content === undefined) await fs.rm(absolute, { force: true });
-        else { await fs.mkdir(path.dirname(absolute), { recursive: true }); await fs.writeFile(absolute, state.content); if (state.mode !== undefined) await fs.chmod(absolute, state.mode); }
+        else { await fs.mkdir(path.dirname(absolute), { recursive: true }); await fs.writeFile(absolute, state.content); }
         restoredFiles.push(file);
+        if (state.content !== undefined && state.mode !== undefined) await fs.chmod(absolute, state.mode);
       }
       await this.recordMutation(restoredFiles);
       return { success: true, message: `Restored ${restoredFiles.length} scoped file(s) to checkpoint ${target.id}.`, checkpoint: target, restoredFiles };
-    } catch (error: any) { return { success: false, message: `Scoped rollback failed: ${error.message}. No broad Git restore was attempted.` }; }
+    } catch (error: any) {
+      await this.recordMutation(restoredFiles).catch(() => {});
+      return { success: false, checkpoint: target, restoredFiles,
+        message: `Scoped rollback failed after restoring ${restoredFiles.length} file(s): ${error.message}. No broad Git restore was attempted.` };
+    }
   }
   getHistory(): Checkpoint[] { return this.checkpoints.map(cp => ({ ...cp })); }
   getTaskCheckpoints(): Checkpoint[] { return this.getHistory().filter(cp => cp.isTaskCheckpoint); }

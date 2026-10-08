@@ -147,7 +147,7 @@ function callOperations(toolName: string, args: Record<string, any>, evidence = 
 function operationStage(op: Operation, scope?: GitWorkflowScope): GitWorkflowStage | undefined {
   if (PR_READS.has(op.name)) return 'Inspect';
   if (op.name.startsWith('pr:')) return 'PR';
-  if (op.name === 'fetch' && scope && (scope.implement || scope.operations.some((name) => BRANCH.has(name) || INTEGRATION.has(name)))) return 'Inspect';
+  if (['fetch', 'pull'].includes(op.name) && scope && (scope.implement || scope.operations.some((name) => BRANCH.has(name) || INTEGRATION.has(name)))) return 'Inspect';
   if (classifyGitCommand(op.name, op.args).risk === 'read') return 'Inspect';
   if (BRANCH.has(op.name) && !(op.name === 'checkout' && op.args.includes('--'))) return 'Branch';
   if (INTEGRATION.has(op.name) || UNDO.has(op.name) || op.name === 'checkout') return 'Implement';
@@ -174,8 +174,9 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
   const scope = gitWorkflowScope(input.userRequest, input.mayEdit, input.implementationRequested);
   const branchOps = scope.operations.filter((name) => BRANCH.has(name));
   const implementOps = scope.operations.filter((name) => INTEGRATION.has(name) || UNDO.has(name));
-  const prerequisiteFetch = scope.operations.includes('fetch') && (scope.implement || branchOps.length > 0 || implementOps.some((name) => INTEGRATION.has(name)));
-  const syncOps = scope.operations.filter((name) => SYNC.has(name) && !(name === 'fetch' && prerequisiteFetch));
+  const remotePrerequisites = scope.operations.filter((name) => ['fetch', 'pull'].includes(name)
+    && (scope.implement || branchOps.length > 0 || implementOps.some((op) => INTEGRATION.has(op))));
+  const syncOps = scope.operations.filter((name) => SYNC.has(name) && !remotePrerequisites.includes(name));
   const required: GitWorkflowStage[] = ['Inspect'];
   if (branchOps.length) required.push('Branch');
   if (scope.implement || implementOps.length) required.push('Implement');
@@ -244,12 +245,12 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
         continue;
       }
       if (stage === 'Inspect') {
-        if (op.name === 'fetch' && prerequisiteFetch) inspected.add('fetch');
+        if (remotePrerequisites.includes(op.name)) inspected.add(op.name);
         if (op.name === 'status') inspected.add('status');
         const baselineDiff = op.name === 'diff' && op.args.every((arg) => arg.startsWith('-'))
           && !op.args.some((arg) => ['--quiet', '--check', '--no-index', '--'].includes(arg));
         if (baselineDiff) inspected.add(op.args.includes('--cached') || op.args.includes('--staged') ? 'staged diff' : 'unstaged diff');
-        if (['status', 'unstaged diff', 'staged diff', ...(prerequisiteFetch ? ['fetch'] : [])].every((name) => inspected.has(name))) advance(seq);
+        if (['status', 'unstaged diff', 'staged diff', ...remotePrerequisites].every((name) => inspected.has(name))) advance(seq);
       } else if (stage === 'Branch') {
         if (scope.operations.some((name) => BRANCH.has(name)) && branchOperationAction(op) === branchActions[completedBranchActions]) {
           completedBranchActions++;
@@ -285,7 +286,7 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
     if (state.stage === 'PR' && scope.pr !== 'publish' && ok
       && ['report_findings', 'report_investigation_findings', 'submit_solution'].includes(toolName)) advance(seq);
   }
-  if (state.stage === 'Inspect') state.pending = ['status', 'unstaged diff', 'staged diff', ...(prerequisiteFetch ? ['fetch'] : [])].filter((name) => !inspected.has(name));
+  if (state.stage === 'Inspect') state.pending = ['status', 'unstaged diff', 'staged diff', ...remotePrerequisites].filter((name) => !inspected.has(name));
   if (state.stage === 'Branch') {
     state.pendingBranchAction = branchActions[completedBranchActions];
     state.pending = branchActions.slice(completedBranchActions).map((action) => `branch ${action}`);

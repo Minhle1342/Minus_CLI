@@ -11,6 +11,25 @@ async function fixture(run: (manager: CheckpointManager, root: string) => Promis
   try { const manager = new CheckpointManager(root); await manager.init(); await run(manager, root); }
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }
+
+test('partial rollback reports restored prefix and remains retryable', async () => fixture(async (manager, root) => {
+  for (const file of ['a.ts', 'b.ts']) await fs.writeFile(path.join(root, file), 'baseline');
+  await manager.createCheckpoint('scoped', { files: ['a.ts', 'b.ts'] });
+  for (const file of ['a.ts', 'b.ts']) await fs.writeFile(path.join(root, file), 'agent');
+  await manager.recordMutation(['a.ts', 'b.ts']);
+  const original = fs.writeFile;
+  let result;
+  try {
+    fs.writeFile = (async (...args: Parameters<typeof fs.writeFile>) => {
+      if (String(args[0]).endsWith('b.ts')) throw new Error('injected I/O failure');
+      return original(...args);
+    }) as typeof fs.writeFile;
+    result = await manager.rollbackLast();
+  } finally { fs.writeFile = original; }
+  assert.equal(result.success, false);
+  assert.deepEqual(result.restoredFiles, ['a.ts']);
+  assert.equal((await manager.rollbackLast()).success, true);
+}));
 test('scoped rollback restores preexisting user dirt, deletes owned new files, preserves unrelated files', async () => fixture(async (manager, root) => {
   await fs.writeFile(path.join(root, 'a.ts'), 'user dirty bytes');
   await fs.writeFile(path.join(root, 'b.ts'), 'unrelated');
