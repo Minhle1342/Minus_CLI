@@ -43,7 +43,11 @@ export function getPhaseTransitionRecoveryGuidance(errorCode: string | undefined
     case 'EXPLORATION_EVIDENCE_REQUIRED':
       return 'Gather fresh inspection or validated-hypothesis evidence for the exact target, then request implementation again.';
     case 'INVALID_PHASE_TRANSITION':
-      return 'Check the current Harness-owned phase and request only a legal next transition: explore → plan, explore → implement, or plan → implement.';
+      return 'Check the current Harness-owned phase and request only a legal next transition: explore → plan, explore → implement, plan → implement, plan → explore, or implement → plan (before mutating).';
+    case 'IMPLEMENT_MUTATIONS_PRESENT':
+      return 'Mutations were already observed this turn, so implement → verify is automatic. Verify the changes first; request plan only before mutating.';
+    case 'DUPLICATE_TRANSITION_REQUEST':
+      return 'This exact transition request was already issued this turn. Do not repeat it unchanged; add new rationale or evidence references, or continue with the currently authorized tools.';
     case 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN':
       return 'Wait for the Harness to return the refreshed phase and tool set, then make the next tool call in a new model response.';
     default:
@@ -88,8 +92,11 @@ export function getPhaseAuthorityState(
   }
 
   const lifecycle = getPhaseLifecycleState(session, turn);
-  if (lifecycle.implementationCompleted) phase = 'verify';
-  if (session.getEvents().some((event) => event.data.turn === turn && event.type === 'phase/verificationFailed')) phase = 'implement';
+  // The lifecycle projection already folds failures and later checks in order,
+  // and invalidates boundaries belonging to an older mutation sequence.
+  if (getTurnCompletionState(session, turn).hasMutations) {
+    phase = lifecycle.implementationCompleted ? 'verify' : 'implement';
+  }
   return { phase, version };
 }
 
@@ -126,6 +133,36 @@ export function applyPhaseAuthority(
   };
 }
 
+/** Signature of a transition request for same-turn duplicate detection. */
+function transitionRequestSignature(targetPhase: unknown, reason: string, evidenceRefs: string[]): string {
+  return `${String(targetPhase)}||${reason}||${[...evidenceRefs].sort().join('|')}`;
+}
+
+/**
+ * True when an identical request (same target, rationale, and evidence set) was
+ * already issued this turn. Callers must check before appending their own
+ * `phase/transitionRequested` event so the current request never matches itself.
+ */
+function hasDuplicateTransitionRequest(
+  session: Session,
+  turn: number,
+  targetPhase: unknown,
+  rationale: string,
+  evidenceRefs: string[],
+): boolean {
+  const reason = rationale || 'missing rationale';
+  const signature = transitionRequestSignature(targetPhase, reason, evidenceRefs);
+  return session.getEvents().some((event) => {
+    if (event.data.turn !== turn || event.type !== 'phase/transitionRequested') return false;
+    const logged = event.data.phaseTransition;
+    if (!logged) return false;
+    const loggedRefs = Array.isArray(logged.evidenceRefs)
+      ? logged.evidenceRefs.map((value: unknown) => String(value).trim()).filter(Boolean)
+      : [];
+    return transitionRequestSignature(logged.targetPhase, String(logged.reason || ''), loggedRefs) === signature;
+  });
+}
+
 /** Evaluate and durably record a model request. Only this function admits a phase change. */
 export function requestPhaseTransition(
   session: Session,
@@ -148,6 +185,14 @@ export function requestPhaseTransition(
     return { accepted: false, phase: current.phase, phaseVersion: current.version, errorCode, reason };
   };
 
+  // Loop guard: an identical request (same target, rationale, and evidence set)
+  // already issued this turn is rejected so implement → plan → implement → …
+  // cannot spin forever. Retries with new rationale or evidence still pass.
+  // Checked before logging so the current request never matches itself; only
+  // transitionRejected is recorded for duplicates.
+  if (hasDuplicateTransitionRequest(session, turn, targetPhase, rationale, evidenceRefs)) {
+    return reject('DUPLICATE_TRANSITION_REQUEST', 'This exact transition request was already issued this turn; provide new rationale or evidence instead of repeating it.');
+  }
   session.append('phase/transitionRequested', {
     turn,
     phaseTransition: { fromPhase: current.phase, targetPhase, phaseVersion: current.version, evidenceRefs, reason: rationale || 'missing rationale' },
@@ -161,6 +206,19 @@ export function requestPhaseTransition(
   } else if (current.phase === 'plan' && targetPhase === 'implement') {
     // Planning is opt-in. An explicit /plan request may create a plan, but an
     // absent plan must not block an evidence-backed implementation transition.
+  } else if (current.phase === 'plan' && targetPhase === 'explore') {
+    // Non-mutating step back for more context (e.g. the plan outgrew what was
+    // inspected). Rationale and evidence stay required; nothing can be orphaned
+    // since no mutation boundary exists between plan and explore.
+  } else if (current.phase === 'implement' && targetPhase === 'plan') {
+    // Return-to-plan is allowed only before any mutation is observed this turn:
+    // afterwards implement → verify is automatic and going back would orphan it.
+    // The check runs synchronously inside sequential tool dispatch, and any later
+    // call in the same response is fenced by PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN,
+    // so the evaluate-time observation cannot be invalidated mid-flight.
+    if (getTurnCompletionState(session, turn).hasMutations) {
+      return reject('IMPLEMENT_MUTATIONS_PRESENT', 'Mutations were already observed this turn; verify them instead of returning to plan.');
+    }
   } else {
     return reject('INVALID_PHASE_TRANSITION', `The Harness does not allow ${current.phase} -> ${String(targetPhase)} from a model request.`);
   }

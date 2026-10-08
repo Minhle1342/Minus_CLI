@@ -128,7 +128,7 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   const normalized = normalizeIntentText(userRequest || '');
   if (!normalized) return [];
   const directPrefix = /^(?:please|hay|vui long|giup toi|thuc hien|chay|goi|git)\b/.test(normalized)
-    || /\b(?:please|hay|vui long|giup toi|thuc hien|chay lenh)\b/.test(normalized);
+    || /\b(?:please|hay|vui long|giup toi|thuc hien|chay lenh|tiep tuc)\b/.test(normalized);
   const capabilityDiscussion = /\b(?:co quyen|co the|kha nang|ho tro|enable|allow|permission|permissions|them tool|nang cap|tai sao|why|whether)\b/.test(normalized);
   if (capabilityDiscussion && !directPrefix) return [];
 
@@ -154,7 +154,7 @@ export function isGitCommandAuthorized(
 ): boolean {
   if (classification.risk === 'read') return true;
   const command = subcommand.toLowerCase();
-  if (command === 'add' && !isExplicitGitAddPathList(args)) return false;
+  if (command === 'add' && !isExplicitGitAddPathList(args) && !isBroadAddWithCommitIntent(args, userRequest)) return false;
   const commitWorkflowStagesExplicitPaths = command === 'add'
     && detectExplicitGitMutationIntent(userRequest).commit
     && isExplicitGitAddPathList(args);
@@ -166,6 +166,7 @@ export function isGitCommandAuthorized(
   };
   const requested = names.has(command)
     || commitWorkflowStagesExplicitPaths
+    || (command === 'add' && isBroadAddWithCommitIntent(args, userRequest))
     || equivalentNames[command]?.some((name) => names.has(name));
   if (!requested) return false;
   return classification.risk !== 'destructive' || hasExplicitDestructiveIntent(userRequest, command);
@@ -174,8 +175,21 @@ export function isGitCommandAuthorized(
 /**
  * `git add` is only allowed to stage literal, workspace-relative paths.
  * Broad selectors/options (`-A`, `--all`, `.`, globs, pathspec magic) remain
- * blocked even when the user authorized a commit.
+ * blocked even when the user authorized a commit — except the plain
+ * whole-tree selectors below when a commit was explicitly requested.
  */
+const BROAD_ADD_WHOLE_TREE = new Set(['-A', '--all', '.', './']);
+
+/** Whole-tree `git add -A/.` with an explicit commit request (no wildcards/pathspec). */
+export function isBroadAddWithCommitIntent(args: string[], userRequest?: string): boolean {
+  if (!detectExplicitGitMutationIntent(userRequest).commit) return false;
+  const relevant = args[0] === '--' ? args.slice(1) : args;
+  if (!relevant.some((arg) => BROAD_ADD_WHOLE_TREE.has(arg.trim()))) return false;
+  return !relevant.some((arg) => {
+    const value = arg.trim();
+    return /[*?[\]!]/.test(value) || value.startsWith(':') || value.startsWith('!');
+  });
+}
 export function isExplicitGitAddPathList(args: string[]): boolean {
   const paths = args[0] === '--' ? args.slice(1) : args;
   if (paths.length === 0) return false;

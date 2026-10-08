@@ -149,7 +149,7 @@ export class ThisTurnToolGate {
       // The model may ask the Harness to advance phase, but cannot expand its current tool authority.
       const isPhaseTransitionTool = tool.name === 'request_phase_transition';
       const isPhaseTransitionRequest = isPhaseTransitionTool
-        && ['explore', 'plan'].includes(classification.phase)
+        && ['explore', 'plan', 'implement'].includes(classification.phase)
         && PHASE_TRANSITION_TASK_CLASSES.has(classification.taskClass);
       const isVerificationRepairTool = classification.phase === 'verify'
         && EDIT_TOOL_NAMES.has(tool.name);

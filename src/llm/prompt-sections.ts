@@ -573,7 +573,8 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
   * Use \`get_symbol_context_360\` if you need to double-check a dependency's signature, callers, or related tests during implementation.
   * Use \`get_diagnostics\` immediately after modifying each file to catch in-memory type/syntax errors before moving forward.
   * Use \`read_file\` to refresh line numbers and verify clean state after a patch.
-- Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.`;
+- Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.
+- Return to Plan: If the scope outgrows current understanding and nothing has been edited yet, call \`request_phase_transition\` to plan with rationale+evidenceRefs instead of guessing; wait for the next turn before using plan tools.`;
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER & DIFF AUDIT)]:
 - Goal: Empirically prove that changes resolve the issue without regressions, and thoroughly inspect the workspace diff.
@@ -712,8 +713,10 @@ function buildPhaseToolAuthorityDirectiveUncached(
     ? ` Read-only exploration: answer directly with text once evidence is found.`
     : options?.canRequestPhaseTransition
       ? ` To advance workflow, call request_phase_transition with rationale+evidenceRefs, then wait for the next turn before using the new phase tools.`
-      : phase === 'plan'
+      : phase === 'plan' && options?.canRequestPhaseTransition !== false
         ? ` Use create_plan for milestones, then request_phase_transition to implement before editing.`
-        : ` Call ONLY tools from this list; do not hallucinate tool names outside it.`;
+        : phase === 'plan'
+          ? ` Use create_plan for milestones and continue with the authorized tools.`
+          : ` Call ONLY tools from this list; do not hallucinate tool names outside it.`;
   return `🔧 [PHASE TOOL AUTHORITY: ${phase}] Authorized this step (${names.length}): ${list}.${advance}`;
 }

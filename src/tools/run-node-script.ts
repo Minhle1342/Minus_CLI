@@ -364,7 +364,7 @@ export const runNodeScriptTool: ToolDefinition = {
       const hasValidated = Boolean(gateContext.hasValidatedHypothesis);
       const risk = gateContext.risk || 'R2';
       const isHighRisk = gateContext.taskClass === 'security' || ['R3', 'R4', 'R5'].includes(risk);
-      const evidenceThreshold = Math.max(1, gateContext.evidenceThreshold || (isHighRisk ? 5 : risk === 'R2' ? 3 : 2));
+      const evidenceThreshold = Math.max(1, gateContext.evidenceThreshold || (isHighRisk ? 6 : risk === 'R2' ? 3 : 2));
       const evidenceScore = Number(gateContext.evidenceScore || 0);
 
       const inspectedFiles = (gateContext.inspectedFiles || []).map((f: string) => f.replace(/\\/g, '/').toLowerCase());

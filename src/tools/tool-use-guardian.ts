@@ -728,13 +728,23 @@ export class ToolUseGuardian {
         && gateContext?.validatedTargetFiles?.some((file) => normalizeTarget(file) === normalizedTarget));
       const risk = gateContext?.risk || 'R2';
       const isHighRisk = gateContext?.taskClass === 'security' || ['R3', 'R4', 'R5'].includes(risk);
-      const evidenceThreshold = Math.max(1, gateContext?.evidenceThreshold || (isHighRisk ? 5 : risk === 'R2' ? 3 : 2));
+      const evidenceThreshold = Math.max(1, gateContext?.evidenceThreshold || (isHighRisk ? 6 : risk === 'R2' ? 3 : 2));
       const evidenceScore = (gateContext?.evidenceScore || 0) + (targetInspected ? 2 : 0);
       const hasEmpiricalEvidence = Boolean(gateContext?.hasValidatedHypothesis
         || gateContext?.hasEmpiricalEvidence || gateContext?.reproductionStatus?.hasPreFixRepro);
       const oldText = String(args?.oldText || args?.old_text || args?.TargetContent || args?.targetContent || args?.searchContent || args?.searchText || '');
       const newText = String(args?.newText || args?.new_text || args?.ReplacementContent || args?.replacementContent || args?.replaceWith || '');
       const changedLineCount = Math.max(oldText.split(/\r?\n/).length, newText.split(/\r?\n/).length);
+      // Item 14: trivial edits bypass the inspect-first requirement: at most 3
+      // changed lines, small payload, non-sensitive target, never high-risk.
+      // A typo fix should not cost a full evidence round-trip. Only applies
+      // when the edit size is genuinely measurable from old/new text
+      // (apply_patch/write_file carry content elsewhere and keep full gating).
+      const hasSizedEdit = `${oldText}${newText}`.length > 0;
+      const isTrivialEdit = !isHighRisk && hasSizedEdit && changedLineCount <= 3
+        && Math.max(oldText.length, newText.length) <= 240
+        && !/(^|[\\/])(?:\.env(?:\.|$)|.*\.(?:key|pem|p12|pfx|kdbx)|package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|secrets?\.[^\\/]*$)/i.test(filePath || '');
+      if (isTrivialEdit) continue;
       const isSmallInspectedEdit = toolName === 'replace_text' && targetInspected
         && Math.max(oldText.length, newText.length) <= 800 && changedLineCount <= 8 && !isHighRisk;
       const isTrivialFastPath = !isHighRisk && Boolean(gateContext?.isTrivialEdit || isSmallInspectedEdit);

@@ -61,7 +61,7 @@ import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.j
 import { ClassificationEngine } from '../control/classification-engine.js';
 import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
 import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
-import { EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
+import { EDIT_TOOL_NAMES, READ_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
@@ -1385,7 +1385,11 @@ export class AgentLoop {
         taskClass: classification.taskClass,
         phase: classification.phase,
         hasPlan: this.planManager.hasPlan(),
-        evidenceGateMode: configuredEvidenceGateMode() || 'enforce',
+        evidenceGateMode: configuredEvidenceGateMode()
+          // Item 14: light refactors (R0-R2) observe instead of enforcing; the
+          // Pareto gate still advises, it just stops hard-blocking them.
+          || (classification.taskClass === 'refactor' && ['R0', 'R1', 'R2'].includes(classification.risk)
+            ? 'observe' : 'enforce'),
         hasValidatedHypothesis,
         supportedHypothesisCount,
         targetFiles: [
@@ -3168,7 +3172,10 @@ export class AgentLoop {
             continue;
           }
 
-          if (phaseTransitionAcceptedInResponse) {
+          // Item 15: pure reads are phase-independent (always authorized), so only
+          // state-changing calls wait for the fresh turn. submit_solution and
+          // edits still fence here.
+          if (phaseTransitionAcceptedInResponse && !READ_TOOL_NAMES.has(toolName)) {
             const blockedResult = {
               success: false,
               errorCode: 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN',

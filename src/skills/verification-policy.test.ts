@@ -14,10 +14,15 @@ test('VerificationPolicy blocks mutation in bugfix mode when reproduction proof 
   const observeCheck = policy.canMutate('bugfix', 'observe');
   assert.equal(observeCheck.allowed, true);
 
-  // In enforce mode without reproduction test, mutation is blocked
-  const enforceCheck = policy.canMutate('bugfix', 'enforce');
-  assert.equal(enforceCheck.allowed, false);
-  assert.match(enforceCheck.reason || '', /REPRODUCTION_GATE_BLOCKED/);
+  // In enforce mode with explicit high risk and no reproduction test, mutation is blocked
+  const enforceHigh = policy.canMutate('bugfix', 'enforce', { riskLevel: 'HIGH' });
+  assert.equal(enforceHigh.allowed, false);
+  assert.match(enforceHigh.reason || '', /REPRODUCTION_GATE_BLOCKED/);
+
+  // Missing riskLevel defaults to R2: allowed with an advisory to run the suite after
+  const enforceUnknownRisk = policy.canMutate('bugfix', 'enforce');
+  assert.equal(enforceUnknownRisk.allowed, true);
+  assert.match(enforceUnknownRisk.advisory || '', /REPRODUCTION_GATE_ADVISORY/);
 
   // After recording a failed test execution (reproduction proof established)
   policy.recordReproductionAttempt('npm test -- --filter=auth', true);
@@ -42,9 +47,10 @@ test('VerificationPolicy allows scratch and test reproduction file mutations unc
   const scratchCheck2 = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'temp/repro_test.ts', isScratchFile: true });
   assert.equal(scratchCheck2.allowed, true);
 
-  // Production files remain blocked without reproduction proof (unknown risk = conservative)
+  // Production files with unknown risk default to R2: allowed with advisory guidance
   const prodCheck = policy.canMutate('bugfix', 'enforce', { targetFilePath: 'src/auth/service.ts' });
-  assert.equal(prodCheck.allowed, false);
+  assert.equal(prodCheck.allowed, true);
+  assert.ok(prodCheck.advisory?.includes('REPRODUCTION_GATE_ADVISORY'));
 
   // Low/medium risk downgrades to advisory: allowed, with guidance attached
   const lowRiskCheck = policy.canMutate('bugfix', 'enforce', {

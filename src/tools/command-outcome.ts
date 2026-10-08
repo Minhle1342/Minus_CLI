@@ -44,7 +44,9 @@ export function annotateCommandResult<T extends Record<string, any>>(command: st
     ...result,
     commandOutcome,
     processStarted: result.processStarted !== false,
-    success: isNonFailingCommandOutcome({ commandOutcome }),
+    // Blocked results never succeeded, even though blockers stay neutral in
+    // failure counters (isNonFailingCommandOutcome still includes them).
+    success: commandOutcome === 'blocked_preflight' ? false : isNonFailingCommandOutcome({ commandOutcome }),
   };
 }
 

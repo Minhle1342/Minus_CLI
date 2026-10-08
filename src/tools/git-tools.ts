@@ -549,9 +549,15 @@ async function executeGitProcess(
 }
 
 export function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
+  // A dry run pushes nothing: branch targeting is moot, not a violation.
+  if (args.some((arg) => arg === '--dry-run' || arg === '-n')) return true;
   const positional = args.filter((arg) => !arg.startsWith('-'));
-  return positional.length >= 2
-    && positional.slice(1).some((refspec) => refspec === requestedBranch || refspec.endsWith(`:${requestedBranch}`));
+  // `git push [<remote>]` with no refspec relies on the upstream default.
+  if (positional.length < 2) return true;
+  return positional.slice(1).some((refspec) => refspec === requestedBranch
+    || refspec === 'HEAD'
+    || refspec === `HEAD:${requestedBranch}`
+    || refspec.endsWith(`:${requestedBranch}`));
 }
 
 function redactGitOutput(value: string): string {

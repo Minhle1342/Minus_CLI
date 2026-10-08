@@ -27,7 +27,7 @@ import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
 import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
-import { classifyGitCommand, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
+import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
 
@@ -78,6 +78,12 @@ const ALLOWED_COMMAND_PREFIXES = [
   'jq ',
   'sed ',
   'awk ',
+  // Điều hướng shell & plumbing an toàn trong workspace (cwd đã cố định workspaceRoot)
+  'cd ',
+  'mkdir ',
+  'cp ',
+  'sleep ',
+  'timeout ',
   // Build, Test & Package Management
   'npm test',
   'npm run ',
@@ -119,6 +125,18 @@ const ALLOWED_COMMAND_PREFIXES = [
   'tsc',
   'curl ',
   'wget ',
+  // Bare JS/TS binaries (không qua npx) cho build/test/lint
+  'tsc ',
+  'eslint ',
+  'jest ',
+  'vitest ',
+  'prettier ',
+  // Docker chỉ-đọc để chẩn đoán sandbox (không cho approvals rộng: subcommands ghi vẫn cần approval)
+  'docker ps',
+  'docker ps ',
+  'docker images',
+  'docker images ',
+  'docker --version',
   // Git commands (Tiêu chuẩn Công nghiệp: Cho phép thao tác Git qua run_command, chặn unrequested push lên main)
   'git status',
   'git status ',
@@ -220,7 +238,8 @@ export async function finalizeCommandResult(
     success?: boolean;
     [key: string]: any;
   },
-  workspace: Workspace
+  workspace: Workspace,
+  extra?: { preflightAdvisory?: string },
 ): Promise<Record<string, any>> {
   const classifiedResult = annotateCommandResult(baseResult.command, baseResult);
   const exitCode = typeof classifiedResult.exitCode === 'number' ? classifiedResult.exitCode : 0;
@@ -259,6 +278,7 @@ export async function finalizeCommandResult(
     verificationOutputComplete: truncatedStdout.savedChars === 0 && truncatedStderr.savedChars === 0,
     ...(logFilePath ? { logFilePath } : {}),
     ...(truncatedStdout.savedChars > 0 ? { savedTokensEstimate: truncatedStdout.savedTokensEstimate } : {}),
+    ...(extra?.preflightAdvisory ? { preflightAdvisory: extra.preflightAdvisory } : {}),
   };
 }
 
@@ -319,7 +339,21 @@ export function isAllowedCommand(command: string): boolean {
 
 export function isAllowedShellCommand(command: string): boolean {
   const analysis = analyzeShellCommand(command);
-  return !analysis.error && !analysis.complex && analysis.segments.every(isAllowedCommand);
+  if (analysis.error) return false;
+  if (!analysis.complex && analysis.segments.every(isAllowedCommand)) return true;
+  // Item 12: bounded two-segment pipelines of allowlisted commands skip approval.
+  return isBoundedAllowlistedPipeline(analysis);
+}
+
+/**
+ * A single `|` joining exactly two allowlisted segments, with no redirect,
+ * backgrounding, or substitution anywhere. Anything else keeps the old
+ * approval requirement.
+ */
+function isBoundedAllowlistedPipeline(analysis: ReturnType<typeof analyzeShellCommand>): boolean {
+  if (analysis.error || analysis.operators.length !== 1 || analysis.operators[0] !== '|') return false;
+  if (analysis.segments.length !== 2 || !analysis.segments.every(isAllowedCommand)) return false;
+  return analysis.segments.every((segment) => !/[><]|`|\$\(/.test(segment));
 }
 
 export interface GitShellPolicyViolation {
@@ -327,6 +361,55 @@ export interface GitShellPolicyViolation {
   errorCode: string;
   suggestion?: string;
   requestedBranch?: string;
+}
+
+/**
+ * F3: whether a user is present to answer approval prompts. A permission
+ * manager without a prompt handler (headless/CI runs deny approvals) means no
+ * approval can ever arrive, so suggestions must redirect to allowlisted
+ * commands instead of telling the model to wait for a user.
+ */
+export function hasApprovalChannel(permissionManager: any): boolean {
+  try {
+    return typeof permissionManager?.hasApprovalChannel === 'function'
+      ? Boolean(permissionManager.hasApprovalChannel())
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+/** Approval suggestion branched by session interactivity; errorCodes are untouched. */
+export function approvalSuggestion(permissionManager: any, misuse?: { tool: string; reason: string }): string {
+  if (hasApprovalChannel(permissionManager)) {
+    return misuse
+      ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
+      : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.';
+  }
+  return misuse
+    ? `No approval channel is available in this session: use the dedicated tool "${misuse.tool}" instead of waiting for approval (${misuse.reason}).`
+    : 'No approval channel is available in this session: switch to an allowlisted command or a dedicated tool instead of waiting for approval.';
+}
+
+/**
+ * Item 9: merge double denials. When no approval channel exists, a permission
+ * denial is not a second verdict — fall through to the single
+ * COMMAND_NOT_ALLOWED below. User rejections, read-only mode, and unexpected
+ * errors still return immediately with their own codes.
+ */
+export function shouldReturnPermissionDenial(
+  permissionManager: any,
+  permCheck: { allowed?: boolean; deniedByUser?: boolean; errorCode?: string },
+): boolean {
+  if (permCheck.allowed) return false;
+  if (hasApprovalChannel(permissionManager)) return true;
+  if (permCheck.deniedByUser === true) return true;
+  try {
+    if (typeof permissionManager?.getMode === 'function' && permissionManager.getMode() === 'read_only') return true;
+  } catch {
+    return true;
+  }
+  return permCheck.errorCode === 'PERMISSION_ERROR';
 }
 
 /**
@@ -339,6 +422,7 @@ export function checkGitPolicyForShell(
   segments: string[],
   workspaceRoot: string,
   userRequest?: string,
+  approvalAvailable = true,
 ): GitShellPolicyViolation | undefined {
   for (const segment of segments) {
     const invocation = parseGitInvocation(segment);
@@ -363,11 +447,13 @@ export function checkGitPolicyForShell(
     }
     const classification = classifyGitCommand(invocation.subcommand, invocation.args);
     if (invocation.subcommand === 'add' && !isExplicitGitAddPathList(invocation.args)) {
-      return {
-        error: 'Broad Git staging is blocked. Use `git add -- <explicit workspace-relative file paths>`; -A/--all, ., wildcard, and pathspec staging are never authorized by a commit request.',
-        errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-        suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
-      };
+      if (!isBroadAddWithCommitIntent(invocation.args, userRequest)) {
+        return {
+          error: 'Broad Git staging is blocked. Use `git add -- <explicit workspace-relative file paths>`; -A/--all, ., wildcard, and pathspec staging are never authorized by a commit request.',
+          errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+          suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
+        };
+      }
     }
     if (!isGitCommandAuthorized(userRequest, invocation.subcommand, classification, invocation.args)) {
       return {
@@ -375,7 +461,9 @@ export function checkGitPolicyForShell(
         errorCode: classification.risk === 'destructive'
           ? 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
           : 'GIT_OPERATION_NOT_AUTHORIZED',
-        suggestion: `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}.`,
+        suggestion: approvalAvailable
+          ? `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}.`
+          : `No approval channel is available in this session: re-run with arguments matching the current task intent, or use an allowlisted read-only git command (status/diff/log).`,
       };
     }
     if (invocation.subcommand === 'push') {
@@ -385,6 +473,7 @@ export function checkGitPolicyForShell(
           error: `Push arguments do not target the user-requested branch "${requestedBranch}".`,
           errorCode: 'GIT_BRANCH_NOT_AUTHORIZED',
           requestedBranch,
+          suggestion: `Push to "${requestedBranch}" instead (e.g. git push origin ${requestedBranch}), or restate the request with the intended branch.`,
         };
       }
     }
@@ -1029,7 +1118,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           suggestion: preflight.suggestion,
           commandOutcome: 'blocked_preflight',
           processStarted: false,
-          success: true,
+          success: false,
           durationMs: 1,
         };
       }
@@ -1039,7 +1128,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Enforce non-bypassable host system-risk policy before emulation or any
       // other dispatch route, not only immediately before native host spawn.
       const hostPolicy = executionTarget === 'host'
-        ? evaluateHostCommandPolicy(effectiveCommand)
+        ? evaluateHostCommandPolicy(effectiveCommand, workspace.rootDir)
         : { allowed: true as const };
       if (!hostPolicy.allowed) {
         return {
@@ -1048,7 +1137,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           preflightCode: hostPolicy.errorCode,
           commandOutcome: 'blocked_preflight',
           processStarted: false,
-          success: true,
+          success: false,
           durationMs: 1,
         };
       }
@@ -1067,12 +1156,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus)) {
           return {
             command: effectiveCommand,
-            message: 'Docker isolation is unavailable; this command requires an isolated execution environment.',
+            message: 'Docker isolation is unavailable; this command is not classified as read-only, so it requires an isolated execution environment and will not silently fall back to the host.',
             preflightCode: 'ISOLATED_SANDBOX_REQUIRED',
-            suggestion: 'Restore Docker, or explicitly use execution_target: "host" and approve the command if host execution is intended.',
+            suggestion: 'The command itself was not judged dangerous. Restore Docker, or explicitly retry with execution_target: "host" (host policy, the allowlist, and approval still apply).',
             commandOutcome: 'blocked_preflight',
             processStarted: false,
-            success: true,
+            success: false,
             durationMs: 1,
           };
         }
@@ -1095,7 +1184,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         if (permCheck.allowed) {
           hasExplicitPermission = true;
           if (context) context.permissionGranted = true;
-        } else {
+        } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)) {
           return {
             command: rawCommand,
             error: permCheck.reason || `Command "${rawCommand}" was rejected or has not been granted execution permission (PERMISSION APPROVAL).`,
@@ -1104,6 +1193,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
           };
         }
+        // else: no approval channel — fall through to the single denial below.
       }
 
       if (shellAnalysis.error || (shellAnalysis.complex && !hasExplicitPermission)) {
@@ -1118,7 +1208,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           command: rawCommand,
           error: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master to avoid triggering the automatic Railway CI/CD system. Requires a direct user request.',
           errorCode: 'PUSH_TO_MAIN_PROHIBITED',
-          suggestion: 'Ask the user to approve permission (Permission Approval) if pushing to main is truly intended.',
+          suggestion: hasApprovalChannel(effectivePermissionManager)
+            ? 'Pushing to main requires a direct user request naming main explicitly — approval alone does not authorize it. Ask the user to approve permission (Permission Approval) only if pushing to main is truly intended.'
+            : 'Pushing to main requires a direct user request, and no approval channel is available in this session: retarget the push to the user-requested branch instead.',
         };
       }
       // Pre-spawn missing-binary probe: fail fast without spawning a shell
@@ -1128,6 +1220,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         ? Boolean(sandboxManager.getStatus?.()?.isIsolated)
         : false;
       const probeDisabled = process.env.MINUS_BINARY_PROBE?.toLowerCase() === 'off';
+      // Item 11: missing binaries with a recovery path (provision recipe or
+      // known fallback) only warn and let execution proceed (observe) instead
+      // of hard-blocking. Binaries with no recovery path still fail fast below.
+      const binaryAdvisories: string[] = [];
       if (!probeDisabled && !probeIsolated) {
         for (const segment of shellAnalysis.segments) {
           const missing = probeMissingBinary(segment, { workspaceRoot: workspace.rootDir });
@@ -1144,24 +1240,30 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
             const devSuggestion = getDevToolSuggestion(missing.name);
             const fallback = devSuggestion?.fallback;
-            return {
-              command: rawCommand,
-              message: fallback
-                ? `Binary "${missing.name}" is not available on PATH. Run the same operation via "${fallback} ..." instead.`
-                : `Binary "${missing.name}" was not found on PATH in the execution environment.`,
-              preflightCode: 'DEV_BINARY_NOT_FOUND',
-              suggestion: devSuggestion
-                ? `Use "${fallback}"${devSuggestion.install ? ` or install it (${devSuggestion.install})` : ''}. Do not retry the bare "${missing.name}" command unchanged.`
-                : `Install "${missing.name}" or use an equivalent tool/approach. Do not retry the same command unchanged.`,
-              ...(fallback ? { fallbackCommand: fallback } : {}),
-              commandOutcome: 'blocked_preflight',
-              processStarted: false,
-              success: true,
-              durationMs: 1,
-            };
+            if (!fallback && !(missing as any).canAutoProvision) {
+              return {
+                command: rawCommand,
+                message: `Binary "${missing.name}" was not found on PATH in the execution environment.`,
+                preflightCode: 'DEV_BINARY_NOT_FOUND',
+                suggestion: devSuggestion?.install
+                  ? `Install it (${devSuggestion.install}). Do not retry the bare "${missing.name}" command unchanged.`
+                  : `Install "${missing.name}" or use an equivalent tool/approach. Do not retry the same command unchanged.`,
+                commandOutcome: 'blocked_preflight',
+                processStarted: false,
+                success: false,
+                durationMs: 1,
+              };
+            }
+            binaryAdvisories.push(
+              fallback
+                ? `Pre-flight note: binary "${missing.name}" is not on PATH; prefer "${fallback} ..." but execution continues and may fail.`
+                : `Pre-flight note: binary "${missing.name}" is not on PATH and auto-provisioning failed; execution continues and may fail.`,
+            );
           }
         }
       }
+      const binaryAdvisory = binaryAdvisories.length > 0 ? binaryAdvisories.join('\n') : undefined;
+      const advisoryExtra = binaryAdvisory ? { preflightAdvisory: binaryAdvisory } : undefined;
 
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
         const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
@@ -1171,9 +1273,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) from the user. Non-allowlist segments: ${deniedSegments.join(', ')}`,
           errorCode: 'COMMAND_NOT_ALLOWED',
           deniedSegments,
-          suggestion: misuse
-            ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
-            : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
+          suggestion: approvalSuggestion(effectivePermissionManager, misuse),
         };
       }
 
@@ -1181,7 +1281,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // đoạn `git ...` vượt qua được các chốt trên đều phải qua thêm kiểm tra
       // scope/intent/branch. Đặt sau PUSH_TO_MAIN_PROHIBITED và allowlist để giữ
       // nguyên mã lỗi cũ; từ chối cứng, không bypass bằng approval chung.
-      const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, context?.userRequest);
+      const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, context?.userRequest, hasApprovalChannel(effectivePermissionManager));
       if (gitPolicyViolation) {
         return {
           ...(gitPolicyViolation.errorCode === 'GIT_CREDENTIAL_IN_URL' ? {} : { command: rawCommand }),
@@ -1201,7 +1301,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             suggestion: 'Run this finite command synchronously in the sandbox, or explicitly choose execution_target="host" if host execution is intended.',
             commandOutcome: 'blocked_preflight',
             processStarted: false,
-            success: true,
+            success: false,
             durationMs: 1,
           };
         }
@@ -1326,7 +1426,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             if (permCheck.allowed) {
               hasExplicitPermission = true;
               if (context) context.permissionGranted = true;
-            } else {
+            } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)) {
               return {
                 command: rawCommand,
                 error: permCheck.reason || `Command "${rawCommand}" was rejected for execution on Host.`,
@@ -1335,6 +1435,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
               };
             }
+            // else: no approval channel — fall through to the single denial below.
           }
         }
         if (!isAllowedOnHost && !hasExplicitPermission) {
@@ -1343,9 +1444,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             command: rawCommand,
             error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) to run on Host.`,
             errorCode: 'COMMAND_NOT_ALLOWED',
-            suggestion: misuse
-              ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
-              : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
+            suggestion: approvalSuggestion(effectivePermissionManager, misuse),
           };
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
@@ -1452,7 +1551,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           ...hostDiagnosis,
           sandbox: hostResult.sandboxType,
           executionTarget: 'host',
-        }, workspace);
+        }, workspace, advisoryExtra);
       }
 
       // Nếu có SandboxManager đang chạy
@@ -1467,7 +1566,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             if (permCheck.allowed) {
               hasExplicitPermission = true;
               if (context) context.permissionGranted = true;
-            } else {
+            } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)) {
               return {
                 command: rawCommand,
                 error: permCheck.reason || `Command "${rawCommand}" was rejected for execution on Host.`,
@@ -1476,6 +1575,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
               };
             }
+            // else: no approval channel — fall through to the single denial below.
           }
         }
 
@@ -1485,9 +1585,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             command: rawCommand,
             error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) to run on Host. (Or enable the Docker Sandbox to run commands without limits).`,
             errorCode: 'COMMAND_NOT_ALLOWED',
-            suggestion: misuse
-              ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
-              : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
+            suggestion: approvalSuggestion(effectivePermissionManager, misuse),
           };
         }
 
@@ -1535,7 +1633,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           ...(hostRecoveryRecommended ? { recommendedExecutionTarget: 'host' } : {}),
           sandbox: res.sandboxType,
           executionTarget: 'auto',
-        }, workspace);
+        }, workspace, advisoryExtra);
       }
 
       // Fallback mặc định
@@ -1546,7 +1644,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           if (permCheck.allowed) {
             hasExplicitPermission = true;
             if (context) context.permissionGranted = true;
-          } else {
+          } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)) {
             return {
               command: rawCommand,
               error: permCheck.reason || `Command "${rawCommand}" was rejected for execution.`,
@@ -1555,6 +1653,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               ...(permCheck.deniedByUser ? { deniedByUser: true } : {}),
             };
           }
+          // else: no approval channel — fall through to the single denial below.
         }
       }
 
@@ -1564,9 +1663,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           command: rawCommand,
           error: `Command "${rawCommand}" requires EXECUTION PERMISSION CONFIRMATION (PERMISSION APPROVAL) before execution.`,
           errorCode: 'COMMAND_NOT_ALLOWED',
-          suggestion: misuse
-            ? `Recommend switching to the dedicated tool "${misuse.tool}": ${misuse.reason}`
-            : 'Ask the user to approve permission (Permission Approval) or switch to a dedicated tool.',
+          suggestion: approvalSuggestion(effectivePermissionManager, misuse),
         };
       }
 
@@ -1640,7 +1737,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     ...rawResult,
                     ...diagnoseCommandFailure(effectiveCommand, rawResult),
                   };
-                  finalizeCommandResult(diagnosed, workspace).then(resolve).catch(() => resolve(diagnosed));
+                  finalizeCommandResult(diagnosed, workspace, advisoryExtra).then(resolve).catch(() => resolve(diagnosed));
                 });
                 return;
               }
@@ -1690,7 +1787,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               ...rawResult,
               ...diagnoseCommandFailure(effectiveCommand, rawResult),
             };
-            finalizeCommandResult(diagnosed, workspace).then(resolve).catch(() => resolve(diagnosed));
+            finalizeCommandResult(diagnosed, workspace, advisoryExtra).then(resolve).catch(() => resolve(diagnosed));
           }
         );
       });

@@ -7,7 +7,7 @@ import {
   diagnoseCommandFailure,
   getDevToolSuggestion,
 } from '../sandbox/command-diagnostics.js';
-import { createRunCommandTool } from './run-command.js';
+import { createRunCommandTool, finalizeCommandResult } from './run-command.js';
 import { probeMissingBinary } from './command-preflight-guard.js';
 import { Workspace } from '../workspace/workspace.js';
 
@@ -101,6 +101,26 @@ test('run_command suggests the dev-tool fallback for known binaries', async () =
   // Unknown binary: generic install guidance, no fabricated fallback.
   assert.equal(result.fallbackCommand, undefined);
   assert.ok(String(result.suggestion).includes('__minus_missing_bin__'));
+});
+
+test('missing binaries with a known fallback observe instead of hard-blocking', async () => {
+  const tool = createRunCommandTool();
+  const result = await tool.execute({ command: 'eslint --version' }, new Workspace());
+  // Never the fail-fast block, whether or not eslint happens to be installed.
+  assert.notEqual(result.preflightCode, 'DEV_BINARY_NOT_FOUND');
+  if (!result.preflightAdvisory) return;
+  assert.match(String(result.preflightAdvisory), /eslint/);
+});
+
+test('finalizeCommandResult carries the pre-flight advisory through', async () => {
+  const result = await finalizeCommandResult(
+    { command: 'eslint --version', stdout: 'v9', exitCode: 0 },
+    new Workspace(),
+    { preflightAdvisory: 'Pre-flight note: test advisory.' },
+  );
+  assert.equal(result.preflightAdvisory, 'Pre-flight note: test advisory.');
+  const plain = await finalizeCommandResult({ command: 'x', stdout: 'ok', exitCode: 0 }, new Workspace());
+  assert.equal(plain.preflightAdvisory, undefined);
 });
 
 test('MINUS_BINARY_PROBE=off disables the pre-spawn probe', async () => {
