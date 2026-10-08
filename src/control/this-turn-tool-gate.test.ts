@@ -10,10 +10,12 @@ import { Workspace } from '../workspace/workspace.js';
 import { PermissionManager } from '../security/permission-manager.js';
 import { CognitiveHarness } from '../agent/cognitive-harness.js';
 import { Session } from '../session/session.js';
-import { applyPhaseAuthority, requestPhaseTransition } from '../agent/phase-lifecycle.js';
+import { applyPhaseAuthority, getPhaseTransitionRecoveryGuidance, requestPhaseTransition } from '../agent/phase-lifecycle.js';
+import { buildPhaseToolAuthorityDirective } from '../llm/prompt-sections.js';
 import { createBrowserTools, BROWSER_TOOL_NAMES } from '../tools/browser-tools.js';
+import { ToolDescriptorRegistry } from './tool-descriptor-registry.js';
 
-test('Playwright browser tools are authorized in every phase (explore included)', () => {
+test('browser inspection remains available while browser effects require mutation authority', () => {
   const gate = new ThisTurnToolGate();
   const tools = createBrowserTools({} as any);
   for (const phase of ['explore', 'plan', 'implement', 'verify', 'release'] as const) {
@@ -33,7 +35,8 @@ test('Playwright browser tools are authorized in every phase (explore included)'
       createdAt: new Date().toISOString(),
     } as any, tools);
     for (const name of BROWSER_TOOL_NAMES) {
-      assert.ok(decision.allowedToolNames.includes(name), `${name} must be allowed in ${phase}`);
+      const effect = new ToolDescriptorRegistry().describe(tools.find(tool => tool.name === name)!).mutates;
+      assert.equal(decision.allowedToolNames.includes(name), !effect, `${name} under read-only ${phase}`);
     }
   }
 });
@@ -194,11 +197,11 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   assert.ok(exploreDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('formulate_and_verify_hypothesis'), 'formulate_and_verify_hypothesis must be allowed');
   assert.ok(exploreDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in explore');
-  assert.ok(exploreDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore phase');
+  assert.equal(exploreDecision.allowedToolNames.includes('replace_text'), false, 'explore must withhold edit authority');
   assert.ok(exploreDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be exposed in explore');
   assert.ok(exploreDecision.allowedToolNames.includes('request_phase_transition'), 'coding exploration can request a Harness-owned transition');
 
-  // 2. Pure read-only exploration (edit tools still available for immediate fixes)
+  // 2. Pure read-only exploration cannot authorize immediate edits
   const readOnlyClassification: any = {
     id: 'class-test-readonly',
     taskClass: 'exploration',
@@ -210,7 +213,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   };
   const readOnlyDecision = gate.decide(readOnlyClassification, registry.getAll());
   assert.ok(readOnlyDecision.allowedToolNames.includes('read_file'), 'read_file must be allowed in read-only');
-  assert.ok(readOnlyDecision.allowedToolNames.includes('replace_text'), 'replace_text is allowed in explore phase');
+  assert.equal(readOnlyDecision.allowedToolNames.includes('replace_text'), false, 'read-only exploration must withhold edits');
   assert.ok(readOnlyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in pure read-only exploration');
 
   const operationsDecision = gate.decide({ ...readOnlyClassification, taskClass: 'operations' }, registry.getAll());
@@ -421,7 +424,7 @@ test('Phase governance banners are advisory: no lock/disable/forbid claims', () 
   }
 });
 
-test('create_file and edit tools are authorized in all phases including plan/explore and implement', () => {
+test('file effects are withheld until an accepted implementation transition', () => {
   const registry = new ToolRegistry(new PlanManager());
   const gate = new ThisTurnToolGate();
   const engine = new ClassificationEngine();
@@ -438,9 +441,9 @@ test('create_file and edit tools are authorized in all phases including plan/exp
   };
 
   const planDecision = gate.decide(planClassification, registry.getAll());
-  assert.ok(planDecision.allowedToolNames.includes('create_file'), 'create_file is authorized in plan phase');
-  assert.ok(planDecision.allowedToolNames.includes('replace_text'), 'replace_text is authorized in plan phase');
-  assert.ok(planDecision.allowedToolNames.includes('write_file'), 'write_file is authorized in plan phase');
+  assert.equal(planDecision.allowedToolNames.includes('create_file'), false, 'create_file is withheld in plan phase');
+  assert.equal(planDecision.allowedToolNames.includes('replace_text'), false, 'replace_text is withheld in plan phase');
+  assert.equal(planDecision.allowedToolNames.includes('write_file'), false, 'write_file is withheld in plan phase');
   assert.ok(planDecision.allowedToolNames.includes('request_phase_transition'), 'request_phase_transition must be allowed in plan phase');
 
   // 2. Transition accepted to implement
@@ -502,11 +505,11 @@ test('Hybrid Multilingual Architecture: Supports English, Vietnamese, French, Ja
     assert.ok(initialDecision.allowedToolNames.includes('read_file'), `[${lang}] must allow read_file`);
     assert.ok(initialDecision.allowedToolNames.includes('search_text'), `[${lang}] must allow search_text`);
     
-    // In all phases, edit tools are authorized and transition is available
+    // Unknown-language action requests expose the transition before file effects
     if (classification.phase === 'explore' || classification.phase === 'plan') {
       assert.ok(initialDecision.allowedToolNames.includes('request_phase_transition'), `[${lang}] must expose request_phase_transition`);
-      assert.ok(initialDecision.allowedToolNames.includes('create_file'), `[${lang}] must expose create_file in ${classification.phase}`);
-      assert.ok(initialDecision.allowedToolNames.includes('replace_text'), `[${lang}] must expose replace_text in ${classification.phase}`);
+      assert.equal(initialDecision.allowedToolNames.includes('create_file'), false, `[${lang}] must withhold create_file in ${classification.phase}`);
+      assert.equal(initialDecision.allowedToolNames.includes('replace_text'), false, `[${lang}] must withhold replace_text in ${classification.phase}`);
 
       // 2. Perform phase transition to implement with evidence
       const session = new Session();
@@ -565,7 +568,7 @@ test('replace_text and edit tools remain authorized in implement phase across mu
   assert.ok(decision.allowedToolNames.includes('submit_solution'), 'submit_solution must be authorized in implement');
 });
 
-test('EDIT and CREATE tools are authorized in ALL phases across all MINUS_TOOL_CONTROL_MODEs', async () => {
+test('phase effects are enforced by bound allowlists while off/shadow remain observational', async () => {
   const gate = new ThisTurnToolGate();
   const registry = new ToolRegistry();
   const workspace = new Workspace(process.cwd());
@@ -590,16 +593,17 @@ test('EDIT and CREATE tools are authorized in ALL phases across all MINUS_TOOL_C
       taskClass: 'exploration',
       phase,
       complexity: 'small',
-      risk: 'R0',
-      requiredCapabilities: ['inspect', 'search'],
-      reversibility: 'read-only',
+      risk: 'R1',
+      requiredCapabilities: ['inspect', 'search', 'edit'],
+      reversibility: 'reversible',
     };
 
     const decision = gate.decide(classification, registry.getAll());
     for (const toolName of editAndCreateTools) {
-      assert.ok(
+      assert.equal(
         decision.allowedToolNames.includes(toolName),
-        `Tool "${toolName}" must be authorized in phase "${phase}" by ThisTurnToolGate`,
+        ['implement', 'verify', 'release'].includes(phase),
+        `Tool "${toolName}" must follow phase authority in "${phase}"`,
       );
     }
 
@@ -622,11 +626,124 @@ test('EDIT and CREATE tools are authorized in ALL phases across all MINUS_TOOL_C
       }, { ...context, controlMode });
 
       // Must NOT be blocked by TOOL_NOT_ALLOWED_THIS_TURN
-      assert.notEqual(
-        res.result?.errorCode,
-        'TOOL_NOT_ALLOWED_THIS_TURN',
-        `replace_text must NOT be rejected with TOOL_NOT_ALLOWED_THIS_TURN in phase "${phase}" under controlMode "${controlMode}"`,
+      assert.equal(
+        res.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN',
+        controlMode === 'enforce' && !decision.allowedToolNames.includes('replace_text'),
+        `replace_text follows ${controlMode} authority in ${phase}`,
       );
     }
   }
+});
+
+test('implement → plan return is exposed, accepted before mutations and blocked after', () => {
+  const registry = new ToolRegistry(new PlanManager());
+  const gate = new ThisTurnToolGate();
+  const implementClassification: any = {
+    id: 'class-test-return-plan',
+    taskClass: 'feature',
+    phase: 'implement',
+    complexity: 'medium',
+    risk: 'R1',
+    requiredCapabilities: ['inspect', 'search', 'plan', 'edit', 'execute', 'verify', 'git-read', 'complete', 'memory'],
+    reversibility: 'reversible',
+  };
+
+  // 1. Gate exposes the transition tool in implement so the model can ask to go back.
+  const implementDecision = gate.decide(implementClassification, registry.getAll());
+  assert.ok(implementDecision.allowedToolNames.includes('request_phase_transition'), 'request_phase_transition must be exposed in implement phase');
+
+  // 2. Accepted when nothing has been mutated yet this turn.
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+  session.append('control/decision', { turn: 1, controlDecision: { classification: implementClassification } });
+  const back = requestPhaseTransition(session, 1, implementClassification, {
+    targetPhase: 'plan',
+    rationale: 'scope is larger than understood, need milestones before editing',
+    evidenceRefs: ['src/index.ts'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(back.accepted, true);
+  assert.equal(back.phase, 'plan');
+  assert.equal(applyPhaseAuthority(implementClassification, session, 1).phase, 'plan');
+
+  // 3. Round trip plan → implement still works afterwards.
+  const fwd = requestPhaseTransition(session, 1, { ...implementClassification, phase: 'plan' }, {
+    targetPhase: 'implement',
+    rationale: 'plan finalized',
+    evidenceRefs: ['plan-task-1'],
+  }, { hasPlan: true, evidenceSufficient: true });
+  assert.equal(fwd.accepted, true);
+
+  // 4. Blocked once a mutation is observed; guidance points at verify.
+  session.append('tool/call', { turn: 1, toolName: 'replace_text', args: { path: 'a.ts' }, toolCallId: 'call-1' });
+  session.append('tool/result', { turn: 1, toolName: 'replace_text', toolCallId: 'call-1', result: { filesModified: ['a.ts'] } });
+  const blocked = requestPhaseTransition(session, 1, implementClassification, {
+    targetPhase: 'plan',
+    rationale: 'want to replan',
+    evidenceRefs: ['a.ts'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(blocked.accepted, false);
+  assert.equal(blocked.errorCode, 'IMPLEMENT_MUTATIONS_PRESENT');
+  assert.match(getPhaseTransitionRecoveryGuidance(blocked.errorCode, blocked.reason), /verify/i);
+
+  // 5. A repeated implement → plan → implement → plan loop with identical
+  // rationale+evidence is rejected as a duplicate; new evidence still passes.
+  const loopSession = new Session();
+  loopSession.append('turn/start', { turn: 2 });
+  loopSession.append('control/decision', { turn: 2, controlDecision: { classification: implementClassification } });
+  const first = requestPhaseTransition(loopSession, 2, implementClassification, {
+    targetPhase: 'plan',
+    rationale: 'need milestones',
+    evidenceRefs: ['src/index.ts'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(first.accepted, true);
+  const fwd2 = requestPhaseTransition(loopSession, 2, { ...implementClassification, phase: 'plan' }, {
+    targetPhase: 'implement',
+    rationale: 'plan drafted',
+    evidenceRefs: ['plan-task-1'],
+  }, { hasPlan: true, evidenceSufficient: true });
+  assert.equal(fwd2.accepted, true);
+  const loop = requestPhaseTransition(loopSession, 2, implementClassification, {
+    targetPhase: 'plan',
+    rationale: 'need milestones',
+    evidenceRefs: ['src/index.ts'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(loop.accepted, false);
+  assert.equal(loop.errorCode, 'DUPLICATE_TRANSITION_REQUEST');
+  const retry = requestPhaseTransition(loopSession, 2, implementClassification, {
+    targetPhase: 'plan',
+    rationale: 'need milestones',
+    evidenceRefs: ['src/index.ts', 'tool-result:read-2'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(retry.accepted, true);
+});
+
+test('plan → explore step-back is accepted with evidence', () => {
+  const planClassification: any = {
+    id: 'class-test-plan-back-explore',
+    taskClass: 'feature',
+    phase: 'plan',
+    complexity: 'medium',
+    risk: 'R1',
+    requiredCapabilities: ['inspect', 'search', 'plan', 'memory'],
+    reversibility: 'read-only',
+  };
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+  session.append('control/decision', { turn: 1, controlDecision: { classification: planClassification } });
+  const back = requestPhaseTransition(session, 1, planClassification, {
+    targetPhase: 'explore',
+    rationale: 'need to inspect an uncovered dependency before planning',
+    evidenceRefs: ['src/index.ts'],
+  }, { hasPlan: false, evidenceSufficient: true });
+  assert.equal(back.accepted, true);
+  assert.equal(back.phase, 'explore');
+  assert.equal(applyPhaseAuthority(planClassification, session, 1).phase, 'explore');
+});
+
+test('phase directive never advertises a transition the harness would deny', () => {
+  const planBlocked = buildPhaseToolAuthorityDirective('plan', ['create_plan', 'read_file'], { canRequestPhaseTransition: false });
+  assert.doesNotMatch(planBlocked, /request_phase_transition/);
+  assert.match(planBlocked, /create_plan/);
+  const planAllowed = buildPhaseToolAuthorityDirective('plan', ['create_plan', 'request_phase_transition'], { canRequestPhaseTransition: true });
+  assert.match(planAllowed, /request_phase_transition/);
 });

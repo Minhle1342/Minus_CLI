@@ -20,7 +20,7 @@ export function detectExplicitGitMutationIntent(userRequest?: string): GitMutati
   const normalized = normalizeIntentText(userRequest || '');
   if (!normalized) return { ...EMPTY_INTENT };
 
-  const mentionsCommit = /\bcommit(?:ting|ted)?\b|\btao\s+commit\b/.test(normalized);
+  const mentionsCommit = /\bcommit(?:ting|ted)?\b|\btao\s+commit\b|\bamend\b|\bluu\s+thay\s+doi\b/.test(normalized);
   const mentionsPush = /\bpush(?:ing|ed)?\b|\bday(?:\s+code)?\s+len\b|\bdua(?:\s+code)?\s+len\s+(?:repo|repository|remote|github|gitlab)\b/.test(normalized);
   const mentionsStage = /\bstage(?:d|ing)?\b|\bgit\s+add\b/.test(normalized);
   if (!mentionsCommit && !mentionsPush && !mentionsStage) return { ...EMPTY_INTENT };
@@ -64,8 +64,12 @@ export function isForcePushAuthorized(userRequest?: string): boolean {
 export function extractRequestedGitBranch(userRequest?: string): string | undefined {
   const normalized = normalizeIntentText(userRequest || '');
   if (!detectExplicitGitMutationIntent(userRequest).push) return undefined;
-  const match = normalized.match(/\b(?:branch|nhanh)\s+["']?([a-z0-9._/-]+)/i);
-  return match?.[1];
+  const match = normalized.match(/\b(?:branch|nhanh)\s+["']?([a-z0-9._/-]+)/i)
+    || normalized.match(/\blen\s+(?:nhanh\s+|branch\s+)?["']?([a-z0-9._/-]+)/i);
+  const branch = match?.[1]?.toLowerCase();
+  // Generic words after "lên" name no branch ("đẩy code lên repo" must not pin branch "repo").
+  if (!branch || /^(repo|repository|remote|github|gitlab|code|ma|nguon|len|lenh)$/.test(branch)) return undefined;
+  return branch;
 }
 
 export function normalizeIntentText(value: string): string {

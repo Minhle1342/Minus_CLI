@@ -3,6 +3,8 @@ import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-
 import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
 import { CLI } from '../ui/cli-ui.js';
+import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
+import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 
 export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
 
@@ -49,6 +51,8 @@ export class PermissionManager {
   private mode: PermissionMode;
   private promptHandler?: PermissionPromptHandler;
   private sessionApprovedCategories = new Set<string>();
+  /** Item 9: per-category command prefixes approved via approve_all_session (run_command only). */
+  private sessionApprovedPrefixes = new Map<string, Set<string>>();
   private requestHistory: PermissionRequest[] = [];
   private workspaceRoot?: string;
 
@@ -76,8 +80,50 @@ export class PermissionManager {
     this.promptHandler = handler;
   }
 
+  /**
+   * F3: True when a user-facing prompt handler is attached (interactive session).
+   * Tool suggestions use this to avoid dead-end "ask the user" advice when no
+   * approval can ever arrive (headless/CI runs deny permission requests).
+   */
+  hasApprovalChannel(): boolean {
+    return typeof this.promptHandler === 'function';
+  }
+
   clearSessionApprovals(): void {
     this.sessionApprovedCategories.clear();
+    this.sessionApprovedPrefixes.clear();
+  }
+
+  /** Raw command text behind a run_command permission request. */
+  private commandTextForApproval(request: PermissionRequest): string {
+    const details = (request.details || {}) as Record<string, any>;
+    return String(
+      details.command || details.CommandLine || details.commandLine || details.cmd || request.target || '',
+    );
+  }
+
+  /** First token of every shell segment (e.g. npm, git, pytest) for prefix-scoped approvals. */
+  private commandPrefixesForApproval(command: string): string[] {
+    const text = command.trim();
+    if (!text || text === '(empty command)') return [];
+    try {
+      const segments = analyzeShellCommand(text).segments;
+      const sources = segments.length > 0 ? segments : [text];
+      const prefixes = sources
+        .map((segment) => segment.trim().split(/\s+/)[0]?.toLowerCase() || '')
+        .filter(Boolean);
+      return [...new Set(prefixes)];
+    } catch {
+      const first = text.split(/\s+/)[0]?.toLowerCase();
+      return first ? [first] : [];
+    }
+  }
+
+  /** True when every segment prefix of a run_command was session-approved. */
+  private isSessionPrefixApproved(request: PermissionRequest): boolean {
+    const prefixes = this.commandPrefixesForApproval(this.commandTextForApproval(request));
+    const allowed = this.sessionApprovedPrefixes.get(request.category);
+    return prefixes.length > 0 && !!allowed && prefixes.every((prefix) => allowed.has(prefix));
   }
 
   /**
@@ -90,7 +136,11 @@ export class PermissionManager {
   ): Promise<PermissionCheckResult> {
     // 2. Chế độ Read-Only (Chỉ cho phép đọc, cấm mọi thao tác ghi / chạy lệnh)
     if (this.mode === 'read_only') {
-      if (['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file', 'run_command', 'git_commit', 'git_push'].includes(toolName)) {
+      const descriptor = new ToolDescriptorRegistry().describe({ name: toolName, description: '', parameters: {}, execute: async () => ({}) });
+      const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
+      const safeCommand = toolName === 'run_command'
+        && new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'strict').evaluateCommand(command, args.cwd).allowed;
+      if ((toolName === 'run_command' && !safeCommand) || toolName === 'run_test_suite' || descriptor.mutates) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
@@ -128,7 +178,11 @@ export class PermissionManager {
 
     // Nếu người dùng đã chọn "Luôn đồng ý danh mục này trong phiên" (approve_all_session):
     // Vẫn hiển thị Diff View trực quan để người dùng theo dõi thay đổi mã nguồn trong thời gian thực!
-    if (this.sessionApprovedCategories.has(request.category)) {
+    // Item 9: run_command approvals are additionally scoped to the approved
+    // command prefixes so one approval cannot blanket-authorize every shell command.
+    const sessionCategoryApproved = this.sessionApprovedCategories.has(request.category)
+      && (toolName !== 'run_command' || this.isSessionPrefixApproved(request));
+    if (sessionCategoryApproved) {
       if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
         CLI.renderSessionAutoApprovedDiff(request);
       }
@@ -141,15 +195,12 @@ export class PermissionManager {
 
     // Nếu không có Prompt Handler (môi trường non-interactive / headless CI)
     if (!this.promptHandler) {
-      if (toolName === 'run_command' || request.riskLevel === 'CRITICAL') {
-        return {
+      return {
           allowed: false,
           errorCode: 'APPROVAL_REQUIRED',
           permissionRequestId: request.id,
-          reason: `Command "${request.target}" requires direct EXECUTION PERMISSION (MINUS PERMISSION APPROVAL) from the user.`,
-        };
-      }
-      return { allowed: true };
+          reason: `Operation "${request.target}" requires direct EXECUTION PERMISSION (MINUS PERMISSION APPROVAL), but no approval channel is available.`,
+      };
     }
 
     // Hỏi ý kiến người dùng qua Interactive Prompt Handler
@@ -166,6 +217,16 @@ export class PermissionManager {
 
       if (decision === 'approve_all_session') {
         this.sessionApprovedCategories.add(request.category);
+        if (toolName === 'run_command') {
+          let prefixes = this.sessionApprovedPrefixes.get(request.category);
+          if (!prefixes) {
+            prefixes = new Set<string>();
+            this.sessionApprovedPrefixes.set(request.category, prefixes);
+          }
+          for (const prefix of this.commandPrefixesForApproval(this.commandTextForApproval(request))) {
+            prefixes.add(prefix);
+          }
+        }
         return {
           allowed: true,
           permissionGranted: toolName === 'run_command',
@@ -452,13 +513,14 @@ export class PermissionManager {
       };
     }
 
+    const descriptor = new ToolDescriptorRegistry().describe({ name: toolName, description: '', parameters: {}, execute: async () => ({}) });
     return {
       id,
       toolName,
       category: 'general',
       target: toolName,
       summary: `Execute tool ${toolName}`,
-      riskLevel: 'LOW',
+      riskLevel: descriptor.mutates || descriptor.requiresApproval ? 'MEDIUM' : 'LOW',
       details: args,
       timestamp,
     };

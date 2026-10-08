@@ -260,3 +260,16 @@ test('tool-use-guardian: Reproduction Gate does not enforce on non-bugfix tasks 
 
   assert.equal(res.valid, true);
 });
+
+test('tool-use-guardian: trivial tiny edits bypass the inspect-first requirement', () => {
+  const guardian = new ToolUseGuardian();
+  guardian.setPreMutationGateContext({
+    taskClass: 'bugfix', isBugfixTask: true, risk: 'R2',
+    evidenceGateMode: 'enforce', evidenceScore: 0, evidenceThreshold: 3, phase: 'implement',
+  } as any);
+  const tiny = guardian.preCallValidate('replace_text', { path: 'src/typo.ts', oldText: 'teh', newText: 'the' });
+  assert.equal(tiny.valid, true);
+  // Sensitive targets still require inspection first.
+  const sensitive = guardian.preCallValidate('replace_text', { path: 'src/.env', oldText: 'a', newText: 'b' });
+  assert.equal(sensitive.valid, false);
+});

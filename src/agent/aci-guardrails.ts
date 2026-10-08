@@ -53,12 +53,34 @@ const LAZY_PHRASES: RegExp[] = [
   /same as (before|above)/i,
   /existing code (here|unchanged|omitted|as-?is)/i,
   /your code here|insert code here|add (your )?code here|code here/i,
-  /phần còn lại/i,
-  /giữ nguyên/i,
-  /(không thay đổi|không đổi)/i,
   /\.\.\.\s*rest\b/i,
   /\brest\s*[\.\u2026]+/i,
 ];
+
+/**
+ * Item 13: Vietnamese preservation notes ("giữ nguyên", "phần còn lại", ...)
+ * are only placeholders when they stand alone. A comment like
+ * `// giữ nguyên logic kiểm tra null` describes real preserved code and must
+ * not block. Bare `...` lines above still always match.
+ */
+const STANDALONE_ONLY_VI_PHRASES: RegExp[] = [
+  /phần còn lại/i,
+  /giữ nguyên/i,
+  /(không thay đổi|không đổi)/i,
+];
+
+/** True when a line holds nothing but a marker (optional comment prefix + phrase + punctuation). */
+function isStandaloneMarkerLine(trimmed: string): boolean {
+  const body = trimmed
+    .replace(/^(?:\/\/|#|--|;|%|\*|<!--|\/\*)/, '')
+    .replace(/-->\s*$/, '')
+    .replace(/\*\/\s*$/, '')
+    .replace(/\.\.\.|…/g, '')
+    .replace(/["'“”‘’()[\]{}:;,.!?…-]/g, '')
+    .replace(/phần còn lại|giữ nguyên|không thay đổi|không đổi/gi, '')
+    .trim();
+  return body === '';
+}
 
 function isProsePath(filePath?: string): boolean {
   return /\.(md|markdown|txt|rst|tex)$/i.test(filePath || '');
@@ -94,6 +116,11 @@ export function detectLazyOmission(text: string, filePath?: string): LazyOmissio
     if (prose && !isCommentLine) continue;
     const phrase = LAZY_PHRASES.find((pattern) => pattern.test(trimmed));
     if (phrase) {
+      findings.push({ line: index + 1, marker: trimmed.slice(0, 120) });
+      continue;
+    }
+    const viMarker = STANDALONE_ONLY_VI_PHRASES.find((pattern) => pattern.test(trimmed));
+    if (viMarker && isStandaloneMarkerLine(trimmed)) {
       findings.push({ line: index + 1, marker: trimmed.slice(0, 120) });
     }
   }

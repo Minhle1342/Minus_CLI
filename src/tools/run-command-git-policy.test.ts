@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
+import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand } from './git-command-policy.js';
+import { detectExplicitGitMutationIntent, extractRequestedGitBranch } from './git-intent.js';
+import { pushArgsTargetBranch } from './git-tools.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
 
 test('parseGitInvocation keeps global flags in argv for scope checks', () => {
@@ -84,7 +87,17 @@ test('commit intent authorizes staging explicit paths but never broad add select
   assert.equal(checkGitPolicyForShell(['git add -- src/index.ts'], '/repo', request), undefined);
   assert.equal(checkGitPolicyForShell(['git add src/index.ts src/tools/run-command.ts'], '/repo', request), undefined);
 
-  for (const command of ['git add -A', 'git add --all', 'git add .', 'git add src/*.ts', 'git add :(top)src/index.ts']) {
+  // Whole-tree selectors stay blocked without commit intent...
+  for (const command of ['git add -A', 'git add --all', 'git add .']) {
+    assert.equal(
+      checkGitPolicyForShell([command], '/repo', 'xem thay đổi giúp tôi')?.errorCode,
+      'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+      `${command} must remain blocked without an explicit commit request`,
+    );
+  }
+
+  // ...and wildcards/pathspecs stay blocked even with commit intent.
+  for (const command of ['git add src/*.ts', 'git add :(top)src/index.ts']) {
     assert.equal(
       checkGitPolicyForShell([command], '/repo', request)?.errorCode,
       'GIT_BROAD_STAGING_NOT_AUTHORIZED',
@@ -122,7 +135,7 @@ test('run_command denies unauthorized git before spawning any process', async ()
   const commit = await tool.execute({ command: 'git commit -m "x"' }, workspace);
   assert.equal(commit.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
   const broadStage = await tool.execute(
-    { command: 'git add -A' },
+    { command: 'git add src/*.ts' },
     workspace,
     { userRequest: 'commit và push code mới lên nhánh develop' },
   );
@@ -137,4 +150,92 @@ test('parseGitInvocation ignores git keywords in non-git commands via AST', () =
   assert.equal(parseGitInvocation('echo "git commit -m test"'), undefined);
   assert.equal(parseGitInvocation('grep "git push" README.md'), undefined);
   assert.equal(parseGitInvocation('cat git.log'), undefined);
+});
+
+test('push args accept HEAD, upstream defaults, and dry runs', () => {
+  assert.equal(pushArgsTargetBranch(['origin', 'HEAD'], 'main'), true);
+  assert.equal(pushArgsTargetBranch(['origin', 'HEAD:main'], 'main'), true);
+  assert.equal(pushArgsTargetBranch(['origin'], 'main'), true);
+  assert.equal(pushArgsTargetBranch([], 'main'), true);
+  assert.equal(pushArgsTargetBranch(['--dry-run', 'origin', 'other'], 'main'), true);
+  assert.equal(pushArgsTargetBranch(['origin', 'main'], 'main'), true);
+  assert.equal(pushArgsTargetBranch(['origin', 'other'], 'main'), false);
+});
+
+test('branch extraction understands len-branch phrasing without false pinning', () => {
+  assert.equal(extractRequestedGitBranch('hãy đẩy code lên nhánh main'), 'main');
+  assert.equal(extractRequestedGitBranch('hãy đẩy lên main'), 'main');
+  assert.equal(extractRequestedGitBranch('hãy đẩy code lên repo'), undefined);
+  assert.equal(extractRequestedGitBranch('fix bug login'), undefined);
+});
+
+test('whole-tree git add passes with explicit commit intent only', () => {
+  const request = 'hãy commit code mới';
+  assert.equal(checkGitPolicyForShell(['git add -A'], '/repo', request), undefined);
+  assert.equal(checkGitPolicyForShell(['git add .'], '/repo', request), undefined);
+  assert.equal(
+    checkGitPolicyForShell(['git add -A'], '/repo', undefined)?.errorCode,
+    'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+  );
+  assert.equal(
+    checkGitPolicyForShell(['git add src/*.ts'], '/repo', request)?.errorCode,
+    'GIT_BROAD_STAGING_NOT_AUTHORIZED',
+  );
+});
+
+test('vietnamese intent synonyms authorize amend and continued flows', () => {
+  assert.ok(detectExplicitGitMutationIntent('hãy sửa commit vừa rồi').commit);
+  assert.ok(detectExplicitGitCommandNames('tiếp tục rebase').includes('rebase'));
+  assert.ok(detectExplicitGitMutationIntent('hãy đẩy code lên main').push);
+  assert.equal(
+    isGitCommandAuthorized('tiếp tục rebase', 'rebase', classifyGitCommand('rebase', [])),
+    true,
+  );
+});
+
+test('no-channel permission denial merges into a single COMMAND_NOT_ALLOWED', async () => {
+  const workspace = new Workspace();
+  const tool = createRunCommandTool();
+  const denyingNoChannel = { checkPermission: async () => ({ allowed: false, errorCode: 'APPROVAL_REQUIRED' }) };
+  const merged = await tool.execute(
+    { command: 'copy a b' },
+    workspace,
+    { permissionManager: denyingNoChannel } as any,
+  );
+  assert.equal(merged.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.match(merged.suggestion || '', /No approval channel is available/);
+
+  const denyingWithChannel = {
+    hasApprovalChannel: () => true,
+    checkPermission: async () => ({ allowed: false, errorCode: 'PERMISSION_DENIED' }),
+  };
+  const direct = await tool.execute(
+    { command: 'copy a b' },
+    workspace,
+    { permissionManager: denyingWithChannel } as any,
+  );
+  assert.equal(direct.errorCode, 'PERMISSION_DENIED');
+});
+
+test('approval suggestions branch on session interactivity, errorCodes unchanged', async () => {
+  const tool = createRunCommandTool();
+  const workspace = new Workspace();
+  // No permission manager anywhere: no approval channel exists.
+  const blocked = await tool.execute({ command: 'copy a b' }, workspace);
+  assert.equal(blocked.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.match(blocked.suggestion, /No approval channel is available/);
+
+  // A permission manager with a prompt handler means a user is present.
+  const interactiveTool = createRunCommandTool(undefined, undefined, { hasApprovalChannel: () => true } as any);
+  const interactive = await interactiveTool.execute({ command: 'copy a b' }, workspace);
+  assert.equal(interactive.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.match(interactive.suggestion, /Ask the user to approve permission/);
+
+  // Same branching inside the git policy gate (direct calls, no git binary needed).
+  const gitDenied = checkGitPolicyForShell(['git stash push'], '/repo', undefined, false);
+  assert.equal(gitDenied?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
+  assert.match(gitDenied?.suggestion || '', /No approval channel is available/);
+  const gitInteractive = checkGitPolicyForShell(['git stash push'], '/repo', undefined, true);
+  assert.equal(gitInteractive?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
+  assert.match(gitInteractive?.suggestion || '', /Ask the user to explicitly request/);
 });

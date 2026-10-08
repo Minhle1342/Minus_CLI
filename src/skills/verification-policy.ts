@@ -140,7 +140,7 @@ export class VerificationPolicy {
       targetFilePath?: string;
       isScratchFile?: boolean;
       criticApproved?: boolean;
-      /** Classification risk (R0..R5 / LOW..CRITICAL). Missing = conservative enforce. */
+      /** Classification risk (R0..R5 / LOW..CRITICAL). Missing defaults to R2 (advisory path). */
       riskLevel?: string;
     },
   ): { allowed: boolean; reason?: string; advisory?: string } {
@@ -156,10 +156,11 @@ export class VerificationPolicy {
       if (isBugfixOrSecurity && !this.hasReproductionProof && !options?.criticApproved) {
         // Risk-tiered reproduction gate: a hand-written repro script is Verifier
         // Tax for low-risk fixes — downgrade to advisory and rely on the
-        // existing test suite. Keep enforcing for HIGH/CRITICAL (or unknown risk).
-        const risk = (options?.riskLevel || '').trim().toUpperCase();
+        // existing test suite. Keep enforcing for HIGH/CRITICAL. Missing
+        // riskLevel defaults to R2 (advisory) instead of blocking.
+        const risk = (options?.riskLevel || 'R2').trim().toUpperCase();
         const highOrCritical = ['R3', 'R4', 'R5', 'HIGH', 'CRITICAL'].includes(risk);
-        if (!options?.riskLevel || highOrCritical) {
+        if (highOrCritical) {
           return {
             allowed: false,
             reason: 'REPRODUCTION_GATE_BLOCKED: Bugfix/security task requires a failing reproduction test execution (e.g. scratch/reproduce_*.py or failing unit test) or a Dual-Agent Verifier approved exploration analysis before modifying production code.',
@@ -290,7 +291,7 @@ export class VerificationPolicy {
     if (effectiveSuccess) {
       if (this.pendingTargetedTests.size > 0) {
         const tier = options?.tier || this.inferTier(command);
-        if (tier === 'full_test' || tier === 'build') {
+        if (tier === 'full_test' && coverage?.verdict !== 'insufficient' && coverage?.verdict !== 'partial') {
           this.pendingTargetedTests.clear();
           this.hasUnverifiedModifications = false;
         } else {
@@ -312,8 +313,8 @@ export class VerificationPolicy {
   /**
    * Kiểm tra xem Agent có được phép kết thúc nhiệm vụ (Final Answer) hay chưa.
    * `measured` carries harness-measured impact (never LLM claims); when it
-   * resolves to HIGH/CRITICAL the required tier is upgraded to a real
-   * full_test pass regardless of the classification risk.
+    * resolves to HIGH/CRITICAL, verification remains proportional to the
+    * actual changes and measured impacted coverage; no blanket full-suite mandate.
    */
   canComplete(
     activeSkillIds: string[] = [],
@@ -382,12 +383,9 @@ export class VerificationPolicy {
 
     if (mandatesVerification && this.pendingTargetedTests.size > 0) {
       const pendingList = Array.from(this.pendingTargetedTests);
-      const hasMatchingTest = this.verificationHistory.some((v) => {
-        if (!v.success) return false;
-        if (v.tier === 'full_test' || v.tier === 'build') return true;
-        return pendingList.some((t) => v.command.includes(t) || t.includes(v.command));
-      });
-      if (!hasMatchingTest) {
+      // Suites leave this set only when actually covered by successful checks.
+      // A pass for one suite cannot discharge the remaining obligations.
+      {
         return {
           allowed: false,
           reason: `IMPACTED_TESTS_REQUIRED: Blast radius identified impacted test suite(s): ${pendingList.slice(0, 3).join(', ')}. Execute the impacted tests or full test suite before completion.${this.coverageGuidance()}`,
@@ -415,6 +413,7 @@ export class VerificationPolicy {
   }
 
   reset(): void {
+    this.pendingTargetedTests.clear();
     this.hasUnverifiedModifications = false;
     this.modifiedFiles.clear();
     this.commentOnlyFiles.clear();

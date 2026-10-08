@@ -144,12 +144,19 @@ export class ThisTurnToolGate {
       const descriptor = this.descriptors.describe(tool);
       // Tool đọc an toàn luôn được phép ở mọi phase vì quan sát là quyền năng cốt lõi của Agent
       const isAlwaysAllowedRead = READ_TOOL_NAMES.has(tool.name) && !descriptor.mutates;
-      // Tool edit hoặc create luôn được phép ở tất cả các phase và control mode
-      const isAlwaysAllowedEdit = EDIT_TOOL_NAMES.has(tool.name);
+      // File effects require an implementation/verification/release phase.
+      const isAuthorizedEdit = EDIT_TOOL_NAMES.has(tool.name)
+        && ['implement', 'verify', 'release'].includes(classification.phase)
+        && required.has('edit');
+      if (descriptor.mutates && (['explore', 'plan'].includes(classification.phase)
+        || classification.reversibility === 'read-only')) {
+        denied.push(tool.name);
+        continue;
+      }
       // The model may ask the Harness to advance phase, but cannot expand its current tool authority.
       const isPhaseTransitionTool = tool.name === 'request_phase_transition';
       const isPhaseTransitionRequest = isPhaseTransitionTool
-        && ['explore', 'plan'].includes(classification.phase)
+        && ['explore', 'plan', 'implement'].includes(classification.phase)
         && PHASE_TRANSITION_TASK_CLASSES.has(classification.taskClass);
       const isVerificationRepairTool = classification.phase === 'verify'
         && EDIT_TOOL_NAMES.has(tool.name);
@@ -157,16 +164,16 @@ export class ThisTurnToolGate {
         && descriptor.phases.includes(classification.phase);
       const capabilityMatch = descriptor.capabilities.some((capability) => required.has(capability))
         || isAlwaysAllowedRead
-        || isAlwaysAllowedEdit
+        || isAuthorizedEdit
         || isPhaseTransitionRequest
         || isVerificationRepairTool
         || isCompletionTool;
       const phaseMatch = descriptor.phases.includes(classification.phase)
         || isAlwaysAllowedRead
-        || isAlwaysAllowedEdit;
+        || isAuthorizedEdit;
       const riskMatch = riskRank[classification.risk] >= riskRank[descriptor.minimumRisk]
         || (classification.risk !== 'R0' || !descriptor.mutates)
-        || isAlwaysAllowedEdit;
+        || isAuthorizedEdit;
 
       if ((!isPhaseTransitionTool && capabilityMatch && phaseMatch && riskMatch) || isPhaseTransitionRequest) {
         allowed.push(tool);

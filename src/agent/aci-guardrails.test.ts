@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AciGuardrails, resolveAciGuardrailMode } from './aci-guardrails.js';
+import { AciGuardrails, resolveAciGuardrailMode, detectLazyOmission } from './aci-guardrails.js';
 
 test('ACI guardrails block prohibited git push to main', () => {
   const guard = new AciGuardrails();
@@ -90,4 +90,12 @@ test('ACI guardrails resolve mode properly from environment', () => {
   assert.equal(resolveAciGuardrailMode('observe'), 'observe');
   assert.equal(resolveAciGuardrailMode('off'), 'off');
   assert.equal(resolveAciGuardrailMode(undefined), 'observe');
+});
+
+test('detectLazyOmission flags standalone markers but not descriptive preservation notes', () => {
+  assert.equal(detectLazyOmission('// giữ nguyên', 'a.ts').length, 1);
+  assert.equal(detectLazyOmission('// giữ nguyên logic kiểm tra null', 'a.ts').length, 0);
+  assert.equal(detectLazyOmission('# phần còn lại của hàm xử lý', 'a.py').length, 0);
+  assert.equal(detectLazyOmission('// ...', 'a.ts').length, 1);
+  assert.equal(detectLazyOmission('// rest of code unchanged', 'a.ts').length, 1);
 });

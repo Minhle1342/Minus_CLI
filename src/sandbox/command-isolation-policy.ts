@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { analyzeShellCommand } from '../security/shell-segmenter.js';
 import type { SandboxStatus } from './types.js';
 
@@ -43,7 +44,13 @@ export function mustBlockUnisolatedAutoExecution(command: string, status: Sandbo
 }
 
 /** Approval is necessary for host execution, but never sufficient for system-destructive commands. */
-export function evaluateHostCommandPolicy(command: string): HostCommandPolicyResult {
+export function evaluateHostCommandPolicy(command: string, workspaceRoot?: string): HostCommandPolicyResult {
+  // Item 10: recursive deletes confined to the workspace are not system
+  // destruction — exempt them here so they fall through to the allowlist and
+  // the approval gate instead of a non-bypassable block.
+  if (workspaceRoot && allRecursiveDeleteTargetsInWorkspace(command, workspaceRoot)) {
+    return { allowed: true };
+  }
   const match = HOST_SYSTEM_RISK.find((pattern) => pattern.test(command));
   if (!match) return { allowed: true };
   return {
@@ -51,4 +58,46 @@ export function evaluateHostCommandPolicy(command: string): HostCommandPolicyRes
     errorCode: 'HOST_SYSTEM_RISK',
     reason: 'Host execution blocked: command matches a system-destructive pattern and cannot be approved.',
   };
+}
+
+const RM_VERBS = new Set(['rm', 'rmdir', 'rd', 'remove-item', 'ri']);
+
+/**
+ * True when the command holds recursive-delete segments and EVERY delete
+ * target resolves inside the workspace. Anything else (format, dd, fork
+ * bombs, outside targets, unparseable input) returns false to stay fail-closed.
+ */
+export function allRecursiveDeleteTargetsInWorkspace(command: string, workspaceRoot: string): boolean {
+  let analysis: { error?: string; segments: string[] };
+  try {
+    analysis = analyzeShellCommand(command);
+  } catch {
+    return false;
+  }
+  if (analysis.error || (analysis.segments || []).length === 0) return false;
+  const root = path.resolve(workspaceRoot);
+  const targets: string[] = [];
+  for (const segment of analysis.segments || []) {
+    const tokens = segment.trim().match(/"[^"]*"|'[^']*'|\S+/g) || [];
+    if (tokens.length === 0) continue;
+    const verb = (tokens[0] || '').toLowerCase();
+    if (!RM_VERBS.has(verb)) continue;
+    const args = tokens.slice(1).map((token) => token.replace(/^["']|["']$/g, ''));
+    const flags = args.filter((arg) => arg.startsWith('-') || arg.startsWith('/'));
+    const recursive = flags.some((flag) => {
+      const bare = flag.replace(/^[-/]+/, '').toLowerCase();
+      return /r/i.test(bare) || bare === 'recurse' || bare === 'recursive' || bare === 's';
+    });
+    if (!recursive) continue;
+    const paths = args.filter((arg) => !arg.startsWith('-') && !arg.startsWith('/'));
+    if (paths.length === 0) return false;
+    targets.push(...paths);
+  }
+  if (targets.length === 0) return false;
+  return targets.every((target) => {
+    const resolved = path.resolve(root, target);
+    const relative = path.relative(root, resolved);
+    const normalized = process.platform === 'win32' ? relative.toLowerCase() : relative;
+    return normalized !== '' && !normalized.startsWith('..') && !path.isAbsolute(normalized);
+  });
 }
