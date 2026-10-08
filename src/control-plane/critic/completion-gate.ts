@@ -33,11 +33,13 @@ export class CompletionGate {
     const reasons: string[] = [];
 
     // If no files have been mutated and zero diagnostic errors exist (conversational / analysis task)
-    if (!workspace.dirty && workspace.changedFiles.length === 0 && workspace.diagnostics.errors.length === 0) {
+    if (!workspace.dirty && workspace.changedFiles.length === 0) {
+      if (!hasSubmittedSolution) blockers.push('The actual answer must be submitted before completion.');
+      if (activeHypothesis?.status === 'TESTING') blockers.push(`Active hypothesis [${activeHypothesis.id}] remains in TESTING state without validation.`);
       return {
-        canComplete: true,
-        score: 100,
-        blockers: [],
+        canComplete: blockers.length === 0,
+        score: blockers.length === 0 ? 100 : 0,
+        blockers,
         staleEvidence: [],
         missingEvidence: [],
         reasons: ['Clean completion: Zero workspace mutations introduced and zero compiler errors.'],

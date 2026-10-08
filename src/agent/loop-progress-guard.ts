@@ -1,5 +1,6 @@
 import { isVerificationCommand } from './completion-evidence.js';
 import { isMutationTool } from '../tools/diff-generator.js';
+import { hasObservedMutation, toolResultFailed } from './completion-observations.js';
 
 export interface ToolProgressObservation {
   toolName: string;
@@ -68,7 +69,7 @@ export interface TrajectoryOscillationStatus {
 export class LoopProgressGuard {
   private readonly seen = new Map<string, SeenObservation>();
   private readonly callHistory: Array<{ toolName: string; callFingerprint: string }> = [];
-  private readonly fileMutationHistory: Array<{ file: string; toolName: string; timestamp: number }> = [];
+  private readonly fileMutationHistory: Array<{ file: string; toolName: string; timestamp: number; fingerprint?: string }> = [];
 
   reset(): void {
     this.seen.clear();
@@ -78,12 +79,7 @@ export class LoopProgressGuard {
 
   observe(observation: ToolProgressObservation): ToolProgressDecision {
     const { toolName, args, result } = observation;
-    const isFailure = Boolean(
-      result.error
-      || result.errorCode
-      || result.success === false
-      || (typeof result.exitCode === 'number' && result.exitCode !== 0),
-    );
+    const isFailure = toolResultFailed(result);
 
     if (isFailure) {
       return { repetitionCount: 0, shouldStop: false };
@@ -91,19 +87,14 @@ export class LoopProgressGuard {
 
     // Pure verification run_commands (e.g. npm test, npm run build, pytest) are treated as guarded observations rather than workspace mutations
     const isPureVerification = toolName === 'run_command' && isVerificationCommand(args.command);
+    const verified = (isPureVerification && result.exitCode === 0 && !result.isBackgroundTask && result.processStarted !== false)
+      || (toolName === 'get_diagnostics' && result.clean === true && !result.totalErrors)
+      || (toolName === 'run_test_suite' && result.exitCode === 0 && result.isPassed === true && !args.useScratchWorkspace);
 
     // Ghi nhận verification command để giải tỏa cảnh báo hyper-mutation
-    if (isPureVerification) {
-      if (this.fileMutationHistory.length > 0) {
-        this.fileMutationHistory.push({
-          file: '__verification__',
-          toolName: 'run_command',
-          timestamp: Date.now(),
-        });
-      }
-    }
+    if (verified) this.fileMutationHistory.length = 0;
 
-    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || (toolName === 'run_command' && !isPureVerification)) {
+    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || hasObservedMutation(toolName, result)) {
       // Ghi nhận file mutation vào quỹ đạo Trajectory
       const rawFile = String(args.path || args.filePath || args.TargetFile || args.targetFile || args.file || '').trim();
       if (rawFile) {
@@ -112,6 +103,7 @@ export class LoopProgressGuard {
           file: normalizedFile,
           toolName,
           timestamp: Date.now(),
+          fingerprint: mutationFingerprint(args, result),
         });
         if (this.fileMutationHistory.length > 10) {
           this.fileMutationHistory.shift();
@@ -135,12 +127,12 @@ export class LoopProgressGuard {
       return { repetitionCount: 0, shouldStop: false };
     }
 
-    if (!GUARDED_INSPECTION_TOOLS.has(toolName) && !isPureVerification) {
+    if (!GUARDED_INSPECTION_TOOLS.has(toolName) && !isPureVerification && toolName !== 'run_command') {
       return { repetitionCount: 0, shouldStop: false };
     }
 
     const callFingerprint = stableStringify({ toolName, args });
-    const resultFingerprint = stableStringify(result);
+    const resultFingerprint = stableStringify(withoutTransientMetadata(result));
 
     // Track alternating call patterns (e.g. A -> B -> A -> B -> A -> B)
     this.callHistory.push({ toolName, callFingerprint });
@@ -170,12 +162,15 @@ export class LoopProgressGuard {
     const m2 = validMutations[len - 2].file;
     const m3 = validMutations[len - 1].file;
 
-    if (m0 === m2 && m1 === m3 && m0 !== m1) {
+    if (m0 === m2 && m1 === m3 && m0 !== m1
+      && validMutations[len - 4].fingerprint !== undefined && validMutations[len - 3].fingerprint !== undefined
+      && validMutations[len - 4].fingerprint === validMutations[len - 2].fingerprint
+      && validMutations[len - 3].fingerprint === validMutations[len - 1].fingerprint) {
       return {
         isOscillating: true,
         affectedFiles: [m0, m1],
         oscillationType: 'ping-pong',
-        message: `[TRAJECTORY DYSREGULATION INTERVENTION]: Detected a continuous ping-pong mutation cycle between "${m0}" and "${m1}". Stop the repeated trial-and-error edits across these two files. Pause, create an isolated test in scratch/ or re-read the original request to investigate the root cause before continuing.`,
+        message: `[TRAJECTORY DYSREGULATION INTERVENTION]: Repeated artifact-identical edits between "${m0}" and "${m1}" show no new progress. Reassess the active task and existing evidence; continue only work and verification authorized by the user.`,
       };
     }
 
@@ -183,13 +178,13 @@ export class LoopProgressGuard {
     const lastFour = this.fileMutationHistory.slice(-4);
     if (lastFour.length === 4 && !lastFour.some((m) => m.file === '__verification__')) {
       const targetFile = lastFour[0].file;
-      const allSame = lastFour.every((m) => m.file === targetFile);
+      const allSame = lastFour[0].fingerprint !== undefined && lastFour.every((m) => m.file === targetFile && m.fingerprint === lastFour[0].fingerprint);
       if (allSame) {
         return {
           isOscillating: true,
           affectedFiles: [targetFile],
           oscillationType: 'hyper-mutation',
-          message: `[TRAJECTORY DYSREGULATION INTERVENTION]: File "${targetFile}" was modified 4 times in a row with no confirming test step. Stop blind code edits; run a test or create a scratch test to verify behavior before editing further.`,
+          message: `[TRAJECTORY DYSREGULATION INTERVENTION]: File "${targetFile}" received four artifact-identical edits with no new progress. Review the actual content and use the smallest verification permitted by the task scope.`,
         };
       }
     }
@@ -258,11 +253,22 @@ export class LoopProgressGuard {
     if (repetitionCount < 2) return { repetitionCount, shouldStop: false };
 
     const message = repetitionCount === 2
-      ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Treat this observation as authoritative and do not call it again unless a workspace-changing action occurs. An empty workspace is a valid state; proceed by creating the requested project files.`
+      ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result twice. Reuse this observation unless relevant content changes. Continue the remaining user-authorized work or provide the established findings.`
       : `[SYSTEM LOOP GUARD]: The identical ${toolName} call returned the same result ${repetitionCount} times without progress. Change strategy now; repeated failure to change strategy will end the turn with an explicit blocker report.`;
 
     return { repetitionCount, message, shouldStop: repetitionCount >= 3 };
   }
+}
+
+function mutationFingerprint(args: Record<string, any>, result: Record<string, any>): string | undefined {
+  const content = args.content ?? args.CodeContent ?? args.ReplacementContent ?? args.newText ?? args.patch ?? args.ReplacementChunks;
+  const observed = result.contentHash ?? result.afterHash ?? result.diff;
+  return observed !== undefined || content !== undefined ? stableStringify(observed ?? content) : undefined;
+}
+
+function withoutTransientMetadata(result: Record<string, any>): Record<string, any> {
+  const transient = new Set(['timestamp', 'duration', 'durationMs', 'executionTime', '_untrusted_context', 'trajectoryIntervention', 'processFailureIntervention', 'domainIntentIntervention']);
+  return Object.fromEntries(Object.entries(result).filter(([key]) => !transient.has(key)));
 }
 
 function stableStringify(value: unknown): string {

@@ -3,6 +3,8 @@ import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-
 import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
 import { CLI } from '../ui/cli-ui.js';
+import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
+import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 
 export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
 
@@ -134,7 +136,11 @@ export class PermissionManager {
   ): Promise<PermissionCheckResult> {
     // 2. Chế độ Read-Only (Chỉ cho phép đọc, cấm mọi thao tác ghi / chạy lệnh)
     if (this.mode === 'read_only') {
-      if (['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file', 'run_command', 'git_commit', 'git_push'].includes(toolName)) {
+      const descriptor = new ToolDescriptorRegistry().describe({ name: toolName, description: '', parameters: {}, execute: async () => ({}) });
+      const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
+      const safeCommand = toolName === 'run_command'
+        && new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'strict').evaluateCommand(command, args.cwd).allowed;
+      if ((toolName === 'run_command' && !safeCommand) || toolName === 'run_test_suite' || descriptor.mutates) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
@@ -507,13 +513,14 @@ export class PermissionManager {
       };
     }
 
+    const descriptor = new ToolDescriptorRegistry().describe({ name: toolName, description: '', parameters: {}, execute: async () => ({}) });
     return {
       id,
       toolName,
       category: 'general',
       target: toolName,
       summary: `Execute tool ${toolName}`,
-      riskLevel: 'LOW',
+      riskLevel: descriptor.mutates || descriptor.requiresApproval ? 'MEDIUM' : 'LOW',
       details: args,
       timestamp,
     };

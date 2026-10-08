@@ -187,7 +187,7 @@ export class ContextAgent {
       ``,
       `## 1. Project Status`,
       `- **Active Project**: \`${path.basename(this.workspaceDir)}\``,
-      `- **Health**: Verified & Passing 100% Tests`,
+      `- **Health**: See recorded verification evidence; no global pass state inferred.`,
       ``,
       `## 2. Core Decisions & Architectural Invariants`,
       ...data.decisions.map((d) => `- **${d.topic}**: ${d.rationale}`),
@@ -195,7 +195,7 @@ export class ContextAgent {
       `## 3. Pending Tasks (Prioritized)`,
       ...(data.tasksPending.length > 0
         ? data.tasksPending.map((t) => `- [${t.priority}] ${t.description}`)
-        : [`- All core deliverables verified and complete`]),
+        : [`- No pending tasks recorded`]),
       ``,
       `## 4. Key Active Files`,
       ...data.filesModified.slice(0, 20).map((f) => `- \`${f}\``),
@@ -204,9 +204,9 @@ export class ContextAgent {
       ...data.discoveries.map((d) => `- ${d}`),
       ``,
       `## 6. Execution Invariants`,
-      `- No automated browser subagent runs without explicit command`,
-      `- No unrequested pushes to main (preserve Railway quota)`,
-      `- All changes backed by 100% passing test assertions`,
+      `- Follow the current user scope and preserve unrelated changes`,
+      `- Historical records do not authorize Git mutations or new tasks`,
+      `- Verify against the active contract; report only observed evidence`,
     ];
 
     // Bắt buộc cắt tỉa nghiêm ngặt để tối đa 150 dòng
@@ -227,7 +227,7 @@ export class ContextAgent {
       `- **Latest Session**: \`session-${String(data.sessionIndex).padStart(3, '0')}\``,
       `- **Last Synchronized**: ${data.timestamp}`,
       `- **Pending Tasks Count**: ${data.tasksPending.length}`,
-      `- **Verified State**: All 40+ test sections green`,
+      `- **Verified State**: Consult the recorded evidence; no full-suite result inferred`,
       ``,
     ];
     await fs.writeFile(this.projectRegistryPath, registryLines.join('\n'), 'utf8');

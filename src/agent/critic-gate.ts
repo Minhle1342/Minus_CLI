@@ -498,11 +498,10 @@ export class CriticGate {
     const allDocsOnly = targetFiles.size > 0
       && Array.from(targetFiles).every((file) => isNonExecutableFile(file) && !isSensitivePath(file));
     if (measuredTier.level !== 'LOW' && targetFiles.size > 0 && !allDocsOnly
-      && !hasSubmittedSolution
       && !isUserExplicitlyExemptingTests(userRequest)
       && !this.evidenceGate.hasVerifiedPassingTest(session, turn)) {
       highImpactUnverified = true;
-      reasons.push(`[MEASURED HIGH-IMPACT VERIFICATION REQUIRED]: ${measuredTier.reasons.join('; ')}. No passing automated test observed in-session after the last mutation — run the test suite before completing.`);
+      reasons.push(`[MEASURED HIGH-IMPACT VERIFICATION REQUIRED]: ${measuredTier.reasons.join('; ')}. No successful verification observed after the last mutation. Run an appropriate diagnostics/typecheck/build/test check for the changed behavior; cover known impacted suites.`);
     }
 
     if (!evidenceDecision.allow) {
@@ -621,6 +620,9 @@ export class CriticGate {
     evidenceDecision?: CompletionEvidenceDecision;
     risk?: string;
   }): Promise<CriticEvaluation> {
+    // The runtime and async API share the same verdict; async validation adds
+    // language syntax diagnostics without dropping synchronous invariants.
+    const sharedDecision = this.evaluate(params);
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
@@ -732,7 +734,8 @@ export class CriticGate {
     // second risk-dependent score threshold that rejects the same session.
     const scoreThreshold = 60;
     const riskLevel = 'invariant-gated';
-    const approved = lspErrors.length === 0 && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
+    const approved = sharedDecision.approved && lspErrors.length === 0 && !exhaustionBlocked && score >= scoreThreshold && evidenceDecision.allow;
+    if (!sharedDecision.approved) reasons.push(...sharedDecision.reasons);
 
     const auditRecord = this.auditLedger.record({
       turn: typeof turn === 'number' ? turn : 1,

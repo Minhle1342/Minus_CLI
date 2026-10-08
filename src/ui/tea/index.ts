@@ -1,5 +1,6 @@
 ﻿import { EventEmitter } from 'node:events';
 import type { KernelEventBus } from '../../kernel/kernel.js';
+import { copyToClipboard } from './clipboard.js';
 import { compactionStatus } from '../compaction-status.js';
 import { Program, type TerminalInput, type TerminalOutput } from './core/program.js';
 import { createRootModel } from './models/root-model.js';
@@ -8,12 +9,13 @@ import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
 import type { Cmd, Completion, Mode, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
+export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
 export interface TeaKernel { ctx: { events: KernelEventBus }; cancelCurrentTask?(): void }
 export interface InteractiveOptions {
   input?: TerminalInput; output?: TerminalOutput; captureOutput?: boolean; mouse?: boolean;
   commands?: PaletteItem[]; metadata?: Partial<SidebarModel>; transcript?: TranscriptEntry[];
   onAbort?(): void; onQuit?(): void; onCompact?(): Promise<void>;
-  onMode?(mode: Mode): void; complete?(value: string, cursor: number): Completion[];
+  onMode?(mode: Mode): void; complete?(value: string, cursor: number): Completion[] | Promise<Completion[]>;
 }
 
 /** Async input port for command handlers; terminal ownership stays in Program. */
@@ -77,6 +79,7 @@ export class TeaTerminal extends EventEmitter {
   }
   private async execute(cmd: Cmd): Promise<void> {
     switch (cmd.type) {
+      case 'copy': await copyToClipboard(cmd.text); this.program.send({ type: 'notice', text: 'Copied selection to clipboard' }); break;
       case 'submit': this.submit(cmd.text); break;
       case 'answer': this.answer(cmd.text === '\x03' ? undefined : cmd.text); break;
       case 'abort': (this.options.onAbort || (() => this.kernel.cancelCurrentTask?.()))(); break;
@@ -92,7 +95,7 @@ export class TeaTerminal extends EventEmitter {
         const text = await openExternalEditor(this.line, terminal); this.line = text; break;
       }
       case 'complete': {
-        const completions = this.options.complete?.(cmd.value, cmd.cursor) || [];
+        const completions = await this.options.complete?.(cmd.value, cmd.cursor) || [];
         // A delayed completion must not overwrite a newer edit or an isolated question.
         if (this.line === cmd.value && this.cursor === cmd.cursor && !this.model.question.active) this.program.send({ type: 'completions', values: completions }); break;
       }

@@ -1,5 +1,6 @@
-﻿import type { ViewportModel, TranscriptEntry } from '../types.js';
+import type { ViewportModel, TranscriptEntry } from '../types.js';
 import { color, fit, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
+import { formatMarkdownTablesWithTea } from '../styles/table.js';
 import type { PermissionCard } from '../types.js';
 export function appendEntry(model: ViewportModel, entry: TranscriptEntry): ViewportModel {
   return { ...model, entries: [...model.entries.slice(-999), entry] };
@@ -28,38 +29,88 @@ function highlightCode(line: string): string {
 }
 
 function formatTool(text: string): string {
-  return stripTerminalControls(text).split('\n').map((line, index) =>
-    index === 0 ? color(line.startsWith('✖') ? tokyoNight.red : tokyoNight.cyan, line) : highlightCode(line)).join('\n');
+  return stripTerminalControls(text).split('\n').map((line, index) => {
+    if (index === 0) return color(line.startsWith('✖') ? tokyoNight.red : tokyoNight.cyan, line);
+    if (/^[╭├╰─┬┼┴]/.test(line.trim())) return color(tokyoNight.border, line);
+    if (line.includes('│')) {
+      const parts = line.split('│');
+      return parts.map((cell, i) => {
+        if (i === 0 && cell === '') return '';
+        if (i === parts.length - 1 && cell === '') return '';
+        return i === 1 ? color(tokyoNight.cyan, cell) : color(tokyoNight.text, cell);
+      }).join(color(tokyoNight.border, '│'));
+    }
+    return highlightCode(line);
+  }).join('\n');
 }
 
-function formatAnswer(text: string): string {
-  const lines = stripTerminalControls(text).split('\n');
-  let inCodeBlock = false;
-  let firstContentLine = true;
-  return lines.map(line => {
-    if (/^\s*```/.test(line)) {
-      inCodeBlock = !inCodeBlock;
-      return color(tokyoNight.muted, line);
+/** Render prose delimiters as color; quoted strings inside code remain literal. */
+function formatAnswerInline(body: string, base: string, depth = 0): string {
+  if (depth > 8) return color(base, body);
+  const tokens = /(?<!\\)(\*\*[^\n]+?\*\*|__[^\n]+?__|`[^`\n]+`|(?<![\p{L}\p{N}])'[^'\n]+'(?![\p{L}\p{N}])|\[[^\]\n]+\]\([^)\n]+\))/gu;
+  let styled = '';
+  let offset = 0;
+  for (const match of body.matchAll(tokens)) {
+    const at = match.index ?? 0;
+    styled += color(base, body.slice(offset, at));
+    const token = match[0];
+    if (token.startsWith('**') || token.startsWith('__')) {
+      styled += formatAnswerInline(token.slice(2, -2), tokyoNight.yellow, depth + 1);
+    } else if (token.startsWith('`') || token.startsWith("'")) {
+      styled += color(tokyoNight.green, token.slice(1, -1));
+    } else {
+      const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)!;
+      styled += formatAnswerInline(link[1], tokyoNight.blue, depth + 1)
+        + color(tokyoNight.muted, ` (${link[2]})`);
     }
-    if (inCodeBlock) return highlightCode(line);
-    if (/^\s{0,3}#{1,6}\s/.test(line)) return color(tokyoNight.purple, line);
+    offset = at + token.length;
+  }
+  return styled + color(base, body.slice(offset));
+}
+
+function formatAnswer(text: string, width = 80): string {
+  const tableProcessed = formatMarkdownTablesWithTea(text, Math.max(20, width - 4));
+  const lines = stripTerminalControls(tableProcessed).split('\n');
+  let codeFence: { marker: string; length: number } | undefined;
+  let firstContentLine = true;
+  return lines.flatMap(line => {
+    const fence = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (codeFence) {
+      if (fence && fence[1][0] === codeFence.marker && fence[1].length >= codeFence.length && !fence[2].trim()) {
+        codeFence = undefined;
+        return [];
+      }
+      return [highlightCode(line)];
+    }
+    if (fence) {
+      codeFence = { marker: fence[1][0], length: fence[1].length };
+      return [];
+    }
+    if (/^[╭├╰─┬┼┴]/.test(line.trim())) {
+      firstContentLine = false;
+      return [color(tokyoNight.border, line)];
+    }
+    if (line.includes('│')) {
+      firstContentLine = false;
+      const parts = line.split('│');
+      return [parts.map((cell, i) => {
+        if (i === 0 && cell === '') return '';
+        if (i === parts.length - 1 && cell === '') return '';
+        return formatAnswerInline(cell, tokyoNight.text);
+      }).join(color(tokyoNight.border, '│'))];
+    }
+    const heading = /^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/.exec(line);
+    if (heading) {
+      firstContentLine = false;
+      return [formatAnswerInline(heading[1], tokyoNight.purple)];
+    }
 
     const bullet = /^(\s*(?:[-*•]|\d+\.))(\s+)/.exec(line);
     const marker = bullet ? color(tokyoNight.blue, bullet[1]) + bullet[2] : '';
     const body = bullet ? line.slice(bullet[0].length) : line;
     const base = firstContentLine ? tokyoNight.cyan : tokyoNight.text;
     if (line.trim()) firstContentLine = false;
-    const tokens = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))/g;
-    let styled = '';
-    let offset = 0;
-    for (const match of body.matchAll(tokens)) {
-      const at = match.index ?? 0;
-      styled += color(base, body.slice(offset, at));
-      const token = match[0];
-      styled += color(token.startsWith('`') ? tokyoNight.green : token.startsWith('[') ? tokyoNight.blue : tokyoNight.yellow, token);
-      offset = at + token.length;
-    }
-    return marker + styled + color(base, body.slice(offset));
+    return [marker + formatAnswerInline(body, base)];
   }).join('\n');
 }
 
@@ -91,10 +142,12 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
       const prefix = entry.kind === 'user' ? 'You › ' : entry.kind === 'answer' ? 'Minus › ' : entry.kind === 'thought' ? 'Thinking › ' : '';
       const prefixColor = entry.kind === 'user' ? tokyoNight.blue : entry.kind === 'answer' ? tokyoNight.purple : tokyoNight.muted;
       const textColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
-      const body = entry.kind === 'answer' ? formatAnswer(entry.text)
+      const body = entry.kind === 'answer' ? formatAnswer(entry.text, width)
         : entry.kind === 'tool' ? formatTool(entry.text)
         : color(textColor, stripTerminalControls(entry.text));
-      rendered = entry.kind === 'permission' && entry.permission ? permissionLines(entry.permission, width) : wrap(color(prefixColor, prefix) + body, width);
+      rendered = entry.kind === 'permission' && entry.permission
+        ? permissionLines(entry.permission, width)
+        : wrap(color(prefixColor, prefix) + body, width);
       widths.set(width, rendered);
     }
     if (model.collapsed && ['thought', 'tool', 'step'].includes(entry.kind)) {
@@ -109,12 +162,13 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
     }
     return [...rendered, ''];
   });
-  if (model.thinking) lines.push(...wrap(color(tokyoNight.muted, 'Thinking › ' + stripTerminalControls(model.thinking)), width));
-  if (model.answerStream) lines.push(...wrap(color(tokyoNight.purple, 'Minus › ') + color(tokyoNight.text, stripTerminalControls(model.answerStream)), width));
+  if (model.thinking) lines.push(...wrap(color(tokyoNight.muted, '… Thinking › ' + stripTerminalControls(model.thinking)), width));
+  // P1: streaming answer keeps an ellipsis marker so it reads differently from a final `Minus ›` answer.
+  if (model.answerStream) lines.push(...wrap(color(tokyoNight.purple, 'Minus … › ') + formatAnswer(model.answerStream, width), width));
   return lines;
 }
-export function viewportView(model: ViewportModel, width: number, height: number): string[] {
-  const lines = viewportLines(model, width);
+export function viewportView(model: ViewportModel, width: number, height: number, selectedLines?: string[]): string[] {
+  const lines = selectedLines || viewportLines(model, width);
   const bottom = Math.max(height, lines.length - model.offset);
   const visible = lines.slice(Math.max(0, bottom - height), bottom);
   return Array.from({ length: height }, (_, i) => fit(visible[i] || '', width));

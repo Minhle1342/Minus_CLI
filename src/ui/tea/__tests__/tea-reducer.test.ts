@@ -95,3 +95,24 @@ test('bridge forwards every kernel event and unsubscribes exactly its listeners'
   dispose(); dispose();
   for (const name of KERNEL_EVENT_NAMES) assert.equal(events.listenerCount(name), 0);
 });
+
+test('compaction notice displays on statusline and auto-hides after 3s', () => {
+  let model = createRootModel();
+  const startTime = 1000;
+  // 1. When compaction is skipped, compactionUntil is scheduled for ~3s
+  [model] = update({ type: 'compaction', status: { scope: 'turn', state: 'skipped' } }, model);
+  assert.equal(model.status.compaction?.state, 'skipped');
+  assert.ok(model.status.compactionUntil && model.status.compactionUntil > Date.now());
+
+  // 2. When tick arrives after 3000ms, compaction notice is cleared
+  const expiryTime = model.status.compactionUntil!;
+  [model] = update({ type: 'tick', now: expiryTime + 10 }, model);
+  assert.equal(model.status.compaction, null);
+  assert.equal(model.status.compactionUntil, undefined);
+
+  // 3. Running compaction does not set auto-hide timer
+  [model] = update({ type: 'compaction', status: { scope: 'turn', state: 'running' } }, model);
+  assert.equal(model.status.compaction?.state, 'running');
+  assert.equal(model.status.compactionUntil, undefined);
+});
+

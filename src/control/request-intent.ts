@@ -8,6 +8,9 @@ export function normalizeRequestIntentText(request: string): string {
     .trim();
 }
 
+/** Shared action vocabulary for classification and mixed read/action requests. */
+export const MUTATION_INTENT = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
+
 export function isReadOnlyRequest(request: string): boolean {
   const text = normalizeRequestIntentText(request);
   if (/\b(?:read[ -]only|chi doc|khong (?:sua|chinh sua|thay doi) (?:code|ma|file)|do not (?:edit|modify|change)|don['’]t (?:edit|modify|change))\b/.test(text)) return true;
@@ -16,6 +19,7 @@ export function isReadOnlyRequest(request: string): boolean {
   const asksExplanation = /^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:explain|describe|review|compare|analy[sz]e|inspect|investigate|suggest|propose|recommend|how|why|what|where|explore|chan doan|giai thich|mo ta|kiem tra|bao cao|phan tich|danh gia|so sanh|de xuat|goi y|tai sao|vi sao|co che|cach|tim hieu|khao sat|nguyen nhan|ly do|xem xet|xem|cho biet|nghien cuu)\b/.test(stripped);
   if (!asksExplanation) return false;
   // Mixed requests that explicitly ask us to implement the proposal still need mutation evidence.
-  return !/\b(?:then|and then|and|sau do|roi|va)\s+(?:(?:please|hay)\s+)?(?:implement|fix|modify|edit|replace|apply|create|delete|refactor|write|patch|trien khai|thuc thi|sua|chinh sua|thay the|ap dung|tao|xoa|viet)\b/.test(stripped);
+  const continuations = stripped.split(/\b(?:and then|then|and|sau do|roi|va)\b/).slice(1);
+  return !continuations.some((part) => MUTATION_INTENT.test(part.replace(/^\s*(?:please|hay)\s+/, '')));
 }
 

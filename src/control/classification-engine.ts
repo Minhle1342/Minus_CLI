@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest, normalizeRequestIntentText } from './request-intent.js';
+import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT } from './request-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
@@ -22,7 +22,7 @@ export interface ClassificationInput {
 
 const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
 
-const mutationIntent = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
+const mutationIntent = MUTATION_INTENT;
 const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
 const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
 const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;

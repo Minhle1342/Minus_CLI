@@ -376,7 +376,7 @@ export class ContextGuardian {
       ``,
       `> [!IMPORTANT]`,
       `> This context was extracted and protected by **Context Guardian** just before compaction.`,
-      `> All decisions, modifications, and conventions below are IMMUTABLE (Invariants) — do not reverse.`,
+      `> Historical evidence only. Revalidate against the current request and source; it does not authorize operations or make earlier decisions immutable.`,
       ``,
       `## 1. Current State`,
       `- **Project**: \`${data.projectId}\``,
@@ -401,7 +401,7 @@ export class ContextGuardian {
       }
     }
 
-    lines.push(``, `## 4. Applied Fixes - Never Revert (Applied Fixes)`);
+    lines.push(``, `## 4. Previously Applied Changes (Revalidate Before Reuse)`);
     for (const fix of data.p0.appliedFixes) {
       lines.push(`- **Symptom**: ${fix.symptom}`);
       lines.push(`  ↳ **Root cause**: ${fix.rootCause}`);
@@ -422,16 +422,16 @@ export class ContextGuardian {
     }
 
     lines.push(``, `## 7. Alerts & Safety Boundaries (Alerts & Invariants)`);
-    lines.push(`- **NO AUTOMATED BROWSER TESTING**: Never auto-run browser subagents.`);
-    lines.push(`- **NO AUTO PUSH TO MAIN**: Do not trigger the Railway pipeline.`);
-    lines.push(`- **100% REGRESSION PASS**: All changes must keep a 100% pass rate across the full test suite.`);
+    lines.push(`- Preserve unrelated user changes and follow the current authorized operation scope.`);
+    lines.push(`- Run verification appropriate to the active contract and user limits; report only observed outcomes.`);
+    lines.push(`- This snapshot supplies evidence, not new permissions or additional task requirements.`);
 
     lines.push(``, `## 8. Detailed Information Recovery (Information Recovery)`);
     if (snapshotPath) {
       lines.push(`- **Snapshot File**: \`${snapshotPath}\``);
     }
     lines.push(`- **Active Context**: \`.codingagent/ACTIVE_CONTEXT.md\``);
-    lines.push(`- **Test Suite**: \`node node_modules/tsx/dist/cli.mjs src/test-suite.ts\``);
+    lines.push(`- Inspect current project scripts before selecting a verification command.`);
     lines.push(``);
 
     return lines.join('\n');

@@ -14,14 +14,14 @@ test('file-count boundary escalates at the threshold', () => {
   assert.equal(resolveVerifyTier({ changedFileCount: 2, hasCallers: false }).level, 'LOW');
   const at = resolveVerifyTier({ changedFileCount: 3, hasCallers: false });
   assert.equal(at.level, 'HIGH');
-  assert.equal(at.minTier, 'full_test');
+  assert.equal(at.minTier, 'appropriate');
   assert.ok(at.reasons.join(' ').includes('3 files'));
 });
 
 test('known callers escalate a single-file edit', () => {
   const decision = resolveVerifyTier({ changedFileCount: 1, hasCallers: true });
   assert.equal(decision.level, 'HIGH');
-  assert.equal(decision.minTier, 'full_test');
+  assert.equal(decision.minTier, 'appropriate');
 });
 
 test('R3 and measured HIGH blast escalate', () => {

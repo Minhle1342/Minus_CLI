@@ -2,6 +2,7 @@ import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
 import { SECTION_PATCH_FORMAT_SPEC, resolvePatchFormatSpec } from '../llm/prompt-sections.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
+import { isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
 
 export interface ToolSynergyContext {
   lastToolName?: string;
@@ -63,10 +64,10 @@ export class ToolSynergyAdvisor {
     } = context;
 
     // 0a. Vừa gọi submit_solution (thành công) hoặc đã submit giải pháp thành công (Playbook POST_SUBMISSION)
-    if ((lastToolName === 'submit_solution' && lastToolResult?.success !== false) || hasSubmittedSolution) {
+    if ((lastToolName === 'submit_solution' && lastToolResult?.submitted === true && !isToolResultFailure(lastToolResult)) || hasSubmittedSolution) {
       return {
         playbook: 'POST_SUBMISSION',
-        guidance: 'Solution has been submitted and verified with empirical evidence. The task is now COMPLETE. You MUST NOT call any further tools. Conclude your turn immediately with your final comprehensive response to the user.',
+        guidance: 'Solution has been submitted successfully. The task is now COMPLETE. Do not call further tools. Return the submitted answer at the requested length.',
         suggestedTools: [],
       };
     }
@@ -142,14 +143,17 @@ export class ToolSynergyAdvisor {
     if (
       lastToolName === 'run_command' &&
       lastToolResult &&
-      !lastToolResult.error &&
-      (lastToolResult.exitCode === 0 || lastToolResult.exitCode === undefined) &&
+      !isToolResultFailure(lastToolResult) &&
+      lastToolResult.processStarted !== false &&
+      !lastToolResult.dryRun &&
+      !['running', 'pending', 'background', 'started'].includes(lastToolResult.status) &&
+      lastToolResult.exitCode === 0 &&
       typeof lastToolResult.command === 'string' &&
-      /\b(?:test|spec|check|verify)\b/i.test(lastToolResult.command)
+      isVerificationCommand(lastToolResult.command)
     ) {
       return {
         playbook: 'C_MUTATION',
-        guidance: 'Test/verification command passed successfully (exit 0). You have empirical proof of correctness. Call "submit_solution" immediately with verification evidence. Do NOT run additional exploration or redundant tests.',
+        guidance: 'The observed verification command completed with exit 0. Reuse this evidence; check the active task acceptance criteria, evidence freshness and remaining authorized workflow before submit_solution. Do not infer that unrelated checks passed.',
         suggestedTools: ['submit_solution'],
       };
     }
@@ -197,7 +201,7 @@ export class ToolSynergyAdvisor {
       if (isClean) {
         return {
           playbook: 'C_MUTATION',
-          guidance: 'Diagnostics clean (0 syntax and type errors). Verification passed! You can now call "submit_solution" with empirical proof and summary, or run specific test suites via "run_command" if required.',
+          guidance: 'Diagnostics reported 0 syntax and type errors. This proves diagnostics cleanliness only; follow the risk-adjusted completion contract and active acceptance criteria before submit_solution.',
           suggestedTools: ['submit_solution', 'run_command'],
         };
       }
@@ -229,7 +233,7 @@ export class ToolSynergyAdvisor {
       const memoText = context.reflexionMemo ? ` Failure reflection: ${context.reflexionMemo}` : '';
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `[LATS BACKTRACKING] 3+ repair attempts failed to satisfy verification tests. Cease monkey-patching. Rollback workspace to the last green checkpoint or re-evaluate the hypothesis from root coordinates.${memoText}`,
+        guidance: `[LATS BACKTRACKING] Repeated repair attempts failed. Stop speculative edits and re-evaluate the causal hypothesis. Failures do not authorize Git restore, reset, stash or discarding workspace changes. Only use a rollback explicitly authorized for the affected scope.${memoText}`,
         suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
       };
     }

@@ -23,10 +23,13 @@ mode; configure the existing permission policy explicitly when needed.
 | Ctrl+X E | Compose using VISUAL/EDITOR (Notepad on Windows, vi elsewhere) |
 | Ctrl+X Q | Cancel active work, restore the terminal, save and quit |
 | Ctrl+X B / D | Toggle sidebar / diff |
+| Ctrl+X ? | Open command palette (leader help) |
+| ↑↓ then Enter | Answer a permission request (Allow once / session / Reject; y/a/n jump to an option) |
 | Ctrl+P | Fuzzy command palette, arrows to select, Enter to execute |
 | Tab | Switch between Plan and Implement; change only between tasks |
-| Ctrl+Space | Accept slash command or file mention completion |
-| Alt+Enter / Shift+Enter | Insert a newline (Shift+Enter needs terminal support) |
+| Space | Accept the selected slash command or file mention completion and continue typing |
+| Enter | Submit the current input; when the `/resume` session list is open, resume the selected session |
+| Alt+Enter / Shift+Enter / Ctrl+J | Insert a newline (Shift+Enter needs terminal support; Ctrl+J always works) |
 | PageUp / PageDown | Scroll transcript; output stays pinned while scrolled up |
 | Ctrl+C / Esc | Cancel a running task; dismiss an active question |
 | Ctrl+O | Collapse or expand thought/tool entries |

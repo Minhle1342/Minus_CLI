@@ -7,6 +7,7 @@ export interface RollbackOutcome {
   restoredCheckpoint?: Checkpoint;
   reason: string;
   guidancePrompt?: string;
+  restoredFiles?: string[];
 }
 
 /**
@@ -65,12 +66,17 @@ export class HypothesisRollbackOrchestrator {
     // 3. Rollback main workspace to last green checkpoint if available
     let rolledBack = false;
     let restoredCheckpoint: Checkpoint | undefined;
+    let restoredFiles: string[] | undefined;
+    let failureReason = 'No restorable scoped checkpoint is available.';
 
     if (this.lastGreenCheckpoint) {
       const outcome = await this.checkpointManager.rollbackToTaskCheckpoint(this.lastGreenCheckpoint.id).catch(() => ({ success: false }));
       if (outcome.success) {
         rolledBack = true;
         restoredCheckpoint = this.lastGreenCheckpoint;
+        restoredFiles = 'restoredFiles' in outcome ? outcome.restoredFiles as string[] : undefined;
+      } else {
+        failureReason = 'message' in outcome ? String(outcome.message) : failureReason;
       }
     } else {
       // Fallback: rollback to immediate preceding checkpoint
@@ -80,23 +86,27 @@ export class HypothesisRollbackOrchestrator {
         if (outcome.success) {
           rolledBack = true;
           restoredCheckpoint = latest;
+          restoredFiles = 'restoredFiles' in outcome ? outcome.restoredFiles as string[] : undefined;
+        } else {
+          failureReason = 'message' in outcome ? String(outcome.message) : failureReason;
         }
       }
     }
 
     const guidancePrompt = [
-      `🔄 [AUTOMATIC ROLLBACK EXECUTED - CLEAN SLATE RESTORED]:`,
+      rolledBack ? '[SCOPED ROLLBACK COMPLETED]:' : '[ROLLBACK NOT PERFORMED]:',
       `Hypothesis [${hypothesisId}] was falsified by empirical test verification.`,
       restoredCheckpoint
         ? `The workspace has been safely restored to clean checkpoint: "${restoredCheckpoint.description}" (${restoredCheckpoint.id}).`
-        : `The workspace mutations have been undone.`,
+        : failureReason,
       `👉 NEXT STEP: Formulate a distinct, new hypothesis. Do NOT repeat the falsified approach.`,
     ].join('\n');
 
     return {
       rolledBack,
       restoredCheckpoint,
-      reason: `Rolled back to clean state after hypothesis ${hypothesisId} falsification.`,
+      restoredFiles,
+      reason: rolledBack ? `Restored scoped checkpoint after hypothesis ${hypothesisId} falsification.` : failureReason,
       guidancePrompt,
     };
   }

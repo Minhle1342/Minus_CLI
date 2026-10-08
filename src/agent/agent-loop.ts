@@ -32,7 +32,8 @@ import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
-import { getTurnCompletionState, hasObservedMutation, observedMutationFiles } from './completion-observations.js';
+import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, collectCompletionObservations } from './completion-observations.js';
+import { resolveGitWorkflow, checkGitWorkflowCall } from './git-workflow.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
@@ -61,7 +62,8 @@ import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.j
 import { ClassificationEngine } from '../control/classification-engine.js';
 import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
 import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
-import { EDIT_TOOL_NAMES, READ_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
+import { EDIT_TOOL_NAMES, READ_TOOL_NAMES, ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
+import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
@@ -121,6 +123,19 @@ import { buildFailureInvestigationBrief, type FailureInvestigationMutation } fro
 
 export function isScratchFilePath(filePath: string): boolean {
   return isScratchPath(filePath);
+}
+
+/** Arguments provide capture scope; tool outcomes separately prove which edits succeeded. */
+export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
+  if (!isMutationTool(toolName)) return [];
+  const targets = new Set<string>();
+  const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) targets.add(value.trim()); };
+  for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'AbsolutePath', 'target_path', 'file_path', 'sourcePath', 'targetPath', 'from', 'to']) add(args[key]);
+  if (Array.isArray(args.targetFiles)) args.targetFiles.forEach(add);
+  if (toolName === 'apply_patch') {
+    for (const match of String(args.patch || '').matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+)$/gm)) add(match[1]);
+  }
+  return [...targets];
 }
 
 function configuredEvidenceGateMode(): 'off' | 'observe' | 'enforce' | undefined {
@@ -1053,6 +1068,15 @@ export class AgentLoop {
       ? (baseMaxSteps > 5 ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor)) : baseMaxSteps)
       : baseMaxSteps;
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
+    const gitCodeChangeRequested = !isReadOnlyRequest(turnUserRequest)
+      && ['bugfix', 'feature', 'refactor'].includes(initialTurnClassification.taskClass)
+      && (initialTurnClassification.requiredCapabilities.includes('edit')
+        || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT'));
+    const gitImplementationReady = () => {
+      if (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()) return true;
+      const implementationTasks = this.planManager.getTasks().filter((task) => task.writeSet.length > 0);
+      return implementationTasks.length > 0 && implementationTasks.every((task) => task.status === 'COMPLETED');
+    };
     const isContinuationOrGoal = isGoal
       || Boolean(options?.isCircuitBreakerRetry)
       || Boolean(options?.isRecoveryResume)
@@ -1069,6 +1093,7 @@ export class AgentLoop {
     let consecutiveNoProgressStrategyChanges = 0;
     let hasSubmittedSolution = false;
     const submissionReadiness = new SubmissionReadiness();
+    let turnMutationCheckpointId: string | undefined;
     const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
       userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
       planBlocker: this.planManager.getCompletionBlocker(),
@@ -1503,7 +1528,7 @@ export class AgentLoop {
       const activeStepQuery = retrievalState.query;
       const stepCompletionState = getTurnCompletionState(session, turn);
 
-      const canRequestPhaseTransition = ['explore', 'plan'].includes(classification.phase)
+      const canRequestPhaseTransition = ['explore', 'plan', 'implement'].includes(classification.phase)
         && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
 
       let activeToolDeclarations: any[];
@@ -1538,7 +1563,9 @@ export class AgentLoop {
         // In explore and plan phases, mutation tools are withheld from model-visible schemas so LLM physically cannot mutate
         // before requesting a phase transition to implement.
         if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => !EDIT_TOOL_NAMES.has(tool.name));
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+            ['run_command', 'git_command'].includes(tool.name)
+            || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
         }
 
         // A transition request is a control primitive, not a retrieved task tool.
@@ -1595,7 +1622,9 @@ export class AgentLoop {
 
         // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
         if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => !EDIT_TOOL_NAMES.has(tool.name));
+          activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+            ['run_command', 'git_command'].includes(tool.name)
+            || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
         }
 
         // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
@@ -1618,9 +1647,26 @@ export class AgentLoop {
       }
 
       // Verification State tracking:
-      const hasVerifiedTests = this.verificationPolicy.canComplete().allowed
+      const completionVerificationSatisfied = this.verificationPolicy.canComplete([], undefined, {
+        userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest),
+      }).allowed
         && stepCompletionState.hasMutations
         && !hasSubmittedSolution;
+      const hasVerifiedTests = completionVerificationSatisfied && collectCompletionObservations(session, turn).some(item =>
+        item.result.seq > stepCompletionState.latestMutationSeq && !isToolResultFailure(item.payload)
+        && item.payload.exitCode === 0 && !item.payload.isBackgroundTask && item.payload.processStarted !== false
+        && (item.toolName === 'run_test_suite' || (item.toolName === 'run_command'
+          && /\b(?:test|pytest|vitest|jest)\b/.test(extractCommandString(item.args))
+          && isVerificationCommand(extractCommandString(item.args)))));
+      const evaluateTurnCritic = (answer: string, evidence?: ReturnType<CompletionEvidenceGate['evaluate']>) => {
+        const state = getTurnCompletionState(session, turn);
+        return (isSubagent || isMockLLM)
+          ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
+          : this.criticGate.evaluate({ finalAnswer: answer, session, workspace: this._workspace,
+              hypothesisTracker: this.hypothesisTracker, domainGuardian: this.domainIntentGuardian,
+              userRequest: turnUserRequest, turn, hasSubmittedSolution, filesModified: state.filesModified,
+              completionState: state, evidenceDecision: evidence, risk: initialTurnClassification.risk });
+      };
 
       const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
       const reliableRouteDecision = decideReliableToolRoute({
@@ -1769,7 +1815,12 @@ export class AgentLoop {
       const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
       const promptDecision = this.stepPromptPolicy.decide({
         activeStepQuery,
+        userRequest: turnUserRequest,
         fingerprint: retrievalState.fingerprint,
+        gitWorkflowObservations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
+        gitWorkflowMayEdit: !isReadOnlyRequest(turnUserRequest),
+        gitWorkflowImplementationRequested: gitCodeChangeRequested,
+        gitWorkflowImplementationReady: gitImplementationReady(),
         failureSignature: this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})
           ? `${this.lastToolExecution.toolName}:failed`
           : undefined,
@@ -1828,6 +1879,7 @@ export class AgentLoop {
             reasonCodes: promptDecision.reasonCodes,
             selectedPlaybooks: promptDecision.selectedPlaybooks,
             selectedGitPlaybook: promptDecision.selectedGitPlaybook,
+            gitWorkflow: promptDecision.gitWorkflow,
             fingerprint: retrievalState.fingerprint,
             estimatedTokensBefore: promptDecision.estimatedTokensBefore,
             estimatedTokensAfter: promptDecision.estimatedTokensAfter,
@@ -2066,8 +2118,8 @@ export class AgentLoop {
       if (readySubmission) {
         const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
         completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
-      } else if (hasVerifiedTests) {
-        completionDirective = `🎯 [VERIFICATION SUCCESSFUL]: All unit test checks passed with Exit Code 0. Code modifications are empirically verified. Do NOT make any more code changes. Call "submit_solution" immediately to conclude the task.`;
+      } else if (completionVerificationSatisfied) {
+        completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
       } else if (isReadOnlyAnswerTask && !stepCompletionState.hasMutations && !hasSubmittedSolution) {
         completionDirective = '[STRONG ADVISORY — READ-ONLY SUBMIT]: When the answer is ready, call submit_solution as the final tool with the actual user-facing answer in summary, resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless actual verification occurred. No code edit or test is required. report_investigation_findings and plain text do not replace submission. After successful submission, call no further tools; return the submitted answer in the user\'s language.';
       }
@@ -2188,7 +2240,7 @@ export class AgentLoop {
 
       // Every model-visible dynamic block enters one arbiter. A preliminary pass
       // provides the footprint used by latency guidance; the final pass includes it.
-      const dynamicBudgetTokens = isLocalizedExecution ? 1200 : 1600;
+      const dynamicBudgetTokens = this.dynamicContextArbiter.getBudget();
       // P0: phase/tool authority directive rides inside the non-truncatable P1.5
       // phaseGuidance slot so the model always sees the exact authorized list.
       const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
@@ -2196,7 +2248,6 @@ export class AgentLoop {
         hasSubmittedSolution,
         isReadOnly: classification.risk === 'R0' || classification.reversibility === 'read-only',
       });
-      const effectivePhaseGuidance = [phaseGuidance, phaseToolDirective].filter(Boolean).join('\n');
       let paretoGateReminder: string | undefined;
       if (['bugfix', 'refactor', 'security'].includes(classification.taskClass)) {
         const inTransitionPhase = ['explore', 'plan'].includes(classification.phase);
@@ -2251,7 +2302,8 @@ export class AgentLoop {
         hypothesisGuidance,
         domainContractContext,
         paretoGateReminder,
-        phaseGuidance: effectivePhaseGuidance,
+        phaseGuidance,
+        phaseToolAuthority: phaseToolDirective,
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
         recalledTurnContext,
@@ -3189,6 +3241,41 @@ export class AgentLoop {
           }
 
 
+          // Reconstruct again for each call: earlier calls in this same batch may have completed a stage.
+          const gitWorkflowNow = resolveGitWorkflow({
+            userRequest: turnUserRequest,
+            observations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
+            mayEdit: !isReadOnlyRequest(turnUserRequest),
+            implementationRequested: gitCodeChangeRequested,
+            implementationReady: gitImplementationReady(),
+          });
+          const gitWorkflowError = checkGitWorkflowCall(gitWorkflowNow, turnUserRequest, toolName, toolArgs);
+          if (gitWorkflowError) {
+            const blockedResult = { success: false, errorCode: 'GIT_WORKFLOW_STAGE_BLOCKED', error: gitWorkflowError,
+              processStarted: false, gitWorkflow: gitWorkflowNow, retryable: true };
+            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
+            await this.persistSession(session);
+            CLI.renderToolResult(toolName, 0, blockedResult);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            continue;
+          }
+
+          const phaseEffect = checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
+            toolArgs, classification.phase, this._workspace.rootDir);
+          const mutationPaths = scopedMutationTargets(toolName, toolArgs);
+          const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
+            this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }))
+            .find(intervention => intervention?.severity === 'BLOCKING');
+          if ((toolControlMode !== 'off' && !phaseEffect.allowed) || domainBlock) {
+            const blockedResult = { success: false, processStarted: false,
+              errorCode: domainBlock ? 'DOMAIN_INTENT_BLOCKED' : 'PHASE_TOOL_EFFECT_BLOCKED',
+              error: domainBlock?.message || phaseEffect.reason, retryable: true };
+            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'policy-effect-blocked');
+            await this.persistSession(session);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            continue;
+          }
+
           const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
             write_file: { reversible: true, checkpoint: true },
             replace_text: { reversible: true, checkpoint: true },
@@ -3213,6 +3300,7 @@ export class AgentLoop {
                 ? { reversible: false, checkpoint: true }
                 : { reversible: true, checkpoint: true };
           }
+          if (!sideEffect && isMutationTool(toolName)) sideEffect = { reversible: true, checkpoint: true };
           if (readySubmission) sideEffect = undefined;
           const effect = sideEffect
             ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible)
@@ -3221,7 +3309,11 @@ export class AgentLoop {
 
           // Tạo Shadow Git Checkpoint trước các thao tác sửa đổi file hoặc chạy lệnh
           if (effect && sideEffect?.checkpoint) {
-            const checkpoint = await this.checkpointManager.createCheckpoint(`Tool ${toolName}: ${JSON.stringify(toolArgs)}`);
+            if (mutationPaths.length && !turnMutationCheckpointId) {
+              turnMutationCheckpointId = (await this.checkpointManager.createTaskCheckpoint(`turn-${turn}`, 'Turn mutation baseline'))?.id;
+            }
+            if (turnMutationCheckpointId && mutationPaths.length) await this.checkpointManager.captureFiles(turnMutationCheckpointId, mutationPaths);
+            const checkpoint = mutationPaths.length ? await this.checkpointManager.createCheckpoint(`Tool ${toolName}`, { files: mutationPaths }) : undefined;
             this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id);
             await this.persistSession(session);
           }
@@ -3361,6 +3453,9 @@ export class AgentLoop {
                 blastRisk: this.maxEditBlastRisk,
                 sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
               },
+              planBlocker: this.planManager.getCompletionBlocker(),
+              activeAgents: submissionSnapshot().activeAgents,
+              evaluateCritic: evaluateTurnCritic,
             }) : undefined;
             let completionEvidence = submissionCheck?.evidence;
             let policyCompletion = submissionCheck?.verification;
@@ -3444,6 +3539,7 @@ export class AgentLoop {
               && !submissionReadiness.current(submissionSnapshot(), true);
             const submitGateBlocked = toolName === 'submit_solution' && (
               readinessInvalidated
+              || submissionCheck?.allowed !== true
               || submissionCheck?.audit.allowed === false
               || policyCompletion?.allowed !== true
               || (isCompletionEvidenceGateEnabled() && completionEvidence?.allow !== true)
@@ -3456,6 +3552,9 @@ export class AgentLoop {
                 ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
                 : policyCompletion?.reason
                   || completionEvidence?.continuationPrompt
+                  || submissionCheck?.blockers.join('\n')
+                  || submissionCheck?.critic?.critiquePrompt
+                  || submissionCheck?.critic?.reasons?.join('\n')
                   || submissionCheck?.audit.reasons.join('\n')
                   || 'Completion evidence is incomplete.';
               executionResult = {
@@ -3657,6 +3756,7 @@ export class AgentLoop {
               this.lastCommandExecutionState.filesModifiedSince++;
             }
             const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+            await this.checkpointManager.recordMutation(mutationPaths);
             this.lastMutationForInvestigation = {
               toolName,
               args: { ...toolArgs },
@@ -3887,7 +3987,9 @@ export class AgentLoop {
             // Xây dựng bản tóm tắt giải pháp giàu cấu trúc để dự phòng và hiển thị
             const richSummaryParts: string[] = [];
             if (summaryText) richSummaryParts.push(summaryText);
-            if (rootCauseText) richSummaryParts.push(`\n**Root Cause:**\n${rootCauseText}`);
+            const readOnlyAnswer = executionResult.result?.resolutionType === 'investigation_only'
+              || (isReadOnlyAnswerTask && filesModifiedList.length === 0);
+            if (rootCauseText && !readOnlyAnswer) richSummaryParts.push(`\n**Root Cause:**\n${rootCauseText}`);
             if (filesModifiedList.length > 0) {
               richSummaryParts.push(`\n**Modified Files:**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
             }
@@ -3905,14 +4007,7 @@ export class AgentLoop {
           if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
             const hId = executionResult.result?.hypothesisId || 'H';
             const hStatus = executionResult.result?.status;
-            if (hStatus === 'validated') {
-              this.verificationPolicy.recordVerification(
-                `hypothesis_${hId}`,
-                true,
-                String(toolArgs.statement || 'Hypothesis verified').slice(0, 240),
-                0,
-              );
-            } else if (hStatus === 'refuted' || hStatus === 'falsified') {
+            if (hStatus === 'refuted' || hStatus === 'falsified') {
               // Case 1b — falsified hypothesis: keep the thought for post-mortem.
               this.persistStepReasoning(session, this._latestReasoning?.thought, {
                 failure: true,
@@ -3950,9 +4045,9 @@ export class AgentLoop {
           } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
             this.reflectionEngine.reset();
             if (isVerificationCommand(commandForAttribution)) {
-              const lastCp = this.checkpointManager.getLastCheckpoint();
-              if (lastCp) {
-                this.rollbackOrchestrator.markGreenCheckpoint(lastCp);
+              if (this.targetFilesModifiedInTurn.size > 0 && !executionResult.result?.isBackgroundTask) {
+                const green = await this.checkpointManager.createCheckpoint('Verified scoped workspace', { files: [...this.targetFilesModifiedInTurn] });
+                if (green) this.rollbackOrchestrator.markGreenCheckpoint(green);
               }
             }
           }
@@ -4573,22 +4668,7 @@ export class AgentLoop {
       const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM || (!hasCodeMutations && !codeChangeRequired))
         ? { allowed: true }
         : this.verificationPolicy.canComplete(activeSkills, undefined, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) });
-      const criticDecision = (isSubagent || isMockLLM)
-        ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
-        : this.criticGate.evaluate({
-          finalAnswer,
-          session,
-          workspace: this._workspace,
-          hypothesisTracker: this.hypothesisTracker,
-          domainGuardian: this.domainIntentGuardian,
-          userRequest: turnUserRequest,
-          turn,
-          hasSubmittedSolution,
-          filesModified: completionState.filesModified,
-          completionState,
-          evidenceDecision,
-          risk: initialTurnClassification.risk,
-        });
+      const criticDecision = evaluateTurnCritic(finalAnswer, evidenceDecision);
       let ocrDecision: OcrGateDecision = {
         allow: true,
         reason: 'not-applicable',
@@ -4659,6 +4739,9 @@ export class AgentLoop {
             blastRisk: this.maxEditBlastRisk,
             sensitivePathTouched: completionState.filesModified.some(file => !isNonExecutableFile(file) && isSensitivePath(file)),
           },
+          planBlocker: this.planManager.getCompletionBlocker(),
+          activeAgents: submissionSnapshot().activeAgents,
+          evaluateCritic: evaluateTurnCritic,
         });
         submissionReadiness.arm(candidate.payload, submissionSnapshot(), candidate.allowed);
         finalAnswerDecision = candidate.allowed ? {
@@ -4687,7 +4770,8 @@ export class AgentLoop {
           consecutiveIncompleteFinals++;
           const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
           this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
-          const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt();
+          const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt({ submissionOnly: requiresReadOnlySubmission
+            || finalAnswerDecision.reason === 'submission-required' });
 
           const actionMandate = requiresReadOnlySubmission
             ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'

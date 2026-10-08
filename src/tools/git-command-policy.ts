@@ -155,10 +155,16 @@ export function isGitCommandAuthorized(
   if (classification.risk === 'read') return true;
   const command = subcommand.toLowerCase();
   if (command === 'add' && !isExplicitGitAddPathList(args) && !isBroadAddWithCommitIntent(args, userRequest)) return false;
-  const commitWorkflowStagesExplicitPaths = command === 'add'
-    && detectExplicitGitMutationIntent(userRequest).commit
-    && isExplicitGitAddPathList(args);
   const names = new Set(detectExplicitGitCommandNames(userRequest));
+  const normalizedRequest = normalizeIntentText(userRequest || '');
+  const commitWorkflowStagesExplicitPaths = command === 'add'
+    && (detectExplicitGitMutationIntent(userRequest).commit || names.has('commit'))
+    && !/\b(?:do not|dont|never|without|khong|dung)\s+(?:git\s+)?commit\b/.test(normalizedRequest)
+    && isExplicitGitAddPathList(args);
+  const requestedBranchCreation = names.has('branch')
+    && /(?:\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?branch\b|\btao\s+(?:nhanh|branch)\b)/.test(normalizedRequest)
+    && !/\b(?:do not|dont|never|khong|dung)\s+(?:create|make|tao)\s+(?:a\s+)?(?:new\s+)?(?:branch|nhanh)\b/.test(normalizedRequest)
+    && ((command === 'checkout' && args.includes('-b')) || (command === 'switch' && (args.includes('-c') || args.includes('--create'))));
   const equivalentNames: Record<string, string[]> = {
     checkout: ['checkout', 'switch', 'restore'],
     switch: ['switch', 'checkout', 'branch'],
@@ -166,6 +172,7 @@ export function isGitCommandAuthorized(
   };
   const requested = names.has(command)
     || commitWorkflowStagesExplicitPaths
+    || requestedBranchCreation
     || (command === 'add' && isBroadAddWithCommitIntent(args, userRequest))
     || equivalentNames[command]?.some((name) => names.has(name));
   if (!requested) return false;

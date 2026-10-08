@@ -8,7 +8,7 @@
  */
 
 export type VerifyLevel = 'LOW' | 'HIGH' | 'CRITICAL';
-export type VerifyMinTier = 'inherit' | 'full_test';
+export type VerifyMinTier = 'inherit' | 'appropriate';
 
 export interface VerifyTierInput {
   changedFileCount: number;
@@ -70,27 +70,27 @@ export function resolveVerifyTier(input: VerifyTierInput): VerifyTierDecision {
 
   if (['R4', 'R5'].includes(risk) || blast === 'CRITICAL') {
     reasons.push(risk ? `classification risk ${risk}` : 'measured blast CRITICAL');
-    return { level: 'CRITICAL', minTier: 'full_test', reasons };
+    return { level: 'CRITICAL', minTier: 'appropriate', reasons };
   }
   if (files >= criticalMinFiles) {
     reasons.push(`${files} files changed (≥${criticalMinFiles})`);
-    return { level: 'CRITICAL', minTier: 'full_test', reasons };
+    return { level: 'CRITICAL', minTier: 'appropriate', reasons };
   }
   if (input.sensitivePathTouched) {
     reasons.push('touched auth/payment/migration-adjacent path');
-    return { level: 'CRITICAL', minTier: 'full_test', reasons };
+    return { level: 'CRITICAL', minTier: 'appropriate', reasons };
   }
   if (risk === 'R3' || blast === 'HIGH') {
     reasons.push(risk === 'R3' ? 'classification risk R3' : 'measured blast HIGH');
-    return { level: 'HIGH', minTier: 'full_test', reasons };
+    return { level: 'HIGH', minTier: 'appropriate', reasons };
   }
   if (input.hasCallers) {
     reasons.push('edited symbol has known callers');
-    return { level: 'HIGH', minTier: 'full_test', reasons };
+    return { level: 'HIGH', minTier: 'appropriate', reasons };
   }
   if (files >= highMinFiles) {
     reasons.push(`${files} files changed (≥${highMinFiles})`);
-    return { level: 'HIGH', minTier: 'full_test', reasons };
+    return { level: 'HIGH', minTier: 'appropriate', reasons };
   }
   return { level: 'LOW', minTier: 'inherit', reasons };
 }

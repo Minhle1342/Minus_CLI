@@ -75,14 +75,22 @@ export function toolCallEntry(name: string, args: Record<string, unknown>): stri
 }
 
 export function toolResultEntry(name: string, result: Record<string, unknown>, durationMs: number): string {
-  const failed = Boolean(result?.error || result?.errorCode || result?.isError || result?.success === false ||
+  // P1: text badges ([OK]/[FAIL]/[DENIED]) so status never depends on color alone.
+  const denied = result?.denied === true || result?.status === 'denied';
+  const failed = !denied && Boolean(result?.error || result?.errorCode || result?.isError || result?.success === false ||
     (typeof result?.exitCode === 'number' && result.exitCode !== 0) ||
     (typeof result?.exit_code === 'number' && result.exit_code !== 0));
-  const heading = `${failed ? '✖' : '✔'} ${name} · ${Math.max(0, Math.round(durationMs || 0))}ms`;
-  if (name === 'submit_solution' && !failed) return `${heading}\nCâu trả lời đã được gửi.`;
+  const badge = denied ? '[DENIED]' : failed ? '[FAIL]' : '[OK]';
+  const heading = `${denied ? '⊘' : failed ? '✖' : '✔'} ${name} ${badge} · ${Math.max(0, Math.round(durationMs || 0))}ms`;
+  if (name === 'submit_solution' && !failed && !denied) {
+    return `${heading}\nCâu trả lời đã được gửi.`;
+  }
 
   const details = visibleValue(result);
-  if (details) return `${heading}\n${resultPreview(details)}`;
-  if (typeof result?.diff === 'string' || typeof result?.patch === 'string') return `${heading}\nDiff available in Diff view`;
+  const hasDiff = typeof result?.diff === 'string' || typeof result?.patch === 'string';
+  // P1: failures point at the Diff view when there is a patch to inspect.
+  const hint = (failed || denied) && hasDiff ? '\n→ Open Diff (Ctrl+X D) to review' : '';
+  if (details) return `${heading}\n${resultPreview(details)}${hint}`;
+  if (hasDiff) return `${heading}\nDiff available — open with Ctrl+X D`;
   return heading;
 }

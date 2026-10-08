@@ -159,10 +159,7 @@ export const SECTION_VERIFICATION_LADDER_FULL = `7. VERIFICATION LADDER & DIFFER
      * Never emit redundant tool calls after \`submit_solution\`.
    - FINAL RESPONSE STRUCTURE: Answer the request directly in the user's language. Mention modified files and verified outcomes when changes were made. For analysis, explain findings, evidence, and uncertainty without a fixed outline.`;
 
-export const SECTION_GIT_OPERATIONS_FULL = `8. GIT & TESTING RUNTIME OPERATIONS (INDUSTRY STANDARD):
-   - Execute all Git operations (git status, git diff, git add, git commit, git checkout, git branch, etc.) directly via \`run_command\`.
-   - Execute test suites (npm test, npx jest, pytest, cargo test, etc.) directly via \`run_command\`.
-   - NEVER push to main/master unless explicitly requested by the user.`;
+export const SECTION_GIT_OPERATIONS_FULL = SECTION_GIT_OPERATIONS;
 
 export const SECTION_FRONTEND_UI_FULL = `9. FRONTEND & UI DESIGN MODIFICATION STANDARD:
     - When modifying or building UIs:

@@ -125,7 +125,9 @@ export class TestEngineeringHarness {
     // 2. Tích hợp với Hypothesis System (Codex Scientific Loop)
     const activeHypothesisId = options.hypothesisId || this.hypothesisTracker?.getActiveHypothesis()?.id;
     if (activeHypothesisId && this.hypothesisTracker) {
-      if (report.isPassed) {
+      const matchesExpected = options.expectedOutcome === 'fail'
+        ? report.exitCode !== 0 && report.failed > 0 : report.isPassed;
+      if (matchesExpected) {
         this.hypothesisTracker.markValidated(
           activeHypothesisId,
           `Experimental verification succeeded: ${report.summaryText}`
@@ -163,17 +165,22 @@ export class TestEngineeringHarness {
     isPostFix?: boolean;
     useScratchWorkspace?: boolean;
     timeoutMs?: number;
+    hypothesisId?: string;
+    mutationSeq?: number;
   }): Promise<{ report: StructuredTestReport; reproStatus: ReproductionStatus }> {
     const report = await this.runTests({
       testCommand: options.command,
       useScratchWorkspace: options.useScratchWorkspace,
       timeoutMs: options.timeoutMs,
+      hypothesisId: options.hypothesisId,
+      expectedOutcome: options.isPostFix ? 'pass' : 'fail',
     });
     this.reproManager.recordAttempt(
       options.command,
       report.exitCode,
       report.summaryText,
       options.isPostFix
+      , { hypothesisId: options.hypothesisId, mutationSeq: options.mutationSeq, empirical: report.totalTests > 0 }
     );
     return {
       report,
@@ -289,6 +296,9 @@ export interface ReproductionAttemptRecord {
   output: string;
   phase: 'pre-fix' | 'post-fix';
   isPassed: boolean;
+  hypothesisId?: string;
+  mutationSeq?: number;
+  empirical?: boolean;
 }
 
 export interface ReproductionStatus {
@@ -307,7 +317,7 @@ export interface ReproductionStatus {
 export class ReproductionVerificationManager {
   private attempts: ReproductionAttemptRecord[] = [];
 
-  recordAttempt(command: string, exitCode: number, output: string, isPostFix?: boolean): ReproductionAttemptRecord {
+  recordAttempt(command: string, exitCode: number, output: string, isPostFix?: boolean, scope?: { hypothesisId?: string; mutationSeq?: number; empirical?: boolean }): ReproductionAttemptRecord {
     const isPassed = exitCode === 0;
     const phase: 'pre-fix' | 'post-fix' = isPostFix ? 'post-fix' : 'pre-fix';
     const record: ReproductionAttemptRecord = {
@@ -318,6 +328,7 @@ export class ReproductionVerificationManager {
       output,
       phase,
       isPassed,
+      ...scope,
     };
     this.attempts.push(record);
     return record;
@@ -328,20 +339,24 @@ export class ReproductionVerificationManager {
   }
 
   hasVerifiedFix(): boolean {
-    const hasPreFail = this.attempts.some((a) => a.phase === 'pre-fix' && !a.isPassed);
-    const hasPostPass = this.attempts.some((a) => a.phase === 'post-fix' && a.isPassed);
-    return hasPreFail && hasPostPass;
+    const latest = this.attempts.at(-1);
+    if (!latest || latest.phase !== 'post-fix' || !latest.isPassed || latest.empirical === false) return false;
+    return this.attempts.slice(0, -1).some(before => before.phase === 'pre-fix' && !before.isPassed && before.empirical !== false
+      && before.command === latest.command && before.hypothesisId === latest.hypothesisId
+      && (before.mutationSeq === undefined && latest.mutationSeq === undefined
+        || before.mutationSeq !== undefined && latest.mutationSeq !== undefined && before.mutationSeq < latest.mutationSeq));
   }
 
   getStatus(): ReproductionStatus {
-    const hasPreFail = this.attempts.some((a) => a.phase === 'pre-fix' && !a.isPassed);
-    const hasPostPass = this.attempts.some((a) => a.phase === 'post-fix' && a.isPassed);
     const lastAttempt = this.attempts[this.attempts.length - 1];
+    const scoped = this.attempts.filter(a => a.command === lastAttempt?.command && a.hypothesisId === lastAttempt?.hypothesisId && a.empirical !== false);
+    const hasPreFail = scoped.some(a => a.phase === 'pre-fix' && !a.isPassed);
+    const hasPostPass = lastAttempt?.phase === 'post-fix' && lastAttempt.isPassed && lastAttempt.empirical !== false;
 
     let details = 'No reproduction test has been recorded yet.';
-    if (hasPreFail && hasPostPass) {
+    if (this.hasVerifiedFix()) {
       details = 'Fully verified: bug reproduced successfully (pre-fix FAIL) and the fix passes tests (post-fix PASS).';
-    } else if (hasPreFail && !hasPostPass) {
+    } else if (hasPreFail) {
       details = 'Bug reproduced successfully (pre-fix FAIL), awaiting post-fix PASS confirmation run.';
     } else if (!hasPreFail && hasPostPass) {
       details = 'Post-fix tests pass, but the initial bug proof step is missing (pre-fix FAIL).';
@@ -349,8 +364,8 @@ export class ReproductionVerificationManager {
 
     return {
       hasPreFixRepro: hasPreFail,
-      hasPostFixPass: hasPostPass,
-      isVerified: hasPreFail && hasPostPass,
+      hasPostFixPass: Boolean(hasPostPass),
+      isVerified: this.hasVerifiedFix(),
       attemptsCount: this.attempts.length,
       lastAttempt,
       details,

@@ -27,6 +27,8 @@ export class KeyDecoder {
           const wheel = Number(mouse[1]) & 0b11000011;
           if (mouse[4] === 'M' && (wheel === 64 || wheel === 65)) {
             messages.push({ type: 'key', key: wheel === 64 ? 'mouse+up' : 'mouse+down', mouse: { x: Number(mouse[2]), y: Number(mouse[3]) }, now });
+          } else if ((Number(mouse[1]) & 3) === 0 || mouse[4] === 'm') {
+            messages.push({ type: 'key', key: mouse[4] === 'm' ? 'mouse+release' : (Number(mouse[1]) & 32) ? 'mouse+drag' : 'mouse+press', mouse: { x: Number(mouse[2]), y: Number(mouse[3]) }, now });
           }
           this.pending = this.pending.slice(mouse[0].length); continue;
         }
@@ -38,7 +40,9 @@ export class KeyDecoder {
       const char = String.fromCodePoint(this.pending.codePointAt(0)!);
       this.pending = this.pending.slice(char.length);
       const code = char.charCodeAt(0);
-      if (char === '\r' || char === '\n') key('enter');
+      if (char === '\r') key('enter');
+      // P1: LF (Ctrl+J / pasted line feeds) inserts a newline instead of submitting.
+      else if (char === '\n') key('ctrl+j');
       else if (char === '\t') key('tab');
       else if (code === 127 || code === 8) key('backspace');
       else if (code === 0) key('ctrl+space');

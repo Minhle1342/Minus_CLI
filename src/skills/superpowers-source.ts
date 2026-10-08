@@ -177,7 +177,7 @@ export const SUPERPOWERS_BUILTIN_SKILLS: Omit<SkillManifest, 'path' | 'source'>[
     id: 'finishing-a-development-branch',
     name: 'Finishing a Development Branch',
     version: '1.0.0',
-    description: 'Inspect changes, verify the full test suite, stage atomic commits, and push to the user-requested remote branch. Use run_command "git status", "git diff", "git add <file>", "git commit -m <msg>", then "git push"; report credential or branch-protection failures only after observing the tool result.',
+    description: 'Finish only the Git operations explicitly authorized by the current request and current workflow stage. Inspect status/diff first. Stage permission does not permit commit; commit permission does not permit push. Verification follows the risk-adjusted task contract and user scope. Preserve unrelated staged/unstaged changes. Report only observed command outcomes.',
     priority: 80,
     requires: ['git-operations'],
     requiredCapabilities: ['git.status', 'git.stage', 'git.commit', 'git.push', 'worktree.remove', 'shell.verify'],

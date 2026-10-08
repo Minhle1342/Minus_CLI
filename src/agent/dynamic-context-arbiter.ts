@@ -1,6 +1,8 @@
 import { ExactTokenizer } from './exact-tokenizer.js';
 
 export interface DynamicContextInputs {
+  /** Exact runtime authority; retained atomically even when the soft budget is too small. */
+  phaseToolAuthority?: string;
   /** P0.8: Instruction Hierarchy Recency Anchor (Strict System Invariants & Anti-Injection) */
   instructionHierarchyAnchor?: string;
   /** P0.85: Per-turn user-facing response language, retained even under context pressure. */
@@ -74,6 +76,8 @@ export interface DynamicContextArbiterOptions {
 }
 
 export interface DynamicContextArbiterResult {
+  /** Immutable controls alone can exceed the soft budget; the whole-request manager decides whether to stop. */
+  budgetExceeded?: boolean;
   renderedContext: string;
   totalTokens: number;
   budgetTokens: number;
@@ -142,6 +146,7 @@ export class DynamicContextArbiter {
 
     // 1. Chuẩn hóa và xếp hạng các nguồn theo thứ tự ưu tiên
     const rawSources: RankedSource[] = [
+      { key: 'phaseToolAuthority', name: 'Phase Tool Authority (P0.7)', content: (inputs.phaseToolAuthority || '').trim(), priority: 0.7, allowTruncation: false },
       {
         key: 'instructionHierarchyAnchor',
         name: 'Instruction Hierarchy Anchor (P0.8)',
@@ -341,7 +346,18 @@ export class DynamicContextArbiter {
       }
     }
 
-    const rankedSources: RankedSource[] = rawSources.filter((s) => s.content.length > 0);
+    const immutableKeys = new Set<keyof DynamicContextInputs>([
+      'phaseToolAuthority', 'instructionHierarchyAnchor', 'responseLanguageDirective',
+      'completionDirective', 'rawPlanContext', 'hypothesisContext', 'hypothesisGuidance', 'domainContractContext',
+    ]);
+    // Active scope and evidence precede replaceable advice. Guidance duplication
+    // must not evict the user's acceptance criteria or authorized tool list.
+    for (const source of rawSources) {
+      if (source.key === 'rawPlanContext') source.priority = 1;
+      if (['hypothesisContext', 'hypothesisGuidance', 'domainContractContext'].includes(source.key)) source.priority = 1.05;
+      if (['advicePrompt', 'reflectionContext', 'strongAdvisory', 'cognitiveScaffold', 'toolPlaybooks', 'gitPlaybook', 'harnessGuidance', 'latencyGuidance', 'testVerificationEncouragement'].includes(source.key)) source.priority += 1;
+    }
+    const rankedSources: RankedSource[] = rawSources.filter((s) => s.content.length > 0).sort((a, b) => a.priority - b.priority);
 
     // Question-aware placement (P3-P7 only): move the most query-relevant evidence
     // toward the front so later budget truncation retains useful evidence first.
@@ -399,7 +415,7 @@ export class DynamicContextArbiter {
       if (currentTotalTokens <= budgetTokens) break;
 
       const source = rankedSources[i];
-      if (source.priority <= 1.5) break; // P1 và P1.5 là bất khả xâm phạm
+      if (immutableKeys.has(source.key)) continue;
 
       const content = included.get(source.key) || '';
       const originalCost = ExactTokenizer.countTokens(content, modelName);
@@ -442,6 +458,7 @@ export class DynamicContextArbiter {
     // budget. Preserve priority, but degrade content as a last resort so it stays hard.
     for (let i = rankedSources.length - 1; i >= 0 && currentTotalTokens > budgetTokens; i--) {
       const source = rankedSources[i];
+      if (immutableKeys.has(source.key)) continue;
       const content = included.get(source.key) || '';
       if (!content) continue;
       const originalCost = ExactTokenizer.countTokens(content, modelName);
@@ -491,6 +508,7 @@ export class DynamicContextArbiter {
     return {
       renderedContext,
       totalTokens: afterTokens,
+      budgetExceeded: afterTokens > budgetTokens,
       budgetTokens,
       sourcesIncluded: rankedSources
         .filter((s) => included.has(s.key))

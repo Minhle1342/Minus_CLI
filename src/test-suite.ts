@@ -13,9 +13,6 @@ import { searchTextTool } from './tools/search-text.js';
 import { replaceTextTool } from './tools/replace-text.js';
 import { applyPatchTool } from './tools/apply-patch.js';
 import { writeFileTool } from './tools/write-file.js';
-import { writeToFileTool } from './tools/write-to-file.js';
-import { replaceFileContentTool } from './tools/replace-file-content.js';
-import { multiReplaceFileContentTool } from './tools/multi-replace-file-content.js';
 import { createFileTool } from './tools/create-file.js';
 import { deleteFileTool } from './tools/delete-file.js';
 import { moveFileTool } from './tools/move-file.js';
@@ -47,11 +44,8 @@ import { GeminiLLM, ensureBase64ThoughtSignature } from './llm/gemini.js';
 import { FallbackRouterLLM } from './llm/fallback-router.js';
 import { CheckpointManager } from './workspace/checkpoint.js';
 import {
-  TokenConfig,
   getModelTokenProfile,
   resolveTokenConfig,
-  TokenPresetTier,
-  TOKEN_TIER_DEFINITIONS,
   getPresetTokenConfig,
   resolveOutputTokensPreset,
   resolveInputTokensPreset,
@@ -73,7 +67,6 @@ import {
   FinalAnswerGuard,
   detectArchitectureAnalysisIntent,
   verifyWorkspaceGrounding,
-  stripMarkdownFormattingForGuard,
   hasUnfulfilledDeferredPromise,
 } from './agent/final-answer-guard.js';
 import { CompletionEvidenceGate, classifyToolEvidence, isNonExecutableFile } from './agent/completion-evidence.js';
@@ -154,10 +147,10 @@ import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming
 import { CodebaseIntelligenceService, isUtilityNoiseSymbol } from './tools/codebase-intelligence.js';
 import { enrichLocationWithSnippet } from './lsp/lsp-manager.js';
 import { CodeSyntaxValidator } from './workspace/syntax-diagnostics.js';
-import { queryCallGraphTool, createQueryCallGraphTool } from './tools/query-call-graph.js';
-import { getRouteMapTool, createGetRouteMapTool } from './tools/get-route-map.js';
-import { getSymbolContext360Tool, createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
-import { getArchitectureTopologyTool, createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
+import { createQueryCallGraphTool } from './tools/query-call-graph.js';
+import { createGetRouteMapTool } from './tools/get-route-map.js';
+import { createGetSymbolContext360Tool } from './tools/symbol-context-360.js';
+import { createGetArchitectureTopologyTool } from './tools/architecture-topology.js';
 import { ToolSynergyAdvisor } from './agent/tool-synergy-advisor.js';
 import { ToolRetriever } from './tools/tool-retriever.js';
 import { StepRetrievalQueryBuilder } from './agent/step-retrieval-query-builder.js';
@@ -179,24 +172,18 @@ import { SuperpowersWorkflowMap } from './skills/workflow-map.js';
 import { VerificationPolicy } from './skills/verification-policy.js';
 import { PermissionManager } from './security/permission-manager.js';
 import { CapabilityCatalog } from './capabilities/capability-catalog.js';
-import { findPackageScriptFailure } from './sandbox/command-diagnostics.js';
 import { TestEngineeringHarness, detectWorkspaceTestCommand, detectWorkspaceBuildCommand } from './testing/test-engineering-harness.js';
 import { CapabilityPolicy } from './capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from './capabilities/default-capabilities.js';
 import { loadLspConfig } from './lsp/config.js';
 import { disposeLspManager, resolveLspSpawnInvocation } from './lsp/lsp-manager.js';
-import { WorktreeManager } from './workspace/worktree-manager.js';
 import { ApprovalManager } from './agent/approval-manager.js';
 import { ReviewManager } from './agent/review-manager.js';
-import { SuperpowersPlugin } from './kernel/plugins/superpowers-plugin.js';
 import { createGitTools } from './tools/git-tools.js';
 import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
 import { classifyGitCommand, detectExplicitGitCommandNames } from './tools/git-command-policy.js';
 import {
   CORE_SYSTEM_PROMPT,
-  SECTION_UNITY_GAME_DEV,
-  SECTION_COMPUTER_USE,
-  SECTION_ARCHITECTURE_ANALYSIS,
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
   CODING_AGENT_SYSTEM_PROMPT,
@@ -968,7 +955,7 @@ async function runUnitTests() {
     }, workspace.rootDir);
     assert(patchDiff === samplePatch, 'apply_patch chuẩn hóa bỏ code block markdown');
 
-    try { await fs.unlink(workspace.resolveSafePath(testDiffFile)); } catch {}
+    try { await fs.unlink(workspace.resolveSafePath(testDiffFile)); } catch { }
   }
 
   // Test 3.9.4: Kiểm tra CLI.renderDiffView hiển thị màu đỏ cho dòng cũ và màu xanh cho dòng mới
@@ -1045,7 +1032,7 @@ async function runUnitTests() {
     const output = autoApprovedLogs.join('\n');
     assert(output.includes('AUTO-APPROVED IN SESSION'), 'Khi approve_all_session, hệ thống thông báo auto-approved kèm Diff View');
     assert(output.includes('+hello session updated'), 'Diff View trong chế độ approve_all_session in đúng dòng mới');
-    try { await fs.unlink(workspace.resolveSafePath('test_auto_diff.txt')); } catch {}
+    try { await fs.unlink(workspace.resolveSafePath('test_auto_diff.txt')); } catch { }
   }
 
   // Test 3.10: Kiểm thử PatchEngine & Unified Diff với Fuzz Matching (Codex CLI Standard)
@@ -1944,8 +1931,8 @@ async function runUnitTests() {
   );
   assert(
     recoveredOnlySession.getDiagnostics().openTurns.length === 0
-      && recoveredOnlySession.getDiagnostics().openSteps.length === 0
-      && recoveredOnlySession.getPendingToolCalls().length === 0,
+    && recoveredOnlySession.getDiagnostics().openSteps.length === 0
+    && recoveredOnlySession.getPendingToolCalls().length === 0,
     'Recovery resume đóng lifecycle và không để lại tool call dangling',
   );
 
@@ -6811,8 +6798,8 @@ Always write tests first!`;
   });
   assert(
     failedToolState.failureSignature.length > 0
-      && failedToolState.discoveredFiles.includes('src/auth/service.ts')
-      && failedToolState.discoveredSymbols.includes('AuthService.refreshToken'),
+    && failedToolState.discoveredFiles.includes('src/auth/service.ts')
+    && failedToolState.discoveredSymbols.includes('AuthService.refreshToken'),
     'Step retrieval query thu nhận failure signature cùng file/symbol mới phát hiện từ tool evidence',
   );
   assert(
@@ -6840,7 +6827,7 @@ Always write tests first!`;
   );
   assert(
     queryAwareResult.renderedContext.indexOf('Auth token interceptor refresh evidence')
-      < queryAwareResult.renderedContext.indexOf('CSS animation unrelated evidence'),
+    < queryAwareResult.renderedContext.indexOf('CSS animation unrelated evidence'),
     'Question-aware arbitration đưa evidence liên quan lên trước trong P3-P7',
   );
 
@@ -7369,7 +7356,7 @@ Always write tests first!`;
   const gitToolsTest = createGitTools(workspace);
   const gitAddDef = gitToolsTest.find((t) => t.name === 'git_add')!;
   assert(gitAddDef !== undefined, 'git_add tool được định nghĩa trong GitTools');
-  
+
   // Kiểm tra Schema Validation trực tiếp chấp nhận files, file, path
   const filesValidation = validateSchemaValue({ files: ['src/index.ts'] }, gitAddDef.parameters as any, '$', { rejectUnknownProperties: true });
   assert(filesValidation.valid === true, 'Schema git_add chấp nhận tham số files');
@@ -7645,7 +7632,7 @@ Always write tests first!`;
   const registry42 = new AgentRegistry();
   registry42.register('agent-fe-1', 'Frontend React Developer');
   registry42.advertiseCapabilities('agent-fe-1', ['frontend', 'react', 'tailwind']);
-  
+
   registry42.register('agent-be-1', 'Backend Go Engineer');
   registry42.advertiseCapabilities('agent-be-1', ['backend', 'go', 'grpc', 'postgres']);
 
@@ -7768,7 +7755,7 @@ Always write tests first!`;
   // Kiểm thử Tool allocate_agent_task
   multiKernel.ctx.agents.register('agent-sec-1', 'Security Auditor');
   multiKernel.ctx.agents.advertiseCapabilities('agent-sec-1', ['security', 'audit']);
-  
+
   const allocateTool = multiKernel.ctx.tools.get('allocate_agent_task')!;
   const allocRes = await allocateTool.execute({
     objective: 'Audit access control policies',
@@ -8738,7 +8725,7 @@ Always write tests first!`;
   const committedBullets = await aceCurator.commitDeltas(aceDeltas);
   assert(committedBullets.length >= 1, 'PlaybookCurator cam kết thành công delta updates vào Living Playbook');
 
-  await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(aceTestDir, { recursive: true, force: true }).catch(() => { });
 
   console.log('\n========================================');
   console.log('🧪 52. KIỂM THỬ DOMAIN INTENT & SEMANTIC MISUNDERSTANDING GUARDIAN (Wink & SCAFFOLD-CEGIS)');
@@ -8954,7 +8941,7 @@ Always write tests first!`;
     'Node cấp 1 được đánh dấu depth: 1 chính xác',
   );
 
-  await fs.rm(deepLspDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(deepLspDir, { recursive: true, force: true }).catch(() => { });
 
   console.log('\n========================================');
   console.log('🧪 54. KIỂM THỬ PERSISTENT SEMANTIC & EPISODIC MEMORY (ExpeRepair, CTIM-Rover, DreamBench-SWE & SWE-Bench-CL)');
@@ -9108,7 +9095,7 @@ Always write tests first!`;
     'retrieveContextSnippet tự động lồng ghép khối Dual-Memory Guidance có cấu trúc',
   );
 
-  await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(dualMemDir, { recursive: true, force: true }).catch(() => { });
 
   // =========================================================================
   // 🧪 55. KIỂM THỬ ĐỒ THỊ ĐA TÁC TỬ DAG PARALLEL SCHEDULER (PlanManager & AgentOrchestrator)
@@ -9630,8 +9617,8 @@ Always write tests first!`;
     assert(bareDrive === 'C:' + path.sep, 'Path resolution: bare drive letter appended with path separator');
 
   } finally {
-    await fs.rm(wsTestDir1, { recursive: true, force: true }).catch(() => {});
-    await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(wsTestDir1, { recursive: true, force: true }).catch(() => { });
+    await fs.rm(wsTestDir2, { recursive: true, force: true }).catch(() => { });
   }
 
   // ==============================================================
@@ -9750,7 +9737,7 @@ Always write tests first!`;
     assert(Boolean(reflReplace.reflectionPrompt && reflReplace.reflectionPrompt.includes('nested/widget.html')), 'ReflectionEngine: Prompt tự vấn chứa đường dẫn file tương tự gợi ý cho replace_text');
 
   } finally {
-    await fs.rm(mutationTempDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(mutationTempDir, { recursive: true, force: true }).catch(() => { });
   }
 
   console.log(`\n========================================`);

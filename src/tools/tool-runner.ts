@@ -266,8 +266,7 @@ export class ToolRunner {
     if (controlMode === 'shadow' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
       const hashValid = Boolean(context.decisionId && context.allowedToolSetHash && hashAllowedToolSet(names) === context.allowedToolSetHash);
-      const isEditOrCreate = EDIT_TOOL_NAMES.has(toolName);
-      const isAllowed = isToolAuthorized(toolName, names) || isEditOrCreate || (toolName === 'update_plan_task' && Boolean(this.registry.get('update_plan_task')));
+      const isAllowed = isToolAuthorized(toolName, names);
       const currentCallCount = this.budgetTracker.getCallCount(context.turn);
       const isWithinBudget = context.maxToolCalls === undefined || currentCallCount < context.maxToolCalls;
 
@@ -319,17 +318,13 @@ export class ToolRunner {
           guardianDiagnosis: diagnosis,
         };
       }
-      const targetTool = this.getTool(toolName);
-      const isMutationInImplement = context.classificationPhase === 'implement' && Boolean(this.rootRegistry?.get(toolName));
-      const isEditOrCreateTool = EDIT_TOOL_NAMES.has(toolName);
-      const canGracefullyBypass = (toolName === 'update_plan_task' || isMutationInImplement || isEditOrCreateTool) && Boolean(targetTool);
-      if (!isToolAuthorized(toolName, names) && !canGracefullyBypass) {
+      if (!isToolAuthorized(toolName, names)) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';
         if (phase === 'plan') {
-          recoverySuggestion = ' To modify code, create an execution plan first using "create_plan" or "update_plan_task" to transition into the "implement" phase.';
+          recoverySuggestion = ' To advance, call request_phase_transition with targetPhase "implement", rationale and evidenceRefs; wait for the next model response and its refreshed authorization before editing.';
         } else if (phase === 'explore') {
-          recoverySuggestion = ' In the "explore" phase, only read and inspection tools are allowed. Gather sufficient evidence before requesting code mutations.';
+          recoverySuggestion = ' Inspect the target, then call request_phase_transition with rationale and evidenceRefs when implementation is requested; wait for the refreshed authorization before editing.';
         } else if (phase === 'verify') {
           recoverySuggestion = ' In the "verify" phase, focus on running tests and checking diagnostics.';
         }

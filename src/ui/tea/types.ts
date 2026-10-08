@@ -1,4 +1,4 @@
-﻿import type { KernelEvents } from '../../kernel/kernel.js';
+import type { KernelEvents } from '../../kernel/kernel.js';
 import type { CompactionStatus } from '../compaction-status.js';
 
 export type KernelMsg = { [K in keyof KernelEvents]: { type: 'kernel'; event: K; args: Parameters<KernelEvents[K]> } }[keyof KernelEvents];
@@ -9,6 +9,7 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'tick'; now: number }
   | { type: 'action'; action: Action }
   | { type: 'log'; text: string }
+  | { type: 'notice'; text: string }
   | { type: 'busy'; busy: boolean }
   | { type: 'question'; prompt: string; active: boolean; permission?: PermissionCard }
   | { type: 'compose'; text: string }
@@ -19,13 +20,16 @@ export type Msg = KeyMsg | KernelMsg
 
 /** Effect descriptions are interpreted by Program, never executed by reducers. */
 export type Cmd = { type: 'submit' | 'answer'; text: string }
+  | { type: 'copy'; text: string }
   | { type: 'abort' | 'quit' | 'compact' | 'editor' }
   | { type: 'complete'; value: string; cursor: number }
   | { type: 'mode'; mode: Mode };
 export type Mode = 'PLAN' | 'IMPLEMENT';
 export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff';
-export interface Completion { label: string; value: string; cursor?: number; kind?: 'file' }
+export interface Completion { label: string; value: string; cursor?: number; kind?: 'file' | 'session' }
 export interface ComposerModel {
+  selection?: { anchor: number; head: number };
+  pastedBlocks?: { start: number; end: number; text: string }[];
   value: string; cursorOffset: number; history: string[]; historyIndex: number;
   draft: string; completions: Completion[]; selected: number; completionDismissed: boolean;
 }
@@ -36,12 +40,13 @@ export interface SidebarModel { visible: boolean; workspace: string; model: stri
 export interface PaletteItem { id: string; label: string; description: string; action?: Action }
 export interface PaletteModel { open: boolean; query: string; selected: number; items: PaletteItem[] }
 export interface DiffViewerModel { visible: boolean; text: string; offset: number; split: boolean; collapsed: number[]; hunk: number }
-export interface StatuslineModel { busy: boolean; aborting: boolean; step: number; maxSteps: number; phase: string; retry: string; notice: string; compaction: CompactionStatus | null; frame: number }
+export interface StatuslineModel { busy: boolean; aborting: boolean; step: number; maxSteps: number; phase: string; retry: string; notice: string; noticeUntil?: number; stoppingUntil?: number; compaction: CompactionStatus | null; compactionUntil?: number; frame: number }
 export interface RootModel {
+  selection?: { target: 'composer' | 'viewport'; anchor: number; head: number; dragging: boolean; lines?: string[]; sourceLines?: string[]; entries?: TranscriptEntry[]; width?: number; viewportOffset?: number; composerCursor?: number };
   width: number; height: number; mode: Mode; focus: Focus; leaderUntil: number;
   composer: ComposerModel; viewport: ViewportModel; sidebar: SidebarModel;
   palette: PaletteModel; diff: DiffViewerModel; status: StatuslineModel;
-  question: { active: boolean; prompt: string; draft?: ComposerModel; permission?: PermissionCard };
+  question: { active: boolean; prompt: string; draft?: ComposerModel; permission?: PermissionCard; selected: number };
 }
 export interface Model<M> { init(): [M, Cmd[]]; update(msg: Msg, model: M): [M, Cmd[]]; view(model: M): string }
 export type Sub = (send: (msg: Msg) => void) => () => void;
