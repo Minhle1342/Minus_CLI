@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import readline from 'node:readline/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { startInteractiveTui, runHeadlessCli, readHeadlessPrompt, parseTeaCommandLine, plainTerminalOutput, type TeaTerminal } from './ui/tea/index.js';
+import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
 import { GeminiLLM } from './llm/gemini.js';
@@ -17,11 +20,11 @@ import { Workspace } from './workspace/workspace.js';
 import {
   CLI,
   AVAILABLE_MODELS,
-  RealtimeSlashCommandHints,
+  SLASH_COMMANDS,
+  getSlashCommandSuggestions,
   colors as c,
   completeSlashCommand,
   UICollapsePreferences,
-  getVisibleWidth,
 } from './ui/cli-ui.js';
 import { AgentKernel } from './kernel/kernel.js';
 import { WorkspacePlugin } from './kernel/plugins/workspace-plugin.js';
@@ -85,51 +88,8 @@ const maxSteps = process.env.MAX_STEPS ? parseInt(process.env.MAX_STEPS, 10) : I
 
 let activeWorkspaceRef: Workspace | undefined;
 
-// Hàm hoàn thành tự động khi người dùng nhấn Tab (Hỗ trợ Slash Commands và @ Mention File / Thư mục)
-function completer(line: string): [string[], string] {
-  if (line.includes('@') && activeWorkspaceRef) {
-    const mentionCompletions = FileMentionEngine.completeMention(line, activeWorkspaceRef);
-    if (mentionCompletions[0].length > 0) {
-      return mentionCompletions;
-    }
-  }
-  return completeSlashCommand(line);
-}
-
 // Phân tích tham số dòng lệnh CLI (--workspace, --model, --sandbox, positional workspace)
-function parseCommandLineArgs(): { cliWorkspace?: string; cliModel?: string; cliSandbox?: string } {
-  const args = process.argv.slice(2);
-  let cliWorkspace: string | undefined;
-  let cliModel: string | undefined;
-  let cliSandbox: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--workspace' && args[i + 1]) {
-      cliWorkspace = args[i + 1];
-      i++;
-    } else if (args[i].startsWith('--workspace=')) {
-      cliWorkspace = args[i].split('=')[1];
-    } else if (args[i] === '--model' && args[i + 1]) {
-      cliModel = args[i + 1];
-      i++;
-    } else if (args[i].startsWith('--model=')) {
-      cliModel = args[i].split('=')[1];
-    } else if (args[i] === '--sandbox' && args[i + 1]) {
-      cliSandbox = args[i + 1];
-      i++;
-    } else if (args[i].startsWith('--sandbox=')) {
-      cliSandbox = args[i].split('=')[1];
-    } else if (args[i] === '--docker') {
-      cliSandbox = 'docker';
-    } else if (args[i] === '--local') {
-      cliSandbox = 'local';
-    } else if (!args[i].startsWith('-') && !cliWorkspace) {
-      cliWorkspace = args[i];
-    }
-  }
-
-  return { cliWorkspace, cliModel, cliSandbox };
-}
+function parseCommandLineArgs(): TeaCliOptions { return parseTeaCommandLine(); }
 
 // Phân tích đường dẫn workspace khởi tạo theo thứ tự ưu tiên
 function getInitialWorkspacePath(savedWorkspace?: string, cliWorkspace?: string): string {
@@ -500,7 +460,27 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
   return new DeepseekLLM(deepseekApiKey || 'dummy_key', model, undefined, undefined, undefined, tokenConfig);
 }
 
+function buildPlanningPrompt(request: string): string {
+  return `[PLANNING MODE REQUEST]: The user requests an exhaustive, phased implementation plan and task decomposition before modifying code.
+Carefully research the relevant codebase files, dependencies, and architecture.
+Follow the Writing Plans & Planning with Files protocols:
+1. Decompose the task into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
+2. Record the dependency-aware task plan with the harness create_plan tool.
+3. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
+4. Present the structured plan directly to the user in their language for alignment and review.
+Do not execute implementation tasks or modify project code in Plan mode.
+
+User Goal / Task Description:
+${request}`;
+}
+
 async function main() {
+  const cliOptions = parseCommandLineArgs();
+  const headless = cliOptions.headless || !input.isTTY || !output.isTTY || process.env.TERM === 'dumb';
+  const headlessPrompt = headless ? await readHeadlessPrompt(cliOptions.prompt) : undefined;
+  if (headless && !headlessPrompt?.trim()) throw new Error('Headless mode requires a prompt. Use minus run "<prompt>" or pipe input.');
+  const restorePlainOutput = headless ? plainTerminalOutput() : undefined;
+  try {
   const hasCodexAuth = isCodexAuthenticated();
   const hasAnyKey =
     apiKey ||
@@ -534,7 +514,7 @@ async function main() {
   }
 
   // 1. Tải cấu hình phiên làm việc đã lưu từ trước (Model name & Workspace path)
-  const { cliWorkspace, cliModel, cliSandbox } = parseCommandLineArgs();
+  const { cliWorkspace, cliModel, cliSandbox } = cliOptions;
   if (cliSandbox) {
     process.env.SANDBOX_MODE = cliSandbox;
   }
@@ -644,23 +624,20 @@ async function main() {
     agentLoop.setTokenConfig(savedSession.tokenConfig);
   }
 
-  const interactiveAgentIds = new Set(['main', 'interactive-agent', 'coding-agent']);
-  const onModelThinkingStart = ({ agentId }: { agentId: string }) => {
-    if (interactiveAgentIds.has(agentId)) CLI.startThinkingSpinner();
-  };
-  const onModelThinkingEnd = ({ agentId }: { agentId: string }) => {
-    if (interactiveAgentIds.has(agentId)) CLI.stopThinkingSpinner();
-  };
-  const onModelRetry = (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string } | null) => {
-    if (payload) {
-      CLI.renderModelRetry(payload);
-    } else {
-      CLI.clearModelRetry();
+  let tui: TeaTerminal | undefined;
+  if (headless) {
+    kernel.ctx.permissions.setPromptHandler(async () => 'reject');
+    try {
+      const attachment = await PromptAttachmentProcessor.resolveAndAttach(headlessPrompt!, workspace);
+      await runHeadlessCli(kernel, attachment.expandedPrompt, {
+        submit: (prompt, signal) => agentLoop.submit(activeSession, prompt, 'human', { signal }).then(() => {}),
+      });
+    } finally {
+      await sessionPersistence.save(activeSession);
+      await kernel.dispose();
     }
-  };
-  kernel.ctx.events.on('model:thinking:start', onModelThinkingStart);
-  kernel.ctx.events.on('model:thinking:end', onModelThinkingEnd);
-  kernel.ctx.events.on('model:retry', onModelRetry);
+    return;
+  }
 
   let sessionCount = 0;
 
@@ -676,56 +653,13 @@ async function main() {
   let activeExecutionController: AbortController | null = null;
   let lastCancellationTimestamp = 0;
   let isPromptingPermission = false;
-  // Canceller for the currently pending interactive question (permission / pickers).
-  // rl.question has no cancellation API, so all interactive prompts go through
-  // askCancellable, which listens on rl 'line' directly and can be dismissed.
-  let activeQuestionCancel: (() => void) | null = null;
-
-  /**
-   * Cancellable replacement for rl.question (which cannot be aborted).
-   * Resolves with the typed line, or undefined when cancelled via Esc / Ctrl+C
-   * (through activeQuestionCancel) or an aborted AbortSignal.
-   */
-  const askCancellable = (
-    rlInterface: readline.Interface,
-    promptText: string,
-    signal?: AbortSignal,
-  ): Promise<string | undefined> => {
-    return new Promise((resolve) => {
-      let settled = false;
-      const cleanup = () => {
-        if (activeQuestionCancel === onAbort) activeQuestionCancel = null;
-        rlInterface.removeListener('line', onLine);
-        signal?.removeEventListener('abort', onAbort);
-      };
-      const onLine = (line: string) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(line);
-      };
-      const onAbort = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        try { output.write('\n'); } catch {}
-        resolve(undefined);
-      };
-      activeQuestionCancel = onAbort;
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      signal?.addEventListener('abort', onAbort, { once: true });
-      rlInterface.setPrompt(promptText);
-      rlInterface.prompt();
-      rlInterface.on('line', onLine);
-    });
-  };
+  let isShuttingDown = false;
+  const askCancellable = (terminal: TeaTerminal, promptText: string, signal?: AbortSignal): Promise<string | undefined> => terminal.ask(promptText, signal);
 
   const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
     const controller = new AbortController();
     activeExecutionController = controller;
+    tui?.setBusy(true);
     try {
       return await fn(controller.signal);
     } catch (err: any) {
@@ -738,6 +672,7 @@ async function main() {
     } finally {
       if (activeExecutionController === controller) {
         activeExecutionController = null;
+        tui?.setBusy(false);
       }
     }
   };
@@ -819,6 +754,60 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     }
   };
 
+  let implementPermissionMode = kernel.ctx.permissions.getMode();
+  tui = startInteractiveTui(kernel, {
+    metadata: { sessions: await sessionPersistence.list(), workspace: workspace.rootDir, model: modelName, session: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 },
+    commands: [
+      ...SLASH_COMMANDS.map(command => ({ id: command.command, label: command.description, description: command.category || "General" })),
+      ...(['compact', 'editor', 'quit', 'sidebar', 'diff', 'mode'] as const).map(action => ({ id: action, label: action, description: 'Session action', action })),
+    ],
+    complete: (value, cursor) => {
+      const mention = FileMentionEngine.extractActiveMention(value, cursor);
+      if (mention) return FileMentionEngine.getFileSuggestions(value, workspace, cursor, 6).map(item => {
+        const file = item.displayPath.includes(' ') ? '"' + item.displayPath + '"' : item.displayPath;
+        const prefix = value.slice(0, mention.start) + '@' + file;
+        return { label: item.displayPath, value: prefix + value.slice(mention.end), cursor: prefix.length, kind: 'file' as const };
+      });
+      return getSlashCommandSuggestions(value.slice(0, cursor), 6).map(item => ({ label: item.command + ' ' + item.description, value: item.command + value.slice(cursor), cursor: item.command.length }));
+    },
+    onAbort: () => { activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
+    onQuit: () => { isShuttingDown = true; activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
+    onMode: mode => {
+      if (mode === 'PLAN') { implementPermissionMode = kernel.ctx.permissions.getMode(); kernel.ctx.permissions.setMode('read_only'); }
+      else kernel.ctx.permissions.setMode(implementPermissionMode);
+    },
+  });
+  const rl = tui;
+  tui.on('line', (line: string) => {
+    if (!activeExecutionController || isPromptingPermission) return;
+    const trimmed = line.trim(); if (!trimmed) return;
+    if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
+      activeExecutionController.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
+    }
+    const item = agentLoop.inbox.enqueue(activeSession.id, trimmed, 'human', { isSteering: true });
+    activeSession.append('input/queued', { inputId: item.id, inputText: trimmed, source: 'human', isSteering: true });
+    void sessionPersistence.save(activeSession).catch(() => {});
+  });
+  kernel.ctx.permissions.setPromptHandler(async request => {
+    isPromptingPermission = true;
+    tui?.setDiff(request.diff || '', false);
+    try {
+      const answer = await rl.ask('Permission request', activeExecutionController?.signal, {
+        toolName: request.toolName,
+        target: request.target || String(request.details?.command || request.details?.path || request.details?.filePath || '(unknown)'),
+        summary: request.summary,
+        riskLevel: request.riskLevel,
+        category: request.category,
+        suggestedTool: request.details?.misuse?.tool,
+      });
+      if (answer === undefined) return 'reject';
+      const normalized = answer.trim().toLowerCase();
+      if (['y', 'yes'].includes(normalized)) return 'approve';
+      if (['a', 'all', 'always'].includes(normalized)) return 'approve_all_session';
+      return 'reject';
+    } finally { isPromptingPermission = false; }
+  });
+
   // Hiển thị Banner mở đầu
   CLI.renderBanner({
     modelName,
@@ -876,329 +865,6 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       isPlan: isPlanIncomplete,
     });
   }
-
-  const completer = (line: string): [string[], string] => {
-    if (activeWorkspaceRef && FileMentionEngine.extractActiveMention(line)) {
-      return FileMentionEngine.completeMention(line, activeWorkspaceRef);
-    }
-    return completeSlashCommand(line);
-  };
-  const rl = readline.createInterface({ input, output, completer });
-  rl.setPrompt(CLI.getPromptSymbol());
-
-  // Cơ chế Concurrent Input Queuing (Google Antigravity Standard):
-  // Lắng nghe câu lệnh người dùng nhập vào ô prompt trong lúc Turn đang thực thi để đưa vào hàng chờ (Mid-Turn Steerability)
-  rl.on('line', (line: string) => {
-    // Chỉ xử lý khi có tác vụ đang chạy ngầm và không nằm trong hộp thoại phân quyền
-    if (!activeExecutionController || isPromptingPermission) {
-      return;
-    }
-    const trimmed = line.trim();
-    if (!trimmed) return;
-
-    // Lệnh hủy tác vụ nhanh khi đang chạy
-    if (trimmed === '/cancel' || trimmed === '/stop' || trimmed === '/abort') {
-      activeExecutionController.abort();
-      lastCancellationTimestamp = Date.now();
-      // /cancel means "stop everything": drop queued steering too (Esc/Ctrl+C
-      // preserves the queue so it can run as follow-up turns instead).
-      if (activeSession) {
-        agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.');
-      }
-      slashHints.clear();
-      CLI.renderTaskCancelledToast('Stopped the running task as requested (/cancel).');
-      return;
-    }
-
-    // Đưa câu lệnh vào hàng đợi Queued Messages của active session
-    if (activeSession) {
-      const enqueuedItem = agentLoop.inbox.enqueue(activeSession.id, trimmed, 'human', { isSteering: true });
-      activeSession.append('input/queued', {
-        inputId: enqueuedItem.id,
-        inputText: trimmed,
-        source: 'human',
-        isSteering: true,
-      });
-      void sessionPersistence.save(activeSession).catch(() => {});
-      CLI.renderQueuedMessageEnqueued(trimmed, enqueuedItem.id);
-    }
-  });
-  const getActiveModelInfo = () => ({
-    modelName,
-    effort: agentLoop.getTokenConfig()?.reasoningEffort || savedSession.tokenConfig?.reasoningEffort || 'medium',
-  });
-  const promptWidth = getVisibleWidth(CLI.getPromptSymbol());
-  const slashHints = new RealtimeSlashCommandHints(
-    output,
-    () => activeWorkspaceRef,
-    getActiveModelInfo,
-    () => promptWidth,
-  );
-
-  // Đăng ký hook Graceful Shutdown và Intercept SIGINT (Hỗ trợ Antigravity CLI Cancellation & Non-terminating Prompt)
-  let isShuttingDown = false;
-  let lastExitPromptTimestamp = 0;
-
-  const handleGracefulShutdown = async (signal: string) => {
-    const now = Date.now();
-
-    // 0. Esc / Ctrl+C dismisses a pending interactive question first
-    // (permission dialog, session/model/goal pickers) instead of exiting.
-    // SIGTERM still proceeds to safe exit below.
-    if (signal === 'SIGINT' && activeQuestionCancel && !activeExecutionController) {
-      activeQuestionCancel();
-      slashHints.clear(promptWidth);
-      CLI.renderTaskCancelledToast('Dismissed the current prompt (Ctrl+C / Esc).');
-      return;
-    }
-
-    // 1. Nếu đang có tác vụ đang thực thi (activeExecutionController):
-    // Dừng tác vụ ngay lập tức, KHÔNG đóng chương trình, tự động hiển thị thông báo sẵn sàng nhận prompt mới!
-    if (activeExecutionController) {
-      activeExecutionController.abort();
-      lastCancellationTimestamp = now;
-      slashHints.clear(promptWidth);
-      CLI.renderTaskCancelledToast('Stopped the running task as requested (Ctrl+C / Esc).');
-      return;
-    }
-
-    // 2. Chống race condition: Bỏ qua tín hiệu trễ (trailing SIGINT) trong vòng 1500ms sau khi vừa hủy tác vụ
-    if (now - lastCancellationTimestamp < 1500) {
-      return;
-    }
-
-    // 3. Nếu người dùng bấm Ctrl+C tại dấu nhắc lệnh prompt (không có tác vụ nào đang chạy):
-    // Không thoát đột ngột làm mất phiên làm việc. Xóa dòng nhập hiện tại, nhắc người dùng và mời tiếp tục nhập prompt.
-    if (signal === 'SIGINT') {
-      const elapsed = now - lastExitPromptTimestamp;
-      // Bỏ qua nếu event bị lặp trong vòng 300ms do readline / process emitter
-      if (elapsed < 300) {
-        return;
-      }
-      // Nếu bấm Ctrl+C lần thứ 2 trong khoảng 300ms đến 2000ms -> Người dùng thực sự muốn thoát
-      if (elapsed > 2000) {
-        lastExitPromptTimestamp = now;
-        try {
-          (rl as any).line = '';
-          (rl as any).cursor = 0;
-          slashHints.clear(promptWidth);
-        } catch {}
-        console.log(`\n  ${c.yellow}⚠️  Press Ctrl+C once more within 2 seconds to exit, or keep typing commands / prompts.${c.reset}`);
-        CLI.renderPromptInputNotice('Ready for a new command. Enter your request / prompt:');
-        try {
-          rl.setPrompt(CLI.getPromptSymbol());
-          rl.prompt(true);
-        } catch {}
-        return;
-      }
-    }
-
-    // 4. Thoát an toàn (SIGTERM từ hệ thống hoặc bấm Ctrl+C 2 lần liên tiếp để xác nhận):
-    if (isShuttingDown) return;
-    isShuttingDown = true;
-    try {
-      if (agentLoop.goalManager.getState()?.phase === 'active') {
-        agentLoop.goalManager.pause(`Interrupted by operator signal (${signal})`);
-      }
-      if (activeSession) {
-        await sessionPersistence.save(activeSession).catch(() => {});
-      }
-      saveSession({
-        modelName,
-        workspacePath: workspace.rootDir,
-        activeSessionId: activeSession?.id,
-      }, workspace.rootDir);
-      await kernel.dispose().catch(() => {});
-    } catch {}
-    console.log(`\n${c.green}Goodbye! Your session has been saved safely. 👋${c.reset}\n`);
-    process.exit(0);
-  };
-
-  process.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => void handleGracefulShutdown('SIGTERM'));
-  rl.on('SIGINT', () => void handleGracefulShutdown('SIGINT'));
-
-  let slashHintRefreshScheduled = false;
-  const handleInputKeypress = (_sequence: string, key?: { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): void => {
-    const isCancelKey = (key?.ctrl && (key?.name === 'c' || _sequence === '\x03')) || key?.name === 'escape' || _sequence === '\x1b';
-    // Esc / Ctrl+C dismisses a pending interactive question (pickers). While a task
-    // runs, the abort below resolves the permission dialog through its signal instead.
-    if (isCancelKey && activeQuestionCancel && !activeExecutionController) {
-      activeQuestionCancel();
-      slashHints.clear(promptWidth);
-      return;
-    }
-    // Phím tắt Ctrl+C hoặc Escape trong lúc đang thực thi: Hủy tác vụ hiện tại ngay lập tức (Antigravity CLI style)
-    if (activeExecutionController) {
-      if (isCancelKey) {
-        activeExecutionController.abort();
-        lastCancellationTimestamp = Date.now();
-        slashHints.clear(promptWidth);
-        CLI.renderTaskCancelledToast('Stopped the running task as requested (Ctrl+C / Esc).');
-        return;
-      }
-    }
-
-    // Phím tắt Ctrl + O: Chuyển đổi giữa Thu gọn (1-line step) và Mở rộng chi tiết (Full verbose)
-    const isCtrlO = (key?.ctrl && (key?.name === 'o' || _sequence === '\x0f')) || _sequence === '\x0f';
-    if (isCtrlO) {
-      if (typeof (rl as any).line === 'string') {
-        (rl as any).line = (rl as any).line.replace(/\x0f/g, '');
-      }
-      const isCurrentlyCompact = agentLoop.collapsePreferences.compactSteps ?? false;
-      const newCompact = !isCurrentlyCompact;
-      agentLoop.setCollapsePreferences({
-        compactSteps: newCompact,
-        thinking: newCompact,
-        tools: newCompact,
-        diff: newCompact,
-      });
-      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
-      CLI.renderCtrlOToggleToast(newCompact);
-      (rl as any)._refreshLine?.();
-      return;
-    }
-
-    if (key?.name === 'return' || key?.name === 'enter' || (key?.ctrl && ['c', 'd'].includes(key.name || ''))) {
-      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
-      return;
-    }
-    // Phím Escape khi đang gõ: Đóng popup gợi ý ngay lập tức hoặc xóa sạch dòng nhập nếu đã đóng gợi ý
-    if (key?.name === 'escape' || _sequence === '\x1b') {
-      slashHints.clear(promptWidth + getVisibleWidth(rl.line.slice(0, rl.cursor)));
-      if (typeof (rl as any).line === 'string' && (rl as any).line.length > 0) {
-        (rl as any).line = '';
-        (rl as any).cursor = 0;
-        try {
-          rl.setPrompt(CLI.getPromptSymbol());
-          rl.prompt(true);
-        } catch {}
-      }
-      return;
-    }
-    // Bỏ qua các phím modifier / toggle đơn lẻ (Caps Lock, Shift, Control, Alt, Meta, v.v.) tránh vỡ UI
-    if (key?.name && ['capslock', 'shift', 'control', 'alt', 'meta', 'pageup', 'pagedown', 'numlock', 'scrolllock'].includes(key.name.toLowerCase())) {
-      return;
-    }
-    const removesOnlyTrigger = (rl.line === '/' || rl.line === '@')
-      && ((key?.name === 'backspace' && rl.cursor === 1) || (key?.name === 'delete' && rl.cursor === 0));
-    if (removesOnlyTrigger) {
-      slashHints.clear(promptWidth);
-      return;
-    }
-    if (slashHintRefreshScheduled) return;
-    slashHintRefreshScheduled = true;
-    setImmediate(() => {
-      slashHintRefreshScheduled = false;
-      const curLine = rl.line || '';
-      const curCursor = rl.cursor ?? curLine.length;
-      slashHints.update(curLine, curCursor);
-    });
-  };
-  // Clear transient rows before readline handles Enter and invokes the question callback.
-  // Character updates are deferred, so prepending does not read stale rl.line state.
-  input.prependListener('keypress', handleInputKeypress);
-
-  /**
-   * Xả sạch mọi dữ liệu tồn đọng trong readline buffer
-   * Đảm bảo các prompt xác nhận quyền hoặc menu không bị nhận ký tự thừa từ lần nhập/dán trước.
-   */
-  function flushStdin(rlInterface: readline.Interface): void {
-    try {
-      (rlInterface as any).line = '';
-      (rlInterface as any).cursor = 0;
-    } catch {}
-  }
-
-  /**
-   * Đọc User Prompt từ bàn phím, tự động gộp các dòng nếu người dùng dán (paste) đoạn văn bản nhiều dòng
-   */
-  async function readUserPrompt(rlInterface: readline.Interface, inputStream: NodeJS.ReadableStream, promptSymbol: string): Promise<string> {
-    // Bảo đảm con trỏ terminal luôn hiển thị nhấp nháy cho người dùng
-    process.stdout.write('\x1b[?25h');
-    slashHints.clear(0);
-    rlInterface.setPrompt(promptSymbol);
-    const promptLen = getVisibleWidth(promptSymbol);
-    const firstLine = await rlInterface.question(promptSymbol);
-    slashHints.clear(promptLen + getVisibleWidth(firstLine));
-    const lines: string[] = [firstLine];
-
-    // Nếu người dùng dán nhiều dòng (multi-line paste), các dòng sau sẽ đến trong vòng vài mili-giây
-    while (true) {
-      const pendingLine = (rlInterface as any).line;
-      if (typeof pendingLine === 'string' && pendingLine.length > 0) {
-        lines.push(pendingLine);
-        (rlInterface as any).line = '';
-        (rlInterface as any).cursor = 0;
-        continue;
-      }
-
-      const hasMore = await new Promise<boolean>((resolve) => {
-        let timer: NodeJS.Timeout;
-        const onLine = (extraLine: string) => {
-          clearTimeout(timer);
-          rlInterface.removeListener('line', onLine);
-          lines.push(extraLine);
-          resolve(true);
-        };
-        timer = setTimeout(() => {
-          rlInterface.removeListener('line', onLine);
-          resolve(false);
-        }, 30);
-        rlInterface.on('line', onLine);
-      });
-
-      if (!hasMore) {
-        break;
-      }
-    }
-
-    flushStdin(rlInterface);
-    return lines.join('\n');
-  }
-
-  // Đăng ký Permission Prompt Handler cho interactive CLI mode
-  kernel.ctx.permissions.setPromptHandler(async (request) => {
-    isPromptingPermission = true;
-    // Dot nhấp nháy của tool (ghi đè dòng bằng \r) sẽ xóa prompt y/n/a khỏi màn hình
-    // trong lúc chờ phím — dừng nó trước khi hỏi, resume sau khi có đáp án.
-    const wasDotActive = CLI.isToolDotActive();
-    try {
-      slashHints.clear();
-      // Xả sạch stdin để ngăn ký tự từ lệnh dán/nhập trước đó bị tràn vào hộp thoại xác nhận quyền
-      flushStdin(rl);
-      CLI.stopToolDotSpinner();
-
-      CLI.renderPermissionPrompt(request);
-      const rawAnswer = await askCancellable(
-        rl,
-        `  ${c.brightYellow}${c.bold}👉 Approve execution? [y: Approve | n: Reject | a: Always approve in session]:${c.reset} `,
-        activeExecutionController?.signal,
-      );
-      flushStdin(rl);
-      // Esc / Ctrl+C dismisses the dialog: fail safe by denying the permission.
-      if (rawAnswer === undefined) {
-        flushStdin(rl);
-        return 'reject';
-      }
-      const answer = rawAnswer.trim().toLowerCase();
-      flushStdin(rl);
-
-      if (answer === 'y' || answer === 'yes' || answer === '') {
-        return 'approve';
-      }
-      if (answer === 'a' || answer === 'all' || answer === 'always') {
-        return 'approve_all_session';
-      }
-      return 'reject';
-    } finally {
-      isPromptingPermission = false;
-      if (wasDotActive) {
-        const details = (request.details && typeof request.details === 'object' ? request.details : {}) as Record<string, any>;
-        CLI.startToolDotSpinner(request.toolName, details);
-      }
-    }
-  });
 
   const switchComposeWorkspace = async (targetPath: string, saveCurrent = true): Promise<void> => {
     const resolvedPath = path.resolve(targetPath);
@@ -1275,7 +941,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
 
   try {
     while (true) {
-      const userPrompt = await readUserPrompt(rl, input, CLI.getPromptSymbol());
+      tui.setMetadata({ sessions: await sessionPersistence.list(), workspace: workspace.rootDir, model: modelName, session: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 });
+      const userPrompt = await tui.readPrompt();
       const trimmed = userPrompt.trim();
 
       if (!trimmed) {
@@ -1964,15 +1631,7 @@ Please focus on executing and verifying this task, and update its status to COMP
         // Người dùng yêu cầu lập kế hoạch cho một nhiệm vụ cụ thể:
         console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Activating Planning Skills (writing-plans, planning-with-files) for task:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
 
-        const expandedPlanningPrompt = `[PLANNING MODE REQUEST]: The user requests an exhaustive, phased implementation plan and task decomposition before modifying code.
-Carefully research the relevant codebase files, dependencies, and architecture.
-Follow the Writing Plans & Planning with Files protocols:
-1. Decompose the task into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
-2. Maintain persistent working memory on disk (task_plan.md, findings.md, progress.md) if this is a multi-step workflow.
-3. Present the structured plan directly to the user in their language for alignment and review.
-
-User Goal / Task Description:
-${planPrompt}`;
+        const expandedPlanningPrompt = buildPlanningPrompt(planPrompt);
 
         // Tự động kiểm tra và đính kèm các File / Thư mục được @mention vào ngữ cảnh
         const attachmentResult = await PromptAttachmentProcessor.resolveAndAttach(planPrompt, workspace);
@@ -2260,8 +1919,15 @@ ${planPrompt}`;
         continue;
       }
 
+      if (trimmed === '/diff') {
+        const result = await promisify(execFile)('git', ['diff', '--no-ext-diff', 'HEAD'], { cwd: workspace.rootDir, maxBuffer: 8 * 1024 * 1024 });
+        tui.setDiff(result.stdout);
+        tui.program.send({ type: 'action', action: 'diff' });
+        continue;
+      }
+
       if (trimmed === '/clear') {
-        console.clear();
+        tui.clear();
         CLI.renderBanner({
           modelName,
           workspaceRoot: workspace.rootDir,
@@ -3040,8 +2706,11 @@ ${planPrompt}`;
         if (sub === 'compact' || sub === 'prune' || sub === 'compress') {
           try {
             console.log(`\n${c.cyan}🧹 Activating Context Compactor to safely compress context...${c.reset}`);
-            const compactRes = await agentLoop.contextCompactor.compact(activeSession.getHistory());
+            await agentLoop.contextGuardian.protectPreCompaction(activeSession);
+            const compactRes = await agentLoop.contextCompactor.compact(activeSession.getHistory(), { force: true, protectActiveTurn: true, enableRollingTurns: false, plan: agentLoop.planManager.getTaskGraph() });
             if (compactRes && compactRes.stats.tokensSaved > 0) {
+              activeSession.setHistory(compactRes.messages, "manual-compaction", { stats: compactRes.stats });
+              await sessionPersistence.save(activeSession);
               console.log(`${c.green}✔ Compressed context successfully. Saved ${compactRes.stats.tokensSaved.toLocaleString()} tokens.${c.reset}\n`);
             } else {
               console.log(`${c.yellow}⚠️ Context is still within the optimal threshold; no compression needed.${c.reset}\n`);
@@ -3082,7 +2751,10 @@ ${planPrompt}`;
 
       try {
         await runWithCancellation(async (signal) => {
-          await agentLoop.submit(activeSession, attachmentResult.expandedPrompt, 'human', { signal });
+          const request = tui?.model.mode === 'PLAN'
+            ? buildPlanningPrompt(trimmed) + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : '')
+            : attachmentResult.expandedPrompt;
+          await agentLoop.submit(activeSession, request, 'human', { signal });
           checkAndAutoCompleteGoal();
         });
       } catch (err: any) {
@@ -3121,14 +2793,11 @@ ${planPrompt}`;
       }
     }
   } finally {
-    kernel.ctx.events.off('model:thinking:start', onModelThinkingStart);
-    kernel.ctx.events.off('model:thinking:end', onModelThinkingEnd);
-    kernel.ctx.events.off('model:retry', onModelRetry);
-    CLI.stopThinkingSpinner();
-    CLI.clearModelRetry();
-    input.removeListener('keypress', handleInputKeypress);
-    slashHints.dispose();
-    rl.close();
+    tui.close();
+    CLI.stopThinkingSpinner(); CLI.clearModelRetry(); CLI.stopToolDotSpinner();
+    if (agentLoop.goalManager.getState()?.phase === 'active') agentLoop.goalManager.pause('Interactive session closed');
+    await sessionPersistence.save(activeSession);
+    await kernel.dispose();
     try {
       const { disposeLspManager } = await import('./lsp/lsp-manager.js');
       await disposeLspManager(kernel.ctx.workspace);
@@ -3137,8 +2806,10 @@ ${planPrompt}`;
       await kernel.ctx.sandbox.dispose();
     } catch {}
   }
+  } finally { restorePlainOutput?.(); }
 }
 
 main().catch((err) => {
-  console.error('Fatal error:', err);
+  console.error('Fatal error:', err instanceof Error ? err.message : String(err));
+  process.exitCode = 1;
 });

@@ -364,7 +364,18 @@ function buildState(
 }
 
 export class ContextBudgetManager {
-  private rejectedCandidateKey?: string;
+  private rejectedCandidateKeys = new Set<string>();
+  private markRejectedCandidate(key: string, limit = 5): void {
+    this.rejectedCandidateKeys.add(key);
+    while (this.rejectedCandidateKeys.size > limit) {
+      const oldest = this.rejectedCandidateKeys.values().next();
+      if (oldest.done) break;
+      this.rejectedCandidateKeys.delete(oldest.value);
+    }
+  }
+  private clearRejectedCandidates(): void {
+    this.rejectedCandidateKeys.clear();
+  }
   readonly mode: ContextManagementMode;
   readonly triggerRatio: number;
   readonly counter: RequestTokenCounter;
@@ -417,7 +428,7 @@ export class ContextBudgetManager {
       envelope, options: { ...options, onCompactionStart: undefined },
       config: this.compactor.getConfig(), count: before, mode: this.mode,
     })).digest('hex');
-    if (candidateKey === this.rejectedCandidateKey) {
+    if (this.rejectedCandidateKeys.has(candidateKey)) {
       const enforce = this.mode === 'enforce' || (this.mode === 'auto' && isKnownProvider(envelope.provider));
       return { mode: this.mode, history: envelope.history, changed: false,
         before, after: before, checkpointObservations,
@@ -465,7 +476,7 @@ export class ContextBudgetManager {
       Math.ceil(before.historyTokens * (phaseTransition?.minSavingsRatio ?? 0.2)),
     );
     if (!budgetPressure && phaseSavings < minimumPhaseSavings) {
-      this.rejectedCandidateKey = candidateKey;
+      this.markRejectedCandidate(candidateKey);
       return {
         mode: this.mode,
         history: envelope.history,
@@ -563,7 +574,7 @@ export class ContextBudgetManager {
     const tokensSaved = before.upperBoundTokens - finalAfter.upperBoundTokens;
     const materialSavings = tokensSaved >= 512 && tokensSaved / Math.max(1, before.upperBoundTokens) >= 0.1;
     if (tokensSaved <= 0 || (before.upperBoundTokens <= usableInputTokens && !materialSavings)) {
-      this.rejectedCandidateKey = candidateKey;
+      this.markRejectedCandidate(candidateKey);
       return {
         mode: this.mode, history: envelope.history, changed: false,
         before, after: before, checkpointObservations,
@@ -573,7 +584,7 @@ export class ContextBudgetManager {
           ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}),
       };
     }
-    this.rejectedCandidateKey = undefined;
+    this.clearRejectedCandidates();
     return {
       mode: this.mode,
       history: finalSelected.messages,

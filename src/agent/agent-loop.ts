@@ -2371,6 +2371,7 @@ export class AgentLoop {
         cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
         enableObservationMasking: true,
         protectActiveTurn: true,
+        plan: this.planManager.getTaskGraph(),
         replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
         protectedMessages: session.getProjectionWithTurns()
           .filter((entry) => entry.turn === turn).map((entry) => entry.message),

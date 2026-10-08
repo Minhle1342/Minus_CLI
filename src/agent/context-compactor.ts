@@ -107,6 +107,9 @@ export interface CompactionOptions {
   preserveLastNTurns?: number;
   /** Completed-turn window size for boundary compaction (defaults to config). */
   preserveCompletedTurns?: number;
+  /** Authoritative live plan for plan-aware Next Steps (rolling path). */
+  plan?: PlanTaskGraph;
+  completionReason?: string;
   modelName?: string;
   mutatedFiles?: string[];
   cognitivePhase?: 'explore' | 'plan' | 'implement' | 'verify';
@@ -141,6 +144,11 @@ export interface CompletedTurnWindowOptions {
 }
 
 const ROLLING_SYNOPSIS_MARKER = '[ROLLING DIALOGUE SYNOPSIS';
+
+/** Bounds keep the synopsis O(1): chronological detail stays in archives. */
+const MAX_SYNOPSIS_ARTIFACT_LINES = 12;
+const MAX_SYNOPSIS_SALIENCY_TRACES = 8;
+const MAX_SYNOPSIS_INDEX_LINES = 20;
 
 function isRollingSynopsisMessage(message: SessionMessage): boolean {
   return message.role === 'user'
@@ -568,7 +576,8 @@ export class ContextCompactor {
    */
   private applyRollingTurnCompaction(
     messages: SessionMessage[],
-    preserveLastNTurns: number
+    preserveLastNTurns: number,
+    taskStateInput?: { plan?: PlanTaskGraph; completionReason?: string }
   ): { messages: SessionMessage[]; archivedTurns: ArchivedTurnDocument[]; prunedTurnsCount: number } {
     const priorSynopsisTexts = messages
       .filter(isRollingSynopsisMessage)
@@ -675,7 +684,7 @@ export class ContextCompactor {
     const allDecisions = Array.from(new Set([...priorDecisions, ...archivedTurns.flatMap((t) => t.keyDecisions)])).slice(0, 10);
     const allTools = Array.from(new Set([...priorTools, ...archivedTurns.flatMap((t) => t.toolsUsed)]));
     const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
-    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(0, 6);
+    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(-MAX_SYNOPSIS_SALIENCY_TRACES);
 
     const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
     const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
@@ -705,8 +714,11 @@ export class ContextCompactor {
     for (const prior of priorArtifactLines) {
       if (!artifactLines.includes(prior)) artifactLines.push(prior);
     }
-    if (artifactLines.length === 0) {
-      artifactLines.push('- No workspace files modified or inspected in archived turns.');
+    // Bound the synopsis: mutated entries first, then read-only, then carried
+    // history. Full detail stays in ArchivedTurnDocument + masked archives.
+    const boundedArtifactLines = artifactLines.slice(0, MAX_SYNOPSIS_ARTIFACT_LINES);
+    if (boundedArtifactLines.length === 0) {
+      boundedArtifactLines.push('- No workspace files modified or inspected in archived turns.');
     }
 
     const highSaliencySection = allHighSaliency.length > 0
@@ -719,6 +731,10 @@ export class ContextCompactor {
 
     const totalArchivedTurns = priorSynopsisLines.length + oldUserTurnIndices.length;
     const turnRangeLabel = totalArchivedTurns === 1 ? 'TURN 1' : `TURNS 1 to ${totalArchivedTurns}`;
+    const rollingTaskState = taskStateInput?.plan
+      ? renderCompactionTaskState(taskStateInput.plan, taskStateInput.completionReason)
+      : null;
+    const chronologicalIndex = [...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES);
     const structuredSummary = [
       `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
       `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
@@ -727,7 +743,7 @@ export class ContextCompactor {
       sessionIntent,
       ``,
       `## 2. Artifact Trail (Files Modified & Inspected)`,
-      ...artifactLines,
+      ...boundedArtifactLines,
       ...highSaliencySection,
       ``,
       `## 4. Decisions Made`,
@@ -735,13 +751,15 @@ export class ContextCompactor {
       ``,
       `## 5. Current State & Tools Executed`,
       `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
-      `- Status: older exchange turns safely packaged with an immutable trace.`,
+      ...(rollingTaskState ? rollingTaskState.state : ['- Status: older exchange turns safely packaged with an immutable trace.']),
+      `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
       ``,
       `## 6. Next Steps`,
-      `- Continue the task on files in the active sliding window.`,
+      ...(rollingTaskState ? rollingTaskState.nextSteps : ['- Continue the task on files in the active sliding window.']),
       ``,
       `### Chronological Turn Index`,
-      ...[...priorSynopsisLines, ...synopsisLines],
+      ...chronologicalIndex,
+      `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
       `\n> (The system will automatically re-inject details if the user refers to the steps above)`
     ].join('\n');
 
@@ -946,7 +964,7 @@ export class ContextCompactor {
     const allDecisions = Array.from(new Set([...priorDecisions, ...archivedTurns.flatMap((t) => t.keyDecisions)])).slice(0, 10);
     const allTools = Array.from(new Set([...priorTools, ...archivedTurns.flatMap((t) => t.toolsUsed)]));
     const allDeltas = archivedTurns.flatMap((t) => t.fileDeltas || []);
-    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(-12);
+    const allHighSaliency = Array.from(new Set([...priorHighSaliency, ...archivedTurns.flatMap((t) => t.highSaliencyTraces || [])])).slice(-MAX_SYNOPSIS_SALIENCY_TRACES);
 
     const mutatedDeltas = allDeltas.filter((d) => d.action === 'modified' || d.action === 'created' || d.action === 'deleted');
     const readOnlyFiles = allTouched.filter((f) => !mutatedDeltas.some((d) => d.path === f));
@@ -974,8 +992,9 @@ export class ContextCompactor {
     for (const prior of priorArtifactLines) {
       if (!artifactLines.includes(prior)) artifactLines.push(prior);
     }
-    if (artifactLines.length === 0) {
-      artifactLines.push('- No workspace files modified or inspected in archived turns.');
+    const boundedWindowArtifacts = artifactLines.slice(0, MAX_SYNOPSIS_ARTIFACT_LINES);
+    if (boundedWindowArtifacts.length === 0) {
+      boundedWindowArtifacts.push('- No workspace files modified or inspected in archived turns.');
     }
 
     const highSaliencySection = allHighSaliency.length > 0
@@ -999,7 +1018,7 @@ export class ContextCompactor {
       sessionIntent,
       ``,
       `## 2. Artifact Trail (Files Modified & Inspected)`,
-      ...artifactLines,
+      ...boundedWindowArtifacts,
       ...highSaliencySection,
       ``,
       `## 4. Decisions Made`,
@@ -1014,7 +1033,7 @@ export class ContextCompactor {
       ...taskState.nextSteps,
       ``,
       `### Chronological Turn Index`,
-      ...[...priorSynopsisLines, ...synopsisLines],
+      ...[...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES),
       `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
       `> (The system will automatically re-inject details if the user refers to the steps above)`
     ].join('\n');
@@ -1165,7 +1184,8 @@ export class ContextCompactor {
 
     if (shouldRunRollingTurns && protectedPaths.size === 0 && !options?.protectedMessages?.length
       && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
-      const rollingResult = this.applyRollingTurnCompaction(workingMessages, preserveTurns);
+      const rollingResult = this.applyRollingTurnCompaction(workingMessages, preserveTurns,
+        { plan: options?.plan, completionReason: options?.completionReason });
       workingMessages = rollingResult.messages;
       archivedTurns = rollingResult.archivedTurns;
       prunedTurnsCount = rollingResult.prunedTurnsCount;
@@ -1267,7 +1287,7 @@ export class ContextCompactor {
                 path: r.path,
                 totalLines: outline.totalLines,
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Re-read with view_file if needed]`,
+                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Full content archived (see archiveId); auto re-injected on reference, else re-read with view_file]`,
               };
             }
             // 2b: Command log cũ -> Giữ status gọn
@@ -1278,14 +1298,14 @@ export class ContextCompactor {
                   exitCode: 0,
                   command: r.command,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). Long log (${rawLog.length} chars) hidden]`,
+                  observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). Long log (${rawLog.length} chars) archived (see archiveId); auto re-injected on reference]`,
                 };
               } else {
                 const logLines = rawLog.split('\n');
                 compressedPayload = {
                   exitCode: r.exitCode,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Command failed (exit ${r.exitCode})]`,
+                  observationMask: `[OBSERVATION MASKED: Command failed (exit ${r.exitCode}); full log archived (see archiveId)]`,
                   errorTail: logLines.slice(-3).join('\n'),
                 };
               }
@@ -1294,14 +1314,14 @@ export class ContextCompactor {
             else if (Array.isArray(r.matches)) {
               compressedPayload = {
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: Search results (${r.totalMatches || r.matches.length} matches) hidden]`,
+                observationMask: `[OBSERVATION MASKED: Search results (${r.totalMatches || r.matches.length} matches) archived (see archiveId); auto re-injected on reference]`,
               };
             }
             // 2d: Khác
             else {
               compressedPayload = {
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: Stale data (${respStr.length} chars) compressed]`,
+                observationMask: `[OBSERVATION MASKED: Stale data (${respStr.length} chars) archived (see archiveId); auto re-injected on reference]`,
               };
             }
 

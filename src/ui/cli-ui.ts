@@ -6,7 +6,7 @@ import { TreeScanResult, TreeNode, getFileExtensionBadge } from '../workspace/tr
 import { ContextInspectionReport } from '../context/context-inspector.js';
 import type { BrainstormingSessionResult } from '../agent/multi-agent-brainstorming.js';
 import type { QualityGateResult } from '../agent/agent-orchestrator.js';
-import { formatTuiErrorDetail } from './ink/components/StepStream.js';
+import { formatTuiErrorDetail } from './error-detail.js';
 import { supportsTerminalColor } from './tui-theme.js';
 
 export interface UICollapsePreferences {
