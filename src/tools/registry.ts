@@ -40,6 +40,7 @@ import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { createAllocateAgentTaskTool, createVerifySubagentQualityTool, createBrainstormDesignTool, createScheduleDagParallelTool } from './subagent-tools.js';
 import { PlanManager } from '../agent/plan-manager.js';
 import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
+import { createExportPlanToConductorTool } from './conductor-tools.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
 import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
 import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
@@ -212,6 +213,19 @@ export class ToolRegistry implements ToolProvider {
   attachPlanManager(planManager: PlanManager): void {
     this.register(createPlanTool(planManager));
     this.register(createUpdatePlanTaskTool(planManager));
+    this.attachConductor(planManager);
+  }
+
+  /**
+   * Sidecar Conductor (additive-only, fail-safe).
+   * Không đổi hành vi plan local; lỗi register không bao giờ throw.
+   */
+  attachConductor(planManager: PlanManager): void {
+    try {
+      this.register(createExportPlanToConductorTool(planManager));
+    } catch {
+      // Conductor unavailable – local plan flow unaffected.
+    }
   }
 
   attachMemoryManager(memoryManager: ProjectMemoryManager): void {
