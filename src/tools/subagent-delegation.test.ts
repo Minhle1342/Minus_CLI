@@ -9,7 +9,9 @@ import { createDelegateTaskTool } from './subagent-tools.js';
 describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
   it('Scenario 1: Subagent chạy độc lập tiêu tốn nhiều thao tác nội bộ -> kết quả tóm tắt ≤ 1600 chars, context cha không bị ô nhiễm', async () => {
     const parentSession = new Session('parent-session-1');
-    parentSession.append('user/message', { text: 'Main user goal' });
+    parentSession.append('user/message', {
+      content: { role: 'user', parts: [{ text: 'Main user goal' }] },
+    });
 
     const registry = new AgentRegistry();
     const manager = new SubagentManager(
@@ -19,12 +21,12 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
           // Simulate subagent making multiple internal tool calls
           for (let i = 0; i < 5; i++) {
             childSession.append('tool/call', {
-              id: `call_${i}`,
-              name: 'read_file',
+              toolCallId: `call_${i}`,
+              toolName: 'read_file',
               args: { path: `src/internal_${i}.ts` },
             });
             childSession.append('tool/result', {
-              id: `call_${i}`,
+              toolCallId: `call_${i}`,
               result: { content: 'huge internal file content '.repeat(200) },
             });
           }
@@ -57,13 +59,13 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
       ((agentId: string, childSession: Session) => ({
         submit: async () => {
           childSession.append('tool/call', {
-            id: 'call_edit_1',
-            name: 'write_file',
+            toolCallId: 'call_edit_1',
+            toolName: 'write_file',
             args: { path: 'src/utils/math.ts', content: 'export const add = 1;' },
           });
           childSession.append('tool/call', {
-            id: 'call_edit_2',
-            name: 'replace_file_content',
+            toolCallId: 'call_edit_2',
+            toolName: 'replace_file_content',
             args: { TargetFile: 'src/components/button.tsx' },
           });
           return 'Files created and updated successfully.';
