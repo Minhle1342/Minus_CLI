@@ -714,6 +714,29 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   };
 
   let implementPermissionMode = kernel.ctx.permissions.getMode();
+  let isPlanModeActive = false;
+  const applyPlanMode = (plan: boolean): void => {
+    if (plan === isPlanModeActive) return;
+    if (plan && activeExecutionController) {
+      console.log(`\n${c.yellow}⚠ Plan mode deferred: a task is running. Permissions unchanged until it finishes.${c.reset}\n`);
+      return;
+    }
+    isPlanModeActive = plan;
+    if (plan) {
+      if (kernel.ctx.permissions.getMode() !== 'read_only') {
+        implementPermissionMode = kernel.ctx.permissions.getMode();
+      }
+      kernel.ctx.permissions.setMode('read_only');
+      try {
+        const running = kernel.ctx.tasks?.listTasks?.().filter(t => t.status === 'running') ?? [];
+        if (running.length > 0) {
+          console.log(`\n${c.yellow}⚠ [PLAN MODE]${c.reset} ${c.dim}${running.length} background task(s) still running from IMPLEMENT (e.g. ${running.slice(0, 3).map(t => t.id).join(', ')}). They are NOT stopped — their writes bypass the plan gate. Stop them or let them finish.${c.reset}\n`);
+        }
+      } catch { /* warn-only, never block plan entry */ }
+    } else {
+      kernel.ctx.permissions.setMode(implementPermissionMode);
+    }
+  };
   const nameFirstTask = async (request: string): Promise<void> => {
     const session = activeSession;
     const names = new SessionNames(sessionPersistence);
@@ -768,10 +791,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     },
     onAbort: () => { activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
     onQuit: () => { isShuttingDown = true; activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
-    onMode: mode => {
-      if (mode === 'PLAN') { implementPermissionMode = kernel.ctx.permissions.getMode(); kernel.ctx.permissions.setMode('read_only'); }
-      else kernel.ctx.permissions.setMode(implementPermissionMode);
-    },
+    onMode: mode => { applyPlanMode(mode === 'PLAN'); },
   });
   const rl = tui;
   tui.on('line', (line: string) => {
@@ -1623,6 +1643,7 @@ Please focus on executing and verifying this task, and update its status to COMP
 
         // Người dùng yêu cầu lập kế hoạch cho một nhiệm vụ cụ thể:
         console.log(`\n${c.magenta}${c.bold}🎯 [PLANNING MODE ACTIVATED]${c.reset} ${c.dim}Activating Planning Skills (writing-plans, planning-with-files) for task:${c.reset} ${c.bold}${planPrompt}${c.reset}\n`);
+        applyPlanMode(true);
 
         const expandedPlanningPrompt = buildPlanningPrompt(planPrompt);
 
@@ -2422,8 +2443,14 @@ Please focus on executing and verifying this task, and update its status to COMP
           kernel.ctx.permissions.clearSessionApprovals();
           console.log(`\n${c.green}✔ Reset all auto-approved categories in this session.${c.reset}\n`);
         } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
-          kernel.ctx.permissions.setMode(sub as any);
-          console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}\n`);
+          if (isPlanModeActive) {
+            implementPermissionMode = sub as any;
+            kernel.ctx.permissions.setMode('read_only');
+            console.log(`\n${c.green}✔ Saved implement mode: ${c.bold}${sub}${c.reset} ${c.dim}(PLAN stays read-only; applies on exit)${c.reset}\n`);
+          } else {
+            kernel.ctx.permissions.setMode(sub as any);
+            console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}\n`);
+          }
         } else {
           CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);
         }

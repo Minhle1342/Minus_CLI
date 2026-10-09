@@ -143,11 +143,19 @@ export class PermissionManager {
         && new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'strict').evaluateCommand(command, args.cwd).allowed;
       const unsafeGit = toolName === 'git_command' && !checkPhaseToolEffect(
         { name: toolName } as any, args, 'explore', this.workspaceRoot || process.cwd()).allowed;
-      if ((toolName === 'run_command' && !safeCommand) || unsafeGit || toolName === 'run_test_suite' || descriptor.mutates) {
+      // npm test/build runs arbitrary test code + writes dist/: in plan it needs
+      // an explicit opt-in flag (sandbox strict already denies it as non-read-only).
+      const isPlanTestCommand = toolName === 'run_command'
+        && /(^|[\s;&|])(npm\s+(test|run\s+(build|test))|npx\s+tsc|pytest|cargo\s+test|dotnet\s+test)(?=[\s;&|]|$)/i.test(command);
+      const planTestBlocked = isPlanTestCommand && process.env.MINUS_PLAN_ALLOW_TEST !== '1';
+      const planTestOptIn = isPlanTestCommand && process.env.MINUS_PLAN_ALLOW_TEST === '1';
+      if ((toolName === 'run_command' && !safeCommand && !planTestOptIn) || planTestBlocked || unsafeGit || toolName === 'run_test_suite' || descriptor.mutates) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
-          reason: `Read-Only mode is on: state-changing tool "${toolName}" is not allowed.`,
+          reason: planTestBlocked
+            ? `Read-Only mode is on: test/build command blocked in plan (set MINUS_PLAN_ALLOW_TEST=1 to opt in).`
+            : `Read-Only mode is on: state-changing tool "${toolName}" is not allowed.`,
         };
       }
       return { allowed: true };
