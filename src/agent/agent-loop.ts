@@ -120,6 +120,7 @@ import { resolveRequestBudget } from './request-budget.js';
 import { selectReplacedObservationIds } from './observation-retention-policy.js';
 import { readCoverageReport, type FileCoverage } from './coverage-report-reader.js';
 import { buildFailureInvestigationBrief, type FailureInvestigationMutation } from './failure-investigation-mode.js';
+import { RateLimitPacer } from './rate-limit-pacer.js';
 
 export function isScratchFilePath(filePath: string): boolean {
   return isScratchPath(filePath);
@@ -492,6 +493,7 @@ export class AgentLoop {
   private editTouchedCallers = false;
   private maxEditBlastRisk: string | undefined;
   readonly pipelinedDispatcher = new PipelinedToolDispatcher();
+  readonly rateLimitPacer = new RateLimitPacer();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
   private cachedTurnNumber?: number;
@@ -2691,6 +2693,18 @@ export class AgentLoop {
         }
       }
 
+      // Satellite 3: Token Pacer & Leaky-Bucket Rate Limiter
+      const estimatedTokensForPacing = requestFootprint?.estimatedInputTokens ?? contextPreparation.after.upperBoundTokens;
+      await this.rateLimitPacer.throttleBeforeRequest(
+        activeModelName,
+        activeModelName,
+        estimatedTokensForPacing,
+        options?.signal,
+        (paceEvent) => {
+          CLI.renderPacerNotice(paceEvent.delayMs, paceEvent.projectedTokens, paceEvent.tpmLimit);
+        },
+      );
+
       let accumulatedThought = '';
       let thoughtTokenCount = 0;
       try {
@@ -2786,6 +2800,10 @@ export class AgentLoop {
         cachedTokens: response.usage.cachedTokens,
         profile: latencyProfile,
       });
+      const actualTotalTokens = (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
+      if (actualTotalTokens > 0) {
+        this.rateLimitPacer.recordActualUsage(actualTotalTokens);
+      }
 
       if (options?.signal?.aborted || response.finishReason === 'aborted') {
         const cancellationMessage = 'Agent stopped: cancellation requested.';

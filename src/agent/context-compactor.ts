@@ -1,6 +1,7 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ContentPart, SessionMessage } from '../session/session.js';
+export type { SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
 import { assertHistoryToolPairing, computeRequestValueDigest } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';

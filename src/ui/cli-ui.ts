@@ -1555,6 +1555,13 @@ export class CLI {
     this.finishCompaction('completed', savedTokens, remainingTokens);
   }
 
+  static renderPacerNotice(delayMs: number, projectedTokens: number, limit: number): void {
+    const line = `⏳ [RATE LIMIT PACER] Approaching TPM limit (${projectedTokens.toLocaleString()}/${limit.toLocaleString()} tokens). Pausing ${(delayMs / 1000).toFixed(1)}s to avoid 429...`;
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r\x1b[2K${c.amber}${line}${c.reset}\n`);
+    }
+  }
+
   static renderWorkspaceCheck(check: {
     cliRoot: string;
     isGitRepo: boolean;
