@@ -1,6 +1,7 @@
 ﻿import { deleteBackward, deleteForward, deleteWordBackward, moveCursor, getNextGraphemeLength } from '../../input-line-editor.js';
 import type { ComposerModel, KeyMsg, Msg } from '../types.js';
 import { color, displayWidth, fit, paintInput, tokyoNight, wrap } from '../styles/theme.js';
+export const INPUT_PLACEHOLDER = 'Work with Minus';
 export function createComposer(): ComposerModel {
   return { value: '', cursorOffset: 0, history: [], historyIndex: -1, draft: '', completions: [], selected: 0, completionDismissed: false };
 }
@@ -101,7 +102,11 @@ export function composerView(state: ComposerModel, width: number, height: number
   const cursorText = pastedLabel(before)
     + '[4m' + color(tokyoNight.cyan, cell)
     + pastedLabel(state.value.slice(state.cursorOffset + length));
-  const lines = wrap(color(tokyoNight.blue, '› ') + cursorText, width);
+  const placeholder = state.value === '';
+  const inputText = placeholder
+    ? '\x1b[4m' + color(tokyoNight.cyan, INPUT_PLACEHOLDER.slice(0, 1)) + color(tokyoNight.muted, INPUT_PLACEHOLDER.slice(1))
+    : cursorText;
+  const lines = wrap(color(tokyoNight.blue, '› ') + inputText, width);
   const cursorRow = wrap('› ' + before, width).length - 1;
   const start = Math.max(0, cursorRow - height + 1);
   // Wrap-continuation marker: every visual row that continues on the next row ends with ¬.

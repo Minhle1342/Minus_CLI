@@ -70,7 +70,11 @@ export class Program {
   }
   render(): void {
     if (!this.active || this.suspended || !this.dirty || this.backpressure) return;
-    const frame = view(this.model).split('\n').map((line, i) => `\x1b[${i + 1};1H${line}\x1b[K`).join('');
+    const lines = view(this.model).split('\n');
+    let frame = '';
+    for (let i = 0; i < lines.length; i++) {
+      frame += `\x1b[${i + 1};1H${lines[i]}\x1b[K`;
+    }
     this.dirty = false;
     try { this.backpressure = this.options.output.write(frame) === false; } catch (error) { this.stop(); throw error; }
   }

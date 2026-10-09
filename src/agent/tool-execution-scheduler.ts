@@ -81,3 +81,48 @@ export function partitionToolCalls(
   flushReads();
   return partitions;
 }
+
+/**
+ * Detects whether a tool call is an evidence sink that should be executed
+ * AFTER other tools in the same turn/batch.
+ *
+ * `update_plan_task` with status='COMPLETED' is an evidence sink:
+ * it requires observable evidence from prior inspection/mutation/verification
+ * tools. If the model invokes it alongside evidence-generating tools in the
+ * same turn, reordering it to the end ensures those tools record evidence
+ * first, preventing premature gate rejections.
+ */
+export function isEvidenceSinkTool(call: { name?: string; args?: Record<string, any> }): boolean {
+  if (call.name === 'update_plan_task') {
+    const status = String(call.args?.status || '').toUpperCase();
+    return status === 'COMPLETED';
+  }
+  return false;
+}
+
+/**
+ * Reorders tool calls so that evidence sink tools (e.g. update_plan_task with status='COMPLETED')
+ * execute after non-sink tools (e.g. read_file, replace_text, run_command).
+ *
+ * Preserves the stable relative order of non-sink tools and sink tools.
+ */
+export function reorderScheduledToolCalls<T extends { name?: string; args?: Record<string, any> }>(
+  calls: T[],
+): T[] {
+  if (calls.length <= 1) return calls;
+  const hasSink = calls.some(isEvidenceSinkTool);
+  const hasNonSink = calls.some((c) => !isEvidenceSinkTool(c));
+  if (!hasSink || !hasNonSink) return calls;
+
+  const nonSinks: T[] = [];
+  const sinks: T[] = [];
+  for (const call of calls) {
+    if (isEvidenceSinkTool(call)) {
+      sinks.push(call);
+    } else {
+      nonSinks.push(call);
+    }
+  }
+
+  return [...nonSinks, ...sinks];
+}

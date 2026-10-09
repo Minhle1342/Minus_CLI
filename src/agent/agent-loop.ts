@@ -71,7 +71,7 @@ import type { VerificationFailureItem } from '../skills/verification-baseline.js
 import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
 import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
-import { partitionToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
+import { partitionToolCalls, reorderScheduledToolCalls, type ScheduledToolCall, type ToolCallPartition } from './tool-execution-scheduler.js';
 import { PipelinedToolDispatcher, extractThoughtPaths, predictObservationCandidates } from './pipelined-tool-dispatcher.js';
 import { CognitiveHarness, detectLeadingQuery } from './cognitive-harness.js';
 import { ContextSnapshotManager, type TaskContextSnapshot } from '../session/context-snapshot-manager.js';
@@ -3020,11 +3020,29 @@ export class AgentLoop {
         const responseFunctionCallParts = (response.rawContent?.parts || [])
           .filter((part: any) => part.functionCall);
 
-        const scheduledToolCalls: ScheduledToolCall[] = normalizedToolCalls.map((call: any, callIndex: number) => ({
-          index: callIndex,
+        interface ExecutionToolCall {
+          call: any;
+          id: string;
+          name: string;
+          args: Record<string, unknown>;
+          responsePart: any;
+        }
+
+        const rawExecutionCalls: ExecutionToolCall[] = normalizedToolCalls.map((call: any, callIndex: number) => ({
+          call,
           id: toolCallIds[callIndex],
           name: call.name || '__invalid_tool_call__',
           args: (call.args as Record<string, unknown>) || {},
+          responsePart: responseFunctionCallParts[callIndex],
+        }));
+
+        const orderedExecutionCalls = reorderScheduledToolCalls<ExecutionToolCall>(rawExecutionCalls);
+
+        const scheduledToolCalls: ScheduledToolCall[] = orderedExecutionCalls.map((item, callIndex: number) => ({
+          index: callIndex,
+          id: item.id,
+          name: item.name,
+          args: item.args,
         }));
         const concurrentReadsEnabled = this.loopOptions?.enableConcurrentReadTools
           ?? envFeatureEnabled('MINUS_CONCURRENT_READ_TOOLS');
@@ -3054,7 +3072,8 @@ export class AgentLoop {
         let parallelSavedMs = 0;
 
         // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
-        for (const [callIndex, call] of normalizedToolCalls.entries()) {
+        for (const [callIndex, item] of orderedExecutionCalls.entries()) {
+          const call = item.call;
           const readPartition = readPartitionByIndex.get(callIndex);
           const partitionStartIndex = readPartition?.calls[0]?.index;
           const partitionEndIndex = readPartition?.calls.at(-1)?.index;
@@ -3087,6 +3106,7 @@ export class AgentLoop {
               }
             } else {
               for (const scheduled of readPartition.calls) {
+                const partitionItem = orderedExecutionCalls[scheduled.index];
                 session.append('tool/call', {
                   turn,
                   step,
@@ -3094,7 +3114,7 @@ export class AgentLoop {
                   toolCallId: scheduled.id,
                   assistantSeq,
                   args: scheduled.args,
-                  thoughtSignature: responseFunctionCallParts[scheduled.index]?.thoughtSignature,
+                  thoughtSignature: partitionItem?.responsePart?.thoughtSignature,
                 });
                 this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
                 // Mirror the sequential path below: in compact mode the completion
@@ -3179,10 +3199,10 @@ export class AgentLoop {
             // The assistant message already declared the entire batch. Record
             // explicit results for every call that will not be dispatched so
             // history remains valid and no call can look silently abandoned.
-            for (let pendingIndex = callIndex; pendingIndex < normalizedToolCalls.length; pendingIndex++) {
-              const pendingCall = normalizedToolCalls[pendingIndex];
+            for (let pendingIndex = callIndex; pendingIndex < orderedExecutionCalls.length; pendingIndex++) {
+              const pendingCall = orderedExecutionCalls[pendingIndex];
               const pendingToolName = pendingCall.name || '__invalid_tool_call__';
-              const pendingToolCallId = toolCallIds[pendingIndex];
+              const pendingToolCallId = pendingCall.id;
               const pendingArgs = (pendingCall.args as Record<string, any>) || {};
               const abortedResult = {
                 error: 'The tool call was not started because cancellation was requested before dispatch.',
@@ -3196,7 +3216,7 @@ export class AgentLoop {
                 toolCallId: pendingToolCallId,
                 assistantSeq,
                 args: pendingArgs,
-                thoughtSignature: responseFunctionCallParts[pendingIndex]?.thoughtSignature,
+                thoughtSignature: pendingCall.responsePart?.thoughtSignature,
                 reason: 'aborted-before-dispatch',
               });
               session.addToolResultWithId(
@@ -3213,10 +3233,10 @@ export class AgentLoop {
             break;
           }
 
-          const toolName = call.name || '';
-          const toolArgs = (call.args as Record<string, any>) || {};
+          const toolName = item.name || '';
+          const toolArgs = (item.args as Record<string, any>) || {};
 
-          const toolCallId = toolCallIds[callIndex];
+          const toolCallId = item.id;
           if (readPartition?.mode !== 'concurrent-read') {
             session.append('tool/call', {
               turn,
@@ -3225,7 +3245,7 @@ export class AgentLoop {
               toolCallId,
               assistantSeq,
               args: toolArgs,
-              thoughtSignature: responseFunctionCallParts[callIndex]?.thoughtSignature,
+              thoughtSignature: item.responsePart?.thoughtSignature,
             });
           }
           if (!deferReadPersistence && readPartition?.mode !== 'concurrent-read') {

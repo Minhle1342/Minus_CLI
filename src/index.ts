@@ -421,13 +421,16 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
 }
 
 function buildPlanningPrompt(request: string): string {
-  return `[PLANNING MODE REQUEST]: The user requests an exhaustive, phased implementation plan and task decomposition before modifying code.
-Carefully research the relevant codebase files, dependencies, and architecture.
+  return `[PLANNING MODE REQUEST]: The user requests a phased implementation plan and task decomposition before modifying code.
+Phase 0 (mandatory) — survey the current state first:
+0. Search and read the relevant codebase files, dependencies, and architecture. Verify what already exists with concrete evidence (exact file paths and line ranges observed via tools, never assumptions).
+1. Classify each requested capability as: ALREADY IMPLEMENTED (cite file:line evidence, plan NO work for it) / NEEDS MODIFICATION (cite what exists and what must change) / MISSING (only these get new implementation steps).
 Follow the Writing Plans & Planning with Files protocols:
-1. Decompose the task into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
-2. Record the dependency-aware task plan with the harness create_plan tool.
-3. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
-4. Present the structured plan directly to the user in their language for alignment and review.
+1. Decompose ONLY the missing/changed delta into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
+2. Never include steps that rebuild or re-implement functionality already present. Reference the existing code instead of re-planning it.
+3. Record the dependency-aware task plan with the harness create_plan tool.
+4. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
+5. Present the structured plan directly to the user in their language for alignment and review, including a short "Already exists - reused as-is" section with file:line evidence.
 Do not execute implementation tasks or modify project code in Plan mode.
 
 User Goal / Task Description:
