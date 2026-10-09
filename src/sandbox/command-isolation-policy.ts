@@ -11,8 +11,14 @@ export interface HostCommandPolicyResult {
 /**
  * Commands that can safely run when Docker is temporarily unavailable. Keep this
  * intentionally small: an unrecognised command must retain the isolation boundary.
+ * Git coverage mirrors the read-only refinements in classifyGitCommand
+ * (git-command-policy.ts): unconditionally read-only subcommands are listed bare,
+ * while multi-mode subcommands (worktree, stash, tag, ...) only match with an
+ * explicit read-only qualifier — `git worktree add` or `git stash push` must
+ * stay fail-closed here. Network subcommands (ls-remote, fetch, pull, push,
+ * clone) are deliberately excluded.
  */
-const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--get|check-ignore)|node\s+(?:--version|-v|--check\b|-c\b|(?:--import\s+\S+\s+)*--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
+const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--(?:get(?:-all|-regexp|-urlmatch)?|list|-l)|check-ignore|blame|shortlog|ls-files|grep|show-ref|rev-list|ls-tree|name-rev|merge-base|version|var|help|tag\s+(?:--list|-l|--verify|-v)|worktree\s+list|stash\s+(?:list|show)|reflog\s+(?:show|exists)|notes\s+(?:list|show)|submodule\s+(?:status|summary)|bundle\s+(?:list-heads|verify)|bisect\s+log|sparse-checkout\s+list|--version|--help)|node\s+(?:--version|-v|--check\b|-c\b|(?:--import\s+\S+\s+)*--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
 
 // This remains a non-bypassable policy even after a user has approved host access.
 const HOST_SYSTEM_RISK = [
