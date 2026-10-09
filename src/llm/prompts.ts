@@ -306,7 +306,8 @@ export const ON_DEMAND_PROMPT_MODULES = {
 
 /**
  * Build a lean unified system prompt with all default sections for the context.
- * Saves ~75-80% tokens vs LEGACY_MONOLITHIC_SYSTEM_PROMPT.
+ * Saves ~63% tokens vs LEGACY_MONOLITHIC_SYSTEM_PROMPT (measured 6469 -> ~2394;
+ * CORE alone saves ~81% vs legacy).
  */
 export function createStandardSystemPrompt(ctx?: PromptAssemblyContext): string {
   const assembler = new PromptAssembler();

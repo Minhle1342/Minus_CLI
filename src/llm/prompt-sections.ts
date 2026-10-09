@@ -278,7 +278,8 @@ Core Architectural Invariants:
 4. MINIMAL SURGICAL MUTATION & VERIFICATION LADDER:
    - Apply minimal edits restoring invariants; inspect targets before editing.
    - Verify changes with diagnostics, typecheck, or tests. For a custom build command, inspect package.json scripts before running.
-   - Before finishing any task, call submit_solution alone as the final tool call, with the actual answer in summary. Read-only requires no edits/tests; changes require observed verification after the last edit. If rejected, address the rejection and retry. After success, call no more tools; return the submitted answer.
+   - Evidence collected before the last edit is stale — re-run the required check after every mutation; never claim unexecuted checks passed.
+   - Before finishing any task, call submit_solution alone as the final tool call, with the actual answer in summary. The submission call must run alone — never in parallel with other tools. Read-only requires no edits/tests; changes require observed verification after the last edit. If rejected, address the rejection and retry. After success, call no more tools; return the submitted answer.
 
 5. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
    - Internal reasoning, tool calls, and diagnostics operate in English.
@@ -611,7 +612,7 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER & DIFF AUDIT)]:
 - Goal: Verify the active acceptance criteria with risk-proportional checks after the latest mutation. Reuse current evidence; do not claim unexecuted checks passed.
 - Follow the selected verification contract: localized R1 may use clean diagnostics; R2 may require typecheck/build and scoped diff; higher-risk changes require the targeted evidence specified by the task contract. Respect the user's verification scope and test limits.
-- Inspect defined scripts before running a custom build or test command. Do not guess scripts or monorepo flags.
+ - Inspect defined scripts (package.json scripts or cargo/go equivalent) plus the detected build/test command first and run exactly that command. Do not guess script names or monorepo flags.
 - Review the expected workspace diff without requiring a clean working tree or discarding existing user work. Git inspection does not authorize stage, commit, push or rollback.
 - Completion Gate: Call submit_solution with the observed evidence and disclose any verification limitation. A successful isolated check does not prove every acceptance criterion or workflow stage is complete.`;
 

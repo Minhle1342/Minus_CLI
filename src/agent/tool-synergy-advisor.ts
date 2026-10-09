@@ -36,6 +36,9 @@ export interface ToolAdvice {
 export function detectBugReportIntent(text?: string): boolean {
   if (!text) return false;
   const lower = text.toLowerCase();
+  // Exclude feature/build phrases that merely contain failure-adjacent nouns
+  // (failover, error handling, error boundary, failure mode analysis).
+  if (/\b(failover|error handling|error boundary|failure mode|error message format|bug tracker dashboard)\b/i.test(lower)) return false;
   return /\b(lỗi|bị lỗi|fix bug|sửa bug|bug|crash|crashed|exception|traceback|failed|failing|error|bị hỏng|không chạy được|fail)\b/i.test(lower);
 }
 

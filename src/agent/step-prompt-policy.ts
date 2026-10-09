@@ -1,6 +1,7 @@
 import type { ClassificationDecision, TaskPhase } from '../control/classification-types.js';
 import type { CompletionObservation } from './completion-observations.js';
 import { resolveGitWorkflow, gitWorkflowGuidance, type GitWorkflowState } from './git-workflow.js';
+import { isMutationTool as isSharedMutationTool } from '../tools/diff-generator.js';
 import {
   SECTION_TOOL_PLAYBOOKS,
   TOOL_PLAYBOOK_PROMPTS,
@@ -102,7 +103,11 @@ function stringifyResult(result: unknown): string {
 }
 
 function isMutationTool(toolName?: string): boolean {
-  return Boolean(toolName && /^(?:apply_patch|replace_text|replace_file_content|multi_replace_file_content|write_file|write_to_file|create_file|delete_file|move_file)$/.test(toolName));
+  if (!toolName) return false;
+  // Single source of truth lives in tools/diff-generator.ts (FILE_MUTATION_TOOLS,
+  // includes run_node_script). run_command is intentionally NOT a blanket mutation:
+  // read-only shell (ls, git status/diff) must not trigger mutation advice.
+  return isSharedMutationTool(toolName);
 }
 
 const STRONG_ADVISORY_HEADER = '[STRONG ADVISORY — ACTION GUIDELINE (non-blocking, tool still executes)]';
@@ -187,6 +192,11 @@ export class StepPromptPolicy {
     const lastResult = stringifyResult(context.lastToolResult).toLowerCase();
     const lastToolFailed = Boolean(context.failureSignature)
       || /(error|failed|failure|exception|exitcode[^0-9]*[1-9])/.test(lastResult);
+    // Infra/transient failures (timeout, rate-limit, connection reset) route to
+    // retry/longTask handling, not root-cause debugging.
+    const infraTransientPattern = /(timeout|timed out|etimedout|econnreset|econnrefused|rate[ -]?limit|too many requests|\b429\b|503|service unavailable|socket hang up)/;
+    const hasLogicFailureSignal = (Boolean(context.failureSignature) && !infraTransientPattern.test(String(context.failureSignature).toLowerCase()))
+      || (lastToolFailed && !infraTransientPattern.test(lastResult));
 
     if (!context.hasSubmittedSolution && !context.hasVerifiedTests) {
       if (/\b(architecture|architectural|topology|dependency|dependencies|route|call[ -]?graph|blast radius|kiến trúc|phụ thuộc)\b/i.test(lower)) {
@@ -194,8 +204,7 @@ export class StepPromptPolicy {
       }
       if (
         ['bugfix', 'security'].includes(context.classification.taskClass)
-        || Boolean(context.failureSignature)
-        || lastToolFailed
+        || hasLogicFailureSignal
         || /\b(root cause|diagnos|debug|traceback|exception|nguyên nhân|lỗi)\b/i.test(lower)
       ) {
         selectedPlaybooks.push('rootCause');
@@ -231,6 +240,9 @@ export class StepPromptPolicy {
 
     // Attachment neighborhood: @-attached files are anchors — force dependency/blast-radius
     // guidance so the model expands to hop-1/hop-2 related files instead of staring at anchors.
+    // NOTE: pinned by step-prompt-policy.test.ts:261 — attachments always force the
+    // architecture playbook (even trivial question/R0). Do not gate this without
+    // updating that contract test first.
     if (context.hasAttachments && !context.hasSubmittedSolution) {
       if (!selectedPlaybooks.includes('architecture')) selectedPlaybooks.push('architecture');
     }
@@ -280,13 +292,17 @@ export class StepPromptPolicy {
           ? ['plan', 'implement'].includes(context.classification.phase)
           : context.harnessProfileName === 'read-only-guard'
             ? confidence < 0.9 && context.visibleToolNames.some(isMutationTool)
-            : false
+            : (highRisk && !evidenceSufficient)
+              || (context.classification.phase === 'verify' && !context.hasVerifiedTests)
     );
     if (includeHarnessGuidance) reasonCodes.push(`HARNESS_${context.harnessProfileName.toUpperCase()}`);
 
     const antiDeception = /\b(skip tests?|ignore tests?|bypass|hardcode|quick fix|trust me|asap|sycophancy|không cần (?:đọc|chạy|test)|gấp để release)\b/i.test(lower);
     const parserTask = /\b(parser|extract|normalize|validator|phone|email|trích xuất|chuẩn hóa)\b/i.test(lower);
-    const riskyMutation = ['bugfix', 'security', 'refactor'].includes(context.classification.taskClass)
+    const riskyMutation = (['bugfix', 'security', 'refactor'].includes(context.classification.taskClass)
+      // feature tasks only need the scaffold when risk is actually high (R3+);
+      // low-risk R0 feature implements stay scaffold-free (pinned by matrix test).
+      || (context.classification.taskClass === 'feature' && highRisk))
       && (capabilities.has('edit') || ['explore', 'implement'].includes(context.classification.phase));
     const includeScaffold = antiDeception
       || context.consecutiveFailures >= 2

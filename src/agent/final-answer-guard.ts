@@ -126,6 +126,23 @@ const SYSTEM_PROMPT_ECHO_MARKERS = [
   '[PHASE TOOL AUTHORITY',
   '[SYSTEM COMPLETION RECOVERY',
   '[SYSTEM EVIDENCE GATE]',
+  '[TOOL PLAYBOOK',
+  '[5-STAGE',
+  '[DOMAIN INTENT',
+  '[LATS',
+  '[TOOL GUARDIAN',
+  '[RELIABLE RETRIEVAL',
+  '[RELIABLE ',
+  '[BLAST RADIUS',
+  '[VERIFICATION OPTIONS]',
+  '[ACTIVE PLAN',
+  '[SYSTEM LOOP',
+  '[SYSTEM GUARD]',
+  '[SYSTEM CAPABILITY',
+  '[SYSTEM SECURITY',
+  '[SYSTEM SOURCE',
+  '[SYSTEM QUALITY',
+  '[SYSTEM ANALYSIS',
 ];
 
 /** A paragraph counts as leaked prompt iff its first non-blank line carries a system marker. */
