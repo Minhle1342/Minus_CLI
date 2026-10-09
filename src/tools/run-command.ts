@@ -30,8 +30,35 @@ import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../
 import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
+import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
+import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
+import {
+  resolveSessionCwd,
+  trackSessionEnv,
+  tryHandleCdCommand,
+} from './shell-session.js';
 
 const MAX_COMMAND_BUFFER_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Soft-timeout → background auto-promotion (Claude Code parity, lite).
+ * Only for explicit long jobs (timeout_ms=0 or >120s, i.e. the caller already
+ * signaled "this will take a while") so ordinary build/test stays sync.
+ * Returns the auto wait window (ms) or undefined when sync should proceed.
+ */
+export function resolveAutoBackgroundWait(
+  waitMsBeforeAsync: number | undefined,
+  timeoutMs: number,
+  taskManager?: TaskManager,
+): number | undefined {
+  if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0) return waitMsBeforeAsync;
+  if (!taskManager) return undefined;
+  if (process.env.MINUS_AUTO_BACKGROUND?.toLowerCase() === 'off') return undefined;
+  if (timeoutMs !== 0 && !(timeoutMs > 120000)) return undefined;
+  const soft = Number(process.env.MINUS_SOFT_TIMEOUT_MS);
+  const softMs = Number.isFinite(soft) && soft > 0 ? Math.min(10000, soft) : 10000;
+  return waitMsBeforeAsync !== undefined ? waitMsBeforeAsync : softMs;
+}
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
 const ALLOWED_COMMAND_PREFIXES = [
@@ -246,8 +273,10 @@ export async function finalizeCommandResult(
 ): Promise<Record<string, any>> {
   const classifiedResult = annotateCommandResult(baseResult.command, baseResult);
   const exitCode = typeof classifiedResult.exitCode === 'number' ? classifiedResult.exitCode : 0;
-  const cleanStdout = sanitizeTerminalOutput(baseResult.stdout || '');
-  const cleanStderr = sanitizeTerminalOutput(baseResult.stderr || '');
+  // Env-scrub: redact secret values before they can enter LLM context or disk.
+  const secrets = collectSecretsFromEnv({ ...(process.env as Record<string, string>), ...((baseResult as any).envForRedaction || {}) });
+  const cleanStdout = redactSecretsFromText(sanitizeTerminalOutput(baseResult.stdout || ''), secrets);
+  const cleanStderr = redactSecretsFromText(sanitizeTerminalOutput(baseResult.stderr || ''), secrets);
   const distilledStdout = distillTestOutput(cleanStdout, exitCode);
 
   const configuredMax = Number(process.env.MINUS_TERMINAL_MAX_OUTPUT_CHARS);
@@ -256,7 +285,9 @@ export async function finalizeCommandResult(
   let logFilePath: string | undefined;
   const combinedLength = distilledStdout.length + cleanStderr.length;
   if (combinedLength > maxLength) {
-    const fullLog = `=== COMMAND ===\n${baseResult.command}\n\n=== STDOUT ===\n${baseResult.stdout || ''}\n\n=== STDERR ===\n${baseResult.stderr || ''}`;
+    const redactedRawStdout = redactSecretsFromText(baseResult.stdout || '', secrets);
+    const redactedRawStderr = redactSecretsFromText(baseResult.stderr || '', secrets);
+    const fullLog = `=== COMMAND ===\n${baseResult.command}\n\n=== STDOUT ===\n${redactedRawStdout}\n\n=== STDERR ===\n${redactedRawStderr}`;
     logFilePath = await offloadLargeLogToDisk(workspace.rootDir, fullLog, baseResult.command);
   }
 
@@ -1046,25 +1077,25 @@ export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefault
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Start ordinary build/test/lint/script work with auto. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines. Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task`. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Never include secrets or tokens in commands.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/jest/vitest, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg/rm calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task` (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Use for build, test, lint, script, and Git commands. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist; this schema does not enumerate it. Commands outside the allowlist may require approval and can still be rejected by policy. Prefer dedicated tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`) to browse, search, and read files; do not use the shell to read, write, delete, move, or rename workspace files; never use shell `mv`, use move_file with sourcePath and targetPath. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines. Avoid unrelated chains, subshells/grouping, and `$()`; complex commands may require approval. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with `manage_task` for servers/watchers. Git mutations require direct user intent; stage only explicit paths; pushes to main/master require approval; system-destructive commands are prohibited.',
+          description: 'Use for build, test, lint, script, and Git commands. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. Prefer dedicated tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`) to browse, search, and read files; do not use the shell to read, write, delete, move, or rename workspace files; never use shell `mv`, use move_file with sourcePath and targetPath. cat/ls/sed/rg/rm single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with `manage_task` for servers/watchers. Git mutations require direct user intent; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
         },
         CommandLine: {
           type: Type.STRING,
-          description: 'Standard Antigravity alias for the terminal command to execute.',
+          description: 'Standard Antigravity alias for the terminal command to execute. Equivalent to `command`; if both are set, `command` wins.',
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. Do not use this parameter as a timeout substitute for finite builds/tests.',
+          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. May be auto-set (~10s) for explicit long jobs (timeout_ms=0|>120s) when omitted. Do not use this parameter as a timeout substitute for finite builds/tests. Background tasks run on the host process manager: they cannot preserve Docker isolation (BACKGROUND_ISOLATION_UNSUPPORTED) and network Git (fetch/pull/clone) cannot go background.',
         },
         timeout_ms: {
           type: Type.NUMBER,
-          description: 'Timeout for synchronous commands in milliseconds (default 120000; min 1000, max 300000). Set timeout_ms=0 to DISABLE the timeout for commands needing more time (long Playwright/E2E); abort signal and output truncation still apply. Continuously running servers must use WaitMsBeforeAsync instead of disabling the timeout.',
+          description: 'Timeout for synchronous commands in milliseconds (default 120000; min 1000, max 300000). Set timeout_ms=0 to DISABLE the timeout for commands needing more time (long Playwright/E2E); abort signal and output truncation still apply. Continuously running servers must use WaitMsBeforeAsync instead of disabling the timeout. Values are clamped to [1000, 300000] unless 0.',
         },
         execution_target: {
           type: Type.STRING,
@@ -1127,6 +1158,46 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       const effectiveCommand = preflight.normalizedCommand || rawCommand;
+
+      // Repo hooks (.minus/hooks.json): opt-in deny/warn rules, evaluated early.
+      const hookVerdict = evaluateCommandHooks(effectiveCommand, workspace.rootDir);
+      if (!hookVerdict.allowed) {
+        return {
+          command: effectiveCommand,
+          message: hookVerdict.message || 'Blocked by repo hook.',
+          preflightCode: hookVerdict.errorCode || 'HOOK_DENIED',
+          suggestion: hookVerdict.suggestion,
+          commandOutcome: 'blocked_preflight',
+          processStarted: false,
+          success: false,
+          durationMs: 1,
+        };
+      }
+
+      // Persistent shell: bare `cd <dir>` sticks for later calls (no spawn).
+      const cdTarget = tryHandleCdCommand(effectiveCommand, workspace);
+      if (cdTarget) {
+        trackSessionEnv(workspace.rootDir, preflight.extractedEnv);
+        return {
+          command: effectiveCommand,
+          stdout: cdTarget,
+          stderr: '',
+          exitCode: 0,
+          durationMs: 1,
+          success: true,
+          commandOutcome: 'succeeded',
+          processStarted: false,
+          persistentCwd: workspace.toRelativePath
+            ? workspace.toRelativePath(cdTarget)
+            : cdTarget,
+        };
+      }
+
+      // Persistent shell env: export/$env prefixes accumulate across calls.
+      const sessionEnv = trackSessionEnv(workspace.rootDir, preflight.extractedEnv);
+      const hookAdvisory = hookVerdict.advisory;
+      const preflightAdvisories: string[] = [];
+      if (hookAdvisory) preflightAdvisories.push(hookAdvisory);
 
       // Enforce non-bypassable host system-risk policy before emulation or any
       // other dispatch route, not only immediately before native host spawn.
@@ -1278,7 +1349,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
       }
       const binaryAdvisory = binaryAdvisories.length > 0 ? binaryAdvisories.join('\n') : undefined;
-      const advisoryExtra = binaryAdvisory ? { preflightAdvisory: binaryAdvisory } : undefined;
+      const mergedAdvisory = [...preflightAdvisories, ...(binaryAdvisory ? [binaryAdvisory] : [])].join('\n') || undefined;
+      const advisoryExtra = mergedAdvisory ? { preflightAdvisory: mergedAdvisory } : undefined;
+      // Session-aware dispatch context: persistent cwd + accumulated env.
+      const sessionCwd = resolveSessionCwd(workspace);
+      const dispatchEnv = { ...sessionEnv };
 
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
         const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
@@ -1305,7 +1380,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
-      if (waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0 && taskManager) {
+      // + soft-timeout→background: explicit long jobs (timeout_ms=0|>120s)
+      // auto-promote after ~10s instead of blocking the turn.
+      const effectiveWaitMs = resolveAutoBackgroundWait(waitMsBeforeAsync, timeoutMs, taskManager);
+      const autoPromoted = effectiveWaitMs !== undefined
+        && (waitMsBeforeAsync === undefined || waitMsBeforeAsync <= 0);
+      if (effectiveWaitMs !== undefined && effectiveWaitMs > 0 && taskManager) {
         // BackgroundTask uses host `spawn(shell: true)`, not SandboxManager.
         // Never let auto silently bypass an available Docker isolation boundary.
         if (executionTarget === 'auto' && sandboxManager?.getStatus?.()?.isIsolated) {
@@ -1326,9 +1406,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             errorCode: 'BACKGROUND_GIT_NETWORK_UNSUPPORTED',
           };
         }
-        const bgTask = taskManager.startTask(effectiveCommand, workspace.rootDir, preflight.extractedEnv);
+        const bgTask = taskManager.startTask(effectiveCommand, sessionCwd, dispatchEnv);
         const startTime = Date.now();
-        const deadline = startTime + waitMsBeforeAsync;
+        const deadline = startTime + effectiveWaitMs;
 
         while (Date.now() < deadline) {
           if (bgTask.status !== 'running') break;
@@ -1342,7 +1422,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           return {
             command: rawCommand,
             exitCode: bgTask.exitCode ?? (bgTask.status === 'stopped' ? 0 : 1),
-            stdout: truncateOutput(bgTask.logs.join('\n')),
+            stdout: truncateOutput(redactSecretsFromText(
+              bgTask.logs.join('\n'),
+              collectSecretsFromEnv({ ...(process.env as Record<string, string>), ...dispatchEnv }),
+            )),
             stderr: '',
             durationMs: Date.now() - startTime,
             success: passed,
@@ -1366,7 +1449,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           taskId: bgTask.id,
           pid: bgTask.pid,
           status: 'running',
-          message: `Tool is running as a background task with task id: ${bgTask.id}`,
+          message: autoPromoted
+            ? `Long sync job auto-promoted to background after ~${Math.round(effectiveWaitMs / 1000)}s (soft-timeout) with task id: ${bgTask.id}`
+            : `Tool is running as a background task with task id: ${bgTask.id}`,
+          ...(autoPromoted ? { autoPromoted: true, softTimeoutMs: effectiveWaitMs } : {}),
           recentLogs: bgTask.logs.slice(-10),
           instruction: `Use the manage_task tool with TaskId="${bgTask.id}" to view status, send stdin (send_input), or kill.`,
         };
@@ -1465,10 +1551,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
         let hostResult = await hostSandbox.exec(effectiveCommand, {
-          cwd: workspace.rootDir,
+          cwd: sessionCwd,
           timeoutMs,
           signal: context?.signal,
-          env: { ...preflight.extractedEnv, ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}) },
+          env: { ...dispatchEnv, ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}) },
         });
 
         // Tự động Auto-Provision nếu native command thất bại do thiếu binary
@@ -1485,11 +1571,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               clearBinaryProbeCache();
               // Thử lại lệnh sau khi nạp PATH
               const retryResult = await hostSandbox.exec(effectiveCommand, {
-                cwd: workspace.rootDir,
+                cwd: sessionCwd,
                 timeoutMs,
                 signal: context?.signal,
                 env: {
-                  ...preflight.extractedEnv,
+                  ...dispatchEnv,
                   ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
                   ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
                 },
@@ -1566,6 +1652,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           ...hostDiagnosis,
           sandbox: hostResult.sandboxType,
           executionTarget: 'host',
+          envForRedaction: dispatchEnv,
         }, workspace, advisoryExtra);
       }
 
@@ -1605,10 +1692,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
 
         const res = await sandboxManager.exec(effectiveCommand, {
-          cwd: workspace.rootDir,
+          cwd: sessionCwd,
           timeoutMs,
           signal: context?.signal,
-          env: preflight.extractedEnv,
+          env: dispatchEnv,
         });
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
@@ -1648,6 +1735,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           ...(hostRecoveryRecommended ? { recommendedExecutionTarget: 'host' } : {}),
           sandbox: res.sandboxType,
           executionTarget: 'auto',
+          envForRedaction: dispatchEnv,
         }, workspace, advisoryExtra);
       }
 
@@ -1682,15 +1770,19 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
 
+      // Fallback has no sandbox boundary: never inherit the full host env.
+      const fallbackEnv = buildSafeChildEnv(dispatchEnv);
+      const finalizeWithSecrets = (r: Record<string, any>) =>
+        finalizeCommandResult({ ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
       return new Promise((resolve) => {
         exec(
           effectiveCommand,
           {
-            cwd: workspace.rootDir,
+            cwd: sessionCwd,
             timeout: timeoutMs,
             signal: context?.signal,
             maxBuffer: MAX_COMMAND_BUFFER_BYTES,
-            env: preflight.extractedEnv ? { ...process.env, ...preflight.extractedEnv } : process.env,
+            env: fallbackEnv,
           },
           (error, stdout, stderr) => {
             const timedOut = error?.killed && error.signal === 'SIGTERM';
@@ -1719,11 +1811,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     exec(
                       effectiveCommand,
                       {
-                        cwd: workspace.rootDir,
+                        cwd: sessionCwd,
                         timeout: timeoutMs,
                         signal: context?.signal,
                         maxBuffer: MAX_COMMAND_BUFFER_BYTES,
-                        env: { ...process.env, ...(preflight.extractedEnv || {}) },
+                        env: buildSafeChildEnv(dispatchEnv),
                       },
                       (retryErr, retryStdout, retryStderr) => {
                         const retryExit = retryErr ? (retryErr.code ?? 1) : 0;
@@ -1742,7 +1834,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                             version: provRes.version,
                           },
                         };
-                        finalizeCommandResult(retryRes, workspace).then(resolve).catch(() => resolve(retryRes));
+                        finalizeWithSecrets(retryRes).then(resolve).catch(() => resolve(retryRes));
                       }
                     );
                     return;
@@ -1752,7 +1844,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     ...rawResult,
                     ...diagnoseCommandFailure(effectiveCommand, rawResult),
                   };
-                  finalizeCommandResult(diagnosed, workspace, advisoryExtra).then(resolve).catch(() => resolve(diagnosed));
+                  finalizeWithSecrets(diagnosed).then(resolve).catch(() => resolve(diagnosed));
                 });
                 return;
               }
@@ -1801,8 +1893,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             const diagnosed = {
               ...rawResult,
               ...diagnoseCommandFailure(effectiveCommand, rawResult),
+              ...(timedOut
+                ? { suggestion: 'Command hit its synchronous timeout. Re-run with a larger timeout_ms, or run it as a background task with WaitMsBeforeAsync (e.g. 5000) and poll via manage_task.' }
+                : {}),
             };
-            finalizeCommandResult(diagnosed, workspace, advisoryExtra).then(resolve).catch(() => resolve(diagnosed));
+            finalizeWithSecrets(diagnosed).then(resolve).catch(() => resolve(diagnosed));
           }
         );
       });

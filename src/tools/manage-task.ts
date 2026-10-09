@@ -45,15 +45,21 @@ Actions:
           return {
             action: 'list',
             count: tasks.length,
-            tasks: tasks.map((t) => ({
-              taskId: t.id,
-              command: t.command,
-              status: t.status,
-              pid: t.pid,
-              startedAt: t.startedAt,
-              exitCode: t.exitCode,
-              recentLogs: t.logs.slice(-5),
-            })),
+            tasks: tasks.map((t) => {
+              const stall = typeof (taskManager as any).getStallInfo === 'function'
+                ? (taskManager as any).getStallInfo(t.id)
+                : undefined;
+              return {
+                taskId: t.id,
+                command: t.command,
+                status: t.status,
+                pid: t.pid,
+                startedAt: t.startedAt,
+                exitCode: t.exitCode,
+                recentLogs: t.logs.slice(-5),
+                ...(stall?.stalled ? { stalled: true, idleMs: stall.idleMs } : {}),
+              };
+            }),
           };
         }
 
@@ -66,6 +72,9 @@ Actions:
             return { error: `No task found with ID: ${taskId}` };
           }
           const logs = taskManager.getTaskLogs(taskId, 30);
+          const stall = typeof (taskManager as any).getStallInfo === 'function'
+            ? (taskManager as any).getStallInfo(taskId)
+            : undefined;
           const isTerminal = task.status !== 'running';
           const terminalStatus = !isTerminal
             ? undefined
@@ -87,6 +96,7 @@ Actions:
             startedAt: task.startedAt,
             exitCode: task.exitCode,
             logTail: logs,
+            ...(stall?.stalled ? { stalled: true, idleMs: stall.idleMs, stallSuggestion: stall.suggestion } : {}),
             ...(commandOutcome ? { commandOutcome, processStarted: true, success: commandOutcome === 'succeeded' } : {}),
             ...(isTerminal ? {
               commandCompletion: {
