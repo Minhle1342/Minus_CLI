@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
@@ -10,6 +12,75 @@ import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
+
+/**
+ * Satellite 1: Observation Virtualization / Spill-to-Disk Constants
+ */
+export const MAX_INLINE_TOOL_CHARS = 4_000;
+export const MAX_INLINE_HEAD_LINES = 30;
+export const MAX_INLINE_TAIL_LINES = 50;
+
+export const TEXT_FIELDS_TO_VIRTUALIZE = ['stdout', 'stderr', 'output', 'content'] as const;
+export const SKIP_SPILL_TOOL_NAMES = new Set([
+  'update_plan_task',
+  'request_phase_transition',
+  'submit_solution',
+  'delegate_task',
+]);
+
+/**
+ * Spill large tool outputs to .minus/scratch/tool_outputs/{toolCallId}.log and return
+ * a clean Head/Tail preview to protect LLM context and prevent rate-limit exhaustion.
+ */
+export function virtualizeToolOutput(
+  rawText: string,
+  toolName: string,
+  toolCallId: string,
+  workspaceRoot: string,
+): string {
+  if (typeof rawText !== 'string' || rawText.length <= MAX_INLINE_TOOL_CHARS) {
+    return rawText;
+  }
+  if (SKIP_SPILL_TOOL_NAMES.has(toolName)) {
+    return rawText;
+  }
+
+  const lines = rawText.split('\n');
+  const headLines = lines.slice(0, MAX_INLINE_HEAD_LINES);
+  const tailLines = lines.slice(-MAX_INLINE_TAIL_LINES);
+
+  try {
+    const scratchDir = path.join(workspaceRoot, '.minus', 'scratch', 'tool_outputs');
+    fs.mkdirSync(scratchDir, { recursive: true });
+
+    const safeId = String(toolCallId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `${safeId}.log`;
+    const fullLogPath = path.join(scratchDir, fileName);
+    const relLogPath = path.join('.minus', 'scratch', 'tool_outputs', fileName).replace(/\\/g, '/');
+
+    fs.writeFileSync(fullLogPath, rawText, 'utf8');
+
+    return [
+      `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters spilled to ${relLogPath}]`,
+      `--- Output Preview (First ${headLines.length} lines) ---`,
+      headLines.join('\n'),
+      '...',
+      `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
+      tailLines.join('\n'),
+      `--- Tip: To inspect full output, run \`grep\` or \`read_file\` on the log file above ---`,
+    ].join('\n');
+  } catch (_err) {
+    return [
+      `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters (spill fallback)]`,
+      `--- Output Preview (First ${headLines.length} lines) ---`,
+      headLines.join('\n'),
+      '...',
+      `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
+      tailLines.join('\n'),
+    ].join('\n');
+  }
+}
+
 
 /**
  * Signatures of prompt injection and system override attempts commonly found in untrusted Level 5 data
@@ -656,8 +727,22 @@ export class ToolRunner {
       
     // Stage 5: Output Normalization & Guardian Reliability Recording
     let normalizedResult = typeof rawResult === 'object' && rawResult !== null
-      ? rawResult
+      ? { ...rawResult }
       : { output: String(rawResult) };
+
+    // Satellite 1: Observation Virtualization / Spill-to-Disk
+    const toolCallId = context?.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const workspaceRoot = this.workspace?.rootDir || process.cwd();
+    for (const field of TEXT_FIELDS_TO_VIRTUALIZE) {
+      if (typeof normalizedResult[field] === 'string' && normalizedResult[field].length > MAX_INLINE_TOOL_CHARS) {
+        normalizedResult[field] = virtualizeToolOutput(
+          normalizedResult[field],
+          toolName,
+          toolCallId,
+          workspaceRoot,
+        );
+      }
+    }
 
     // Validate tool output against tool.outputSchema BEFORE injecting runtime metadata
     if (tool.outputSchema) {
