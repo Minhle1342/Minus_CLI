@@ -19,6 +19,7 @@ export class Program {
   private backpressure = false;
   private readonly keys = new KeyDecoder();
   private readonly utf8 = new StringDecoder('utf8');
+  private cmdChain: Promise<void> = Promise.resolve();
   private disposers: (() => void)[] = [];
   private readonly signals: EventEmitter;
   constructor(model: RootModel, private readonly options: ProgramOptions) { this.model = model; this.signals = options.signals || process; }
@@ -64,7 +65,7 @@ export class Program {
     if (!this.active) return;
     const [model, commands] = update(msg, this.model); this.dirty ||= model !== this.model; this.model = model;
     for (const command of commands) {
-      Promise.resolve().then(() => this.active ? this.options.execute(command) : undefined).catch(error => this.send({ type: 'log', text: `Error: ${error instanceof Error ? error.message : String(error)}` }));
+      this.cmdChain = this.cmdChain.then(() => this.active ? this.options.execute(command) : undefined).catch(error => this.send({ type: 'log', text: `Error: ${error instanceof Error ? error.message : String(error)}` }));
     }
   }
   render(): void {

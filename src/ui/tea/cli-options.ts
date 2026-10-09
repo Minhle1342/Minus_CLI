@@ -1,4 +1,4 @@
-﻿export interface TeaCliOptions { headless: boolean; prompt?: string; cliWorkspace?: string; cliModel?: string; cliSandbox?: string }
+﻿export interface TeaCliOptions { headless: boolean; plan?: boolean; prompt?: string; cliWorkspace?: string; cliModel?: string; cliSandbox?: string }
 export function parseTeaCommandLine(args = process.argv.slice(2)): TeaCliOptions {
   const result: TeaCliOptions = { headless: false };
   const positional: string[] = [];
@@ -6,6 +6,7 @@ export function parseTeaCommandLine(args = process.argv.slice(2)): TeaCliOptions
   for (let i = 0; i < args.length; i++) {
     const value = args[i];
     if (value === '--headless') { result.headless = true; continue; }
+    if (value === '--plan') { result.plan = true; continue; }
     if (value === '--docker' || value === '--local') { result.cliSandbox = value === '--docker' ? 'docker' : 'local'; continue; }
     if (value === 'run' && positional.length === 0 && !commandConsumed) { result.headless = true; commandConsumed = true; continue; }
     const match = value.match(/^--(workspace|model|sandbox)(?:=(.*))?$/);

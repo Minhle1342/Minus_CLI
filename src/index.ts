@@ -586,9 +586,13 @@ async function main() {
   let tui: TeaTerminal | undefined;
   if (headless) {
     kernel.ctx.permissions.setPromptHandler(async () => 'reject');
+    if (cliOptions.plan) kernel.ctx.permissions.setMode('read_only');
     try {
       const attachment = await PromptAttachmentProcessor.resolveAndAttach(headlessPrompt!, workspace);
-      await runHeadlessCli(kernel, attachment.expandedPrompt, {
+      const headlessText = cliOptions.plan
+        ? buildPlanningPrompt(attachment.expandedPrompt)
+        : attachment.expandedPrompt;
+      await runHeadlessCli(kernel, headlessText, {
         submit: (prompt, signal) => agentLoop.submit(activeSession, prompt, 'human', { signal }).then(() => {}),
       });
     } finally {
@@ -800,7 +804,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
       activeExecutionController.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
     }
-    const item = agentLoop.inbox.enqueue(activeSession.id, trimmed, 'human', { isSteering: true });
+    const item = agentLoop.inbox.enqueue(activeSession.id, isPlanModeActive ? buildPlanningPrompt(trimmed) : trimmed, 'human', { isSteering: true });
     activeSession.append('input/queued', { inputId: item.id, inputText: trimmed, source: 'human', isSteering: true });
     void sessionPersistence.save(activeSession).catch(() => {});
   });

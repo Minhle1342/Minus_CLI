@@ -99,7 +99,7 @@ export class TeaTerminal extends EventEmitter {
         // A delayed completion must not overwrite a newer edit or an isolated question.
         if (this.line === cmd.value && this.cursor === cmd.cursor && !this.model.question.active) this.program.send({ type: 'completions', values: completions }); break;
       }
-      case 'mode': this.options.onMode?.(cmd.mode); break;
+      case 'mode': await this.options.onMode?.(cmd.mode); break;
     }
   }
   close(): void {

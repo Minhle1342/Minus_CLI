@@ -493,7 +493,7 @@ export class ToolRunner {
 
       // Nếu tool là thao tác ghi/sửa, kiểm tra xem file có thuộc danh sách bảo vệ không
       if (
-        ['replace_text', 'write_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName) &&
+        EDIT_TOOL_NAMES.has(toolName) &&
         this.workspace.isProtectedFile(rawPath)
       ) {
         const errRes = {
