@@ -1,8 +1,15 @@
 import { spawn, ChildProcess, execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { buildSafeChildEnv } from '../security/env-scrub.js';
 
 const execFileAsync = promisify(execFile);
+
+/** Idle time after which a running task is considered stalled (one-shot notice). */
+export const STALL_IDLE_MS = Number(process.env.MINUS_STALL_IDLE_MS) > 0
+  ? Number(process.env.MINUS_STALL_IDLE_MS)
+  : 45_000;
+const STALL_RENOTIFY_MS = 60_000;
 
 export interface BackgroundTask {
   id: string;
@@ -15,6 +22,10 @@ export interface BackgroundTask {
   logs: string[];
   process?: ChildProcess;
   stopRequested?: boolean;
+  /** Last timestamp (ms) any stdout/stderr/exit line was appended. */
+  lastOutputAt: number;
+  /** Last timestamp (ms) a stall notice was emitted. Limits noise to 1/min. */
+  lastStallNoticeAt?: number;
 }
 
 /**
@@ -51,12 +62,13 @@ export class TaskManager {
       status: 'running',
       startedAt,
       logs: [],
+      lastOutputAt: Date.now(),
     };
 
-    // Khởi chạy child process với shell và env kết hợp
+    // Khởi chạy child process với shell và env đã scrub (không leak host secrets)
     const child = spawn(command, [], {
       cwd: effectiveCwd,
-      env: env ? { ...process.env, ...env } : process.env,
+      env: buildSafeChildEnv(env),
       shell: true,
       // POSIX process groups make whole-tree termination possible. Windows
       // uses taskkill /T against the exact shell PID instead.
@@ -73,6 +85,7 @@ export class TaskManager {
       for (const line of lines) {
         if (line.trim()) {
           task.logs.push(`[${new Date().toLocaleTimeString('vi-VN')}] ${line}`);
+          task.lastOutputAt = Date.now();
           if (task.logs.length > 1000) {
             task.logs.shift();
           }
@@ -86,11 +99,13 @@ export class TaskManager {
     child.on('exit', (code) => {
       task.status = task.stopRequested || code === 0 ? 'stopped' : 'failed';
       task.exitCode = code;
+      task.lastOutputAt = Date.now();
       task.logs.push(`[SYSTEM] Process exited with code: ${code}`);
     });
 
     child.on('error', (err) => {
       task.status = 'failed';
+      task.lastOutputAt = Date.now();
       task.logs.push(`[SYSTEM ERROR] ${err.message}`);
     });
 
@@ -128,6 +143,22 @@ export class TaskManager {
   }
 
   /**
+   * Stall watchdog: running task with no output beyond STALL_IDLE_MS.
+   * Pure read — use getTaskLogs()/getStallInfo() to surface the one-shot notice.
+   */
+  getStallInfo(taskId: string): { stalled: boolean; idleMs: number; suggestion?: string } | undefined {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== 'running') return undefined;
+    const idleMs = Date.now() - task.lastOutputAt;
+    if (idleMs < STALL_IDLE_MS) return { stalled: false, idleMs };
+    return {
+      stalled: true,
+      idleMs,
+      suggestion: `Task ${taskId} produced no output for ${Math.round(idleMs / 1000)}s (possible prompt/stall). Use send_input to answer it, or kill it.`,
+    };
+  }
+
+  /**
    * Lấy logs mới nhất của một background task
    */
   getTaskLogs(taskId: string, linesCount: number = 30): string {
@@ -136,7 +167,17 @@ export class TaskManager {
       return `Background task not found with ID: ${taskId}`;
     }
     const count = Math.max(1, linesCount);
-    return task.logs.slice(-count).join('\n') || '(No log output yet)';
+    const tail = task.logs.slice(-count).join('\n') || '(No log output yet)';
+    // One-shot stall notice (max 1/min): silent when healthy → zero context cost.
+    if (task.status === 'running') {
+      const idleMs = Date.now() - task.lastOutputAt;
+      const sinceNotice = Date.now() - (task.lastStallNoticeAt || 0);
+      if (idleMs >= STALL_IDLE_MS && sinceNotice >= STALL_RENOTIFY_MS) {
+        task.lastStallNoticeAt = Date.now();
+        return `${tail}\n[STALL WATCHDOG] No output for ${Math.round(idleMs / 1000)}s — process may be waiting on input or stalled. Send input via manage_task (send_input) or kill the task.`;
+      }
+    }
+    return tail;
   }
 
   /**
