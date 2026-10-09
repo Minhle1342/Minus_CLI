@@ -207,6 +207,7 @@ export class TaskManager {
       pid: t.pid,
       status: t.status,
       startedAt: t.startedAt,
+      lastOutputAt: t.lastOutputAt,
       exitCode: t.exitCode,
       logs: t.logs,
     }));

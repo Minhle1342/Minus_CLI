@@ -1832,7 +1832,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Fallback has no sandbox boundary: never inherit the full host env.
       const fallbackEnv = buildSafeChildEnv(dispatchEnv);
       const finalizeWithSecrets = (r: Record<string, any>) =>
-        finalizeCommandResult({ ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
+        finalizeCommandResult({ command: effectiveCommand, ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
       return new Promise((resolve) => {
         exec(
           effectiveCommand,
