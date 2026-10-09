@@ -36,7 +36,7 @@ import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, col
 import { resolveGitWorkflow, checkGitWorkflowCall } from './git-workflow.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
-import { createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
+import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
@@ -669,6 +669,7 @@ export class AgentLoop {
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     this.orchestrator.bindPlanManager(this.planManager);
     if (options?.enableSubagents !== false) {
+      this.toolRegistry.register(createDelegateTaskTool(this.subagentManager));
       this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
       this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
       this.toolRegistry.register(createWaitAgentTool(this.subagentManager));
@@ -5503,7 +5504,7 @@ export class AgentLoop {
     signal: AbortSignal,
   ): AgentLoop {
     const childRegistry = new ToolRegistry();
-    const forbidden = new Set(['delegate_agent', 'spawn_agent', 'get_agent_result', 'wait_agent', 'stop_agent', 'resume_agent', 'allocate_agent_task', 'schedule_dag_parallel', 'verify_subagent_quality', 'brainstorm_design']);
+    const forbidden = new Set(['delegate_task', 'delegate_agent', 'spawn_agent', 'get_agent_result', 'wait_agent', 'stop_agent', 'resume_agent', 'allocate_agent_task', 'schedule_dag_parallel', 'verify_subagent_quality', 'brainstorm_design']);
     for (const tool of this.toolRegistry.getAll()) {
       if (!forbidden.has(tool.name)) childRegistry.register(tool);
     }

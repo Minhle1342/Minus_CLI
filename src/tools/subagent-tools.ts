@@ -34,6 +34,52 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
   };
 }
 
+export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition {
+  return {
+    name: 'delegate_task',
+    description: 'Synchronously delegate an independent, bounded subtask to an isolated subagent. Runs in a separate in-memory session and returns a compact summary with touched files, preventing parent context pollution.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        task: {
+          type: Type.STRING,
+          description: 'Clear description of the subtask to perform.',
+        },
+        allowedTools: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional list of allowed tool names (e.g. ["read_file", "search_files", "run_command"]).',
+        },
+        maxSteps: {
+          type: Type.INTEGER,
+          description: 'Maximum step budget for this subtask (default: 6).',
+        },
+        verificationCommand: {
+          type: Type.STRING,
+          description: 'Optional verification command to execute before finishing.',
+        },
+      },
+      required: ['task'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace, context?: any): Promise<Record<string, any>> {
+      const task = String(args.task || '').trim();
+      if (!task) return { error: 'The "task" parameter is required.' };
+      const maxSteps = typeof args.maxSteps === 'number' ? args.maxSteps : 6;
+      const allowedTools = Array.isArray(args.allowedTools) ? args.allowedTools.map(String) : undefined;
+      const verificationCommand = typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined;
+
+      const result = await manager.executeIsolatedTask(task, {
+        maxSteps,
+        allowedTools,
+        verificationCommand,
+        signal: context?.signal,
+      });
+
+      return result;
+    },
+  };
+}
+
 export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'spawn_agent',

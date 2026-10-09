@@ -192,6 +192,16 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
 
   // 5. Agent Orchestration
   {
+    name: 'agent.delegate_task',
+    toolName: 'delegate_task',
+    category: 'agent',
+    sideEffect: 'none',
+    reversible: false,
+    requiresApproval: false,
+    retryable: true,
+    description: 'Delegate an isolated subtask synchronously with compact result extraction.',
+  },
+  {
     name: 'agent.delegate',
     toolName: 'delegate_agent',
     category: 'agent',

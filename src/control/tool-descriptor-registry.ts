@@ -269,7 +269,7 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'delegate_agent' || name === 'spawn_agent' || name === 'wait_agent' || name === 'get_agent_result' || name === 'stop_agent' || name === 'resume_agent') {
+    } else if (name === 'delegate_task' || name === 'delegate_agent' || name === 'spawn_agent' || name === 'wait_agent' || name === 'get_agent_result' || name === 'stop_agent' || name === 'resume_agent') {
       const isReadOnly = name === 'wait_agent' || name === 'get_agent_result';
       descriptor = {
         name,

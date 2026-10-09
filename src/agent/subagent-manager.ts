@@ -22,6 +22,22 @@ export interface SubagentOptions {
   verificationCommand?: string;
 }
 
+export interface IsolatedTaskOptions {
+  allowedTools?: string[];
+  maxSteps?: number;
+  verificationCommand?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface IsolatedTaskResult {
+  success: boolean;
+  summary: string;
+  filesModified: string[];
+  durationMs: number;
+  error?: string;
+}
+
 export type SubagentFactory = (
   agentId: string,
   session: Session,
@@ -252,6 +268,107 @@ export class SubagentManager {
       }
     }
     return stoppedCount;
+  }
+
+  /**
+   * Satellite 5: Synchronous Subagent Task Delegation
+   * Executes a bounded subtask in an isolated in-memory session.
+   * Returns a compact summary (≤ 400 tokens / 1600 chars) and list of touched files
+   * without polluting parent session history.
+   */
+  async executeIsolatedTask(
+    task: string,
+    options: IsolatedTaskOptions = {},
+  ): Promise<IsolatedTaskResult> {
+    const cleanTask = task.trim();
+    if (!cleanTask) throw new Error('Task description must not be empty.');
+
+    const startTime = Date.now();
+    const id = `subtask-${Date.now()}-${this.counter++}`;
+    const session = new Session(`session-${id}`);
+    const controller = new AbortController();
+
+    if (options.signal) {
+      if (options.signal.aborted) {
+        controller.abort();
+      } else {
+        options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+    }
+
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const timeoutTimer = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    let childLoop: AgentLoop;
+    try {
+      childLoop = this.factory(id, session, {
+        maxSteps: options.maxSteps ?? 6,
+        toolNames: options.allowedTools,
+        verificationCommand: options.verificationCommand,
+      }, controller.signal);
+    } catch (err: any) {
+      clearTimeout(timeoutTimer);
+      return {
+        success: false,
+        summary: '',
+        filesModified: [],
+        durationMs: Date.now() - startTime,
+        error: err.message,
+      };
+    }
+
+    try {
+      this.agents.register(id, `IsolatedTask: ${cleanTask.slice(0, 60)}`);
+      this.agents.update(id, { status: 'running', sessionId: session.id });
+
+      const rawAnswer = await childLoop.submit(session, cleanTask, 'human', {
+        maxSteps: options.maxSteps ?? 6,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutTimer);
+
+      const filesModifiedSet = new Set<string>();
+      for (const event of session.getEvents()) {
+        if (event.type === 'tool/call') {
+          const args = event.data?.args;
+          if (args && typeof args === 'object') {
+            for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path']) {
+              if (typeof args[key] === 'string' && args[key].trim()) {
+                filesModifiedSet.add(args[key].trim());
+              }
+            }
+          }
+        }
+      }
+
+      const maxSummaryChars = 1600;
+      let summary = (rawAnswer || '').trim();
+      if (summary.length > maxSummaryChars) {
+        summary = `${summary.slice(0, maxSummaryChars)}\n\n[TRUNCATED: Subagent summary exceeded 1,600 chars]`;
+      }
+
+      this.agents.update(id, { status: 'idle' });
+
+      return {
+        success: !controller.signal.aborted,
+        summary: summary || 'Subagent finished without explicit text response.',
+        filesModified: Array.from(filesModifiedSet),
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err: any) {
+      clearTimeout(timeoutTimer);
+      this.agents.update(id, { status: 'error' });
+      return {
+        success: false,
+        summary: '',
+        filesModified: [],
+        durationMs: Date.now() - startTime,
+        error: err.message,
+      };
+    }
   }
 
   private finishFailure(handle: SubagentHandle, error: unknown): void {
