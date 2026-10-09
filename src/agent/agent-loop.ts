@@ -1976,13 +1976,27 @@ export class AgentLoop {
           ? Math.min(400, configuredRepoMapTokens)
           : configuredRepoMapTokens;
 
+      const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
+        ? (this.llm.getTokenConfig() || {})
+        : {};
+      const activeModelName = this.llm?.getActiveProvider?.()?.name
+        || this.llm?.modelName
+        || this.llm?.constructor?.name
+        || 'unknown';
+
+      // Satellite 4: Dynamic Harness Zero-Base Trimming
+      const inputBudgetMax = activeTokenConfig.maxInputTokens || 128_000;
+      const historyTokens = ContextCompactor.countHistoryTokens(session.getHistory(), activeModelName);
+      const historyPressureRatio = historyTokens / inputBudgetMax;
+      const isHighHistoryPressure = historyPressureRatio >= 0.50;
+
       const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
       const shouldRecallRepoMem = explicitRepoMem
         ? (effectiveRepoMemTokens > 0)
         : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
       const shouldRenderRepoMap = explicitRepoMap
         ? (effectiveRepoMapTokens > 0)
-        : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && effectiveRepoMapTokens > 0);
+        : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && !isHighHistoryPressure && effectiveRepoMapTokens > 0);
 
       const memoryLimit = isLocalizedExecution ? 2 : 4;
       const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
@@ -2096,13 +2110,6 @@ export class AgentLoop {
           // Fail-open
         }
       }
-      const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
-        ? (this.llm.getTokenConfig() || {})
-        : {};
-      const activeModelName = this.llm?.getActiveProvider?.()?.name
-        || this.llm?.modelName
-        || this.llm?.constructor?.name
-        || 'unknown';
 
       // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
       const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
@@ -2315,24 +2322,37 @@ export class AgentLoop {
         }
       }
 
+      // Satellite 4: Dynamic Harness Zero-Base Trimming
+      const trimmedAdvicePrompt = isHighHistoryPressure ? undefined : effectiveAdvicePrompt;
+      const trimmedScaffoldText = isHighHistoryPressure ? undefined : effectiveScaffoldText;
+      const trimmedToolPlaybooks = isHighHistoryPressure ? undefined : promptDecision.toolPlaybookPrompt;
+      const trimmedGitPlaybook = isHighHistoryPressure ? undefined : promptDecision.gitPlaybookPrompt;
+      const trimmedWarmStartTopoMap = isHighHistoryPressure ? undefined : warmStartTopoMap;
+      const trimmedRepositoryContext = isHighHistoryPressure ? '' : repositoryContext;
+      const trimmedHarnessGuidance = isHighHistoryPressure
+        ? (classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+            : undefined)
+        : [
+            promptDecision.harnessGuidance,
+            classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+              ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+              : undefined,
+          ].filter(Boolean).join('\n');
+
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
         responseLanguageDirective: '[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.',
         completionDirective,
-        advicePrompt: effectiveAdvicePrompt,
+        advicePrompt: trimmedAdvicePrompt,
         testVerificationEncouragement,
         reflectionContext,
         strongAdvisory: promptDecision.strongAdvisoryPrompt,
-        cognitiveScaffold: effectiveScaffoldText,
-        warmStartTopoMap,
-        toolPlaybooks: promptDecision.toolPlaybookPrompt,
-        gitPlaybook: promptDecision.gitPlaybookPrompt,
-        harnessGuidance: [
-          promptDecision.harnessGuidance,
-          classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
-            : undefined,
-        ].filter(Boolean).join('\n'),
+        cognitiveScaffold: trimmedScaffoldText,
+        warmStartTopoMap: trimmedWarmStartTopoMap,
+        toolPlaybooks: trimmedToolPlaybooks,
+        gitPlaybook: trimmedGitPlaybook,
+        harnessGuidance: trimmedHarnessGuidance,
         epistemicVerdictContext,
         hypothesisContext,
         hypothesisGuidance,
@@ -2348,7 +2368,7 @@ export class AgentLoop {
         memoryPrompt: effectiveMemoryPrompt,
         composeContext,
         repositoryMemoryContext,
-        repositoryContext,
+        repositoryContext: trimmedRepositoryContext,
       };
       const arbitrationOptions = {
         maxBudgetTokens: dynamicBudgetTokens,
