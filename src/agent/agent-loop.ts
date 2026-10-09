@@ -1103,13 +1103,17 @@ export class AgentLoop {
       const implementationTasks = this.planManager.getTasks().filter((task) => task.writeSet.length > 0);
       return implementationTasks.length > 0 && implementationTasks.every((task) => task.status === 'COMPLETED');
     };
+    // Normalize Vietnamese diacritics so accented resume intents (làm, tiếp tục, thực hiện...)
+    // match the unaccented resume-intent pattern below instead of silently dropping the plan.
+    const normalizedResumeRequest = turnUserRequest.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const isExplicitPlanReset = /(^|[\s;,.])(\/clear|\/new\b|new plan|ke hoach moi|bo qua plan|huy plan)([\s;,.]|$)/i.test(normalizedResumeRequest);
     const isContinuationOrGoal = isGoal
       || Boolean(options?.isCircuitBreakerRetry)
       || Boolean(options?.isRecoveryResume)
       || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]')
       || turnUserRequest.includes('[GOAL CONTINUATION]')
-      || (this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted() && !turnUserRequest.includes('[PLANNING MODE REQUEST]') && (turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[IMPLEMENTATION MODE REQUEST]') || /\b(?:implement|execute|resume|continue|start|proceed|thuc hien|thuc thi|trien khai|tien hanh|bat dau|lam|tiep tuc)\b/i.test(turnUserRequest) || initialTurnClassification.phase === 'implement'));
-    this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
+      || (this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted() && !turnUserRequest.includes('[PLANNING MODE REQUEST]') && (turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[IMPLEMENTATION MODE REQUEST]') || /\b(?:implement|execute|resume|continue|start|proceed|thuc hien|thuc thi|trien khai|tien hanh|bat dau|lam|tiep tuc)\b/i.test(normalizedResumeRequest) || initialTurnClassification.phase === 'implement'));
+    this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal && !isExplicitPlanReset });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
     }
@@ -4659,7 +4663,7 @@ export class AgentLoop {
           finalAnswer
           && finalAnswer.trim().length > 80
           && !isCompletionStub(finalAnswer)
-          && (!initialTurnClassification.requiredCapabilities.includes('edit') || hasSubmittedSolution || hasVerifiedTests)
+          && ((!initialTurnClassification.requiredCapabilities.includes('edit') && !this.planManager.getRequirements().verificationRequired) || hasSubmittedSolution || hasVerifiedTests)
         );
         if (planAllowsReconciliation) {
           this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');

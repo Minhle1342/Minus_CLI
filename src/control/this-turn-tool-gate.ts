@@ -10,7 +10,7 @@ const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 
 /** Small phase-specific exploration anchors pinned after relevance retrieval. */
 const PHASE_EXPLORE_TOOL_ANCHORS: Record<string, readonly string[]> = {
   explore: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics'],
-  plan: ['read_file', 'search_text', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
+  plan: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
   implement: ['read_file', 'get_symbol_context_360', 'get_diagnostics'],
   verify: ['read_file', 'get_diagnostics', 'run_command'],
   release: [],

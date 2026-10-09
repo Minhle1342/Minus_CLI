@@ -582,15 +582,17 @@ export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (RE
 
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION & IMPACT ASSESSMENT)]:
 - Goal: Analyze blast radius and module boundaries, then break down complex changes into 2-5 atomic milestones with \`create_plan\`.
+- Read-Only Scope: In Plan / read-only mode, survey and plan ONLY — no edits, no test execution. Write verification steps as commands to run later; do not run them now. Never call \`update_plan_task\` or \`submit_solution\` in Plan mode.
 - Pre-Plan Impact & Architecture Exploration:
   * Call \`codegraph_impact\` or \`analyze_impact\` to quantify caller blast radius and risk (LOW/MEDIUM/HIGH/CRITICAL) before planning modifications.
   * Call \`get_architecture_topology\` to inspect module layer boundaries and prevent circular dependencies.
   * Call \`codegraph_explore\` or \`get_symbol_context_360\` to clarify dependencies and interface contracts.
-  * Use \`search_text\` or \`read_file\` to confirm config or reference lines.
+  * Use \`search_text\`, \`search_codebase_fast\`, \`list_files\`, \`inspect_symbol\`, or \`read_file\` to confirm config or reference lines.
+  * Only call tools present in your available tool list. If no codegraph index exists (codegraph_* tools absent), fall back to \`search_text\` / \`search_codebase_fast\` / \`read_file\` — never invent or hallucinate tool calls.
 - Milestone Structuring:
   * Sequence: [Inspect / Isolate -> Surgical Mutation -> Verification Ladder & Diff Audit].
   * Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.
-  * Transition: After plan is finalized, call \`request_phase_transition\` to implement before editing.`;
+  * Stop Condition: After recording the plan with a single \`create_plan\` call, present it to the user and stop. Then call \`request_phase_transition\` to implement before editing.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.

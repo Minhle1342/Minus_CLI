@@ -429,8 +429,9 @@ Follow the Writing Plans & Planning with Files protocols:
 1. Decompose ONLY the missing/changed delta into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
 2. Never include steps that rebuild or re-implement functionality already present. Reference the existing code instead of re-planning it.
 3. Record the dependency-aware task plan with the harness create_plan tool.
-4. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
-5. Present the structured plan directly to the user in their language for alignment and review, including a short "Already exists - reused as-is" section with file:line evidence.
+4. Stop condition: call create_plan exactly once, then present the plan and stop. Do not call update_plan_task or submit_solution in Plan mode.
+5. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
+6. Present the structured plan directly to the user in their language for alignment and review, including a short "Already exists - reused as-is" section with file:line evidence.
 Do not execute implementation tasks or modify project code in Plan mode.
 
 User Goal / Task Description:
@@ -451,9 +452,15 @@ function buildImplementationPrompt(request: string, planManager?: PlanManager): 
   const taskDetail = nextTask
     ? `Active / Next Target Task #${nextTask.id}: "${nextTask.title}"\nAcceptance Criteria: ${nextTask.acceptanceCriteria || 'Observable verification of task title'}${anchorsDetail}`
     : 'All planned tasks are completed.';
+  const planOverview = planManager.getTasks()
+    .map((task) => `#${task.id} [${task.status}] ${task.title}${task.notes ? ` — notes: ${task.notes}` : ''}`)
+    .join('\n');
   return `[IMPLEMENTATION MODE REQUEST] [RESUME INCOMPLETE PLAN]:
 You are in IMPLEMENT mode executing the active task plan.
 ${taskDetail}
+
+Full plan overview (statuses change as you complete tasks; anything surveyed as already-implemented in task notes must be reused as-is, never rebuilt):
+${planOverview}
 
 Implementation Protocols:
 1. Research blast radius with analyze_impact or codegraph_explore before modifying code.

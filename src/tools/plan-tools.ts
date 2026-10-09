@@ -305,7 +305,11 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
 
         const existingTasks = planManager.getTasks();
         // Dynamic expansion only for newly started steps (see recovery note above).
-        if (status === 'IN_PROGRESS' && existingTasks.length < planManager.getRequirements().maximumTasks && !existingTasks.some((t) => t.id === id)) {
+        // Require an explicit justification so the model cannot silently invent step IDs
+        // and drift off-plan: without notes/evidence, fall through to PLAN_TASK_NOT_FOUND.
+        const expansionJustification = (typeof args.notes === 'string' && args.notes.trim())
+          || (typeof args.evidence === 'string' && args.evidence.trim());
+        if (status === 'IN_PROGRESS' && expansionJustification && existingTasks.length < planManager.getRequirements().maximumTasks && !existingTasks.some((t) => t.id === id)) {
           const fallbackTitle = (typeof args.evidence === 'string' && args.evidence.trim())
             || (typeof args.notes === 'string' && args.notes.trim())
             || `Task #${id}`;
