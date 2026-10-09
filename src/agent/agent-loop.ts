@@ -2470,8 +2470,16 @@ export class AgentLoop {
           openTurn: session.getOpenTurn(),
         },
         replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
-        protectedMessages: session.getProjectionWithTurns()
-          .filter((entry) => entry.turn === turn).map((entry) => entry.message),
+        protectedMessages: (() => {
+          const currentTurnEntries = session.getProjectionWithTurns().filter((entry) => entry.turn === turn);
+          if (currentTurnEntries.length <= 4) {
+            return currentTurnEntries.map((entry) => entry.message);
+          }
+          const userPrompts = currentTurnEntries.filter((e) => e.message.role === 'user' && !e.message.parts?.some((p) => p.functionResponse));
+          const lastExchanges = currentTurnEntries.slice(-4);
+          const preserved = new Set([...userPrompts, ...lastExchanges]);
+          return Array.from(preserved).map((e) => e.message);
+        })(),
         protectedPaths: [
           ...(this.planManager.getActiveTask()?.readSet || []),
           ...(this.planManager.getActiveTask()?.writeSet || []),

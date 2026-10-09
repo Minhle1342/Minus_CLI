@@ -1144,8 +1144,20 @@ export class ContextCompactor {
       if (message.role === 'user' && !message.parts?.some((part) => part.functionResponse)
         && !isRollingSynopsisMessage(message)) activeTurnStart = index;
     });
-    const protectedMessages = new Set(options?.protectActiveTurn
-      ? messages.slice(Math.max(0, activeTurnStart)) : []);
+    let activeTurnProtected: SessionMessage[] = [];
+    if (options?.protectActiveTurn) {
+      const activeTurnMessages = messages.slice(Math.max(0, activeTurnStart));
+      // Satellite 2: In-Turn Microcompaction - Sliding window 2 steps
+      // Keep user prompt(s) + the last 4 messages of active turn (approx last 2 steps N, N-1)
+      if (activeTurnMessages.length <= 4) {
+        activeTurnProtected = activeTurnMessages;
+      } else {
+        const userPrompts = activeTurnMessages.filter((m) => m.role === 'user' && !m.parts?.some((p) => p.functionResponse));
+        const recentStepMessages = activeTurnMessages.slice(-4);
+        activeTurnProtected = Array.from(new Set([...userPrompts, ...recentStepMessages]));
+      }
+    }
+    const protectedMessages = new Set(activeTurnProtected);
     for (const message of options?.protectedMessages || []) protectedMessages.add(message);
     const replacedObservationIds = new Set(options?.replacedObservationIds || []);
     // Unpin only a response-only message whose every observation has a known
@@ -1242,8 +1254,7 @@ export class ContextCompactor {
           // Unresolved failures and command verification are not stale merely
           // because they are old or refer to a subsequently mutated file.
           if (options?.protectActiveTurn && (r.success === false
-            || (typeof r.exitCode === 'number' && r.exitCode !== 0)
-            || (resp.name === 'run_command' && !hasReplacement))) return part;
+            || (typeof r.exitCode === 'number' && r.exitCode !== 0))) return part;
           const isMutated = Boolean(
             rawFilePath && normalizeFilePathVariants(String(rawFilePath)).some((v) => mutatedFilesNormalized.has(v))
           );
