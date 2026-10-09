@@ -2239,7 +2239,7 @@ export class AgentLoop {
       if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0
         && !isUserExplicitlyExemptingTests(turnUserRequest)) {
         if (classification.risk === 'R1') {
-          testVerificationEncouragement = `💡 [VERIFICATION RECOMMENDED]: You have made ${this.editToolCallsInTurn} source-code edits. For localized R1 changes, run \`get_diagnostics\` to empirically verify type/syntax cleanliness before finishing the task or calling "submit_solution".`;
+          testVerificationEncouragement = `[VERIFICATION OPTIONS]: Inspect diagnostics and follow the measured DYNAMIC VERIFICATION requirement; classification R1 alone does not waive impacted behavioral tests.`;
         } else {
           const [detectedCmd, detectedBuildCmd, detectedIntegrationCmd] = await Promise.all([
             detectWorkspaceTestCommand(this._workspace.rootDir),
@@ -2325,7 +2325,9 @@ export class AgentLoop {
         hypothesisGuidance,
         domainContractContext,
         paretoGateReminder,
-        phaseGuidance,
+        phaseGuidance: [phaseGuidance, this.verificationPolicy.formatVerificationGuidance({
+          hasCallers: this.editTouchedCallers, blastRisk: this.maxEditBlastRisk,
+        }, isUserExplicitlyExemptingTests(turnUserRequest))].filter(Boolean).join('\n'),
         phaseToolAuthority: phaseToolDirective,
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
@@ -2433,7 +2435,7 @@ export class AgentLoop {
         (event) => Boolean(event.data.compactionState),
       )?.data.compactionState as CompactionStateV1 | undefined;
       const requestEnvelope: ModelRequestEnvelope = {
-        provider: this.llm?.constructor?.name || 'unknown',
+        provider: getModelTokenProfile(activeModelName, this.llm?.baseURL).provider,
         model: activeModelName,
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
@@ -2451,6 +2453,11 @@ export class AgentLoop {
         enableObservationMasking: true,
         protectActiveTurn: true,
         plan: this.planManager.getTaskGraph(),
+        recoveryWindow: {
+          entries: session.getProjectionWithTurns(),
+          completedTurns: session.getCompletedTurnNumbers(),
+          openTurn: session.getOpenTurn(),
+        },
         replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
         protectedMessages: session.getProjectionWithTurns()
           .filter((entry) => entry.turn === turn).map((entry) => entry.message),
@@ -2585,31 +2592,14 @@ export class AgentLoop {
         });
       }
       if (contextPreparation.failureReason) {
-        // Kiểm tra giới hạn phần cứng thực tế của Model Provider (Gemini 1M, Claude 200k, GPT 128k)
-        const modelProfile = getModelTokenProfile(activeModelName);
-        const hardwareLimit = modelProfile?.maxSupportedInputTokens || 128000;
-        const actualEstimatedInput = contextPreparation.after.inputTokens;
-
-        if (actualEstimatedInput < hardwareLimit && didCompactThisStep) {
-          // Context chỉ vượt qua mức budget cấu hình mềm của người dùng (ví dụ: gói /token low 16K)
-          // nhưng vẫn hoàn toàn nằm trong giới hạn chịu tải thực tế của Provider.
-          // Tự động duy trì thực thi, cảnh báo nhẹ để không làm gián đoạn turn của người dùng.
-          CLI.renderContextBudgetExceededNotice({
-            currentTokens: actualEstimatedInput,
-            configuredBudget: workingHistoryBudget,
-            hardwareLimit,
-            tier: activeTokenConfig.maxInputTokens ? `${activeTokenConfig.maxInputTokens} tokens` : 'Custom',
-          });
-        } else {
-          // Chỉ dừng khi thực sự tràn giới hạn phần cứng của Model Provider
-          const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${hardwareLimit} provider hardware limit exceeded).`;
-          session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
-          await this.persistSession(session);
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
-          return message;
-        }
+        const inputLimit = Math.max(1, (activeTokenConfig.maxInputTokens || 128000) - (activeTokenConfig.maxOutputTokens || 0));
+        const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${inputLimit} input budget after output reserve).`;
+        console.error(`${message} Recovery could not fit the current request and task state. Use /context status to inspect the budget or /new-session to start a separate session.`);
+        session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
+        await this.persistSession(session);
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
+        return message;
       }
-
       session.recordRequestHeader({
         turn,
         step,
@@ -3801,6 +3791,8 @@ export class AgentLoop {
             this.verificationPolicy.recordModification(mutatedPath, {
               impactedTestSuites: blast?.impactedTestSuites,
               risk: blast?.risk,
+              hasCallers: Array.isArray(blast?.directConsumers || blast?.callers)
+                && (blast.directConsumers || blast.callers).length > 0,
               commentOnly: commentOnlyEdit,
             });
             // ponytail: move_file is fs.rename — content identical by construction.
@@ -3980,7 +3972,7 @@ export class AgentLoop {
               isClean,
               detail,
               isClean ? 0 : 1,
-              { tier: 'typecheck' },
+              { tier: 'diagnostics' },
             );
           }
           if (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace) {
@@ -3992,7 +3984,7 @@ export class AgentLoop {
               passed,
               String(executionResult.result?.summary || '').slice(0, 240),
               executionResult.result?.exitCode,
-              { tier: 'full_test' },
+              { stdout: String(executionResult.result?.rawOutputSnippet || executionResult.result?.summary || '') },
             );
           }
           if (toolName === 'submit_solution') submissionReadiness.clear();

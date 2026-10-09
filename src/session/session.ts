@@ -1063,11 +1063,46 @@ export class Session {
       }
       if (event.type === 'session/compaction') {
         const messages = cloneJson(event.data.messages || []);
+        // Retained messages keep their event-derived turn identity across replay.
+        // Masked tool payloads are matched by stable call IDs; new summaries
+        // remain unassigned rather than inventing a completed turn.
+        const identity = (message: Content): string => {
+          const ids = (message.parts || []).flatMap((part: any) =>
+            part.functionCall?.id ? [`call:${part.functionCall.id}`]
+              : part.functionResponse?.id ? [`result:${part.functionResponse.id}`] : []);
+          return ids.length ? `${message.role}:${ids.join('|')}` : computeRequestValueDigest(message);
+        };
+        const retained = new Map<string, ProjectedMessageWithTurn[]>();
+        for (const entry of projected) {
+          const key = identity(entry.message);
+          const matches = retained.get(key) || [];
+          matches.push(entry); retained.set(key, matches);
+        }
+        const ambiguous = new Set(Array.from(retained).filter(([, matches]) =>
+          new Set(matches.map(entry => entry.turn)).size > 1).map(([key]) => key));
+        // Reduced active prose has a different identity. Only accept a mapping
+        // proven against the pre-compaction events of the still-open turn.
+        const reducedTurns = new Map<string, number>();
+        const replacements = (event.data.compactionState as any)?.activeTextReplacements;
+        if (Array.isArray(replacements) && currentTurn !== undefined) {
+          for (const replacement of replacements) {
+            if (!replacement || replacement.turn !== currentTurn
+              || typeof replacement.beforeDigest !== 'string'
+              || typeof replacement.afterDigest !== 'string') continue;
+            const originals = projected.filter(entry => entry.message.role === 'model'
+              && computeRequestValueDigest(entry.message) === replacement.beforeDigest);
+            if (originals.length && originals.every(entry => entry.turn === currentTurn)) {
+              reducedTurns.set(replacement.afterDigest, currentTurn);
+            }
+          }
+        }
         projected.length = 0;
         for (const message of messages) {
+          const previous = retained.get(identity(message))?.shift();
           projected.push({
             message,
-            turn: undefined,
+            turn: ambiguous.has(identity(message)) ? undefined : previous?.turn
+              ?? (message.role === 'model' ? reducedTurns.get(computeRequestValueDigest(message)) : undefined),
             isSynopsis: isSynopsisContent(message),
             sourceEventSeq: event.seq,
           });

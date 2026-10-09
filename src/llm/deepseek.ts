@@ -3,6 +3,7 @@ import { Session } from '../session/session.js';
 import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
 import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason, type LLMUsage } from './gemini.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { fetchCodexResponse } from './codex-responses.js';
 import { createPromptCacheKey } from './cache-envelope.js';
 import { openAIPromptCacheFields } from './provider-capabilities.js';
 
@@ -561,9 +562,7 @@ export class DeepseekLLM {
 
     let response: Response;
     try {
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
+      const headers = {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.apiKey}`,
           'HTTP-Referer': 'https://github.com/mini-agent-loop',
@@ -571,7 +570,12 @@ export class DeepseekLLM {
           'session-id': affinityKey,
           'X-Session-ID': affinityKey,
           ...this.extraHeaders,
-        },
+        };
+      response = this.baseURL.includes('/backend-api/codex') || this.extraHeaders.originator === 'codex_cli_rs'
+        ? await fetchCodexResponse(this.baseURL, requestBody, headers, request?.signal)
+        : await fetch(endpoint, {
+        method: 'POST',
+        headers,
         body: JSON.stringify(requestBody),
         signal: request?.signal,
       });

@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { parseTeaCommandLine } from '../cli-options.js';
@@ -29,6 +29,17 @@ test('interactive input supports normal prompts, isolated questions, abort and c
   const waiting = tui.readPrompt(); f.input.emit('data', '\x18q'); assert.equal(await waiting, '/exit');
   assert.equal(f.input.isRaw, false);
   assert.equal(f.kernel.ctx.events.listenerCount('model:thought'), 0);
+});
+
+test('explicit authentication status remains visible while the terminal is busy', async () => {
+  const f = fixture();
+  const tui = startInteractiveTui(f.kernel, { input: f.input, output: f.output });
+  try {
+    tui.setBusy(true);
+    tui.program.send({ type: 'log', text: 'Using existing ChatGPT/Codex credentials.' });
+    tui.program.render();
+    assert.match(f.writes.join('').replace(/\x1b\[[0-9;]*m/g, ''), /Using existing ChatGPT\/Codex credentials/);
+  } finally { tui.close(); }
 });
 
 test('headless streams plain answers, propagates failure, unbinds and has no terminal control sequences', async () => {

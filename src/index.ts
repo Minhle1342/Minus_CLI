@@ -37,7 +37,8 @@ import { RepomixPlugin } from './kernel/plugins/repomix-plugin.js';
 import { SearchPlugin } from './kernel/plugins/search-plugin.js';
 import { CodeGraphPlugin } from './kernel/plugins/codegraph-plugin.js';
 import { SandboxManager } from './sandbox/sandbox-manager.js';
-import { getCodexCredentials, isCodexAuthenticated } from './llm/codex-auth.js';
+import { isCodexAuthenticated, type CodexLoginOptions } from './llm/codex-auth.js';
+import { createOpenAIClient, isOpenAIModel } from './llm/openai-model.js';
 import {
   FileMentionEngine,
   PromptAttachmentProcessor,
@@ -166,7 +167,7 @@ function getInitialModelName(savedModel?: string, cliModel?: string): string {
   return apiKey ? 'gemini-3.7-flash' : 'groq/llama-3.3-70b-versatile';
 }
 
-async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
+async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, loginOptions?: CodexLoginOptions & { interactive?: boolean }) {
   // 0. Smart Multi-Provider 3-Tier Fallback Router (Chống Rate-Limit & Quá tải)
   if (model === 'auto-fallback' || model === 'smart-router') {
     const tiers: ProviderTier[] = [];
@@ -347,52 +348,9 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>) {
     return new DeepseekLLM('dummy_key', rawModel, undefined, 'https://text.pollinations.ai/openai', undefined, tokenConfig);
   }
 
-  // 9. OpenAI Codex CLI (GPT-5.6 Sol / Terra / Luna, o4-mini, o3-mini qua OpenAI API hoặc ChatGPT Plus OAuth)
-  if (
-    model.startsWith('codex/') ||
-    model.startsWith('gpt-5.6-') ||
-    model === 'gpt-5.6-sol' ||
-    model === 'gpt-5.6-terra' ||
-    model === 'gpt-5.6-luna'
-  ) {
-    const rawModel = model.replace(/^codex\//, '');
-    const codexCreds = getCodexCredentials();
-
-    // 1. Nếu có OPENAI_API_KEY trong .env -> Luôn ưu tiên dùng endpoint chính thức (tránh Cloudflare bot challenge)
-    if (openaiApiKey) {
-      const baseUrl = process.env.CODEX_BASE_URL || 'https://api.openai.com/v1';
-      return new DeepseekLLM(openaiApiKey, rawModel, undefined, baseUrl, undefined, tokenConfig);
-    }
-
-    // 2. Nếu có token OAuth từ Codex CLI (~/.codex/auth.json)
-    if (codexCreds?.accessToken) {
-      const codexBaseUrl = process.env.CODEX_BASE_URL || 'https://chatgpt.com/backend-api/codex';
-      return new DeepseekLLM(
-        codexCreds.accessToken,
-        rawModel,
-        undefined,
-        codexBaseUrl,
-        codexCreds.accountId ? { 'chatgpt-account-id': codexCreds.accountId } : undefined,
-        tokenConfig
-      );
-    }
-
-    throw new Error(
-      `No OPENAI_API_KEY or Codex CLI OAuth token found!\n` +
-      `👉 Best option: add OPENAI_API_KEY=sk-... to your .env file for a direct connection bypassing Cloudflare.\n` +
-      `👉 Or run 'codex login' and configure a proxy.`
-    );
-  }
-
-  // 10. OpenAI Direct (Chính thức qua API Key)
-  if (model.startsWith('openai/')) {
-    const rawModel = model.replace(/^openai\//, '');
-    const key = openaiApiKey || getCodexCredentials()?.accessToken;
-    if (!key) {
-      throw new Error(`OPENAI_API_KEY is not configured in .env! Please paste your key into .env.`);
-    }
-    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-    return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
+  // Direct OpenAI/Codex models share ChatGPT authentication and Responses routing.
+  if (isOpenAIModel(model)) {
+    return createOpenAIClient(model, tokenConfig, { ...loginOptions, apiKey: openaiApiKey });
   }
 
   // 11. Anthropic Claude Messages API (native streaming + tool use)
@@ -2099,7 +2057,17 @@ Please focus on executing and verifying this task, and update its status to COMP
 
         try {
           const currentTokens = agentLoop.getTokenConfig();
-          const newLLM = await createLLM(targetModel, currentTokens);
+          const showAuthStatus = (text: string) => {
+            if (tui) tui.program.send({ type: 'log', text });
+            else console.log(text);
+          };
+          const newLLM = await runWithCancellation(signal => createLLM(targetModel, currentTokens, {
+            interactive: true,
+            signal,
+            onStatus: showAuthStatus,
+            onLoginRequired: () => showAuthStatus(`\n${c.cyan}Opening ChatGPT sign-in in your browser. Choose Continue with Google if you use Google for your ChatGPT account. Complete login to activate ${targetModel}. Press Esc / Ctrl+C to cancel.${c.reset}`),
+          }));
+          if (!newLLM) continue;
           llm = newLLM;
           agentLoop.setLLM(newLLM, targetModel);
           modelName = targetModel;

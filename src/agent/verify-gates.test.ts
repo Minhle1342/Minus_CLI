@@ -11,7 +11,7 @@ function record(session: Session, turn: number, toolName: string, args: Record<s
   session.append('tool/result', { turn, step: 1, toolCallId, toolName, result });
 }
 
-test('policy does not block completion on tier requirements (non-blocking VERIFICATION_TIER_REQUIRED)', () => {
+test('policy dynamically requires behavioral checks for multi-file changes', () => {
   const policy = new VerificationPolicy();
   policy.setRequiredRisk('R2');
   policy.recordModification('src/a.ts');
@@ -19,14 +19,18 @@ test('policy does not block completion on tier requirements (non-blocking VERIFI
   policy.recordModification('src/c.ts');
   policy.recordVerification('get_diagnostics', true, undefined, 0);
   const result = policy.canComplete();
-  assert.equal(result.allowed, true);
+  assert.equal(result.errorCode, 'VERIFICATION_TIER_REQUIRED');
+  policy.recordVerification('npm test', true);
+  assert.equal(policy.canComplete().allowed, true);
 });
 
-test('policy allows sensitive-path edit verification via successful diagnostics', () => {
+test('policy requires behavioral tests after a sensitive-path edit', () => {
   const policy = new VerificationPolicy();
   policy.setRequiredRisk('R0');
   policy.recordModification('src/auth/session.ts');
   policy.recordVerification('get_diagnostics', true, undefined, 0);
+  assert.equal(policy.canComplete().errorCode, 'VERIFICATION_TIER_REQUIRED');
+  policy.recordVerification('vitest run src/auth/session.test.ts', true);
   assert.equal(policy.canComplete().allowed, true);
 });
 

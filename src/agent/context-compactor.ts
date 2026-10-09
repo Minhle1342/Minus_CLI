@@ -918,7 +918,7 @@ export class ContextCompactor {
       },
     });
 
-    const preserve = Math.max(1, Math.floor(options.preserveCompletedTurns ?? this.config.preserveCompletedTurns ?? 4));
+    const preserve = Math.max(0, Math.floor(options.preserveCompletedTurns ?? this.config.preserveCompletedTurns ?? 4));
     const completed = Array.from(new Set(options.completedTurns || [])).filter(
       (turn) => Number.isInteger(turn) && turn !== options.openTurn,
     ).sort((a, b) => a - b);

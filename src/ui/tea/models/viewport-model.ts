@@ -1,5 +1,5 @@
 import type { ViewportModel, TranscriptEntry } from '../types.js';
-import { color, fit, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
+import { color, displayWidth, fit, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 import { formatMarkdownTablesWithTea } from '../styles/table.js';
 import type { PermissionCard } from '../types.js';
 export function appendEntry(model: ViewportModel, entry: TranscriptEntry): ViewportModel {
@@ -44,31 +44,68 @@ function formatTool(text: string): string {
   }).join('\n');
 }
 
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
 /** Render prose delimiters as color; quoted strings inside code remain literal. */
-function formatAnswerInline(body: string, base: string, depth = 0): string {
+export function formatAnswerInline(body: string, base: string, depth = 0): string {
   if (depth > 8) return color(base, body);
-  const tokens = /(?<!\\)(\*\*[^\n]+?\*\*|__[^\n]+?__|`[^`\n]+`|(?<![\p{L}\p{N}])'[^'\n]+'(?![\p{L}\p{N}])|\[[^\]\n]+\]\([^)\n]+\))/gu;
+  const tokens = /(?<!\\)(`[^`\n]+`|!\[[^\]\n]*\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|<kbd>[^<\n]+<\/kbd>|<mark>[^<\n]+<\/mark>|<u>[^<\n]+<\/u>|\*\*\*(?!\s)[^\*\n]+?(?<!\s)\*\*\*|(?<![\p{L}\p{N}])___(?!\s)[^_\n]+?(?<!\s)___(?![\p{L}\p{N}])|\*\*(?!\s)[^\*\n]+?(?<!\s)\*\*|(?<![\p{L}\p{N}])__(?!\s)[^_\n]+?(?<!\s)__(?![\p{L}\p{N}])|~~(?!\s)[^~\n]+?(?<!\s)~~|(?<![\p{L}\p{N}\*])\*(?!\s|\*)[^\*\n]+?(?<!\s|\*)\*(?![\p{L}\p{N}\*])|(?<![\p{L}\p{N}_])_(?!\s|_)[^_\n]+?(?<!\s|_)_(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}])'[^'\n]+'(?![\p{L}\p{N}]))/gu;
   let styled = '';
   let offset = 0;
   for (const match of body.matchAll(tokens)) {
     const at = match.index ?? 0;
-    styled += color(base, body.slice(offset, at));
+    styled += color(base, decodeHtmlEntities(body.slice(offset, at)));
     const token = match[0];
-    if (token.startsWith('**') || token.startsWith('__')) {
-      styled += formatAnswerInline(token.slice(2, -2), tokyoNight.yellow, depth + 1);
-    } else if (token.startsWith('`') || token.startsWith("'")) {
+    if (token.startsWith('`')) {
       styled += color(tokyoNight.green, token.slice(1, -1));
-    } else {
+    } else if (token.startsWith('![')) {
+      const img = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(token);
+      if (img) {
+        const label = img[1] ? `🖼 ${img[1]}` : '🖼 image';
+        styled += color(tokyoNight.purple, label) + color(tokyoNight.muted, ` (${img[2]})`);
+      } else {
+        styled += color(base, token);
+      }
+    } else if (token.startsWith('[')) {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)!;
       styled += formatAnswerInline(link[1], tokyoNight.blue, depth + 1)
         + color(tokyoNight.muted, ` (${link[2]})`);
+    } else if (token.startsWith('<kbd>')) {
+      const kbd = /^<kbd>([^<\n]+)<\/kbd>$/i.exec(token);
+      styled += kbd ? color(tokyoNight.yellow, `[${kbd[1]}]`) : color(base, token);
+    } else if (token.startsWith('<mark>')) {
+      const mark = /^<mark>([^<\n]+)<\/mark>$/i.exec(token);
+      styled += mark ? color(tokyoNight.yellow, mark[1]) : color(base, token);
+    } else if (token.startsWith('<u>')) {
+      const u = /^<u>([^<\n]+)<\/u>$/i.exec(token);
+      styled += u ? `\x1b[4m${color(base, u[1])}\x1b[24m` : color(base, token);
+    } else if (token.startsWith('***') || token.startsWith('___')) {
+      styled += `\x1b[1;3m${formatAnswerInline(token.slice(3, -3), tokyoNight.yellow, depth + 1)}\x1b[22;23m`;
+    } else if (token.startsWith('**') || token.startsWith('__')) {
+      styled += formatAnswerInline(token.slice(2, -2), tokyoNight.yellow, depth + 1);
+    } else if (token.startsWith('~~')) {
+      styled += `\x1b[9m${color(tokyoNight.muted, token.slice(2, -2))}\x1b[29m`;
+    } else if ((token.startsWith('*') && token.endsWith('*')) || (token.startsWith('_') && token.endsWith('_'))) {
+      styled += `\x1b[3m${formatAnswerInline(token.slice(1, -1), tokyoNight.cyan, depth + 1)}\x1b[23m`;
+    } else if (token.startsWith("'")) {
+      styled += color(tokyoNight.green, token.slice(1, -1));
+    } else {
+      styled += color(base, token);
     }
     offset = at + token.length;
   }
-  return styled + color(base, body.slice(offset));
+  return styled + color(base, decodeHtmlEntities(body.slice(offset)));
 }
 
-function formatAnswer(text: string, width = 80): string {
+export function formatAnswer(text: string, width = 80): string {
   const tableProcessed = formatMarkdownTablesWithTea(text, Math.max(20, width - 4));
   const lines = stripTerminalControls(tableProcessed).split('\n');
   let codeFence: { marker: string; length: number } | undefined;
@@ -96,9 +133,27 @@ function formatAnswer(text: string, width = 80): string {
       return [parts.map((cell, i) => {
         if (i === 0 && cell === '') return '';
         if (i === parts.length - 1 && cell === '') return '';
-        return formatAnswerInline(cell, tokyoNight.text);
+        const targetWidth = displayWidth(cell);
+        const content = cell.slice(1).trimEnd();
+        const formatted = formatAnswerInline(content, tokyoNight.text);
+        const pad = Math.max(0, targetWidth - 1 - displayWidth(formatted) - 1);
+        return ' ' + formatted + ' '.repeat(pad) + ' ';
       }).join(color(tokyoNight.border, '│'))];
     }
+
+    const hr = /^\s{0,3}(?:[-*_]\s*){3,}$/.exec(line);
+    if (hr) {
+      firstContentLine = false;
+      const hrWidth = Math.min(Math.max(width - 4, 10), 80);
+      return [color(tokyoNight.border, '─'.repeat(hrWidth))];
+    }
+
+    const quote = /^\s{0,3}>+\s*(.*)$/.exec(line);
+    if (quote) {
+      firstContentLine = false;
+      return [color(tokyoNight.purple, '▎ ') + formatAnswerInline(quote[1], tokyoNight.muted)];
+    }
+
     const heading = /^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/.exec(line);
     if (heading) {
       firstContentLine = false;
@@ -106,8 +161,23 @@ function formatAnswer(text: string, width = 80): string {
     }
 
     const bullet = /^(\s*(?:[-*•]|\d+\.))(\s+)/.exec(line);
-    const marker = bullet ? color(tokyoNight.blue, bullet[1]) + bullet[2] : '';
-    const body = bullet ? line.slice(bullet[0].length) : line;
+    let marker = '';
+    let body = line;
+    if (bullet) {
+      const remaining = line.slice(bullet[0].length);
+      const task = /^\[([ xX])\]\s+/.exec(remaining);
+      if (task) {
+        const isChecked = task[1].toLowerCase() === 'x';
+        const checkbox = isChecked
+          ? color(tokyoNight.green, '☑ ')
+          : color(tokyoNight.muted, '☐ ');
+        marker = color(tokyoNight.blue, bullet[1]) + bullet[2] + checkbox;
+        body = remaining.slice(task[0].length);
+      } else {
+        marker = color(tokyoNight.blue, bullet[1]) + bullet[2];
+        body = remaining;
+      }
+    }
     const base = firstContentLine ? tokyoNight.cyan : tokyoNight.text;
     if (line.trim()) firstContentLine = false;
     return [marker + formatAnswerInline(body, base)];

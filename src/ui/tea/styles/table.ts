@@ -102,8 +102,8 @@ export class Table {
     const naturalWidths: number[] = Array.from({ length: colCount }, (_, col) => {
       let maxW = 1;
       for (const row of allRows) {
-        const text = row[col] || '';
-        for (const line of String(text).split('\n')) {
+        const text = row[col] ? String(row[col]).replace(/<br\s*\/?>/gi, '\n') : '';
+        for (const line of text.split('\n')) {
           maxW = Math.max(maxW, displayWidth(line.trim()));
         }
       }
@@ -146,7 +146,7 @@ export class Table {
 
     const renderRowCells = (row: string[], isHeader = false): string[] => {
       const wrappedCells: string[][] = colWidths.map((w, col) => {
-        const text = row[col] != null ? String(row[col]) : '';
+        const text = row[col] != null ? String(row[col]).replace(/<br\s*\/?>/gi, '\n') : '';
         return text.split('\n').flatMap(part => wrap(part, w));
       });
       const maxLines = Math.max(...wrappedCells.map(c => c.length), 1);
@@ -281,14 +281,14 @@ export function formatMarkdownTablesWithTea(text: string, width?: number): strin
       continue;
     }
 
-    const header = rawHeader;
+    const header = rawHeader.map(h => h.replace(/<br\s*\/?>/gi, '\n'));
     const colCount = header.length;
     const dataRows: string[][] = [];
     i += 2;
     while (i < lines.length) {
       const row = splitMarkdownTableRow(lines[i]);
       if (!row) break;
-      dataRows.push(Array.from({ length: colCount }, (_, column) => row[column] || ''));
+      dataRows.push(Array.from({ length: colCount }, (_, column) => (row[column] || '').replace(/<br\s*\/?>/gi, '\n')));
       i++;
     }
 

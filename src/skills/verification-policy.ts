@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';import { isSensitivePath, resolveVerifyTier } from '../agent/verify-tier-resolver.js';
+import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
+import { isSensitivePath, resolveVerifyTier, verifyCriticalMinFiles } from '../agent/verify-tier-resolver.js';
 import { evaluateVerificationCoverage, type VerificationCoverage } from '../agent/verification-coverage.js';
 import type { FileCoverage } from '../agent/coverage-report-reader.js';
 import { VerificationBaselineManager, type BaselineSnapshot } from './verification-baseline.js';
@@ -75,6 +76,9 @@ export class VerificationPolicy {
   private readonly maxRepairCycles: number = 3;
   private baselineManager: VerificationBaselineManager = new VerificationBaselineManager();
   private requiredRisk: ControlRisk = 'R0';
+  private measuredBlastRisk?: string;
+  private touchedCallers = false;
+  private impactedSuitesInTurn = new Set<string>();
 
   private requiredSkills: Set<string> = new Set([
     'test-driven-development',
@@ -178,7 +182,7 @@ export class VerificationPolicy {
   /**
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
-  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string; commentOnly?: boolean }): void {
+  recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string; commentOnly?: boolean; hasCallers?: boolean }): void {
     if (filePath) {
       this.modifiedFiles.add(filePath);
       if (options?.commentOnly) this.commentOnlyFiles.add(filePath);
@@ -194,9 +198,14 @@ export class VerificationPolicy {
       this.hasUnverifiedModifications = true;
       this.lastVerification = undefined;
       this.verificationHistory = [];
+      this.pendingTargetedTests = new Set(this.impactedSuitesInTurn);
     }
+    if (options?.risk?.toUpperCase() === 'CRITICAL') this.measuredBlastRisk = 'CRITICAL';
+    else if (options?.risk?.toUpperCase() === 'HIGH' && this.measuredBlastRisk !== 'CRITICAL') this.measuredBlastRisk = 'HIGH';
+    this.touchedCallers ||= Boolean(options?.hasCallers);
     if (options?.impactedTestSuites) {
       for (const t of options.impactedTestSuites) {
+        this.impactedSuitesInTurn.add(t);
         this.pendingTargetedTests.add(t);
       }
     }
@@ -312,9 +321,8 @@ export class VerificationPolicy {
 
   /**
    * Kiểm tra xem Agent có được phép kết thúc nhiệm vụ (Final Answer) hay chưa.
-   * `measured` carries harness-measured impact (never LLM claims); when it
-    * resolves to HIGH/CRITICAL, verification remains proportional to the
-    * actual changes and measured impacted coverage; no blanket full-suite mandate.
+   * `measured` carries harness-measured impact (never LLM claims).
+   * Select the required check dynamically and use post-mutation evidence.
    */
   canComplete(
     activeSkillIds: string[] = [],
@@ -377,10 +385,6 @@ export class VerificationPolicy {
     }
 
 
-    // Non-blocking: VERIFICATION_TIER_REQUIRED không còn chặn hoàn thành tác vụ.
-    // Mọi bằng chứng xác minh thành công (diagnostics, typecheck, targeted test, lint, full_test)
-    // đều cho phép hoàn thành.
-
     if (mandatesVerification && this.pendingTargetedTests.size > 0) {
       const pendingList = Array.from(this.pendingTargetedTests);
       // Suites leave this set only when actually covered by successful checks.
@@ -394,7 +398,45 @@ export class VerificationPolicy {
       }
     }
 
+    const requirement = this.getVerificationRequirement(measured);
+    const qualifying = this.verificationHistory.filter(record => requirement.acceptedTiers.includes(record.tier!)).at(-1);
+    const laterBehavioralFailure = qualifying && this.verificationHistory.slice(this.verificationHistory.lastIndexOf(qualifying) + 1)
+      .some(record => ['targeted_test', 'full_test'].includes(record.tier || '') && !record.success);
+    if (!qualifying?.success || qualifying.coverage?.verdict === 'insufficient' || laterBehavioralFailure) {
+      return { allowed: false, errorCode: 'VERIFICATION_TIER_REQUIRED',
+        reason: `VERIFICATION_TIER_REQUIRED: ${requirement.requiredTier} required after the latest mutation (${requirement.reasons.join('; ')}). Accepted checks: ${requirement.acceptedTiers.join(', ')}. Inspect project scripts and run the appropriate check within the user's test scope.` };
+    }
     return { allowed: true };
+  }
+
+  /** Recomputed from actual turn mutations; no LLM-declared verification level. */
+  getVerificationRequirement(measured?: { changedFileCount?: number; hasCallers?: boolean; blastRisk?: string; sensitivePathTouched?: boolean }) {
+    const executableFiles = Array.from(this.modifiedFiles).filter(file => !isNonExecutableFile(file)
+      && !(this.commentOnlyFiles.has(file) && !isSensitivePath(file)) && !this.contentPreservedFiles.has(file));
+    const blastRisk = this.measuredBlastRisk === 'CRITICAL' || measured?.blastRisk?.toUpperCase() === 'CRITICAL'
+      ? 'CRITICAL' : this.measuredBlastRisk || measured?.blastRisk;
+    const decision = resolveVerifyTier({ changedFileCount: Math.max(executableFiles.length, measured?.changedFileCount || 0),
+      hasCallers: this.touchedCallers || measured?.hasCallers || false, classificationRisk: this.requiredRisk, blastRisk,
+      sensitivePathTouched: measured?.sensitivePathTouched || executableFiles.some(isSensitivePath) });
+    let requiredTier: VerificationLadderTier = 'diagnostics';
+    const reasons = [...decision.reasons];
+    if (['R4', 'R5'].includes(this.requiredRisk) || blastRisk?.toUpperCase() === 'CRITICAL'
+      || Math.max(executableFiles.length, measured?.changedFileCount || 0) >= verifyCriticalMinFiles()) requiredTier = 'full_test';
+    else if (decision.level !== 'LOW' || this.impactedSuitesInTurn.size > 0) requiredTier = 'targeted_test';
+    else if (this.requiredRisk === 'R2') requiredTier = 'typecheck';
+    if (!reasons.length) reasons.push(`classification ${this.requiredRisk}`);
+    const acceptedTiers: VerificationLadderTier[] = requiredTier === 'full_test' ? ['full_test']
+      : requiredTier === 'targeted_test' ? ['targeted_test', 'full_test']
+      : requiredTier === 'typecheck' ? ['typecheck', 'build', 'targeted_test', 'full_test']
+      : ['structural', 'diff', 'diagnostics', 'typecheck', 'build', 'targeted_test', 'full_test'];
+    return { requiredTier, acceptedTiers, reasons, pendingSuites: this.getPendingTargetedTests() };
+  }
+
+  formatVerificationGuidance(measured?: Parameters<VerificationPolicy['getVerificationRequirement']>[0], userExemptsTesting = false): string {
+    if (!this.modifiedFiles.size && !this.hasUnverifiedModifications) return '';
+    if (userExemptsTesting) return '[DYNAMIC VERIFICATION]: User explicitly exempted tests. Disclose checks not performed.';
+    const requirement = this.getVerificationRequirement(measured);
+    return `[DYNAMIC VERIFICATION]: Required: ${requirement.requiredTier}; accepted: ${requirement.acceptedTiers.join(', ')}. Reasons: ${requirement.reasons.join('; ')}. Pending impacted suites: ${requirement.pendingSuites.join(', ') || 'none'}. Use fresh evidence after the latest mutation; inspect project scripts before choosing commands. Respect user test limits and disclose blockers; do not claim unexecuted checks passed.`;
   }
 
   /** Coverage detail appended to gate rejections so the LLM knows what to run. */
@@ -423,6 +465,9 @@ export class VerificationPolicy {
     this.repairCycles = 0;
     this.baselineManager.reset();
     this.requiredRisk = 'R0';
+    this.measuredBlastRisk = undefined;
+    this.touchedCallers = false;
+    this.impactedSuitesInTurn.clear();
     this.hasReproductionProof = false;
     this.reproductionProofCommand = undefined;
   }
@@ -430,10 +475,17 @@ export class VerificationPolicy {
   private inferTier(command: string): VerificationLadderTier {
     if (/\b(?:build|compile)\b/i.test(command)) return 'build';
     if (/\b(?:run_test_suite|vitest|jest|mocha|ava|test|pytest|cargo\s+test|dotnet\s+test|go\s+test)\b/i.test(command)) {
-      return /(?:--runInBand|--filter|--testNamePattern|\btest\s+[^\s-]|\bvitest\s+run\s+[^\s-]|\bjest\s+[^\s-]|\b(?:run\s+)?[a-zA-Z0-9_./-]+\.(?:spec|test)\.[cm]?[jt]sx?)/i.test(command) ? 'targeted_test' : 'full_test';
+      const filtered = /(?:--filter|--testNamePattern|--testPathPatterns?|--runTestsByPath|--test-name-pattern|--grep|(?:^|\s)-(?:k|m|t|g|run|skip)(?:\s|=)|\btest:(?!(?:all|full|regression)\b)[\w-]+)/i.test(command);
+      if (filtered) return 'targeted_test';
+      if (/\bcargo\s+test\b/i.test(command)
+        && /(?:--(?:lib|test|bin|bench|example|package|exclude)\b|(?:^|\s)-p(?:\s|=))/i.test(command)) return 'targeted_test';
+      const pytestArgs = command.match(/\bpytest\b([\s\S]*)/i)?.[1];
+      if (pytestArgs?.trim().split(/\s+/).some(arg => arg && !arg.startsWith('-'))) return 'targeted_test';
+      if (/\bgo\s+test\s+\.\/\.\.\.(?:\s|$)/i.test(command)) return 'full_test';
+      return /(?:\btest\s+[^\s-]|\b(?:vitest\s+run|jest|pytest)\s+[^\s-]|\b(?:run\s+)?[a-zA-Z0-9_./-]+\.(?:spec|test)\.[cm]?[jt]sx?)/i.test(command) ? 'targeted_test' : 'full_test';
     }
-    if (/\b(?:tsc|typecheck|get_diagnostics)\b/i.test(command)) return 'typecheck';
-    if (/\b(?:lint|diagnostic)\b/i.test(command)) return 'diagnostics';
+    if (/\b(?:tsc|typecheck)\b/i.test(command)) return 'typecheck';
+    if (/\b(?:lint|diagnostic|get_diagnostics)\b/i.test(command)) return 'diagnostics';
     return 'structural';
   }
 

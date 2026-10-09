@@ -900,11 +900,35 @@ export const AVAILABLE_MODELS: ModelOption[] = [
 
   // 12. MINUS CLI Models (OpenAI / ChatGPT Plus)
   {
+    id: 'c61s',
+    name: 'codex/gpt-6.1-sol',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'GPT-6.1 Sol: latest model for complex coding and long-running agent workflows',
+    recommended: true,
+  },
+  {
+    id: 'c6a',
+    name: 'codex/gpt-6-astra',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'GPT-6 Astra: advanced reasoning for demanding coding and research tasks',
+  },
+  {
+    id: 'c6s',
+    name: 'codex/gpt-6-sol',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'GPT-6 Sol: complex coding and agentic workflows',
+  },
+  {
+    id: 'c6l',
+    name: 'codex/gpt-6-luna',
+    provider: 'MINUS (OpenAI / ChatGPT Plus)',
+    desc: 'GPT-6 Luna: efficient model for focused coding and repeatable tasks',
+  },
+  {
     id: 'cs',
     name: 'codex/gpt-5.6-sol',
     provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '☀️ GPT-5.6 Sol: Peak reasoning, complex logic planning & ultimate code completion',
-    recommended: true,
   },
   {
     id: 'ct',
@@ -917,24 +941,6 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     name: 'codex/gpt-5.6-luna',
     provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '🌙 GPT-5.6 Luna: Ultra-fast and light, optimized for clear-cut and repeatable tasks',
-  },
-  {
-    id: 'c4',
-    name: 'codex/o4-mini',
-    provider: 'MINUS (OpenAI / ChatGPT Plus)',
-    desc: 'o4-mini: next-gen code reasoning optimized for coding agents',
-  },
-  {
-    id: 'c3',
-    name: 'codex/o3-mini',
-    provider: 'MINUS (OpenAI / ChatGPT Plus)',
-    desc: 'o3-mini: deep programming reasoning for tough algorithms',
-  },
-  {
-    id: 'cg',
-    name: 'codex/gpt-4o',
-    provider: 'MINUS (OpenAI / ChatGPT Plus)',
-    desc: 'GPT-4o: Versatile, large-context handling and stable code generation',
   },
 ];
 

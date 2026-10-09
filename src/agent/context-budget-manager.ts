@@ -9,6 +9,8 @@ import {
   type MaskedObservationRecord,
 } from "./context-compactor.js";
 import type { ArchivedTurnDocument } from "../context/turn-memory-retriever.js";
+import { compactActiveTurnText, type ActiveTextReplacement } from './active-turn-compaction.js';
+import { getHistoryTotalChars } from '../session/message-metrics.js';
 
 export type ContextManagementMode = "legacy" | "shadow" | "enforce" | "auto";
 export type TokenCountSource =
@@ -69,6 +71,7 @@ export interface CompactionStateV1 {
   verification: VerificationEvidenceState[];
   archivedTurnIds: string[];
   maskedObservationIds: string[];
+  activeTextReplacements?: ActiveTextReplacement[];
 }
 
 export interface ContextPreparationResult {
@@ -100,6 +103,12 @@ export interface ContextPrepareOptions extends Omit<
   previousState?: CompactionStateV1;
   /** UI-only signal, emitted only when candidate compaction actually begins. */
   onCompactionStart?: () => void;
+  /** Event-derived turns for recovery; never infer completed turns from message roles. */
+  recoveryWindow?: {
+    entries: import('./context-compactor.js').TurnWindowEntry[];
+    completedTurns: number[];
+    openTurn?: number;
+  };
   /** Consider an early compaction at a durable phase boundary only when savings justify losing the cache prefix. */
   phaseTransition?: { minHistoryTokens?: number; minSavingsTokens?: number; minSavingsRatio?: number };
 }
@@ -437,7 +446,7 @@ export class ContextBudgetManager {
           ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}) };
     }
     options.onCompactionStart?.();
-    const { previousState, phaseTransition, onCompactionStart, ...compactionOptions } = options;
+    const { previousState, phaseTransition, onCompactionStart, recoveryWindow, ...compactionOptions } = options;
     const baseOptions: CompactionOptions = {
       ...compactionOptions,
       force: true,
@@ -497,12 +506,17 @@ export class ContextBudgetManager {
 
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
-    if (!withinBudget && envelope.history.length > 2 && !options.protectActiveTurn) {
+    if (!withinBudget && ((!options.protectActiveTurn && envelope.history.length > 2) || (useEnforce && options.protectActiveTurn && recoveryWindow))) {
       const emergencyBudgetTokens = Math.max(
         1,
         usableInputTokens - before.nonHistoryTokens,
       );
-      const emergencyCandidate = this.compactor.compact(selected.messages, {
+      let emergencyCandidate = recoveryWindow && options.protectActiveTurn
+        ? this.compactor.compactCompletedTurnWindow(recoveryWindow.entries, {
+          completedTurns: recoveryWindow.completedTurns, openTurn: recoveryWindow.openTurn,
+          preserveCompletedTurns: 1, plan: options.plan,
+        })
+        : this.compactor.compact(selected.messages, {
         ...baseOptions,
         enforceBudget: true,
         maxInputTokens: Math.max(
@@ -513,6 +527,15 @@ export class ContextBudgetManager {
         preserveLastNTurns: 2,
         enableObservationMasking: true,
       });
+      if (recoveryWindow && options.protectActiveTurn) {
+        const count = await this.counter.count({ ...envelope, history: emergencyCandidate.messages });
+        if (count.upperBoundTokens > usableInputTokens) {
+          emergencyCandidate = this.compactor.compactCompletedTurnWindow(recoveryWindow.entries, {
+            completedTurns: recoveryWindow.completedTurns, openTurn: recoveryWindow.openTurn,
+            preserveCompletedTurns: 0, plan: options.plan,
+          });
+        }
+      }
       if (emergencyCandidate.stats.charsSaved > 0) {
         const emergencyEnvelope = {
           ...envelope,
@@ -571,6 +594,28 @@ export class ContextBudgetManager {
       }
     }
 
+    let activeTextReplacements: ActiveTextReplacement[] = [];
+    if (!withinBudget && useEnforce && options.protectActiveTurn && recoveryWindow) {
+      const reduced = compactActiveTurnText(finalSelected.messages, recoveryWindow.entries, recoveryWindow.openTurn);
+      if (reduced.replacements.length > 0) {
+        const reducedCount = await this.counter.count({ ...envelope, history: reduced.messages });
+        if (reducedCount.upperBoundTokens < finalAfter.upperBoundTokens) {
+          activeTextReplacements = reduced.replacements;
+          finalSelected = { messages: reduced.messages, stats: { ...finalSelected.stats,
+            compactedLength: getHistoryTotalChars(reduced.messages),
+            compactedTokens: ContextCompactor.countHistoryTokens(reduced.messages, envelope.model),
+            charsSaved: Math.max(0, getHistoryTotalChars(envelope.history) - getHistoryTotalChars(reduced.messages)),
+            maskedObservations: [...(finalSelected.stats.maskedObservations || []), ...reduced.archives],
+            strategiesApplied: [...finalSelected.stats.strategiesApplied, 'active-turn-assistant-text-compaction'],
+          } };
+          finalAfter = reducedCount;
+          withinBudget = reducedCount.upperBoundTokens <= usableInputTokens;
+          finalSelected.stats.tokensSaved = before.upperBoundTokens - finalAfter.upperBoundTokens;
+          finalSelected.stats.withinBudget = withinBudget;
+          finalSelected.stats.budgetOverflowTokens = Math.max(0, finalAfter.upperBoundTokens - usableInputTokens);
+        }
+      }
+    }
     const tokensSaved = before.upperBoundTokens - finalAfter.upperBoundTokens;
     const materialSavings = tokensSaved >= 512 && tokensSaved / Math.max(1, before.upperBoundTokens) >= 0.1;
     if (tokensSaved <= 0 || (before.upperBoundTokens <= usableInputTokens && !materialSavings)) {
@@ -594,11 +639,11 @@ export class ContextBudgetManager {
       candidateAfter,
       compactionStats: finalSelected.stats,
       checkpointObservations,
-      state: buildState(
+      state: { ...buildState(
         finalSelected.messages,
         finalSelected.stats,
         previousState,
-      ),
+      ), ...(activeTextReplacements.length ? { activeTextReplacements } : {}) },
       withinBudget,
       phaseTransitionCompacted: phaseTransitionEligible && !budgetPressure,
       ...(effectiveMode === "enforce" && !withinBudget
