@@ -789,7 +789,8 @@ export class PlanManager {
     };
   }
 
-  getCompletionBlocker(): string | undefined {
+  getCompletionBlocker(options?: { phase?: string; isReadOnly?: boolean }): string | undefined {
+    if (options?.phase === 'plan' || options?.isReadOnly) return undefined;
     if (!this.hasPlan()) return undefined;
     const unfinished = this.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status));
     if (unfinished.length === 0) return undefined;

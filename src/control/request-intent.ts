@@ -9,7 +9,7 @@ export function normalizeRequestIntentText(request: string): string {
 }
 
 /** Shared action vocabulary for classification and mixed read/action requests. */
-export const MUTATION_INTENT = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
+export const MUTATION_INTENT = /\b(?:implement|fix|change|modify|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|sua|trien khai|thuc hien|thuc thi|tien hanh|bat dau thuc hien|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
 
 export function isReadOnlyRequest(request: string): boolean {
   const text = normalizeRequestIntentText(request);

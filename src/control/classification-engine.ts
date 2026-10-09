@@ -59,6 +59,7 @@ export class ClassificationEngine {
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
     } else if (/^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:(?:run|execute|chay|thuc thi|test|verify|lint|typecheck|bien dich)\b|build\s+(?:the\s+)?(?:project|repo|repository|package)\b)/i.test(normalizeRequestIntentText(intentPrompt))
+      && !/\b(?:ke hoach|plan|task|dag)\b/i.test(normalizedText)
       && !normalizeRequestIntentText(intentPrompt).split(/\b(?:and then|then|and|sau do|roi|va)\b/).slice(1).some(part => MUTATION_INTENT.test(part))) {
       taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
@@ -201,7 +202,7 @@ export class ClassificationEngine {
       phase,
       complexity,
       externality: taskClass === 'release' ? 'external-state' : needsNetwork ? 'network' : 'local',
-      reversibility: risk === 'R0' ? 'read-only' : risk >= 'R4' ? 'hard-to-reverse' : 'reversible',
+      reversibility: (risk === 'R0' || phase === 'plan') ? 'read-only' : risk >= 'R4' ? 'hard-to-reverse' : 'reversible',
       risk,
       requiredCapabilities: capabilities,
       confidence,

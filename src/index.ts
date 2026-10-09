@@ -13,6 +13,7 @@ import { AnthropicLLM } from './llm/anthropic.js';
 import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
+import type { PlanManager } from './agent/plan-manager.js';
 import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { SessionNames, shortSessionName } from './session/session-names.js';
@@ -433,6 +434,30 @@ User Goal / Task Description:
 ${request}`;
 }
 
+function buildImplementationPrompt(request: string, planManager?: PlanManager): string {
+  if (!planManager || !planManager.hasPlan() || planManager.isAllTasksCompleted()) {
+    return request;
+  }
+  const nextTask = planManager.getNextIncompleteTask();
+  const taskDetail = nextTask
+    ? `Active / Next Target Task #${nextTask.id}: "${nextTask.title}"\nAcceptance Criteria: ${nextTask.acceptanceCriteria || 'Observable verification of task title'}`
+    : 'All planned tasks are completed.';
+  return `[IMPLEMENTATION MODE REQUEST] [RESUME INCOMPLETE PLAN]:
+You are in IMPLEMENT mode executing the active task plan.
+${taskDetail}
+
+Implementation Protocols:
+1. Research blast radius with analyze_impact or codegraph_explore before modifying code.
+2. Update task state to IN_PROGRESS using update_plan_task before applying edits.
+3. Apply surgical minimal changes with edit tools (replace_text, apply_patch, etc.).
+4. Empirically verify changes with tests/build/diagnostics via run_command.
+5. Update task state to COMPLETED using update_plan_task with evidence.
+6. Do NOT claim the plan is finished without calling edit tools, update_plan_task, and verifying.
+
+User Request:
+${request}`;
+}
+
 async function main() {
   const cliOptions = parseCommandLineArgs();
   const headless = cliOptions.headless || !input.isTTY || !output.isTTY || process.env.TERM === 'dumb';
@@ -804,7 +829,16 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
       activeExecutionController.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
     }
-    const item = agentLoop.inbox.enqueue(activeSession.id, isPlanModeActive ? buildPlanningPrompt(trimmed) : trimmed, 'human', { isSteering: true });
+    const item = agentLoop.inbox.enqueue(
+      activeSession.id,
+      isPlanModeActive
+        ? buildPlanningPrompt(trimmed)
+        : (agentLoop.planManager.hasPlan() && !agentLoop.planManager.isAllTasksCompleted()
+          ? buildImplementationPrompt(trimmed, agentLoop.planManager)
+          : trimmed),
+      'human',
+      { isSteering: true },
+    );
     activeSession.append('input/queued', { inputId: item.id, inputText: trimmed, source: 'human', isSteering: true });
     void sessionPersistence.save(activeSession).catch(() => {});
   });
@@ -2779,9 +2813,14 @@ Please focus on executing and verifying this task, and update its status to COMP
 
       try {
         await runWithCancellation(async (signal) => {
-          const request = tui?.model.mode === 'PLAN'
-            ? buildPlanningPrompt(trimmed) + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${attachmentResult.expandedPrompt}` : '')
-            : attachmentResult.expandedPrompt;
+          const isPlanMode = tui?.model.mode === 'PLAN' || isPlanModeActive;
+          const hasIncompletePlan = agentLoop.planManager.hasPlan() && !agentLoop.planManager.isAllTasksCompleted();
+          const basePrompt = attachmentResult.expandedPrompt;
+          const request = isPlanMode
+            ? buildPlanningPrompt(trimmed) + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${basePrompt}` : '')
+            : (hasIncompletePlan
+              ? buildImplementationPrompt(basePrompt, agentLoop.planManager)
+              : basePrompt);
           await agentLoop.submit(activeSession, request, 'human', { signal });
           checkAndAutoCompleteGoal();
         });

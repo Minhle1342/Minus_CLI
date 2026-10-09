@@ -15,6 +15,7 @@ import { CriticGate } from './critic-gate.js';
 import { AgentLoop } from './agent-loop.js';
 import { ClassificationEngine } from '../control/classification-engine.js';
 import { ToolRegistry } from '../tools/registry.js';
+import { PlanManager } from './plan-manager.js';
 
 const diagnostics = { errors: [], syntaxErrors: [], unresolvedImports: [], warnings: [], timestamp: 0 };
 
@@ -416,3 +417,64 @@ test('system-prompt echo is rejected and stripped before TUI render', () => {
   assert.equal(isSystemPromptEcho(clean), false);
   assert.equal(stripSystemPromptEcho(clean), clean);
 });
+
+test('Plan mode: PlanManager bypasses completion blocker in plan phase or read-only mode', () => {
+  const plan = new PlanManager();
+  plan.createPlan([
+    { id: 1, title: 'Refactor State Machine', acceptanceCriteria: 'Step 1' },
+    { id: 2, title: 'Refactor Error Handling', acceptanceCriteria: 'Step 2' },
+  ]);
+
+  // Default execution phase blocks because tasks are pending
+  const normalBlocker = plan.getCompletionBlocker();
+  assert.ok(normalBlocker?.includes('Execution plan is incomplete: 2 task(s) remain'));
+
+  // Plan phase or read-only mode bypasses the blocker
+  assert.equal(plan.getCompletionBlocker({ phase: 'plan' }), undefined);
+  assert.equal(plan.getCompletionBlocker({ isReadOnly: true }), undefined);
+});
+
+test('Plan mode: ClassificationEngine sets reversibility to read-only for planning mode requests', () => {
+  const engine = new ClassificationEngine();
+  const decision = engine.classify({
+    request: '[PLANNING MODE REQUEST]: The user requests an implementation plan.\nUser Goal: Refactor error handling',
+  });
+  assert.equal(decision.phase, 'plan');
+  assert.equal(decision.reversibility, 'read-only');
+});
+
+test('Implement mode: ClassificationEngine recognizes plan execution intent and assigns implement phase with edit capability', () => {
+  const engine = new ClassificationEngine();
+  const decision1 = engine.classify({
+    request: 'thực thi kế hoạch',
+    hasPlan: true,
+  });
+  assert.equal(decision1.phase, 'implement');
+  assert.ok(decision1.requiredCapabilities.includes('edit'));
+
+  const decision2 = engine.classify({
+    request: 'tiến hành thực hiện',
+    hasPlan: true,
+  });
+  assert.equal(decision2.phase, 'implement');
+  assert.ok(decision2.requiredCapabilities.includes('edit'));
+});
+
+test('Implement mode: PlanManager preserves incomplete tasks across turns when continuation is requested', () => {
+  const plan = new PlanManager();
+  plan.beginTurn(1, '[PLANNING MODE REQUEST] Plan refactoring');
+  plan.createPlan([
+    { id: 1, title: 'Inspect code', acceptanceCriteria: 'Step 1' },
+    { id: 2, title: 'Implement fix', acceptanceCriteria: 'Step 2' },
+  ]);
+  assert.equal(plan.hasPlan(), true);
+  assert.equal(plan.getTasks().length, 2);
+
+  // Turn 2: User switches to Implement and says "tiến hành thực hiện" with preserveIncompletePlan: true
+  plan.beginTurn(2, 'tiến hành thực hiện', { preserveIncompletePlan: true });
+  assert.equal(plan.hasPlan(), true);
+  assert.equal(plan.getTasks().length, 2);
+  assert.ok(plan.getCompletionBlocker()?.includes('Execution plan is incomplete: 2 task(s) remain'));
+});
+
+

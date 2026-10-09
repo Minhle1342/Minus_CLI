@@ -261,9 +261,10 @@ export interface RuntimeHarnessProfile {
 }
 
 export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string): RuntimeHarnessProfile {
-  const isBugfixOrSecurity = taskClass === 'bugfix' || taskClass === 'security';
-  const isExploration = phase === 'explore' || taskClass === 'exploration' || taskClass === 'docs';
-  const isScaffoldOrFeature = taskClass === 'feature' || taskClass === 'scaffold' || taskClass === 'greenfield';
+  const isPlanning = phase === 'plan';
+  const isBugfixOrSecurity = !isPlanning && (taskClass === 'bugfix' || taskClass === 'security');
+  const isExploration = isPlanning || phase === 'explore' || taskClass === 'exploration' || taskClass === 'docs';
+  const isScaffoldOrFeature = !isPlanning && (taskClass === 'feature' || taskClass === 'scaffold' || taskClass === 'greenfield');
 
   if (isBugfixOrSecurity) {
     return {
@@ -1077,7 +1078,11 @@ export class AgentLoop {
       request: retrievalUserRequest,
       hasPlan: this.planManager.hasPlan(),
     });
+    const isPlanOrReadOnlyMode = () =>
+      initialTurnClassification.phase === 'plan'
+      || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
     const isReadOnlyAnswerTask = isReadOnlyRequest(retrievalUserRequest)
+      || isPlanOrReadOnlyMode()
       || initialTurnClassification.reversibility === 'read-only'
       || (!initialTurnClassification.requiredCapabilities.includes('edit')
         && !initialTurnClassification.requiredCapabilities.includes('git-write')
@@ -1102,7 +1107,8 @@ export class AgentLoop {
       || Boolean(options?.isCircuitBreakerRetry)
       || Boolean(options?.isRecoveryResume)
       || turnUserRequest.includes('[RESUME INCOMPLETE PLAN]')
-      || turnUserRequest.includes('[GOAL CONTINUATION]');
+      || turnUserRequest.includes('[GOAL CONTINUATION]')
+      || (this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted() && !turnUserRequest.includes('[PLANNING MODE REQUEST]') && (turnUserRequest.includes('[RESUME INCOMPLETE PLAN]') || turnUserRequest.includes('[IMPLEMENTATION MODE REQUEST]') || /\b(?:implement|execute|resume|continue|start|proceed|thuc hien|thuc thi|trien khai|tien hanh|bat dau|lam|tiep tuc)\b/i.test(turnUserRequest) || initialTurnClassification.phase === 'implement'));
     this.planManager.beginTurn(turn, turnUserRequest, { preserveIncompletePlan: isContinuationOrGoal });
     if (isGoal && !this.planManager.hasPlan()) {
       this.planManager.setPlanRequired(true, 'goal-mode-active');
@@ -1118,15 +1124,15 @@ export class AgentLoop {
     this.rollbackOrchestrator.resetGreenCheckpoint();
     const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
       userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
-      planBlocker: this.planManager.getCompletionBlocker(),
+      planBlocker: isPlanOrReadOnlyMode() ? undefined : this.planManager.getCompletionBlocker(),
       activeAgents: this.agentRegistry.list().filter(agent => agent.id !== this.agentId
         && ['running', 'waiting'].includes(agent.status)).length });
-    const submissionCodeChangeRequired = () => (initialTurnClassification.phase !== 'explore' && initialTurnClassification.requiredCapabilities.includes('edit'))
+    const submissionCodeChangeRequired = () => !isPlanOrReadOnlyMode() && ((initialTurnClassification.phase !== 'explore' && initialTurnClassification.phase !== 'plan' && initialTurnClassification.requiredCapabilities.includes('edit'))
       || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
       || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
       || getTurnCompletionState(session, turn).hasMutations
       || this.verificationPolicy.hasPendingModifications()
-      || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0);
+      || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0));
     let submittedSolutionSummary: string | undefined;
     let submittedValidatedDraft = false;
     let hasReportedFindings = false;
@@ -1810,7 +1816,8 @@ export class AgentLoop {
         : '';
       const legacyPlanContext = this.planManager.renderExecutionContext();
       const planRequirements = this.planManager.getRequirements();
-      const stepPlanBlocker = this.planManager.getCompletionBlocker();
+      const isStepPlanOrReadOnly = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+      const stepPlanBlocker = isStepPlanOrReadOnly ? undefined : this.planManager.getCompletionBlocker();
       const planBlocked = Boolean(stepPlanBlocker?.includes('graph-blocked'));
       const stepPlanContext = this.planManager.renderStepPromptContext({
         phase: classification.phase,
@@ -3455,7 +3462,8 @@ export class AgentLoop {
             executionResult = preexecutedReadResult;
           } else {
             // Chạy tool qua pipeline an toàn
-            const originalCodeChangeRequired = submissionCodeChangeRequired();
+            const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+            const originalCodeChangeRequired = isPlanModeThisStep ? false : submissionCodeChangeRequired();
             const submissionCheck = toolName === 'submit_solution' ? evaluateSubmission({ ...toolArgs, summary: String(toolArgs.summary || '') }, {
               session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
               codeChangeRequired: originalCodeChangeRequired, taskClass: classification.taskClass,
@@ -3466,7 +3474,7 @@ export class AgentLoop {
                 blastRisk: this.maxEditBlastRisk,
                 sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
               },
-              planBlocker: this.planManager.getCompletionBlocker(),
+              planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
               activeAgents: submissionSnapshot().activeAgents,
               evaluateCritic: evaluateTurnCritic,
             }) : undefined;
@@ -4598,7 +4606,8 @@ export class AgentLoop {
         hasSubmittedSolution ? submittedSolutionSummary : undefined);
       consecutiveEmptyTurns = 0;
 
-      const planBlocker = this.planManager.getCompletionBlocker();
+      const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+      const planBlocker = isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker();
       if (planBlocker) {
         consecutivePlanCompletionRejects++;
         const canRetryPlan = consecutivePlanCompletionRejects <= maxPlanCompletionRetries;
@@ -4749,14 +4758,14 @@ export class AgentLoop {
       if (finalAnswerDecision.allow && requiresSubmission) {
         const candidate = evaluateSubmission({ summary: finalAnswer }, {
           session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
-          codeChangeRequired: submissionCodeChangeRequired(), taskClass: classification.taskClass,
+          codeChangeRequired: isPlanModeThisStep ? false : submissionCodeChangeRequired(), taskClass: classification.taskClass,
           verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
           evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
             changedFileCount: this.targetFilesModifiedInTurn.size, hasCallers: this.editTouchedCallers,
             blastRisk: this.maxEditBlastRisk,
             sensitivePathTouched: completionState.filesModified.some(file => !isNonExecutableFile(file) && isSensitivePath(file)),
           },
-          planBlocker: this.planManager.getCompletionBlocker(),
+          planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
           activeAgents: submissionSnapshot().activeAgents,
           evaluateCritic: evaluateTurnCritic,
         });
