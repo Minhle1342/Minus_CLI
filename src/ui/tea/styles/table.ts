@@ -317,21 +317,25 @@ export function formatSubmitSolutionTable(result: Record<string, unknown>, width
   table.headers('Thuộc tính / Property', 'Chi tiết / Details');
 
   const resolution = result.resolutionType ? String(result.resolutionType) : 'code_fix';
+  const isInvestigationOnly = resolution === 'investigation_only';
   table.row('Loại giải pháp', resolution);
 
   if (result.summary) {
     table.row('Tóm tắt', String(result.summary));
   }
 
-  if (result.rootCause) {
-    table.row('Nguyên nhân gốc', String(result.rootCause));
+  const rootCauseText = typeof result.rootCause === 'string'
+    ? result.rootCause.trim()
+    : result.rootCause != null ? String(result.rootCause).trim() : '';
+  if (rootCauseText && !isInvestigationOnly) {
+    table.row('Nguyên nhân gốc', rootCauseText);
   }
 
-  const files = Array.isArray(result.filesModified) ? result.filesModified : [];
+  const files = Array.isArray(result.filesModified)
+    ? result.filesModified.map((f) => String(f).trim()).filter(Boolean)
+    : [];
   if (files.length > 0) {
     table.row('Tệp đã sửa đổi', files.join('\n'));
-  } else {
-    table.row('Tệp đã sửa đổi', '(Không có thay đổi tệp)');
   }
 
   if (result.verificationMethod) {
@@ -339,7 +343,10 @@ export function formatSubmitSolutionTable(result: Record<string, unknown>, width
   }
 
   if (result.verificationEvidence) {
-    table.row('Bằng chứng xác minh', String(result.verificationEvidence));
+    const verificationText = String(result.verificationEvidence).trim();
+    if (verificationText) {
+      table.row('Bằng chứng xác minh', verificationText);
+    }
   }
 
   if (result.groundingScore !== undefined) {
