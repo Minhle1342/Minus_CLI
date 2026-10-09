@@ -12,7 +12,7 @@ export interface HostCommandPolicyResult {
  * Commands that can safely run when Docker is temporarily unavailable. Keep this
  * intentionally small: an unrecognised command must retain the isolation boundary.
  */
-const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch)|node\s+(?:--version|-v)|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
+const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--get|check-ignore)|node\s+(?:--version|-v|--check\b|-c\b|(?:--import\s+\S+\s+)*--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
 
 // This remains a non-bypassable policy even after a user has approved host access.
 const HOST_SYSTEM_RISK = [
@@ -32,14 +32,25 @@ function isReadOnlySegment(segment: string): boolean {
   return READ_ONLY_COMMAND.test(normalized);
 }
 
+function isReadOnlyPipeline(analysis: ReturnType<typeof analyzeShellCommand>): boolean {
+  if (analysis.error || analysis.operators.length !== 1 || analysis.operators[0] !== '|') return false;
+  if (analysis.segments.length !== 2 || !analysis.segments.every(isReadOnlySegment)) return false;
+  return analysis.segments.every((segment) => !/[><]|`|\$\(/.test(segment));
+}
+
 /** True when a command must not silently fall back from Docker to the host. */
 export function requiresIsolatedExecution(command: string): boolean {
   const analysis = analyzeShellCommand(command);
-  return Boolean(analysis.error || analysis.complex || analysis.segments.length === 0 || analysis.segments.some((segment) => !isReadOnlySegment(segment)));
+  if (analysis.error || analysis.segments.length === 0) return true;
+  if (isReadOnlyPipeline(analysis)) return false;
+  return Boolean(analysis.complex || analysis.segments.some((segment) => !isReadOnlySegment(segment)));
 }
 
 /** Only enforce fail-closed behaviour for an unexpected Docker-to-local downgrade. */
 export function mustBlockUnisolatedAutoExecution(command: string, status: SandboxStatus): boolean {
+  if (process.env.MINUS_ALLOW_HOST_FALLBACK === 'true' || process.env.MINUS_ALLOW_HOST_FALLBACK === '1') {
+    return false;
+  }
   return Boolean(status.fallbackToLocal && !status.isIsolated && requiresIsolatedExecution(command));
 }
 

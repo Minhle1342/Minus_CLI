@@ -11,7 +11,12 @@ import {
 test('only known read-only commands may use an automatic local fallback', () => {
   assert.equal(requiresIsolatedExecution('rg "SandboxManager" src'), false);
   assert.equal(requiresIsolatedExecution('git status && git diff'), false);
+  assert.equal(requiresIsolatedExecution('node --test'), false);
+  assert.equal(requiresIsolatedExecution('node --import tsx --test src/sandbox/command-isolation-policy.test.ts'), false);
+  assert.equal(requiresIsolatedExecution('tsc --noEmit'), false);
+  assert.equal(requiresIsolatedExecution('git rev-parse HEAD'), false);
   assert.equal(requiresIsolatedExecution('npm test'), true);
+  assert.equal(requiresIsolatedExecution('node script.js'), true);
   assert.equal(requiresIsolatedExecution('echo ok > marker.txt'), true);
 });
 
@@ -25,6 +30,16 @@ test('Docker-to-local fallback is fail-closed only for commands requiring isolat
   };
   assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), true);
   assert.equal(mustBlockUnisolatedAutoExecution('git status', fallbackStatus), false);
+  assert.equal(mustBlockUnisolatedAutoExecution('node --test', fallbackStatus), false);
+  assert.equal(mustBlockUnisolatedAutoExecution('node --import tsx --test src/test.ts', fallbackStatus), false);
+
+  // Environment override MINUS_ALLOW_HOST_FALLBACK
+  process.env.MINUS_ALLOW_HOST_FALLBACK = 'true';
+  try {
+    assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), false);
+  } finally {
+    delete process.env.MINUS_ALLOW_HOST_FALLBACK;
+  }
 });
 
 test('system-destructive host commands cannot bypass the policy with approval', () => {

@@ -18,6 +18,13 @@ export interface PlanEvidence {
   files?: string[];
 }
 
+export interface EvidenceValidationResult {
+  valid: boolean;
+  requiredKind: EvidenceKind | 'any';
+  missingAnchors: string[];
+  hasKindEvidence: boolean;
+}
+
 export type PlanTaskRisk = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 export interface PlanTask {
@@ -418,7 +425,12 @@ export class PlanManager {
     this.persist('evidence-recorded');
   }
 
-  updateTask(id: number, status: TaskStatus, notes?: string): PlanTask | null {
+  updateTask(
+    id: number,
+    status: TaskStatus,
+    notes?: string,
+    anchors?: { readSet?: string[]; writeSet?: string[] },
+  ): PlanTask | null {
     if (!Number.isInteger(id) || id < 1 || !VALID_STATUSES.has(status)) {
       throw new Error('Task id/status is invalid.');
     }
@@ -429,6 +441,10 @@ export class PlanManager {
     if (taskIndex < 0) return null;
 
     const task = this.tasks[taskIndex];
+    if (anchors) {
+      if (Array.isArray(anchors.readSet)) task.readSet = normalizeStringList(anchors.readSet);
+      if (Array.isArray(anchors.writeSet)) task.writeSet = normalizeStringList(anchors.writeSet);
+    }
     if (TERMINAL_STATUSES.has(task.status)) {
       if (task.status === status) {
         if (notes && typeof notes === 'string') task.notes = notes.trim();
@@ -481,9 +497,16 @@ export class PlanManager {
     if (
       status === 'COMPLETED'
       && this.activeTurn !== undefined
-      && !this.hasRequiredEvidence(task)
     ) {
-      throw new Error(`Task #${id} cannot be completed before matching successful ${this.requiredEvidenceKind(task)} evidence is observed.`);
+      const validation = this.getEvidenceValidation(task);
+      if (!validation.valid) {
+        const missingDetail = validation.missingAnchors.length > 0
+          ? ` Missing ${validation.requiredKind} evidence for required anchor file(s): [${validation.missingAnchors.join(', ')}].`
+          : '';
+        throw new Error(
+          `Task #${id} cannot be completed before matching successful ${validation.requiredKind} evidence is observed.${missingDetail}`,
+        );
+      }
     }
     if ((status === 'FAILED' || status === 'SKIPPED') && !normalizedNotes) {
       throw new Error(`${status} requires notes explaining the concrete blocker or skip reason.`);
@@ -688,7 +711,13 @@ export class PlanManager {
       }
     }
 
-    if (!this.hasRequiredEvidence(task)) throw new Error(`Task #${taskId} cannot be completed without matching successful task-scoped ${this.requiredEvidenceKind(task)} evidence.`);
+    const validation = this.getEvidenceValidation(task);
+    if (!validation.valid) {
+      const missingDetail = validation.missingAnchors.length > 0
+        ? ` Missing ${validation.requiredKind} evidence for required anchor file(s): [${validation.missingAnchors.join(', ')}].`
+        : '';
+      throw new Error(`Task #${taskId} cannot be completed without matching successful task-scoped ${validation.requiredKind} evidence.${missingDetail}`);
+    }
 
     // Xác định các task có dependencies được thỏa mãn trước khi hoàn tất task hiện tại
     const previouslySatisfiedIds = new Set(
@@ -947,20 +976,25 @@ export class PlanManager {
     return 'any';
   }
 
-  private hasRequiredEvidence(task: PlanTask): boolean {
+  getEvidenceValidation(task: PlanTask): EvidenceValidationResult {
     const required = this.requiredEvidenceKind(task);
-    if (required === 'any') return true;
+    if (required === 'any') {
+      return { valid: true, requiredKind: 'any', missingAnchors: [], hasKindEvidence: true };
+    }
 
     const anchors = required === 'mutation' ? task.writeSet : required === 'inspection' ? task.readSet : [];
-    const coveredFiles = task.evidence.filter(item => item.outcome === 'success' && item.kind === required).flatMap(item => item.files || []);
-    if (!anchors.every(anchor => coveredFiles.some(file => {
+    const coveredFiles = task.evidence
+      .filter((item) => item.outcome === 'success' && item.kind === required)
+      .flatMap((item) => item.files || []);
+
+    const missingAnchors = anchors.filter((anchor) => !coveredFiles.some((file) => {
       const target = file.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
       const expected = anchor.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '').toLowerCase();
       return target === expected || target.startsWith(`${expected}/`);
-    }))) return false;
+    }));
 
     // 1. Kiểm tra trực tiếp trên task
-    return task.evidence.some((item) => {
+    const hasKindEvidence = task.evidence.some((item) => {
       if (item.outcome !== 'success' || item.kind !== required) return false;
       if (required === 'verification') return (item.seq || 0) > Math.max(task.lastMutationSeq, this.lastMutationSeq);
       if (required === 'git') {
@@ -973,6 +1007,18 @@ export class PlanManager {
       }
       return true;
     });
+
+    const valid = missingAnchors.length === 0 && hasKindEvidence;
+    return {
+      valid,
+      requiredKind: required,
+      missingAnchors,
+      hasKindEvidence,
+    };
+  }
+
+  hasRequiredEvidence(task: PlanTask): boolean {
+    return this.getEvidenceValidation(task).valid;
   }
 
   private validateGraph(tasks: PlanTask[]): void {

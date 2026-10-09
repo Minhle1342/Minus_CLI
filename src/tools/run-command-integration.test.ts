@@ -23,7 +23,65 @@ test('auto execution refuses a Docker-to-local downgrade for a mutating command'
   const result = await tool.execute({ command: 'npm test' }, new Workspace());
   assert.equal(result.commandOutcome, 'blocked_preflight');
   assert.equal(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
+  assert.equal(result.errorCode, 'ISOLATED_SANDBOX_REQUIRED');
+  assert.ok(result.error);
   assert.equal(result.processStarted, false);
+});
+
+test('Gate 3.2: auto execution allows read-only node test runner command during Docker downgrade', async () => {
+  let executedCommand = '';
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+      dockerAvailable: false, fallbackToLocal: true,
+    }),
+    exec: async (cmd: string) => {
+      executedCommand = cmd;
+      return { stdout: 'tests passed', stderr: '', exitCode: 0, durationMs: 10, success: true };
+    },
+  } as any);
+  const result = await tool.execute({ command: 'node --import tsx --test src/test.ts' }, new Workspace());
+  assert.notEqual(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
+  assert.equal(result.success, true);
+  assert.equal(executedCommand, 'node --import tsx --test src/test.ts');
+});
+
+test('Gate 3.5: bounded allowlisted pipeline executes without COMMAND_PARSE_REJECTED or approval prompt', async () => {
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+      dockerAvailable: false, fallbackToLocal: true,
+    }),
+    exec: async (cmd: string) => {
+      return { stdout: 'sample line 1\nsample line 2', stderr: '', exitCode: 0, durationMs: 10, success: true };
+    },
+  } as any);
+  const result = await tool.execute({ command: 'git status | findstr modified' }, new Workspace());
+  assert.notEqual(result.errorCode, 'COMMAND_PARSE_REJECTED');
+  assert.notEqual(result.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.notEqual(result.errorCode, 'PERMISSION_DENIED');
+  assert.equal(result.success, true);
+});
+
+test('Gate 3.5: safe chain operators (|| and ;) execute without approval denial', async () => {
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+      dockerAvailable: false, fallbackToLocal: true,
+    }),
+    exec: async (cmd: string) => {
+      return { stdout: 'done', stderr: '', exitCode: 0, durationMs: 10, success: true };
+    },
+  } as any);
+  const fallbackResult = await tool.execute({ command: 'where node || where npm' }, new Workspace());
+  assert.notEqual(fallbackResult.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.notEqual(fallbackResult.errorCode, 'PERMISSION_DENIED');
+  assert.equal(fallbackResult.success, true);
+
+  const seqResult = await tool.execute({ command: 'git status ; git branch' }, new Workspace());
+  assert.notEqual(seqResult.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.notEqual(seqResult.errorCode, 'PERMISSION_DENIED');
+  assert.equal(seqResult.success, true);
 });
 
 test('host system-destructive commands are blocked before permission or process dispatch', async () => {

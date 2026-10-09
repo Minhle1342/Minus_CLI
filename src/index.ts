@@ -439,8 +439,14 @@ function buildImplementationPrompt(request: string, planManager?: PlanManager): 
     return request;
   }
   const nextTask = planManager.getNextIncompleteTask();
+  const anchorsDetail = nextTask
+    ? [
+        nextTask.readSet.length > 0 ? `Required read/inspect file anchors: [${nextTask.readSet.join(', ')}]` : '',
+        nextTask.writeSet.length > 0 ? `Target edit/mutation file anchors: [${nextTask.writeSet.join(', ')}]` : '',
+      ].filter(Boolean).map((s) => `\n${s}`).join('')
+    : '';
   const taskDetail = nextTask
-    ? `Active / Next Target Task #${nextTask.id}: "${nextTask.title}"\nAcceptance Criteria: ${nextTask.acceptanceCriteria || 'Observable verification of task title'}`
+    ? `Active / Next Target Task #${nextTask.id}: "${nextTask.title}"\nAcceptance Criteria: ${nextTask.acceptanceCriteria || 'Observable verification of task title'}${anchorsDetail}`
     : 'All planned tasks are completed.';
   return `[IMPLEMENTATION MODE REQUEST] [RESUME INCOMPLETE PLAN]:
 You are in IMPLEMENT mode executing the active task plan.
@@ -448,11 +454,12 @@ ${taskDetail}
 
 Implementation Protocols:
 1. Research blast radius with analyze_impact or codegraph_explore before modifying code.
-2. Update task state to IN_PROGRESS using update_plan_task before applying edits.
-3. Apply surgical minimal changes with edit tools (replace_text, apply_patch, etc.).
-4. Empirically verify changes with tests/build/diagnostics via run_command.
-5. Update task state to COMPLETED using update_plan_task with evidence.
-6. Do NOT claim the plan is finished without calling edit tools, update_plan_task, and verifying.
+2. Update task state to IN_PROGRESS using update_plan_task before applying edits or inspections.
+3. For inspection tasks, execute inspection tools (e.g. read_file) on ALL declared read anchor files before calling update_plan_task(status='COMPLETED').
+4. Apply surgical minimal changes with edit tools (replace_text, apply_patch, etc.).
+5. Empirically verify changes with tests/build/diagnostics via run_command.
+6. Update task state to COMPLETED using update_plan_task with evidence ONLY after tool evidence is observed. Never mark COMPLETED at Step 1 before tool execution.
+7. Do NOT claim the plan is finished without calling edit tools, update_plan_task, and verifying.
 
 User Request:
 ${request}`;

@@ -204,6 +204,16 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
           type: Type.STRING,
           description: 'Concise explanation of the observed result. Annotation only: it is recorded as notes and can never satisfy the completion evidence gate by itself — run a real tool first.',
         },
+        readSet: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional updated list of file paths to inspect for this task.',
+        },
+        writeSet: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional updated list of file paths to mutate for this task.',
+        },
       },
       required: ['id', 'status'],
     },
@@ -224,14 +234,24 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
 
       let updated;
       try {
-        updated = planManager.updateTask(id, status, args.notes || args.evidence);
+        const anchors = (Array.isArray(args.readSet) || Array.isArray(args.writeSet))
+          ? { readSet: args.readSet, writeSet: args.writeSet }
+          : undefined;
+        updated = planManager.updateTask(id, status, args.notes || args.evidence, anchors);
       } catch (error: any) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         let hint = 'Execute a tool matching the task acceptance criteria before marking it complete.';
+        const missingMatch = errorMsg.match(/Missing (?:inspection|mutation|verification) evidence for required anchor file\(s\): \[([^\]]+)\]/);
+        const missingFiles = missingMatch ? missingMatch[1] : '';
+
         if (errorMsg.includes('inspection evidence')) {
-          hint = 'This step requires inspection evidence. Call inspection tools (e.g. read_file, search_codebase_fast, list_files, inspect_symbol) before marking COMPLETED.';
+          hint = missingFiles
+            ? `This step requires inspection evidence for: ${missingFiles}. Call inspection tools (e.g. read_file) on these exact files before marking COMPLETED.`
+            : 'This step requires inspection evidence. Call inspection tools (e.g. read_file, search_codebase_fast, list_files, inspect_symbol) before marking COMPLETED.';
         } else if (errorMsg.includes('mutation evidence')) {
-          hint = 'This step requires code mutation evidence. Call mutation tools (e.g. replace_text, apply_patch, create_file, write_file) before marking COMPLETED.';
+          hint = missingFiles
+            ? `This step requires code mutation evidence for: ${missingFiles}. Call mutation tools (e.g. replace_text, apply_patch, create_file, write_file) on these exact files before marking COMPLETED.`
+            : 'This step requires code mutation evidence. Call mutation tools (e.g. replace_text, apply_patch, create_file, write_file) before marking COMPLETED.';
         } else if (errorMsg.includes('verification evidence')) {
           hint = 'This step requires test/build verification evidence. Call run_command (to run tests or build) or get_diagnostics before marking COMPLETED.';
         }
@@ -240,6 +260,7 @@ export function createUpdatePlanTaskTool(planManager: PlanManager): ToolDefiniti
           errorCode: 'PLAN_TRANSITION_REJECTED',
           retryable: true,
           hint,
+          missingAnchors: missingFiles ? missingFiles.split(',').map((f) => f.trim().replace(/^['"]|['"]$/g, '')) : undefined,
           activeTask: planManager.getActiveTask(),
         };
       }

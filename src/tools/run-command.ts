@@ -47,7 +47,9 @@ const ALLOWED_COMMAND_PREFIXES = [
   'tail ',
   'tail',
   'more ',
+  'more',
   'less ',
+  'less',
   'ls',
   'ls ',
   'dir',
@@ -76,6 +78,7 @@ const ALLOWED_COMMAND_PREFIXES = [
   'set ',
   '$env:',
   'jq ',
+  'jq',
   'sed ',
   'awk ',
   // Điều hướng shell & plumbing an toàn trong workspace (cwd đã cố định workspaceRoot)
@@ -350,7 +353,7 @@ export function isAllowedShellCommand(command: string): boolean {
  * backgrounding, or substitution anywhere. Anything else keeps the old
  * approval requirement.
  */
-function isBoundedAllowlistedPipeline(analysis: ReturnType<typeof analyzeShellCommand>): boolean {
+export function isBoundedAllowlistedPipeline(analysis: ReturnType<typeof analyzeShellCommand>): boolean {
   if (analysis.error || analysis.operators.length !== 1 || analysis.operators[0] !== '|') return false;
   if (analysis.segments.length !== 2 || !analysis.segments.every(isAllowedCommand)) return false;
   return analysis.segments.every((segment) => !/[><]|`|\$\(/.test(segment));
@@ -1156,6 +1159,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus)) {
           return {
             command: effectiveCommand,
+            error: 'Docker isolation is unavailable; this command is not classified as read-only, so it requires an isolated execution environment and will not silently fall back to the host.',
+            errorCode: 'ISOLATED_SANDBOX_REQUIRED',
             message: 'Docker isolation is unavailable; this command is not classified as read-only, so it requires an isolated execution environment and will not silently fall back to the host.',
             preflightCode: 'ISOLATED_SANDBOX_REQUIRED',
             suggestion: 'The command itself was not judged dangerous. Restore Docker, or explicitly retry with execution_target: "host" (host policy, the allowlist, and approval still apply).',
@@ -1170,10 +1175,20 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway
       const blockedPushToMain = isBlockedGitPushToMain(effectiveCommand);
 
-      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, hoặc chứa phân đoạn ngoài allowlist
+      // Bounded allowlisted pipelines (e.g. `npm test | head -n 20`, `git log --oneline | head -n 5`)
+      // skip interactive approval and are not rejected as complex grouping.
+      const isBoundedPipeline = isBoundedAllowlistedPipeline(shellAnalysis);
+      const isComplex = Boolean(shellAnalysis.complex && !isBoundedPipeline);
+
+      const SAFE_CHAIN_OPERATORS = new Set(['&&', '||', ';']);
+      const hasDisallowedOperators = isBoundedPipeline
+        ? false
+        : shellAnalysis.operators.some((operator) => !SAFE_CHAIN_OPERATORS.has(operator));
+
+      // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, chứa toán tử không an toàn, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
-        || shellAnalysis.complex
-        || shellAnalysis.operators.some((operator) => operator !== '&&')
+        || isComplex
+        || hasDisallowedOperators
         || blockedPushToMain
         || !shellAnalysis.segments.every(isAllowedCommand);
 
@@ -1196,7 +1211,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         // else: no approval channel — fall through to the single denial below.
       }
 
-      if (shellAnalysis.error || (shellAnalysis.complex && !hasExplicitPermission)) {
+      if (shellAnalysis.error || (isComplex && !hasExplicitPermission)) {
         return {
           command: rawCommand,
           error: shellAnalysis.error || 'Complex shell grouping/substitution requires explicit permission.',
