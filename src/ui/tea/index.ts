@@ -7,7 +7,7 @@ import { createRootModel } from './models/root-model.js';
 import { KernelTEAAdapter } from './kernel-bridge.js';
 import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
-import type { Cmd, Completion, Mode, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
+import type { Cmd, Completion, GrillOption, Mode, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
 export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
 export interface TeaKernel { ctx: { events: KernelEventBus }; cancelCurrentTask?(): void }
@@ -24,6 +24,7 @@ export class TeaTerminal extends EventEmitter {
   private closed = false;
   private pending?: (text: string) => void;
   private questionResolver?: (text: string | undefined) => void;
+  private grillResolver?: (text: string | undefined) => void;
   private queued: string[] = [];
   private restoreOutput?: () => void;
   constructor(private readonly kernel: TeaKernel, private readonly options: InteractiveOptions) {
@@ -60,10 +61,10 @@ export class TeaTerminal extends EventEmitter {
   question(prompt: string, signal?: AbortSignal): Promise<string> {
     return this.ask(prompt, signal).then(value => value ?? 'n');
   }
-  ask(prompt: string, signal?: AbortSignal, permission?: PermissionCard): Promise<string | undefined> {
+  ask(prompt: string, signal?: AbortSignal, permission?: PermissionCard, sessionId?: string): Promise<string | undefined> {
     if (this.closed || signal?.aborted) return Promise.resolve(undefined);
     if (this.questionResolver) throw new Error('A terminal question is already active');
-    this.program.send({ type: 'question', prompt: stripTerminalControls(prompt), active: true, permission });
+    this.program.send({ type: 'question', prompt: stripTerminalControls(prompt), active: true, permission, sessionId });
     return new Promise(resolve => {
       const cancel = () => this.answer(undefined);
       this.questionResolver = value => { signal?.removeEventListener('abort', cancel); this.program.send({ type: 'question', prompt: '', active: false }); resolve(value); };
@@ -71,6 +72,48 @@ export class TeaTerminal extends EventEmitter {
     });
   }
   dismissQuestion(): void { this.answer(undefined); }
+  /** Mở grill modal đè lên input; resolve với label được chọn hoặc undefined khi hủy. */
+  openGrill(question: string, options: GrillOption[] = [], sessionId?: string): void {
+    if (this.closed) return;
+    this.program.send({ type: 'grill', open: true, question, options, loading: options.length === 0, sessionId });
+  }
+  /** Mở session tabs modal ngay trên viewport để chuyển/quản lý nhiều session song song. */
+  openSessions(): void {
+    if (this.closed) return;
+    this.program.send({ type: 'sessions', open: true });
+  }
+  /** Nạp lịch sử session cũ vào tab cache + viewport (nếu đang xem đúng tab đó). */
+  setSessionTranscript(sessionId: string, entries: TranscriptEntry[]): void {
+    if (this.closed) return;
+    this.program.send({ type: 'session-transcript', sessionId, entries });
+  }
+  /** Outer (slash) đã switch kernel: swap viewport/tab theo, không phát Cmd. */
+  adoptSession(sessionId: string): void {
+    if (this.closed) return;
+    this.program.send({ type: 'sessions-adopt', activeId: sessionId });
+  }
+  dismissSessions(): void {
+    if (this.closed) return;
+    this.program.send({ type: 'sessions', open: false });
+  }
+  setGrillOptions(question: string, options: GrillOption[], sessionId?: string): void {
+    if (this.closed) return;
+    this.program.send({ type: 'grill', open: true, question, options, loading: false, sessionId });
+  }
+  grillChoose(question: string, options: GrillOption[] = [], sessionId?: string): Promise<string | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
+    if (this.grillResolver) throw new Error('A grill modal is already active');
+    this.openGrill(question, options, sessionId);
+    return new Promise((resolve) => { this.grillResolver = resolve; });
+  }
+  dismissGrill(): void { this.resolveGrill(undefined); }
+  private resolveGrill(value: string | undefined): void {
+    const resolve = this.grillResolver; this.grillResolver = undefined;
+    if (resolve) {
+      this.program.send({ type: 'grill', open: false });
+      resolve(value);
+    }
+  }
   private answer(value: string | undefined): void { const resolve = this.questionResolver; this.questionResolver = undefined; resolve?.(value); }
   private submit(text: string): void {
     if (this.pending) { const resolve = this.pending; this.pending = undefined; resolve(text); }
@@ -82,6 +125,13 @@ export class TeaTerminal extends EventEmitter {
       case 'copy': await copyToClipboard(cmd.text); this.program.send({ type: 'notice', text: 'Copied selection to clipboard' }); break;
       case 'submit': this.submit(cmd.text); break;
       case 'answer': this.answer(cmd.text === '\x03' ? undefined : cmd.text); break;
+      case 'grill-pick': this.resolveGrill(cmd.text); break;
+      case 'grill-cancel': this.resolveGrill(undefined); break;
+      case 'session-switch': this.submit(`/sessions open ${cmd.sessionId}`); break;
+      // Đồng bộ với /new-session: kernel tạo đúng id optimistic + episodic epilogue.
+      case 'session-new': this.submit(cmd.sessionId ? `/new-session ${cmd.sessionId}` : '/new-session'); break;
+      case 'session-close': this.program.send({ type: 'notice', text: `Closed tab ${cmd.sessionId} (persisted session kept)` }); break;
+      case 'session-delete': this.submit(`/sessions delete ${cmd.sessionId}`); break;
       case 'abort': (this.options.onAbort || (() => this.kernel.cancelCurrentTask?.()))(); break;
       case 'quit': this.options.onQuit?.(); this.close(); break;
       case 'compact': if (this.options.onCompact) await this.options.onCompact(); else this.submit('/context compact'); break;
@@ -104,7 +154,7 @@ export class TeaTerminal extends EventEmitter {
   }
   close(): void {
     if (this.closed) return;
-    this.closed = true; this.answer(undefined);
+    this.closed = true; this.answer(undefined); this.resolveGrill(undefined);
     this.restoreOutput?.(); this.restoreOutput = undefined;
     this.program.stop();
     this.pending?.('/exit'); this.pending = undefined; this.queued = []; this.emit('close');

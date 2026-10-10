@@ -1,6 +1,11 @@
 import { isVerificationCommand } from './completion-evidence.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { hasObservedMutation, toolResultFailed } from './completion-observations.js';
+import {
+  deterministicBlockCode,
+  deterministicBlockFingerprint,
+  deterministicRemediation,
+} from '../tools/deterministic-failure-dedup.js';
 
 export interface ToolProgressObservation {
   toolName: string;
@@ -70,17 +75,29 @@ export class LoopProgressGuard {
   private readonly seen = new Map<string, SeenObservation>();
   private readonly callHistory: Array<{ toolName: string; callFingerprint: string }> = [];
   private readonly fileMutationHistory: Array<{ file: string; toolName: string; timestamp: number; fingerprint?: string }> = [];
+  /** Đếm lặp cho deterministic blocks (được guard dù là failure). */
+  private readonly deterministicBlocks = new Map<string, number>();
 
   reset(): void {
     this.seen.clear();
     this.callHistory.length = 0;
     this.fileMutationHistory.length = 0;
+    this.deterministicBlocks.clear();
   }
 
   observe(observation: ToolProgressObservation): ToolProgressDecision {
     const { toolName, args, result } = observation;
-    const isFailure = toolResultFailed(result);
 
+    // Deterministic infra/policy blocks (ISOLATED_SANDBOX_REQUIRED, ...): retry
+    // y hệt trong cùng turn mà state không đổi là vô ích → guard riêng với
+    // remediation cụ thể. Check trước isFailure vì blocked_preflight được tính
+    // là non-failing theo thiết kế (command-outcome.ts) nhưng vẫn lặp vô ích.
+    const blockCode = deterministicBlockCode(result);
+    if (blockCode) {
+      return this.recordDeterministicBlock(toolName, args, blockCode);
+    }
+
+    const isFailure = toolResultFailed(result);
     if (isFailure) {
       return { repetitionCount: 0, shouldStop: false };
     }
@@ -240,6 +257,23 @@ export class LoopProgressGuard {
       }
     }
     return { repetitionCount: 0, shouldStop: false };
+  }
+
+  private recordDeterministicBlock(
+    toolName: string,
+    args: Record<string, any>,
+    errorCode: string,
+  ): ToolProgressDecision {
+    const fingerprint = deterministicBlockFingerprint(toolName, args, errorCode);
+    const repetitionCount = (this.deterministicBlocks.get(fingerprint) || 0) + 1;
+    this.deterministicBlocks.set(fingerprint, repetitionCount);
+    if (repetitionCount < 2) return { repetitionCount, shouldStop: false };
+
+    const message = repetitionCount === 2
+      ? `[SYSTEM LOOP GUARD]: The identical ${toolName} call was blocked deterministically (${errorCode}) twice with no state change. ${deterministicRemediation(toolName, errorCode)}`
+      : `[SYSTEM LOOP GUARD]: The identical ${toolName} call was blocked deterministically (${errorCode}) ${repetitionCount} times without progress. Change strategy now; repeated failure to change strategy will end the turn with an explicit blocker report.`;
+
+    return { repetitionCount, message, shouldStop: repetitionCount >= 3 };
   }
 
   private recordObservation(

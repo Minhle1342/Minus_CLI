@@ -106,6 +106,7 @@ export interface SlashCommandSuggestion extends SlashCommandDefinition {
 export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/compose', usage: '/compose <objective>|status|abort|answer <text>', description: 'Spec-driven lifecycle in an isolated worktree', category: 'Planning' },
   { command: '/compose-next', usage: '/compose-next [grill answer]', description: 'Advance Compose by one legal phase', category: 'Planning' },
+  { command: '/grill-me', usage: '/grill-me [question]', description: 'Thống nhất lựa chọn với LLM qua modal gợi ý (TEA overlay)', category: 'Planning', aliases: ['/grill'] },
   { command: '/model', usage: '/model [id|name]', description: 'Select the LLM model', category: 'Model & Routing', aliases: ['/modal'] },
   { command: '/tokens', usage: '/tokens [low|medium|high|max|output|input|thinking|reset] [val]', description: 'Select a preset bundle (low/medium/high/max) or tune tokens', category: 'Model & Routing', aliases: ['/token', '/token-budget'] },
   { command: '/workspace', usage: '/workspace [path]', description: 'Show or switch workspace', category: 'Workspace', aliases: ['/cd'] },
@@ -2153,6 +2154,12 @@ export class CLI {
     const isError = isToolResultFailure(result);
     const duration = durationMs > 0 ? ` ${c.slate}(${durationMs}ms)${c.reset}` : '';
 
+    // Deterministic repeat bị short-circuit: 1 dòng gọn, không lặp error detail.
+    if (result?.deduped === true) {
+      console.log(`  ${c.slate}↩ ${name} deduped (repeated block suppressed)${duration}${c.reset}`);
+      return;
+    }
+
     if (isError) {
       const cleanErr = formatTuiErrorDetail(getToolFailureDetail(result), 120);
       console.log(`  ${c.crimson}✖ ${name} failed${duration}:${c.reset} ${cleanErr}`);
@@ -2244,7 +2251,7 @@ export class CLI {
 
     process.stdout.write(`  ${toolPrefix}${targetStr}${statusBadge}${visibleDuration}${visibleTelemetry}\n`);
 
-    if (isError) {
+    if (isError && (opts.result as any)?.deduped !== true) {
       const cleanErr = formatTuiErrorDetail(getToolFailureDetail(opts.result), 120);
       process.stdout.write(`    ${c.crimson}└─ ${truncateToTerminalWidth(cleanErr, Math.max(1, width - 7))}${c.reset}\n`);
     }

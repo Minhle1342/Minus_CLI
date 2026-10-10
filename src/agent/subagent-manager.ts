@@ -20,6 +20,8 @@ export interface SubagentOptions {
   maxBudgetTokens?: number;
   fileScope?: string[];
   verificationCommand?: string;
+  /** Session cha sở hữu delegation (task nền ghi đúng log cha dù đã switch tab). */
+  parentSessionId?: string;
 }
 
 export interface IsolatedTaskOptions {
@@ -51,11 +53,13 @@ export type SubagentFactory = (
  * the parent session event log, so completion survives process boundaries.
  */
 export class SubagentManager {
-  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session }>();
+  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session; parentSessionId?: string }>();
   private completionListeners = new Map<string, Array<(handle: SubagentHandle) => void>>();
   private counter = 0;
   private boundSession?: Session;
   private boundSessionId?: string;
+  /** Registry session cha đã bind — resolve parent cho task nền sau khi switch. */
+  private parentSessions = new Map<string, Session>();
 
   constructor(
     private readonly agents: AgentRegistry,
@@ -64,6 +68,7 @@ export class SubagentManager {
   ) {}
 
   bindSession(session: Session): void {
+    this.parentSessions.set(session.id, session);
     if (this.boundSessionId === session.id) {
       this.boundSession = session;
       return;
@@ -85,7 +90,7 @@ export class SubagentManager {
         this.recordState(recovered);
       }
 
-      this.handles.set(state.id, { handle: recovered, controller });
+      this.handles.set(state.id, { handle: recovered, controller, parentSessionId: session.id });
       this.agents.register(state.id, `Subagent: ${state.objective.slice(0, 60)}`);
       this.agents.update(state.id, {
         status: this.registryStatus(recovered.status),
@@ -94,9 +99,16 @@ export class SubagentManager {
     }
   }
 
+  /** Drop parent registry entry (session deleted/pruned). Handles giữ parentSessionId để debug. */
+  evictSession(sessionId: string): void {
+    this.parentSessions.delete(sessionId);
+  }
+
   start(objective: string, options: SubagentOptions = {}): SubagentHandle {
     const cleanObjective = objective.trim();
     if (!cleanObjective) throw new Error('Subagent objective must not be empty.');
+    const parentSessionId = options.parentSessionId ?? this.boundSession?.id;
+    if (!parentSessionId) throw new Error('SubagentManager must be bound to a parent session.');
     if (!this.boundSession) throw new Error('SubagentManager must be bound to a parent session.');
 
     const id = `subagent-${Date.now()}-${this.counter++}`;
@@ -109,7 +121,7 @@ export class SubagentManager {
       status: 'running',
       startedAt: new Date().toISOString(),
     };
-    this.handles.set(id, { handle, controller });
+    this.handles.set(id, { handle, controller, parentSessionId });
     this.agents.register(id, `Subagent: ${cleanObjective.slice(0, 60)}`);
     this.agents.update(id, {
       status: 'running',
@@ -208,6 +220,7 @@ export class SubagentManager {
     if (!entry || !this.boundSession || (entry.handle.status !== 'stopped' && entry.handle.status !== 'failed')) {
       return undefined;
     }
+    entry.parentSessionId ??= options.parentSessionId ?? this.boundSession.id;
 
     const session = new Session(`session-${id}-resume-${Date.now()}`);
     const controller = new AbortController();
@@ -438,8 +451,12 @@ export class SubagentManager {
   }
 
   private recordState(handle: SubagentHandle): void {
-    if (!this.boundSession) return;
-    this.boundSession.append('agent/delegation', { delegation: { ...handle } });
-    void this.persistSession?.(this.boundSession);
+    // Ghi vào log của session CHA sở hữu delegation — không phải session đang bind
+    // (task nền hoàn thành sau khi user đã switch tab).
+    const parentId = this.handles.get(handle.id)?.parentSessionId;
+    const parent = (parentId ? this.parentSessions.get(parentId) : undefined) ?? this.boundSession;
+    if (!parent) return;
+    parent.append('agent/delegation', { delegation: { ...handle } });
+    void this.persistSession?.(parent);
   }
 }

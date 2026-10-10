@@ -516,22 +516,25 @@ export class ProjectMemoryManager {
       goalId?: string;
       tags?: string[];
       expiresAt?: string;
+      /** Session sở hữu insight (task nền truyền tường minh để không ghi nhầm sang session đang xem). */
+      session?: Session;
     } = {},
   ): Promise<MemoryRecord> {
     const scope = options.scope || 'project';
-    if (scope !== 'project' && !this.session) {
+    const session = options.session ?? this.session;
+    if (scope !== 'project' && !session) {
       throw new Error(`Cannot save ${scope}-scoped memory without a bound session.`);
     }
 
     const now = new Date().toISOString();
     const existingRecords = scope === 'project'
       ? this.memoryData.learnedInsights
-      : (this.session?.getMemoryRecords() || []);
+      : (session?.getMemoryRecords() || []);
     const sameKeyRecords = existingRecords.filter((item) => item.key === key);
     const existing = [...sameKeyRecords].reverse().find((item) => this.normalizeInsight(item).trustStatus === 'active')
       || sameKeyRecords.at(-1);
     const source = options.source || 'manual';
-    const latestObservedResult = this.session?.getEvents()
+    const latestObservedResult = session?.getEvents()
       .filter((event) => event.type === 'tool/result')
       .at(-1);
     if (options.confidence !== undefined && (!Number.isFinite(options.confidence) || options.confidence < 0 || options.confidence > 1)) {
@@ -566,7 +569,7 @@ export class ProjectMemoryManager {
       trustStatus,
       createdAt: trustStatus === 'contested' ? now : existing?.createdAt || now,
       updatedAt: now,
-      sessionId: scope === 'project' ? undefined : this.session?.id,
+      sessionId: scope === 'project' ? undefined : session?.id,
       goalId: options.goalId,
       tags: options.tags,
       sourceEventSeq: latestObservedResult?.seq,
@@ -620,7 +623,7 @@ export class ProjectMemoryManager {
         tags: record.tags,
       });
     } else {
-      this.session!.addMemoryRecord(record);
+      session!.addMemoryRecord(record);
     }
 
     return record;

@@ -12,8 +12,8 @@ export function statuslineView(model: RootModel): string {
   const detail = isCompactionActive ? formatCompactionStatus(status.compaction!) : status.retry || (status.notice === 'Stopping…' ? '' : status.notice);
   // P0: leader is always discoverable — idle shows `Ctrl+X ?`, active lists keys incl. `? help`.
   const keys = model.leaderUntil
-    ? 'Ctrl+X: C compact · E editor · Q quit · B sidebar · D diff · ? help'
-    : 'Tab mode · Ctrl+P commands · Ctrl+X ? leader';
+    ? 'Ctrl+X: C compact · E editor · Q quit · B sidebar · D diff · S sessions · ? help'
+    : 'Tab mode · Ctrl+P commands · Ctrl+T sessions · Ctrl+X ? leader';
   // P1: unpinned transcript surfaces a scroll-back hint instead of silently hiding new output.
   const scrollHint = model.viewport.offset > 0 ? `↑ ${model.viewport.offset} new · PgDn to end` : '';
   const tail = scrollHint ? (detail ? `${scrollHint} · ${detail}` : scrollHint) : (detail || keys);

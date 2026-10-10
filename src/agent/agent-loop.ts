@@ -1531,7 +1531,7 @@ export class AgentLoop {
         });
       }
 
-      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase);
+      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase, { sessionId: session.id });
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
         workspaceDir: this._workspace.rootDir,
@@ -2678,7 +2678,7 @@ export class AgentLoop {
         allowedFunctionNames: visibleToolNames,
         ...(readySubmission ? { functionCallingMode: 'ANY' as const } : {}),
         onRetry: (retryPayload: any) => {
-          this.kernel?.ctx.events.emit('model:retry', retryPayload);
+          this.kernel?.ctx.events.emit('model:retry', retryPayload, { sessionId: session.id });
         },
       };
       const requestStartedAt = Date.now();
@@ -2688,6 +2688,7 @@ export class AgentLoop {
         turn,
         step,
         startedAt: requestStartedAt,
+        sessionId: session.id,
       });
 
       // PASTE: Inter-Step Pattern Prediction
@@ -2732,14 +2733,14 @@ export class AgentLoop {
         if (typeof this.llm.generateStream === 'function') {
           response = await this.llm.generateStream(session, activeToolDeclarations, {
             onRetry: (retryPayload: any) => {
-              this.kernel?.ctx.events.emit('model:retry', retryPayload);
+              this.kernel?.ctx.events.emit('model:retry', retryPayload, { sessionId: session.id });
             },
             onThoughtToken: (token: string) => {
               if (firstTokenAt === undefined) {
-                this.kernel?.ctx.events.emit('model:retry', null);
+                this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
               }
               firstTokenAt ??= Date.now();
-              this.kernel?.ctx.events.emit('model:thought', token);
+              this.kernel?.ctx.events.emit('model:thought', token, { sessionId: session.id });
               accumulatedThought += token;
               thoughtTokenCount++;
               if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
@@ -2765,10 +2766,10 @@ export class AgentLoop {
             },
             onContentToken: (token: string) => {
               if (firstTokenAt === undefined) {
-                this.kernel?.ctx.events.emit('model:retry', null);
+                this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
               }
               firstTokenAt ??= Date.now();
-              this.kernel?.ctx.events.emit('model:token', token);
+              this.kernel?.ctx.events.emit('model:token', token, { sessionId: session.id });
             },
             onToolCallEarly: (earlyCall: any) => {
               if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
@@ -2793,12 +2794,13 @@ export class AgentLoop {
           response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
         }
       } finally {
-        this.kernel?.ctx.events.emit('model:retry', null);
+        this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
         this.kernel?.ctx.events.emit('model:thinking:end', {
           agentId: this.agentId,
           turn,
           step,
           endedAt: Date.now(),
+          sessionId: session.id,
         });
       }
       this.setCircuitBreakerRetries(session.id, 0);
@@ -2957,7 +2959,7 @@ export class AgentLoop {
         // aggregate only for non-streaming providers to avoid duplicating the
         // reasoning trace in reactive UIs.
         if (typeof this.llm.generateStream !== 'function') {
-          this.kernel?.ctx.events.emit('model:thought', response.reasoningContent);
+          this.kernel?.ctx.events.emit('model:thought', response.reasoningContent, { sessionId: session.id });
         }
 
         // Wink-Style Specification Drift & Goal Substitution Nudge
@@ -3010,7 +3012,7 @@ export class AgentLoop {
             ...hookContext,
             reason: continuationReason,
           });
-          this.kernel?.ctx.events.emit('step:after', step);
+          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
           continue;
         }
 
@@ -3167,7 +3169,7 @@ export class AgentLoop {
                   args: scheduled.args,
                   thoughtSignature: partitionItem?.responsePart?.thoughtSignature,
                 });
-                this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args);
+                this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args, { sessionId: session.id });
                 // Mirror the sequential path below: in compact mode the completion
                 // one-liner (renderCompactOneLiner) already shows each tool, so
                 // emitting the verbose call line here would render every
@@ -3277,7 +3279,7 @@ export class AgentLoop {
                 'aborted-before-dispatch',
               );
               CLI.renderToolResult(pendingToolName, 0, abortedResult);
-              this.kernel?.ctx.events.emit('tool:error', pendingToolName, abortedResult);
+              this.kernel?.ctx.events.emit('tool:error', pendingToolName, abortedResult, { sessionId: session.id });
             }
             await this.persistSession(session);
             toolBatchCancelled = true;
@@ -3311,7 +3313,7 @@ export class AgentLoop {
             };
             session.addToolResultWithId(toolName, invalidResult, toolCallId, 'invalid-tool-call');
             if (!deferReadPersistence) await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, invalidResult);
+            this.kernel?.ctx.events.emit('tool:error', toolName, invalidResult, { sessionId: session.id });
             continue;
           }
 
@@ -3327,7 +3329,7 @@ export class AgentLoop {
             };
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'phase-transition-requires-fresh-turn');
             await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3347,7 +3349,7 @@ export class AgentLoop {
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
             await this.persistSession(session);
             CLI.renderToolResult(toolName, 0, blockedResult);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3363,7 +3365,7 @@ export class AgentLoop {
               error: domainBlock?.message || phaseEffect.reason, retryable: true };
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'policy-effect-blocked');
             await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult);
+            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3394,7 +3396,7 @@ export class AgentLoop {
           if (!sideEffect && isMutationTool(toolName)) sideEffect = { reversible: true, checkpoint: true };
           if (readySubmission) sideEffect = undefined;
           const effect = sideEffect
-            ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible)
+            ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible, session.id)
             : undefined;
           if (effect) await this.persistSession(session);
 
@@ -3405,13 +3407,13 @@ export class AgentLoop {
             }
             if (turnMutationCheckpointId && mutationPaths.length) await this.checkpointManager.captureFiles(turnMutationCheckpointId, mutationPaths);
             const checkpoint = mutationPaths.length ? await this.checkpointManager.createCheckpoint(`Tool ${toolName}`, { files: mutationPaths }) : undefined;
-            this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id);
+            this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id, session.id);
             await this.persistSession(session);
           }
 
           const preexecutedReadResult = preexecutedReadResults.get(callIndex);
           if (!preexecutedReadResult) {
-            this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs);
+            this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs, { sessionId: session.id });
             if (!this._collapsePreferences.compactSteps) {
               CLI.renderToolCall(toolName, toolArgs);
             } else {
@@ -3780,7 +3782,11 @@ export class AgentLoop {
           }
 
           CLI.stopToolDotSpinner();
-          if (this._collapsePreferences.compactSteps) {
+          if ((executionResult.result as any)?.deduped === true) {
+            // Option 2: deterministic repeat bị short-circuit — chỉ render 1 dòng
+            // gọn thay vì lặp lại full FAIL block.
+            CLI.renderCompactStepLine(toolName, toolArgs, executionResult.durationMs, executionResult.result);
+          } else if (this._collapsePreferences.compactSteps) {
             CLI.renderCompactOneLiner({
               step,
               maxSteps: effectiveMaxSteps,
@@ -4136,7 +4142,7 @@ export class AgentLoop {
               // Lược bỏ edge case lặp: cùng fingerprint (defect+location) thì không render lại khối RCA
               CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
             }
-            this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result);
+            this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result, { sessionId: session.id });
           } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
             this.reflectionEngine.reset();
             if (isVerificationCommand(commandForAttribution)) {
@@ -4461,7 +4467,7 @@ export class AgentLoop {
           }
           if (effect) {
             const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
-            this.effectLedger.commit(effect.id, outcome);
+            this.effectLedger.commit(effect.id, outcome, 'tool-result-recorded', session.id);
           }
           if (!deferReadPersistence || partitionEndIndex === callIndex) {
             await this.persistSession(session);
@@ -4521,7 +4527,7 @@ export class AgentLoop {
         // The divider is structural navigation, not step detail: keep it visible
         // in compact mode so consecutive steps remain scannable.
         CLI.renderStepFooter();
-        this.kernel?.ctx.events.emit('step:after', step);
+        this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
 
         if (strategyChangeRequired) {
           CLI.renderReflectionAlert(
@@ -4564,7 +4570,7 @@ export class AgentLoop {
           const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
           CLI.renderModelAction('final_answer');
           await CLI.renderFinalAnswer(finalAnswer);
-          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
+          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer, { sessionId: session.id });
           session.addModelMessage({ text: finalAnswer });
           await this.persistSession(session);
           if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
@@ -4651,7 +4657,7 @@ export class AgentLoop {
             ...hookContext,
             reason: 'continuation-requested',
           });
-          this.kernel?.ctx.events.emit('step:after', step);
+          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
           continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
         }
 
@@ -4663,7 +4669,7 @@ export class AgentLoop {
           session.append('step/end', { turn, step, reason: 'missing-final-answer' });
           await this.persistSession(session);
           await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
-          this.kernel?.ctx.events.emit('step:after', step);
+          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
           this.goalManager.disarm();
           return message;
@@ -4703,7 +4709,7 @@ export class AgentLoop {
           ...hookContext,
           reason: planReason,
         });
-        this.kernel?.ctx.events.emit('step:after', step);
+        this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
         if (canRetryPlan) continue;
 
         const planAllowsReconciliation = Boolean(
@@ -4905,7 +4911,7 @@ export class AgentLoop {
             ...hookContext,
             reason: incompleteFinalReason,
           });
-          this.kernel?.ctx.events.emit('step:after', step);
+          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
           if (canRetryIncompleteFinal) continue;
 
           const incompleteFinalMessage = `Agent stopped: completion remained unresolved after ${consecutiveIncompleteFinals} attempts (${finalAnswerDecision.reason || 'unknown'}).`;
@@ -4941,7 +4947,7 @@ export class AgentLoop {
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
       await CLI.renderFinalAnswer(finalAnswer);
-      this.kernel?.ctx.events.emit('model:final_answer', finalAnswer);
+      this.kernel?.ctx.events.emit('model:final_answer', finalAnswer, { sessionId: session.id });
 
       // Ghi nhận câu trả lời cuối cùng vào Session
       session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
@@ -5113,6 +5119,16 @@ export class AgentLoop {
     for (const input of session.getPendingInputs()) {
       this.inbox.restore(session.id, input);
     }
+  }
+
+  /** Dọn per-session state khỏi managers (session bị xóa/prune). Không đụng session đang active. */
+  evictSessionState(sessionId: string): void {
+    if (sessionId === this.activeSession?.id) return;
+    this.planManager.evictSession(sessionId);
+    this.goalManager.evictSession(sessionId);
+    this.effectLedger.evictSession(sessionId);
+    this.subagentManager.evictSession(sessionId);
+    this.toolRunner.evictSession(sessionId);
   }
 
   /**

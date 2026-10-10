@@ -1,5 +1,8 @@
 ﻿import type { DiffViewerModel } from '../types.js';
 import { color, fit, tokyoNight, wrap } from '../styles/theme.js';
+export function createDiffViewer(): DiffViewerModel {
+  return { visible: false, text: '', offset: 0, split: false, collapsed: [], hunk: 0 };
+}
 export function diffView(model: DiffViewerModel, width: number, height: number): string[] {
   let hunk = -1;
   const lines = model.text.split('\n').filter(line => { if (line.startsWith('@@')) { hunk++; return true; } return hunk < 0 || !model.collapsed.includes(hunk); });

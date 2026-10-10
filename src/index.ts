@@ -4,6 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { startInteractiveTui, runHeadlessCli, readHeadlessPrompt, parseTeaCommandLine, plainTerminalOutput, type TeaTerminal } from './ui/tea/index.js';
+import { sessionHistoryToTranscript } from './ui/tea/models/viewport-model.js';
 import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import dotenv from 'dotenv';
@@ -60,6 +61,7 @@ import {
   normalizePresetTier,
 } from './llm/token-config.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
+import { suggestGrillOptions } from './agent/grill-suggest.js';
 import type { OcrReviewService } from './review/open-code-review.js';
 import { checkWorkspaceChanges, findCliRoot, updateCli } from './tools/cli-updater.js';
 
@@ -870,7 +872,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         riskLevel: request.riskLevel,
         category: request.category,
         suggestedTool: request.details?.misuse?.tool,
-      });
+      }, activeSession.id);
       if (answer === undefined) return 'reject';
       const normalized = answer.trim().toLowerCase();
       if (['y', 'yes'].includes(normalized)) return 'approve';
@@ -1002,9 +1004,15 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
   }
 
   try {
+    let hydratedInitialTranscript = false;
     while (true) {
       const namedSessions = await new SessionNames(sessionPersistence).list();
-      tui.setMetadata({ sessions: namedSessions.map(session => session.name), workspace: workspace.rootDir, model: modelName, session: namedSessions.find(session => session.id === activeSession.id)?.name || activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 });
+      tui.setMetadata({ sessions: namedSessions.map(session => session.name), sessionIds: namedSessions.map(session => session.id), workspace: workspace.rootDir, model: modelName, session: namedSessions.find(session => session.id === activeSession.id)?.name || activeSession.id, activeSessionId: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 });
+      if (!hydratedInitialTranscript) {
+        hydratedInitialTranscript = true;
+        // Nạp lịch sử session đang active vào viewport ngay từ đầu (kẻo trống dù có nội dung cũ).
+        try { tui.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory())); } catch { /* không chặn vòng lặp */ }
+      }
       const userPrompt = await tui.readPrompt();
       const trimmed = userPrompt.trim();
 
@@ -1046,6 +1054,50 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           }
         } catch (error: any) {
           console.error(`\n${c.red}Compose: ${error.message}${c.reset}\n`);
+        }
+        continue;
+      }
+
+      // Slash /grill-me (alias /grill): thống nhất lựa chọn user ↔ LLM qua modal overlay đè lên input TEA.
+      if (trimmed === '/grill-me' || trimmed.startsWith('/grill-me ') || trimmed === '/grill' || trimmed.startsWith('/grill ')) {
+        try {
+          const rawArgs = trimmed.startsWith('/grill-me') ? trimmed.slice('/grill-me'.length).trim() : trimmed.slice('/grill'.length).trim();
+          const composeState = kernel.ctx.compose?.getState?.();
+          const grillQ = (composeState && (kernel.ctx.compose as any).grill?.nextQuestion?.(composeState.grillQnA)?.question) || composeState?.objective || '';
+          const question = rawArgs || grillQ || 'Bạn muốn quyết định điều gì tiếp theo?';
+          const llm = (kernel.ctx as any).llm || (agentLoop as any).llm;
+          // Mở modal ở trạng thái loading (đè lên input), fetch LLM song song rồi đổ options vào.
+          const pickPromise = tui.grillChoose(question, [], activeSession?.id);
+          const recentTranscript = activeSession ? activeSession.getHistory().slice(-4).map((msg: any) =>
+            (msg.parts || []).map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n').slice(0, 500)) : [];
+          const { options } = await suggestGrillOptions(llm, question, {
+            composeQuestion: grillQ || undefined,
+            composePhase: composeState?.phase,
+            recentTranscript,
+          });
+          tui.setGrillOptions(question, options, activeSession?.id);
+          const picked = await pickPromise;
+          if (!picked) {
+            tui.program.send({ type: 'notice', text: 'Grill cancelled — giữ nguyên lựa chọn của bạn.' });
+            continue;
+          }
+          // Thống nhất lựa chọn: nếu Compose đang GRILL thì ghi nhận grill answer, đồng thời submit như prompt thường.
+          try {
+            if (kernel.ctx.compose?.isActive?.()) {
+              const st = kernel.ctx.compose.getState();
+              if (st?.phase === 'GRILL') await kernel.ctx.compose.answerGrill(picked);
+            }
+          } catch (grillErr: any) {
+            console.error(`\n${c.red}Grill answer: ${grillErr.message}${c.reset}\n`);
+          }
+          sessionCount++;
+          await runWithCancellation(async (signal) => {
+            await agentLoop.submit(activeSession, `[grill-me] Câu hỏi: ${question}\nLựa chọn đã thống nhất với LLM: ${picked}`, 'human', { signal });
+            checkAndAutoCompleteGoal();
+          });
+        } catch (error: any) {
+          console.error(`\n${c.red}grill-me: ${error.message}${c.reset}\n`);
+          try { tui.dismissGrill(); } catch {}
         }
         continue;
       }
@@ -1544,6 +1596,12 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         }
 
         if (!selectableSessionIds.includes(selectedSessionId)) {
+          // Cho phép nhập tên hiển thị thay vì id (giống /sessions open).
+          const byName = namedSessions.find(session => session.name === selectedSessionId)
+            || namedSessions.find(session => session.name.toLowerCase() === selectedSessionId.toLowerCase());
+          if (byName && selectableSessionIds.includes(byName.id)) selectedSessionId = byName.id;
+        }
+        if (!selectableSessionIds.includes(selectedSessionId)) {
           console.log(`\n${c.yellow}Session not found:${c.reset} ${selectedSessionId}\n`);
           continue;
         }
@@ -1571,7 +1629,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         agentLoop.bindSession(activeSession);
         saveSession({ activeSessionId: activeSession.id }, workspace.rootDir);
         saveSession({ activeSessionId: activeSession.id });
-        CLI.renderSessionTranscript(activeSession.id, activeSession.getHistory());
+        // Swap viewport/tab theo session vừa resume + hydrate lịch sử (thay cho console dump).
+        tui?.adoptSession(activeSession.id);
+        tui?.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory()));
 
         // 1. Nếu có Compose feature đang active
         if (kernel.ctx.compose && kernel.ctx.compose.isActive()) {
@@ -1784,19 +1844,49 @@ Please focus on executing and verifying this task, and update its status to COMP
               console.log(`\n${c.brightCyan}Session diagnostics:${c.reset}\n${JSON.stringify(inspected.getDiagnostics(), null, 2)}\n`);
             }
           } else if (action === 'open' && targetId) {
-            const loaded = await kernel.ctx.sessions.load(targetId);
+            let loaded = await kernel.ctx.sessions.load(targetId);
+            if (!loaded) {
+              // Người dùng có thể dán tên hiển thị (tab-strip hiện tên, không phải id).
+              const named = await new SessionNames(sessionPersistence).list();
+              const match = named.find(session => session.name === targetId)
+                || named.find(session => session.name.toLowerCase() === targetId.toLowerCase());
+              if (match) loaded = await kernel.ctx.sessions.load(match.id);
+            }
             if (!loaded) {
               console.log(`\n${c.yellow}Session not found:${c.reset} ${targetId}\n`);
             } else {
               activeSession = loaded;
               agentLoop.bindSession(activeSession);
               saveSession({ activeSessionId: activeSession.id });
+              // Outer switch: swap viewport/tab theo + hydrate lịch sử cũ (kẻo trắng).
+              tui?.adoptSession(activeSession.id);
+              tui?.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory()));
               console.log(`\n${c.green}✔ Opened session:${c.reset} ${activeSession.id} (${activeSession.seq} events)\n`);
+            }
+          } else if (action === 'delete' && targetId) {
+            try {
+              const existing = await kernel.ctx.sessions.load(targetId);
+              if (existing && existing.seq > 0) {
+                console.log(`\n${c.yellow}Giữ lại session:${c.reset} ${targetId} (còn ${existing.seq} events) — chỉ ẩn tab, không xóa file.\n`);
+              } else {
+                const removed = await kernel.ctx.sessions.remove(targetId);
+                if (removed) {
+                  agentLoop.evictSessionState(targetId);
+                  kernel.ctx.permissions.evictSessionApprovals(targetId);
+                }
+                console.log(removed
+                  ? `\n${c.green}✔ Đã xóa vĩnh viễn session:${c.reset} ${targetId} (chưa có nội dung)\n`
+                  : `\n${c.gray}Session không tồn tại:${c.reset} ${targetId}\n`);
+              }
+            } catch (err: any) {
+              console.error(`\n${c.red}✖ Không xóa được session:${c.reset}`, err.message);
             }
           } else if (action === 'new') {
             activeSession = await kernel.ctx.sessions.create(targetId);
             agentLoop.bindSession(activeSession);
             saveSession({ activeSessionId: activeSession.id });
+            // Session mới: swap viewport sang tab trắng (idempotent nếu tab đã tạo từ modal).
+            tui?.adoptSession(activeSession.id);
             console.log(`\n${c.green}✔ Created session:${c.reset} ${activeSession.id}\n`);
           } else {
             const ids = await kernel.ctx.sessions.list();
@@ -1810,15 +1900,29 @@ Please focus on executing and verifying this task, and update its status to COMP
         continue;
       }
 
-      if (trimmed === '/new-session' || trimmed === '/reset-session') {
-        const { episodicRecord, newSession } = await agentLoop.resetSessionWithEpisodicEpilogue(activeSession);
-        activeSession = newSession;
-        saveSession({ activeSessionId: activeSession.id });
-        console.log(`\n${c.green}✔ Saved the Episodic Memory summary from the previous session and created a clean new session:${c.reset} ${activeSession.id}`);
-        if (episodicRecord) {
-          console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
+      if (trimmed === '/new-session' || trimmed === '/reset-session' || trimmed.startsWith('/new-session ') || trimmed.startsWith('/reset-session ')) {
+        // Arg tùy chọn: id do session tab modal (+ new) truyền sang để kernel tạo
+        // đúng session đó (đồng bộ 2 đường). Gõ tay không arg vẫn tạo id ngẫu nhiên.
+        const arg = (trimmed.startsWith('/new-session ') ? trimmed.slice('/new-session'.length)
+          : trimmed.startsWith('/reset-session ') ? trimmed.slice('/reset-session'.length) : '')
+          .trim().split(/\s+/).filter(Boolean)[0];
+        const previousId = activeSession.id;
+        try {
+          const { episodicRecord, newSession } = await agentLoop.resetSessionWithEpisodicEpilogue(activeSession, arg || undefined);
+          activeSession = newSession;
+          saveSession({ activeSessionId: activeSession.id });
+          tui?.adoptSession(activeSession.id);
+          console.log(`\n${c.green}✔ Saved the Episodic Memory summary from the previous session and created a clean new session:${c.reset} ${activeSession.id}`);
+          if (episodicRecord) {
+            console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
+          }
+          console.log('');
+        } catch (err: any) {
+          // Kernel tạo thất bại (vd. id đã tồn tại): trả viewport về session cũ,
+          // kẻo tab optimistic mồ côi với pending kẹt.
+          tui?.adoptSession(previousId);
+          console.error(`\n${c.red}✖ Cannot create session:${c.reset}`, err.message);
         }
-        console.log('');
         continue;
       }
 
@@ -1831,6 +1935,9 @@ Please focus on executing and verifying this task, and update its status to COMP
           activeSession = await kernel.ctx.sessions.fork(activeSession, boundarySeq);
           agentLoop.bindSession(activeSession);
           saveSession({ activeSessionId: activeSession.id });
+          // Fork kế thừa lịch sử parent: swap viewport + hydrate để thấy nội dung tiếp nối.
+          tui?.adoptSession(activeSession.id);
+          tui?.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory()));
           console.log(`\n${c.green}✔ Forked session:${c.reset} ${parentId} @ seq ${boundarySeq} → ${activeSession.id}\n`);
         } catch (err: any) {
           console.error(`\n${c.red}✖ Cannot fork session:${c.reset}`, err.message);

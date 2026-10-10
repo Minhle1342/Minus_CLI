@@ -85,6 +85,11 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, d
   if (name === 'submit_solution' && !failed && !denied) {
     return `${heading}\nCâu trả lời đã được gửi.`;
   }
+  // Deterministic repeat bị short-circuit (deduped:true): collapse thành 1 dòng,
+  // không lặp lại full FAIL block — chi tiết xem ở lần block đầu tiên.
+  if ((result as any)?.deduped === true) {
+    return `${heading} · repeated block suppressed (see first occurrence)`;
+  }
 
   const details = visibleValue(result);
   const hasDiff = typeof result?.diff === 'string' || typeof result?.patch === 'string';

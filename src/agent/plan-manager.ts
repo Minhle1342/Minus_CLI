@@ -166,6 +166,19 @@ function normalizeRisk(value: unknown): PlanTaskRisk {
  * The LLM proposes decomposition, while this class owns validation, legal
  * transitions, observed evidence, replay, and the model-facing active context.
  */
+/** Per-session plan snapshot kept while another session is active. */
+interface PlanSessionState {
+  tasks: PlanTask[];
+  activeTurn?: number;
+  goal: string;
+  planRequired: boolean;
+  verificationRequired: boolean;
+  evidenceSeq: number;
+  lastMutationSeq: number;
+}
+function emptyPlanState(): PlanSessionState {
+  return { tasks: [], activeTurn: undefined, goal: '', planRequired: false, verificationRequired: false, evidenceSeq: 0, lastMutationSeq: 0 };
+}
 export class PlanManager {
   private tasks: PlanTask[] = [];
   private session?: Session;
@@ -175,12 +188,61 @@ export class PlanManager {
   private verificationRequired = false;
   private evidenceSeq = 0;
   private lastMutationSeq = 0;
+  /** Per-session state — switch tab không còn mất dirty state, task nền đọc đúng plan của nó khi rebind. */
+  private states = new Map<string, PlanSessionState>();
+  private activeSessionId?: string;
 
   bindSession(session: Session): void {
-    if (this.session === session && this.tasks.length > 0) return;
-
+    if (this.activeSessionId === session.id) {
+      this.session = session;
+      return;
+    }
+    this.stashActive();
+    this.activeSessionId = session.id;
+    const saved = this.states.get(session.id);
+    if (saved) {
+      this.restoreState(saved);
+      this.session = session;
+      return;
+    }
+    // Session chưa từng gặp: reset fields trước khi rehydrate, kẻo sót state
+    // của session cũ khi log trống (log trống thì rehydrate không ghi đè gì).
+    this.restoreState(emptyPlanState());
     this.session = session;
     this.rehydrateFromSession();
+  }
+
+  /** Drop per-session plan state (session deleted/pruned). */
+  evictSession(sessionId: string): void {
+    this.states.delete(sessionId);
+    if (this.activeSessionId === sessionId) {
+      this.activeSessionId = undefined;
+      this.session = undefined;
+      this.restoreState(emptyPlanState());
+    }
+  }
+
+  private stashActive(): void {
+    if (!this.activeSessionId) return;
+    this.states.set(this.activeSessionId, {
+      tasks: this.tasks,
+      activeTurn: this.activeTurn,
+      goal: this.goal,
+      planRequired: this.planRequired,
+      verificationRequired: this.verificationRequired,
+      evidenceSeq: this.evidenceSeq,
+      lastMutationSeq: this.lastMutationSeq,
+    });
+  }
+
+  private restoreState(state: PlanSessionState): void {
+    this.tasks = state.tasks;
+    this.activeTurn = state.activeTurn;
+    this.goal = state.goal;
+    this.planRequired = state.planRequired;
+    this.verificationRequired = state.verificationRequired;
+    this.evidenceSeq = state.evidenceSeq;
+    this.lastMutationSeq = state.lastMutationSeq;
   }
 
   /** Rehydrate plan state from the most recent valid session plan event. */

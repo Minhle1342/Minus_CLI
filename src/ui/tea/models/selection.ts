@@ -49,15 +49,17 @@ export function selectionKey(msg: Msg, model: RootModel, layout: SelectionLayout
     const { x, y } = msg.mouse;
     const pressed = msg.key === 'mouse+press';
     if (!pressed && !selection?.dragging) return [model, []];
+    // Session tab-strip chiếm dòng y=2 (khi height > 4) nên viewport bắt đầu ở y=3.
+    const strip = model.height > 4 ? 1 : 0;
     const target = pressed ? y >= layout.composerTop && y < layout.composerTop + layout.composerHeight ? 'composer'
-      : y >= 2 && y < 2 + layout.bodyHeight && x <= layout.mainWidth && !model.diff.visible ? 'viewport' : undefined : selection!.target;
+      : y >= 2 + strip && y < 2 + strip + layout.bodyHeight && x <= layout.mainWidth && !model.diff.visible ? 'viewport' : undefined : selection!.target;
     if (!target) return [{ ...model, selection: undefined, composer: { ...model.composer, selection: undefined } }, []];
     const sourceLines = target === 'viewport' ? (pressed ? viewportLines(model.viewport, layout.mainWidth) : selection!.sourceLines!) : undefined;
     const lines = sourceLines?.map(line => stripTerminalControls(line));
     const viewportOffset = pressed ? model.viewport.offset : selection!.viewportOffset ?? model.viewport.offset;
     const composerCursor = pressed ? model.composer.cursorOffset : selection!.composerCursor;
     const bottom = Math.max(layout.bodyHeight, (lines?.length || 0) - viewportOffset);
-    const row = Math.max(0, bottom - layout.bodyHeight) + Math.max(0, Math.min(layout.bodyHeight - 1, y - 2));
+    const row = Math.max(0, bottom - layout.bodyHeight) + Math.max(0, Math.min(layout.bodyHeight - 1, y - 2 - strip));
     const head = target === 'composer' ? inputOffset(pressed ? { ...model, selection: undefined } : model, layout, x, y) : lineOffset(lines!, row, x - 1);
     const anchor = pressed ? head : selection!.anchor;
     if (msg.key === 'mouse+release' && head === anchor) return [{ ...model, selection: undefined, composer: { ...model.composer, selection: undefined } }, []];
@@ -112,7 +114,7 @@ export function selectionRows(model: RootModel, rows: string[], layout: Selectio
     const first = Math.max(0, bottom - layout.bodyHeight);
     offset = lines.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
     lines = lines.slice(first, bottom);
-    top = 1;
+    top = 1 + (model.height > 4 ? 1 : 0); // header + session tab-strip
   } else {
     const display = composerDisplay({ ...model.composer, cursorOffset: selection.composerCursor ?? model.composer.cursorOffset });
     start = composerDisplay({ ...model.composer, cursorOffset: start }).cursorOffset + 2;

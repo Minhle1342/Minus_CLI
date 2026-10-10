@@ -12,10 +12,47 @@ export class GoalManager {
   private session?: Session;
   private state?: GoalState;
   private armed = false;
+  /** Per-session goal state — switch tab không mất armed/state, task nền không đọc nhầm goal session khác. */
+  private states = new Map<string, GoalState | undefined>();
+  private armedSessions = new Set<string>();
+  private activeSessionId?: string;
 
   bindSession(session: Session): void {
+    if (this.activeSessionId === session.id) {
+      this.session = session;
+      return;
+    }
+    this.stashActive();
+    this.activeSessionId = session.id;
     this.session = session;
+    if (this.states.has(session.id)) {
+      this.state = this.states.get(session.id);
+      this.armed = this.armedSessions.has(session.id);
+      return;
+    }
+    // Session chưa từng gặp: reset trước rehydrate để log trống không sót state cũ.
+    this.state = undefined;
+    this.armed = false;
     this.rehydrateFromSession();
+  }
+
+  /** Drop per-session goal state (session deleted/pruned). */
+  evictSession(sessionId: string): void {
+    this.states.delete(sessionId);
+    this.armedSessions.delete(sessionId);
+    if (this.activeSessionId === sessionId) {
+      this.activeSessionId = undefined;
+      this.session = undefined;
+      this.state = undefined;
+      this.armed = false;
+    }
+  }
+
+  private stashActive(): void {
+    if (!this.activeSessionId) return;
+    this.states.set(this.activeSessionId, this.state);
+    if (this.armed) this.armedSessions.add(this.activeSessionId);
+    else this.armedSessions.delete(this.activeSessionId);
   }
 
   rehydrateFromSession(): void {

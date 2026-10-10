@@ -33,16 +33,19 @@ import { ComposePlugin } from './plugins/compose-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 
+/** Optional trailing context threading the owning session through content events. */
+export interface SessionEventContext { sessionId?: string }
+
 export interface KernelEvents {
   'kernel:init': () => void;
   'kernel:disposed': () => void;
   'plugin:registered': (pluginName: string) => void;
-  'step:before': (step: number, maxSteps: number, phase?: import('../control/classification-types.js').TaskPhase) => void;
-  'step:after': (step: number) => void;
+  'step:before': (step: number, maxSteps: number, phase?: import('../control/classification-types.js').TaskPhase, ctx?: SessionEventContext) => void;
+  'step:after': (step: number, ctx?: SessionEventContext) => void;
   'router:decision': (decision: import('../agent/reliable-tool-orchestration.js').ReliableToolRouteDecision) => void;
   'gate:exploration_sufficiency': (decision: import('../agent/critic-gate.js').ExplorationSufficiencyDecision) => void;
   'gate:reproduction_advisory': (info: { turn: number; toolName: string; targetFilePath: string; advisory: string }) => void;
-  'tool:before': (toolName: string, args: Record<string, any>) => void;
+  'tool:before': (toolName: string, args: Record<string, any>, ctx?: SessionEventContext) => void;
   'tool:after': (
     toolName: string,
     result: Record<string, any>,
@@ -50,27 +53,29 @@ export interface KernelEvents {
     args: Record<string, any>,
     context?: { sessionId?: string; agentId?: string; turn?: number },
   ) => void;
-  'tool:error': (toolName: string, error: any) => void;
-  'model:thought': (thought: string) => void;
+  'tool:error': (toolName: string, error: any, ctx?: SessionEventContext) => void;
+  'model:thought': (thought: string, ctx?: SessionEventContext) => void;
   'model:thinking:start': (lifecycle: {
     agentId: string;
     turn: number;
     step: number;
     startedAt: number;
+    sessionId?: string;
   }) => void;
   'model:thinking:end': (lifecycle: {
     agentId: string;
     turn: number;
     step: number;
     endedAt: number;
+    sessionId?: string;
   }) => void;
   'model:retry': (payload: {
     attempt: number;
     maxRetries: number;
     delayMs: number;
     message?: string;
-  } | null) => void;
-  'model:token': (token: string) => void;
+  } | null, ctx?: SessionEventContext) => void;
+  'model:token': (token: string, ctx?: SessionEventContext) => void;
   'model:usage': (usage: import('../llm/gemini.js').LLMUsage) => void;
   'model:request_telemetry': (telemetry: {
     turn: number;
@@ -100,7 +105,7 @@ export interface KernelEvents {
     savedMs: number;
     persistenceWrites: number;
   }) => void;
-  'model:final_answer': (answer: string) => void;
+  'model:final_answer': (answer: string, ctx?: SessionEventContext) => void;
   'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string) => void;

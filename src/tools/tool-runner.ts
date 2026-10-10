@@ -12,6 +12,10 @@ import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { READ_TOOL_NAMES, EDIT_TOOL_NAMES } from '../control/tool-descriptor-registry.js';
 import { ToolUseGuardian, classifyToolFailure, type ToolFailureDiagnosis } from './tool-use-guardian.js';
+import {
+  deterministicBlockCode,
+  deterministicCallFingerprint,
+} from './deterministic-failure-dedup.js';
 
 /**
  * Satellite 1: Observation Virtualization / Spill-to-Disk Constants
@@ -154,29 +158,59 @@ export interface ToolExecutionGuard {
 }
 
 export class TurnBudgetTracker {
-  private currentTurn?: number;
-  private count: number = 0;
+  /** Budget tách theo session — turn numbers của 2 session không còn ăn chung. */
+  private buckets = new Map<string, { turn?: number; count: number }>();
 
-  getCallCount(turn?: number): number {
-    if (turn !== undefined && this.currentTurn !== turn) {
-      this.currentTurn = turn;
-      this.count = 0;
+  private bucket(sessionId?: string): { turn?: number; count: number } {
+    const key = sessionId ?? '';
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = { count: 0 };
+      this.buckets.set(key, bucket);
     }
-    return this.count;
+    return bucket;
   }
 
-  increment(turn?: number): number {
-    if (turn !== undefined && this.currentTurn !== turn) {
-      this.currentTurn = turn;
-      this.count = 0;
-    }
-    this.count++;
-    return this.count;
+  /** Drop budget của session đã xóa (chống phình map). */
+  evictSession(sessionId: string): void {
+    this.buckets.delete(sessionId);
   }
 
-  reset(turn?: number): void {
-    this.currentTurn = turn;
-    this.count = 0;
+  getCallCount(turn?: number, sessionId?: string): number {
+    const bucket = this.bucket(sessionId);
+    if (turn !== undefined && bucket.turn !== turn) {
+      bucket.turn = turn;
+      bucket.count = 0;
+    }
+    return bucket.count;
+  }
+
+  increment(turn?: number, sessionId?: string): number {
+    const bucket = this.bucket(sessionId);
+    if (turn !== undefined && bucket.turn !== turn) {
+      bucket.turn = turn;
+      bucket.count = 0;
+    }
+    bucket.count++;
+    return bucket.count;
+  }
+
+  reset(turn?: number, sessionId?: string): void {
+    if (turn === undefined && sessionId === undefined) {
+      this.buckets.clear();
+      return;
+    }
+    if (sessionId === undefined) {
+      for (const bucket of this.buckets.values()) {
+        if (bucket.turn === turn) {
+          bucket.count = 0;
+        }
+      }
+      return;
+    }
+    const bucket = this.bucket(sessionId);
+    bucket.turn = turn;
+    bucket.count = 0;
   }
 }
 
@@ -235,6 +269,12 @@ export class ToolRunner {
   private executionGuard?: ToolExecutionGuard;
   readonly guardian: ToolUseGuardian;
   private readonly budgetTracker: TurnBudgetTracker;
+  /**
+   * Cache deterministic infra/policy blocks theo turn: call giống hệt mà state
+   * không đổi thì trả cached result (deduped:true) thay vì re-execute + render
+   * thêm block ✖ FAIL. Shared qua createScoped để mọi scoped runner cùng thấy.
+   */
+  private deterministicDedup = new Map<string, { errorCode: string; result: Record<string, any>; turn: number | undefined; sessionId?: string }>();
 
   constructor(
     registry: ToolProvider,
@@ -272,6 +312,15 @@ export class ToolRunner {
 
   resetTurnBudget(turn?: number): void {
     this.budgetTracker.reset(turn);
+    this.deterministicDedup.clear();
+  }
+
+  /** Drop per-session budget + dedup state (session deleted/pruned). */
+  evictSession(sessionId: string): void {
+    this.budgetTracker.evictSession(sessionId);
+    for (const [key, entry] of this.deterministicDedup) {
+      if (entry.sessionId === sessionId) this.deterministicDedup.delete(key);
+    }
   }
 
   setExecutionGuard(executionGuard?: ToolExecutionGuard): void {
@@ -298,7 +347,7 @@ export class ToolRunner {
   }
 
   createScoped(provider: ToolProvider): ToolRunner {
-    return new ToolRunner(
+    const scoped = new ToolRunner(
       provider,
       this.workspace,
       this.permissionManager,
@@ -307,6 +356,74 @@ export class ToolRunner {
       this.budgetTracker,
       this.rootRegistry || this.registry,
     );
+    scoped.deterministicDedup = this.deterministicDedup;
+    return scoped;
+  }
+
+  /**
+   * Phạm vi pipeline ảnh hưởng kết quả: cùng args nhưng khác controlMode /
+   * decision / phase / permission thì không phải repeat — không dedup chung.
+   */
+  private dedupScope(context?: ToolExecutionContext): Record<string, unknown> {
+    return {
+      sessionId: context?.sessionId,
+      controlMode: context?.controlMode,
+      decisionId: (context as any)?.decisionId,
+      allowedToolSetHash: (context as any)?.allowedToolSetHash,
+      classificationPhase: (context as any)?.classificationPhase,
+      maxToolCalls: (context as any)?.maxToolCalls,
+      permissionGranted: (context as any)?.permissionGranted,
+    };
+  }
+
+  /**
+   * Short-circuit: call giống hệt đã bị deterministic block trong cùng turn
+   * thì trả cached result + deduped:true (durationMs 0), không re-execute.
+   * Trả undefined khi không có cache hit (đi tiếp pipeline bình thường).
+   */
+  private checkDeterministicDedup(
+    toolName: string,
+    args: Record<string, any>,
+    context?: ToolExecutionContext,
+  ): ToolExecutionResult | undefined {
+    const turn = context?.turn;
+    const sessionId = context?.sessionId;
+    const key = deterministicCallFingerprint(toolName, args, this.dedupScope(context));
+    const entry = this.deterministicDedup.get(key);
+    if (!entry || entry.turn !== turn || entry.sessionId !== sessionId) {
+      if (entry) this.deterministicDedup.delete(key);
+      return undefined;
+    }
+    return {
+      toolName,
+      args,
+      result: {
+        ...entry.result,
+        deduped: true,
+        retryable: false,
+        dedupNote: `Identical call already blocked this turn (${entry.errorCode}); re-execution skipped.`,
+      },
+      durationMs: 0,
+    };
+  }
+
+  /**
+   * Ghi nhận kết quả để dedup lần sau: deterministic block → cache theo turn;
+   * success hoặc lỗi non-deterministic → xóa cache (state có thể đã đổi).
+   */
+  private trackDeterministicResult(
+    toolName: string,
+    args: Record<string, any>,
+    result: Record<string, any>,
+    context?: ToolExecutionContext,
+  ): void {
+    const fingerprint = deterministicCallFingerprint(toolName, args, this.dedupScope(context));
+    const code = deterministicBlockCode(result);
+    if (code) {
+      this.deterministicDedup.set(fingerprint, { errorCode: code, result: { ...result }, turn: context?.turn, sessionId: context?.sessionId });
+    } else {
+      this.deterministicDedup.delete(fingerprint);
+    }
   }
 
   async run(
@@ -332,6 +449,10 @@ export class ToolRunner {
       };
     }
 
+    // Option 2: short-circuit deterministic repeat — trả cached block, không re-execute.
+    const deduped = this.checkDeterministicDedup(toolName, args, context);
+    if (deduped) return deduped;
+
     // Stage 0: 3-Mode Governance (off, shadow, enforce)
     const controlMode = context?.controlMode
       ?? ((context?.allowedToolNames || context?.allowedToolSetHash) ? 'enforce' : 'off');
@@ -340,7 +461,7 @@ export class ToolRunner {
       const names = context.allowedToolNames || [];
       const hashValid = Boolean(context.decisionId && context.allowedToolSetHash && hashAllowedToolSet(names) === context.allowedToolSetHash);
       const isAllowed = isToolAuthorized(toolName, names);
-      const currentCallCount = this.budgetTracker.getCallCount(context.turn);
+      const currentCallCount = this.budgetTracker.getCallCount(context.turn, context.sessionId);
       const isWithinBudget = context.maxToolCalls === undefined || currentCallCount < context.maxToolCalls;
 
       if (!hashValid) {
@@ -373,7 +494,7 @@ export class ToolRunner {
       // P2: shadow observations never consume the execution budget. Only real
       // dispatches (wouldAllow) advance the per-turn call count.
       if (shadowObservation.wouldAllow) {
-        this.budgetTracker.increment(context.turn);
+        this.budgetTracker.increment(context.turn, context.sessionId);
       }
     } else if (controlMode === 'enforce' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
@@ -383,6 +504,7 @@ export class ToolRunner {
         const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
         diagnosis.category = 'AUTHORIZATION_DENIED';
         diagnosis.recoveryAction = 'Re-issue turn decision with valid allowlist hash.';
+        this.trackDeterministicResult(toolName, args, errRes, context);
         return {
           toolName,
           args,
@@ -412,6 +534,7 @@ export class ToolRunner {
         const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
         diagnosis.category = 'AUTHORIZATION_DENIED';
         diagnosis.recoveryAction = recoverySuggestion.trim() || `Select an authorized tool from: ${names.slice(0, 5).join(', ')}`;
+        this.trackDeterministicResult(toolName, args, errRes, context);
         return {
           toolName,
           args,
@@ -420,7 +543,7 @@ export class ToolRunner {
           guardianDiagnosis: diagnosis,
         };
       }
-      const currentCallCount = this.budgetTracker.getCallCount(context.turn);
+      const currentCallCount = this.budgetTracker.getCallCount(context.turn, context.sessionId);
       if (context.maxToolCalls !== undefined && currentCallCount >= context.maxToolCalls) {
         const errorMsg = `Per-turn tool call budget (${context.maxToolCalls}) exhausted for turn ${context.turn ?? 'current'}. Please conclude current turn or provide text response to the user.`;
         const errRes = {
@@ -432,6 +555,7 @@ export class ToolRunner {
         const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
         diagnosis.category = 'BUDGET_EXHAUSTED';
         diagnosis.recoveryAction = 'Conclude current turn or provide text response to the user.';
+        this.trackDeterministicResult(toolName, args, errRes, context);
         return {
           toolName,
           args,
@@ -440,7 +564,7 @@ export class ToolRunner {
           guardianDiagnosis: diagnosis,
         };
       }
-      this.budgetTracker.increment(context.turn);
+      this.budgetTracker.increment(context.turn, context.sessionId);
     }
 
     // Stage 1: Tool Lookup
@@ -452,6 +576,7 @@ export class ToolRunner {
         errorCode: 'UNKNOWN_TOOL',
       };
       const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+      this.trackDeterministicResult(toolName, args, errRes, context);
       return {
         toolName,
         args,
@@ -472,6 +597,7 @@ export class ToolRunner {
         || (isPolicyDenial
           ? classifyToolFailure(toolName, errRes.error, errRes)
           : this.guardian.recordExecution(toolName, errRes, Date.now() - startTime));
+      this.trackDeterministicResult(toolName, args, errRes, context);
       return {
         toolName,
         args,
@@ -489,9 +615,10 @@ export class ToolRunner {
     } catch (error: any) {
       const errRes = { error: error.message, errorCode: 'INVALID_ARGS' };
       const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+      this.trackDeterministicResult(toolName, candidateArgs || {}, errRes, context);
       return {
         toolName,
-        args,
+        args: candidateArgs,
         result: errRes,
         durationMs: Date.now() - startTime,
         guardianDiagnosis: diagnosis,
@@ -507,6 +634,7 @@ export class ToolRunner {
         validationErrors: validation.errors,
       };
       const diagnosis = this.guardian.recordExecution(toolName, errRes, Date.now() - startTime);
+      this.trackDeterministicResult(toolName, executionArgs, errRes, context);
       return {
         toolName,
         args: executionArgs,
@@ -522,10 +650,12 @@ export class ToolRunner {
     if (context?.classificationPhase || readOnlyScope) {
       const effect = checkPhaseToolEffect(tool, executionArgs, readOnlyScope ? 'explore' : context!.classificationPhase!, this.workspace.rootDir);
       if (!effect.allowed) {
+        const blockedRes = { success: false, processStarted: false, errorCode: 'PHASE_TOOL_EFFECT_BLOCKED',
+          error: effect.reason, retryable: true };
+        this.trackDeterministicResult(toolName, executionArgs, blockedRes, context);
         return {
           toolName, args: executionArgs,
-          result: { success: false, processStarted: false, errorCode: 'PHASE_TOOL_EFFECT_BLOCKED',
-            error: effect.reason, retryable: true },
+          result: blockedRes,
           durationMs: Date.now() - startTime,
           shadowObservation,
         };
@@ -553,6 +683,7 @@ export class ToolRunner {
         const diagnosis = classifyToolFailure(toolName, err.message, errRes);
         diagnosis.category = 'SECURITY_VIOLATION';
         diagnosis.recoveryAction = 'Operate strictly within workspace boundaries.';
+        this.trackDeterministicResult(toolName, executionArgs, errRes, context);
         return {
           toolName,
           args: executionArgs,
@@ -575,6 +706,7 @@ export class ToolRunner {
         const diagnosis = classifyToolFailure(toolName, errRes.error, errRes);
         diagnosis.category = 'SECURITY_VIOLATION';
         diagnosis.recoveryAction = 'Do not modify critical system configuration files.';
+        this.trackDeterministicResult(toolName, executionArgs, errRes, context);
         return {
           toolName,
           args: executionArgs,
@@ -589,13 +721,15 @@ export class ToolRunner {
     if (this.executionGuard) {
       const decision = await this.executionGuard.check(toolName, executionArgs, this.workspace, context);
       if (!decision.allow) {
+        const guardRes = {
+          error: decision.reason || 'Tool execution was rejected by the active orchestration policy.',
+          errorCode: decision.errorCode || 'EXECUTION_GUARD_REJECTED',
+        };
+        this.trackDeterministicResult(toolName, executionArgs, guardRes, context);
         return {
           toolName,
           args: executionArgs,
-          result: {
-            error: decision.reason || 'Tool execution was rejected by the active orchestration policy.',
-            errorCode: decision.errorCode || 'EXECUTION_GUARD_REJECTED',
-          },
+          result: guardRes,
           durationMs: Date.now() - startTime,
         };
       }
@@ -826,6 +960,7 @@ export class ToolRunner {
 
     // Record execution in Guardian (unmasks Error-as-200 and updates tool reliability stats)
     const diagnosis = this.guardian.recordExecution(toolName, resultSnapshot, Date.now() - startTime);
+    this.trackDeterministicResult(toolName, executionArgs, resultSnapshot, context);
 
     return {
       toolName,

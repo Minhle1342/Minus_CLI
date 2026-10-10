@@ -54,6 +54,8 @@ export class PermissionManager {
   private sessionApprovedCategories = new Set<string>();
   /** Item 9: per-category command prefixes approved via approve_all_session (run_command only). */
   private sessionApprovedPrefixes = new Map<string, Set<string>>();
+  /** Approve_all_session tách theo session — duyệt ở tab A không lan sang tab B. */
+  private approvalsBySession = new Map<string, { categories: Set<string>; prefixes: Map<string, Set<string>> }>();
   private requestHistory: PermissionRequest[] = [];
   private workspaceRoot?: string;
 
@@ -93,6 +95,34 @@ export class PermissionManager {
   clearSessionApprovals(): void {
     this.sessionApprovedCategories.clear();
     this.sessionApprovedPrefixes.clear();
+    this.approvalsBySession.clear();
+  }
+
+  /** Drop approval của session đã xóa (chống phình map). */
+  evictSessionApprovals(sessionId: string): void {
+    this.approvalsBySession.delete(sessionId);
+  }
+
+  private approvalStore(sessionId: string, create: boolean): { categories: Set<string>; prefixes: Map<string, Set<string>> } | undefined {
+    let entry = this.approvalsBySession.get(sessionId);
+    if (!entry && create) {
+      entry = { categories: new Set(), prefixes: new Map() };
+      this.approvalsBySession.set(sessionId, entry);
+    }
+    return entry;
+  }
+
+  /** Kiểm tra approve_all_session — có sessionId thì chỉ nhìn store của session đó. */
+  private isSessionApproved(request: PermissionRequest, toolName: string, sessionId?: string): boolean {
+    const categories = sessionId
+      ? this.approvalsBySession.get(sessionId)?.categories
+      : this.sessionApprovedCategories;
+    if (!categories?.has(request.category)) return false;
+    if (toolName !== 'run_command') return true;
+    const prefixes = sessionId
+      ? this.approvalsBySession.get(sessionId)?.prefixes
+      : this.sessionApprovedPrefixes;
+    return this.prefixesApproved(request, prefixes);
   }
 
   /** Raw command text behind a run_command permission request. */
@@ -120,11 +150,10 @@ export class PermissionManager {
     }
   }
 
-  /** True when every segment prefix of a run_command was session-approved. */
-  private isSessionPrefixApproved(request: PermissionRequest): boolean {
+  private prefixesApproved(request: PermissionRequest, allowed?: Map<string, Set<string>>): boolean {
     const prefixes = this.commandPrefixesForApproval(this.commandTextForApproval(request));
-    const allowed = this.sessionApprovedPrefixes.get(request.category);
-    return prefixes.length > 0 && !!allowed && prefixes.every((prefix) => allowed.has(prefix));
+    const scoped = allowed?.get(request.category);
+    return prefixes.length > 0 && !!scoped && prefixes.every((prefix) => scoped.has(prefix));
   }
 
   /**
@@ -191,8 +220,8 @@ export class PermissionManager {
     // Vẫn hiển thị Diff View trực quan để người dùng theo dõi thay đổi mã nguồn trong thời gian thực!
     // Item 9: run_command approvals are additionally scoped to the approved
     // command prefixes so one approval cannot blanket-authorize every shell command.
-    const sessionCategoryApproved = this.sessionApprovedCategories.has(request.category)
-      && (toolName !== 'run_command' || this.isSessionPrefixApproved(request));
+    // Approval tách theo sessionId trong context — tab khác không được duyệt ké.
+    const sessionCategoryApproved = this.isSessionApproved(request, toolName, context?.sessionId);
     if (sessionCategoryApproved) {
       if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
         CLI.renderSessionAutoApprovedDiff(request);
@@ -227,12 +256,15 @@ export class PermissionManager {
       }
 
       if (decision === 'approve_all_session') {
-        this.sessionApprovedCategories.add(request.category);
+        const store = context?.sessionId
+          ? this.approvalStore(context.sessionId, true)!
+          : { categories: this.sessionApprovedCategories, prefixes: this.sessionApprovedPrefixes };
+        store.categories.add(request.category);
         if (toolName === 'run_command') {
-          let prefixes = this.sessionApprovedPrefixes.get(request.category);
+          let prefixes = store.prefixes.get(request.category);
           if (!prefixes) {
             prefixes = new Set<string>();
-            this.sessionApprovedPrefixes.set(request.category, prefixes);
+            store.prefixes.set(request.category, prefixes);
           }
           for (const prefix of this.commandPrefixesForApproval(this.commandTextForApproval(request))) {
             prefixes.add(prefix);

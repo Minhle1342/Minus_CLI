@@ -21,6 +21,8 @@ export interface SessionPruneOptions {
   activeSessionId?: string;
   /** Chế độ chạy thử, không thực sự xóa file */
   dryRun?: boolean;
+  /** Callback cho mỗi session bị xóa (để dọn per-session state ở managers). */
+  onEvict?: (sessionId: string) => void;
 }
 
 export interface SessionPruneResult {

@@ -7,85 +7,114 @@ import type { EffectOutcome, EffectState } from '../session/session.js';
  * recovery never mistakes an unobserved effect for a successful one.
  */
 export class EffectLedger {
-  private session?: Session;
-  private counter = 0;
+  private sessions = new Map<string, Session>();
+  private counters = new Map<string, number>();
+  private activeSessionId?: string;
 
   bindSession(session: Session): void {
-    this.session = session;
+    this.sessions.set(session.id, session);
+    this.activeSessionId = session.id;
   }
 
-  prepare(toolName: string, toolCallId: string, reversible = true): EffectState {
-    if (!this.session) throw new Error('EffectLedger must be bound to a session.');
+  /** Drop per-session ledger state (session deleted/pruned). Active pointer falls back. */
+  evictSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    this.counters.delete(sessionId);
+    if (this.activeSessionId === sessionId) {
+      const next = this.sessions.keys().next();
+      this.activeSessionId = next.done ? undefined : next.value;
+    }
+  }
+
+  private resolve(sessionId?: string): Session {
+    const session = this.peek(sessionId);
+    if (!session) throw new Error('EffectLedger must be bound to a session.');
+    return session;
+  }
+
+  private peek(sessionId?: string): Session | undefined {
+    const id = sessionId ?? this.activeSessionId;
+    return id ? this.sessions.get(id) : undefined;
+  }
+
+  private scopedId(sessionId: string): string {
+    const next = this.counters.get(sessionId) || 0;
+    this.counters.set(sessionId, next + 1);
+    return `effect-${Date.now()}-${next}`;
+  }
+
+  prepare(toolName: string, toolCallId: string, reversible = true, sessionId?: string): EffectState {
+    const session = this.resolve(sessionId);
     const effect: EffectState = {
-      id: `effect-${Date.now()}-${this.counter++}`,
+      id: this.scopedId(session.id),
       toolName,
       toolCallId,
       status: 'prepared',
       reversible,
       preparedAt: new Date().toISOString(),
     };
-    this.session.append('effect/change', { effect, reason: 'prepared' });
+    session.append('effect/change', { effect, reason: 'prepared' });
     return { ...effect };
   }
 
-  attachCheckpoint(effectId: string, checkpointId?: string): EffectState | undefined {
+  attachCheckpoint(effectId: string, checkpointId?: string, sessionId?: string): EffectState | undefined {
     return this.transition(effectId, {
       checkpointId,
       reversible: Boolean(checkpointId),
       reason: checkpointId ? 'checkpoint-attached' : 'no-reversible-checkpoint',
-    });
+    }, sessionId);
   }
 
-  commit(effectId: string, outcome: EffectOutcome = 'success', reason = 'tool-result-recorded'): EffectState | undefined {
+  commit(effectId: string, outcome: EffectOutcome = 'success', reason = 'tool-result-recorded', sessionId?: string): EffectState | undefined {
     return this.transition(effectId, {
       status: 'committed',
       outcome,
       completedAt: new Date().toISOString(),
       reason,
-    });
+    }, sessionId);
   }
 
-  fail(effectId: string, reason: string, outcome: EffectOutcome = 'unknown'): EffectState | undefined {
+  fail(effectId: string, reason: string, outcome: EffectOutcome = 'unknown', sessionId?: string): EffectState | undefined {
     return this.transition(effectId, {
       status: 'failed',
       outcome,
       completedAt: new Date().toISOString(),
       reason,
-    });
+    }, sessionId);
   }
 
-  rollback(effectId: string, reason = 'operator-rollback'): EffectState | undefined {
-    const current = this.get(effectId);
+  rollback(effectId: string, reason = 'operator-rollback', sessionId?: string): EffectState | undefined {
+    const current = this.get(effectId, sessionId);
     if (!current || !current.reversible || current.status !== 'committed') return undefined;
     return this.transition(effectId, {
       status: 'rolledback',
       completedAt: new Date().toISOString(),
       reason,
-    });
+    }, sessionId);
   }
 
-  rollbackByCheckpoint(checkpointId: string, reason = 'operator-rollback'): EffectState | undefined {
-    const effect = this.session?.getEffectStates().find(
+  rollbackByCheckpoint(checkpointId: string, reason = 'operator-rollback', sessionId?: string): EffectState | undefined {
+    const effect = this.peek(sessionId)?.getEffectStates().find(
       (candidate) => candidate.checkpointId === checkpointId && candidate.status === 'committed',
     );
-    return effect ? this.rollback(effect.id, reason) : undefined;
+    return effect ? this.rollback(effect.id, reason, sessionId) : undefined;
   }
 
-  get(effectId: string): EffectState | undefined {
-    return this.session?.getEffectStates().find((effect) => effect.id === effectId);
+  get(effectId: string, sessionId?: string): EffectState | undefined {
+    return this.peek(sessionId)?.getEffectStates().find((effect) => effect.id === effectId);
   }
 
-  list(): EffectState[] {
-    return this.session?.getEffectStates() || [];
+  list(sessionId?: string): EffectState[] {
+    return this.peek(sessionId)?.getEffectStates() || [];
   }
 
-  private transition(effectId: string, changes: Partial<EffectState> & { reason: string }): EffectState | undefined {
-    if (!this.session) throw new Error('EffectLedger must be bound to a session.');
-    const current = this.get(effectId);
+  private transition(effectId: string, changes: Partial<EffectState> & { reason: string }, sessionId?: string): EffectState | undefined {
+    const session = this.resolve(sessionId);
+    const current = session.getEffectStates().find((effect) => effect.id === effectId);
     if (!current) return undefined;
     const { reason, ...stateChanges } = changes;
     const next: EffectState = { ...current, ...stateChanges };
-    this.session.append('effect/change', { effect: next, reason });
+    session.append('effect/change', { effect: next, reason });
     return { ...next };
   }
 }
