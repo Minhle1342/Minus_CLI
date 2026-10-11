@@ -338,11 +338,13 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
           }
 
           if (!response.ok) {
+            const rateLimited = response.status === 429 || response.status === 503;
             return {
               error: githubAuth ? `GitHub API returned HTTP ${response.status}.` : `HTTP request failed with status ${response.status} ${response.statusText}`,
               errorCode: githubAuth && [401, 403, 404].includes(response.status) ? 'GITHUB_ACCESS_DENIED' : 'HTTP_FETCH_ERROR',
               statusCode: response.status,
               url: canonicalUrl,
+              ...(rateLimited ? { retryable: true, hint: 'Rate-limited by the remote server; retry after a short delay with fewer parallel fetches.' } : {}),
             };
           }
 
