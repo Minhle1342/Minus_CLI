@@ -262,7 +262,7 @@ export function evaluateCommandPreflight(
       allowed: true,
       normalizedCommand,
       extractedEnv,
-      // ponytail: name-based server detection is inherently uncertain; use task timeout/background dispatch if it actually runs long.
+      // Dev server commands without explicit WaitMsBeforeAsync run with soft-timeout/background fallback.
       reason: '[OBSERVE] Possible long-running dev server command; WaitMsBeforeAsync is recommended.',
       suggestion: 'Add the WaitMsBeforeAsync parameter (e.g. 3000ms) to automatically move the command to a Background Task.',
     };

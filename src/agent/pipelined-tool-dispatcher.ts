@@ -164,6 +164,13 @@ export class PipelinedToolDispatcher {
     speculativeMisses: 0,
     speculativeSavedMs: 0,
   };
+  private maxConcurrentSpeculative: number;
+
+  constructor(options?: { maxConcurrentSpeculative?: number }) {
+    const envVal = Number(process.env.MINUS_MAX_SPECULATIVE_TASKS);
+    this.maxConcurrentSpeculative = options?.maxConcurrentSpeculative
+      ?? (Number.isFinite(envVal) && envVal > 0 ? envVal : 4);
+  }
 
   /**
    * Kiểm tra xem một tool có phải là an toàn / chỉ đọc (read-only) để thực thi sớm hay không
@@ -243,8 +250,8 @@ export class PipelinedToolDispatcher {
     if (!this.isSafeReadOnlyTool(toolName)) {
       return false;
     }
-    // ponytail: max 2 speculative tasks per turn is plenty for 99% of read cascades
-    if (this.inFlightExecutions.size >= 2) {
+    // Dynamic queue capacity: supports deep read cascades without unbounded disk contention
+    if (this.inFlightExecutions.size >= this.maxConcurrentSpeculative) {
       return false;
     }
 
