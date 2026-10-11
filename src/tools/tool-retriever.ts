@@ -1,6 +1,7 @@
 import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
+import { hasNetworkIntent } from '../control/network-intent.js';
 import { batchSubwordSimilarity } from '../native/semantic-batch.js';
 import { ToolTransitionGraph } from './tool-transition-graph.js';
 import { LocalCrossEncoderReranker } from './reranker.js';
@@ -211,7 +212,7 @@ export class ToolRetriever {
     const isGameQuery = /\b(game|pixel|sprite|tilemap|physics|unity|engine|scaffold|asset)\b/i.test(lowerQ);
     const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
     const isMultiAgentQuery = /\b(subagent|delegate|swarm|dag|shared_context|event_bus|orchestrat|blackboard|state|occ|lock)\b/i.test(lowerQ);
-    const isNetworkQuery = /\b(web|internet|online|browse|research|latest|current|news|url|website|citation|external|documentation)\b/i.test(lowerQ);
+    const isNetworkQuery = hasNetworkIntent(cleanedQuery);
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
     const isVisionQuery = /\b(image|screenshot|photo|picture|vision|diagram|pixel)\b/i.test(lowerQ);

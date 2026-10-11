@@ -4,6 +4,7 @@ import type { ClassificationDecision } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
+import { hasNetworkIntent } from './network-intent.js';
 
 const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
@@ -132,7 +133,16 @@ export class ThisTurnToolGate {
       ? baseAnchors
       : baseAnchors.filter((name) => !name.startsWith('codegraph_'));
 
-    const phaseExploreToolAnchors = filteredAnchors.filter((name) => names.includes(name));
+    const anchors = [...filteredAnchors];
+    // Pin web tools when the turn needs network: pasted URL, explicit web
+    // request, or proactive refresh. Guarantees visibility even if RATS ranks low.
+    if (required.has('network') || hasNetworkIntent(options?.userRequest)) {
+      for (const name of ['web_search', 'web_fetch']) {
+        if (names.includes(name) && !anchors.includes(name)) anchors.push(name);
+      }
+    }
+
+    const phaseExploreToolAnchors = anchors.filter((name) => names.includes(name));
 
     return {
       id: `tools-${classification.id.slice(6)}-${allowedToolSetHash.slice(0, 12)}`,

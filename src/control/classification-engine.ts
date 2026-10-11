@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT } from './request-intent.js';
+import { hasNetworkIntent } from './network-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
 export interface ClassificationInput {
@@ -129,7 +130,7 @@ export class ClassificationEngine {
       reasons.push('LANGUAGE_AGNOSTIC_ACTION_DEFAULT');
     }
 
-    const needsNetwork = /\b(?:web|internet|online|latest|documentation|docs|website|truc tuyen|moi nhat)\b/i.test(normalizedText);
+    const needsNetwork = hasNetworkIntent(normalizedText) || hasNetworkIntent(rawPrompt);
     if (needsNetwork && !capabilities.includes('network')) {
       capabilities.push('network');
       if (risk === 'R0') risk = 'R1';
