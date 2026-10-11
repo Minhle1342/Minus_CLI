@@ -7,7 +7,6 @@ import { startInteractiveTui, runHeadlessCli, readHeadlessPrompt, parseTeaComman
 import { sessionHistoryToTranscript } from './ui/tea/models/viewport-model.js';
 import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
-import dotenv from 'dotenv';
 import { GeminiLLM } from './llm/gemini.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { AnthropicLLM } from './llm/anthropic.js';
@@ -65,8 +64,12 @@ import { runGrillFlow } from './agent/grill-suggest.js';
 import type { OcrReviewService } from './review/open-code-review.js';
 import { checkWorkspaceChanges, findCliRoot, updateCli } from './tools/cli-updater.js';
 
-// Load biến môi trường từ file .env
-dotenv.config();
+// Load biến môi trường từ file .env bằng Node.js stdlib (native)
+try {
+  process.loadEnvFile?.();
+} catch {
+  // .env không tồn tại hoặc lỗi parse - bỏ qua
+}
 
 // Mặc định chạy ở chế độ auto: Dùng Docker nếu Docker daemon đã running, ngược lại dùng Local Sandbox an toàn, nhẹ nhàng và chống cạn kiệt RAM
 if (!process.env.SANDBOX_MODE) {

@@ -32,25 +32,13 @@ export class AcceptancePolicy {
     // 2. Unresolved compiler/syntax errors
     const normalized = (file: string) => file.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
     const changed = new Set(params.changedFiles.map(file => normalized(file.path)));
-    const targeted = (items: DiagnosticSnapshot['errors']) => items.filter(item => changed.has(normalized(item.file)));
-    const errors = targeted(params.diagnostics.errors);
-    const syntaxErrors = targeted(params.diagnostics.syntaxErrors);
-    const unresolvedImports = targeted(params.diagnostics.unresolvedImports);
-    if (errors.length > 0) {
-      violations.push(
-        `Found ${errors.length} unresolved compiler error(s) in changed files.`,
-      );
-    }
-    if (syntaxErrors.length > 0) {
-      violations.push(
-        `Found ${syntaxErrors.length} syntax error(s) in changed files.`,
-      );
-    }
-    if (unresolvedImports.length > 0) {
-      violations.push(
-        `Found ${unresolvedImports.length} missing import / undefined name error(s) in changed files.`,
-      );
-    }
+    const matchFile = (items: DiagnosticSnapshot['errors'], label: string) => {
+      const hits = items.filter(item => changed.has(normalized(item.file)));
+      if (hits.length > 0) violations.push(`Found ${hits.length} ${label} in changed files.`);
+    };
+    matchFile(params.diagnostics.errors, 'unresolved compiler error(s)');
+    matchFile(params.diagnostics.syntaxErrors, 'syntax error(s)');
+    matchFile(params.diagnostics.unresolvedImports, 'missing import / undefined name error(s)');
 
     // 3. Unregistered files in restricted scopes
     if (params.registeredFiles && params.registeredFiles.length > 0) {
