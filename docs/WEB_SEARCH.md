@@ -79,6 +79,7 @@ The upstream API supports the `/search` endpoint with `q`, `format`, `language`,
 - `time_range`: `day`, `month`, or `year`.
 - `safe_search`: `0` off, `1` moderate, or `2` strict; default 1.
 - `page`: result page 1-20; default 1.
+- `preset`: free shortcut — `code` (general + !github !stackoverflow), `news` (news), `science` (science + !arxiv !semantic_scholar !pubmed). Explicit `categories`/`engine_shortcuts` win. Requires the shortcuts on the instance (bundled defaults cover them).
 
 The structured operators are passed through SearXNG to its upstream engines, so `site:` and `filetype:` behavior can vary between engines. SearXNG `!shortcut` selection is native syntax and requires the shortcut to exist on the configured instance. External `!!` bangs and redirects are intentionally not exposed as structured options because they bypass the configured metasearch flow.
 
