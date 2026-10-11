@@ -3024,7 +3024,6 @@ export class AgentLoop {
             `[SYSTEM STREAM CONTINUATION]: The previous model response ended with ${finishDetail} before a confirmed final answer. Continue from the preserved text prefix. Re-issue any intended tool call in full; no partial tool call was executed.`,
             'system',
           );
-          await this.persistSession(session);
           CLI.renderStepFooter();
           const continuationReason = `${finishReason}-continuation`;
           session.append('step/end', { turn, step, reason: continuationReason });
@@ -4973,7 +4972,6 @@ export class AgentLoop {
 
       // Ghi nhận câu trả lời cuối cùng vào Session
       session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-      await this.persistSession(session);
       session.append('step/end', { turn, step, reason: 'final-answer' });
       await this.persistSession(session);
       await this.agentHooks.run('agent/after-step', {
