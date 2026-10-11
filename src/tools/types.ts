@@ -28,7 +28,6 @@ export interface ToolExecutionContext {
   /** Set only by the orchestrator after checking session-backed evidence. */
   completionEvidenceVerified?: boolean;
   completionEvidenceReason?: string;
-  maxToolCalls?: number;
   /** Optional cancellation signal to abort long-running tools and child processes. */
   signal?: AbortSignal;
 }

@@ -261,3 +261,18 @@ test('caches importer scans across repeated attachments', async () => {
   });
 });
 
+test('ignores mid-word @ tokens (emails) when extracting mentions', async () => {
+  const paths = PromptAttachmentProcessor.extractMentionedPaths('Contact user@example.com about @real.ts');
+  assert.deepEqual(paths, ['real.ts']);
+});
+
+test('reports path-like unresolved mentions as not_found instead of dropping silently', async () => {
+  await withWorkspace(async (workspace, root) => {
+    await writeFile(path.join(root, 'real.ts'), `export const real = 1;\n`);
+    const result = await PromptAttachmentProcessor.resolveAndAttach('Check @real.ts and @missing.ts plus @admin', workspace);
+    assert.equal(result.hasAttachments, true);
+    assert.deepEqual(result.skippedAttachments, [{ path: 'missing.ts', reason: 'not_found' }]);
+    assert.match(result.expandedPrompt, /missing\.ts: not_found/);
+  });
+});
+

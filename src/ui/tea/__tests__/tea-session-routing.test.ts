@@ -42,6 +42,37 @@ test('tool events with background ctx do not leak into viewed viewport', () => {
   assert.equal(m.sessions.tabs.find((t) => t.id === 'a')!.unread, 0);
 });
 
+test('busy tracks per session with parallel tasks', () => {
+  let m = twoTabs();
+  [m] = update({ type: 'busy', busy: true, sessionId: 'a' }, m);
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'a')!.busy, true);
+  assert.equal(m.status.busy, true);
+  // Task B starts while A still runs — both dots on, global stays on.
+  [m] = update({ type: 'busy', busy: true, sessionId: 'b' }, m);
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'b')!.busy, true);
+  assert.equal(m.status.busy, true);
+  // A finishes first: only A dot off, B keeps running, pin re-points to B.
+  [m] = update({ type: 'busy', busy: false, sessionId: 'a' }, m);
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'a')!.busy, false);
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'b')!.busy, true);
+  assert.equal(m.status.busy, true);
+  assert.equal(m.status.busySessionId, 'b');
+  // B finishes: all off, unpinned.
+  [m] = update({ type: 'busy', busy: false, sessionId: 'b' }, m);
+  assert.equal(m.status.busy, false);
+  assert.equal(m.status.busySessionId, undefined);
+});
+
+test('legacy busy without sessionId falls back to viewed tab', () => {
+  let m = twoTabs();
+  [m] = update({ type: 'busy', busy: true }, m);
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'a')!.busy, true);
+  assert.equal(m.status.busySessionId, 'a');
+  [m] = update({ type: 'busy', busy: false }, m);
+  assert.equal(m.status.busy, false);
+  assert.equal(m.status.busySessionId, undefined);
+});
+
 test('explicit ctx wins over busy pin (parallel tasks)', () => {
   let m = twoTabs();
   [m] = update({ type: 'busy', busy: true }, m); // pin A, đang xem A

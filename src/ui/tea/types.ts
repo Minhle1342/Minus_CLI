@@ -10,7 +10,7 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'action'; action: Action }
   | { type: 'log'; text: string }
   | { type: 'notice'; text: string }
-  | { type: 'busy'; busy: boolean }
+  | { type: 'busy'; busy: boolean; /** session sở hữu task (đa task song song); thiếu → tab đang xem */ sessionId?: string }
   | { type: 'question'; prompt: string; active: boolean; permission?: PermissionCard; sessionId?: string }
   | { type: 'grill'; open: boolean; question?: string; options?: GrillOption[]; loading?: boolean; sessionId?: string }
   | { type: 'grill-loading'; loading: boolean }
@@ -49,10 +49,12 @@ export interface ComposerModel {
 export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string }
 export interface TranscriptEntry { kind: 'user' | 'answer' | 'thought' | 'tool' | 'step' | 'log' | 'permission'; text: string; permission?: PermissionCard }
 /** Một tab = một session chạy song song trong cùng cửa sổ terminal. Entries cache giữ transcript riêng mỗi tab. */
-export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; lastActive?: number; entries?: TranscriptEntry[] }
-export interface SessionTabsModel { open: boolean; selected: number; tabs: SessionTab[]; activeId: string; /** switch do TEA khởi xướng, kernel chưa confirm — metadata không được revert */ pendingActiveId?: string }
+export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[] }
+export interface SessionTabsModel { open: boolean; selected: number; tabs: SessionTab[]; activeId: string; /** model mặc định chung cho tab chưa chọn riêng (đồng bộ từ global /model + metadata) */ defaultModel?: string; /** switch do TEA khởi xướng, kernel chưa confirm — metadata không được revert */ pendingActiveId?: string }
 export interface ViewportModel { entries: TranscriptEntry[]; thinking: string; answerStream: string; offset: number; pinned: boolean; collapsed: boolean }
 export interface SidebarModel { visible: boolean; workspace: string; model: string; session: string; sessions: string[]; tools: string[]; files: string[]; invariants: string[]; tokens: number; maxTokens: number;
+  /** Model mặc định chung (carrier cho metadata, không render trực tiếp — sidebar.model luôn là model của tab đang xem). */
+  defaultModel?: string;
   /** IDs song song với `sessions` (vốn là tên hiển thị) + id active — để tab-strip switch đúng session. */
   sessionIds?: string[]; activeSessionId?: string }
 export interface PaletteItem { id: string; label: string; description: string; action?: Action }

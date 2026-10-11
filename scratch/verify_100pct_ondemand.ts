@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { ToolSynergyAdvisor, detectBugReportIntent } from '../src/agent/tool-synergy-advisor.js';
-import { resolveSubagentPromptSections, ON_DEMAND_PROMPT_MODULES, SECTION_PATCH_FORMAT_SPEC } from '../src/llm/prompts.js';
+import { resolveSubagentPromptSections, SECTION_PATCH_FORMAT_SPEC } from '../src/llm/prompts.js';
 
 console.log('================================================================');
 console.log('🧪 KIỂM CHỨNG TOÀN DIỆN 3 ĐIỂM NÂNG CẤP ON-DEMAND PROMPT (100%)');

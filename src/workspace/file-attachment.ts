@@ -50,7 +50,7 @@ export interface AttachmentResult {
   expandedPrompt: string;
   attachments: AttachedItemSummary[];
   hasAttachments: boolean;
-  skippedAttachments?: Array<{ path: string; reason: 'attachment_limit' | 'source_byte_limit' | 'context_token_limit' }>;
+  skippedAttachments?: Array<{ path: string; reason: 'attachment_limit' | 'source_byte_limit' | 'context_token_limit' | 'not_found' }>;
   /** User @-attached files (anchors). Set even when neighborhood expansion is disabled. */
   anchorPaths?: string[];
   /** 2-hop neighborhood around anchors. Only set when MINUS_ATTACH_EXPAND=on (default). */
@@ -425,17 +425,16 @@ export class PromptAttachmentProcessor {
   /**
    * Regex phát hiện các @mention file/thư mục hoặc lệnh /add, /attach
    * Hỗ trợ Unicode (Tiếng Việt), đường dẫn trong ngoặc kép @"...", ký tự định tuyến Next.js (), [], @, +, #,...
+   * Guard biên trái (đầu chuỗi/khoảng trắng/dấu mở): không nuốt email (user@example.com)
+   * hay token giữa từ — cùng quy ước với FileMentionEngine.extractActiveMention.
    */
-  private static readonly MENTION_REGEX = /(?:@(?:"([^"]+)"|'([^']+)'|([^\s"'`]+))|(?:^|\s)\/(?:add|attach)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+)))/gu;
+  private static readonly MENTION_REGEX = /(?:(?:^|[\s(=,;:[{"'`])@(?:"([^"]+)"|'([^']+)'|([^\s"'`]+))|(?:^|\s)\/(?:add|attach)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+)))/gu;
 
+  /** Single canonical anchor rule (kept short: injected into every attach turn). */
   private static readonly INVESTIGATION_SCOPE_DIRECTIVE = [
     '[INVESTIGATION SCOPE - ATTACHMENT ANCHOR RULE]',
-    'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth.',
-    'MANDATORY expansion before concluding root cause or editing code:',
-    '1. Read the anchor file(s).',
-    '2. Inspect HOP-1 files (direct imports, importers, dir top-ranked files).',
-    '3. Inspect HOP-2 files (files related to hop-1) with read_file / grep_search / analyze_impact.',
-    'FORBIDDEN: concluding root cause or applying fixes based on anchor content alone without checking callers/dependencies.',
+    'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth: inspect the hop-1/hop-2 files listed above with read_file / grep_search / analyze_impact before concluding root cause or editing code.',
+    'FORBIDDEN: concluding root cause or applying fixes from anchor content alone without checking callers/dependencies.',
   ].join('\n');
 
   /**
@@ -592,7 +591,8 @@ export class PromptAttachmentProcessor {
 
   private static async scanImporters(anchorRel: string, base: string, workspace: Workspace): Promise<string[]> {
     const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const importLine = new RegExp(`(?:import|require|from)\\s*[^\\n]*?${escaped}`, 'i');
+    // Word-boundary hai đầu: base "note" không khớp "denote"/"noted" trong dòng import.
+    const importLine = new RegExp(`(?:import|require|from)\\s*[^\\n]*?(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'i');
     let entries: WorkspaceEntryInfo[];
     try {
       const entriesCacheKey = `entries::${workspace.rootDir}`;
@@ -672,11 +672,7 @@ export class PromptAttachmentProcessor {
           }
         }
       }
-      // Hop-1b removed: same-dir sibling suggestions no longer enter the LLM
-      // context on @-attach. Only the anchor plus real graph relations
-      // (imports / importers) are suggested; the model reads siblings itself
-      // via read_file only if needed.
-      // Hop-1c: file import anchor (callers ngược).
+      // Hop-1b: file import anchor (callers ngược).
       if (hop1Count < MAX_RELATED_HOP1) {
         const importers = await this.findImporters(anchor, workspace).catch((): string[] => []);
         for (const importer of importers.slice(0, 4)) {
@@ -875,6 +871,10 @@ export class PromptAttachmentProcessor {
 
         const safePath = workspace.resolveSafePath(relPath);
         if (!fs.existsSync(safePath)) {
+          // Mention dạng path (có / \ .) nhưng không tồn tại: báo not_found để
+          // model biết @ không resolve (tín hiệu typo). Từ trần (@admin) giữ
+          // im lặng, tránh nhiễu ngôn ngữ tự nhiên.
+          if (/[/\\.]/.test(relPath)) skippedAttachments.push({ path: relPath, reason: 'not_found' });
           continue;
         }
 

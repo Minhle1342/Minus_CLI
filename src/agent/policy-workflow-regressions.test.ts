@@ -9,6 +9,11 @@ function outcome(seq: number, command: string, payload: Record<string, any> = {}
     payload: { success: true, exitCode: 0, processStarted: true, commandOutcome: 'succeeded', ...payload } } as any;
 }
 const baseline = [outcome(2, 'git status'), outcome(4, 'git diff'), outcome(6, 'git diff --cached')];
+function denied(seq: number, command: string, priorError: string) {
+  return { toolName: 'run_command', args: { command },
+    call: { seq: seq - 1 }, result: { seq },
+    payload: { success: false, errorCode: 'GIT_WORKFLOW_STAGE_BLOCKED', error: priorError, processStarted: false } } as any;
+}
 function workflow(userRequest: string, observations = baseline, implement = false) {
   return resolveGitWorkflow({ userRequest, observations, mayEdit: implement,
     implementationRequested: implement, implementationReady: true })!;
@@ -48,6 +53,29 @@ test('explicit pull can complete a remote prerequisite before implementation', (
   assert.equal(checkGitWorkflowCall(state, request, 'run_command', { command: 'git pull origin' }), undefined);
   assert.equal(workflow(request, [...baseline, outcome(8, 'git pull origin')], true).stage, 'Implement');
   assert.equal(workflow(request, [...baseline, outcome(8, 'git pull origin', { exitCode: 1, success: false })], true).stage, 'Inspect');
+});
+
+test('stage denial names the exact command that satisfies the missing evidence', () => {
+  const request = 'please git add and git commit';
+  const partial = [outcome(2, 'git status'), outcome(4, 'git diff')];
+  const state = workflow(request, partial);
+  assert.equal(state.stage, 'Inspect');
+  assert.deepEqual(state.pending, ['staged diff']);
+  const denial = checkGitWorkflowCall(state, request, 'run_command', { command: 'git add .' })!;
+  assert.match(denial, /belongs to Commit/);
+  assert.match(denial, /Run: git diff --cached/);
+  assert.doesNotMatch(denial, /STOP retrying/);
+});
+
+test('third identical stage denial escalates to stop retrying', () => {
+  const request = 'please git add and git commit';
+  const partial = [outcome(2, 'git status'), outcome(4, 'git diff')];
+  const prior = 'Git add belongs to Commit, but the current workflow stage is Inspect. Required evidence: staged diff.';
+  const repeated = workflow(request, [...partial, denied(6, 'git add .', prior), denied(8, 'git add .', prior)]);
+  assert.equal(repeated.denialCounts?.add, 2);
+  const third = checkGitWorkflowCall(repeated, request, 'run_command', { command: 'git add .' })!;
+  assert.match(third, /denial 3 for git add — STOP retrying/);
+  assert.match(third, /Run: git diff --cached/);
 });
 
 test('multiple branch actions require their own ordered successful outcomes', () => {

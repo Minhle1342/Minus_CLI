@@ -76,7 +76,7 @@ describe('Deterministic failure dedup (ISOLATED_SANDBOX_REQUIRED & policy blocks
     assert.equal(scopedRepeat.result.deduped, true);
 
     // Reset xóa cache.
-    runner.resetTurnBudget(8);
+    runner.resetTurnBudget();
     const afterReset = await runner.run('run_command', { command: 'npm test' }, { turn: 8 } as any);
     assert.equal(afterReset.result.deduped, undefined);
   });

@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { ToolRegistry } from './registry.js';
-import { ToolRunner, TurnBudgetTracker } from './tool-runner.js';
+import { ToolRunner } from './tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import type { ToolDefinition } from './types.js';
 
-describe('ToolRunner & TurnBudgetTracker Suite', () => {
+describe('ToolRunner Suite', () => {
   const workspace = new Workspace(process.cwd());
 
-  it('1. TurnBudgetTracker chia sẻ chính xác giữa runner gốc và các scoped sub-runners', async () => {
+  it('1. Không còn giới hạn số tool-call: scoped runners thực thi không giới hạn', async () => {
     const registry = new ToolRegistry();
     const mockTool: ToolDefinition = {
       name: 'test_read',
@@ -34,15 +34,12 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
       allowedToolNames: allowed,
       allowedToolSetHash: hash,
       turn: 1,
-      maxToolCalls: 2,
     };
 
     // Sub-runner 1 cho step 1
     const scopedRunner1 = parentRunner.createScoped(registry);
     const res1 = await scopedRunner1.run('test_read', { key: 'step1' }, contextTurn1Step1);
     assert.equal(res1.result.success, true);
-    assert.equal(scopedRunner1.scopedCallCount, 1);
-    assert.equal(parentRunner.scopedCallCount, 1);
 
     // Sub-runner 2 cho step 2 (mô phỏng step tiếp theo trong agent-loop)
     const contextTurn1Step2 = {
@@ -52,17 +49,15 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     const scopedRunner2 = parentRunner.createScoped(registry);
     const res2 = await scopedRunner2.run('test_read', { key: 'step2' }, contextTurn1Step2);
     assert.equal(res2.result.success, true);
-    assert.equal(scopedRunner2.scopedCallCount, 2);
-    assert.equal(parentRunner.scopedCallCount, 2);
 
-    // Sub-runner 3 cho step 3: vượt ngân sách (maxToolCalls = 2)
+    // Sub-runner 3 cho step 3: không còn ngân sách để vượt — vẫn thành công.
     const scopedRunner3 = parentRunner.createScoped(registry);
     const res3 = await scopedRunner3.run('test_read', { key: 'step3' }, contextTurn1Step2);
-    assert.equal(res3.result.errorCode, 'TOOL_CALL_BUDGET_EXHAUSTED');
-    assert.equal(res3.guardianDiagnosis?.category, 'BUDGET_EXHAUSTED');
+    assert.equal(res3.result.success, true);
+    assert.equal(res3.result.value, 'step3');
   });
 
-  it('2. TurnBudgetTracker tự động reset khi chuyển turn mới', async () => {
+  it('2. Không reset gì khi chuyển turn mới: mọi call đều thực thi', async () => {
     const registry = new ToolRegistry();
     registry.register({
       name: 'ping',
@@ -75,30 +70,28 @@ describe('ToolRunner & TurnBudgetTracker Suite', () => {
     const allowed = ['ping'];
     const hash = hashAllowedToolSet(allowed);
 
-    // Turn 1: dùng hết ngân sách (1 call)
+    // Turn 1: gọi nhiều lần, tất cả đều thành công.
     const ctxTurn1 = {
       decisionId: 'd-1',
       allowedToolNames: allowed,
       allowedToolSetHash: hash,
       turn: 1,
-      maxToolCalls: 1,
     };
     const res1 = await runner.run('ping', {}, ctxTurn1);
     assert.equal(res1.result.pong, true);
 
-    const res1Blocked = await runner.run('ping', {}, ctxTurn1);
-    assert.equal(res1Blocked.result.errorCode, 'TOOL_CALL_BUDGET_EXHAUSTED');
+    const res1Again = await runner.run('ping', {}, ctxTurn1);
+    assert.equal(res1Again.result.pong, true);
 
-    // Chuyển sang Turn 2: Ngân sách được cấp mới
+    // Chuyển sang Turn 2: vẫn thực thi bình thường.
     const ctxTurn2 = {
       decisionId: 'd-2',
       allowedToolNames: allowed,
       allowedToolSetHash: hash,
       turn: 2,
-      maxToolCalls: 1,
     };
     const res2 = await runner.run('ping', {}, ctxTurn2);
-    assert.equal(res2.result.pong, true, 'Turn 2 được reset ngân sách và thực thi thành công');
+    assert.equal(res2.result.pong, true);
   });
 
   it('observe-mode evidence warning is stored with the successful tool result', async () => {

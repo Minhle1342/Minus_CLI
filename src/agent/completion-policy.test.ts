@@ -418,6 +418,18 @@ test('system-prompt echo is rejected and stripped before TUI render', () => {
   assert.equal(stripSystemPromptEcho(clean), clean);
 });
 
+test('system-prompt echo strip covers submission and reasoning guard blocks', () => {
+  const leaked = 'Findings: null guard fixed in parser.ts and verified with npm test (12 passed).\n\n[SUBMISSION REQUIRED]: Call submit_solution alone as the final tool.';
+  assert.equal(isSystemPromptEcho(leaked), false);
+  const stripped = stripSystemPromptEcho(leaked);
+  assert.ok(!stripped.includes('SUBMISSION REQUIRED'), 'submission block stripped');
+  assert.ok(stripped.includes('Findings: null guard fixed'), 'substantive content survives');
+
+  const reasoning = '🧠 [ADAPTIVE REASONING ESCALATED TO "MAX"]:\nYour previous solution attempt was rejected (2 rejection(s)).';
+  assert.equal(isSystemPromptEcho(reasoning), true);
+  assert.equal(stripSystemPromptEcho(reasoning).trim(), '');
+});
+
 test('Plan mode: PlanManager bypasses completion blocker in plan phase or read-only mode', () => {
   const plan = new PlanManager();
   plan.createPlan([

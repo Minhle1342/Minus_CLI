@@ -58,7 +58,6 @@ test('read-only exploration can inspect Git history through guarded run_command'
     decisionId: decision.id,
     allowedToolNames: decision.allowedToolNames,
     allowedToolSetHash: decision.allowedToolSetHash,
-    maxToolCalls: decision.maxToolCalls,
     userRequest: 'Explain how the current implementation relates to recent commits',
   };
   const gitLog = await runner.run('run_command', { command: 'git log -n 5 --stat' }, context);
@@ -70,7 +69,7 @@ test('read-only exploration can inspect Git history through guarded run_command'
   assert.equal(mutationAttempt.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
 });
 
-test('adaptive tool budget scales generously for hard tasks and large complexity', () => {
+test('turn gate decides allowlists without any tool-call budget', () => {
   const registry = new ToolRegistry();
   const gate = new ThisTurnToolGate();
 
@@ -85,8 +84,9 @@ test('adaptive tool budget scales generously for hard tasks and large complexity
     reversibility: 'reversible',
   };
   const decisionHard = gate.decide(hardClassification, registry.getAll());
-  // Budget should scale up to accommodate deep exploration on hard tasks (>= 20)
-  assert.ok(decisionHard.maxToolCalls >= 20, `Expected maxToolCalls >= 20, got ${decisionHard.maxToolCalls}`);
+  // Không còn maxToolCalls trong decision — allowlist vẫn đầy đủ.
+  assert.equal((decisionHard as any).maxToolCalls, undefined);
+  assert.ok(decisionHard.allowedToolNames.length > 0);
 
   // Critical task in implement phase
   const criticalImplement: any = {
@@ -99,8 +99,8 @@ test('adaptive tool budget scales generously for hard tasks and large complexity
     reversibility: 'hard-to-reverse',
   };
   const decisionCrit = gate.decide(criticalImplement, registry.getAll());
-  // Previously was capped at 2! Now should be at least 14
-  assert.ok(decisionCrit.maxToolCalls >= 14, `Expected maxToolCalls >= 14, got ${decisionCrit.maxToolCalls}`);
+  assert.equal((decisionCrit as any).maxToolCalls, undefined);
+  assert.ok(decisionCrit.allowedToolNames.length > 0);
 });
 
 test('phase-specific exploration anchors stay visible after dynamic retrieval', () => {

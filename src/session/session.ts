@@ -56,7 +56,8 @@ export type SessionEventType =
   | 'phase/verificationFailed'
   | 'phase/invalidated'
   | 'audit/task-completion'
-  | 'context/snapshot';
+  | 'context/snapshot'
+  | 'model/change';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
 
@@ -108,6 +109,8 @@ export interface SessionEventData {
   inputId?: string;
   inputText?: string;
   isSteering?: boolean;
+  /** Per-tab model chosen via scoped /model (model/change events). */
+  modelName?: string;
   parentSessionId?: string;
   boundarySeq?: number;
   reason?: string;
@@ -304,6 +307,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'phase/invalidated',
     'audit/task-completion',
     'context/snapshot',
+    'model/change',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);
   }
@@ -506,8 +510,11 @@ export class Session {
   }
 
   getEventsAfter(sequence: number): SessionEvent[] {
+    // Filter by SEQ, never slice by index: the persisted cursor counts events,
+    // so a diverged log (stale/replaced session object) must not silently
+    // write the wrong range. With a healthy log both are identical.
     const boundary = Math.max(0, Math.floor(sequence));
-    return this.eventLog.slice(boundary).map((event) => cloneJson(event));
+    return this.eventLog.filter((event) => event.seq > boundary).map((event) => cloneJson(event));
   }
 
   addUserMessage(text: string, source: 'human' | 'system' | 'injected' = 'human', inputId?: string): void {
@@ -552,8 +559,8 @@ export class Session {
     });
   }
 
-  getPendingInputs(): Array<{ inputId: string; text: string; source: 'human' | 'system' | 'injected'; queuedAt: string }> {
-    const pending = new Map<string, { inputId: string; text: string; source: 'human' | 'system' | 'injected'; queuedAt: string }>();
+  getPendingInputs(): Array<{ inputId: string; text: string; source: 'human' | 'system' | 'injected'; queuedAt: string; isSteering?: boolean }> {
+    const pending = new Map<string, { inputId: string; text: string; source: 'human' | 'system' | 'injected'; queuedAt: string; isSteering?: boolean }>();
     for (const event of this.eventLog) {
       if (event.type === 'input/queued' && event.data.inputId && event.data.inputText) {
         pending.set(event.data.inputId, {
@@ -561,6 +568,7 @@ export class Session {
           text: event.data.inputText,
           source: event.data.source || 'human',
           queuedAt: event.createdAt,
+          isSteering: event.data.isSteering,
         });
       } else if (event.type === 'input/claimed' && event.data.inputId) {
         pending.delete(event.data.inputId);
@@ -569,6 +577,27 @@ export class Session {
       }
     }
     return Array.from(pending.values());
+  }
+
+  /**
+   * Pending inputs that steer the CURRENT turn (mid-turn steering).
+   * Queued future tasks (submit() path, isSteering === false) run after this
+   * turn and must not block its submission. Legacy events without the flag
+   * still block (fail-closed).
+   */
+  getPendingSteeringInputs(): Array<{ inputId: string; text: string; source: 'human' | 'system' | 'injected'; queuedAt: string; isSteering?: boolean }> {
+    return this.getPendingInputs().filter((input) => input.isSteering !== false);
+  }
+
+  /** Latest per-tab model chosen via /model (model/change events), if any. */
+  getModelName(): string | undefined {
+    for (let i = this.eventLog.length - 1; i >= 0; i--) {
+      const event = this.eventLog[i];
+      if (event.type === 'model/change' && typeof event.data?.modelName === 'string' && event.data.modelName.trim()) {
+        return event.data.modelName.trim();
+      }
+    }
+    return undefined;
   }
 
   addModelMessage(params: { text?: string; functionCalls?: FunctionCall[]; rawContent?: Content }): void {
@@ -970,6 +999,58 @@ export class Session {
   replaceHistory(newHistory: Content[], reason = 'projection-rewrite'): void {
     this.setHistory(newHistory, reason);
   }
+
+  /**
+   * Roll back the latest turn/user prompt from projected history.
+   * Reverts back to the previous user message (or empty history if this was the only turn).
+   */
+  rollbackLastTurn(): { success: boolean; undonePrompt?: string; remainingMessages: number } {
+    const projected = this.getProjectionWithTurns();
+    if (projected.length === 0) {
+      return { success: false, remainingMessages: 0 };
+    }
+
+    // Find the last real human prompt in projected history (not tool results and not synthetic prompts)
+    let lastHumanIndex = -1;
+    let undonePrompt: string | undefined;
+
+    for (let i = projected.length - 1; i >= 0; i--) {
+      const entry = projected[i];
+      if (entry.message.role !== 'user') continue;
+      if (entry.message.parts?.some((p: any) => p.functionResponse)) continue;
+
+      const text = entry.message.parts
+        ?.map((p: any) => (typeof p.text === 'string' ? p.text : ''))
+        .filter(Boolean)
+        .join('\n') || '';
+
+      if (text.startsWith('[SYSTEM ') || text.startsWith('[CRITIC ')) continue;
+
+      const sourceEvent = this.eventLog.find((e) => e.seq === entry.sourceEventSeq);
+      if (sourceEvent && sourceEvent.type === 'user/message' && sourceEvent.data.source && sourceEvent.data.source !== 'human') {
+        continue;
+      }
+
+      lastHumanIndex = i;
+      const userInstructionMatch = text.match(/\[USER INSTRUCTION\]:\s*\n?([\s\S]+)$/);
+      undonePrompt = userInstructionMatch ? userInstructionMatch[1].trim() : text.trim();
+      break;
+    }
+
+    if (lastHumanIndex === -1) {
+      this.setHistory([], 'undo-rollback');
+      return { success: true, remainingMessages: 0 };
+    }
+
+    const newHistory = projected.slice(0, lastHumanIndex).map((p) => p.message);
+    const openTurn = this.getOpenTurn();
+    if (openTurn !== undefined) {
+      this.append('turn/end', { turn: openTurn, reason: 'undo-rollback' });
+    }
+    this.setHistory(newHistory, 'undo-rollback');
+    return { success: true, undonePrompt, remainingMessages: newHistory.length };
+  }
+
 
   static projectHistoryFromEvents(events: SessionEvent[]): Content[] {
     let projected: Content[] = [];

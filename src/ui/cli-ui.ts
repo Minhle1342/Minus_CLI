@@ -1485,7 +1485,7 @@ export class CLI {
   /**
    * Hiển thị Diff code gọn gàng
    */
-  static renderDiff(diffText: string, options: { filePath?: string; status?: 'MODIFIED' | 'CREATED' | 'DELETED' } = {}): void {
+  static renderDiff(diffText: string, options: { filePath?: string; status?: 'MODIFIED' | 'CREATED' | 'DELETED' | 'RESTORED' } = {}): void {
     const lines = diffText.trim().split('\n');
     const title = options.filePath ? `Diff: ${options.status || 'MODIFIED'} ${options.filePath}` : 'Diff Patch';
     console.log(`\n  ${c.slate}─── ${title} ───${c.reset}`);

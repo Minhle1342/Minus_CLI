@@ -61,7 +61,7 @@ import {
   normalizePresetTier,
 } from './llm/token-config.js';
 import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming.js';
-import { suggestGrillOptions } from './agent/grill-suggest.js';
+import { runGrillFlow } from './agent/grill-suggest.js';
 import type { OcrReviewService } from './review/open-code-review.js';
 import { checkWorkspaceChanges, findCliRoot, updateCli } from './tools/cli-updater.js';
 
@@ -534,14 +534,16 @@ async function main() {
   let llm = await createLLM(modelName, savedSession.tokenConfig || globalSavedSession.tokenConfig);
   let sessionPersistence = new SessionPersistence(workspace.rootDir);
   let loadedSession = savedSession.activeSessionId
-    ? await sessionPersistence.load(savedSession.activeSessionId)
+    ? await sessionPersistence.loadOrQuarantine(savedSession.activeSessionId)
     : undefined;
 
-  // Nếu không tìm thấy activeSession theo ID lưu, tự động quét tìm phiên dở dang gần nhất trong workspace
+  // Nếu không tìm thấy activeSession theo ID lưu, tự động quét tìm phiên dở dang gần nhất trong workspace.
+  // Quarantine file hỏng rồi quét lại (tối đa 3 lần) để candidate hỏng không chặn candidate khỏe.
   if (!loadedSession) {
-    const latestInterrupted = await sessionPersistence.findLatestInterruptedSession();
-    if (latestInterrupted) {
-      loadedSession = await sessionPersistence.load(latestInterrupted.sessionId);
+    for (let attempt = 0; attempt < 3 && !loadedSession; attempt++) {
+      const latestInterrupted = await sessionPersistence.findLatestInterruptedSession();
+      if (!latestInterrupted) break;
+      loadedSession = await sessionPersistence.loadOrQuarantine(latestInterrupted.sessionId);
     }
   }
 
@@ -621,7 +623,11 @@ async function main() {
   const toolControlMode = configuredToolControlMode === 'off' || configuredToolControlMode === 'enforce'
     ? configuredToolControlMode
     : 'shadow';
-  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence, toolControlMode });
+  const agentLoop = new AgentLoop(kernel, undefined, { maxSteps, workspace, sessionPersistence, toolControlMode,
+    // Recreate per-tab models after restart without interactive login flows
+    // (login-gated models fail fast here → run falls back to the default).
+    createSessionLLM: async (name: string) => createLLM(name, savedSession.tokenConfig ?? undefined, { interactive: false }),
+  });
   agentLoop.bindSession(activeSession);
   if (savedSession.tokenConfig) {
     agentLoop.setTokenConfig(savedSession.tokenConfig);
@@ -666,7 +672,10 @@ async function main() {
   const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
     const controller = new AbortController();
     activeExecutionController = controller;
-    tui?.setBusy(true);
+    // Chốt session sở hữu task lúc bắt đầu: user switch tab giữa chừng cũng
+    // không làm dot busy rơi nhầm sang tab khác lúc task kết thúc.
+    const runSessionId = activeSession?.id;
+    tui?.setBusy(true, runSessionId);
     try {
       return await fn(controller.signal);
     } catch (err: any) {
@@ -679,7 +688,7 @@ async function main() {
     } finally {
       if (activeExecutionController === controller) {
         activeExecutionController = null;
-        tui?.setBusy(false);
+        tui?.setBusy(false, runSessionId);
       }
     }
   };
@@ -817,7 +826,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     })();
   };
   tui = startInteractiveTui(kernel, {
-    metadata: { sessions: await sessionPersistence.list(), workspace: workspace.rootDir, model: modelName, session: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 },
+    metadata: { sessions: await sessionPersistence.list(), workspace: workspace.rootDir, model: modelName, defaultModel: modelName, session: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 },
     commands: [
       ...SLASH_COMMANDS.map(command => ({ id: command.command, label: command.description, description: command.category || "General" })),
       ...(['compact', 'editor', 'quit', 'sidebar', 'diff', 'mode'] as const).map(action => ({ id: action, label: action, description: 'Session action', action })),
@@ -880,6 +889,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       return 'reject';
     } finally { isPromptingPermission = false; }
   });
+  kernel.ctx.grill.setPromptHandler(async (question, ctx, sessionId, signal) =>
+    runGrillFlow(tui, (kernel.ctx as any).llm || (agentLoop as any).llm, question, { ...ctx, sessionId }, sessionId, signal));
 
   // Kiểm tra phiên gián đoạn / Quota suspension / Crash recovery trước đó để hỗ trợ One-Click Resume
   // NẾU TẤT CẢ TASK CỦA PLAN HOẶC GOAL ĐÃ HOÀN THÀNH -> TUYỆT ĐỐI KHÔNG HIỂN THỊ CẢNH BÁO
@@ -1007,7 +1018,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     let hydratedInitialTranscript = false;
     while (true) {
       const namedSessions = await new SessionNames(sessionPersistence).list();
-      tui.setMetadata({ sessions: namedSessions.map(session => session.name), sessionIds: namedSessions.map(session => session.id), workspace: workspace.rootDir, model: modelName, session: namedSessions.find(session => session.id === activeSession.id)?.name || activeSession.id, activeSessionId: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 });
+      tui.setMetadata({ sessions: namedSessions.map(session => session.name), sessionIds: namedSessions.map(session => session.id), workspace: workspace.rootDir, model: agentLoop.getSessionModelName(activeSession.id) ?? modelName, defaultModel: modelName, session: namedSessions.find(session => session.id === activeSession.id)?.name || activeSession.id, activeSessionId: activeSession.id, maxTokens: agentLoop.getTokenConfig(activeSession)?.maxInputTokens || 128000 });
       if (!hydratedInitialTranscript) {
         hydratedInitialTranscript = true;
         // Nạp lịch sử session đang active vào viewport ngay từ đầu (kẻo trống dù có nội dung cũ).
@@ -1067,16 +1078,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           const question = rawArgs || grillQ || 'Bạn muốn quyết định điều gì tiếp theo?';
           const llm = (kernel.ctx as any).llm || (agentLoop as any).llm;
           // Mở modal ở trạng thái loading (đè lên input), fetch LLM song song rồi đổ options vào.
-          const pickPromise = tui.grillChoose(question, [], activeSession?.id);
           const recentTranscript = activeSession ? activeSession.getHistory().slice(-4).map((msg: any) =>
             (msg.parts || []).map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n').slice(0, 500)) : [];
-          const { options } = await suggestGrillOptions(llm, question, {
+          const picked = await runGrillFlow(tui, llm, question, {
             composeQuestion: grillQ || undefined,
             composePhase: composeState?.phase,
             recentTranscript,
-          });
-          tui.setGrillOptions(question, options, activeSession?.id);
-          const picked = await pickPromise;
+            sessionId: activeSession?.id,
+          }, activeSession?.id);
           if (!picked) {
             tui.program.send({ type: 'notice', text: 'Grill cancelled — giữ nguyên lựa chọn của bạn.' });
             continue;
@@ -2113,6 +2122,20 @@ Please focus on executing and verifying this task, and update its status to COMP
           const rollbackRes = await agentLoop.rollback(activeSession);
           if (rollbackRes.success) {
             console.log(`\n${c.green}✔ ${rollbackRes.message}${c.reset}\n`);
+            if (rollbackRes.diffs && rollbackRes.diffs.length > 0) {
+              console.log(`${c.brightCyan}📋 Thay đổi file đã được hoàn tác (Unified Diff):${c.reset}`);
+              for (const item of rollbackRes.diffs) {
+                CLI.renderDiff(item.diff, {
+                  filePath: item.filePath,
+                  status: item.status === 'DELETED' ? 'DELETED' : item.status === 'RESTORED' ? 'RESTORED' : 'MODIFIED',
+                });
+              }
+            }
+            if (activeSession) {
+              try {
+                tui?.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory()));
+              } catch { /* không chặn */ }
+            }
           } else {
             console.log(`\n${c.yellow}⚠️  ${rollbackRes.message}${c.reset}\n`);
           }
@@ -2226,7 +2249,7 @@ Please focus on executing and verifying this task, and update its status to COMP
 
         // Nếu người dùng chỉ gõ /model hoặc /modal mà không truyền tên -> Mở menu chọn số thứ tự
         if (!targetModel) {
-          CLI.renderModelSelector(modelName);
+          CLI.renderModelSelector(agentLoop.getSessionModelName(activeSession.id) ?? modelName);
           const choice = (await askCancellable(rl, `${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`))?.trim();
           
           if (!choice) {
@@ -2253,10 +2276,12 @@ Please focus on executing and verifying this task, and update its status to COMP
           if (!newLLM) continue;
           llm = newLLM;
           agentLoop.setLLM(newLLM, targetModel);
+          // Scope vào tab đang xem: các tab khác giữ model của chúng để chạy song song.
+          await agentLoop.setSessionLLM(activeSession, newLLM, targetModel);
           modelName = targetModel;
           saveSession({ modelName }, workspace.rootDir);
           saveSession({ modelName });
-          console.log(`\n${c.green}✔ Activated model:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Saved for future sessions)${c.reset}\n`);
+          console.log(`\n${c.green}✔ Activated model:${c.reset} ${c.bold}${c.brightCyan}${modelName}${c.reset} ${c.gray}(Scoped to this tab · saved as default for new sessions)${c.reset}\n`);
 
           // Kiểm tra an toàn Token Budget Context Window
           try {

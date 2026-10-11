@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRootModel, update } from '../models/root-model.js';
+import { lineRangeSuffix, toolResultEntry } from '../models/tool-entry.js';
 
 test('viewport keeps each tool call and result visible without submit_solution control metadata', () => {
   let model = createRootModel();
@@ -18,6 +19,57 @@ test('viewport keeps each tool call and result visible without submit_solution c
   assert.equal(model.viewport.entries[2].text, '● submit_solution');
   assert.match(model.viewport.entries[3].text, /Câu trả lời đã được gửi/);
   assert.doesNotMatch(model.viewport.entries[3].text, /_untrusted_context|timestamp|Internal final answer instruction/);
+});
+
+test('read-only results show normalized line range instead of content excerpt', () => {
+  // Explicit args win over everything else.
+  assert.equal(
+    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', startLine: 10, endLine: 20 }),
+    '✔ read_file [OK] (startLine: 10, endLine: 20)',
+  );
+  // offset/limit aliases normalize to the same two params, never shown raw.
+  assert.equal(
+    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', offset: 200, limit: 11 }),
+    '✔ read_file [OK] (startLine: 200, endLine: 210)',
+  );
+  assert.doesNotMatch(
+    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', offset: 200, limit: 11 }),
+    /offset|limit/,
+  );
+  // No args (e.g. hydrated history): fall back to the effective range echoed in the result.
+  assert.equal(
+    toolResultEntry('read_file', { content: 'const x = 1;', startLine: 1, endLine: 120 }),
+    '✔ read_file [OK] (startLine: 1, endLine: 120)',
+  );
+  // Tools without line bounds keep the content excerpt.
+  assert.equal(
+    toolResultEntry('list_files', { files: ['a.ts'] }, 0, { dirPath: 'src' }),
+    '✔ list_files [OK] · a.ts',
+  );
+  // Failures keep full diagnostics, never collapsed to a range.
+  const failed = toolResultEntry('read_file', { errorCode: 'ENOENT', error: 'missing' }, 0, { path: 'a.ts', startLine: 1, endLine: 5 });
+  assert.match(failed, /\[FAIL\]/);
+  assert.match(failed, /missing/);
+});
+
+test('lineRangeSuffix resolves explicit args, aliases, result echo, and partial bounds', () => {
+  assert.equal(lineRangeSuffix({ startLine: 10, endLine: 20 }, {}), ' (startLine: 10, endLine: 20)');
+  assert.equal(lineRangeSuffix({ offset: 5, limit: 10 }, {}), ' (startLine: 5, endLine: 14)');
+  assert.equal(lineRangeSuffix({ startLine: '7', endLine: '9' }, {}), ' (startLine: 7, endLine: 9)');
+  assert.equal(lineRangeSuffix({}, { startLine: 1, endLine: 120 }), ' (startLine: 1, endLine: 120)');
+  assert.equal(lineRangeSuffix({ startLine: 3 }, {}), ' (startLine: 3)');
+  assert.equal(lineRangeSuffix(undefined, { endLine: 9 }), ' (endLine: 9)');
+  assert.equal(lineRangeSuffix({ path: 'a.ts' }, { content: 'x' }), undefined);
+  assert.equal(lineRangeSuffix(undefined, {}), undefined);
+});
+
+test('live read with line range renders the range on the result row', () => {
+  let model = createRootModel();
+  [model] = update({ type: 'kernel', event: 'tool:before', args: ['read_file', { path: 'src/a.ts', startLine: 10, endLine: 20 }] }, model);
+  [model] = update({ type: 'kernel', event: 'tool:after', args: ['read_file', {
+    path: 'src/a.ts', content: 'const x = 1;', startLine: 10, endLine: 20,
+  }, 5, { path: 'src/a.ts', startLine: 10, endLine: 20 }] }, model);
+  assert.equal(model.viewport.entries[1].text, '✔ read_file [OK] (startLine: 10, endLine: 20)');
 });
 
 test('tool failures retain diagnostic output', () => {

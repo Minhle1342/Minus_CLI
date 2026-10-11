@@ -72,6 +72,77 @@ test('findLatestEventOfType scans without cloning the log', () => {
   assert.equal(session.findLatestEventOfType('plan/change' as any), undefined);
 });
 
+test('getModelName returns the latest model/change event', () => {
+  const session = new Session('session-model-name');
+  assert.equal(session.getModelName(), undefined);
+  session.append('model/change', { modelName: 'gemini' });
+  session.append('turn/start', { turn: 1 });
+  session.append('model/change', { modelName: 'groq' });
+  assert.equal(session.getModelName(), 'groq');
+});
+
+test('getEventsAfter filters by seq, never by log index', () => {
+  const session = new Session('session-seq-filter');
+  buildTurn(session, 1);
+  const after = session.getEventsAfter(2);
+  assert.deepEqual(after.map((e) => e.seq), [3, 4, 5, 6]);
+});
+
+test('save fails loud on diverged logs instead of corrupting the file', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-session-diverged-'));
+  try {
+    const persistence = new SessionPersistence(root);
+    // Case A: memory shorter than cursor (stale session object) → ahead guard.
+    const stale = new Session('session-diverged');
+    buildTurn(stale, 1);
+    await persistence.save(stale);
+    (stale as any).eventLog.splice(1, 2);
+    await assert.rejects(persistence.save(stale), /ahead of in-memory session/);
+    // Case B: suffix no longer resumes the file → resume guard (no write happens).
+    const suffix = new Session('session-diverged-suffix');
+    buildTurn(suffix, 1);
+    await persistence.save(suffix);
+    (suffix as any).eventLog[2].seq = 60;
+    suffix.append('turn/start', { turn: 99 });
+    await assert.rejects(persistence.save(suffix), /Refusing to persist session/);
+    const reloaded = await persistence.load('session-diverged-suffix');
+    assert.equal(reloaded?.seq, 6);
+  } finally {
+    await fs.rm(path.join(root, '.codingagent'), { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('loadOrQuarantine preserves corrupt files aside and loads healthy ones', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-session-quarantine-'));
+  try {
+    const persistence = new SessionPersistence(root);
+    const healthy = new Session('session-healthy');
+    healthy.append('turn/start', { turn: 1 });
+    await persistence.save(healthy);
+
+    // Craft a gapped file like session-mv231wow9fff (missing middle seqs).
+    const victim = new Session('session-gapped');
+    buildTurn(victim, 1);
+    buildTurn(victim, 2);
+    await persistence.save(victim);
+    const victimPath = persistence.getSessionPath('session-gapped');
+    const raw = (await fs.readFile(victimPath, 'utf8')).split('\n').filter(Boolean);
+    await fs.writeFile(victimPath, [raw[0], ...raw.slice(4)].join('\n') + '\n');
+
+    const loaded = await persistence.loadOrQuarantine('session-gapped');
+    assert.equal(loaded, undefined);
+    assert.equal(await persistence.load('session-healthy').then((s) => s?.id), 'session-healthy');
+    const dir = await fs.readdir(path.dirname(victimPath));
+    assert.ok(dir.some((f) => f.startsWith('session-gapped.jsonl.corrupt-')), 'corrupt file renamed aside, never deleted');
+    assert.ok(!dir.includes('session-gapped.jsonl'), 'original path cleared');
+
+    // Unknown errors still throw; missing files still return undefined.
+    assert.equal(await persistence.loadOrQuarantine('session-missing'), undefined);
+  } finally {
+    await fs.rm(path.join(root, '.codingagent'), { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test('persistence prunes by tail read and finds interrupted sessions', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-session-persist-'));
   try {

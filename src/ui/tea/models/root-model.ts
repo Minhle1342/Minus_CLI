@@ -1,11 +1,11 @@
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, createSessionTabs, syncSessionTabs, adoptActiveTab, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer } from './diff-model.js';
 import { headerView, statuslineView } from './statusline-model.js';
-import { toolCallEntry, toolResultEntry } from './tool-entry.js';
+import { toolCallEntry, toolErrorEntry, toolResultEntry } from './tool-entry.js';
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
 import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight } from '../styles/theme.js';
@@ -70,6 +70,7 @@ function kernelSessionId(msg: KernelMsg): string | undefined {
     case 'model:thought':
     case 'model:token':
     case 'model:final_answer':
+    case 'model:changed':
     case 'tool:before':
     case 'tool:error': {
       const last: unknown = msg.args[msg.args.length - 1];
@@ -95,17 +96,26 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
     case 'log': return msg.text.trim() ? log(msg.text) : [model, []];
     case 'notice': return [{ ...model, status: { ...model.status, notice: msg.text } }, []];
     case 'busy': {
-      // Pin tab sở hữu task lúc busy:true — event kernel sau đó route về tab này,
-      // tool-entry không lọt sang tab đang xem. busy:false → unpin + tắt dot.
-      const owner = msg.busy ? model.sessions.activeId : undefined;
-      return [{ ...model, status: { ...model.status, busy: msg.busy, busySessionId: owner, aborting: msg.busy ? model.status.aborting : false, retry: '', notice: msg.busy ? '' : model.status.aborting ? 'Task cancelled' : model.status.notice },
-        sessions: { ...model.sessions, tabs: model.sessions.tabs.map(t => ({ ...t, busy: msg.busy ? t.id === owner : false })) } }, []];
+      // Busy theo từng session (đa task song song): chỉ dot đúng tab, global
+      // busy còn sáng khi bất kỳ tab nào còn chạy. Pin giữ đầu mối đầu tiên
+      // cho event kernel legacy thiếu ctx; task xong thì re-pin sang tab còn chạy.
+      const rawOwner = msg.sessionId ?? model.sessions.activeId;
+      const owner = model.sessions.tabs.some(t => t.id === rawOwner) ? rawOwner : model.sessions.activeId;
+      const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, busy: msg.busy } : t);
+      const anyBusy = tabs.some(t => t.busy);
+      let pin = model.status.busySessionId;
+      if (msg.busy) pin = pin ?? owner;
+      else if (pin === owner) pin = tabs.find(t => t.busy)?.id;
+      return [{ ...model, status: { ...model.status, busy: anyBusy, busySessionId: pin, aborting: msg.busy ? model.status.aborting : false, retry: '', notice: msg.busy ? '' : model.status.aborting ? 'Task cancelled' : model.status.notice },
+        sessions: { ...model.sessions, tabs } }, []];
     }
     case 'compose': return [{ ...model, composer: { ...model.composer, value: msg.text, cursorOffset: msg.text.length } }, []];
     case 'completions': return [{ ...model, composer: { ...model.composer, completions: msg.values, selected: 0 } }, []];
     case 'diff': return [{ ...model, diff: { ...model.diff, text: msg.text, visible: msg.reveal ?? model.diff.visible, offset: 0, collapsed: [], hunk: 0 } }, []];
     case 'metadata': {
-      const sidebar = { ...model.sidebar, ...msg.data };
+      // `model` là state per-session-tab (outer gửi model của kernel-active session):
+      // tách khỏi spread global để không đè nhầm lên tab đang xem.
+      const { model: metaModel, ...rest } = msg.data;
       // sessionIds (id thật) ưu tiên; sessions có thể là tên hiển thị (main loop)
       // hoặc ids (startup) — chỉ dùng làm ids khi không có sessionIds.
       const ids = msg.data.sessionIds ?? msg.data.sessions ?? model.sessions.tabs.map(t => t.id);
@@ -121,7 +131,37 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           ? { ...sessions, pendingActiveId: undefined }
           : { ...sessions, pendingActiveId: pending };
       }
-      return [{ ...model, sidebar, sessions }, []];
+      // Model mặc định chung theo metadata của outer (tab chưa /model riêng theo default này).
+      if (msg.data.defaultModel !== undefined) sessions = { ...sessions, defaultModel: msg.data.defaultModel };
+      // Route model về đúng tab sở hữu: cache authoritative khi khác default,
+      // sidebar chỉ đổi khi mô tả đúng tab đang xem và không có switch lạc quan.
+      let displayModel: string | undefined;
+      if (typeof metaModel === 'string' && metaModel) {
+        const metaActive = typeof msg.data.activeSessionId === 'string' ? msg.data.activeSessionId : undefined;
+        const metaSession = typeof msg.data.session === 'string' ? msg.data.session : undefined;
+        const owner = (metaActive && sessions.tabs.some(t => t.id === metaActive)) ? metaActive
+          : (!msg.data.sessionIds && metaSession && sessions.tabs.some(t => t.id === metaSession)) ? metaSession
+          : undefined;
+        const target = owner ?? sessions.activeId;
+        if (sessions.defaultModel !== undefined && metaModel !== sessions.defaultModel) {
+          sessions = { ...sessions, tabs: sessions.tabs.map(t => t.id === target ? { ...t, model: metaModel } : t) };
+        }
+        if (target === sessions.activeId && !sessions.pendingActiveId) {
+          displayModel = metaModel;
+        }
+      }
+      let next: RootModel = { ...model, sidebar: { ...model.sidebar, ...rest }, sessions };
+      if (displayModel !== undefined) {
+        next = { ...next, sidebar: { ...next.sidebar, model: displayModel } };
+      }
+      if (!pending && hasSync && sessions.activeId !== model.sessions.activeId
+        && sessions.tabs.some(t => t.id === sessions.activeId)) {
+        next = adoptAfterSync(next, sessions, model.sessions.activeId);
+        if (displayModel !== undefined) {
+          next = { ...next, sidebar: { ...next.sidebar, model: displayModel } };
+        }
+      }
+      return [next, []];
     }
     case 'sessions-adopt': {
       // Outer (slash) đã switch kernel: swap viewport theo, không phát Cmd.
@@ -141,8 +181,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
     case 'question': {
       const owner = msg.active ? (msg.sessionId ?? model.sessions.activeId) : (model.question.sessionId ?? model.sessions.activeId);
       if (!msg.active) {
-        const draft = model.question.draft || createComposer();
         const closed = { active: false as const, prompt: '', selected: 0 };
+        // Chỉ stash draft khi question đã clear composer (owner là tab đang xem).
+        // Question của tab nền không đụng composer nên lúc đóng không trả gì —
+        // text mỗi tab ở yên trong tab của nó.
+        const draft = model.question.draft;
+        if (!draft) return [{ ...model, question: closed }, []];
         // Draft trả đúng tab sở hữu question — không ghi đè composer tab đang xem.
         if (owner === model.sessions.activeId) return [{ ...model, composer: draft, question: closed }, []];
         const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, composer: sanitizeComposer(draft) } : t);
@@ -152,9 +196,10 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       const withCard = owner === model.sessions.activeId
         ? { ...model, viewport: { ...appendEntry(model.viewport, card), offset: 0, pinned: true } }
         : ownerAppendEntry(model, card, owner);
+      const ownerActive = owner === model.sessions.activeId;
       return [{ ...withCard, focus: 'composer', palette: { ...withCard.palette, open: false },
-        composer: owner === model.sessions.activeId ? createComposer() : withCard.composer,
-        question: { active: true, prompt: msg.prompt, draft: model.composer, permission: msg.permission, selected: 0, sessionId: owner } }, []];
+        composer: ownerActive ? createComposer() : withCard.composer,
+        question: { active: true, prompt: msg.prompt, draft: ownerActive ? model.composer : undefined, permission: msg.permission, selected: 0, sessionId: owner } }, []];
     }
     case 'grill': {
       if (!msg.open) return [{ ...model, focus: model.focus === 'grill' ? 'composer' : model.focus, grill: { ...model.grill, open: false, loading: false } }, []];
@@ -174,13 +219,26 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
     case 'session-transcript': {
       // Hydrate lịch sử session cũ vào tab cache; nếu đúng tab đang xem thì vẽ ngay.
       if (!model.sessions.tabs.some(t => t.id === msg.sessionId)) return [model, []];
-      const tabs = model.sessions.tabs.map(t => t.id === msg.sessionId ? { ...t, entries: msg.entries, thinking: '', answerStream: '', unread: 0, historyKnown: true, lastActive: Date.now() } : t);
+      const prev = model.sessions.tabs.find(t => t.id === msg.sessionId)!;
+      const viewed = msg.sessionId === model.sessions.activeId;
+      // Tab đang chạy task nền (busy / còn stream live) thì hydrate chỉ bổ sung
+      // cache, KHÔNG ghi đè entries và KHÔNG xóa stream — nếu không transcript
+      // đang chạy sẽ bị lịch sử cũ đè mất, chunks mới append tiếp gây trộn view.
+      const liveThinking = viewed ? model.viewport.thinking : (prev.thinking || '');
+      const liveAnswer = viewed ? model.viewport.answerStream : (prev.answerStream || '');
+      const hasLive = Boolean(prev.busy || liveThinking || liveAnswer);
+      const tabs = model.sessions.tabs.map(t => t.id === msg.sessionId ? { ...t,
+        entries: msg.entries,
+        thinking: hasLive ? liveThinking : '',
+        answerStream: hasLive ? liveAnswer : '',
+        unread: viewed ? 0 : (t.unread ?? 0),
+        historyKnown: true, lastActive: Date.now() } : t);
       const sessions = { ...model.sessions, tabs };
-      if (msg.sessionId !== model.sessions.activeId) return [{ ...model, sessions }, []];
+      if (!viewed) return [{ ...model, sessions }, []];
       const tab = tabs.find(t => t.id === msg.sessionId);
       return [{ ...model, sessions,
-        viewport: { ...model.viewport, entries: msg.entries, thinking: '', answerStream: '', offset: 0, pinned: true },
-        sidebar: { ...model.sidebar, session: tab?.title || model.sidebar.session },
+        viewport: { ...model.viewport, entries: msg.entries, thinking: liveThinking, answerStream: liveAnswer, offset: 0, pinned: true },
+        sidebar: { ...model.sidebar, session: tab?.title || model.sidebar.session, model: tab ? tabDisplayModel(model, tab) : model.sidebar.model },
         status: msg.entries.length ? { ...model.status, notice: `Đã khôi phục lịch sử session (${msg.entries.length} msgs)` } : model.status,
       }, []];
     }
@@ -222,10 +280,10 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
             const next = { ...t, tools: (t.tools ?? []).filter(tool => tool !== name) };
             return typeof diff === 'string' ? { ...next, diff: { ...createDiffViewer(), ...(t.diff ?? {}), text: diff, offset: 0 } } : next;
           }) } };
-          return [ownerAppendEntry(withTabs, { kind: 'tool', text: toolResultEntry(name, result, duration) }, explicitOwner), []];
+          return [ownerAppendEntry(withTabs, { kind: 'tool', text: toolResultEntry(name, result, duration, args) }, explicitOwner), []];
         }
         case 'tool:error': {
-          const entry = { kind: 'tool' as const, text: `✖ ${msg.args[0]}: ${String(msg.args[1]?.message || msg.args[1])}` };
+          const entry = { kind: 'tool' as const, text: toolErrorEntry(String(msg.args[0] ?? 'unknown_tool'), msg.args[1]) };
           if (!entry.text.trim()) return [model, []];
           return [ownerAppendEntry(model, entry, explicitOwner), []];
         }
@@ -236,7 +294,22 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           return [{ ...model, sessions: { ...model.sessions, tabs } }, []];
         }        case 'model:retry': { const retry = msg.args[0]; return ownerActive ? [{ ...model, status: { ...model.status, retry: retry ? `Retry ${retry.attempt}/${retry.maxRetries} in ${Math.ceil(retry.delayMs / 1000)}s · ${retry.message || ''}` : '' } }, []] : [model, []]; }
         case 'workspace:changed': return [{ ...model, sidebar: { ...model.sidebar, workspace: msg.args[1] } }, []];
-        case 'model:changed': return [{ ...model, sidebar: { ...model.sidebar, model: msg.args[0] } }, []];
+        case 'model:changed': {
+          // Model theo từng tab: ctx tường minh → ghim vào tab sở hữu (+ sidebar nếu đang xem tab đó).
+          // Thiếu ctx (đổi default chung) → cập nhật default; sidebar giữ model riêng của tab đang xem nếu có.
+          const explicitOwner = kernelSessionId(msg);
+          if (explicitOwner && model.sessions.tabs.some(t => t.id === explicitOwner)) {
+            const tabs = model.sessions.tabs.map(t => t.id === explicitOwner ? { ...t, model: msg.args[0] } : t);
+            const sidebar = explicitOwner === model.sessions.activeId
+              ? { ...model.sidebar, model: msg.args[0] }
+              : model.sidebar;
+            return [{ ...model, sidebar, sessions: { ...model.sessions, tabs } }, []];
+          }
+          const activeTab = model.sessions.tabs.find(t => t.id === model.sessions.activeId);
+          return [{ ...model,
+            sidebar: { ...model.sidebar, model: activeTab?.model ?? msg.args[0] },
+            sessions: { ...model.sessions, defaultModel: msg.args[0] } }, []];
+        }
         case 'agent:abort': case 'abort': return [{ ...model, status: { ...model.status, aborting: model.status.busy } }, []];
         case 'agent:status': case 'agent/status': {
           const record = msg.args[0];

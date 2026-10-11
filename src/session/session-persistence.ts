@@ -106,6 +106,15 @@ export class SessionPersistence {
       throw new Error(`Persisted session is ahead of in-memory session: ${persistedSeq} > ${session.seq}.`);
     }
 
+    const pending = session.getEventsAfter(persistedSeq);
+    // Fail LOUD instead of corrupting the file: the suffix must resume exactly
+    // where the file ends. A mismatch means a diverged writer (stale/replaced
+    // session object or concurrent writer) — appending would create a gap or
+    // duplicate sequence like session-mv231wow9fff (2026-10-10).
+    const firstPending = pending[0];
+    if (firstPending && firstPending.seq !== persistedSeq + 1) {
+      throw new Error(`Refusing to persist session "${session.id}": file ends at seq ${persistedSeq} but memory resumes at seq ${firstPending.seq}.`);
+    }
     const lines: string[] = [];
     if (!state && !existing) {
       const header: SessionFileHeader = {
@@ -117,7 +126,7 @@ export class SessionPersistence {
       lines.push(JSON.stringify(header));
     }
 
-    for (const event of session.getEventsAfter(persistedSeq)) {
+    for (const event of pending) {
       lines.push(JSON.stringify(event));
     }
 
@@ -156,6 +165,41 @@ export class SessionPersistence {
       await this.save(session);
     }
     return session;
+  }
+
+  /**
+   * Load with corruption tolerance for startup paths: a structurally corrupt
+   * session file (sequence gap, malformed header/event) is quarantined aside
+   * (renamed with a .corrupt stamp, NEVER deleted) and undefined is returned
+   * so startup falls back instead of fatal-erroring. Any other error rethrows.
+   */
+  async loadOrQuarantine(sessionId: string): Promise<Session | undefined> {
+    try {
+      return await this.load(sessionId);
+    } catch (error: any) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/Non-contiguous session event sequence|Malformed session header|Invalid session event|Unsupported or malformed session snapshot/.test(message)) {
+        throw error;
+      }
+      const stamped = await this.quarantine(sessionId);
+      console.warn(`⚠️  Quarantined corrupt session "${sessionId}" (${message}). Original preserved at ${stamped}; starting without it.`);
+      return undefined;
+    }
+  }
+
+  /** Rename a session file aside for forensics; returns the new path (or undefined when absent). */
+  async quarantine(sessionId: string): Promise<string | undefined> {
+    const filePath = this.getSessionPath(sessionId);
+    const stamped = `${filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    try {
+      await fs.rename(filePath, stamped);
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error;
+      return undefined;
+    }
+    this.persistedState.delete(sessionId);
+    await fs.rename(`${filePath}.meta.json`, `${stamped}.meta.json`).catch(() => {});
+    return stamped;
   }
 
   async list(): Promise<string[]> {

@@ -157,63 +157,6 @@ export interface ToolExecutionGuard {
   ): Promise<{ allow: boolean; reason?: string; errorCode?: string }>;
 }
 
-export class TurnBudgetTracker {
-  /** Budget tách theo session — turn numbers của 2 session không còn ăn chung. */
-  private buckets = new Map<string, { turn?: number; count: number }>();
-
-  private bucket(sessionId?: string): { turn?: number; count: number } {
-    const key = sessionId ?? '';
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      bucket = { count: 0 };
-      this.buckets.set(key, bucket);
-    }
-    return bucket;
-  }
-
-  /** Drop budget của session đã xóa (chống phình map). */
-  evictSession(sessionId: string): void {
-    this.buckets.delete(sessionId);
-  }
-
-  getCallCount(turn?: number, sessionId?: string): number {
-    const bucket = this.bucket(sessionId);
-    if (turn !== undefined && bucket.turn !== turn) {
-      bucket.turn = turn;
-      bucket.count = 0;
-    }
-    return bucket.count;
-  }
-
-  increment(turn?: number, sessionId?: string): number {
-    const bucket = this.bucket(sessionId);
-    if (turn !== undefined && bucket.turn !== turn) {
-      bucket.turn = turn;
-      bucket.count = 0;
-    }
-    bucket.count++;
-    return bucket.count;
-  }
-
-  reset(turn?: number, sessionId?: string): void {
-    if (turn === undefined && sessionId === undefined) {
-      this.buckets.clear();
-      return;
-    }
-    if (sessionId === undefined) {
-      for (const bucket of this.buckets.values()) {
-        if (bucket.turn === turn) {
-          bucket.count = 0;
-        }
-      }
-      return;
-    }
-    const bucket = this.bucket(sessionId);
-    bucket.turn = turn;
-    bucket.count = 0;
-  }
-}
-
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
     return Promise.reject(new Error('ABORTED'));
@@ -268,7 +211,6 @@ export class ToolRunner {
   private permissionManager?: PermissionManager;
   private executionGuard?: ToolExecutionGuard;
   readonly guardian: ToolUseGuardian;
-  private readonly budgetTracker: TurnBudgetTracker;
   /**
    * Cache deterministic infra/policy blocks theo turn: call giống hệt mà state
    * không đổi thì trả cached result (deduped:true) thay vì re-execute + render
@@ -282,7 +224,6 @@ export class ToolRunner {
     permissionManager?: PermissionManager,
     executionGuard?: ToolExecutionGuard,
     guardian?: ToolUseGuardian,
-    budgetTracker?: TurnBudgetTracker,
     rootRegistry?: ToolProvider,
   ) {
     this.registry = registry;
@@ -291,7 +232,6 @@ export class ToolRunner {
     this.permissionManager = permissionManager;
     this.executionGuard = executionGuard;
     this.guardian = guardian || new ToolUseGuardian({ workspaceDir: this.workspace?.rootDir });
-    this.budgetTracker = budgetTracker || new TurnBudgetTracker();
     if (this.workspace?.rootDir && typeof this.guardian.setWorkspaceDir === 'function') {
       this.guardian.setWorkspaceDir(this.workspace.rootDir);
     }
@@ -301,23 +241,13 @@ export class ToolRunner {
     }
   }
 
-  get scopedCallCount(): number {
-    return this.budgetTracker.getCallCount();
-  }
-
-  set scopedCallCount(val: number) {
-    this.budgetTracker.reset();
-    for (let i = 0; i < val; i++) this.budgetTracker.increment();
-  }
-
-  resetTurnBudget(turn?: number): void {
-    this.budgetTracker.reset(turn);
+  /** Xóa per-turn deterministic-dedup cache (gọi khi chuyển turn). */
+  resetTurnBudget(): void {
     this.deterministicDedup.clear();
   }
 
-  /** Drop per-session budget + dedup state (session deleted/pruned). */
+  /** Drop per-session dedup state (session deleted/pruned). */
   evictSession(sessionId: string): void {
-    this.budgetTracker.evictSession(sessionId);
     for (const [key, entry] of this.deterministicDedup) {
       if (entry.sessionId === sessionId) this.deterministicDedup.delete(key);
     }
@@ -353,7 +283,6 @@ export class ToolRunner {
       this.permissionManager,
       this.executionGuard,
       this.guardian,
-      this.budgetTracker,
       this.rootRegistry || this.registry,
     );
     scoped.deterministicDedup = this.deterministicDedup;
@@ -371,7 +300,6 @@ export class ToolRunner {
       decisionId: (context as any)?.decisionId,
       allowedToolSetHash: (context as any)?.allowedToolSetHash,
       classificationPhase: (context as any)?.classificationPhase,
-      maxToolCalls: (context as any)?.maxToolCalls,
       permissionGranted: (context as any)?.permissionGranted,
     };
   }
@@ -461,8 +389,6 @@ export class ToolRunner {
       const names = context.allowedToolNames || [];
       const hashValid = Boolean(context.decisionId && context.allowedToolSetHash && hashAllowedToolSet(names) === context.allowedToolSetHash);
       const isAllowed = isToolAuthorized(toolName, names);
-      const currentCallCount = this.budgetTracker.getCallCount(context.turn, context.sessionId);
-      const isWithinBudget = context.maxToolCalls === undefined || currentCallCount < context.maxToolCalls;
 
       if (!hashValid) {
         shadowObservation = {
@@ -478,23 +404,11 @@ export class ToolRunner {
           reason: `Shadow observation: Tool "${toolName}" is not in allowed tools [${names.join(', ')}] for phase "${context.classificationPhase || 'unknown'}".`,
           decisionId: context.decisionId,
         };
-      } else if (!isWithinBudget) {
-        shadowObservation = {
-          wouldAllow: false,
-          errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED',
-          reason: `Shadow observation: Tool call budget (${context.maxToolCalls}) would be exhausted.`,
-          decisionId: context.decisionId,
-        };
       } else {
         shadowObservation = {
           wouldAllow: true,
           decisionId: context.decisionId,
         };
-      }
-      // P2: shadow observations never consume the execution budget. Only real
-      // dispatches (wouldAllow) advance the per-turn call count.
-      if (shadowObservation.wouldAllow) {
-        this.budgetTracker.increment(context.turn, context.sessionId);
       }
     } else if (controlMode === 'enforce' && (context?.allowedToolNames || context?.allowedToolSetHash)) {
       const names = context.allowedToolNames || [];
@@ -543,28 +457,6 @@ export class ToolRunner {
           guardianDiagnosis: diagnosis,
         };
       }
-      const currentCallCount = this.budgetTracker.getCallCount(context.turn, context.sessionId);
-      if (context.maxToolCalls !== undefined && currentCallCount >= context.maxToolCalls) {
-        const errorMsg = `Per-turn tool call budget (${context.maxToolCalls}) exhausted for turn ${context.turn ?? 'current'}. Please conclude current turn or provide text response to the user.`;
-        const errRes = {
-          error: errorMsg,
-          errorCode: 'TOOL_CALL_BUDGET_EXHAUSTED',
-          budget: context.maxToolCalls,
-          turn: context.turn,
-        };
-        const diagnosis = classifyToolFailure(toolName, errorMsg, errRes);
-        diagnosis.category = 'BUDGET_EXHAUSTED';
-        diagnosis.recoveryAction = 'Conclude current turn or provide text response to the user.';
-        this.trackDeterministicResult(toolName, args, errRes, context);
-        return {
-          toolName,
-          args,
-          result: errRes,
-          durationMs: Date.now() - startTime,
-          guardianDiagnosis: diagnosis,
-        };
-      }
-      this.budgetTracker.increment(context.turn, context.sessionId);
     }
 
     // Stage 1: Tool Lookup

@@ -10,7 +10,7 @@ import { evaluateSubmission, SubmissionReadiness } from './submission-readiness.
 import { computeRequestValueDigest } from '../session/session-invariants.js';
 import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy } from './completed-turn-compaction-policy.js';
 import { AgentLoopOptions } from './types.js';
-import { CheckpointManager } from '../workspace/checkpoint.js';
+import { CheckpointManager, type FileDiffItem, type RollbackResult } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
 import { ContextCompactor } from './context-compactor.js';
 import { ContextGuardian, ContextAgent, TurnMemoryRetriever, PlaybookReflector, PlaybookCurator } from '../context/index.js';
@@ -367,6 +367,10 @@ export function calculateTaskComplexity(
  */
 export class AgentLoop {
   private llm: any;
+  /** Per-session-tab LLM overrides set via scoped /model (sessionId → client). */
+  private sessionModels = new Map<string, { llm: any; modelName: string }>();
+  /** Shared LLM instances by model name (tabs on the same model reuse one client). */
+  private modelInstances = new Map<string, any>();
   private toolRegistry: ToolRegistry;
   private toolProvider: ToolProvider;
   private toolRunner: ToolRunner;
@@ -706,6 +710,9 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
+    // Workspace switch starts a fresh session epoch (same as SessionManager):
+    // per-tab model overrides belong to the old workspace's sessions.
+    this.sessionModels.clear();
     this.verificationPolicy.setWorkspaceRoot(workspace.rootDir);
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
@@ -764,10 +771,77 @@ export class AgentLoop {
     }
   }
 
-  getTokenConfig(): import('../llm/token-config.js').TokenConfig | undefined {
+  /**
+   * Scope an LLM to one session tab (/model applies to the viewed tab).
+   * The instance is cached by model name and shared across tabs using the
+   * same model. Persists a model/change event so the choice survives restart.
+   */
+  async setSessionLLM(session: Session, llm: any, modelName: string): Promise<void> {
+    const name = (modelName || '').trim() || llm?.modelName || 'custom';
+    if (this.getEffectiveModelName(session) === name && this.sessionModels.get(session.id)?.llm === llm) return;
+    this.sessionModels.set(session.id, { llm, modelName: name });
+    this.modelInstances.set(name, llm);
+    session.append('model/change', { modelName: name });
+    await this.persistSession(session).catch(() => {});
+    this.kernel?.ctx.events.emit('model:changed', name, { sessionId: session.id });
+  }
+
+  /** Explicit per-tab model name, if /model was scoped to this session. */
+  getSessionModelName(sessionId: string): string | undefined {
+    return this.sessionModels.get(sessionId)?.modelName;
+  }
+
+  /** Effective model name: explicit per-tab override → persisted model/change → loop default. */
+  getEffectiveModelName(session: Session): string | undefined {
+    return this.sessionModels.get(session.id)?.modelName
+      ?? session.getModelName()
+      ?? this.llm?.modelName;
+  }
+
+  /**
+   * Resolve the LLM a session runs with. Sync fast path (map hit or default);
+   * use ensureSessionLLM() first when a persisted name may need recreating.
+   */
+  private llmFor(session: Session): any {
+    const override = this.sessionModels.get(session.id);
+    if (override) return override.llm;
+    const persisted = session.getModelName();
+    if (persisted) {
+      const cached = this.modelInstances.get(persisted);
+      if (cached) {
+        this.sessionModels.set(session.id, { llm: cached, modelName: persisted });
+        return cached;
+      }
+    }
+    return this.llm;
+  }
+
+  /** Best-effort async recreate of a persisted per-tab model (post-restart). Falls back to default. */
+  private async ensureSessionLLM(session: Session): Promise<void> {
+    if (this.sessionModels.has(session.id)) return;
+    const persisted = session.getModelName();
+    if (!persisted) return;
+    const cached = this.modelInstances.get(persisted);
+    if (cached) {
+      this.sessionModels.set(session.id, { llm: cached, modelName: persisted });
+      return;
+    }
+    const factory = this.loopOptions?.createSessionLLM;
+    if (!factory) return;
+    try {
+      const llm = await factory(persisted);
+      if (llm) {
+        this.modelInstances.set(persisted, llm);
+        this.sessionModels.set(session.id, { llm, modelName: persisted });
+      }
+    } catch { /* fall back to loop default */ }
+  }
+
+  getTokenConfig(session?: Session): import('../llm/token-config.js').TokenConfig | undefined {
+    const llm = session ? this.llmFor(session) : this.llm;
     let baseConfig: import('../llm/token-config.js').TokenConfig | undefined = undefined;
-    if (this.llm && typeof this.llm.getTokenConfig === 'function') {
-      baseConfig = { ...this.llm.getTokenConfig() };
+    if (llm && typeof llm.getTokenConfig === 'function') {
+      baseConfig = { ...llm.getTokenConfig() };
     }
     const currentDynamicBudget = this.dynamicContextArbiter?.getBudget();
     if (currentDynamicBudget !== undefined) {
@@ -794,15 +868,90 @@ export class AgentLoop {
 
   /**
    * Hoàn tác hành động sửa đổi gần nhất (/undo)
+   * Phục hồi file về checkpoint trước đó và tua ngược lịch sử hội thoại về tin nhắn gần nhất.
    */
-  async rollback(session?: Session): Promise<{ success: boolean; message: string }> {
+  async rollback(session?: Session): Promise<{
+    success: boolean;
+    message: string;
+    restoredFiles?: string[];
+    diffs?: FileDiffItem[];
+    undonePrompt?: string;
+  }> {
     const targetSession = session || this.activeSession;
     if (targetSession) this.effectLedger.bindSession(targetSession);
-    const result = await this.checkpointManager.rollbackLast();
-    if (result.restoredFiles?.length && targetSession) {
-      await this.recordWorkspaceRestoration(targetSession, result.restoredFiles, result.success ? result.checkpoint?.id : undefined);
+
+    // 1. Rollback file workspace
+    // Ưu tiên rollback về task checkpoint của turn gần nhất nếu có (turn-${lastTurn})
+    const lastTurn = targetSession ? (targetSession.getOpenTurn() ?? targetSession.getCompletedTurnNumbers().at(-1)) : undefined;
+    let fileResult: RollbackResult | undefined;
+    if (lastTurn !== undefined) {
+      fileResult = await this.checkpointManager.rollbackToTaskCheckpoint(`turn-${lastTurn}`).catch(() => undefined);
     }
-    return result;
+    if (!fileResult || !fileResult.success) {
+      fileResult = await this.checkpointManager.rollbackLast().catch(() => undefined);
+    }
+
+    // 2. Rollback session conversation history về message gần nhất
+    let sessionRollback: { success: boolean; undonePrompt?: string; remainingMessages: number } | undefined;
+    if (targetSession) {
+      sessionRollback = targetSession.rollbackLastTurn();
+    }
+
+    const filesRestoredCount = fileResult?.restoredFiles?.length || 0;
+    const hadFileSuccess = Boolean(fileResult?.success && filesRestoredCount > 0);
+    const hadSessionSuccess = Boolean(sessionRollback?.success);
+
+    if (!hadFileSuccess && !hadSessionSuccess) {
+      return {
+        success: false,
+        message: fileResult?.message || 'Không có checkpoint hoặc tin nhắn nào trong phiên để hoàn tác.',
+      };
+    }
+
+    // 3. Cập nhật cache, ledger và invalidation
+    if (fileResult?.checkpoint?.id && targetSession) {
+      this.effectLedger.rollbackByCheckpoint(fileResult.checkpoint.id);
+    }
+    if (fileResult?.restoredFiles?.length) {
+      for (const file of fileResult.restoredFiles) {
+        this.verificationPolicy.recordModification(file);
+        this.targetFilesModifiedInTurn.add(file);
+        this.repositoryMap.invalidate(file);
+      }
+    }
+    this.dynamicContextCache.invalidate();
+    disposeSharedTypeScriptService();
+    this.lastCommandExecutionState = undefined;
+    this.lastMutationForInvestigation = undefined;
+    this.rollbackOrchestrator.resetGreenCheckpoint();
+    if (targetSession) {
+      await this.persistSession(targetSession);
+    }
+
+    // 4. Soạn message báo cáo kết quả chi tiết
+    let msg = '';
+    if (sessionRollback?.undonePrompt) {
+      const promptSnippet = sessionRollback.undonePrompt.length > 50
+        ? sessionRollback.undonePrompt.slice(0, 50) + '...'
+        : sessionRollback.undonePrompt;
+      msg = `Đã hoàn tác tin nhắn "${promptSnippet}".`;
+    } else {
+      msg = `Đã hoàn tác lượt gần nhất.`;
+    }
+
+    if (filesRestoredCount > 0) {
+      msg += ` Đã khôi phục ${filesRestoredCount} file(s) về trạng thái trước đó.`;
+    } else {
+      msg += ` (Không có thay đổi file nào cần hoàn tác trong lượt này).`;
+    }
+
+    return {
+      success: true,
+      message: msg,
+      restoredFiles: fileResult?.restoredFiles,
+      diffs: fileResult?.diffs,
+      undonePrompt: sessionRollback?.undonePrompt,
+    };
   }
 
   private async recordWorkspaceRestoration(session: Session, restoredFiles: string[], checkpointId?: string, turn = session.getOpenTurn()): Promise<void> {
@@ -831,6 +980,7 @@ export class AgentLoop {
     session: Session,
     options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean },
   ): Promise<string> {
+    const llm = this.llmFor(session);
     while (true) {
       try {
         const retries = this.getCircuitBreakerRetries(session.id);
@@ -879,7 +1029,7 @@ export class AgentLoop {
           } catch { }
 
           // 3. Backoff delay trước khi gọi lại LLM (môi trường test delay cực ngắn)
-          const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(this.llm?.constructor?.name?.includes('Mock'));
+          const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(llm?.constructor?.name?.includes('Mock'));
           const backoffMs = isTestEnv
             ? 5
             : (errClassification.retryAfterMs ?? Math.min(1500 * Math.pow(1.5, nextRetries - 1), 8000));
@@ -1016,6 +1166,10 @@ export class AgentLoop {
 
   private async runInternal(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean }): Promise<string> {
     this.activeSession = session;
+    // Per-tab model scoping: parallel session tabs may each run a different
+    // LLM. Resolve once per run — never mutate the shared this.llm mid-run.
+    await this.ensureSessionLLM(session);
+    const llm = this.llmFor(session);
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
     );
@@ -1364,8 +1518,8 @@ export class AgentLoop {
       }
       // A single whole-request budget gate runs immediately before the provider
       // call, after tools and dynamic context are known.
-      const userConfiguredInput = typeof this.llm?.getTokenConfig === 'function'
-        ? this.llm.getTokenConfig()?.maxInputTokens
+      const userConfiguredInput = typeof llm?.getTokenConfig === 'function'
+        ? llm.getTokenConfig()?.maxInputTokens
         : undefined;
       const maxBudget = userConfiguredInput || this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
       // Tự động căn chỉnh workingHistoryBudget theo tỷ lệ 75% cấu hình người dùng (từ /token low/medium/high/max)
@@ -1977,12 +2131,12 @@ export class AgentLoop {
           ? Math.min(400, configuredRepoMapTokens)
           : configuredRepoMapTokens;
 
-      const activeTokenConfig = typeof this.llm.getTokenConfig === 'function'
-        ? (this.llm.getTokenConfig() || {})
+      const activeTokenConfig = typeof llm.getTokenConfig === 'function'
+        ? (llm.getTokenConfig() || {})
         : {};
-      const activeModelName = this.llm?.getActiveProvider?.()?.name
-        || this.llm?.modelName
-        || this.llm?.constructor?.name
+      const activeModelName = llm?.getActiveProvider?.()?.name
+        || llm?.modelName
+        || llm?.constructor?.name
         || 'unknown';
 
       // Satellite 4: Dynamic Harness Zero-Base Trimming
@@ -1991,7 +2145,7 @@ export class AgentLoop {
       const historyPressureRatio = historyTokens / inputBudgetMax;
       const isHighHistoryPressure = historyPressureRatio >= 0.50;
 
-      const mockModel = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      const mockModel = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
       const shouldRecallRepoMem = explicitRepoMem
         ? (effectiveRepoMemTokens > 0)
         : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
@@ -2469,7 +2623,7 @@ export class AgentLoop {
         (event) => Boolean(event.data.compactionState),
       )?.data.compactionState as CompactionStateV1 | undefined;
       const requestEnvelope: ModelRequestEnvelope = {
-        provider: getModelTokenProfile(activeModelName, this.llm?.baseURL).provider,
+        provider: getModelTokenProfile(activeModelName, llm?.baseURL).provider,
         model: activeModelName,
         systemPrompt: assembledSystemPrompt,
         tools: activeToolDeclarations,
@@ -2730,8 +2884,8 @@ export class AgentLoop {
       let accumulatedThought = '';
       let thoughtTokenCount = 0;
       try {
-        if (typeof this.llm.generateStream === 'function') {
-          response = await this.llm.generateStream(session, activeToolDeclarations, {
+        if (typeof llm.generateStream === 'function') {
+          response = await llm.generateStream(session, activeToolDeclarations, {
             onRetry: (retryPayload: any) => {
               this.kernel?.ctx.events.emit('model:retry', retryPayload, { sessionId: session.id });
             },
@@ -2791,7 +2945,7 @@ export class AgentLoop {
             },
           }, requestOptions);
         } else {
-          response = await this.llm.generate(session, activeToolDeclarations, requestOptions);
+          response = await llm.generate(session, activeToolDeclarations, requestOptions);
         }
       } finally {
         this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
@@ -2892,7 +3046,7 @@ export class AgentLoop {
         || this.agentId === 'delegation-parent'
         || this.agentId === 'delegation-recovery-parent';
       const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
-      const isMockLLM = Boolean(this.llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+      const isMockLLM = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
 
       let userGoal: string | undefined = this.goalManager?.getState()?.objective;
       if (!userGoal) {
@@ -2958,7 +3112,7 @@ export class AgentLoop {
         // Streaming providers already emitted each thought chunk. Emit the
         // aggregate only for non-streaming providers to avoid duplicating the
         // reasoning trace in reactive UIs.
-        if (typeof this.llm.generateStream !== 'function') {
+        if (typeof llm.generateStream !== 'function') {
           this.kernel?.ctx.events.emit('model:thought', response.reasoningContent, { sessionId: session.id });
         }
 
@@ -3211,7 +3365,6 @@ export class AgentLoop {
                       classificationPhase: classification.phase,
                       phaseVersion: classification.phaseVersion,
                       classificationRisk: classification.risk,
-                      maxToolCalls: recommendedToolDecision.maxToolCalls,
                     } : {}),
                   },
                   scheduled.id,
@@ -3734,7 +3887,6 @@ export class AgentLoop {
                     classificationPhase: classification.phase,
                     phaseVersion: classification.phaseVersion,
                     classificationRisk: classification.risk,
-                    maxToolCalls: recommendedToolDecision.maxToolCalls,
                   } : {}),
                   ...(toolName === 'submit_solution' ? {
                     completionEvidenceVerified: true,
@@ -4142,7 +4294,10 @@ export class AgentLoop {
               // Lược bỏ edge case lặp: cùng fingerprint (defect+location) thì không render lại khối RCA
               CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
             }
-            this.kernel?.ctx.events.emit('tool:error', toolName, executionResult.result, { sessionId: session.id });
+            // NOTE: không emit `tool:error` ở đây — `tool:after` đã phát ở trên
+            // với cùng result và TEA đã render full [FAIL] block. Emit thêm gây
+            // duplicate dòng `✖ <tool>: [object Object]`. `tool:error` chỉ dành
+            // cho các nhánh blocked/aborted không có `tool:after`.
           } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
             this.reflectionEngine.reset();
             if (isVerificationCommand(commandForAttribution)) {
@@ -5024,11 +5179,14 @@ export class AgentLoop {
       throw new Error('AgentLoop is currently draining another session inbox.');
     }
 
-    const item = this.inbox.enqueue(session.id, text, source);
+    const item = this.inbox.enqueue(session.id, text, source, { isSteering: false });
     session.append('input/queued', {
       inputId: item.id,
       inputText: item.text,
       source: item.source,
+      // Queued future task, NOT mid-turn steering: must not block the running
+      // turn's submit_solution gate (see getPendingSteeringInputs).
+      isSteering: false,
     });
     const isRunning = this.drainingInbox || this.runQueues.has(session.id);
     const shouldStartDrain = !isRunning && !this.drainScheduled;
@@ -5129,6 +5287,7 @@ export class AgentLoop {
     this.effectLedger.evictSession(sessionId);
     this.subagentManager.evictSession(sessionId);
     this.toolRunner.evictSession(sessionId);
+    this.sessionModels.delete(sessionId);
   }
 
   /**
@@ -5528,12 +5687,16 @@ export class AgentLoop {
     const availableNames = childRegistry.getAll().map((tool) => tool.name);
     const allowedNames = (options.toolNames || availableNames).filter((name) => !forbidden.has(name));
     const childScope = childRegistry.createScope(`subagent-scope:${agentId}`, allowedNames);
+    // Subagent inherits its parent tab's model (parallel tabs stay on their own models).
+    const parentLLM = options.parentSessionId
+      ? (this.sessionModels.get(options.parentSessionId)?.llm ?? this.llm)
+      : this.llm;
     const subagentSections = resolveSubagentPromptSections({
       capabilities: options.capabilities || options.requiredCapabilities,
       toolNames: allowedNames,
       brief: options.brief,
     });
-    const childLoop = new AgentLoop(this.llm, childRegistry, {
+    const childLoop = new AgentLoop(parentLLM, childRegistry, {
       workspace: options.worktreePath ? new Workspace(options.worktreePath) : this._workspace,
       maxSteps: options.maxSteps ?? this.maxSteps,
       toolScope: childScope,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ToolRegistry } from './registry.js';
-import { ToolRunner, TurnBudgetTracker } from './tool-runner.js';
+import { ToolRunner } from './tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { PermissionManager } from '../security/permission-manager.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
@@ -10,22 +10,7 @@ import type { ToolDefinition } from './types.js';
 describe('Tool session scoping Suite', () => {
   const workspace = new Workspace(process.cwd());
 
-  it('1. TurnBudgetTracker tách budget theo session (cùng turn number không ăn chung)', () => {
-    const tracker = new TurnBudgetTracker();
-    assert.equal(tracker.increment(3, 'sess-a'), 1);
-    assert.equal(tracker.increment(3, 'sess-a'), 2);
-    assert.equal(tracker.increment(3, 'sess-b'), 1);
-    assert.equal(tracker.getCallCount(3, 'sess-a'), 2);
-    assert.equal(tracker.getCallCount(3, 'sess-b'), 1);
-    // Không sessionId → bucket legacy chung, hành vi cũ giữ nguyên.
-    assert.equal(tracker.increment(3), 1);
-    assert.equal(tracker.getCallCount(3), 1);
-    tracker.evictSession('sess-a');
-    assert.equal(tracker.getCallCount(3, 'sess-a'), 0);
-    assert.equal(tracker.getCallCount(3, 'sess-b'), 1);
-  });
-
-  it('2. Budget enforce trong run() tách theo sessionId trong context', async () => {
+  it('1. Không còn budget theo session: mọi session gọi không giới hạn', async () => {
     const registry = new ToolRegistry();
     const mockTool: ToolDefinition = {
       name: 'scoped_read',
@@ -41,12 +26,11 @@ describe('Tool session scoping Suite', () => {
       allowedToolNames: allowed,
       allowedToolSetHash: hashAllowedToolSet(allowed),
       turn: 1,
-      maxToolCalls: 1,
     };
     const first = await runner.run('scoped_read', { key: 'a1' }, { ...base, sessionId: 'sess-a' });
     assert.equal(first.result.success, true);
     const second = await runner.run('scoped_read', { key: 'a2' }, { ...base, sessionId: 'sess-a' });
-    assert.equal(second.result.errorCode, 'TOOL_CALL_BUDGET_EXHAUSTED');
+    assert.equal(second.result.success, true);
     const otherSession = await runner.run('scoped_read', { key: 'b1' }, { ...base, sessionId: 'sess-b' });
     assert.equal(otherSession.result.success, true);
   });

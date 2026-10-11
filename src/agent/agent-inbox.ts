@@ -78,12 +78,13 @@ export class AgentInbox {
 
   restore(
     sessionId: string,
-    input: { inputId: string; text: string; source: AgentInputSource; queuedAt: string },
+    input: { inputId: string; text: string; source: AgentInputSource; queuedAt: string; isSteering?: boolean },
   ): AgentInboxItem {
     const existing = this.queues.get(sessionId)?.find((item) => item.id === input.inputId);
     return existing || this.enqueue(sessionId, input.text, input.source, {
       id: input.inputId,
       enqueuedAt: input.queuedAt,
+      isSteering: input.isSteering,
     });
   }
 

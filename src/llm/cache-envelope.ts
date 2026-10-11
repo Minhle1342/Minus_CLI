@@ -30,7 +30,7 @@ export interface PromptCacheEnvelope {
   metadata: Required<PromptCacheEnvelopeOptions>;
 }
 
-const TIER_ORDER: PromptCacheTier[] = ['T0', 'T1', 'T2', 'T3'];
+export const TIER_ORDER: PromptCacheTier[] = ['T0', 'T1', 'T2', 'T3'];
 
 /** Canonical, content-addressed prompt envelope. T3 remains the dynamic uncached tail. */
 export function createPromptCacheEnvelope(

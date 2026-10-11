@@ -1,9 +1,12 @@
 import type { GrillOption } from '../ui/tea/types.js';
+import { Session } from '../session/session.js';
 
 export interface GrillSuggestContext {
   composeQuestion?: string;
   composePhase?: string;
   recentTranscript?: string[];
+  /** Session id của tab đang route — phiên gợi ý ephemeral mang id này để trace. */
+  sessionId?: string;
 }
 
 /** Heuristic fallback khi LLM offline — luôn trả về ít nhất 2 phương án. */
@@ -33,6 +36,34 @@ export interface GrillLLM {
   generate?(...args: any[]): Promise<{ text?: string } | string>;
 }
 
+export interface GrillUI {
+  grillChoose(question: string, options: GrillOption[], sessionId?: string): Promise<string | undefined>;
+  setGrillOptions(question: string, options: GrillOption[], sessionId?: string): void;
+  dismissGrill(): void;
+}
+
+/** Shared open-loading-then-fill flow for /grill-me and model-initiated ask_user. */
+export async function runGrillFlow(
+  ui: GrillUI,
+  llm: GrillLLM | undefined,
+  question: string,
+  ctx: GrillSuggestContext = {},
+  sessionId?: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (signal?.aborted) return undefined;
+  const pickPromise = ui.grillChoose(question, [], sessionId);
+  const onAbort = () => ui.dismissGrill();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    const { options } = await suggestGrillOptions(llm, question, ctx);
+    ui.setGrillOptions(question, options, sessionId);
+    return await pickPromise;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Gọi LLM live để gợi ý 3-5 phương án ngắn gọn; lỗi/timeout → fallback heuristic. */
 export async function suggestGrillOptions(
   llm: GrillLLM | undefined,
@@ -52,8 +83,13 @@ export async function suggestGrillOptions(
     ]
       .filter(Boolean)
       .join('\n');
+    // Session thật: provider generate() đọc history qua getHistory(),
+    // object giả {messages} luôn throw → rơi về heuristic.
+    const routedId = ctx.sessionId?.trim();
+    const grillSession = routedId ? new Session(routedId) : new Session();
+    grillSession.addUserMessage(prompt);
     const raw = await Promise.race([
-      (llm as any).generate({ messages: [{ role: 'user', content: prompt }] }, [], {}),
+      (llm as any).generate(grillSession, [], {}),
       new Promise((_, reject) => setTimeout(() => reject(new Error('grill-suggest-timeout')), timeoutMs)),
     ]);
     const text = typeof raw === 'string' ? raw : String((raw as any)?.text || '');

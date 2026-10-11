@@ -87,8 +87,21 @@ test('permission card + draft follow the owning session, not the viewed tab', ()
   assert.ok(!plain(m).includes('Permission request'), 'no foreign card in viewed viewport');
   const tabB = m.sessions.tabs.find((t) => t.id === 'b')!;
   assert.ok((tabB.entries || []).some((e) => e.kind === 'permission'), 'card cached on owner tab');
-  // Đóng question → draft stash về tab B, composer A nguyên vẹn.
+  // Đóng question của tab nền → không đụng composer nào: text A ở yên tab A,
+  // cache tab B không dính text lạ.
   [m] = update({ type: 'question', prompt: '', active: false } as Msg, m);
   assert.equal(m.composer.value, 'keep-me');
-  assert.equal(m.sessions.tabs.find((t) => t.id === 'b')!.composer?.value, 'keep-me');
+  assert.equal(m.sessions.tabs.find((t) => t.id === 'b')!.composer, undefined);
+});
+
+test('in-progress @-mention text is held per tab across routing', () => {
+  let m = twoTabs();
+  m = typeText(m, 'fix bug in @src/ui/tea');
+  m = switchTo(m, '2');
+  assert.equal(m.composer.value, '', 'tab B starts with fresh input');
+  m = typeText(m, '@other');
+  m = switchTo(m, '1');
+  assert.equal(m.composer.value, 'fix bug in @src/ui/tea', 'mention draft A restored intact');
+  m = switchTo(m, '2');
+  assert.equal(m.composer.value, '@other', 'mention draft B kept separate');
 });

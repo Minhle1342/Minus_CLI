@@ -49,7 +49,7 @@ export class TeaTerminal extends EventEmitter {
   set line(value: string) { this.program.send({ type: 'compose', text: value }); }
   get cursor(): number { return this.model.composer.cursorOffset; }
   resetComposer(): void { this.line = ''; }
-  setBusy(busy: boolean): void { this.program.send({ type: 'busy', busy }); }
+  setBusy(busy: boolean, sessionId?: string): void { this.program.send({ type: 'busy', busy, sessionId }); }
   setMetadata(data: Partial<SidebarModel>): void { this.program.send({ type: 'metadata', data }); }
   setDiff(text: string, reveal = false): void { this.program.send({ type: 'diff', text, reveal }); }
   clear(): void { this.program.send({ type: 'action', action: 'clear' }); }

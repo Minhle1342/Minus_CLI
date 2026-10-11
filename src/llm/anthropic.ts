@@ -1,6 +1,6 @@
 import { type FunctionCall, type FunctionDeclaration } from '@google/genai';
 import { Session } from '../session/session.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
+import { createStandardSystemPrompt } from './prompts.js';
 import {
   LLMResponse,
   LLMRequestOptions,
@@ -47,13 +47,13 @@ export class AnthropicLLM {
       this.modelName = apiKeyOrOptions.modelName || 'claude-sonnet-5';
       this.apiKey = apiKeyOrOptions.apiKey || process.env.ANTHROPIC_API_KEY || '';
       this.baseURL = apiKeyOrOptions.baseURL || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1';
-      this.systemPrompt = apiKeyOrOptions.systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
+      this.systemPrompt = apiKeyOrOptions.systemPrompt || createStandardSystemPrompt();
       this.extraHeaders = apiKeyOrOptions.extraHeaders || {};
       this.tokenConfig = resolveTokenConfig(this.modelName, apiKeyOrOptions.tokenConfig, this.baseURL);
     } else {
       this.apiKey = apiKeyOrOptions || process.env.ANTHROPIC_API_KEY || '';
       this.modelName = modelName || 'claude-sonnet-5';
-      this.systemPrompt = systemPrompt || CODING_AGENT_SYSTEM_PROMPT;
+      this.systemPrompt = systemPrompt || createStandardSystemPrompt();
       this.baseURL = baseURL || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1';
       this.extraHeaders = extraHeaders || {};
       this.tokenConfig = resolveTokenConfig(this.modelName, tokenConfig, this.baseURL);

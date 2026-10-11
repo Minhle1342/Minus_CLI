@@ -59,7 +59,7 @@ export function evaluateSubmission(payload: SubmitSolutionPayload, context: Subm
   });
   const critic = context.evaluateCritic?.(normalized.summary, evidence);
   const blockers = [context.planBlocker, (context.activeAgents || 0) > 0 ? 'Active agents must finish before submission.' : undefined,
-    context.session.getPendingInputs().length > 0 ? 'Pending user input must be handled before submission.' : undefined].filter(Boolean) as string[];
+    context.session.getPendingSteeringInputs().length > 0 ? 'Pending user input must be handled before submission.' : undefined].filter(Boolean) as string[];
   return { payload: normalized, evidence, verification, audit, critic, blockers,
     allowed: blockers.length === 0 && critic?.approved !== false && verification.allowed && evidence?.allow !== false && audit.allowed };
 }
@@ -103,7 +103,7 @@ export class SubmissionReadiness {
   arm(payload: SubmitSolutionPayload, snapshot: SubmissionSnapshot, allowed: boolean): boolean {
     this.clear();
     if (!allowed || snapshot.planBlocker || snapshot.activeAgents > 0
-      || snapshot.session.getPendingInputs().length > 0 || snapshot.session.getPendingToolCalls().length > 0) return false;
+      || snapshot.session.getPendingSteeringInputs().length > 0 || snapshot.session.getPendingToolCalls().length > 0) return false;
     const fingerprint = submissionFingerprint(snapshot);
     if (!fingerprint) return false;
     this.ticket = { fingerprint, payload };
@@ -114,7 +114,7 @@ export class SubmissionReadiness {
     if (!this.ticket) return undefined;
     const pending = snapshot.session.getPendingToolCalls().filter(call =>
       !allowSubmissionCall || call.data.toolName !== 'submit_solution');
-    if (snapshot.planBlocker || snapshot.activeAgents > 0 || snapshot.session.getPendingInputs().length > 0 || pending.length > 0
+    if (snapshot.planBlocker || snapshot.activeAgents > 0 || snapshot.session.getPendingSteeringInputs().length > 0 || pending.length > 0
       || this.ticket.fingerprint !== submissionFingerprint(snapshot)) this.clear();
     return this.ticket?.payload;
   }

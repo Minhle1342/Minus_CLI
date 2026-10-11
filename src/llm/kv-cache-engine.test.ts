@@ -7,7 +7,6 @@ import { PromptAssembler, resolveSectionTier } from './prompt-assembler.js';
 import {
   detectPromptContext,
   clearPromptContextCache,
-  DEFAULT_PROMPT_SECTIONS,
   CORE_SYSTEM_PROMPT,
 } from './prompt-sections.js';
 
@@ -20,7 +19,7 @@ test('PromptAssembler - Strict Static-First Prefix Alignment (T0 -> T1 -> T2 -> 
   assembler.register({ id: 'tool-declarations', content: 'Tools: read_file, replace_text', priority: 100 }); // T1
   assembler.register({ id: 'system-invariant', content: 'Strict Safety Guardrails', priority: -1000 }); // T0
 
-  const assembled = assembler.assemble();
+  const assembled = assembler.assembleForContext({});
   const lines = assembled.split('\n\n');
 
   // Kiểm tra thứ tự nghiêm ngặt Static-First: T0 -> T1 -> T2 -> T3
@@ -47,14 +46,14 @@ test('PromptAssembler - Canonical Text Normalization eliminates whitespace noise
   const dirtyContent = 'Line 1 with trailing spaces     \r\nLine 2 with trailing tabs\t\t\r\n\r\nLine 3   ';
   assembler.register({ id: 'core', content: dirtyContent, priority: -1000 });
 
-  const cleaned = assembler.assemble();
+  const cleaned = assembler.assembleForContext({});
   assert(!cleaned.includes('\r'), 'Không được chứa ký tự Windows CRLF');
   assert(!cleaned.includes('spaces     \n'), 'Phải cắt bỏ trailing spaces');
   assert(!cleaned.includes('tabs\t\t\n'), 'Phải cắt bỏ trailing tabs');
   assert(cleaned.includes('Line 1 with trailing spaces\nLine 2 with trailing tabs'));
 });
 
-test('PromptAssembler - assembleTiered & Prefix Invariance across dynamic step turns', () => {
+test('PromptAssembler - Static Prefix Invariance across dynamic step turns', () => {
   const assembler = new PromptAssembler();
 
   // Cấu hình các section cố định của Repository & Session
@@ -62,27 +61,22 @@ test('PromptAssembler - assembleTiered & Prefix Invariance across dynamic step t
   assembler.register({ id: 'repo-rules', content: 'AGENTS.md guidelines and rules', priority: 50 });
   assembler.register({ id: 'session-dag', content: 'DAG Plan: Step 1 -> Step 2', priority: 500 });
 
-  // Lấy stable prefix signature tại turn 1 (chưa có dynamic tail)
-  const initialSig = assembler.getStablePrefixSignature();
-  const initialTiered = assembler.assembleTiered();
+  // Turn 1 (chưa có dynamic tail)
+  const initial = assembler.assembleForContext({});
+  assert(initial.length > 0);
 
-  assert(initialTiered.stablePrefix.length > 0);
-  assert.equal(initialTiered.t3DynamicTail, '');
-
-  // Giả lập Turn 2: Thêm dynamic tail của Step 1
+  // Giả lập Turn 2: Thêm dynamic tail của Step 1 (T3 luôn nằm ở đuôi)
   const unregisterStep1 = assembler.register({
     id: 'step-1-context',
     content: 'User query: Fix bug in auth. Error output: 401 Unauthorized',
     priority: 1500, // T3
   });
 
-  const step1Sig = assembler.getStablePrefixSignature();
-  const step1Tiered = assembler.assembleTiered();
+  const step1 = assembler.assembleForContext({});
 
-  // BẤT BIẾN KV-CACHE: Stable prefix signature KHÔNG ĐỔI dù có thêm dynamic tail!
-  assert.equal(step1Sig, initialSig, 'Prefix signature phải 100% bất biến khi thêm dynamic T3 section');
-  assert.equal(step1Tiered.stablePrefix, initialTiered.stablePrefix, 'Nội dung stable prefix phải giữ nguyên tuyệt đối');
-  assert(step1Tiered.t3DynamicTail.includes('User query: Fix bug in auth'));
+  // BẤT BIẾN KV-CACHE: thêm dynamic T3 section chỉ nối đuôi, tiền tố giữ nguyên!
+  assert(step1.startsWith(initial), 'Stable prefix phải 100% bất biến khi thêm dynamic T3 section');
+  assert(step1.includes('User query: Fix bug in auth'));
 
   // Giả lập Turn 3: Chuyển sang Step 2 với dynamic context hoàn toàn mới
   unregisterStep1();
@@ -92,30 +86,11 @@ test('PromptAssembler - assembleTiered & Prefix Invariance across dynamic step t
     priority: 1500, // T3
   });
 
-  const step2Sig = assembler.getStablePrefixSignature();
-  const step2Tiered = assembler.assembleTiered();
+  const step2 = assembler.assembleForContext({});
 
-  assert.equal(step2Sig, initialSig, 'Prefix signature vẫn giữ nguyên tuyệt đối ở Step 2');
-  assert.equal(step2Tiered.stablePrefix, initialTiered.stablePrefix);
-  assert(step2Tiered.t3DynamicTail.includes('auth.ts:42'));
-});
-
-test('PromptAssembler - createCacheEnvelope generates deterministic cache key', () => {
-  const assembler = new PromptAssembler();
-  for (const s of DEFAULT_PROMPT_SECTIONS) {
-    assembler.register(s);
-  }
-
-  const envelope = assembler.createCacheEnvelope({
-    provider: 'gemini',
-    model: 'gemini-2.5-flash',
-    toolSchemaVersion: 'schema-v1',
-  });
-
-  assert.equal(envelope.version, 2);
-  assert(envelope.cacheKey.startsWith('pc2_'), 'Cache key phải có tiền tố pc2_');
-  assert(envelope.tiers.length >= 2, 'Phải có ít nhất T0 và T1');
-  assert(envelope.metadata.provider === 'gemini');
+  assert(step2.startsWith(initial), 'Prefix vẫn giữ nguyên tuyệt đối ở Step 2');
+  assert(step2.includes('auth.ts:42'));
+  assert(!step2.includes('401 Unauthorized'), 'Tail cũ phải biến mất khi sang step mới');
 });
 
 test('detectPromptContext - SOTA Polyglot and Monorepo Workspace Fingerprinting', () => {

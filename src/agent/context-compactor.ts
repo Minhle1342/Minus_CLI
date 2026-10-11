@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { ContentPart, SessionMessage } from '../session/session.js';
 export type { SessionMessage } from '../session/session.js';
 import { SemanticSlicer } from './semantic-slicer.js';
-import { assertHistoryToolPairing, computeRequestValueDigest } from '../session/session-invariants.js';
+import { assertHistoryToolPairing, collectToolPairSpans, computeRequestValueDigest, demoteOrphanToolResponses } from '../session/session-invariants.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
 import { ExactTokenizer } from './exact-tokenizer.js';
 import { nativeCompactHistory, nativeComputeStringHash } from '../native/index.js';
@@ -645,7 +645,25 @@ export class ContextCompactor {
 
     // Điểm bắt đầu của cửa sổ trượt (các turn được bảo toàn ở đuôi)
     const cutoffTurnIdx = userTurnIndices[userTurnIndices.length - preserveLastNTurns];
-    const preservedTailMessages = sourceMessages.slice(cutoffTurnIdx);
+    // Pair-aware cuts: a tool result may land turns after its call (background /
+    // deferred / recovered results). Never strand half a pair across the archive
+    // boundary — carry the stranded mate into the preserved tail verbatim.
+    const carriedIdx = new Set<number>();
+    const carried: SessionMessage[] = [];
+    for (const span of collectToolPairSpans(sourceMessages)) {
+      if (span.callIdx < 0) continue; // true orphan: entry demotion already handled it
+      const lo = Math.min(span.callIdx, span.respIdx);
+      const hi = Math.max(span.callIdx, span.respIdx);
+      const loKept = lo < turn0EndIndex || lo >= cutoffTurnIdx;
+      const hiKept = hi < turn0EndIndex || hi >= cutoffTurnIdx;
+      if (loKept === hiKept) continue;
+      const stranded = loKept ? hi : lo;
+      if (!carriedIdx.has(stranded)) {
+        carriedIdx.add(stranded);
+        carried.push(sourceMessages[stranded]);
+      }
+    }
+    const preservedTailMessages = [...carried, ...sourceMessages.slice(cutoffTurnIdx)];
 
     // Các turn cũ cần được thu gọn thành tóm tắt
     const archivedTurns: ArchivedTurnDocument[] = [];
@@ -895,7 +913,18 @@ export class ContextCompactor {
     entries: TurnWindowEntry[],
     options: CompletedTurnWindowOptions,
   ): { messages: SessionMessage[]; stats: CompactionStats } {
-    const inputMessages = entries.map((entry) => entry.message);
+    // Damaged-log resilience (mirrors compact()): demote pre-existing orphans
+    // before pruning, so a lost parent message can never fatal this path.
+    const healedOrphans = demoteOrphanToolResponses(entries.map((entry) => entry.message));
+    const healedEntries = healedOrphans.demotedIds.length > 0
+      ? entries.map((entry, index) => ({ ...entry, message: healedOrphans.messages[index] }))
+      : entries;
+    if (healedOrphans.demotedIds.length > 0) {
+      try {
+        console.warn(`[compaction] Demoted ${healedOrphans.demotedIds.length} orphaned tool response(s) from a damaged history (${healedOrphans.demotedIds.join(', ')}); payload preserved as text.`);
+      } catch { /* logging must never break compaction */ }
+    }
+    const inputMessages = healedEntries.map((entry) => entry.message);
     const originalLength = getHistoryTotalChars(inputMessages);
     const originalTokens = ContextCompactor.countHistoryTokens(inputMessages);
     const noChange = (strategiesApplied: string[] = []): { messages: SessionMessage[]; stats: CompactionStats } => ({
@@ -925,7 +954,7 @@ export class ContextCompactor {
     ).sort((a, b) => a - b);
     if (completed.length <= preserve) return noChange();
 
-    const priorSynopsisTexts = entries
+    const priorSynopsisTexts = healedEntries
       .filter((entry) => entry.isSynopsis || isRollingSynopsisMessage(entry.message))
       .flatMap((entry) => entry.message.parts || [])
       .map((part: any) => typeof part.text === 'string' ? part.text : '')
@@ -935,7 +964,7 @@ export class ContextCompactor {
     const alreadyArchived = new Set(this.parseArchivedTurnNumbers(priorSynopsisLines));
 
     const messagesByTurn = new Map<number, SessionMessage[]>();
-    for (const entry of entries) {
+    for (const entry of healedEntries) {
       if (entry.turn === undefined || entry.isSynopsis) continue;
       const list = messagesByTurn.get(entry.turn) || [];
       list.push(entry.message);
@@ -1040,12 +1069,24 @@ export class ContextCompactor {
     ].join('\n');
 
     const prunedSet = new Set(prunableTurns);
+    // Pass 1: prune by turn.
+    const entryIsSynopsis = healedEntries.map((entry) => entry.isSynopsis || isRollingSynopsisMessage(entry.message));
+    const keep = healedEntries.map((entry, index) => !entryIsSynopsis[index]
+      && !(entry.turn !== undefined && prunedSet.has(entry.turn)));
+    // Pass 2 (pair-aware): unprune any message whose pair mate is kept, so a
+    // background/deferred result landing in another turn never strands its call.
+    for (const span of collectToolPairSpans(healedEntries.map((entry) => entry.message))) {
+      if (span.callIdx < 0) continue;
+      const lo = Math.min(span.callIdx, span.respIdx);
+      const hi = Math.max(span.callIdx, span.respIdx);
+      if (keep[lo] === keep[hi]) continue;
+      const stranded = keep[lo] ? hi : lo;
+      if (!entryIsSynopsis[stranded]) keep[stranded] = true;
+    }
     const keptMessages: SessionMessage[] = [];
     let insertAt = -1;
-    entries.forEach((entry, index) => {
-      const isPriorSynopsis = entry.isSynopsis || isRollingSynopsisMessage(entry.message);
-      const isPrunedTurn = entry.turn !== undefined && prunedSet.has(entry.turn);
-      if (isPriorSynopsis || isPrunedTurn) {
+    healedEntries.forEach((entry, index) => {
+      if (!keep[index]) {
         if (insertAt < 0) insertAt = keptMessages.length;
         return;
       }
@@ -1094,7 +1135,22 @@ export class ContextCompactor {
    * giữ nguyên vẹn 100% tin nhắn để tránh vỡ KV-Cache của OpenAI Codex.
    */
   compact(messages: SessionMessage[], options?: CompactionOptions): { messages: SessionMessage[]; stats: CompactionStats } {
-    assertHistoryToolPairing(messages);
+    // Damaged-log resilience (e.g. a persisted sequence gap swallowed the
+    // assistant message carrying a tool call): demote pre-existing orphan
+    // responses to marked text and continue, instead of fatal-erroring the
+    // run on every request. Anything else (duplicates, unpaired calls,
+    // misordered pairs) still throws loudly below and at the exit assert.
+    try {
+      assertHistoryToolPairing(messages);
+    } catch (error: any) {
+      if (!/orphan tool result id/.test(error?.message || '')) throw error;
+      const repaired = demoteOrphanToolResponses(messages as any);
+      if (repaired.demotedIds.length === 0) throw error;
+      try {
+        console.warn(`[compaction] Demoted ${repaired.demotedIds.length} orphaned tool response(s) from a damaged history (${repaired.demotedIds.join(', ')}); payload preserved as text.`);
+      } catch { /* logging must never break compaction */ }
+      messages = repaired.messages;
+    }
     let compactedLength = 0;
     let prunedPartsCount = 0;
     let prunedTurnsCount = 0;

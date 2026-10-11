@@ -1,12 +1,8 @@
 import type { PromptAssemblyContext } from './prompt-sections.js';
 import {
-  createPromptCacheKey,
-  createPromptCacheEnvelope,
-  type PromptCacheEnvelope,
-  type PromptCacheEnvelopeOptions,
-  type PromptCacheSection,
-  type PromptCacheTier,
   canonicalizePromptText,
+  TIER_ORDER,
+  type PromptCacheTier,
 } from './cache-envelope.js';
 
 export interface PromptSection {
@@ -20,24 +16,8 @@ export interface PromptSection {
 
 interface RegisteredPromptSection extends PromptSection {
   order: number;
+  tier: PromptCacheTier;
 }
-
-export interface TieredAssembledPrompt {
-  t0Core: string;
-  t1RepoRules: string;
-  t2SessionDirectives: string;
-  t3DynamicTail: string;
-  /** Prefix consisting of T0 + T1 + T2 - guaranteed stable across dynamic step changes. */
-  stablePrefix: string;
-  /** Full prompt concatenated in static-first tier order. */
-  fullPrompt: string;
-  /** Unique cache signature for the prompt. */
-  cacheSignature: string;
-  /** Number of active sections included in this assembly. */
-  sectionCount: number;
-}
-
-const TIER_ORDER: PromptCacheTier[] = ['T0', 'T1', 'T2', 'T3'];
 
 /**
  * Resolves the cache tier for a prompt section:
@@ -107,99 +87,9 @@ export class PromptAssembler {
       .join('\n\n');
   }
 
-  /**
-   * Assembles the prompt broken down into structured cache tiers (T0, T1, T2, T3)
-   * and separates the cacheable stablePrefix from the dynamicTail.
-   */
-  assembleTiered(ctx: PromptAssemblyContext = {}): TieredAssembledPrompt {
-    const active = this.sortedSections().filter((section) => !section.condition || section.condition(ctx));
-    const byTier: Record<PromptCacheTier, string[]> = { T0: [], T1: [], T2: [], T3: [] };
-
-    for (const section of active) {
-      const tier = resolveSectionTier(section);
-      const canonical = canonicalizePromptText(section.content);
-      if (canonical) {
-        byTier[tier].push(canonical);
-      }
-    }
-
-    const t0Core = byTier.T0.join('\n\n');
-    const t1RepoRules = byTier.T1.join('\n\n');
-    const t2SessionDirectives = byTier.T2.join('\n\n');
-    const t3DynamicTail = byTier.T3.join('\n\n');
-
-    const stablePrefix = [t0Core, t1RepoRules, t2SessionDirectives].filter(Boolean).join('\n\n');
-    const fullPrompt = [stablePrefix, t3DynamicTail].filter(Boolean).join('\n\n');
-    const cacheSignature = this.getCacheSignature(ctx);
-
-    return {
-      t0Core,
-      t1RepoRules,
-      t2SessionDirectives,
-      t3DynamicTail,
-      stablePrefix,
-      fullPrompt,
-      cacheSignature,
-      sectionCount: active.length,
-    };
-  }
-
-  /**
-   * Generates a stable prefix signature guaranteed to remain invariant
-   * when dynamic T3 sections are added or mutated.
-   */
-  getStablePrefixSignature(ctx: PromptAssemblyContext = {}): string {
-    const tiered = this.assembleTiered(ctx);
-    return createPromptCacheKey(tiered.stablePrefix || tiered.fullPrompt, {
-      provider: 'provider-neutral',
-      model: 'runtime-selected',
-      policyVersion: 'prefix-alignment-v2',
-    });
-  }
-
-  /**
-   * Builds a standardized PromptCacheEnvelope for explicit context caching (e.g. Gemini / Anthropic cache breakpoint).
-   */
-  createCacheEnvelope(
-    options: PromptCacheEnvelopeOptions,
-    ctx: PromptAssemblyContext = {},
-  ): PromptCacheEnvelope {
-    const active = this.sortedSections().filter((section) => !section.condition || section.condition(ctx));
-    const promptCacheSections: PromptCacheSection[] = active.map((s) => ({
-      id: s.id,
-      tier: resolveSectionTier(s),
-      content: s.content,
-      order: s.order,
-    }));
-    return createPromptCacheEnvelope(promptCacheSections, options);
-  }
-
-  /**
-   * Default assemble method for backward compatibility.
-   * Evaluates all sections with an empty context (only unconditionally enabled sections or conditions returning true for {}).
-   */
-  assemble(): string {
-    return this.assembleForContext({});
-  }
-
-  /**
-   * Generates a collision-resistant, content-addressed signature for prompt-caching validation.
-   */
-  getCacheSignature(ctx: PromptAssemblyContext = {}): string {
-    const text = this.assembleForContext(ctx);
-    if (process.env.MINUS_CACHE_ENVELOPE_V2 === 'off') return legacyCacheSignature(text);
-    return createPromptCacheKey(text, {
-      provider: 'provider-neutral',
-      model: 'runtime-selected',
-      policyVersion: 'prompt-assembler-v2',
-    });
-  }
-
   private sortedSections(): RegisteredPromptSection[] {
     return Array.from(this.sections.values()).sort((a, b) => {
-      const tierA = resolveSectionTier(a);
-      const tierB = resolveSectionTier(b);
-      const tierDiff = TIER_ORDER.indexOf(tierA) - TIER_ORDER.indexOf(tierB);
+      const tierDiff = TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier);
       if (tierDiff !== 0) return tierDiff;
       const priorityDiff = (a.priority || 0) - (b.priority || 0);
       if (priorityDiff !== 0) return priorityDiff;
@@ -208,13 +98,4 @@ export class PromptAssembler {
       return a.id.localeCompare(b.id);
     });
   }
-}
-
-function legacyCacheSignature(text: string): string {
-  let hash = 0;
-  for (let index = 0; index < text.length; index++) {
-    hash = ((hash << 5) - hash) + text.charCodeAt(index);
-    hash |= 0;
-  }
-  return `h_${(hash >>> 0).toString(16)}_${text.length}`;
 }

@@ -29,7 +29,9 @@ import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { DreamManager } from '../dream/dream-manager.js';
 import { McpManager } from '../mcp/mcp-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
+import { GrillService } from '../agent/grill-service.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
+import { GrillPlugin } from './plugins/grill-plugin.js';
 import { disposeLspManager } from '../lsp/lsp-manager.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 
@@ -108,7 +110,7 @@ export interface KernelEvents {
   'model:final_answer': (answer: string, ctx?: SessionEventContext) => void;
   'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
-  'model:changed': (newModel: string) => void;
+  'model:changed': (newModel: string, ctx?: SessionEventContext) => void;
   'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
   'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
   'agent:abort': () => void;
@@ -168,6 +170,7 @@ export interface KernelContext {
   repositoryMemory: CitationValidatedRepositoryMemory;
   dream: DreamManager;
   compose: ComposeController;
+  grill: GrillService;
   checkpoints: CheckpointManager;
   compactor: ContextCompactor;
   reflection: ReflectionEngine;
@@ -232,6 +235,7 @@ export class AgentKernel {
     const critic = new CriticGate();
     const verification = new VerificationPolicy();
     const compose = new ComposeController(workspace.rootDir, plan, critic);
+    const grill = new GrillService();
     const sandbox = new SandboxManager({ workspacePath: workspace.rootDir });
     const tasks = new TaskManager(workspace.rootDir);
     const schedules = new ScheduleManager();
@@ -271,6 +275,7 @@ export class AgentKernel {
       repositoryMemory,
       dream,
       compose,
+      grill,
       checkpoints,
       compactor,
       reflection,
@@ -373,6 +378,9 @@ export class AgentKernel {
     }
     if (!this.plugins.has('compose')) {
       await this.use(new ComposePlugin());
+    }
+    if (!this.plugins.has('grill-plugin')) {
+      await this.use(GrillPlugin);
     }
 
     // Tool/capability registration must survive a Docker startup failure.

@@ -386,4 +386,81 @@ describe('AgentLoop Bug Fixes Verification', () => {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
   });
+
+  it('Fix /undo: AgentLoop.rollback rewinds conversation history and deletes files created by tools with diffs', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'undo-test-'));
+    try {
+      const workspace = new Workspace(rootDir);
+      const existingFile = path.join(rootDir, 'existing.ts');
+      await fs.writeFile(existingFile, 'original baseline\n', 'utf8');
+
+      const llm = new ScriptedCompletionLLM([
+        {
+          text: '',
+          toolCalls: [
+            { id: 'call_1', name: 'write_file', args: { path: 'existing.ts', content: 'modified by agent\n' } },
+            { id: 'call_2', name: 'write_file', args: { path: 'created.ts', content: 'newly created\n' } },
+          ],
+        },
+        {
+          text: 'Finished editing existing.ts and creating created.ts',
+          toolCalls: [],
+        },
+      ]);
+
+      const registry = new ToolRegistry();
+      registry.register({
+        name: 'write_file',
+        description: 'Write file',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string' }, content: { type: 'string' } },
+          required: ['path', 'content'],
+        } as any,
+        execute: async (args: any) => {
+          const target = path.join(rootDir, args.path);
+          await fs.writeFile(target, args.content, 'utf8');
+          return { success: true };
+        },
+      });
+
+      const loop = new AgentLoop(llm as any, registry, { workspace });
+      const session = new Session('session-undo-test');
+      session.addUserMessage('Tạo created.ts và sửa existing.ts');
+
+      await loop.run(session);
+
+      // Verify turn produced expected files
+      assert.equal(await fs.readFile(existingFile, 'utf8'), 'modified by agent\n');
+      assert.equal(await fs.readFile(path.join(rootDir, 'created.ts'), 'utf8'), 'newly created\n');
+      assert(session.getHistory().length > 1, 'session should have user and model messages');
+
+      // Now invoke /undo rollback
+      const rollbackRes = await loop.rollback(session);
+      assert.equal(rollbackRes.success, true);
+      assert(rollbackRes.diffs && rollbackRes.diffs.length === 2);
+
+      const modifiedDiff = rollbackRes.diffs.find((d) => d.filePath === 'existing.ts');
+      assert(modifiedDiff);
+      assert.equal(modifiedDiff.status, 'MODIFIED');
+      assert.match(modifiedDiff.diff, /-modified by agent/);
+      assert.match(modifiedDiff.diff, /\+original baseline/);
+
+      const createdDiff = rollbackRes.diffs.find((d) => d.filePath === 'created.ts');
+      assert(createdDiff);
+      assert.equal(createdDiff.status, 'DELETED');
+      assert.match(createdDiff.diff, /-newly created/);
+
+      // Verify disk state: created.ts deleted, existing.ts restored
+      assert.equal(await fs.readFile(existingFile, 'utf8'), 'original baseline\n');
+      await assert.rejects(fs.stat(path.join(rootDir, 'created.ts')));
+
+      // Verify conversation history rolled back to before user prompt
+      assert.equal(session.getHistory().length, 0, 'session history must be rewound');
+      assert.match(rollbackRes.undonePrompt || '', /Tạo created\.ts và sửa existing\.ts/);
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });
+

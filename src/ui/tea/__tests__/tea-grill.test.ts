@@ -56,3 +56,13 @@ test('suggestGrillOptions falls back to heuristic when LLM offline', async () =>
   assert.equal(live.options.length, 3);
   assert.ok(live.options.every((o) => o.source === 'llm'));
 });
+
+test('suggestGrillOptions passes a real Session carrying the routed sessionId', async () => {
+  let seen: any;
+  const llm = { generate: async (session: any) => { seen = session; return { text: '1. Phương án A\n2. Phương án B' }; } };
+  const live = await suggestGrillOptions(llm, 'Chạy ở đâu?', { sessionId: 'tab-session-7' });
+  assert.equal(live.fromLLM, true);
+  assert.equal(typeof seen?.getHistory, 'function', 'LLM phải nhận Session thật, không phải object giả');
+  assert.equal(seen.id, 'tab-session-7');
+  assert.ok(JSON.stringify(seen.getHistory()).includes('Chạy ở đâu?'));
+});

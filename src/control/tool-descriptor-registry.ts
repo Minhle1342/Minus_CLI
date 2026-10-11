@@ -318,6 +318,18 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
+    } else if (name === 'ask_user') {
+      descriptor = {
+        name,
+        capabilities: ['plan', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
+        schemaCost: this.cost(tool),
+      };
     } else if (name.startsWith('compose_') || name === 'generate_spec' || name === 'lock_spec' || name === 'verify_spec_matrix') {
       descriptor = {
         name,

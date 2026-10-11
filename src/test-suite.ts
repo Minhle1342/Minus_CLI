@@ -186,8 +186,7 @@ import {
   CORE_SYSTEM_PROMPT,
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
-  CODING_AGENT_SYSTEM_PROMPT,
-  SECTION_VERIFICATION_LADDER_FULL,
+  createStandardSystemPrompt,
   SECTION_PHASE_VERIFY_GUIDANCE,
 } from './llm/prompts.js';
 import { PromptAssembler } from './llm/prompt-assembler.js';
@@ -1173,16 +1172,16 @@ async function runUnitTests() {
     allowedToolSetHash: hashAllowedToolSet(['tampered']),
   });
   assert(invalidBinding.result.errorCode === 'INVALID_TOOL_DECISION_BINDING', 'ToolRunner detects a tampered allowlist hash');
-  const budgetContext = {
+  const unlimitedContext = {
     decisionId: gatedDecision.id,
     allowedToolNames: gatedDecision.allowedToolNames,
     allowedToolSetHash: gatedDecision.allowedToolSetHash,
-    maxToolCalls: 1,
   };
-  const budgetedRunner = new ToolRunner(boundScope, workspace);
-  const firstBudgetedCall = await budgetedRunner.run('read_file', { path: 'package.json' }, budgetContext);
-  const exhaustedBudgetCall = await budgetedRunner.run('read_file', { path: 'package.json' }, budgetContext);
-  assert(!firstBudgetedCall.result.error && exhaustedBudgetCall.result.errorCode === 'TOOL_CALL_BUDGET_EXHAUSTED', 'Bound runtime enforces the per-turn call budget');
+  const unbudgetedRunner = new ToolRunner(boundScope, workspace);
+  const firstUnlimitedCall = await unbudgetedRunner.run('read_file', { path: 'package.json' }, unlimitedContext);
+  const secondUnlimitedCall = await unbudgetedRunner.run('read_file', { path: 'package.json' }, unlimitedContext);
+  assert(!firstUnlimitedCall.result.error && !secondUnlimitedCall.result.error, 'Bound runtime không còn giới hạn số tool-call');
+
 
   const segmented = analyzeShellCommand('npm test && npm install unsafe-package');
   assert(segmented.segments.length === 2, 'Shell segmenter evaluates every chained command');
@@ -3304,7 +3303,7 @@ export async function calculateTotal(items: any[]): Promise<number> {
     content: 'All destructive actions require explicit approval.',
   });
   assert(kernel.ctx.systemPrompt.list().includes('test-approval-policy'), 'Plugin đăng ký được system-prompt section');
-  assert(kernel.ctx.systemPrompt.assemble().includes('explicit approval'), 'Prompt assembler ghép section theo cấu hình plugin');
+  assert(kernel.ctx.systemPrompt.assembleForContext({}).includes('explicit approval'), 'Prompt assembler ghép section theo cấu hình plugin');
   removePromptSection();
   const registeredAgent = kernel.ctx.agents.register('review-agent', 'Review Agent');
   const runningAgent = kernel.ctx.agents.update('review-agent', { status: 'running', sessionId: 'hook-probe', turn: 1, step: 1 });
@@ -4192,7 +4191,7 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
     optKernel.ctx.systemPrompt.list().includes(WEB_SEARCH_PROMPT_SECTION_ID),
     'SearchPlugin registers the web-search decision policy in the assembled system prompt',
   );
-  const assembledSearchPrompt = optKernel.ctx.systemPrompt.assemble();
+  const assembledSearchPrompt = optKernel.ctx.systemPrompt.assembleForContext({});
   assert(
     assembledSearchPrompt.includes('MUST SEARCH:')
     && assembledSearchPrompt.includes('DO NOT SEARCH:')
@@ -7083,30 +7082,23 @@ Always write tests first!`;
   }
 
   // ========================================
-  // 🧪 39. KIỂM THỬ BỐN CHIẾN LƯỢC TỐI ƯU HÓA SYSTEM PROMPT (GIẢM >70% TOKEN MỖI TURN)
+  // 🧪 39. KIỂM THỬ SYSTEM PROMPT TINH GỌN (CORE + PROGRESSIVE DISCLOSURE)
   // ========================================
   console.log('\n========================================');
-  console.log('🧪 39. KIỂM THỬ BỐN CHIẾN LƯỢC TỐI ƯU HÓA SYSTEM PROMPT (GIẢM >70% TOKEN MỖI TURN)');
+  console.log('🧪 39. KIỂM THỬ SYSTEM PROMPT TINH GỌN (CORE + PROGRESSIVE DISCLOSURE)');
   console.log('========================================');
 
-  // 39.1. Đong đếm Token và chứng minh mức tiết kiệm > 70% của Core Invariant Prompt
+  // 39.1. Core Invariant Prompt siêu tinh gọn, bảo toàn các quy tắc sống còn
   const coreChars = CORE_SYSTEM_PROMPT.length;
-  const legacyChars = CODING_AGENT_SYSTEM_PROMPT.length;
   const coreTokens = ContextCompactor.estimateTokens(CORE_SYSTEM_PROMPT);
-  const legacyTokens = ContextCompactor.estimateTokens(CODING_AGENT_SYSTEM_PROMPT);
-  const tokenReductionPercent = ((legacyTokens - coreTokens) / legacyTokens) * 100;
 
   console.log(`- Core System Prompt: ${coreChars} chars (~${coreTokens} tokens)`);
-  console.log(`- Legacy System Prompt: ${legacyChars} chars (~${legacyTokens} tokens)`);
-  console.log(`- Tỷ lệ cắt giảm Token của Core Invariant: ${tokenReductionPercent.toFixed(1)}%`);
 
   assert(coreTokens < 1500, `CORE_SYSTEM_PROMPT đạt chuẩn siêu tinh gọn (< 1500 tokens, thực tế: ~${coreTokens})`);
-  assert(tokenReductionPercent > 70, `Chiến lược 1 & 3 đạt mục tiêu cắt giảm > 70% token (thực tế: ${tokenReductionPercent.toFixed(1)}%)`);
   assert(!CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'), 'Core prompt đã tách 5-Stage Protocol sang ToolSynergyAdvisor để tối ưu KV-Cache');
   assert(CORE_SYSTEM_PROMPT.includes('VERIFICATION LADDER'), 'Core prompt bảo toàn Verification Ladder');
   assert(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'), 'Core prompt bảo toàn quy tắc Language Matching');
   assert(CORE_SYSTEM_PROMPT.includes('custom build command'), 'Core prompt hướng dẫn kiểm tra custom build command');
-  assert(SECTION_VERIFICATION_LADDER_FULL.includes('CUSTOM BUILD & SCRIPT DISCIPLINE'), 'SECTION_VERIFICATION_LADDER_FULL chứa quy định custom build command');
   assert(SECTION_PHASE_VERIFY_GUIDANCE.includes('Inspect defined scripts') && SECTION_PHASE_VERIFY_GUIDANCE.includes('Respect the user'), 'VERIFY guidance kiểm tra script và giữ phạm vi kiểm chứng người dùng');
 
   // 39.2. Progressive Disclosure & Context-Aware Assembly
@@ -7131,9 +7123,8 @@ Always write tests first!`;
   assert(!standardAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Standard turn không nạp module Deep Architecture (tiết kiệm ~600 tokens)');
 
   const standardTokens = ContextCompactor.estimateTokens(standardAssembled);
-  const standardSavings = ((legacyTokens - standardTokens) / legacyTokens) * 100;
-  console.log(`- Standard Turn Assembled Prompt: ${standardAssembled.length} chars (~${standardTokens} tokens, tiết kiệm ${standardSavings.toFixed(1)}%)`);
-  assert(standardSavings >= 60, `Standard turn duy trì mức giảm token >= 60% sau khi bổ sung cache-tier directives (thực tế: ${standardSavings.toFixed(1)}%)`);
+  console.log(`- Standard Turn Assembled Prompt: ${standardAssembled.length} chars (~${standardTokens} tokens)`);
+  assert(standardTokens < 3000, `Standard turn giữ ngân sách < 3000 tokens, module nặng rò rỉ vô điều kiện sẽ lộ ở đây (thực tế: ~${standardTokens})`);
 
   // Tình huống B: Yêu cầu phân tích kiến trúc -> Module Architecture Analysis được nạp động
   const archCtx = detectPromptContext(
@@ -7163,9 +7154,9 @@ Always write tests first!`;
   assert(standardAssembled.startsWith('You are a fast, precise, safe coding agent') || standardAssembled.startsWith('You are a high-performance coding agent'), 'Core Invariant luôn nằm ở vị trí đầu tiên (Priority -1000)');
   assert(archAssembled.startsWith('You are a fast, precise, safe coding agent') || archAssembled.startsWith('You are a high-performance coding agent'), 'Kiến trúc mới đảm bảo Stable Prefix không bị xáo trộn khi nạp thêm module');
 
-  // 39.4. Tương thích ngược (Backward Compatibility)
-  assert(typeof customAssembler.assemble() === 'string' && customAssembler.assemble().length > 0, 'PromptAssembler.assemble() hoạt động bình thường không cần đối số');
-  assert(typeof CODING_AGENT_SYSTEM_PROMPT === 'string' && CODING_AGENT_SYSTEM_PROMPT.length > 0, 'CODING_AGENT_SYSTEM_PROMPT duy trì tương thích ngược');
+  // 39.4. Default thống nhất cho mọi provider (không còn monolith riêng)
+  assert(typeof customAssembler.assembleForContext({}) === 'string' && customAssembler.assembleForContext({}).length > 0, 'PromptAssembler.assembleForContext() hoạt động bình thường không cần đối số');
+  assert(typeof createStandardSystemPrompt() === 'string' && createStandardSystemPrompt().length > 0, 'createStandardSystemPrompt() là default duy nhất cho mọi provider');
 
   console.log('\n========================================');
   console.log('🧪 40. KIỂM THỬ TOOL USE GUARDIAN (RELIABILITY WRAPPER & TAXONOMY CLASSIFIER)');

@@ -108,13 +108,30 @@ test('an external change to a tracked artifact invalidates a ticket', async () =
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
-test('queued user requests and unreadable artifacts fail closed', async () => {
+test('steering inputs block submission but queued future tasks do not', async () => {
   const base = snapshot();
   const ticket = new SubmissionReadiness();
   assert.equal(ticket.arm({ summary }, base, true), true);
-  base.session.append('input/queued', { inputId: 'new-scope', inputText: 'Also fix the bug.', source: 'human' });
+  // Mid-turn steering (isSteering: true) must still fail closed.
+  base.session.append('input/queued', { inputId: 'steer-1', inputText: 'Also fix the bug.', source: 'human', isSteering: true });
   assert.equal(ticket.current(base), undefined);
   assert.equal(ticket.arm({ summary }, base, true), false);
+  assert.ok(evaluateSubmission({ summary }, context(base.session)).blockers.some((b) => b.includes('Pending user input')));
+  // Claimed steering unblocks again.
+  base.session.append('input/claimed', { inputId: 'steer-1' });
+  assert.equal(ticket.arm({ summary }, base, true), true);
+  // A future task queued via submit() (isSteering: false) while this turn runs
+  // must NOT block this turn's submission (parallel-tasks regression).
+  base.session.append('input/queued', { inputId: 'next-task', inputText: 'Second task.', source: 'human', isSteering: false });
+  assert.ok(ticket.current(base));
+  assert.equal(ticket.arm({ summary }, base, true), true);
+  const check = evaluateSubmission({ summary }, context(base.session));
+  assert.equal(check.allowed, true);
+  assert.deepEqual(check.blockers, []);
+});
+
+test('unreadable tracked artifacts fail closed', async () => {
+  const ticket = new SubmissionReadiness();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'submission-unreadable-'));
   try {
     const unreadable = { ...snapshot(), workspaceRoot: root };

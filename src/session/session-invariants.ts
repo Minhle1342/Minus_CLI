@@ -69,6 +69,82 @@ export function assertHistoryToolPairing(messages: Content[]): void {
   }
 }
 
+/** A tool call/response pair located by message index (either side may come first in damaged orders). */
+export interface ToolPairSpan {
+  id: string;
+  callIdx: number;
+  /** -1 when no matching call exists anywhere (true orphan — see demoteOrphanToolResponses). */
+  respIdx: number;
+}
+
+/** Cap for preserved payload text when demoting an orphaned tool response. */
+export const MAX_DEMOTED_OBSERVATION_CHARS = 2000;
+
+/**
+ * Locate every functionResponse and its latest preceding functionCall.
+ * Splitters use spans to avoid cutting between the two halves of a pair
+ * (background/deferred results may land turns after their call).
+ */
+export function collectToolPairSpans(messages: Content[]): ToolPairSpan[] {
+  const spans: ToolPairSpan[] = [];
+  const lastCallIdx = new Map<string, number>();
+  messages.forEach((message, index) => {
+    for (const part of message.parts || []) {
+      const callId = (part as any).functionCall?.id;
+      if (typeof callId === 'string' && callId && !lastCallIdx.has(callId)) lastCallIdx.set(callId, index);
+      const response = (part as any).functionResponse;
+      if (response && typeof response.id === 'string' && response.id) {
+        spans.push({ id: response.id, callIdx: lastCallIdx.get(response.id) ?? -1, respIdx: index });
+      }
+    }
+  });
+  return spans;
+}
+
+/**
+ * Quarantine-repair for histories damaged by event loss (e.g. a persisted
+ * gap swallowed the assistant message carrying a tool call): every
+ * functionResponse with NO matching functionCall anywhere in the list is
+ * demoted to a marked plain-text part, preserving its payload for the model.
+ * Valid pairs, misordered pairs (call exists later) and duplicates are left
+ * untouched — those still fail loudly via assertHistoryToolPairing.
+ */
+export function demoteOrphanToolResponses<T extends Content>(messages: T[]): { messages: T[]; demotedIds: string[] } {
+  const callIds = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.parts || []) {
+      const callId = (part as any).functionCall?.id;
+      if (typeof callId === 'string' && callId) callIds.add(callId);
+    }
+  }
+  const demotedIds: string[] = [];
+  const fixed = messages.map((message) => {
+    if (!message.parts?.some((part) => (part as any).functionResponse?.id)) return message;
+    let changed = false;
+    const parts = message.parts.map((part: any) => {
+      const response = part?.functionResponse;
+      const id = response?.id;
+      if (typeof id !== 'string' || !id || callIds.has(id)) return part;
+      changed = true;
+      demotedIds.push(id);
+      let snapshot = '';
+      try {
+        snapshot = JSON.stringify(response.response ?? {});
+      } catch {
+        snapshot = String(response.response ?? '');
+      }
+      if (snapshot.length > MAX_DEMOTED_OBSERVATION_CHARS) {
+        snapshot = `${snapshot.slice(0, MAX_DEMOTED_OBSERVATION_CHARS)}… (+${snapshot.length - MAX_DEMOTED_OBSERVATION_CHARS} chars omitted)`;
+      }
+      return {
+        text: `[RECOVERED UNPAIRED OBSERVATION ${response.name || 'unknown_tool'}:${id}] Original tool response preserved as text because its call is missing from history.\n${snapshot}`,
+      };
+    });
+    return changed ? { ...message, parts } : message;
+  });
+  return { messages: fixed, demotedIds };
+}
+
 export function assertSessionRuntimeInvariants(
   events: SessionEvent[],
   options: { allowOpenLifecycle?: boolean; allowPendingToolCalls?: boolean } = {},

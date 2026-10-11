@@ -96,7 +96,7 @@ test('enforced binding cannot dispatch a registered root tool or edit outside it
   let executions = 0;
   const registry = new ToolRegistry();
   for (const name of ['outside_authority', 'replace_text']) registry.register({ name, description: 'fixture', parameters: { type: 'OBJECT' } as any, execute: async () => { executions++; return {}; } });
-  const runner = new ToolRunner(registry.createScope('empty-scope', []), new Workspace(process.cwd()), new PermissionManager('auto_approve'), undefined, undefined, undefined, registry);
+  const runner = new ToolRunner(registry.createScope('empty-scope', []), new Workspace(process.cwd()), new PermissionManager('auto_approve'), undefined, undefined, registry);
   for (const phase of ['plan', 'implement']) for (const name of ['outside_authority', 'replace_text']) {
     const outcome = await runner.run(name, {}, { controlMode: 'enforce', decisionId: 'bound', allowedToolNames: [], allowedToolSetHash: hashAllowedToolSet([]), classificationPhase: phase });
     assert.equal(outcome.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');

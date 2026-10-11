@@ -61,6 +61,12 @@ export interface AgentLoopOptions {
   dynamicContextBudget?: number;
   /** Custom prompt sections to seed the PromptAssembler (used by Subagents for progressive specialization). */
   promptSections?: any[];
+  /**
+   * Recreate an LLM client by model name (used to restore per-tab models after
+   * restart, when only the name survived in the session log). Must never throw
+   * interactive login flows — return undefined/null to fall back to default.
+   */
+  createSessionLLM?: (modelName: string) => Promise<any>;
 }
 
 export type AgentState =

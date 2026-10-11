@@ -130,7 +130,7 @@ export class SubagentManager {
     });
     this.recordState(handle);
 
-    this.launch(handle, session, options, controller);
+    this.launch(handle, session, { ...options, parentSessionId }, controller);
 
     return { ...handle };
   }
@@ -233,7 +233,7 @@ export class SubagentManager {
     delete entry.handle.finishedAt;
     this.agents.update(id, { status: 'running', sessionId: session.id });
     this.recordState(entry.handle);
-    this.launch(entry.handle, session, options, controller);
+    this.launch(entry.handle, session, { ...options, parentSessionId: entry.parentSessionId }, controller);
     return { ...entry.handle };
   }
 

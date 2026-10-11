@@ -65,3 +65,34 @@ test('snapshot capture rejects escaping paths', async () => fixture(async (manag
   await assert.rejects(manager.createCheckpoint('unsafe', { files: ['../outside'] }), /escapes workspace/);
   assert.equal(manager.getHistory().length, 0);
 }));
+
+test('rollback returns line diffs and deletes newly created files', async () => fixture(async (manager, root) => {
+  await fs.writeFile(path.join(root, 'edit.ts'), 'line 1\nold line\nline 3\n');
+  await manager.createCheckpoint('before mutation', { files: ['edit.ts', 'created.ts'] });
+
+  // Simulate agent editing edit.ts and creating created.ts
+  await fs.writeFile(path.join(root, 'edit.ts'), 'line 1\nnew line modified\nline 3\n');
+  await fs.writeFile(path.join(root, 'created.ts'), 'function hello() {\n  return 42;\n}\n');
+  await manager.recordMutation(['edit.ts', 'created.ts']);
+
+  const res = await manager.rollbackLast();
+  assert.equal(res.success, true);
+  assert.equal(res.restoredFiles?.length, 2);
+  assert(res.diffs && res.diffs.length === 2);
+
+  const editDiff = res.diffs.find(d => d.filePath === 'edit.ts');
+  assert(editDiff);
+  assert.equal(editDiff.status, 'MODIFIED');
+  assert.match(editDiff.diff, /-new line modified/);
+  assert.match(editDiff.diff, /\+old line/);
+
+  const createdDiff = res.diffs.find(d => d.filePath === 'created.ts');
+  assert(createdDiff);
+  assert.equal(createdDiff.status, 'DELETED');
+  assert.match(createdDiff.diff, /-function hello/);
+
+  // File system state verification
+  assert.equal(await fs.readFile(path.join(root, 'edit.ts'), 'utf8'), 'line 1\nold line\nline 3\n');
+  await assert.rejects(fs.stat(path.join(root, 'created.ts')));
+}));
+

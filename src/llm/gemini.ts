@@ -1,6 +1,6 @@
 import { GoogleGenAI, type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
-import { CODING_AGENT_SYSTEM_PROMPT } from './prompts.js';
+import { createStandardSystemPrompt } from './prompts.js';
 import { TokenConfig, resolveTokenConfig } from './token-config.js';
 import { retryWithExponentialBackoff } from './error-handling.js';
 import { createPromptCacheKey } from './cache-envelope.js';
@@ -81,7 +81,7 @@ export class GeminiLLM {
   constructor(
     apiKey: string,
     modelName: string = 'gemini-3.5-flash',
-    systemPrompt: string = CODING_AGENT_SYSTEM_PROMPT,
+    systemPrompt: string = createStandardSystemPrompt(),
     tokenConfig?: Partial<TokenConfig>,
   ) {
     if (!apiKey) {

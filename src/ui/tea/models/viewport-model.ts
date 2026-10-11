@@ -33,7 +33,13 @@ function highlightCode(line: string): string {
 
 function formatTool(text: string): string {
   return stripTerminalControls(text).split('\n').map((line, index) => {
-    if (index === 0) return color(line.startsWith('✖') ? tokyoNight.red : tokyoNight.cyan, line);
+    if (index === 0) {
+      if (line.startsWith('✖')) return color(tokyoNight.red, line);
+      // TUI: read-only call lines (›) are subordinate to the conversation —
+      // render muted so mutation tools (●/✔) keep visual weight.
+      if (line.startsWith('› ')) return color(tokyoNight.muted, line);
+      return color(tokyoNight.cyan, line);
+    }
     if (/^[╭├╰─┬┼┴]/.test(line.trim())) return color(tokyoNight.border, line);
     if (line.includes('│')) {
       const parts = line.split('│');
@@ -54,7 +60,10 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
     .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&');
+    .replace(/&amp;/g, '&')
+    // Standard markdown backslash escapes: the guard lookbehinds in
+    // formatAnswerInline keep `\X` literal, so unescape here instead.
+    .replace(/\\([\\`*_{}[\]()#+\-.!])/g, '$1');
 }
 
 /** Render prose delimiters as color; quoted strings inside code remain literal. */
@@ -110,7 +119,24 @@ export function formatAnswerInline(body: string, base: string, depth = 0): strin
 
 export function formatAnswer(text: string, width = 80): string {
   const tableProcessed = formatMarkdownTablesWithTea(text, Math.max(20, width - 4));
-  const lines = stripTerminalControls(tableProcessed).split('\n');
+  const rawLines = stripTerminalControls(tableProcessed).split('\n');
+  // Setext H1 underline (===): fold into the previous text line as ATX.
+  // `---` intentionally stays a horizontal rule (pinned by tests).
+  const lines: string[] = [];
+  let inFence = false;
+  for (const line of rawLines) {
+    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) inFence = !inFence;
+    const prev = lines.length > 0 ? lines[lines.length - 1] : '';
+    const prevIsProse = prev.trim() !== ''
+      && !/^[╭├╰─┬┼┴]/.test(prev.trim())
+      && !/^\s{0,3}(#{1,6}\s|>+\s*|(?:[-*•]|\d+\.)\s|(`{3,}|~{3,}))/.test(prev);
+    if (!inFence && /^\s{0,3}=+\s*$/.test(line) && prevIsProse) {
+      lines[lines.length - 1] = `# ${prev.trim()}`;
+    } else {
+      lines.push(line);
+    }
+  }
   let codeFence: { marker: string; length: number } | undefined;
   let firstContentLine = true;
   return lines.flatMap(line => {
@@ -207,6 +233,9 @@ function permissionLines(request: PermissionCard, width: number): string[] {
 }
 
 export function viewportLines(model: ViewportModel, width: number): string[] {
+  // TUI: divider Tokyo Night khép mỗi cặp tool đã xong (call + result).
+  // Vẽ ở tầng render nên live + history replay đều có, không tốn entry.
+  const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
   const lines = model.entries.flatMap(entry => {
     let widths = cachedLines.get(entry);
     if (!widths) { widths = new Map(); cachedLines.set(entry, widths); }
@@ -223,19 +252,33 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
         : wrap(color(prefixColor, prefix) + body, width);
       widths.set(width, rendered);
     }
+    // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
+    const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
     if (model.collapsed && ['thought', 'tool', 'step'].includes(entry.kind)) {
-      if (rendered.length <= 1) return rendered;
+      if (rendered.length <= 1) return isToolResult ? [...rendered, pairDivider] : rendered;
       const label = entry.kind === 'thought' ? 'Thinking' : entry.kind === 'tool' ? 'Tool' : 'Step';
       const labelColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : tokyoNight.yellow;
       const badge = color(tokyoNight.purple, '▸ ') + color(labelColor, label)
         + color(tokyoNight.muted, ` · ${rendered.length - 1} lines hidden · `);
       const summary = stripTerminalControls(entry.text).split('\n')[0].trim();
       const summaryColor = summary.startsWith('✖') ? tokyoNight.red : entry.kind === 'thought' ? tokyoNight.muted : tokyoNight.text;
-      return wrap(badge + color(summaryColor, summary), width).slice(0, 1);
+      const badgeLines = wrap(badge + color(summaryColor, summary), width).slice(0, 1);
+      return isToolResult ? [...badgeLines, pairDivider] : badgeLines;
     }
-    return [...rendered, ''];
+    // TUI: single-line (read-only) tool rows take no blank separator, so a
+    // call + result pair costs 2 rows instead of 4+. Multi-line entries keep
+    // the breathing room.
+    if (entry.kind === 'tool' && !entry.text.includes('\n')) {
+      return isToolResult ? [...rendered, pairDivider] : rendered;
+    }
+    return isToolResult ? [...rendered, pairDivider] : [...rendered, ''];
   });
-  if (model.thinking) lines.push(...wrap(color(tokyoNight.muted, '… Thinking › ' + stripTerminalControls(model.thinking)), width));
+  // TUI: thinking is ephemeral (archived into a thought entry on flush) — show
+  // only the tail as one flattened line so the stream never floods the viewport.
+  if (model.thinking) {
+    const tail = stripTerminalControls(model.thinking).replace(/\s+/g, ' ').trim().slice(-240);
+    lines.push(...wrap(color(tokyoNight.muted, '… Thinking › ' + tail), width));
+  }
   // P1: streaming answer keeps an ellipsis marker so it reads differently from a final `Minus ›` answer.
   if (model.answerStream) lines.push(...wrap(color(tokyoNight.purple, 'Minus … › ') + formatAnswer(model.answerStream, width), width));
   return lines;
@@ -275,6 +318,53 @@ export function shortTabTitle(id: string): string {
  * - functionResponse → kind tool qua toolResultEntry (y hệt tool:after live;
  *   duration 0ms vì event log không persist thời gian chạy tool)
  */
+/**
+ * System steering blocks are model scaffolding, never user content: hide the
+ * whole bubble when hydrating history into the transcript. Wrappers around
+ * real user text unwrap to the text. A user literally typing a marker stays
+ * hidden — same accepted tradeoff as the final-answer echo strip (vanishingly
+ * rare, display-only: the model context and event log are untouched).
+ */
+const HIDDEN_TRANSCRIPT_LEADERS = [
+  '[SUBMISSION REQUIRED]',
+  '[STRONG ADVISORY',
+  '[SYSTEM LOOP ADVISORY]',
+  '[SYSTEM COMPLETION RECOVERY',
+  '[ADAPTIVE REASONING',
+  '🧠 [ADAPTIVE REASONING',
+  '[EVIDENCE_GATE_OBSERVE]',
+  '[WEAK_SUBMISSION_SUMMARY_',
+  '[REPRODUCTION_VERIFICATION_',
+  '[VERIFICATION LADDER',
+  '[UNVERIFIED_MUTATION',
+  '[CASCADE_REPAIR_',
+  '[READY TO SUBMIT]',
+  '[VERIFICATION REQUIREMENTS SATISFIED]',
+  '[RESPONSE LANGUAGE]',
+  '[SYSTEM ',
+  '[CRITIC ',
+];
+const UNWRAP_TRANSCRIPT_LEADERS = [
+  '[USER QUEUED MESSAGE (MID-TURN STEERING)]:',
+  '[USER INSTRUCTION]:',
+];
+
+/** User-visible text for a hydrated user bubble; undefined = hide the bubble. */
+export function userVisibleText(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed === 'Continue') return undefined;
+  for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
+    if (trimmed.startsWith(leader)) return undefined;
+  }
+  for (const leader of UNWRAP_TRANSCRIPT_LEADERS) {
+    if (trimmed.startsWith(leader)) {
+      const inner = trimmed.slice(leader.length).trim();
+      return inner || undefined;
+    }
+  }
+  return text;
+}
+
 interface HistoryPart { text?: string; thought?: boolean; functionCall?: { name?: string; args?: unknown; id?: string }; functionResponse?: { name?: string; id?: string; response?: unknown } }
 export function sessionHistoryToTranscript(messages: Array<{
   role?: string;
@@ -295,14 +385,27 @@ export function sessionHistoryToTranscript(messages: Array<{
       .map((part) => (part.text as string).trim())
       .filter(Boolean)
       .join('\n');
-    if (text) entries.push({ kind: isAssistant ? 'answer' : 'user', text });
-    for (const part of parts) {
-      const call = part.functionCall;
-      if (call && typeof call === 'object') {
-        const name = typeof call.name === 'string' && call.name ? call.name : 'unknown_tool';
-        const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
-          ? call.args as Record<string, unknown> : {};
-        entries.push({ kind: 'tool', text: toolCallEntry(name, args) });
+    if (text) {
+      if (!isAssistant) {
+        const visible = userVisibleText(text);
+        if (visible !== undefined) entries.push({ kind: 'user', text: visible });
+      } else {
+        entries.push({ kind: 'answer', text });
+      }
+    }
+    // Tool parts hydrate even when the message carries no prose: the model
+    // routinely emits call-only messages, and tool/result events project as
+    // text-less user-role messages (see Session.addToolResultWithId). Dropping
+    // them here would silently strip every tool entry from a hydrated tab.
+    if (isAssistant) {
+      for (const part of parts) {
+        const call = part.functionCall;
+        if (call && typeof call === 'object') {
+          const name = typeof call.name === 'string' && call.name ? call.name : 'unknown_tool';
+          const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+            ? call.args as Record<string, unknown> : {};
+          entries.push({ kind: 'tool', text: toolCallEntry(name, args) });
+        }
       }
     }
     for (const part of parts) {
@@ -349,9 +452,11 @@ export function syncSessionTabs(model: SessionTabsModel, ids: string[], activeId
 
 /** Lưu transcript + stream buffer + chrome (composer/diff/tools/tokens) hiện tại vào tab active trước khi switch/new. */
 function snapshotActive(model: RootModel): SessionTab[] {
+  // NOTE: không snapshot `model` (model tường minh của tab): tab chưa từng /model
+  // phải tiếp tục theo default chung thay vì bị ghim vào giá trị lúc switch.
   return model.sessions.tabs.map(t =>
     t.id === model.sessions.activeId
-      ? { ...t, entries: model.viewport.entries, thinking: model.viewport.thinking, answerStream: model.viewport.answerStream, busy: model.status.busy, lastActive: Date.now(),
+      ? { ...t, entries: model.viewport.entries, thinking: model.viewport.thinking, answerStream: model.viewport.answerStream, lastActive: Date.now(),
         composer: sanitizeComposer(model.composer), diff: model.diff, tools: model.sidebar.tools, tokens: model.sidebar.tokens }
       : t);
 }
@@ -361,14 +466,20 @@ export function sanitizeComposer(composer: ComposerModel): ComposerModel {
   return { ...composer, completions: [], selected: 0, selection: undefined };
 }
 
-/** Restore chrome của tab ra xem: composer/diff/tools/tokens riêng từng session. */
-export function restoreTabChrome(target: SessionTab): { composer: ComposerModel; diff: DiffViewerModel; tools: string[]; tokens: number } {
+/** Restore chrome của tab ra xem: composer/diff/tools/tokens/model riêng từng session. */
+export function restoreTabChrome(target: SessionTab): { composer: ComposerModel; diff: DiffViewerModel; tools: string[]; tokens: number; model?: string } {
   return {
     composer: target.composer ? sanitizeComposer(target.composer) : createComposer(),
     diff: target.diff ?? createDiffViewer(),
     tools: target.tools ?? [],
     tokens: target.tokens ?? 0,
+    model: target.model,
   };
+}
+
+/** Model hiển thị cho tab: tường minh theo tab, else default chung, else sidebar hiện tại. */
+export function tabDisplayModel(model: RootModel, tab: SessionTab): string {
+  return tab.model ?? model.sessions.defaultModel ?? model.sidebar.model;
 }
 
 /**
@@ -442,8 +553,39 @@ function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     viewport: { ...model.viewport, entries: target.entries || [], thinking: target.thinking || '', answerStream: target.answerStream || '', offset: 0, pinned: true },
     composer: chrome.composer,
     diff: chrome.diff,
-    sidebar: { ...model.sidebar, session: target.title, tools: chrome.tools, tokens: chrome.tokens },
+    sidebar: { ...model.sidebar, session: target.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, target) },
   }, [{ type: 'session-switch', sessionId: target.id }]];
+}
+
+/**
+ * Kernel flipped the active session without TEA initiating (a tab-list sync
+ * resolved a different activeId): snapshot the live viewport/chrome into the
+ * outgoing tab and restore the incoming tab's cache — the same swap
+ * adoptActiveTab performs. Without this, the incoming tab's live entries would
+ * append onto the outgoing tab's transcript (overlay) and the outgoing tab's
+ * live state would never be snapshotted (data loss).
+ */
+export function adoptAfterSync(model: RootModel, sessions: SessionTabsModel, prevActiveId: string): RootModel {
+  const newActiveId = sessions.activeId;
+  if (!newActiveId || newActiveId === prevActiveId) return { ...model, sessions };
+  const target = sessions.tabs.find(t => t.id === newActiveId);
+  if (!target) return { ...model, sessions };
+  const snapped: SessionTab[] = sessions.tabs.map(t =>
+    t.id === prevActiveId
+      ? { ...t, entries: model.viewport.entries, thinking: model.viewport.thinking, answerStream: model.viewport.answerStream, lastActive: Date.now(),
+        composer: sanitizeComposer(model.composer), diff: model.diff, tools: model.sidebar.tools, tokens: model.sidebar.tokens }
+      : t);
+  const restored = snapped.find(t => t.id === newActiveId)!;
+  const chrome = restoreTabChrome(restored);
+  const tabs = snapped.map(t => t.id === newActiveId ? { ...t, unread: 0 } : t);
+  const withSessions = { ...model, sessions: { ...sessions, tabs } };
+  return {
+    ...withSessions,
+    viewport: { ...model.viewport, entries: restored.entries || [], thinking: restored.thinking || '', answerStream: restored.answerStream || '', offset: 0, pinned: true },
+    composer: chrome.composer,
+    diff: chrome.diff,
+    sidebar: { ...model.sidebar, session: restored.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(withSessions, restored) },
+  };
 }
 
 /**
@@ -468,7 +610,7 @@ export function adoptActiveTab(model: RootModel, newActiveId: string): RootModel
     viewport: { ...model.viewport, entries: restored.entries || [], thinking: restored.thinking || '', answerStream: restored.answerStream || '', offset: 0, pinned: true },
     composer: chrome.composer,
     diff: chrome.diff,
-    sidebar: { ...model.sidebar, session: restored.title, tools: chrome.tools, tokens: chrome.tokens },
+    sidebar: { ...model.sidebar, session: restored.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, restored) },
   };
 }
 
@@ -487,7 +629,8 @@ function createNewTab(model: RootModel): [RootModel, Cmd[]] {
     viewport: { ...model.viewport, entries: [], thinking: '', answerStream: '', offset: 0, pinned: true },
     composer: createComposer(),
     diff: createDiffViewer(),
-    sidebar: { ...model.sidebar, session: shortTabTitle(id), tools: [], tokens: 0 },
+    // Tab mới chưa /model riêng → hiển thị default chung, không kế thừa model tab cũ.
+    sidebar: { ...model.sidebar, session: shortTabTitle(id), tools: [], tokens: 0, model: model.sessions.defaultModel ?? model.sidebar.model },
   }, [{ type: 'session-new', sessionId: id }]];
 }
 
@@ -517,7 +660,7 @@ function hideTab(model: RootModel, index: number, keepOpen = false): [RootModel,
     viewport: hidingActive ? { ...model.viewport, entries: shown.entries || [], thinking: shown.thinking || '', answerStream: shown.answerStream || '', offset: 0, pinned: true } : model.viewport,
     composer: hidingActive ? chrome.composer : model.composer,
     diff: hidingActive ? chrome.diff : model.diff,
-    sidebar: hidingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens } : model.sidebar,
+    sidebar: hidingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, shown) } : model.sidebar,
     status: { ...model.status, notice: `Đã ẩn tab ${target.title} (vẫn chạy nền · Ctrl+T → h để hiện)` },
   }, hidingActive ? [{ type: 'session-switch', sessionId: fallback.id }] : []];
 }
@@ -572,7 +715,7 @@ function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     viewport: deletingActive ? { ...model.viewport, entries: shown.entries || [], thinking: shown.thinking || '', answerStream: shown.answerStream || '', offset: 0, pinned: true } : model.viewport,
     composer: deletingActive ? chrome.composer : model.composer,
     diff: deletingActive ? chrome.diff : model.diff,
-    sidebar: deletingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens } : model.sidebar,
+    sidebar: deletingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, shown) } : model.sidebar,
     status: { ...model.status, notice: `Đã xóa tab ${target.title} (session rỗng)` },
   }, cmds];
 }
@@ -704,7 +847,7 @@ export function sessionTabsView(state: SessionTabsModel, width: number, height: 
       const dot = tab.hidden ? color(tokyoNight.muted, '○ ') : tab.busy ? color(tokyoNight.yellow, '● ') : tab.id === state.activeId ? color(tokyoNight.green, '● ') : color(tokyoNight.muted, '○ ');
       const count = tab.entries?.length ?? 0;
       const title = tab.hidden ? color(tokyoNight.muted, `${tab.title} (ẩn)`) : color(tokyoNight.text, tab.title);
-      const meta = color(tokyoNight.muted, `${tab.id}${count ? ` · ${count} msgs` : ''}${tab.id === state.activeId ? ' · active' : ''}${tab.busy ? ' · busy' : ''}${tab.hidden ? ' · ẩn khỏi strip' : ''}${tab.unread ? ` · ${tab.unread} chưa đọc` : ''}`);
+      const meta = color(tokyoNight.muted, `${tab.id}${count ? ` · ${count} msgs` : ''}${tab.id === state.activeId ? ' · active' : ''}${tab.busy ? ' · busy' : ''}${tab.hidden ? ' · ẩn khỏi strip' : ''}${tab.unread ? ` · ${tab.unread} chưa đọc` : ''}`) + color(tokyoNight.cyan, ` · ${tab.model ?? state.defaultModel ?? 'default'}`);
       lines.push(...wrap(`${marker}${color(tokyoNight.cyan, `${i + 1}.`)} ${dot}${title}`, panelWidth));
       lines.push(...wrap(`    ${meta}`, panelWidth));
     });

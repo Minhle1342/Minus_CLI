@@ -43,13 +43,13 @@ describe('On-demand table output instructions', () => {
   it('uses only the dynamic tail and removes guidance on the next non-tabular turn', () => {
     const assembler = new PromptAssembler();
     for (const section of DEFAULT_PROMPT_SECTIONS) assembler.register(section);
-    const plain = assembler.assembleTiered({ request: 'Explain this function' });
-    const table = assembler.assembleTiered({ request: 'List tools in a Markdown table' });
-    const next = assembler.assembleTiered({ request: 'Fix a bug' });
-    assert.equal(table.stablePrefix, plain.stablePrefix);
-    assert.ok(table.t3DynamicTail.includes(SECTION_TABULAR_OUTPUT));
-    assert.ok(!plain.fullPrompt.includes(SECTION_TABULAR_OUTPUT));
-    assert.ok(!next.fullPrompt.includes(SECTION_TABULAR_OUTPUT));
+    const plain = assembler.assembleForContext({ request: 'Explain this function' });
+    const table = assembler.assembleForContext({ request: 'List tools in a Markdown table' });
+    const next = assembler.assembleForContext({ request: 'Fix a bug' });
+    assert.ok(table.startsWith(plain), 'Tabular guidance chỉ nối đuôi, tiền tố giữ nguyên');
+    assert.ok(table.includes(SECTION_TABULAR_OUTPUT));
+    assert.ok(!plain.includes(SECTION_TABULAR_OUTPUT));
+    assert.ok(!next.includes(SECTION_TABULAR_OUTPUT));
   });
 
   it('specifies the contract consumed by the new TUI layout', () => {

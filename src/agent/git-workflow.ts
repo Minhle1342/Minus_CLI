@@ -33,6 +33,8 @@ export interface GitWorkflowState {
   blocked?: string;
   playbook?: GitWorkflowPromptId;
   pendingBranchAction?: GitWorkflowScope['branchAction'];
+  /** Prior stage denials this turn, keyed by operation name. */
+  denialCounts?: Record<string, number>;
 }
 
 export interface GitWorkflowInput {
@@ -154,6 +156,31 @@ function operationStage(op: Operation, scope?: GitWorkflowScope): GitWorkflowSta
   if (op.name === 'add' || op.name === 'commit') return 'Commit';
   if (SYNC.has(op.name)) return 'Sync';
   return undefined;
+}
+
+/** Concrete commands that satisfy abstract pending evidence names. */
+const PENDING_EVIDENCE_COMMANDS: Record<string, string> = {
+  'status': 'git status',
+  'unstaged diff': 'git diff',
+  'staged diff': 'git diff --cached',
+  'fetch': 'git fetch',
+  'pull': 'git pull',
+};
+
+export function pendingEvidenceCommands(pending: string[]): string[] {
+  return pending.map((name) => PENDING_EVIDENCE_COMMANDS[name]).filter(Boolean);
+}
+
+/** Prior GIT_WORKFLOW_STAGE_BLOCKED denials this turn, keyed by operation name. */
+export function countStageDenials(observations: readonly CompletionObservation[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const observation of observations) {
+    if (observation.payload?.errorCode !== 'GIT_WORKFLOW_STAGE_BLOCKED') continue;
+    for (const op of callOperations(observation.toolName, observation.args, false)) {
+      counts[op.name] = (counts[op.name] || 0) + 1;
+    }
+  }
+  return counts;
 }
 
 function branchOperationAction(op: Operation): GitWorkflowScope['branchAction'] {
@@ -301,11 +328,13 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
   state.playbook = state.stage === 'Inspect' ? 'gitInspect' : state.stage === 'Branch' ? 'gitBranch'
     : state.stage === 'Commit' ? 'gitCommit' : state.stage === 'Sync' ? 'gitSync' : state.stage === 'PR' ? 'gitPrEnhance'
     : state.stage === 'Implement' ? (implementOps.some((op) => UNDO.has(op)) ? 'gitRollback' : implementOps.length ? 'gitIntegrate' : 'gitImplement') : undefined;
+  state.denialCounts = countStageDenials(input.observations);
   return state;
 }
 
 export function gitWorkflowGuidance(state: GitWorkflowState): string {
-  return `[GIT WORKFLOW STATE]\nCurrent stage: ${state.stage}. Completed: ${state.completed.map((item) => item.stage).join(' -> ') || 'none'}. Skipped (not requested): ${state.skipped.join(', ') || 'none'}.\nAuthorized operations: ${state.scope.operations.join(', ') || 'none'}; code implementation: ${state.scope.implement}; PR: ${state.scope.pr ?? 'none'}.\n${state.pending.length ? `Required evidence: ${state.pending.join(', ')}.\n` : ''}${state.blocked ? `${state.blocked}\n` : ''}Use separate tool calls for stages. Tool attempts, background starts, dry runs, and narrative claims do not complete a stage. Preserve user changes and the requested paths/refs/remotes; this state does not broaden authorization. ${state.stage === 'Done' ? 'Requested Git workflow is complete; do not repeat Git mutations.' : 'Complete only the current authorized stage before the next Git mutation.'}`;
+  const run = pendingEvidenceCommands(state.pending);
+  return `[GIT WORKFLOW STATE]\nCurrent stage: ${state.stage}. Completed: ${state.completed.map((item) => item.stage).join(' -> ') || 'none'}. Skipped (not requested): ${state.skipped.join(', ') || 'none'}.\nAuthorized operations: ${state.scope.operations.join(', ') || 'none'}; code implementation: ${state.scope.implement}; PR: ${state.scope.pr ?? 'none'}.\n${state.pending.length ? `Required evidence: ${state.pending.join(', ')}.${run.length ? ` Run: ${run.join(', ')}.` : ''}\n` : ''}${state.blocked ? `${state.blocked}\n` : ''}Use separate tool calls for stages. Tool attempts, background starts, dry runs, and narrative claims do not complete a stage. Preserve user changes and the requested paths/refs/remotes; this state does not broaden authorization. ${state.stage === 'Done' ? 'Requested Git workflow is complete; do not repeat Git mutations.' : 'Complete only the current authorized stage before the next Git mutation.'}`;
 }
 
 /** Additional ordering guard; existing command/path/branch authorization remains authoritative. */
@@ -322,7 +351,12 @@ export function checkGitWorkflowCall(state: GitWorkflowState | undefined, userRe
       : state.scope.operations.includes(op.name) || equivalentBranch;
     if (!permitted) return `Git operation ${op.name} is outside the user-authorized workflow scope.`;
     if (stage === 'Branch' && branchOperationAction(op) !== (state.pendingBranchAction ?? state.scope.branchAction)) return `Next authorized branch action is ${state.pendingBranchAction ?? state.scope.branchAction}; this invocation would ${branchOperationAction(op)} a branch.`;
-    if (stage !== state.stage) return `Git ${op.name} belongs to ${stage}, but the current workflow stage is ${state.stage}. Required evidence: ${state.pending.join(', ') || 'successful result for the current stage'}.`;
+    if (stage !== state.stage) {
+      const run = pendingEvidenceCommands(state.pending);
+      const prior = state.denialCounts?.[op.name] || 0;
+      const stop = prior >= 2 ? ` This is denial ${prior + 1} for git ${op.name} — STOP retrying it.` : '';
+      return `Git ${op.name} belongs to ${stage}, but the current workflow stage is ${state.stage}.${stop} Required evidence: ${state.pending.join(', ') || 'successful result for the current stage'}.${run.length ? ` Run: ${run.join(', ')}.` : ''}`;
+    }
     if (toolName === 'git_command' && !isGitCommandAuthorized(userRequest, op.name, classifyGitCommand(op.name, op.args), op.args)) {
       return `Git ${op.name} is not authorized by the current user request.`;
     }

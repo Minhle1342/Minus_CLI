@@ -161,6 +161,28 @@ const ALLOWED_COMMAND_PREFIXES = [
   'jest ',
   'vitest ',
   'prettier ',
+  'biome ',
+  'oxlint ',
+  'stylelint ',
+  // Python linters & formatters (ruff/black/isort/flake8/mypy/pylint)
+  'ruff ',
+  'black ',
+  'flake8 ',
+  'isort ',
+  'mypy ',
+  'pylint ',
+  // Go / Rust (cargo clippy/fmt đã phủ bởi tiền tố 'cargo ')
+  'gofmt ',
+  'goimports ',
+  'rustfmt ',
+  // Ruby / PHP / Kotlin / Swift / C-C++ (mỗi ngôn ngữ 1-2 binary chủ lưu)
+  'rubocop ',
+  'phpcs ',
+  'php-cs-fixer ',
+  'ktlint ',
+  'swiftlint ',
+  'swiftformat ',
+  'clang-format ',
   // Docker chỉ-đọc để chẩn đoán sandbox (không cho approvals rộng: subcommands ghi vẫn cần approval)
   'docker ps',
   'docker ps ',
@@ -1136,7 +1158,7 @@ export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefault
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/jest/vitest, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg/rm calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task` (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Never include secrets or tokens in commands.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg/rm calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task` (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {

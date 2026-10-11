@@ -1,12 +1,26 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { computeLineDiff } from '../tools/diff-generator.js';
 
 export interface Checkpoint {
   id: string; index: number; timestamp: string; description: string;
   commitHash?: string; diffSummary?: string; isTaskCheckpoint?: boolean; taskId?: string; workspaceDigest?: string;
 }
 type FileState = { content?: Buffer; mode?: number };
-type RollbackResult = { success: boolean; message: string; checkpoint?: Checkpoint; restoredFiles?: string[] };
+
+export interface FileDiffItem {
+  filePath: string;
+  diff: string;
+  status: 'MODIFIED' | 'CREATED' | 'DELETED' | 'RESTORED';
+}
+
+export type RollbackResult = {
+  success: boolean;
+  message: string;
+  checkpoint?: Checkpoint;
+  restoredFiles?: string[];
+  diffs?: FileDiffItem[];
+};
 type ScopedSnapshot = { before: Map<string, FileState>; owned: Map<string, FileState> };
 
 /** Scoped byte snapshots preserve user dirt and never change Git's index or branch. */
@@ -86,21 +100,43 @@ export class CheckpointManager {
     const snapshot = this.snapshots.get(target.id);
     if (!snapshot || snapshot.before.size === 0) return { success: false, message: 'Checkpoint has no scoped file snapshot; no files were restored.' };
     const restoredFiles: string[] = [];
+    const diffs: FileDiffItem[] = [];
     try {
       for (const [file] of snapshot.before) if (!this.same(await this.readState(file), snapshot.owned.get(file)!)) return { success: false, message: `Rollback refused: ${file} changed outside the recorded mutation. User changes were preserved.` };
       for (const [file, state] of snapshot.before) {
-        if (!this.same(await this.readState(file), snapshot.owned.get(file)!)) throw new Error(`Concurrent external change: ${file}`);
+        const current = await this.readState(file);
+        if (!this.same(current, snapshot.owned.get(file)!)) throw new Error(`Concurrent external change: ${file}`);
         const absolute = path.join(this.workspaceDir, file);
-        if (state.content === undefined) await fs.rm(absolute, { force: true });
-        else { await fs.mkdir(path.dirname(absolute), { recursive: true }); await fs.writeFile(absolute, state.content); }
+        if (state.content === undefined) {
+          // File was created by tool (or did not exist before). Undo deletes it.
+          const currentText = current.content ? current.content.toString('utf8') : '';
+          const diff = computeLineDiff(currentText, '', file);
+          diffs.push({ filePath: file, diff, status: 'DELETED' });
+          await fs.rm(absolute, { force: true });
+        } else if (current.content === undefined) {
+          // File existed before, was deleted by tool. Undo restores it.
+          const restoredText = state.content.toString('utf8');
+          const diff = computeLineDiff('', restoredText, file);
+          diffs.push({ filePath: file, diff, status: 'RESTORED' });
+          await fs.mkdir(path.dirname(absolute), { recursive: true });
+          await fs.writeFile(absolute, state.content);
+        } else {
+          // File was modified by tool. Undo restores original content.
+          const currentText = current.content.toString('utf8');
+          const restoredText = state.content.toString('utf8');
+          const diff = computeLineDiff(currentText, restoredText, file);
+          diffs.push({ filePath: file, diff, status: 'MODIFIED' });
+          await fs.mkdir(path.dirname(absolute), { recursive: true });
+          await fs.writeFile(absolute, state.content);
+        }
         restoredFiles.push(file);
         if (state.content !== undefined && state.mode !== undefined) await fs.chmod(absolute, state.mode);
       }
       await this.recordMutation(restoredFiles);
-      return { success: true, message: `Restored ${restoredFiles.length} scoped file(s) to checkpoint ${target.id}.`, checkpoint: target, restoredFiles };
+      return { success: true, message: `Restored ${restoredFiles.length} scoped file(s) to checkpoint ${target.id}.`, checkpoint: target, restoredFiles, diffs };
     } catch (error: any) {
       await this.recordMutation(restoredFiles).catch(() => {});
-      return { success: false, checkpoint: target, restoredFiles,
+      return { success: false, checkpoint: target, restoredFiles, diffs,
         message: `Scoped rollback failed after restoring ${restoredFiles.length} file(s): ${error.message}. No broad Git restore was attempted.` };
     }
   }
