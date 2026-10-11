@@ -122,9 +122,7 @@ import { readCoverageReport, type FileCoverage } from './coverage-report-reader.
 import { buildFailureInvestigationBrief, type FailureInvestigationMutation } from './failure-investigation-mode.js';
 import { RateLimitPacer } from './rate-limit-pacer.js';
 
-export function isScratchFilePath(filePath: string): boolean {
-  return isScratchPath(filePath);
-}
+export const isScratchFilePath = isScratchPath;
 
 /** Arguments provide capture scope; tool outcomes separately prove which edits succeeded. */
 export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
@@ -146,8 +144,7 @@ function configuredEvidenceGateMode(): 'off' | 'observe' | 'enforce' | undefined
 
 function envFeatureEnabled(name: string, defaultValue = true): boolean {
   const value = process.env[name]?.trim().toLowerCase();
-  if (!value) return defaultValue;
-  return !['0', 'false', 'off', 'disabled'].includes(value);
+  return value ? !['0', 'false', 'off', 'disabled'].includes(value) : defaultValue;
 }
 
 function envFiniteNumber(name: string): number | undefined {
@@ -201,157 +198,28 @@ function detectAttachmentAnchors(text: string): string[] {
   return [...anchors];
 }
 
-/**
- * Extract the [REQUEST ANALYSIS] block the model opens its reasoning with
- * (goal, scope, ambiguities, plan, risk — see CORE_SYSTEM_PROMPT §3). Returns undefined
- * when the model did not include one.
- */
-export function extractRequestAnalysis(reasoning: string | undefined | null): string | undefined {
-  if (!reasoning) return undefined;
-  const match = /\[REQUEST ANALYSIS\]([\s\S]*?)(?:\[\/REQUEST ANALYSIS\]|$)/i.exec(reasoning);
-  if (!match) return undefined;
-  const block = match[1].trim();
-  return block ? block : undefined;
-}
+export {
+  extractRequestAnalysis,
+  parseRequestAnalysisFields,
+  type RequestAnalysisFields,
+} from './request-analysis.js';
 
-export interface RequestAnalysisFields {
-  goal?: string;
-  scope?: string;
-  ambiguities?: string;
-  plan?: string;
-  risk?: string;
-}
+export {
+  resolveRuntimeHarnessProfile,
+  calculateTaskComplexity,
+  type RuntimeHarnessProfile,
+  type TaskComplexityAssessment,
+} from './task-complexity.js';
 
-/**
- * Parses a [REQUEST ANALYSIS] block into structured fields.
- * Backward compatible: old 3-field blocks (goal/scope/ambiguities) still parse;
- * missing plan/risk simply stay undefined.
- */
-export function parseRequestAnalysisFields(block: string | undefined | null): RequestAnalysisFields {
-  if (!block?.trim()) return {};
-  const fields: RequestAnalysisFields = {};
-  let current: keyof RequestAnalysisFields | undefined;
-  for (const rawLine of block.split('\n')) {
-    const line = rawLine.trim();
-    const m = /^(goal|scope|ambiguit(?:y|ies)|plan|risk)\s*:\s*(.*)$/i.exec(line);
-    if (m) {
-      const key = m[1].toLowerCase();
-      const value = (m[2] ?? '').trim();
-      if (key.startsWith('goal')) { current = 'goal'; fields.goal = value; }
-      else if (key.startsWith('scope')) { current = 'scope'; fields.scope = value; }
-      else if (key.startsWith('ambig')) { current = 'ambiguities'; fields.ambiguities = value; }
-      else if (key.startsWith('plan')) { current = 'plan'; fields.plan = value; }
-      else if (key.startsWith('risk')) { current = 'risk'; fields.risk = value; }
-    } else if (current && line) {
-      fields[current] = ((fields[current] ?? '') + '\n' + line).trim();
-    }
-  }
-  for (const k of Object.keys(fields) as Array<keyof RequestAnalysisFields>) {
-    if (!fields[k]?.trim()) delete fields[k];
-  }
-  return fields;
-}
+import {
+  extractRequestAnalysis,
+  parseRequestAnalysisFields,
+} from './request-analysis.js';
 
-export interface RuntimeHarnessProfile {
-  profileName: 'strict-verification' | 'velocity-first' | 'read-only-guard' | 'balanced-default';
-  /** @deprecated Kept for profile API compatibility; evidence policy decides whether reproduction is required. */
-  enforceScratchTest: boolean;
-  criticStrictness: 'strict' | 'standard' | 'lenient';
-  compactionRatioBias: number;
-  guidance: string;
-}
-
-export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string): RuntimeHarnessProfile {
-  const isPlanning = phase === 'plan';
-  const isBugfixOrSecurity = !isPlanning && (taskClass === 'bugfix' || taskClass === 'security');
-  const isExploration = isPlanning || phase === 'explore' || taskClass === 'exploration' || taskClass === 'docs';
-  const isScaffoldOrFeature = !isPlanning && (taskClass === 'feature' || taskClass === 'scaffold' || taskClass === 'greenfield');
-
-  if (isBugfixOrSecurity) {
-    return {
-      profileName: 'strict-verification',
-      enforceScratchTest: false,
-      criticStrictness: 'strict',
-      compactionRatioBias: -0.05,
-      guidance: '🛡️ [HARNESS PROFILE: STRICT-VERIFICATION ACTIVE]: Bugfix/security tasks require risk-proportional evidence. Use empirical verification for high-risk changes; small, easily reversible changes may proceed once the target has been read and the causal mechanism has direct evidence.',
-    };
-  }
-
-  if (isExploration) {
-    return {
-      profileName: 'read-only-guard',
-      enforceScratchTest: false,
-      criticStrictness: 'standard',
-      compactionRatioBias: -0.05,
-      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Prioritize structural survey — call read/search tools and extract context. Avoid direct source-code intervention before a plan exists.',
-    };
-  }
-
-  if (isScaffoldOrFeature) {
-    return {
-      profileName: 'velocity-first',
-      enforceScratchTest: false,
-      criticStrictness: 'lenient',
-      compactionRatioBias: +0.05,
-      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Scaffolding/new-feature task. Prioritize source-code creation speed and relax test-blocker checks in the early steps.',
-    };
-  }
-
-  return {
-    profileName: 'balanced-default',
-    enforceScratchTest: false,
-    criticStrictness: 'standard',
-    compactionRatioBias: 0,
-    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Balanced operation following the standard TDD workflow.',
-  };
-}
-
-export interface TaskComplexityAssessment {
-  score: number;
-  scaleFactor: number;
-  reason: string;
-}
-
-/**
- * SWE-Reasoner Dynamic Test-Time Compute Allocation (Phase 2):
- * Đánh giá độ phức tạp tác vụ C_task dựa trên yêu cầu, phân loại và dấu vết stack trace
- * để tự động co giãn ngân sách bước (step budget) và token window tương ứng.
- */
-export function calculateTaskComplexity(
-  userRequest: string,
-  taskClass?: string
-): TaskComplexityAssessment {
-  let score = 0.2;
-  const reasons: string[] = [];
-
-  if (taskClass === 'bugfix' || taskClass === 'security') {
-    score += 0.35;
-    reasons.push('Bugfix/security task requires deep reasoning and execution verification');
-  } else if (taskClass === 'feature' || taskClass === 'refactor') {
-    score += 0.25;
-    reasons.push('New-feature/refactor task requires an expanded search space');
-  }
-
-  const hasStackTrace = /(?:(?:Error|Exception):|at\s+[\w$./\\-]+\s*\([^)]+:\d+:\d+\)|Traceback \(most recent call last\):)/i.test(userRequest);
-  if (hasStackTrace) {
-    score += 0.25;
-    reasons.push('Error stack trace detected in the request');
-  }
-
-  if (userRequest.length > 500) {
-    score += 0.15;
-    reasons.push('Detailed request description with many constraints');
-  }
-
-  score = Math.min(1.0, Math.max(0.1, score));
-  const scaleFactor = 1.0 + Math.round(score * 10) / 10;
-
-  return {
-    score,
-    scaleFactor,
-    reason: reasons.length > 0 ? reasons.join('; ') : 'Standard task',
-  };
-}
+import {
+  resolveRuntimeHarnessProfile,
+  calculateTaskComplexity,
+} from './task-complexity.js';
 
 /**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
