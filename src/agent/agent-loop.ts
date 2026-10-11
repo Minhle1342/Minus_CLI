@@ -152,18 +152,21 @@ function envFiniteNumber(name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
-function hypothesisBlastRadiusRisk(
+const BLAST_RISK_MAP: Record<string, 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5'> = {
+  CRITICAL: 'R5',
+  HIGH: 'R3',
+  MEDIUM: 'R2',
+  LOW: 'R1',
+};
+
+export function hypothesisBlastRadiusRisk(
   hypotheses: Array<{ blastRadius?: string }>,
 ): 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | undefined {
-  const mapped = hypotheses.map((hypothesis) => (
-    hypothesis.blastRadius === 'CRITICAL' ? 'R5'
-      : hypothesis.blastRadius === 'HIGH' ? 'R3'
-        : hypothesis.blastRadius === 'MEDIUM' ? 'R2'
-          : hypothesis.blastRadius === 'LOW' ? 'R1'
-            : 'R0'
-  ));
-  const rank = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 } as const;
-  return mapped.sort((a, b) => rank[b] - rank[a])[0];
+  if (hypotheses.length === 0) return undefined;
+  return hypotheses
+    .map((h) => BLAST_RISK_MAP[h.blastRadius || ''] || 'R0')
+    .sort()
+    .reverse()[0];
 }
 
 function isComprehensiveSubmissionSummary(value: string): boolean {

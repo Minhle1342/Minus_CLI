@@ -12,3 +12,11 @@ test('isScratchFilePath and isScratchPath exhibit identical behavior', () => {
   assert.equal(isScratchFilePath(scratchFile), true);
   assert.equal(isScratchFilePath(normalFile), false);
 });
+
+test('hypothesisBlastRadiusRisk correctly ranks highest risk', async () => {
+  const { hypothesisBlastRadiusRisk } = await import('./agent-loop.js');
+  assert.equal(hypothesisBlastRadiusRisk([{ blastRadius: 'LOW' }, { blastRadius: 'CRITICAL' }]), 'R5');
+  assert.equal(hypothesisBlastRadiusRisk([{ blastRadius: 'MEDIUM' }, { blastRadius: 'HIGH' }]), 'R3');
+  assert.equal(hypothesisBlastRadiusRisk([{ blastRadius: 'UNKNOWN' }]), 'R0');
+  assert.equal(hypothesisBlastRadiusRisk([]), undefined);
+});
