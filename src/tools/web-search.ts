@@ -477,6 +477,13 @@ async function extractTopContentFromResults(
   }
 }
 
+/** Free preset shortcuts: pure local mapping to SearXNG categories/engines, no external API. */
+const PRESET_SHORTCUTS: Record<string, { categories?: string; engine_shortcuts?: string[] }> = {
+  code: { categories: 'general', engine_shortcuts: ['github', 'stackoverflow'] },
+  news: { categories: 'news' },
+  science: { categories: 'science', engine_shortcuts: ['arxiv', 'semantic_scholar', 'pubmed'] },
+};
+
 /** Creates a web_search tool backed by an operator-controlled SearXNG instance. */
 export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDefinition {
   const baseUrl = options.baseUrl ?? process.env.SEARXNG_BASE_URL ?? DEFAULT_BASE_URL;
@@ -545,6 +552,11 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           type: Type.BOOLEAN,
           description: 'When true, automatically fetches and extracts clean markdown & code snippets from the top 1-2 search results for immediate single-turn resolution.',
         },
+        preset: {
+          type: Type.STRING,
+          description: 'Optional free preset mapping to SearXNG categories/engines: "code" (github, stackoverflow), "news", or "science" (arxiv, semantic_scholar, pubmed). Explicit categories/engine_shortcuts win.',
+          enum: ['code', 'news', 'science'],
+        },
         mode: {
           type: Type.STRING,
           description: 'Search mode: "live" for real-time web search (default), or "cached" for local/cached index retrieval.',
@@ -560,10 +572,18 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
         return { error: 'This Node.js runtime does not provide fetch(). Use Node.js 18 or newer.', errorCode: 'FETCH_UNAVAILABLE' };
       }
 
-      const queries = buildAdvancedQueries(args, primaryQuery);
+      const preset = typeof args.preset === 'string' ? PRESET_SHORTCUTS[args.preset] : undefined;
+      const effectiveArgs = preset
+        ? {
+            ...args,
+            categories: args.categories ?? preset.categories,
+            engine_shortcuts: args.engine_shortcuts ?? preset.engine_shortcuts,
+          }
+        : args;
+      const queries = buildAdvancedQueries(effectiveArgs, primaryQuery);
       let urls: URL[];
       try {
-        urls = queries.map((query) => buildSearchUrl(baseUrl, query, args));
+        urls = queries.map((query) => buildSearchUrl(baseUrl, query, effectiveArgs));
       } catch (error: any) {
         return { error: `Invalid SearXNG configuration: ${error.message}`, errorCode: 'SEARXNG_CONFIG_ERROR' };
       }
