@@ -557,10 +557,13 @@ export class AgentLoop {
       this.toolRegistry.register(createScheduleDagParallelTool(this.orchestrator));
     }
 
+    this.registerGameToolsIfApplicable(this._workspace);
+  }
+
+  private registerGameToolsIfApplicable(workspace: Workspace): void {
     if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
       try {
-        const ctx = detectPromptContext(this._workspace);
-        if (ctx.isUnity) {
+        if (detectPromptContext(workspace).isUnity) {
           (this.toolRegistry as any).registerGameTools().catch(() => {});
         }
       } catch { }
@@ -588,14 +591,7 @@ export class AgentLoop {
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
-    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
-      try {
-        const ctx = detectPromptContext(workspace);
-        if (ctx.isUnity) {
-          (this.toolRegistry as any).registerGameTools().catch(() => {});
-        }
-      } catch { }
-    }
+    this.registerGameToolsIfApplicable(workspace);
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
       (this as any).checkpointManager = this.kernel.ctx.checkpoints;
