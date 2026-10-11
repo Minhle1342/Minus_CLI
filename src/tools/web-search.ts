@@ -436,7 +436,7 @@ async function extractTopContentFromResults(
   if (results.length === 0) return undefined;
   if (parentSignal?.aborted) return undefined;
 
-  const targets = results.slice(0, 1);
+  const targets = results.slice(0, 2);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
