@@ -38,6 +38,12 @@ HOW TO USE RESULTS:
 - When an investigation lead points to official documentation, a resolved GitHub Issue/PR, or technical article, call web_fetch(url="...") to deeply inspect the markdown document, exact API signatures, and complete code blocks.
 - Use web_fetch with extract_mode: "code_blocks" when only implementation examples are needed to save context tokens.
 - Apply findings via apply_patch and empirically verify results with run_command test suites.
+
+DIG DEEPER THAN SNIPPETS:
+- Never answer from titles/snippets alone when facts, versions, API signatures, or code are needed: fetch the top 1-2 investigation leads with web_fetch and cite the fetched pages, not the search result.
+- Follow investigationLeads in order (official docs and resolved issues first); if the first page is thin or paywalled, fetch the next lead instead of guessing.
+- For long documents, paginate with offset/max_length until the needed section is found; use extract_mode "code_blocks" when only implementation examples matter.
+- Cross-check contested, version-sensitive, or high-impact claims against at least two independent sources before stating them as fact.
 - If web_search is unavailable, times out, or returns no useful results, say so briefly and continue from available evidence when possible; never invent current facts or citations.`;
 
 /**
