@@ -229,7 +229,7 @@ export class RealtimeSlashCommandHints {
     private readonly getWorkspace?: () => Workspace | undefined,
     private readonly getModelInfo?: () => { modelName: string; effort?: string },
     private readonly getPromptWidth: () => number = () => 2,
-  ) {}
+  ) { }
 
   update(line: string, cursorIndex?: number, cursorColumn?: number): void {
     if (!this.terminal.isTTY) return;
@@ -430,7 +430,7 @@ function getToolFailureDetail(result: Record<string, any>): string {
 
   const causeLine = outputLines.find((line) =>
     /\b(?:error|failed|failure|exception|fatal|not found|not recognized)\b/i.test(line)
-      && !/^build failed!?$/i.test(line),
+    && !/^build failed!?$/i.test(line),
   ) || outputLines.find((line) => /\b(?:error|failed|failure|exception|fatal|not found|not recognized)\b/i.test(line));
   if (causeLine) return causeLine;
   if (outputLines.length > 0) return outputLines[0];
@@ -1368,7 +1368,7 @@ export class CLI {
     const width = getTerminalWidth();
     console.log(`\n${createBoxHeader('🤖 AVAILABLE MODELS (SELECT MODEL)', c.geminiPurple, width)}`);
     console.log(`${c.geminiPurple}${c.bold}│${c.reset}`);
-    
+
     let lastProvider = '';
     for (const m of AVAILABLE_MODELS) {
       if (m.provider !== lastProvider) {
@@ -1714,8 +1714,8 @@ export class CLI {
       const outcomeColor = v.outcome === 'CONFIRMED_THESIS'
         ? c.emerald
         : v.outcome === 'REFINED_HYPOTHESIS'
-        ? c.brightYellow
-        : c.brightCyan;
+          ? c.brightYellow
+          : c.brightCyan;
 
       console.log(`     ${c.slate}├─ ${c.brightYellow}Thesis:${c.reset}     ${v.thesisClaim}`);
       console.log(`     ${c.slate}├─ ${c.brightCyan}Antithesis:${c.reset} ${v.antithesisRebuttal}`);
@@ -1728,8 +1728,8 @@ export class CLI {
       const recColor = r.recommendation === 'PROCEED'
         ? c.emerald
         : r.recommendation === 'TRY_ALTERNATIVE'
-        ? c.brightYellow
-        : c.crimson;
+          ? c.brightYellow
+          : c.crimson;
 
       console.log(`     ${c.slate}├─ ${c.brightBlue}MCTS Rollout:${c.reset} ${r.steps.length} lookahead rollout steps · Feasibility: ${c.bold}${scorePct}%${c.reset} ➔ ${recColor}${c.bold}${r.recommendation}${c.reset}`);
       for (const s of r.steps) {
@@ -2120,7 +2120,8 @@ export class CLI {
     console.log('');
   }
 
-  static renderReasoningInspection(data: { thought: string; timestamp?: string; step?: number; turn?: number }): void {    console.log(`\n${c.brightCyan}${c.bold}❯ REASONING TRACE${c.reset}`);
+  static renderReasoningInspection(data: { thought: string; timestamp?: string; step?: number; turn?: number }): void {
+    console.log(`\n${c.brightCyan}${c.bold}❯ REASONING TRACE${c.reset}`);
     console.log(data.thought || 'No trace recorded.');
     console.log('');
   }
@@ -2325,18 +2326,6 @@ export class CLI {
     for (const a of attachments) {
       console.log(`    • ${path.basename(a.path)} (${(a.sizeBytes / 1024).toFixed(1)} KB)`);
     }
-    if (related && related.length > 0) {
-      const hop1 = related.filter((r) => r.hop === 1).length;
-      const hop2 = related.filter((r) => r.hop === 2).length;
-      console.log(`    ${c.cyan}🔗 Extended 2-hop investigation scope: ${related.length} related files (hop-1: ${hop1}, hop-2: ${hop2})${c.reset}`);
-      for (const r of related.slice(0, 8)) {
-        console.log(`      • ${r.path} (hop-${r.hop} • ${r.reason}${r.via ? ` via ${r.via}` : ''})`);
-      }
-      if (related.length > 8) {
-        console.log(`      • ... (+${related.length - 8} other files)`);
-      }
-    }
-    console.log('');
   }
 
   static renderStepFooter(): void {
@@ -2560,19 +2549,19 @@ export class CLI {
       }).join('');
 
       return processed
-          .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
-          .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}$1${c.reset}`)
-          .replace(/^# (.*$)/gm, `\n${c.brightCyan}${c.bold}=== $1 ===${c.reset}`)
-          .replace(/\*\*([^*]+)\*\*/g, `${c.bold}$1${c.reset}`)
-          .replace(/(^|\s)\*([^* \n][^*\n]*[^* \n])\*(\s|$)/g, `$1${c.italic}$2${c.reset}$3`)
-          .replace(/`([^`\n]+)`/g, `${c.brightCyan}$1${c.reset}`)
-          .replace(/^(\s*)[-*]\s+/gm, `$1${c.emerald}•${c.reset} `)
-          .replace(/^(\s*)(\d+)\.\s+/gm, `$1${c.geminiAmber}$2.${c.reset} `)
-          .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.geminiBlue}ℹ NOTE:${c.reset} $1`)
-          .replace(/^>\s*\[!TIP\]\s*(.*$)/gm, `  ${c.geminiGreen}💡 TIP:${c.reset} $1`)
-          .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
-          .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
-          .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
+        .replace(/^### (.*$)/gm, `${c.brightCyan}${c.bold}❯ $1${c.reset}`)
+        .replace(/^## (.*$)/gm, `\n${c.geminiAmber}${c.bold}$1${c.reset}`)
+        .replace(/^# (.*$)/gm, `\n${c.brightCyan}${c.bold}=== $1 ===${c.reset}`)
+        .replace(/\*\*([^*]+)\*\*/g, `${c.bold}$1${c.reset}`)
+        .replace(/(^|\s)\*([^* \n][^*\n]*[^* \n])\*(\s|$)/g, `$1${c.italic}$2${c.reset}$3`)
+        .replace(/`([^`\n]+)`/g, `${c.brightCyan}$1${c.reset}`)
+        .replace(/^(\s*)[-*]\s+/gm, `$1${c.emerald}•${c.reset} `)
+        .replace(/^(\s*)(\d+)\.\s+/gm, `$1${c.geminiAmber}$2.${c.reset} `)
+        .replace(/^>\s*\[!NOTE\]\s*(.*$)/gm, `  ${c.geminiBlue}ℹ NOTE:${c.reset} $1`)
+        .replace(/^>\s*\[!TIP\]\s*(.*$)/gm, `  ${c.geminiGreen}💡 TIP:${c.reset} $1`)
+        .replace(/^>\s*\[!IMPORTANT\]\s*(.*$)/gm, `  ${c.geminiAmber}⚡ IMPORTANT:${c.reset} $1`)
+        .replace(/^>\s*\[!WARNING\]\s*(.*$)/gm, `  ${c.geminiRed}⚠️ WARNING:${c.reset} $1`)
+        .replace(/^>\s*\[!CAUTION\]\s*(.*$)/gm, `  ${c.crimson}🛑 CAUTION:${c.reset} $1`);
     };
     const lines = tableProcessed.split('\n');
     const output: string[] = [];

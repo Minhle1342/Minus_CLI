@@ -143,11 +143,12 @@ test('fresh verification supersedes a failed check and later mutation invalidate
 
 test('strict sandbox checks effects and containment before allowing read commands', () => {
   const policy = new SandboxPolicyEngine(process.cwd(), 'strict');
-  for (const command of ['echo text > file', 'git status && git branch new-name', 'git branch new-name', 'git diff --output=out.patch', 'find . -delete', 'rg --pre script query', 'env node script.js']) {
+  for (const command of ['echo text > file', 'git status && git branch new-name', 'git branch new-name', 'git diff --output=out.patch', 'find . -delete', 'find . -exec rm {} +', 'rg --pre script query', 'env node script.js']) {
     assert.equal(policy.evaluateCommand(command).allowed, false, command);
   }
   assert.equal(policy.evaluateCommand('git status -s').allowed, true);
   assert.equal(policy.evaluateCommand('git branch -a').allowed, true);
+  assert.equal(policy.evaluateCommand('find src -type f -exec wc -l {} + | sort -n').allowed, true);
   assert.equal(policy.evaluateCommand('git status -s', '..').allowed, false);
 });
 

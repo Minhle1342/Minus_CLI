@@ -209,6 +209,16 @@ export class ToolSynergyAdvisor {
         };
       }
       const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
+      const errFiles = Array.isArray(lastToolResult?.diagnostics)
+        ? [...new Set(lastToolResult.diagnostics.map((d: any) => d?.file).filter(Boolean))]
+        : [];
+      if (errFiles.length >= 2) {
+        return {
+          playbook: 'B_DEBUGGING',
+          guidance: `[BATCH CLEANUP] Diagnostics detected ${errCount} compiler/type error(s) across ${errFiles.length} files (${errFiles.slice(0, 5).join(', ')}). Fixing file-by-file wastes turns: call "run_node_script" once with targetFiles set to the error files, fixing root causes only (never weaken assertions or edit test expectations to match buggy behavior). Then re-run "get_diagnostics" to confirm zero errors before committing.`,
+          suggestedTools: ['run_node_script', 'get_diagnostics', 'read_file'],
+        };
+      }
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[5-STAGE ROOT CAUSE PROTOCOL] Diagnostics detected ${errCount} compiler/type error(s). Never monkey-patch crash sites or weaken assertions! Protocol: 1.[Extract Coordinates] -> 2.[Backward Causal Trace callers] -> 3.[Falsifiable Hypothesis] -> 4.[Surgical Fix] -> 5.[Verification]. Verify the anchor with "verify_edit" first, then use "replace_text" or "apply_patch" to resolve errors before submitting.`,

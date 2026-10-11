@@ -44,8 +44,30 @@ const SAFE_READ_ONLY_PREFIXES = [
   'ls', 'dir', 'tree', 'Get-ChildItem', 'gci',
   'grep', 'rg', 'ripgrep', 'findstr', 'Select-String', 'sls', 'find', 'fd',
   'wc', 'which', 'where', 'pwd', 'echo', 'printf', 'env', 'printenv', 'jq',
+  'sort', 'uniq', 'cut', 'tr', 'sed', 'awk',
   'git status', 'git log', 'git diff', 'git show', 'git branch',
 ];
+
+const SAFE_FIND_EXEC_COMMANDS = new Set([
+  'wc', 'cat', 'head', 'tail', 'file', 'stat', 'sha256sum', 'md5sum', 'grep', 'sort', 'uniq', 'cut'
+]);
+
+function isSafeFindCommand(args: string[]): boolean {
+  if (args.some(arg => /^-(?:delete|execdir|ok|okdir|fprint|fprint0|fprintf)$/.test(arg))) {
+    return false;
+  }
+  const execIdx = args.findIndex(arg => arg === '-exec');
+  if (execIdx === -1) {
+    return true;
+  }
+  const subCmd = args[execIdx + 1]?.toLowerCase();
+  if (!subCmd || !SAFE_FIND_EXEC_COMMANDS.has(subCmd)) {
+    return false;
+  }
+  // Check that the rest of exec args don't contain redirections or shell escape operators
+  const execArgs = args.slice(execIdx + 1);
+  return !execArgs.some(arg => /[><|;&`$]/.test(arg));
+}
 
 /**
  * SandboxPolicyEngine - Bộ Thực thi Quy tắc Bảo mật & Giới hạn Ranh giới Workspace (Codex Standard)
@@ -119,7 +141,13 @@ export class SandboxPolicyEngine {
     }
 
     const analysis = parseShellAst(trimmed);
-    const isReadOnly = !analysis.error && !analysis.complex && analysis.commands.length > 0
+    const hasOnlyPipes = analysis.operators.length === 0 || analysis.operators.every(op => op === '|');
+    const isObfuscationSafe = !analysis.hasObfuscation || (
+      analysis.obfuscationReasons.length === 1 &&
+      analysis.obfuscationReasons[0] === 'Dynamic shell eval/exec detected.' &&
+      analysis.commands.some(c => c.executable.toLowerCase() === 'find')
+    );
+    const isReadOnly = !analysis.error && !analysis.hasSubshell && hasOnlyPipes && isObfuscationSafe && analysis.commands.length > 0
       && analysis.commands.every((command) => {
         if (command.redirects.length || command.assignments.length) return false;
         const executable = command.executable.toLowerCase();
@@ -130,7 +158,9 @@ export class SandboxPolicyEngine {
           return classifyGitCommand(args[0], args.slice(1)).risk === 'read';
         }
         if (executable === 'env' || executable === 'printenv') return args.length === 0;
-        if (executable === 'find' && args.some(arg => /^-(?:delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf)$/.test(arg))) return false;
+        if (executable === 'find') {
+          return isSafeFindCommand(args);
+        }
         if (['rg', 'ripgrep'].includes(executable) && args.some(arg => /^--pre(?:=|$)/.test(arg))) return false;
         // Exclude script interpreters and executable lookup wrappers.
         return SAFE_READ_ONLY_PREFIXES.some(prefix => !prefix.includes(' ') && prefix.toLowerCase() === executable);
