@@ -108,9 +108,9 @@ export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. GOOGLE ANTIGRAVITY AUTONO
       * NEVER run polling or busy-waiting loops.
       * One-shot wait: call \`schedule(DurationSeconds=N, Prompt="...", TimerCondition="<task-id>" | "any")\` then STOP calling tools. The system wakes you when the task finishes or the timer expires.
       * Recurring monitoring: \`schedule(CronExpression="*/5 * * * *", Prompt="...", MaxIterations=N)\`.
-    - REAL-TIME WEB SEARCH & DOCUMENTATION RETRIEVAL (\`search_web\`, \`read_url_content\`):
-      * For unfamiliar libraries, breaking API changes, recent SDKs, or external errors, call \`search_web\` with targeted queries.
-      * Use \`read_url_content\` to fetch docs, READMEs, or API guides as clean Markdown without browser overhead.`;
+    - REAL-TIME WEB SEARCH & DOCUMENTATION RETRIEVAL (\`web_search\`, \`web_fetch\`):
+      * For unfamiliar libraries, breaking API changes, recent SDKs, or external errors, call \`web_search\` with targeted queries.
+      * Use \`web_fetch\` to fetch docs, READMEs, or API guides as clean Markdown without browser overhead.`;
 
 export const SECTION_CODEBASE_INTELLIGENCE_FULL = `13. DEEP CODEBASE ARCHITECTURE, CALL GRAPH & ROUTE INTELLIGENCE PROTOCOL (100% CODE COMPREHENSION):
     - SEMANTIC CODE GRAPH & FLOW TRAVERSAL (\`codegraph_explore\`, \`codegraph_search\`):

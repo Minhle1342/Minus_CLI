@@ -382,25 +382,15 @@ export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; for servers/watchers/background daemons, MUST set WaitMsBeforeAsync=5000 to launch automatically in background. When asked to run, start, or test a server, NEVER just output passive shell snippets; proactively call run_command with WaitMsBeforeAsync=5000.
    - manage_task: Manage background tasks (list, status, kill, send_input).
    - schedule: Event-driven delays via schedule(DurationSeconds=N, Prompt="...", TimerCondition="..."). Avoid polling.
-   - Web retrieval: Use search_web and read_url_content for third-party docs and APIs.`;
+   - Web retrieval: Use web_search and web_fetch for third-party docs and APIs (per the web-search decision policy).`;
 
 export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
-   - codegraph_explore: 1-call semantic traversal (source + call paths + blast radius) for "how does X work", architectural flow, or surveying code. Call first when repo has .codegraph/ index.
-   - codegraph_search: Fast FTS5 keyword & symbol search in CodeGraph index.
-   - codegraph_impact / analyze_impact: Analyze blast radius and affected callers/exports before modifying code.
-   - query_call_graph: Traverse callers/callees with depth 1-5 to trace symbol dependencies.
-   - get_route_map: Discover endpoints, handlers, and middleware across Express, Next.js, Fastify, Hono, NestJS.
-   - get_symbol_context_360: 360-degree panorama: AST definition, signatures, callers, callees, referencing files, and related tests.
-   - get_architecture_topology: Inspect layer boundaries and detect circular dependencies (A -> B -> C -> A).`;
+   - Follow the codegraph usage policy: codegraph_explore first for structural questions, then targeted hops.
+   - get_symbol_context_360 for a symbol panorama; codegraph_impact / analyze_impact before modifying code.
+   - Tool schemas carry exact parameters; phase guidance carries the per-step chain.`;
 
 export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
-   - Playbook A (Architecture & Exploration): codegraph_explore / get_architecture_topology -> get_symbol_context_360 -> read_file.
-   - Playbook B (Root Cause): get_diagnostics / inspect_symbol -> query_call_graph(callers) / codegraph_explore -> read_file.
-   - Playbook C (Mutation): get_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> test.
-   - Playbook D (Long Tasks): run_command(WaitMsBeforeAsync=5000) -> manage_task -> schedule.
-   - Playbook E (Subagents & Multi-Agent): brainstorm_design -> allocate_agent_task(checkAntiDuplication, fileScope) -> write_shared_context -> publish_agent_event -> wait_agent -> verify_subagent_quality.
-   - Playbook F (DAG Plan): codegraph_impact / analyze_impact -> create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.
-   - Playbook V (Verification & Workspace Diff Audit): get_diagnostics -> build/typecheck -> targeted test -> run_command("git diff --stat") & run_command("git diff") -> submit_solution.`;
+   - Per-step tool chains are injected dynamically below (architecture, root cause, mutation, long tasks, subagents, plans, verification). Follow the injected chain; tool schemas carry exact parameters.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {
