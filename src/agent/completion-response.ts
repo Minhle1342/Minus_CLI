@@ -13,6 +13,8 @@ export function buildCompletionRecoveryPrompt(options: {
   reason?: string;
   recovery?: CompletionRecovery;
   hasSubmittedSolution?: boolean;
+  /** Gate detail (e.g. the exact verification rejection) so the model can act on it. */
+  detail?: string;
 }): string {
   const recovery = options.hasSubmittedSolution ? 'revise-answer' : options.recovery || 'revise-answer';
   const instruction: Record<CompletionRecovery, string> = {
@@ -21,5 +23,6 @@ export function buildCompletionRecoveryPrompt(options: {
     'execute-task': 'Complete the user-authorized work that remains, or replace an inaccurate promise with the findings already established. Use tools only for work still needed; do not expand the task.',
     'verify-changes': 'Run verification appropriate to the actual changes. If verification is blocked, describe the observed failure and the remaining uncertainty honestly.',
   };
-  return `[SYSTEM COMPLETION RECOVERY: ${recovery}]: ${options.reason || 'Incomplete answer'}.\n${instruction[recovery]}`;
+  return `[SYSTEM COMPLETION RECOVERY: ${recovery}]: ${options.reason || 'Incomplete answer'}.\n${instruction[recovery]}`
+    + (options.detail ? `\n[BLOCKING DETAIL]: ${options.detail}` : '');
 }

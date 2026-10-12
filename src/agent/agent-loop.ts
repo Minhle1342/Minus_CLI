@@ -2226,7 +2226,7 @@ export class AgentLoop {
         completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
       } else if (completionVerificationSatisfied) {
         completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
-      } else if (isReadOnlyAnswerTask && !stepCompletionState.hasMutations && !hasSubmittedSolution) {
+      } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
         completionDirective = '[STRONG ADVISORY — READ-ONLY SUBMIT]: When the answer is ready, call submit_solution as the final tool with the actual user-facing answer in summary, resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless actual verification occurred. No code edit or test is required. report_investigation_findings and plain text do not replace submission. After successful submission, call no further tools; return the submitted answer in the user\'s language.';
       }
 
@@ -4880,7 +4880,7 @@ export class AgentLoop {
                   allow: false,
                   reason: 'unverified-evidence' as const,
                   recovery: 'verify-changes',
-                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification.`,
+                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification. A command the verification policy does not recognize (e.g. running a script you just created) does not satisfy this gate; read the DYNAMIC VERIFICATION requirement for the accepted tier.`,
                 }
                 : (!ocrDecision.allow)
                   ? {
@@ -4945,6 +4945,7 @@ export class AgentLoop {
             reason: finalAnswerDecision.reason,
             recovery: finalAnswerDecision.recovery,
             hasSubmittedSolution,
+            detail: verificationDecision.allowed ? undefined : verificationDecision.reason,
           });
 
           const fullContinuationPrompt = [
