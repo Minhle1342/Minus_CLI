@@ -121,6 +121,27 @@ test('viewportLines: renders complete markdown answer in viewport model', () => 
   assert.match(fullText, /🖼 Sơ đồ/);
 });
 
+test('viewportLines: formats thinking markdown like an answer', () => {
+  const model: ViewportModel = {
+    offset: 0,
+    thinking: '',
+    answerStream: '',
+    pinned: false,
+    collapsed: false,
+    entries: [{
+      kind: 'thought',
+      text: '# Bước 1\n\n- đọc `canComplete`\n- **kiểm tra** mutation\n\n> lưu ý: chỉ dẫn này',
+    }],
+  };
+  const fullText = viewportLines(model, 80).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(fullText, /Thinking › /);
+  assert.match(fullText, /Bước 1/);
+  assert.match(fullText, /▎ lưu ý: chỉ dẫn này/);
+  assert.doesNotMatch(fullText, /\*\*/, 'bold markers must be consumed by the markdown pipeline');
+  assert.doesNotMatch(fullText, /`/, 'inline-code backticks must be consumed');
+  assert.match(fullText, /- đọc/, 'list markers stay visible');
+});
+
 test('formatAnswer: folds setext H1 underline (===) into a heading', () => {
   const rendered = formatAnswer('Tiêu đề báo cáo\n===\nNội dung bên dưới');
   assert.match(rendered, /Tiêu đề báo cáo/);

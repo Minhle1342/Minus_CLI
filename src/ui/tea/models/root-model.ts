@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer } from './diff-model.js';
@@ -555,8 +555,14 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       if (msg.key === 'pageup' || msg.key === 'pagedown') {
         const mainWidth = Math.max(1, model.width - sidebarWidthFor(model.width, model.sidebar.visible, model.height));
         const maxOffset = Math.max(0, viewportLines(model.viewport, mainWidth).length - Math.max(1, model.height - 6));
+        // PgDn past the last answer jumps straight to it; inside an answer it
+        // still steps one page so long replies stay readable.
         const delta = (msg.key.endsWith('up') ? 1 : -1) * Math.max(1, model.height - 6);
-        const offset = Math.max(0, Math.min(maxOffset, model.viewport.offset + delta));
+        const stepped = Math.max(0, Math.min(maxOffset, model.viewport.offset + delta));
+        const target = msg.key === 'pagedown' && stepped < model.viewport.offset
+          ? lastAnswerOffset(model.viewport, mainWidth)
+          : undefined;
+        const offset = target === undefined ? stepped : Math.max(0, Math.min(maxOffset, target));
         return [{ ...model, viewport: { ...model.viewport, offset, pinned: offset === 0 } }, []];
       }
       if (msg.key === 'ctrl+space' && model.composer.completions.length) {

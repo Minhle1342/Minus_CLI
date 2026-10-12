@@ -232,11 +232,8 @@ function permissionLines(request: PermissionCard, width: number): string[] {
     edge('╰' + '─'.repeat(width - 2) + '╯')];
 }
 
-export function viewportLines(model: ViewportModel, width: number): string[] {
-  // TUI: divider Tokyo Night khép mỗi cặp tool đã xong (call + result).
-  // Vẽ ở tầng render nên live + history replay đều có, không tốn entry.
-  const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
-  const lines = model.entries.flatMap(entry => {
+/** Rendered lines contributed by one transcript entry (cached per width). */
+function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, pairDivider: string): string[] {
     let widths = cachedLines.get(entry);
     if (!widths) { widths = new Map(); cachedLines.set(entry, widths); }
     let rendered = widths.get(width);
@@ -244,7 +241,9 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
       const prefix = entry.kind === 'user' ? 'You › ' : entry.kind === 'answer' ? 'Minus › ' : entry.kind === 'thought' ? 'Thinking › ' : '';
       const prefixColor = entry.kind === 'user' ? tokyoNight.blue : entry.kind === 'answer' ? tokyoNight.purple : tokyoNight.muted;
       const textColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
-      const body = entry.kind === 'answer' ? formatAnswer(entry.text, width)
+      // Thinking is model prose: same markdown pipeline as the answer, the
+      // muted "Thinking › " prefix keeps it visually subordinate.
+      const body = entry.kind === 'answer' || entry.kind === 'thought' ? formatAnswer(entry.text, width)
         : entry.kind === 'tool' ? formatTool(entry.text)
         : color(textColor, stripTerminalControls(entry.text));
       rendered = entry.kind === 'permission' && entry.permission
@@ -254,7 +253,7 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
     }
     // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
     const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
-    if (model.collapsed && ['thought', 'tool', 'step'].includes(entry.kind)) {
+    if (collapsed && ['thought', 'tool', 'step'].includes(entry.kind)) {
       if (rendered.length <= 1) return isToolResult ? [...rendered, pairDivider] : rendered;
       const label = entry.kind === 'thought' ? 'Thinking' : entry.kind === 'tool' ? 'Tool' : 'Step';
       const labelColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : tokyoNight.yellow;
@@ -272,7 +271,30 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
       return isToolResult ? [...rendered, pairDivider] : rendered;
     }
     return isToolResult ? [...rendered, pairDivider] : [...rendered, ''];
-  });
+  }
+
+/**
+ * Lines rendered below the last `Minus ›` answer. Offsetting by this parks the
+ * answer at the bottom of the viewport; undefined when no answer exists.
+ * Caller clamps against its own maxOffset.
+ */
+export function lastAnswerOffset(model: ViewportModel, width: number): number | undefined {
+  let index = -1;
+  for (let i = model.entries.length - 1; i >= 0; i--) {
+    if (model.entries[i].kind === 'answer') { index = i; break; }
+  }
+  if (index < 0) return undefined;
+  const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
+  return model.entries.slice(index + 1)
+    .reduce((sum, entry) => sum + entryLines(entry, width, model.collapsed, pairDivider).length, 0)
+    + (model.thinking ? 1 : 0) + (model.answerStream ? 1 : 0);
+}
+
+export function viewportLines(model: ViewportModel, width: number): string[] {
+  // TUI: divider Tokyo Night khép mỗi cặp tool đã xong (call + result).
+  // Vẽ ở tầng render nên live + history replay đều có, không tốn entry.
+  const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
+  const lines = model.entries.flatMap(entry => entryLines(entry, width, model.collapsed, pairDivider));
   // TUI: thinking is ephemeral (archived into a thought entry on flush) — show
   // only the tail as one flattened line so the stream never floods the viewport.
   if (model.thinking) {

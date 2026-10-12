@@ -25,6 +25,28 @@ test('scroll pin holds the visible lines while new output arrives', () => {
   assert.deepEqual(viewportView(model.viewport, 80, 20), before);
 });
 
+test('PgDn past the last answer jumps to it instead of paging one screen', () => {
+  let model = createRootModel({ width: 80, height: 24 });
+  for (let i = 0; i < 40; i++) [model] = update({ type: 'log', text: 'row ' + i }, model);
+  [model] = update({ type: 'kernel', event: 'model:final_answer', args: ['FINAL-ANSWER-MARKER'] }, model);
+  for (let i = 0; i < 30; i++) [model] = update({ type: 'log', text: 'tail ' + i }, model);
+  [model] = update({ type: 'key', key: 'pageup', now: 1 }, model);
+  assert.ok(model.viewport.offset > 0, 'starts scrolled up');
+  let guard = 0;
+  while (model.viewport.offset > 0 && guard++ < 20) [model] = update({ type: 'key', key: 'pagedown', now: guard }, model);
+  const visible = viewportView(model.viewport, 80, 20).join('\n');
+  assert.match(visible, /FINAL-ANSWER-MARKER/, 'the latest answer must land in the viewport');
+});
+
+test('PgDn without any answer keeps plain paging', () => {
+  let model = createRootModel({ width: 80, height: 24 });
+  for (let i = 0; i < 40; i++) [model] = update({ type: 'log', text: 'row ' + i }, model);
+  [model] = update({ type: 'key', key: 'pageup', now: 1 }, model);
+  const before = model.viewport.offset;
+  [model] = update({ type: 'key', key: 'pagedown', now: 2 }, model);
+  assert.ok(model.viewport.offset < before, 'pages toward the bottom');
+});
+
 test('composer draws whole grapheme at cursor and no terminal control commands from payload', () => {
   let model = createRootModel();
   [model] = update({ type: 'compose', text: '👩‍💻中文' }, model);
