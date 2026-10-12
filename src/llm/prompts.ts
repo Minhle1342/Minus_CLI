@@ -93,7 +93,7 @@ export const SECTION_TERMINAL_SANDBOX_FULL = `6. TERMINAL-FIRST EXPLORATION & SA
     - FILE INSPECTION & ZERO-BLOAT POLICY: Always prefer \`read_file\` over terminal commands (\`cat\`, \`sed\`, \`head\`, \`tail\`). Use \`read_file(symbol='...')\` for 1-shot function/class extraction, or read 150-300 lines per window. DO NOT use \`run_command\` with sequential \`sed -n\` 50-line slices: it bloats steps, triggers permission prompts, and wastes context budget.
     - FILE DELETION & SAFE MUTATION: Always use \`delete_file\` (with reason and expectedFileHash) or \`move_file\`. NEVER run \`rm\`, \`del\`, \`rmdir\`, \`Remove-Item\` via \`run_command\`; \`rm\` is unavailable on Windows cmd.exe and triggers CRITICAL permission gates.
     - BUILD, TEST & PROACTIVE SERVER RUNTIME:
-      * Use \`run_command\` for testing (\`npm test\`, \`pytest\`), building (\`npm run build\`, \`tsc\`), and managing dependencies.
+      * Use \`run_command\` for testing (\`npm test\`, \`pytest\`, \`go test\`, \`cargo test\`, etc.), building (\`npm run build\`, \`tsc\`, \`go build\`, etc), and managing dependencies.
       * PROACTIVE LOCAL SERVER LAUNCH INVARIANT: When the user asks to run, start, test, or verify a dev server, web service, or daemon (e.g. \`npm run dev\`, \`npm start\`, \`vite\`, \`next dev\`, \`python app.py\`, \`uvicorn\`), NEVER just output text instructions or shell snippets. PROACTIVELY call \`run_command\` with \`WaitMsBeforeAsync=5000\` to launch it as a background task. Check startup logs, confirm the listening port/URL is active, and report status (TaskId, PID, Port).`;
 
 export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. GOOGLE ANTIGRAVITY AUTONOMOUS TOOLCHAIN COORDINATION PROTOCOL (100% ANTIGRAVITY SPECIFICATION):

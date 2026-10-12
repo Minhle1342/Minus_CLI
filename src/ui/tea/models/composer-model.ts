@@ -2,6 +2,11 @@
 import type { ComposerModel, KeyMsg, Msg } from '../types.js';
 import { color, displayWidth, fit, paintInput, tokyoNight, wrap } from '../styles/theme.js';
 export const INPUT_PLACEHOLDER = 'Work with Minus';
+/** SGR underline cho cursor cell + placeholder (không có trong theme helper). */
+const UNDERLINE = '\x1b[4m';
+/** Nen label pasted-block = tokyoNight.yellow (#e0af68). */
+const PASTED_BG = '\x1b[48;2;224;175;104m';
+const RESET = '\x1b[0m';
 export function createComposer(): ComposerModel {
   return { value: '', cursorOffset: 0, history: [], historyIndex: -1, draft: '', completions: [], selected: 0, completionDismissed: false };
 }
@@ -97,14 +102,17 @@ export function composerView(state: ComposerModel, width: number, height: number
   const length = getNextGraphemeLength(state.value.slice(state.cursorOffset));
   const cell = state.value.slice(state.cursorOffset, state.cursorOffset + length) || ' ';
   // P1: underline + cyan cursor cell — reverse-only blocks read as selection.
-  const pastedLabel = (text: string) => color(tokyoNight.text, text).replace(/\[Pasted ~\d+ lines\]/g,
-    label => '\x1b[48;2;224;175;104m' + color(tokyoNight.background, label) + '\x1b[0m' + '\x1b[38;2;192;202;245m');
+  const pastedLabel = (text: string) => text.split(/(\[Pasted ~\d+ lines\])/g).map((part) =>
+    /^\[Pasted ~\d+ lines\]$/.test(part)
+      ? PASTED_BG + color(tokyoNight.background, part) + RESET
+      : color(tokyoNight.text, part),
+  ).join('');
   const cursorText = pastedLabel(before)
-    + '[4m' + color(tokyoNight.cyan, cell)
+    + UNDERLINE + color(tokyoNight.cyan, cell)
     + pastedLabel(state.value.slice(state.cursorOffset + length));
   const placeholder = state.value === '';
   const inputText = placeholder
-    ? '\x1b[4m' + color(tokyoNight.cyan, INPUT_PLACEHOLDER.slice(0, 1)) + color(tokyoNight.muted, INPUT_PLACEHOLDER.slice(1))
+    ? UNDERLINE + color(tokyoNight.cyan, INPUT_PLACEHOLDER.slice(0, 1)) + color(tokyoNight.muted, INPUT_PLACEHOLDER.slice(1))
     : cursorText;
   const lines = wrap(color(tokyoNight.blue, '› ') + inputText, width);
   const cursorRow = wrap('› ' + before, width).length - 1;

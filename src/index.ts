@@ -828,6 +828,62 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       finally { clearTimeout(timer); }
     })();
   };
+  const performHotModelSwitch = async (inputModel?: string): Promise<void> => {
+    try {
+      let targetModel = (inputModel || '').trim();
+      if (targetModel) {
+        const directMatch = AVAILABLE_MODELS.find((m) => m.id === targetModel);
+        if (directMatch) {
+          targetModel = directMatch.name;
+        }
+      }
+      if (!targetModel) {
+        const currentName = agentLoop.getSessionModelName(activeSession.id) ?? modelName;
+        if (tui) {
+          const picked = await tui.modelPickerChoose(
+            AVAILABLE_MODELS.map((m) => ({ id: m.id, name: m.name, desc: m.desc, provider: m.provider, recommended: m.recommended, current: m.name === currentName })),
+            activeSession.id,
+          );
+          if (!picked) {
+            tui.program.send({ type: 'notice', text: 'Đã hủy đổi model.' });
+            return;
+          }
+          targetModel = picked.name;
+        } else {
+          return;
+        }
+      }
+
+      const currentTokens = agentLoop.getTokenConfig();
+      const showAuthStatus = (text: string) => {
+        if (tui) tui.program.send({ type: 'log', text });
+        else console.log(text);
+      };
+      const newLLM = await runWithCancellation(signal => createLLM(targetModel, currentTokens, {
+        interactive: true,
+        signal,
+        onStatus: showAuthStatus,
+        onLoginRequired: () => showAuthStatus(`\n${c.cyan}Opening ChatGPT sign-in in your browser. Choose Continue with Google if you use Google for your ChatGPT account. Complete login to activate ${targetModel}. Press Esc / Ctrl+C to cancel.${c.reset}`),
+      }));
+      if (!newLLM) return;
+      llm = newLLM;
+      agentLoop.queueModelSwitch(newLLM, targetModel, activeSession.id);
+      modelName = targetModel;
+      saveSession({ modelName }, workspace.rootDir);
+      saveSession({ modelName });
+      const msg = `🔄 Model switch queued: Sẽ áp dụng ${targetModel} từ bước tiếp theo.`;
+      if (tui) {
+        tui.program.send({ type: 'notice', text: msg });
+        tui.program.send({ type: 'log', text: msg });
+      } else {
+        console.log(`\n${c.green}✔ ${msg}${c.reset}\n`);
+      }
+    } catch (err) {
+      const errorMsg = `❌ Không thể đổi model: ${(err as Error).message}`;
+      if (tui) tui.program.send({ type: 'notice', text: errorMsg });
+      else console.error(errorMsg);
+    }
+  };
   tui = startInteractiveTui(kernel, {
     metadata: { sessions: await sessionPersistence.list(), workspace: workspace.rootDir, model: modelName, defaultModel: modelName, session: activeSession.id, maxTokens: agentLoop.getTokenConfig()?.maxInputTokens || 128000 },
     commands: [
@@ -852,6 +908,9 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     onAbort: () => { activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
     onQuit: () => { isShuttingDown = true; activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
     onMode: mode => { applyPlanMode(mode === 'PLAN'); },
+    onHotModelSwitch: async (newModelName) => {
+      await performHotModelSwitch(newModelName);
+    },
   });
   const rl = tui;
   tui.on('line', (line: string) => {
@@ -859,6 +918,11 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     const trimmed = line.trim(); if (!trimmed) return;
     if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
       activeExecutionController.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
+    }
+    if (trimmed === '/model' || trimmed === '/modal' || trimmed.startsWith('/model ') || trimmed.startsWith('/modal ')) {
+      const target = trimmed.replace(/^\/(?:model|modal)\s*/, '').trim();
+      void performHotModelSwitch(target);
+      return;
     }
     const item = agentLoop.inbox.enqueue(
       activeSession.id,
@@ -2230,7 +2294,21 @@ Please focus on executing and verifying this task, and update its status to COMP
           agentLoop.bindSession(activeSession);
           saveSession({ activeSessionId: activeSession.id, workspacePath: workspace.rootDir }, workspace.rootDir);
           saveSession({ activeSessionId: activeSession.id, workspacePath: workspace.rootDir });
-          CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
+          if (tui) {
+            const namedSessions = await new SessionNames(sessionPersistence).list();
+            const sessionIds = Array.from(new Set([activeSession.id, ...namedSessions.map((s) => s.id)]));
+            tui.switchWorkspace({
+              workspace: workspace.rootDir,
+              activeSessionId: activeSession.id,
+              sessionIds,
+              titles: namedSessions.map((s) => s.name),
+              entries: sessionHistoryToTranscript(activeSession.getHistory()),
+              model: agentLoop.getSessionModelName(activeSession.id) ?? modelName,
+              defaultModel: modelName,
+            });
+          } else {
+            CLI.renderWorkspaceChanged(oldPath, workspace.rootDir);
+          }
         } catch (err: any) {
           console.error(`\n${c.red}✖ Error switching workspace:${c.reset}`, err.message);
         }

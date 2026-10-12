@@ -242,6 +242,9 @@ export class AgentLoop {
   private sessionModels = new Map<string, { llm: any; modelName: string }>();
   /** Shared LLM instances by model name (tabs on the same model reuse one client). */
   private modelInstances = new Map<string, any>();
+  /** Pending hot model switches queued during task execution (sessionId -> { llm, modelName }). */
+  private pendingModelSwitches = new Map<string, { llm: any; modelName: string }>();
+  private pendingGlobalLLM: { llm: any; modelName: string } | null = null;
   private toolRegistry: ToolRegistry;
   private toolProvider: ToolProvider;
   private toolRunner: ToolRunner;
@@ -658,6 +661,26 @@ export class AgentLoop {
     return this.sessionModels.get(sessionId)?.modelName;
   }
 
+  /**
+   * Queue a model switch to be applied at the next execution step / turn.
+   * Prevents breaking in-flight HTTP streams while honoring hot swap.
+   */
+  queueModelSwitch(newLLM: any, modelName?: string, sessionId?: string): void {
+    const targetName = (modelName || '').trim() || newLLM?.modelName || 'custom';
+    if (sessionId) {
+      this.pendingModelSwitches.set(sessionId, { llm: newLLM, modelName: targetName });
+    } else {
+      this.pendingGlobalLLM = { llm: newLLM, modelName: targetName };
+    }
+  }
+
+  getPendingModelSwitch(sessionId?: string): { llm: any; modelName: string } | undefined {
+    if (sessionId && this.pendingModelSwitches.has(sessionId)) {
+      return this.pendingModelSwitches.get(sessionId);
+    }
+    return this.pendingGlobalLLM || undefined;
+  }
+
   /** Effective model name: explicit per-tab override → persisted model/change → loop default. */
   getEffectiveModelName(session: Session): string | undefined {
     return this.sessionModels.get(session.id)?.modelName
@@ -1036,7 +1059,14 @@ export class AgentLoop {
     // Per-tab model scoping: parallel session tabs may each run a different
     // LLM. Resolve once per run — never mutate the shared this.llm mid-run.
     await this.ensureSessionLLM(session);
-    const llm = this.llmFor(session);
+    const initialPending = this.pendingModelSwitches.get(session.id) || this.pendingGlobalLLM;
+    if (initialPending) {
+      this.pendingModelSwitches.delete(session.id);
+      if (this.pendingGlobalLLM === initialPending) this.pendingGlobalLLM = null;
+      await this.setSessionLLM(session, initialPending.llm, initialPending.modelName);
+      this.setLLM(initialPending.llm, initialPending.modelName);
+    }
+    let llm = this.llmFor(session);
     const turnUserEvent = [...session.getEvents()].reverse().find(
       (event) => event.type === 'user/message' && event.data.source !== 'system',
     );
@@ -1324,6 +1354,18 @@ export class AgentLoop {
           this.inbox.clear(session.id, cancellationMessage);
         }
         return cancellationMessage;
+      }
+
+      // Next-Step Hot Swap: Check if user switched model while loop/tool was executing
+      const stepPending = this.pendingModelSwitches.get(session.id) || this.pendingGlobalLLM;
+      if (stepPending) {
+        this.pendingModelSwitches.delete(session.id);
+        if (this.pendingGlobalLLM === stepPending) {
+          this.pendingGlobalLLM = null;
+        }
+        await this.setSessionLLM(session, stepPending.llm, stepPending.modelName);
+        this.setLLM(stepPending.llm, stepPending.modelName);
+        llm = stepPending.llm;
       }
 
       // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
@@ -4436,11 +4478,11 @@ export class AgentLoop {
             }
           }
           // Tool-level circuit breaker: track external tools that failed due to rate limits or quota exhaustion
-          const execError = String(executionResult.result?.error || executionResult.result?.message || executionResult.result?.stderr || '');
-          const isToolRateLimited = executionResult.result?.errorCode === 'RATE_LIMIT_EXCEEDED'
-            || executionResult.result?.errorCode === 'QUOTA_EXCEEDED'
-            || executionResult.result?.errorCode === 'RESOURCE_EXHAUSTED'
-            || /\b(?:429\s+Too\s+Many\s+Requests|rate\s*limit|quota\s*exceeded|resource_exhausted)\b/i.test(execError);
+          const toolRes = executionResult.result;
+          const isToolRateLimited = toolRes?.errorCode === 'RATE_LIMIT_EXCEEDED'
+            || toolRes?.errorCode === 'QUOTA_EXCEEDED'
+            || toolRes?.errorCode === 'RESOURCE_EXHAUSTED'
+            || /\b(?:429|rate\s*limit|quota\s*exceeded|resource_exhausted)\b/i.test(String(toolRes?.error || toolRes?.message || toolRes?.stderr || ''));
           if (isToolRateLimited) {
             this.circuitBreakerTrippedTools.add(toolName);
           }
@@ -5029,6 +5071,14 @@ export class AgentLoop {
       // the break in drainInbox); otherwise clear so no promise hangs forever.
       if (options?.signal?.aborted && (!this.drainingInbox || this.drainingSessionId !== session.id)) {
         this.inbox.clear(session.id, 'Agent execution cancelled.');
+      }
+      // Ensure any pending model switch queued during this turn is applied even if the turn concluded
+      const leftoverPending = this.pendingModelSwitches.get(session.id) || this.pendingGlobalLLM;
+      if (leftoverPending) {
+        this.pendingModelSwitches.delete(session.id);
+        if (this.pendingGlobalLLM === leftoverPending) this.pendingGlobalLLM = null;
+        await this.setSessionLLM(session, leftoverPending.llm, leftoverPending.modelName).catch(() => {});
+        this.setLLM(leftoverPending.llm, leftoverPending.modelName);
       }
     }
   }

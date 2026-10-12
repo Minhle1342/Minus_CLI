@@ -18,14 +18,26 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'sessions'; open?: boolean; tabs?: SessionTab[]; activeId?: string }
   | { type: 'sessions-adopt'; activeId: string }
   | { type: 'session-transcript'; sessionId: string; entries: TranscriptEntry[] }
+  | { type: 'workspace-switch'; workspace: string; activeSessionId: string; sessionIds?: string[]; titles?: string[]; entries?: TranscriptEntry[]; model?: string; defaultModel?: string }
   | { type: 'compose'; text: string }
   | { type: 'completions'; values: Completion[] }
   | { type: 'diff'; text: string; reveal?: boolean }
   | { type: 'metadata'; data: Partial<SidebarModel> }
   | { type: 'compaction'; status: CompactionStatus | null };
 
+export interface SwitchWorkspaceOptions {
+  workspace: string;
+  activeSessionId: string;
+  sessionIds?: string[];
+  titles?: string[];
+  entries?: TranscriptEntry[];
+  model?: string;
+  defaultModel?: string;
+}
+
 /** Effect descriptions are interpreted by Program, never executed by reducers. */
 export type Cmd = { type: 'submit' | 'answer'; text: string }
+  | { type: 'hot-model-switch'; model: string }
   | { type: 'grill-pick'; text: string }
   | { type: 'grill-cancel' }
   | { type: 'model-pick'; id: string; name: string }

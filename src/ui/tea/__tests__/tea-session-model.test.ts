@@ -167,3 +167,50 @@ test('session-transcript hydrate restores the tab model display', () => {
   [m] = update({ type: 'session-transcript', sessionId: 'b', entries: [{ kind: 'log', text: 'old' }] }, m);
   assert.equal(m.sidebar.model, 'groq', 'hydrate keeps owner tab model');
 });
+
+test('workspace-switch replaces all tabs from old workspace and activates new workspace session', () => {
+  let m = twoTabs();
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.deepEqual(m.sessions.tabs.map((t) => t.id), ['a', 'b']);
+
+  [m] = update({
+    type: 'workspace-switch',
+    workspace: '/home/user/project-beta',
+    activeSessionId: 'sess-beta-1',
+    sessionIds: ['sess-beta-1', 'sess-beta-2'],
+    titles: ['Task 1', 'Task 2'],
+    entries: [{ kind: 'log', text: 'Restored beta history' }],
+    model: 'claude-3-5',
+    defaultModel: 'gemini',
+  }, m);
+
+  // Tabs của workspace cũ phải bị xóa sạch, chỉ còn sessions của workspace mới
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.deepEqual(m.sessions.tabs.map((t) => t.id), ['sess-beta-1', 'sess-beta-2']);
+  assert.equal(m.sessions.activeId, 'sess-beta-1');
+  assert.equal(m.sidebar.workspace, '/home/user/project-beta');
+  assert.equal(m.viewport.entries.length, 1);
+  assert.equal(m.viewport.entries[0].text, 'Restored beta history');
+  assert.equal(m.sidebar.model, 'claude-3-5');
+  assert.ok(m.status.notice?.includes('project-beta'));
+});
+
+test('workspace-switch to empty workspace initializes single active tab with no leak', () => {
+  let m = twoTabs();
+  [m] = update({
+    type: 'workspace-switch',
+    workspace: '/home/user/brand-new-ws',
+    activeSessionId: 'sess-new-1',
+    sessionIds: [],
+    entries: [],
+  }, m);
+
+  // Workspace mới tinh chưa có session nào lưu: chỉ có 1 tab active duy nhất, không leak tabs cũ
+  assert.equal(m.sessions.tabs.length, 1);
+  assert.equal(m.sessions.tabs[0].id, 'sess-new-1');
+  assert.equal(m.sessions.activeId, 'sess-new-1');
+  assert.equal(m.sidebar.workspace, '/home/user/brand-new-ws');
+  assert.equal(m.viewport.entries.length, 0);
+  assert.equal(m.viewport.thinking, '');
+  assert.equal(m.viewport.answerStream, '');
+});

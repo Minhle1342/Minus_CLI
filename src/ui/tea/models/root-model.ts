@@ -1,6 +1,7 @@
-import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry } from '../types.js';
+import path from 'node:path';
+import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer } from './diff-model.js';
@@ -168,6 +169,75 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
     case 'sessions-adopt': {
       // Outer (slash) đã switch kernel: swap viewport theo, không phát Cmd.
       return [adoptActiveTab(model, msg.activeId), []];
+    }
+    case 'workspace-switch': {
+      const ids = Array.from(new Set([
+        msg.activeSessionId,
+        ...(msg.sessionIds || []),
+      ])).filter(Boolean);
+
+      const titleMap = new Map<string, string>();
+      if (msg.sessionIds && msg.titles) {
+        msg.sessionIds.forEach((id, i) => {
+          if (msg.titles?.[i]) titleMap.set(id, msg.titles[i]);
+        });
+      }
+
+      const tabs: SessionTab[] = ids.map((id) => {
+        const rawTitle = titleMap.get(id);
+        return {
+          id,
+          title: rawTitle ? shortTabTitle(rawTitle) : shortTabTitle(id),
+          historyKnown: id === msg.activeSessionId ? Boolean(msg.entries) : false,
+          lastActive: id === msg.activeSessionId ? Date.now() : 0,
+          entries: id === msg.activeSessionId ? (msg.entries || []) : undefined,
+        };
+      });
+
+      const activeTab = tabs.find((t) => t.id === msg.activeSessionId) || tabs[0];
+      const activeId = activeTab ? activeTab.id : msg.activeSessionId;
+      const displayModel = msg.model ?? msg.defaultModel ?? model.sidebar.model;
+
+      const sessions: SessionTabsModel = {
+        open: false,
+        selected: Math.max(0, tabs.findIndex((t) => t.id === activeId)),
+        tabs,
+        activeId,
+        pendingActiveId: undefined,
+        defaultModel: msg.defaultModel ?? model.sessions.defaultModel,
+      };
+
+      const baseName = path.basename(msg.workspace) || msg.workspace;
+      const next: RootModel = {
+        ...model,
+        focus: 'composer',
+        sessions,
+        viewport: {
+          ...model.viewport,
+          entries: msg.entries || [],
+          thinking: '',
+          answerStream: '',
+          offset: 0,
+          pinned: true,
+        },
+        composer: createComposer(),
+        diff: createDiffViewer(),
+        sidebar: {
+          ...model.sidebar,
+          workspace: msg.workspace,
+          session: activeTab?.title || shortTabTitle(activeId),
+          sessions: ids,
+          model: displayModel,
+          tools: [],
+          tokens: 0,
+        },
+        status: {
+          ...model.status,
+          notice: `Đã chuyển workspace sang ${baseName}`,
+        },
+      };
+
+      return [next, []];
     }
     case 'compaction': {
       const isFinished = Boolean(msg.status && msg.status.state !== 'running');
@@ -435,7 +505,16 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           if (!items.length) return [model, []];
           const item = items[Math.min(model.palette.selected, items.length - 1)];
           const next = { ...model, focus: 'composer' as const, palette: { ...model.palette, open: false } };
-          return item.action ? action(next, item.action) : [next, [{ type: 'submit', text: item.id }]];
+          if (item.action) return action(next, item.action);
+          const text = item.id;
+          if (next.status.busy && (text === '/model' || text === '/modal' || text.startsWith('/model ') || text.startsWith('/modal '))) {
+            const targetModel = text.replace(/^\/(?:model|modal)\s*/, '').trim();
+            return [
+              { ...next, status: { ...next.status, notice: targetModel ? `Đang lên lịch đổi sang model ${targetModel}…` : 'Đang mở danh sách model…' } },
+              [{ type: 'hot-model-switch', model: targetModel }]
+            ];
+          }
+          return [next, [{ type: 'submit', text: item.id }]];
         }
         // P1: selection wraps around the list edges.
         if (msg.key === 'up' || msg.key === 'down') {
@@ -499,6 +578,13 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const text = session?.kind === 'session' ? session.value.trim() : model.composer.value.trim();
         if (!text) return [model, []];
         const composer = { ...createComposer(), history: [...model.composer.history.slice(-199), text] };
+        if (model.status.busy && (text === '/model' || text === '/modal' || text.startsWith('/model ') || text.startsWith('/modal '))) {
+          const targetModel = text.replace(/^\/(?:model|modal)\s*/, '').trim();
+          return [
+            { ...model, composer, status: { ...model.status, notice: targetModel ? `Đang lên lịch đổi sang model ${targetModel}…` : 'Đang mở danh sách model…' } },
+            [{ type: 'hot-model-switch', model: targetModel }]
+          ];
+        }
         return [{ ...model, composer, viewport: { ...appendEntry(model.viewport, { kind: 'user', text }), offset: 0, pinned: true } }, [{ type: 'submit', text }]];
       }
       const composer = updateComposer(model.composer, msg);

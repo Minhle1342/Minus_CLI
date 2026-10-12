@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRootModel, update } from '../models/root-model.js';
 import { updateComposer, createComposer } from '../models/composer-model.js';
+import { statuslineView } from '../models/statusline-model.js';
+import { stripTerminalControls } from '../styles/theme.js';
 import { KernelTEAAdapter, KERNEL_EVENT_NAMES } from '../kernel-bridge.js';
 import { KernelEventBus } from '../../../kernel/kernel.js';
 import type { Msg } from '../types.js';
@@ -115,4 +117,54 @@ test('compaction notice displays on statusline and auto-hides after 3s', () => {
   assert.equal(model.status.compaction?.state, 'running');
   assert.equal(model.status.compactionUntil, undefined);
 });
+
+test('/model and /modal trigger hot-model-switch Cmd during busy state without polluting transcript', () => {
+  let model = createRootModel();
+  [model] = update({ type: 'busy', busy: true }, model);
+  assert.equal(model.status.busy, true);
+
+  // 1. Gõ /model claude-3-5-sonnet khi đang busy
+  [model] = update({ type: 'compose', text: '/model claude-3-5-sonnet' }, model);
+  const [modelAfterSubmit, effects] = update(key('enter'), model);
+
+  // Effects phát hot-model-switch với model target
+  assert.deepEqual(effects, [{ type: 'hot-model-switch', model: 'claude-3-5-sonnet' }]);
+  // Ô nhập được reset
+  assert.equal(modelAfterSubmit.composer.value, '');
+  // Viewport entries không bị thêm /model như user message
+  assert.equal(modelAfterSubmit.viewport.entries.length, 0);
+
+  // 2. Gõ /model không kèm tên khi đang busy
+  [model] = update({ type: 'compose', text: '/model' }, modelAfterSubmit);
+  const [, effectsNoArgs] = update(key('enter'), model);
+  assert.deepEqual(effectsNoArgs, [{ type: 'hot-model-switch', model: '' }]);
+
+  // 3. Gõ /modal có tên khi đang busy
+  [model] = update({ type: 'compose', text: '/modal gpt-4o' }, modelAfterSubmit);
+  const [, effectsModal] = update(key('enter'), model);
+  assert.deepEqual(effectsModal, [{ type: 'hot-model-switch', model: 'gpt-4o' }]);
+
+  // 4. Khi KHÔNG busy (idle), /model vẫn submit bình thường
+  let idleModel = createRootModel();
+  [idleModel] = update({ type: 'compose', text: '/model claude-3-5-sonnet' }, idleModel);
+  const [idleAfter, idleEffects] = update(key('enter'), idleModel);
+  assert.deepEqual(idleEffects, [{ type: 'submit', text: '/model claude-3-5-sonnet' }]);
+  assert.equal(idleAfter.viewport.entries.length, 1);
+});
+
+test('statusline surfaces tool + step + retry statuses besides phase', () => {
+  let model = createRootModel({ width: 120, height: 24 });
+  [model] = update({ type: 'busy', busy: true }, model);
+  [model] = update({ type: 'kernel', event: 'tool:before', args: ['run_command', {}] }, model);
+  [model] = update({ type: 'kernel', event: 'step:before', args: [3, 10] }, model);
+  [model] = update({ type: 'kernel', event: 'model:retry', args: [{ attempt: 1, maxRetries: 3, delayMs: 1000 }] }, model);
+  const text = stripTerminalControls(statuslineView(model));
+  assert.ok(text.includes('run_command'), text);
+  assert.ok(text.includes('Step 3/10'), text);
+  assert.ok(text.includes('Retry 1/3'), text);
+  const ansi = statuslineView(model);
+  assert.ok(ansi.includes('158;206;106'), 'tool segment green');
+  assert.ok(ansi.includes('224;175;104'), 'retry segment yellow');
+});
+
 

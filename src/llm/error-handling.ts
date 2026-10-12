@@ -216,6 +216,15 @@ export async function retryWithExponentialBackoff<T>(
   const waitForBackoff = async (ms: number): Promise<void> => {
     if (!options.signal) return sleep(ms);
     if (options.signal.aborted) throw abortError();
+    if (!options.sleepFn) {
+      try {
+        await delay(ms, undefined, { signal: options.signal });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw abortError();
+        throw err;
+      }
+      return;
+    }
     let onAbort: () => void = () => {};
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(abortError());

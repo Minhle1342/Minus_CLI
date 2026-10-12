@@ -1,4 +1,4 @@
-﻿import { EventEmitter } from 'node:events';
+import { EventEmitter } from 'node:events';
 import type { KernelEventBus } from '../../kernel/kernel.js';
 import { copyToClipboard } from './clipboard.js';
 import { compactionStatus } from '../compaction-status.js';
@@ -7,15 +7,17 @@ import { createRootModel } from './models/root-model.js';
 import { KernelTEAAdapter } from './kernel-bridge.js';
 import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
-import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
+import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard, SwitchWorkspaceOptions } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
 export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
+export type { SwitchWorkspaceOptions };
 export interface TeaKernel { ctx: { events: KernelEventBus }; cancelCurrentTask?(): void }
 export interface InteractiveOptions {
   input?: TerminalInput; output?: TerminalOutput; captureOutput?: boolean; mouse?: boolean;
   commands?: PaletteItem[]; metadata?: Partial<SidebarModel>; transcript?: TranscriptEntry[];
   onAbort?(): void; onQuit?(): void; onCompact?(): Promise<void>;
   onMode?(mode: Mode): void; complete?(value: string, cursor: number): Completion[] | Promise<Completion[]>;
+  onHotModelSwitch?(newModelName: string): Promise<void> | void;
 }
 
 /** Async input port for command handlers; terminal ownership stays in Program. */
@@ -93,6 +95,14 @@ export class TeaTerminal extends EventEmitter {
     if (this.closed) return;
     this.program.send({ type: 'sessions-adopt', activeId: sessionId });
   }
+  /**
+   * Chuyển workspace: dọn sạch session tabs của workspace cũ, nạp danh sách
+   * session mới, set activeId, khôi phục transcript mới và reset buffer/composer.
+   */
+  switchWorkspace(options: SwitchWorkspaceOptions): void {
+    if (this.closed) return;
+    this.program.send({ type: 'workspace-switch', ...options });
+  }
   dismissSessions(): void {
     if (this.closed) return;
     this.program.send({ type: 'sessions', open: false });
@@ -140,6 +150,14 @@ export class TeaTerminal extends EventEmitter {
     switch (cmd.type) {
       case 'copy': await copyToClipboard(cmd.text); this.program.send({ type: 'notice', text: 'Copied selection to clipboard' }); break;
       case 'submit': this.submit(cmd.text); break;
+      case 'hot-model-switch': {
+        if (this.options.onHotModelSwitch) {
+          await this.options.onHotModelSwitch(cmd.model);
+        } else {
+          this.emit('hot-model-switch', cmd.model);
+        }
+        break;
+      }
       case 'answer': this.answer(cmd.text === '\x03' ? undefined : cmd.text); break;
       case 'grill-pick': this.resolveGrill(cmd.text); break;
       case 'grill-cancel': this.resolveGrill(undefined); break;

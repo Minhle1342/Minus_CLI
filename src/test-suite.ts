@@ -4173,6 +4173,14 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
   testKernel.ctx.setLLM({ name: 'mock' }, 'gemini-3.5-flash');
   assert(modelChangedFired === 'gemini-3.5-flash', 'Micro-Kernel phát đúng event model:changed khi setLLM');
 
+  // 8. Kiểm tra AgentLoop queueModelSwitch (Next-Step Hot Swap)
+  const hotSwapLoop = new AgentLoop(testKernel.ctx.llm, testKernel.ctx.tools, { workspace });
+  const mockNewLLM = { modelName: 'claude-3-5-sonnet' };
+  hotSwapLoop.queueModelSwitch(mockNewLLM, 'claude-3-5-sonnet', 'session-123');
+  const pending = hotSwapLoop.getPendingModelSwitch('session-123');
+  assert(pending?.modelName === 'claude-3-5-sonnet', 'AgentLoop queueModelSwitch lưu đúng pendingModelSwitch theo session');
+  assert(pending?.llm === mockNewLLM, 'AgentLoop queueModelSwitch lưu đúng LLM instance');
+
   console.log('\n========================================');
   console.log('🧪 21. KIỂM THỬ TOKEN OPTIMIZATION (REPOMIX, MINISEARCH & KV-CACHE ALIGNMENT)');
   console.log('========================================');

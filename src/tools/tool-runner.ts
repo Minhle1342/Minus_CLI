@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ToolProvider } from './registry.js';
 import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
@@ -185,22 +186,13 @@ export interface ToolExecutionGuard {
   ): Promise<{ allow: boolean; reason?: string; errorCode?: string }>;
 }
 
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(new Error('ABORTED'));
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('ABORTED');
+  try {
+    await delay(ms, undefined, { signal });
+  } catch {
+    throw new Error('ABORTED');
   }
-  return new Promise((resolve, reject) => {
-    let timer: any;
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new Error('ABORTED'));
-    };
-    timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 const TOOL_CANONICAL_ALIASES: Record<string, string> = {
