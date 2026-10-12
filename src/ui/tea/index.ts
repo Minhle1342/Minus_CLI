@@ -7,7 +7,7 @@ import { createRootModel } from './models/root-model.js';
 import { KernelTEAAdapter } from './kernel-bridge.js';
 import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
-import type { Cmd, Completion, GrillOption, Mode, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
+import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
 export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
 export interface TeaKernel { ctx: { events: KernelEventBus }; cancelCurrentTask?(): void }
@@ -25,6 +25,7 @@ export class TeaTerminal extends EventEmitter {
   private pending?: (text: string) => void;
   private questionResolver?: (text: string | undefined) => void;
   private grillResolver?: (text: string | undefined) => void;
+  private modelPickerResolver?: (value: { id: string; name: string } | undefined) => void;
   private queued: string[] = [];
   private restoreOutput?: () => void;
   constructor(private readonly kernel: TeaKernel, private readonly options: InteractiveOptions) {
@@ -107,6 +108,21 @@ export class TeaTerminal extends EventEmitter {
     return new Promise((resolve) => { this.grillResolver = resolve; });
   }
   dismissGrill(): void { this.resolveGrill(undefined); }
+  /** Mở model-picker modal đè lên viewport; resolve với {id, name} được chọn hoặc undefined khi hủy. */
+  modelPickerChoose(options: ModelPickerOption[] = [], sessionId?: string): Promise<{ id: string; name: string } | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
+    if (this.modelPickerResolver) throw new Error('A model picker modal is already active');
+    this.program.send({ type: 'model-picker', open: true, options, sessionId });
+    return new Promise((resolve) => { this.modelPickerResolver = resolve; });
+  }
+  dismissModelPicker(): void { this.resolveModelPicker(undefined); }
+  private resolveModelPicker(value: { id: string; name: string } | undefined): void {
+    const resolve = this.modelPickerResolver; this.modelPickerResolver = undefined;
+    if (resolve) {
+      this.program.send({ type: 'model-picker', open: false });
+      resolve(value);
+    }
+  }
   private resolveGrill(value: string | undefined): void {
     const resolve = this.grillResolver; this.grillResolver = undefined;
     if (resolve) {
@@ -127,6 +143,8 @@ export class TeaTerminal extends EventEmitter {
       case 'answer': this.answer(cmd.text === '\x03' ? undefined : cmd.text); break;
       case 'grill-pick': this.resolveGrill(cmd.text); break;
       case 'grill-cancel': this.resolveGrill(undefined); break;
+      case 'model-pick': this.resolveModelPicker({ id: cmd.id, name: cmd.name }); break;
+      case 'model-cancel': this.resolveModelPicker(undefined); break;
       case 'session-switch': this.submit(`/sessions open ${cmd.sessionId}`); break;
       // Đồng bộ với /new-session: kernel tạo đúng id optimistic + episodic epilogue.
       case 'session-new': this.submit(cmd.sessionId ? `/new-session ${cmd.sessionId}` : '/new-session'); break;
@@ -154,7 +172,7 @@ export class TeaTerminal extends EventEmitter {
   }
   close(): void {
     if (this.closed) return;
-    this.closed = true; this.answer(undefined); this.resolveGrill(undefined);
+    this.closed = true; this.answer(undefined); this.resolveGrill(undefined); this.resolveModelPicker(undefined);
     this.restoreOutput?.(); this.restoreOutput = undefined;
     this.program.stop();
     this.pending?.('/exit'); this.pending = undefined; this.queued = []; this.emit('close');

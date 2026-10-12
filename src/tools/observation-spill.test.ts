@@ -7,6 +7,7 @@ import {
   MAX_INLINE_TOOL_CHARS,
   MAX_INLINE_HEAD_LINES,
   MAX_INLINE_TAIL_LINES,
+  MAX_INLINE_LINES,
   virtualizeToolOutput,
 } from './tool-runner.js';
 
@@ -67,6 +68,48 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       const longOutput = 'A'.repeat(MAX_INLINE_TOOL_CHARS + 500);
       const result = virtualizeToolOutput(longOutput, 'update_plan_task', 'call_plan', tmpDir);
       assert.strictEqual(result, longOutput);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 4: Already-truncated output is not re-spilled', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-test-'));
+    try {
+      const preTruncated = `[STDOUT TRUNCATED: 11,287 characters spilled to .minus/logs/command_outputs/x.log]\n--- Output Preview ---\n${'z'.repeat(MAX_INLINE_TOOL_CHARS + 100)}`;
+      const result = virtualizeToolOutput(preTruncated, 'run_command', 'call_double', tmpDir);
+      assert.strictEqual(result, preTruncated);
+      assert.strictEqual(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs')), false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 5: Few-lines-but-long output does not duplicate head as tail', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-test-'));
+    try {
+      const raw = 'y'.repeat(MAX_INLINE_TOOL_CHARS + 1000);
+      const result = virtualizeToolOutput(raw, 'run_command', 'call_fewlines', tmpDir);
+      assert.ok(result.includes('[STDOUT TRUNCATED:'));
+      assert.ok(!result.includes('Last 1 lines'), 'tail section must be omitted when head covers all lines');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 6: Many short lines under the char budget still spill', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-test-'));
+    try {
+      const lines: string[] = [];
+      for (let i = 1; i <= MAX_INLINE_LINES + 50; i++) {
+        lines.push(`ok ${i}`);
+      }
+      const raw = lines.join('\n');
+      assert.ok(raw.length < MAX_INLINE_TOOL_CHARS);
+      const result = virtualizeToolOutput(raw, 'run_command', 'call_manylines', tmpDir);
+      assert.ok(result.includes('[STDOUT TRUNCATED:'));
+      assert.ok(result.includes('ok 1'));
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_manylines.log')));
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

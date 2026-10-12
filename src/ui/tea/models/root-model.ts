@@ -8,6 +8,7 @@ import { headerView, statuslineView } from './statusline-model.js';
 import { toolCallEntry, toolErrorEntry, toolResultEntry } from './tool-entry.js';
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
+import { createModelPickerModel, modelPickerKey, modelPickerLayout } from './model-picker-model.js';
 import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight } from '../styles/theme.js';
 
 const defaultCommands: PaletteItem[] = [
@@ -35,6 +36,7 @@ export function createRootModel(options: { width?: number; height?: number; comm
     sidebar: { visible: false, workspace: '', model: '', session: '', sessions: [], tools: [], files: [], invariants: [], tokens: 0, maxTokens: 128000 },
     palette: { open: false, query: '', selected: 0, items: options.commands || defaultCommands }, diff: { visible: false, text: '', offset: 0, split: false, collapsed: [], hunk: 0 },
     grill: createGrillModel(),
+    modelPicker: createModelPickerModel(),
     sessions: createSessionTabs('', []),
     status: { busy: false, aborting: false, step: 0, maxSteps: Infinity, phase: '', retry: '', notice: '', compaction: null, frame: 0 }, question: { active: false, prompt: '', selected: 0 } };
 }
@@ -206,6 +208,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       return [{ ...model, focus: 'grill' as const, palette: { ...model.palette, open: false }, grill: { open: true, question: msg.question ?? model.grill.question, options: msg.options ?? model.grill.options, selected: 0, loading: msg.loading ?? false, sessionId: msg.sessionId ?? model.sessions.activeId } }, []];
     }
     case 'grill-loading': return [{ ...model, grill: { ...model.grill, loading: msg.loading } }, []];
+    case 'model-picker': {
+      if (!msg.open) return [{ ...model, focus: model.focus === 'model-picker' ? 'composer' : model.focus, modelPicker: { ...model.modelPicker, open: false } }, []];
+      const options = msg.options ?? model.modelPicker.options;
+      const current = Math.max(0, options.findIndex((o) => o.current));
+      return [{ ...model, focus: 'model-picker' as const, palette: { ...model.palette, open: false }, modelPicker: { open: true, options, selected: current, query: '', sessionId: msg.sessionId ?? model.sessions.activeId } }, []];
+    }
     case 'sessions': {
       if (msg.tabs || msg.activeId) {
         const ids = msg.tabs ? msg.tabs.map(t => t.id) : model.sidebar.sessions;
@@ -322,6 +330,13 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       }
     }
     case 'key': {
+      // Model-picker modal mở: chuột thuộc về modal trước mọi hit-test khác
+      // (kẻo click lọt xuống strip/viewport sau modal).
+      if ((model.modelPicker.open || model.focus === 'model-picker') && msg.mouse) {
+        const handled = modelPickerKey(msg, { ...model, focus: 'model-picker' as const });
+        if (handled) return handled;
+        return [model, []];
+      }
       // Click chuột trên session tab-strip (dòng y=2, ngay trên viewport):
       // tab → switch, × → ẩn tạm, + new → tạo tab. Nuốt click để không lọt
       // xuống text-selection của viewport. Grill/question giữ quyền ưu tiên.
@@ -398,6 +413,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       // Session tabs modal đè lên input/composer (sau grill): quản lý nhiều session song song.
       if (model.sessions.open || model.focus === 'sessions') {
         const handled = sessionTabsKey(msg, { ...model, focus: 'sessions' as const });
+        if (handled) return handled;
+        return [model, []];
+      }
+      // Model-picker modal đè lên viewport (sau sessions): ↑↓ + Enter hoặc click chuột để chọn model.
+      if (model.modelPicker.open || model.focus === 'model-picker') {
+        const handled = modelPickerKey(msg, { ...model, focus: 'model-picker' as const });
         if (handled) return handled;
         return [model, []];
       }
@@ -574,6 +595,15 @@ export function view(model: RootModel): string {
   if (model.sessions.open) {
     const panel = sessionTabsView(model.sessions, width, height);
     const startRow = Math.max(1, Math.floor((height - panel.length) / 2));
+    rows = rows.map((row, i) => {
+      const p = i - startRow;
+      if (p < 0 || p >= panel.length) return row;
+      return panel[p];
+    });
+  }
+  // Model-picker modal: đè lên giữa màn hình, ngay trên viewport để chọn model.
+  if (model.modelPicker.open) {
+    const { panel, startRow } = modelPickerLayout(model.modelPicker, width, height);
     rows = rows.map((row, i) => {
       const p = i - startRow;
       if (p < 0 || p >= panel.length) return row;

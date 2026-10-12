@@ -81,8 +81,6 @@ test('Terminal Sanitizer: truncateTerminalOutput truncates large output and comp
   const result = truncateTerminalOutput(largeText, {
     maxLength: 5000,
     maxLines: 80,
-    preserveHeadLines: 15,
-    preserveTailLines: 20,
     logFilePath: '.minus/logs/test.log',
   });
 

@@ -14,6 +14,7 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'question'; prompt: string; active: boolean; permission?: PermissionCard; sessionId?: string }
   | { type: 'grill'; open: boolean; question?: string; options?: GrillOption[]; loading?: boolean; sessionId?: string }
   | { type: 'grill-loading'; loading: boolean }
+  | { type: 'model-picker'; open: boolean; options?: ModelPickerOption[]; sessionId?: string }
   | { type: 'sessions'; open?: boolean; tabs?: SessionTab[]; activeId?: string }
   | { type: 'sessions-adopt'; activeId: string }
   | { type: 'session-transcript'; sessionId: string; entries: TranscriptEntry[] }
@@ -27,6 +28,8 @@ export type Msg = KeyMsg | KernelMsg
 export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'grill-pick'; text: string }
   | { type: 'grill-cancel' }
+  | { type: 'model-pick'; id: string; name: string }
+  | { type: 'model-cancel' }
   | { type: 'session-switch'; sessionId: string }
   | { type: 'session-new'; sessionId?: string }
   | { type: 'session-close'; sessionId: string }
@@ -36,9 +39,13 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'complete'; value: string; cursor: number }
   | { type: 'mode'; mode: Mode };
 export type Mode = 'PLAN' | 'IMPLEMENT';
-export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'grill' | 'sessions';
+export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'grill' | 'sessions' | 'model-picker';
 export interface GrillOption { id: string; label: string; detail?: string; source: 'llm' | 'heuristic' | 'user' }
 export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
+/** Một entry trong modal chọn model (/model): mirror AVAILABLE_MODELS của cli-ui. */
+export interface ModelPickerOption { id: string; name: string; desc?: string; provider?: string; recommended?: boolean; /** true = model đang active của tab */ current?: boolean }
+/** Modal chọn model đè lên viewport — cùng ngôn ngữ visual/key với grill. */
+export interface ModelPickerModel { open: boolean; options: ModelPickerOption[]; selected: number; /** chuỗi lọc fuzzy (mirror palette query) */ query: string; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
 export interface Completion { label: string; value: string; cursor?: number; kind?: 'file' | 'session' }
 export interface ComposerModel {
   selection?: { anchor: number; head: number };
@@ -67,6 +74,7 @@ export interface RootModel {
   composer: ComposerModel; viewport: ViewportModel; sidebar: SidebarModel;
   palette: PaletteModel; diff: DiffViewerModel; status: StatuslineModel;
   grill: GrillModel;
+  modelPicker: ModelPickerModel;
   sessions: SessionTabsModel;
   question: { active: boolean; prompt: string; draft?: ComposerModel; permission?: PermissionCard; selected: number; sessionId?: string };
 }

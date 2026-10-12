@@ -358,8 +358,10 @@ export async function finalizeCommandResult(
   const maxLength = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 8000;
 
   let logFilePath: string | undefined;
-  const combinedLength = distilledStdout.length + cleanStderr.length;
-  if (combinedLength > maxLength) {
+  // Offload only when an individual stream actually exceeds its truncation
+  // budget (stdout > maxLength, stderr > maxLength/2); combined length alone
+  // would create orphan log files for output that is never truncated.
+  if (distilledStdout.length > maxLength || cleanStderr.length > Math.floor(maxLength / 2)) {
     const redactedRawStdout = redactSecretsFromText(baseResult.stdout || '', secrets);
     const redactedRawStderr = redactSecretsFromText(baseResult.stderr || '', secrets);
     const fullLog = `=== COMMAND ===\n${baseResult.command}\n\n=== STDOUT ===\n${redactedRawStdout}\n\n=== STDERR ===\n${redactedRawStderr}`;

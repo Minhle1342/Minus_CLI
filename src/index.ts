@@ -2252,16 +2252,30 @@ Please focus on executing and verifying this task, and update its status to COMP
 
         // Nếu người dùng chỉ gõ /model hoặc /modal mà không truyền tên -> Mở menu chọn số thứ tự
         if (!targetModel) {
-          CLI.renderModelSelector(agentLoop.getSessionModelName(activeSession.id) ?? modelName);
-          const choice = (await askCancellable(rl, `${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`))?.trim();
-          
-          if (!choice) {
-            console.log(`${c.dim}Model selection cancelled.${c.reset}\n`);
-            continue;
-          }
+          const currentName = agentLoop.getSessionModelName(activeSession.id) ?? modelName;
+          // TUI: modal đè lên viewport (↑↓ + Enter hoặc click chuột), thay cho prompt gõ id/name.
+          if (tui) {
+            const picked = await tui.modelPickerChoose(
+              AVAILABLE_MODELS.map((m) => ({ id: m.id, name: m.name, desc: m.desc, provider: m.provider, recommended: m.recommended, current: m.name === currentName })),
+              activeSession.id,
+            );
+            if (!picked) {
+              console.log(`${c.dim}Model selection cancelled.${c.reset}\n`);
+              continue;
+            }
+            targetModel = picked.name;
+          } else {
+            CLI.renderModelSelector(currentName);
+            const choice = (await askCancellable(rl, `${c.brightYellow}Select a model [1-${AVAILABLE_MODELS.length} or model name]: ${c.reset}`))?.trim();
 
-          const matchedOption = AVAILABLE_MODELS.find((m) => m.id === choice);
-          targetModel = matchedOption ? matchedOption.name : choice;
+            if (!choice) {
+              console.log(`${c.dim}Model selection cancelled.${c.reset}\n`);
+              continue;
+            }
+
+            const matchedOption = AVAILABLE_MODELS.find((m) => m.id === choice);
+            targetModel = matchedOption ? matchedOption.name : choice;
+          }
         }
 
         try {

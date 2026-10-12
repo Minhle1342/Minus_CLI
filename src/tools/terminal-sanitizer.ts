@@ -5,8 +5,6 @@ import { nativeTruncateToolOutput } from '../native/index.js';
 export interface TerminalTruncationOptions {
   maxLength?: number;
   maxLines?: number;
-  preserveHeadLines?: number;
-  preserveTailLines?: number;
   logFilePath?: string;
   exitCode?: number;
 }

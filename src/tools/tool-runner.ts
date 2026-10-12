@@ -21,6 +21,8 @@ import {
  * Satellite 1: Observation Virtualization / Spill-to-Disk Constants
  */
 export const MAX_INLINE_TOOL_CHARS = 4_000;
+// Many short lines stay under the char budget but still flood context.
+export const MAX_INLINE_LINES = 200;
 export const MAX_INLINE_HEAD_LINES = 30;
 export const MAX_INLINE_TAIL_LINES = 50;
 
@@ -42,16 +44,32 @@ export function virtualizeToolOutput(
   toolCallId: string,
   workspaceRoot: string,
 ): string {
-  if (typeof rawText !== 'string' || rawText.length <= MAX_INLINE_TOOL_CHARS) {
+  if (typeof rawText !== 'string') {
+    return rawText;
+  }
+  const lines = rawText.split('\n');
+  if (rawText.length <= MAX_INLINE_TOOL_CHARS && lines.length <= MAX_INLINE_LINES) {
     return rawText;
   }
   if (SKIP_SPILL_TOOL_NAMES.has(toolName)) {
     return rawText;
   }
+  // Already truncated upstream (e.g. run_command finalize offloaded the full log):
+  // re-spilling would save truncated-of-truncated and orphan the true log file.
+  if (
+    rawText.includes('[STDOUT TRUNCATED:') ||
+    rawText.includes('SAVED TO DISK') ||
+    rawText.includes('SAVED TO FILE')
+  ) {
+    return rawText;
+  }
 
-  const lines = rawText.split('\n');
   const headLines = lines.slice(0, MAX_INLINE_HEAD_LINES);
-  const tailLines = lines.slice(-MAX_INLINE_TAIL_LINES);
+  // Few-lines-but-long output: head already covers everything, tail would duplicate it.
+  const tailLines =
+    lines.length > MAX_INLINE_HEAD_LINES + MAX_INLINE_TAIL_LINES
+      ? lines.slice(-MAX_INLINE_TAIL_LINES)
+      : [];
 
   try {
     const scratchDir = path.join(workspaceRoot, '.minus', 'scratch', 'tool_outputs');
@@ -64,24 +82,34 @@ export function virtualizeToolOutput(
 
     fs.writeFileSync(fullLogPath, rawText, 'utf8');
 
-    return [
+    const preview: string[] = [
       `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters spilled to ${relLogPath}]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
-      '...',
-      `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
-      tailLines.join('\n'),
-      `--- Tip: To inspect full output, run \`grep\` or \`read_file\` on the log file above ---`,
-    ].join('\n');
+    ];
+    if (tailLines.length > 0) {
+      preview.push(
+        '...',
+        `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
+        tailLines.join('\n'),
+      );
+    }
+    preview.push(`--- Tip: To inspect full output, run \`grep\` or \`read_file\` on the log file above ---`);
+    return preview.join('\n');
   } catch (_err) {
-    return [
+    const preview: string[] = [
       `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters (spill fallback)]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
-      '...',
-      `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
-      tailLines.join('\n'),
-    ].join('\n');
+    ];
+    if (tailLines.length > 0) {
+      preview.push(
+        '...',
+        `--- Error & Tail Summary (Last ${tailLines.length} lines) ---`,
+        tailLines.join('\n'),
+      );
+    }
+    return preview.join('\n');
   }
 }
 
@@ -760,7 +788,7 @@ export class ToolRunner {
     const toolCallId = context?.toolCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const workspaceRoot = this.workspace?.rootDir || process.cwd();
     for (const field of TEXT_FIELDS_TO_VIRTUALIZE) {
-      if (typeof normalizedResult[field] === 'string' && normalizedResult[field].length > MAX_INLINE_TOOL_CHARS) {
+      if (typeof normalizedResult[field] === 'string') {
         normalizedResult[field] = virtualizeToolOutput(
           normalizedResult[field],
           toolName,
