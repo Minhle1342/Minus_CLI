@@ -2,6 +2,7 @@ import type { Session } from '../session/session.js';
 import { collectCompletionObservations, observedMutationFiles } from './completion-observations.js';
 import { FinalAnswerGuard, normalizeForMatching } from './final-answer-guard.js';
 import { verifyHighMinFiles } from './verify-tier-resolver.js';
+import { isScratchPath } from '../skills/verification-policy.js';
 import {
   CompletionEvidenceGate,
   isNonExecutableFile,
@@ -172,9 +173,11 @@ export class SolutionGroundingAuditor {
       const mutations = observations.filter((item) =>
         observedMutationFiles(item.toolName, item.args, item.payload).length > 0,
       );
+      // Scratch/repro files are working artifacts, not the deliverable: counting
+      // them pushed read-only investigations out of the answer-only path below.
       sessionMutatedFiles = Array.from(
         new Set(mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload))),
-      );
+      ).filter((file) => !isScratchPath(file));
     }
 
     // 4. Đồng bộ danh sách file thay đổi (Reconcile Files Modified)

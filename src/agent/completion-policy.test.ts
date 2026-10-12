@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { FinalAnswerGuard, verifyWorkspaceGrounding, detectAnalysisOrInvestigationIntent, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
 import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
-import { CompletionEvidenceGate, isVerificationCommand } from './completion-evidence.js';
+import { CompletionEvidenceGate, isUserExplicitlyExemptingTests, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { createReportFindingsTool } from '../tools/report-findings.js';
@@ -333,6 +333,14 @@ test('exploration tasks with cause investigation and expository introductions co
     assert.equal(result, substantiveAnswer);
     assert.equal(llm.calls, 1);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+test('/no-verify marker exempts tests regardless of phrasing', () => {
+  assert.equal(isUserExplicitlyExemptingTests('fix the bug /no-verify'), true);
+  assert.equal(isUserExplicitlyExemptingTests('/no-verify'), true);
+  assert.equal(isUserExplicitlyExemptingTests('fix the bug, no test required'), true);
+  assert.equal(isUserExplicitlyExemptingTests('fix the bug'), false);
+  assert.equal(isUserExplicitlyExemptingTests(undefined), false);
 });
 
 test('Evidence Gate does not trigger false positives on 0-file scripts, CommandLine, analysis, or negation', () => {

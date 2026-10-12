@@ -604,6 +604,8 @@ export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VER
 - Follow the selected verification contract: localized R1 may use clean diagnostics; R2 may require typecheck/build and scoped diff; higher-risk changes require the targeted evidence specified by the task contract. Respect the user's verification scope and test limits.
  - Inspect defined scripts (package.json scripts or cargo/go equivalent) plus the detected build/test command first and run exactly that command. Do not guess script names or monorepo flags.
 - Review the expected workspace diff without requiring a clean working tree or discarding existing user work. Git inspection does not authorize stage, commit, push or rollback.
+- Tier discipline: run the tier named in DYNAMIC VERIFICATION (diagnostics/typecheck/targeted/full) — a lighter check never satisfies a heavier requirement.
+- Impacted suites: when DYNAMIC VERIFICATION names pending suites, run each of them (or the full suite) — one suite passing does not discharge the others.
 - Completion Gate: Call submit_solution with the observed evidence and disclose any verification limitation. A successful isolated check does not prove every acceptance criterion or workflow stage is complete.`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:

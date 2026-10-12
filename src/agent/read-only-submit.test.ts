@@ -26,6 +26,31 @@ class ScriptedReadOnlyLLM {
   }
 }
 
+test('blocked submit appends gate-block telemetry with measured fields', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gate-block-'));
+  try {
+    const workspace = new Workspace(root);
+    const llm = new ScriptedReadOnlyLLM([
+      { toolCalls: [{ name: 'create_plan', args: { tasks: [{ title: 'Fix foo', writeSet: ['src/foo.ts'] }] } }] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary: 'done', resolutionType: 'other', filesModified: ['src/foo.ts'] } }] },
+      { text: 'plan still open' },
+    ]);
+    const session = new Session();
+    session.addUserMessage('Fix the bug in src/foo.ts');
+    const loop = new AgentLoop(llm, new ToolRegistry(), { workspace, maxSteps: 3, toolControlMode: 'off' });
+    await loop.run(session);
+    const blocks = session.getEvents().filter((event) => event.type === 'control/decision'
+      && (event.data as any)?.controlDecision?.kind === 'gate-block');
+    assert.ok(blocks.length >= 1, 'a blocked submit must leave gate-block telemetry');
+    const detail = (blocks[0].data as any).controlDecision;
+    assert.equal(typeof detail.errorCode, 'string');
+    assert.equal(typeof detail.taskClass, 'string');
+    assert.deepEqual(detail.filesModified, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test('every read-only control mode requires submit as the final tool, even after a direct answer', async () => {
   for (const toolControlMode of ['off', 'shadow', 'enforce'] as const) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'readonly-submit-'));

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { isVerificationCommand, isNonExecutableFile } from '../agent/completion-evidence.js';
+import { isVerificationCommand, isNonExecutableFile, isScratchPath } from '../agent/completion-evidence.js';
 import { isSensitivePath, resolveVerifyTier, verifyCriticalMinFiles } from '../agent/verify-tier-resolver.js';
 import { evaluateVerificationCoverage, type VerificationCoverage } from '../agent/verification-coverage.js';
 import type { FileCoverage } from '../agent/coverage-report-reader.js';
@@ -28,18 +28,7 @@ export interface VerificationRecord {
   coverage?: VerificationCoverage;
 }
 
-export function isScratchPath(filePath: string): boolean {
-  const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
-  return (
-    normalized.startsWith('scratch/') ||
-    normalized.startsWith('.scratch/') ||
-    normalized.startsWith('temp/') ||
-    normalized.startsWith('.temp/') ||
-    /(?:^|[\\/])(?:scratch|throwaway|repro|reproduce)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(normalized) ||
-    /(?:^|[\\/])scratch[\\/]/i.test(normalized) ||
-    /(?:^|[\\/])temp[\\/]/i.test(normalized)
-  );
-}
+export { isScratchPath } from '../agent/completion-evidence.js';
 
 /** Heuristic comment-line check across common languages: slash-slash, hash, dash-dash, percent, semicolon, quote, html, block and star lines. */
 function isCommentLine(line: string): boolean {
@@ -183,6 +172,11 @@ export class VerificationPolicy {
    * Đánh dấu đã có thay đổi code trên workspace (write_file, replace_text, apply_patch, create_file, delete_file, move_file)
    */
   recordModification(filePath?: string, options?: { impactedTestSuites?: string[]; risk?: string; commentOnly?: boolean; hasCallers?: boolean }): void {
+    // Scratch/repro files are working artifacts, not the deliverable (canMutate
+    // already lets them through unconditionally). Recording them as
+    // modifications made every read-only investigation that produced a throwaway
+    // script demand a real test suite before it could answer.
+    if (filePath && isScratchPath(filePath)) return;
     if (filePath) {
       this.modifiedFiles.add(filePath);
       if (options?.commentOnly) this.commentOnlyFiles.add(filePath);

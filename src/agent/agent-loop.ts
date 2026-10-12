@@ -3728,6 +3728,13 @@ export class AgentLoop {
                 },
                 durationMs: 1,
               };
+              // Gate-block telemetry: durable measured fields on control/decision
+              // (not model history, so zero token cost) to tell false blocks from true ones.
+              const submitBlock = { kind: 'gate-block' as const, errorCode: (executionResult.result as any)?.errorCode,
+                taskClass: classification.taskClass,
+                resolutionType: typeof toolArgs.resolutionType === 'string' ? toolArgs.resolutionType : undefined,
+                filesModified: getTurnCompletionState(session, turn).filesModified };
+              session.append('control/decision', { turn, step, controlDecision: submitBlock });
             } else if (!aciValidation.allowed) {
               executionResult = {
                 toolName,
@@ -4880,7 +4887,7 @@ export class AgentLoop {
                   allow: false,
                   reason: 'unverified-evidence' as const,
                   recovery: 'verify-changes',
-                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification. A command the verification policy does not recognize (e.g. running a script you just created) does not satisfy this gate; read the DYNAMIC VERIFICATION requirement for the accepted tier.`,
+                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification. A command the verification policy does not recognize (e.g. running a script you just created) does not satisfy this gate; read the DYNAMIC VERIFICATION requirement for the accepted tier. If the user waives tests, they can append /no-verify to the request instead of rephrasing.`,
                 }
                 : (!ocrDecision.allow)
                   ? {
@@ -4924,6 +4931,15 @@ export class AgentLoop {
       }
 
       if (!finalAnswerDecision.allow) {
+        // Same telemetry for answer-only completions; the pure
+        // submission-required redirect is routing, not a block.
+        if (finalAnswerDecision.reason !== 'submission-required') {
+          const answerBlock = { kind: 'gate-block' as const, errorCode: finalAnswerDecision.reason || 'unknown',
+            recovery: (finalAnswerDecision as any).recovery,
+            taskClass: classification.taskClass,
+            filesModified: getTurnCompletionState(session, turn).filesModified };
+          session.append('control/decision', { turn, step, controlDecision: answerBlock });
+        }
         // Case 1c — completion-gate rejection: keep the thought that produced
         // the rejected answer so the retry can diagnose, not guess.
         this.persistStepReasoning(session, this._latestReasoning?.thought, {

@@ -91,6 +91,24 @@ export function isScratchCommand(command: unknown): boolean {
   return /(?:^|\s|["'])(?:\.?\/|\.?\\)?(?:\.scratch|\.temp|scratch|temp)[\\/]/i.test(cmd);
 }
 
+/**
+ * Scratch/repro working files. They are never the deliverable of a task, so no
+ * completion gate may count them as a code change. Lives here (not in
+ * verification-policy) because that module already imports this one.
+ */
+export function isScratchPath(filePath: string): boolean {
+  const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
+  return (
+    normalized.startsWith('scratch/') ||
+    normalized.startsWith('.scratch/') ||
+    normalized.startsWith('temp/') ||
+    normalized.startsWith('.temp/') ||
+    /(?:^|[\\/])(?:scratch|throwaway|repro|reproduce)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(normalized) ||
+    /(?:^|[\\/])scratch[\\/]/i.test(normalized) ||
+    /(?:^|[\\/])temp[\\/]/i.test(normalized)
+  );
+}
+
 export function isNonExecutableFile(filePath: string): boolean {
   const normalizedPath = (filePath || '').trim().toLowerCase();
   if (!normalizedPath) return false;
@@ -102,6 +120,9 @@ export function isNonExecutableFile(filePath: string): boolean {
 
 export function isUserExplicitlyExemptingTests(userRequest?: string): boolean {
   if (!userRequest) return false;
+  // Explicit /no-verify marker (append as a suffix: "fix X /no-verify"). Checked
+  // first so the escape hatch never depends on natural-language phrasing.
+  if (userRequest.includes('/no-verify')) return true;
   return /\b(?:khong can (?:chay )?(?:test|kiem thu|build)|no test(?:ing)? required|skip test(?:ing)?|do not run tests?)\b/i.test(
     userRequest.normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
   );
@@ -263,8 +284,9 @@ export class CompletionEvidenceGate {
     const isBlockedInvestigation = options.resolutionType === 'investigation_only' && externalBlockers.length > 0;
     const effectiveCodeChangeRequired = isBlockedInvestigation ? false : options.codeChangeRequired;
 
-    // Thu thập đường dẫn các file đã được chỉnh sửa
-    const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload));
+    // Thu thập đường dẫn các file đã được chỉnh sửa (bỏ scratch: artifact, không phải deliverable)
+    const mutatedFilePaths = mutations.flatMap((m) => observedMutationFiles(m.toolName, m.args, m.payload))
+      .filter((file) => !isScratchPath(file));
     const allMutationsAreNonExecutable = mutatedFilePaths.length > 0 && mutatedFilePaths.every(isNonExecutableFile) && mutations.every((m) => observedMutationFiles(m.toolName, m.args, m.payload).length > 0);
     const userExplicitlyExemptsTesting = isUserExplicitlyExemptingTests(options.userRequest);
 

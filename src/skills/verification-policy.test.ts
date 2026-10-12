@@ -167,6 +167,21 @@ test('Net-zero diff and deleted scratch bypass via git status', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('scratch artifacts never demand verification, real product edits still do', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-scratch-'));
+  const scratch = new VerificationPolicy();
+  scratch.setWorkspaceRoot(dir);
+  scratch.recordModification('scratch/repro_bug.py');
+  assert.equal(scratch.canComplete().allowed, true, 'scratch must not mandate a test suite');
+
+  const mixed = new VerificationPolicy();
+  mixed.setWorkspaceRoot(dir);
+  mixed.recordModification('scratch/repro_bug.py');
+  mixed.recordModification('src/real.ts');
+  assert.equal(mixed.canComplete().allowed, false, 'a real edit still mandates verification');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('Pure rename bypasses, later real edit revokes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-move-'));
   const git = (args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
