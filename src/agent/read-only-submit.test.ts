@@ -51,22 +51,20 @@ test('blocked submit appends gate-block telemetry with measured fields', async (
   }
 });
 
-test('every read-only control mode requires submit as the final tool, even after a direct answer', async () => {
+test('every read-only control mode answers directly without a submit round trip', async () => {
   for (const toolControlMode of ['off', 'shadow', 'enforce'] as const) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'readonly-submit-'));
     try {
       const workspace = new Workspace(root);
-      const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }, submit()]);
+      const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }]);
       const session = new Session();
       session.addUserMessage('Explain the type error; read only.');
       const loop = new AgentLoop(llm, new ToolRegistry(), { workspace, maxSteps: 4, toolControlMode });
       assert.equal(await loop.run(session), answer);
-      assert.equal(llm.calls, 2);
-      assert.match(llm.prompts[1], /STRONG ADVISORY.*SUBMIT/);
+      assert.equal(llm.calls, 1);
       assert.ok(llm.declarations.every(names => names.includes('submit_solution')));
       const calls = session.getEvents().filter(event => event.type === 'tool/call');
-      assert.deepEqual(calls.map(event => event.data.toolName), ['submit_solution']);
-      assert.ok(session.getEvents().some(event => event.type === 'tool/result' && event.data.result?.submitted === true));
+      assert.deepEqual(calls.map(event => event.data.toolName), []);
     } finally {
       await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
@@ -132,33 +130,33 @@ test('failed submission and an old-turn receipt cannot authorize a direct final 
   } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
-test('non-editing answers require submission even without an explicit read-only phrase', async () => {
+test('non-editing answers return directly even without an explicit read-only phrase', async () => {
   for (const request of ['Summarize this type annotation.', 'Find the type error.']) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'readonly-generic-'));
     try {
       const workspace = new Workspace(root);
-      const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }, submit()]);
+      const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }]);
       const session = new Session();
       session.addUserMessage(request);
       const loop = new AgentLoop(llm, new ToolRegistry(), { workspace, maxSteps: 4 });
       assert.equal(await loop.run(session), answer);
-      assert.equal(llm.calls, 2);
-      assert.equal(session.getEvents().filter(event => event.type === 'tool/call').at(-1)?.data.toolName, 'submit_solution');
+      assert.equal(llm.calls, 1);
+      assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), []);
     } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
   }
 });
 
-test('read-only completion still requires submission when auto-finalization is disabled', async () => {
+test('read-only completion answers directly when auto-finalization is disabled', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'readonly-no-auto-'));
   try {
     const workspace = new Workspace(root);
-    const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }, submit(), { text: answer, toolCalls: [] }]);
+    const llm = new ScriptedReadOnlyLLM([{ text: answer, toolCalls: [] }]);
     const session = new Session();
     session.addUserMessage('Explain the type error; read only.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { workspace, maxSteps: 4, enableSubmitAutoFinalization: false });
     assert.equal(await loop.run(session), answer);
-    assert.equal(llm.calls, 3);
-    assert.deepEqual(llm.declarations[2], [], 'no tool schemas after successful submission');
+    assert.equal(llm.calls, 1);
+    assert.ok(llm.declarations[0].includes('submit_solution'), 'submit stays declared for mutation tasks');
   } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CORE_SYSTEM_PROMPT, SECTION_PHASE_VERIFY_GUIDANCE } from './prompt-sections.js';
 
-test('core prompt defines one submission rule for both read-only and mutation tasks', () => {
-  assert.equal(CORE_SYSTEM_PROMPT.match(/submit_solution/g)?.length, 1);
-  assert.match(CORE_SYSTEM_PROMPT, /any task, call submit_solution alone as the final tool call/);
+test('core prompt routes read-only answers directly and keeps submission for other tasks', () => {
+  assert.equal(CORE_SYSTEM_PROMPT.match(/submit_solution/g)?.length, 2);
+  assert.match(CORE_SYSTEM_PROMPT, /Read-only questions.*return the final answer directly and never call submit_solution/);
+  assert.match(CORE_SYSTEM_PROMPT, /any other task, call submit_solution alone as the final tool call/);
   assert.match(CORE_SYSTEM_PROMPT, /actual answer in summary/);
   assert.match(CORE_SYSTEM_PROMPT, /Read-only requires no edits\/tests/);
   assert.match(CORE_SYSTEM_PROMPT, /observed verification after the last edit/);

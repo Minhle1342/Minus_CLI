@@ -2227,7 +2227,7 @@ export class AgentLoop {
       } else if (completionVerificationSatisfied) {
         completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
       } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
-        completionDirective = '[STRONG ADVISORY — READ-ONLY SUBMIT]: When the answer is ready, call submit_solution as the final tool with the actual user-facing answer in summary, resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless actual verification occurred. No code edit or test is required. report_investigation_findings and plain text do not replace submission. After successful submission, call no further tools; return the submitted answer in the user\'s language.';
+        completionDirective = '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: When the answer is ready, return it directly as the final answer — do not call submit_solution for read-only answers. No code edit or test is required. A concise answer is valid; do not invent edits or verification. Return the answer in the user\'s language.';
       }
 
       // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
@@ -4898,10 +4898,16 @@ export class AgentLoop {
                   }
                   : { allow: true });
 
-      // Apply to every answer-only completion, not just requests recognized by
-      // the intent classifier (e.g. a diagnosis may also advertise edit tools).
-      const requiresReadOnlySubmission = !hasCodeMutations && !codeChangeRequired && !hasSubmittedSolution;
-      const requiresSubmission = requiresReadOnlySubmission || (!hasSubmittedSolution && !isSubagent && !isMockLLM);
+      // Read-only completions (no mutations and none required) return the
+      // final answer directly — no submit_solution round trip. Submission
+      // stays mandatory for everything else. Subagents keep the old rule:
+      // their read-only completions are still audited through
+      // submit_solution, since no other gate checks subagent output.
+      const isDirectAnswerCompletion = !hasCodeMutations && !codeChangeRequired;
+      const requiresReadOnlySubmission = isDirectAnswerCompletion && !hasSubmittedSolution;
+      const requiresSubmission = isDirectAnswerCompletion
+        ? (isSubagent && !hasSubmittedSolution && !isMockLLM)
+        : (!hasSubmittedSolution && !isSubagent && !isMockLLM);
       if (finalAnswerDecision.allow && requiresSubmission) {
         const candidate = evaluateSubmission({ summary: finalAnswer }, {
           session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
@@ -4955,8 +4961,10 @@ export class AgentLoop {
           const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt({ submissionOnly: requiresReadOnlySubmission
             || finalAnswerDecision.reason === 'submission-required' });
 
-          const actionMandate = requiresReadOnlySubmission
-            ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
+          const actionMandate = requiresReadOnlySubmission && !isSubagent
+            ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.'
+            : requiresReadOnlySubmission
+              ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
             : buildCompletionRecoveryPrompt({
             reason: finalAnswerDecision.reason,
             recovery: finalAnswerDecision.recovery,

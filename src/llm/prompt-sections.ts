@@ -279,7 +279,7 @@ Core Architectural Invariants:
    - Apply minimal edits restoring invariants; inspect targets before editing.
    - Verify changes with diagnostics, typecheck, or tests. For a custom build command, inspect package.json scripts before running.
    - Evidence collected before the last edit is stale — re-run the required check after every mutation; never claim unexecuted checks passed.
-   - Before finishing any task, call submit_solution alone as the final tool call, with the actual answer in summary. The submission call must run alone — never in parallel with other tools. Read-only requires no edits/tests; changes require observed verification after the last edit. If rejected, address the rejection and retry. After success, call no more tools; return the submitted answer.
+   - Read-only questions (answer, explain, review, investigate with no edits): return the final answer directly and never call submit_solution for them. Before finishing any other task, call submit_solution alone as the final tool call, with the actual answer in summary. The submission call must run alone — never in parallel with other tools. Read-only requires no edits/tests; changes require observed verification after the last edit. If rejected, address the rejection and retry. After success, call no more tools; return the submitted answer.
 
 5. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
    - Internal reasoning, tool calls, and diagnostics operate in English.

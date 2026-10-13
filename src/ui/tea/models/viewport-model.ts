@@ -118,7 +118,7 @@ export function formatAnswerInline(body: string, base: string, depth = 0): strin
 }
 
 export function formatAnswer(text: string, width = 80): string {
-  const tableProcessed = formatMarkdownTablesWithTea(text, Math.max(20, width - 4));
+  const tableProcessed = formatMarkdownTablesWithTea(text, Math.max(20, width));
   const rawLines = stripTerminalControls(tableProcessed).split('\n');
   // Setext H1 underline (===): fold into the previous text line as ATX.
   // `---` intentionally stays a horizontal rule (pinned by tests).
@@ -163,7 +163,9 @@ export function formatAnswer(text: string, width = 80): string {
         if (i === 0 && cell === '') return '';
         if (i === parts.length - 1 && cell === '') return '';
         const targetWidth = displayWidth(cell);
-        const content = cell.slice(1).trimEnd();
+        // Own Table rows pad cells with a leading space; foreign │ lines
+        // (model-drawn, pasted output) must not lose their first character.
+        const content = (cell.startsWith(' ') ? cell.slice(1) : cell).trim();
         const formatted = formatAnswerInline(content, tokyoNight.text);
         const pad = Math.max(0, targetWidth - 1 - displayWidth(formatted) - 1);
         return ' ' + formatted + ' '.repeat(pad) + ' ';
@@ -173,7 +175,7 @@ export function formatAnswer(text: string, width = 80): string {
     const hr = /^\s{0,3}(?:[-*_]\s*){3,}$/.exec(line);
     if (hr) {
       firstContentLine = false;
-      const hrWidth = Math.min(Math.max(width - 4, 10), 80);
+      const hrWidth = Math.min(Math.max(width, 10), 80);
       return [color(tokyoNight.border, '─'.repeat(hrWidth))];
     }
 

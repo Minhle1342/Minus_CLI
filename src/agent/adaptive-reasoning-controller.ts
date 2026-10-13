@@ -86,7 +86,7 @@ export class AdaptiveReasoningController {
       `🧠 [ADAPTIVE REASONING ESCALATED TO "${this.currentTier.toUpperCase()}"]:`,
       `Your previous solution attempt was rejected by verification gates (${this.rejectionCount} rejection(s)).`,
       options?.submissionOnly
-        ? 'Correct the submission contract using existing evidence. Inspect only missing evidence; do not introduce edits or tests for a submission-only rejection.'
+        ? 'Correct the answer using existing evidence. Inspect only missing evidence; do not introduce edits or tests for a submission-only rejection.'
         : 'Reassess the specific rejection using observed evidence and inspect only what is missing before resubmitting. This guidance does not change the provider thinking budget or authorize new operations.',
     ].join('\n');
   }

@@ -180,7 +180,7 @@ class ScriptedCompletionLLM {
   }
 }
 
-test('AgentLoop requires submission of a concise answer without reporting or verification tools', async () => {
+test('AgentLoop returns a read-only answer directly without submission tool calls', async () => {
   assert.notEqual(process.env.NODE_ENV, 'test', 'This test must exercise real completion gates');
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-loop-'));
   try {
@@ -188,31 +188,56 @@ test('AgentLoop requires submission of a concise answer without reporting or ver
     const answer = 'AgentLoop coordinates tools and completion.';
     const llm = new ScriptedCompletionLLM([
       { text: answer, toolCalls: [] },
-      { toolCalls: [{ name: 'submit_solution', args: { summary: answer, resolutionType: 'investigation_only' } }] },
     ]);
     const session = new Session();
     session.addUserMessage('Explain the architecture in one sentence.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 3, workspace });
     assert.equal(await loop.run(session), 'AgentLoop coordinates tools and completion.');
-    assert.equal(llm.calls, 2);
-    assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), ['submit_solution']);
+    assert.equal(llm.calls, 1);
+    assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), []);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
-test('AgentLoop repairs unsupported execution claims and submits without forcing verification', async () => {
+test('mutation tasks without submission are redirected to submit_solution', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-mutation-redirect-'));
+  try {
+    const workspace = new Workspace(rootDir);
+    const registry = new ToolRegistry();
+    registry.register({ name: 'replace_text', description: 'edit', parameters: { type: 'OBJECT', properties: {} } as any,
+      execute: async () => ({ success: true, filesModified: ['a.ts'] }) });
+    const summary = 'Replaced the null guard in a.ts.';
+    const llm = new ScriptedCompletionLLM([
+      { toolCalls: [{ name: 'replace_text', args: { path: 'a.ts' } }] },
+      { text: summary, toolCalls: [] },
+      { toolCalls: [{ name: 'submit_solution', args: { summary } }] },
+    ]);
+    const session = new Session();
+    session.addUserMessage('Fix the crash on startup /no-verify.');
+    const loop = new AgentLoop(llm, registry, { maxSteps: 3, workspace });
+    await loop.run(session);
+    // The text answer must not finalize directly: the loop redirects to
+    // submit_solution (visible in history) and the model follows it.
+    assert.equal(llm.calls, 3);
+    assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), ['replace_text', 'submit_solution']);
+    assert.match(JSON.stringify(session.getHistory()), /SUBMISSION REQUIRED/);
+  } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+test('AgentLoop repairs unsupported execution claims with a direct revised answer', async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-recovery-'));
   try {
     const workspace = new Workspace(rootDir);
     const llm = new ScriptedCompletionLLM([
       { text: 'I ran tests and they passed.', toolCalls: [] },
-      { toolCalls: [{ name: 'submit_solution', args: { summary: 'The explanation is based on source inspection; tests have not been run.', resolutionType: 'investigation_only' } }] },
+      { text: 'The explanation is based on source inspection; tests have not been run.', toolCalls: [] },
     ]);
     const session = new Session();
     session.addUserMessage('Explain the architecture briefly.');
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
     assert.match(await loop.run(session), /tests have not been run/);
     assert.equal(llm.calls, 2);
-    assert.match(llm.prompts[1], /call submit_solution/);
+    assert.deepEqual(session.getEvents().filter(event => event.type === 'tool/call').map(event => event.data.toolName), []);
+    assert.match(llm.prompts[1], /READ-ONLY DIRECT ANSWER/);
     assert.doesNotMatch(llm.prompts[1], /MANDATORY TOOL CALL REQUIRED/);
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
@@ -237,18 +262,31 @@ test('a recorded report is a fallback, not a replacement for a newer answer', as
   try {
     const workspace = new Workspace(rootDir);
     const report = 'The entry point is main(). The remaining callers have not been inspected. '.repeat(5);
-    for (const latest of ['The entry point is main().', '']) {
+    // A newer substantive answer returns directly without a submit round trip.
+    {
       const llm = new ScriptedCompletionLLM([
         { toolCalls: [{ name: 'report_investigation_findings', args: { userFacingReport: report } }] },
-        { text: latest, toolCalls: [] },
-        { toolCalls: [{ name: 'submit_solution', args: { summary: latest || report.trim(), resolutionType: 'investigation_only' } }] },
+        { text: 'The entry point is main().', toolCalls: [] },
       ]);
       const session = new Session();
       session.addUserMessage('Explain the entry point briefly.');
       const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
-      assert.equal(await loop.run(session), latest || report.trim());
-      assert.equal(llm.calls, 3);
-      assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings', 'submit_solution']);
+      assert.equal(await loop.run(session), 'The entry point is main().');
+      assert.equal(llm.calls, 2);
+      assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings']);
+    }
+    // An empty newer answer falls back to the recorded report, returned directly.
+    {
+      const llm = new ScriptedCompletionLLM([
+        { toolCalls: [{ name: 'report_investigation_findings', args: { userFacingReport: report } }] },
+        { text: '', toolCalls: [] },
+      ]);
+      const session = new Session();
+      session.addUserMessage('Explain the entry point briefly.');
+      const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
+      assert.equal(await loop.run(session), report.trim());
+      assert.equal(llm.calls, 2);
+      assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings']);
     }
   } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

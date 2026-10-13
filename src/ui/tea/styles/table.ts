@@ -116,11 +116,17 @@ export class Table {
     if (totalNatural <= contentBudget) {
       colWidths = [...naturalWidths];
     } else {
-      // Allocate budget proportionally, keeping minimum column width
+      // Narrow columns keep their natural width first so labels are not
+      // crushed to the minimum when a sibling column is much longer.
       const minColWidth = 6;
-      colWidths = naturalWidths.map(w =>
-        Math.max(minColWidth, Math.floor(contentBudget * (w / totalNatural))),
-      );
+      const narrowFirst = naturalWidths.map((_, i) => i).sort((a, b) => naturalWidths[a] - naturalWidths[b]);
+      colWidths = new Array(colCount).fill(0);
+      let free = contentBudget;
+      narrowFirst.forEach((idx, pos) => {
+        const fair = Math.floor(free / (narrowFirst.length - pos));
+        colWidths[idx] = Math.min(naturalWidths[idx], Math.max(minColWidth, fair));
+        free -= colWidths[idx];
+      });
       let allocated = colWidths.reduce((a, b) => a + b, 0);
       let diff = contentBudget - allocated;
       if (diff > 0) {

@@ -49,7 +49,7 @@ export interface SubmitSolutionResult {
 export function createSubmitSolutionTool(workspace: Workspace): ToolDefinition {
   return {
     name: 'submit_solution',
-    description: 'Submit the actual final answer as the last tool call for the current task, including every read-only question, explanation, review, and investigation. For read-only tasks, put the answer itself in summary; use resolutionType="investigation_only", filesModified=[], and verificationMethod="not_applicable" unless verification actually occurred. No edit or test is required for read-only answers. A report or plain-text answer does not replace successful submission. For tasks with code changes, run a real verification command after the last edit (test/build/lint/typecheck/get_diagnostics); merely running the script you created does not count. After successful submission, call no further tools.',
+    description: 'Submit the actual final answer as the last tool call for tasks with workspace changes or audited investigations. Do NOT use this tool for read-only questions (answer, explain, review) — return those answers directly as the final answer instead. For tasks with code changes, run a real verification command after the last edit (test/build/lint/typecheck/get_diagnostics); merely running the script you created does not count. After successful submission, call no further tools.',
     parameters: {
       type: 'OBJECT',
       properties: {
