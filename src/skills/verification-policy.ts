@@ -176,14 +176,12 @@ export class VerificationPolicy {
     // already lets them through unconditionally). Recording them as
     // modifications made every read-only investigation that produced a throwaway
     // script demand a real test suite before it could answer.
-    if (filePath && isScratchPath(filePath)) return;
-    if (filePath) {
-      this.modifiedFiles.add(filePath);
-      if (options?.commentOnly) this.commentOnlyFiles.add(filePath);
-      else {
-        this.commentOnlyFiles.delete(filePath);
-        this.contentPreservedFiles.delete(filePath);
-      }
+    if (!filePath || isScratchPath(filePath)) return;
+    this.modifiedFiles.add(filePath);
+    if (options?.commentOnly) this.commentOnlyFiles.add(filePath);
+    else {
+      this.commentOnlyFiles.delete(filePath);
+      this.contentPreservedFiles.delete(filePath);
     }
     const isNonExec = filePath ? isNonExecutableFile(filePath) : false;
     const isSensitiveCode = filePath ? (!isNonExec && isSensitivePath(filePath)) : false;

@@ -555,14 +555,11 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       if (msg.key === 'pageup' || msg.key === 'pagedown') {
         const mainWidth = Math.max(1, model.width - sidebarWidthFor(model.width, model.sidebar.visible, model.height));
         const maxOffset = Math.max(0, viewportLines(model.viewport, mainWidth).length - Math.max(1, model.height - 6));
-        // PgDn past the last answer jumps straight to it; inside an answer it
-        // still steps one page so long replies stay readable.
         const delta = (msg.key.endsWith('up') ? 1 : -1) * Math.max(1, model.height - 6);
-        const stepped = Math.max(0, Math.min(maxOffset, model.viewport.offset + delta));
-        const target = msg.key === 'pagedown' && stepped < model.viewport.offset
+        const target = msg.key === 'pagedown' && model.viewport.offset > 0
           ? lastAnswerOffset(model.viewport, mainWidth)
           : undefined;
-        const offset = target === undefined ? stepped : Math.max(0, Math.min(maxOffset, target));
+        const offset = Math.max(0, Math.min(maxOffset, target ?? model.viewport.offset + delta));
         return [{ ...model, viewport: { ...model.viewport, offset, pinned: offset === 0 } }, []];
       }
       if (msg.key === 'ctrl+space' && model.composer.completions.length) {

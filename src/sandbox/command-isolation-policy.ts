@@ -18,7 +18,17 @@ export interface HostCommandPolicyResult {
  * stay fail-closed here. Network subcommands (ls-remote, fetch, pull, push,
  * clone) are deliberately excluded.
  */
-const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--(?:get(?:-all|-regexp|-urlmatch)?|list|-l)|check-ignore|blame|shortlog|ls-files|grep|show-ref|rev-list|ls-tree|name-rev|merge-base|version|var|help|tag\s+(?:--list|-l|--verify|-v)|worktree\s+list|stash\s+(?:list|show)|reflog\s+(?:show|exists)|notes\s+(?:list|show)|submodule\s+(?:status|summary)|bundle\s+(?:list-heads|verify)|bisect\s+log|sparse-checkout\s+list|--version|--help)|node\s+(?:--version|-v|--check\b|-c\b|(?:--import\s+\S+\s+)*--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
+const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--(?:get(?:-all|-regexp|-urlmatch)?|list|-l)|check-ignore|blame|shortlog|ls-files|grep|show-ref|rev-list|ls-tree|name-rev|merge-base|version|var|help|tag\s+(?:--list|-l|--verify|-v)|worktree\s+list|stash\s+(?:list|show)|reflog\s+(?:show|exists)|notes\s+(?:list|show)|submodule\s+(?:status|summary)|bundle\s+(?:list-heads|verify)|bisect\s+log|sparse-checkout\s+list|--version|--help)|node\s+(?:--version|-v|--check\b|-c\b|(?:[^\r\n]*\s+)?--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
+
+/**
+ * Test, build, lint, and typecheck commands that are safe to run when Docker
+ * isolation is unavailable (they inspect, compile, lint, or run tests without arbitrary unisolated mutation).
+ */
+export const SAFE_DEV_COMMAND = /^(?:(?:npm|pnpm|yarn|bun)\s+(?:test\b|t\b|run\s+(?:test|build|lint|typecheck|type-check|check|format|compile)[\w:-]*)|(?:npx\s+|bunx\s+|pnpm\s+dlx\s+)?(?:tsc(?:\.cmd|\.exe)?|tsx|jest|vitest|eslint|prettier|biome|oxlint|stylelint|mocha|ava|playwright\s+test|cypress\s+run)\b|(?:tsx|jest|vitest|eslint|prettier|biome|oxlint|stylelint|mocha|ava)\b|pytest\b|python(?:3)?\s+(?:-m\s+(?:pytest|unittest|mypy|ruff|black|flake8))\b|cargo\s+(?:test|check|build|clippy|fmt)\b|go\s+(?:test|vet|build|fmt)\b|dotnet\s+(?:test|build)\b|ctest\b|clang-format\b|gofmt\b|goimports\b|golangci-lint\b|rustfmt\b|ruff\b|black\b|isort\b|flake8\b|mypy\b|pylint\b|rubocop\b|phpcs\b|php-cs-fixer\b|ktlint\b|swiftlint\b|swiftformat\b|mvn\s+(?:test|verify|compile)\b|gradle\s+(?:test|check|build)\b|(?:\.\/)?gradlew(?:\.bat)?\s+(?:test|check|build)\b|node\s+(?:[^\r\n]*\s+)?--test\b)/i;
+
+export function isSafeDevCommand(command: string): boolean {
+  return SAFE_DEV_COMMAND.test(command.trim());
+}
 
 // This remains a non-bypassable policy even after a user has approved host access.
 const HOST_SYSTEM_RISK = [
@@ -35,7 +45,7 @@ function isReadOnlySegment(segment: string): boolean {
   if (!normalized || /(?:^|[^<])>>?|\b(?:tee|out-file|set-content|add-content)\b/i.test(normalized)) {
     return false;
   }
-  return READ_ONLY_COMMAND.test(normalized);
+  return READ_ONLY_COMMAND.test(normalized) || SAFE_DEV_COMMAND.test(normalized);
 }
 
 function isReadOnlyPipeline(analysis: ReturnType<typeof analyzeShellCommand>): boolean {

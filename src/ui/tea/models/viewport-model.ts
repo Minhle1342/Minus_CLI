@@ -279,10 +279,7 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
  * Caller clamps against its own maxOffset.
  */
 export function lastAnswerOffset(model: ViewportModel, width: number): number | undefined {
-  let index = -1;
-  for (let i = model.entries.length - 1; i >= 0; i--) {
-    if (model.entries[i].kind === 'answer') { index = i; break; }
-  }
+  const index = model.entries.findLastIndex((e) => e.kind === 'answer');
   if (index < 0) return undefined;
   const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
   return model.entries.slice(index + 1)

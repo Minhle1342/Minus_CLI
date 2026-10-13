@@ -26,7 +26,7 @@ import { annotateCommandResult } from './command-outcome.js';
 import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
 import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
-import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution } from '../sandbox/command-isolation-policy.js';
+import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
@@ -116,10 +116,27 @@ const ALLOWED_COMMAND_PREFIXES = [
   'timeout ',
   // Build, Test & Package Management
   'npm test',
+  'npm test ',
+  'npm t',
+  'npm t ',
   'npm run ',
   'npm start',
   'npm --version',
   'npm list',
+  'pnpm ',
+  'pnpm',
+  'pnpm test',
+  'pnpm test ',
+  'pnpm t',
+  'pnpm t ',
+  'pnpm run ',
+  'pnpm build',
+  'yarn ',
+  'yarn',
+  'yarn test',
+  'yarn test ',
+  'yarn run ',
+  'yarn build',
   'npx ',
   'npx tsx',
   'npx tsc',
@@ -127,6 +144,8 @@ const ALLOWED_COMMAND_PREFIXES = [
   'npx prettier',
   'npx jest',
   'npx vitest',
+  'tsx ',
+  'tsx',
   'bun ',
   'bun',
   'bunx ',
@@ -140,10 +159,15 @@ const ALLOWED_COMMAND_PREFIXES = [
   'uvx',
   'dotnet ',
   'dotnet',
+  'dotnet test',
+  'dotnet test ',
+  'dotnet build',
+  'dotnet build ',
   'python ',
   'python3 ',
   'pip ',
   'pip3 ',
+  'pytest',
   'pytest ',
   'mvn ',
   'gradle ',
@@ -411,6 +435,9 @@ export function isBlockedGitPushToMain(command: string): boolean {
  */
 export function isAllowedCommand(command: string): boolean {
   const trimmed = command.trim();
+  if (isSafeDevCommand(trimmed)) {
+    return true;
+  }
   if (ALLOWED_COMMAND_PREFIXES.some((prefix) => {
     const exact = prefix.trim();
     return trimmed === exact || (prefix.endsWith(' ') && trimmed.startsWith(prefix));

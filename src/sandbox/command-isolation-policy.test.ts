@@ -8,14 +8,22 @@ import {
   requiresIsolatedExecution,
 } from './command-isolation-policy.js';
 
-test('only known read-only commands may use an automatic local fallback', () => {
+test('read-only and test/build/lint/typecheck commands may use an automatic local fallback', () => {
   assert.equal(requiresIsolatedExecution('rg "SandboxManager" src'), false);
   assert.equal(requiresIsolatedExecution('git status && git diff'), false);
   assert.equal(requiresIsolatedExecution('node --test'), false);
   assert.equal(requiresIsolatedExecution('node --import tsx --test src/sandbox/command-isolation-policy.test.ts'), false);
   assert.equal(requiresIsolatedExecution('tsc --noEmit'), false);
   assert.equal(requiresIsolatedExecution('git rev-parse HEAD'), false);
-  assert.equal(requiresIsolatedExecution('npm test'), true);
+  assert.equal(requiresIsolatedExecution('npm test'), false);
+  assert.equal(requiresIsolatedExecution('npm run build'), false);
+  assert.equal(requiresIsolatedExecution('npm run lint'), false);
+  assert.equal(requiresIsolatedExecution('npm run typecheck'), false);
+  assert.equal(requiresIsolatedExecution('npx vitest run'), false);
+  assert.equal(requiresIsolatedExecution('pytest'), false);
+  assert.equal(requiresIsolatedExecution('cargo test'), false);
+  assert.equal(requiresIsolatedExecution('dotnet test'), false);
+  assert.equal(requiresIsolatedExecution('npm install malicious-pkg'), true);
   assert.equal(requiresIsolatedExecution('node script.js'), true);
   assert.equal(requiresIsolatedExecution('echo ok > marker.txt'), true);
 });
@@ -28,7 +36,9 @@ test('Docker-to-local fallback is fail-closed only for commands requiring isolat
     dockerAvailable: false,
     fallbackToLocal: true,
   };
-  assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), true);
+  assert.equal(mustBlockUnisolatedAutoExecution('npm install malicious-pkg', fallbackStatus), true);
+  assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), false);
+  assert.equal(mustBlockUnisolatedAutoExecution('npm run build', fallbackStatus), false);
   assert.equal(mustBlockUnisolatedAutoExecution('git status', fallbackStatus), false);
   assert.equal(mustBlockUnisolatedAutoExecution('node --test', fallbackStatus), false);
   assert.equal(mustBlockUnisolatedAutoExecution('node --import tsx --test src/test.ts', fallbackStatus), false);
@@ -36,7 +46,7 @@ test('Docker-to-local fallback is fail-closed only for commands requiring isolat
   // Environment override MINUS_ALLOW_HOST_FALLBACK
   process.env.MINUS_ALLOW_HOST_FALLBACK = 'true';
   try {
-    assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), false);
+    assert.equal(mustBlockUnisolatedAutoExecution('npm install malicious-pkg', fallbackStatus), false);
   } finally {
     delete process.env.MINUS_ALLOW_HOST_FALLBACK;
   }

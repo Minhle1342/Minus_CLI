@@ -98,15 +98,7 @@ export function isScratchCommand(command: unknown): boolean {
  */
 export function isScratchPath(filePath: string): boolean {
   const normalized = (filePath || '').trim().replace(/\\/g, '/').toLowerCase();
-  return (
-    normalized.startsWith('scratch/') ||
-    normalized.startsWith('.scratch/') ||
-    normalized.startsWith('temp/') ||
-    normalized.startsWith('.temp/') ||
-    /(?:^|[\\/])(?:scratch|throwaway|repro|reproduce)[_-][a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/i.test(normalized) ||
-    /(?:^|[\\/])scratch[\\/]/i.test(normalized) ||
-    /(?:^|[\\/])temp[\\/]/i.test(normalized)
-  );
+  return /(?:^|\/)\.?(?:scratch|temp)\/|(?:^|\/)(?:scratch|throwaway|repro|reproduce)[_-][\w-]+\.\w+$/i.test(normalized);
 }
 
 export function isNonExecutableFile(filePath: string): boolean {

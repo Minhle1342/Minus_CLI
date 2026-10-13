@@ -20,12 +20,30 @@ test('auto execution refuses a Docker-to-local downgrade for a mutating command'
     }),
     exec: async () => { throw new Error('must not execute'); },
   } as any);
-  const result = await tool.execute({ command: 'npm test' }, new Workspace());
+  const result = await tool.execute({ command: 'npm install malicious-pkg' }, new Workspace());
   assert.equal(result.commandOutcome, 'blocked_preflight');
   assert.equal(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
   assert.equal(result.errorCode, 'ISOLATED_SANDBOX_REQUIRED');
   assert.ok(result.error);
   assert.equal(result.processStarted, false);
+});
+
+test('auto execution allows test and build commands during Docker downgrade', async () => {
+  let executedCommand = '';
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+      dockerAvailable: false, fallbackToLocal: true,
+    }),
+    exec: async (cmd: string) => {
+      executedCommand = cmd;
+      return { stdout: 'tests passed', stderr: '', exitCode: 0, durationMs: 10, success: true };
+    },
+  } as any);
+  const result = await tool.execute({ command: 'npm test' }, new Workspace());
+  assert.notEqual(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
+  assert.equal(result.success, true);
+  assert.equal(executedCommand, 'npm test');
 });
 
 test('Gate 3.2: auto execution allows read-only node test runner command during Docker downgrade', async () => {
