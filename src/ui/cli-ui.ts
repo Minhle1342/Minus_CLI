@@ -134,7 +134,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/skills', usage: '/skills [inspect] [id]', description: 'Show Superpowers skills', category: 'Superpowers' },
   { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Show capability catalog', category: 'Superpowers' },
   { command: '/approvals', usage: '/approvals [approve|reject] [id]', description: 'Handle approval requests', category: 'Security' },
-  { command: '/permissions', usage: '/permissions [mode|reset]', description: 'Configure file/command approval policy (always_ask, ask_sensitive, auto_approve, read_only)', category: 'Security', aliases: ['/permission', '/perm'] },
+  { command: '/permissions', usage: '/permissions [mode|reset|project <mode|clear|status>]', description: 'Configure file/command approval policy (always_ask, ask_sensitive, auto_approve, read_only), incl. per-project override', category: 'Security', aliases: ['/permission', '/perm'] },
   { command: '/undo', description: 'Undo the most recent checkpoint', category: 'Shadow Git', aliases: ['/rollback'] },
   { command: '/checkpoints', description: 'Show checkpoint history', category: 'Shadow Git' },
   { command: '/diff', description: 'Show the unified diff of the current task', category: 'Shadow Git' },
@@ -942,6 +942,70 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     name: 'codex/gpt-5.6-luna',
     provider: 'MINUS (OpenAI / ChatGPT Plus)',
     desc: '🌙 GPT-5.6 Luna: Ultra-fast and light, optimized for clear-cut and repeatable tasks',
+  },
+
+  // 13. InternAI discovery-api (OpenAI-compatible relay)
+  {
+    id: 'ia0',
+    name: 'internai/deepseek-v4-pro-0813',
+    provider: 'InternAI (Discovery API)',
+    desc: 'DeepSeek V4 Pro: deep reasoning and coding, 1M context',
+    recommended: true,
+  },
+  {
+    id: 'ia1',
+    name: 'internai/deepseek-v4-flash-0731',
+    provider: 'InternAI (Discovery API)',
+    desc: 'DeepSeek V4 Flash: fast coding model, 1M context',
+    recommended: true,
+  },
+  {
+    id: 'ia2',
+    name: 'internai/glm-5.3',
+    provider: 'InternAI (Discovery API)',
+    desc: 'GLM 5.3: reasoning and coding, 1M context',
+  },
+  {
+    id: 'ia3',
+    name: 'internai/kimi-k2.6',
+    provider: 'InternAI (Discovery API)',
+    desc: 'Kimi K2.6: coding agent with long context, 262K context',
+  },
+  {
+    id: 'ia4',
+    name: 'internai/qwen3.8-27b',
+    provider: 'InternAI (Discovery API)',
+    desc: 'Qwen 3.8 27B: lightweight, fast coding pick, 262K context',
+  },
+  {
+    id: 'ia5',
+    name: 'internai/minimax-m3',
+    provider: 'InternAI (Discovery API)',
+    desc: 'MiniMax M3: coding model balancing cost and capability, 1M context',
+  },
+  {
+    id: 'ia6',
+    name: 'internai/intern-s2',
+    provider: 'InternAI (Discovery API)',
+    desc: 'Intern-S2: reasoning and coding, 262K context',
+  },
+  {
+    id: 'ia7',
+    name: 'internai/Agents-A1',
+    provider: 'InternAI (Discovery API)',
+    desc: 'Agents-A1: agentic workflows, 262K context',
+  },
+  {
+    id: 'ia8',
+    name: 'internai/Atria-Dawn-Preview',
+    provider: 'InternAI (Discovery API)',
+    desc: 'Atria Dawn Preview: large-context preview model, 524K context',
+  },
+  {
+    id: 'ia9',
+    name: 'internai/deepseek-v4-flash-vision',
+    provider: 'InternAI (Discovery API)',
+    desc: 'DeepSeek V4 Flash Vision: fast coding with image input, 1M context',
   },
 ];
 

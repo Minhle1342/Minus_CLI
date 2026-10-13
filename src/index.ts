@@ -86,6 +86,7 @@ const siliconflowApiKey = process.env.SILICONFLOW_API_KEY || '';
 const mistralApiKey = process.env.MISTRAL_API_KEY || '';
 const openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
 const omniRouteApiKey = process.env.OMNIROUTE_API_KEY || '';
+const internaiApiKey = process.env.INTERNAI_API_KEY || '';
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
 const anthropicApiKeys = Array.from(new Set([
   process.env.ANTHROPIC_API_KEY,
@@ -267,6 +268,17 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
     const rawModel = model.replace(/^omniroute\//, '');
     const baseUrl = process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1';
     const key = process.env.OMNIROUTE_API_KEY || 'sk_omniroute';
+    return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
+  }
+
+  // 0.3. InternAI discovery-api (OpenAI-compatible)
+  if (model.startsWith('internai/')) {
+    const rawModel = model.replace(/^internai\//, '');
+    const baseUrl = process.env.INTERNAI_BASE_URL || 'https://discovery-api.intern-ai.org.cn/v1';
+    const key = internaiApiKey;
+    if (!key) {
+      throw new Error(`INTERNAI_API_KEY is not configured in .env!\n👉 Paste your discovery-api key into INTERNAI_API_KEY in .env.`);
+    }
     return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
   }
 
@@ -604,8 +616,19 @@ async function main() {
     }
   }
 
+  // Per-project permission override: hydrate from the workspace session file
+  // on startup and every workspace switch (opencode-style auto-accept).
+  const hydrateProjectPermission = (rootDir: string): void => {
+    const override = loadSession(rootDir).permissionMode;
+    kernel.ctx.permissions.setProjectMode(rootDir,
+      override === 'always_ask' || override === 'ask_sensitive' || override === 'auto_approve' || override === 'read_only'
+        ? override : null);
+  };
+  hydrateProjectPermission(workspace.rootDir);
+
   // Lắng nghe sự kiện thay đổi workspace hoặc model từ Kernel để tự động đồng bộ xuống đĩa
   kernel.ctx.events.on('workspace:changed', (_oldPath: string, newPath: string) => {
+    hydrateProjectPermission(newPath);
     saveSession({ workspacePath: newPath }, workspace.rootDir);
     saveSession({ workspacePath: newPath });
   });
@@ -639,7 +662,10 @@ async function main() {
   let tui: TeaTerminal | undefined;
   if (headless) {
     kernel.ctx.permissions.setPromptHandler(async () => 'reject');
-    if (cliOptions.plan) kernel.ctx.permissions.setMode('read_only');
+    if (cliOptions.plan) {
+      kernel.ctx.permissions.setMode('read_only');
+      kernel.ctx.permissions.setPlanLock(true);
+    }
     try {
       const attachment = await PromptAttachmentProcessor.resolveAndAttach(headlessPrompt!, workspace);
       const headlessText = cliOptions.plan
@@ -782,6 +808,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
       return;
     }
     isPlanModeActive = plan;
+    kernel.ctx.permissions.setPlanLock(plan);
     if (plan) {
       if (kernel.ctx.permissions.getMode() !== 'read_only') {
         implementPermissionMode = kernel.ctx.permissions.getMode();
@@ -2724,6 +2751,24 @@ Please focus on executing and verifying this task, and update its status to COMP
         if (sub === 'reset') {
           kernel.ctx.permissions.clearSessionApprovals();
           console.log(`\n${c.green}✔ Reset all auto-approved categories in this session.${c.reset}\n`);
+        } else if (sub === 'project') {
+          const projectSub = parts[1]?.toLowerCase();
+          const rootDir = workspace.rootDir;
+          if (!projectSub || projectSub === 'status') {
+            const override = kernel.ctx.permissions.getProjectMode(rootDir);
+            console.log(`\n${c.bold}Project permission override:${c.reset} ${override ?? `${c.dim}(none — global mode applies)`}`);
+            console.log(`${c.dim}Global mode: ${kernel.ctx.permissions.getMode()} · Effective here: ${kernel.ctx.permissions.effectiveMode()}${c.reset}\n`);
+          } else if (projectSub === 'clear') {
+            kernel.ctx.permissions.setProjectMode(rootDir, null);
+            saveSession({ permissionMode: undefined }, rootDir);
+            console.log(`\n${c.green}✔ Cleared project override for:${c.reset} ${c.bold}${rootDir}${c.reset}\n`);
+          } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(projectSub)) {
+            kernel.ctx.permissions.setProjectMode(rootDir, projectSub as any);
+            saveSession({ permissionMode: projectSub as any }, rootDir);
+            console.log(`\n${c.green}✔ Project override for:${c.reset} ${c.bold}${rootDir}${c.reset} ${c.green}→${c.reset} ${c.bold}${projectSub}${c.reset}\n`);
+          } else {
+            console.log(`\n${c.red}✖ Usage:${c.reset} ${c.bold}/permissions project [mode|clear|status]${c.reset}\n`);
+          }
         } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
           if (isPlanModeActive) {
             implementPermissionMode = sub as any;
@@ -2731,7 +2776,8 @@ Please focus on executing and verifying this task, and update its status to COMP
             console.log(`\n${c.green}✔ Saved implement mode: ${c.bold}${sub}${c.reset} ${c.dim}(PLAN stays read-only; applies on exit)${c.reset}\n`);
           } else {
             kernel.ctx.permissions.setMode(sub as any);
-            console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}\n`);
+            const projectOverride = kernel.ctx.permissions.getProjectMode(workspace.rootDir);
+            console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}${projectOverride ? ` ${c.dim}(project override ${projectOverride} still applies here)` : ''}\n`);
           }
         } else {
           CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);

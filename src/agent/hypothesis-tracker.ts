@@ -205,14 +205,14 @@ export class HypothesisTracker {
     const falsified = this.getFalsifiedHypotheses();
     if (falsified.length === 0) return '';
 
+    // Statements and reasons already live in the scratchpad; refer by id only.
     const warnings = falsified.map(
-      (h) => `• [${h.id} Rejected]: ${h.statement} ➔ Reason: ${h.rejectionReason || 'Tests failed'}`,
+      (h) => `• [${h.id} Rejected]: see scratchpad — propose a distinct mechanism, do not repeat.`,
     );
 
     return [
       `\n🚫 [FALSIFIED HYPOTHESES - DO NOT REPEAT]:`,
       ...warnings,
-      `👉 Propose a new hypothesis with a distinct mechanism before further mutations.`,
     ].join('\n');
   }
 

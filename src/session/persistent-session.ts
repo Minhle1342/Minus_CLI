@@ -44,6 +44,8 @@ export interface SessionData {
   tokenConfig?: import('../llm/token-config.js').TokenConfig;
   autoStartDocker?: boolean;
   ocr?: OcrSessionConfig;
+  /** Per-project permission mode override (auto-accept), hydrated on workspace entry. */
+  permissionMode?: import('../security/permission-manager.js').PermissionMode;
   lastUpdated?: string;
 }
 

@@ -535,6 +535,7 @@ export class DynamicContextArbiter {
    * Khử trùng lặp chéo giữa các tầng trí nhớ và lịch sử:
    * 1. Nếu các insight trong Project Memory (P4) đã được nạp ở Warm-Start (History[0]), lọc bỏ để tránh trùng lặp.
    * 2. Nếu các statement của Repository Memory (P6) đã có trong History hoặc P1-P5, lọc bớt các dòng trùng lặp.
+   * 3. Nếu các dòng của Selective Re-injection (P3) đã có trong History[0] hoặc tầng trên, lọc bớt tương tự.
    */
   private deduplicateSources(sources: RankedSource[], existingHistoryText?: string): void {
     const higherPriorityTexts: string[] = [];
@@ -585,6 +586,22 @@ export class DynamicContextArbiter {
         return !higherPriorityTexts.some((highText) => highText.includes(trimmed));
       });
       repoMemSource.content = filteredLines.join('\n').trim();
+    }
+
+    // 3. Khử trùng lặp trong P3 (Selective Re-injection): các dòng đã có trong
+    // History[0] hoặc tầng trên không cần inject lại. Loại trừ chính nội dung P3
+    // khỏi tập so sánh để tránh tự khớp.
+    const recallSource = sources.find((s) => s.key === 'recalledTurnContext');
+    if (recallSource && recallSource.content) {
+      const ownLower = recallSource.content.toLowerCase();
+      const others = higherPriorityTexts.filter((highText) => highText !== ownLower);
+      const lines = recallSource.content.split('\n');
+      const filteredLines = lines.filter((line) => {
+        const trimmed = line.trim().toLowerCase();
+        if (trimmed.length < 25) return true; // Giữ lại tiêu đề / định dạng
+        return !others.some((highText) => highText.includes(trimmed));
+      });
+      recallSource.content = filteredLines.join('\n').trim();
     }
   }
 

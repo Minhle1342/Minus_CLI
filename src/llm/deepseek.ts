@@ -7,6 +7,13 @@ import { fetchCodexResponse } from './codex-responses.js';
 import { createPromptCacheKey } from './cache-envelope.js';
 import { openAIPromptCacheFields } from './provider-capabilities.js';
 
+/**
+ * Stall watchdog for SSE streams: a silent stream (no chunk within the
+ * window) is cut and reported as transport_eof so the agent loop's existing
+ * stream-continuation retry resumes it, instead of hanging forever.
+ */
+const STREAM_STALL_TIMEOUT_MS = 15 * 60 * 1000;
+
 export interface DeepseekLLMOptions {
   modelName?: string;
   apiKey?: string;
@@ -679,30 +686,46 @@ export class DeepseekLLM {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      while (true) {
-        if (request?.signal?.aborted) {
-          rawFinishReason = 'aborted';
-          break;
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      let stalled = false;
+      const resetStallTimer = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => { stalled = true; void reader.cancel().catch(() => {}); }, STREAM_STALL_TIMEOUT_MS);
+      };
+      try {
+        resetStallTimer();
+        while (true) {
           if (request?.signal?.aborted) {
             rawFinishReason = 'aborted';
             break;
           }
-          processSseLine(line);
+          const { done, value } = await reader.read();
+          if (done) break;
+          resetStallTimer();
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (request?.signal?.aborted) {
+              rawFinishReason = 'aborted';
+              break;
+            }
+            processSseLine(line);
+          }
         }
+      } finally {
+        if (stallTimer) clearTimeout(stallTimer);
       }
 
       if (!request?.signal?.aborted) {
         buffer += decoder.decode();
-        for (const line of buffer.split('\n')) processSseLine(line);
+        const tail = buffer.split('\n');
+        // A stall can cut mid-line: the trailing fragment is unparseable JSON,
+        // so drop it instead of throwing (complete lines were already processed).
+        if (stalled) tail.pop();
+        for (const line of tail) processSseLine(line);
       }
     }
 

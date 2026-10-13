@@ -1,4 +1,5 @@
 import type { ToolExecutionContext } from '../tools/types.js';
+import path from 'node:path';
 import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-command.js';
 import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
@@ -58,6 +59,10 @@ export class PermissionManager {
   private approvalsBySession = new Map<string, { categories: Set<string>; prefixes: Map<string, Set<string>> }>();
   private requestHistory: PermissionRequest[] = [];
   private workspaceRoot?: string;
+  /** Per-project mode override (opencode-style auto-accept): keyed by workspace root, survives workspace switches. */
+  private projectModes = new Map<string, PermissionMode>();
+  /** Plan mode forces read_only regardless of global/project modes. */
+  private planLock = false;
 
   constructor(mode: PermissionMode = 'ask_sensitive') {
     this.mode = mode;
@@ -76,6 +81,32 @@ export class PermissionManager {
   }
 
   getMode(): PermissionMode {
+    return this.mode;
+  }
+
+  /** Per-project override for the given workspace root (null clears it). */
+  setProjectMode(root: string, mode: PermissionMode | null): void {
+    const key = path.resolve(root);
+    if (mode) this.projectModes.set(key, mode);
+    else this.projectModes.delete(key);
+  }
+
+  getProjectMode(root: string): PermissionMode | undefined {
+    return this.projectModes.get(path.resolve(root));
+  }
+
+  /** Plan mode entry/exit: locked means effective read_only for every project. */
+  setPlanLock(locked: boolean): void {
+    this.planLock = locked;
+  }
+
+  /** Effective mode for the current workspace: plan lock wins, then project override, then global. */
+  effectiveMode(): PermissionMode {
+    if (this.planLock) return 'read_only';
+    if (this.workspaceRoot) {
+      const override = this.projectModes.get(path.resolve(this.workspaceRoot));
+      if (override) return override;
+    }
     return this.mode;
   }
 
@@ -164,8 +195,9 @@ export class PermissionManager {
     args: Record<string, any>,
     context?: ToolExecutionContext,
   ): Promise<PermissionCheckResult> {
+    const mode = this.effectiveMode();
     // 2. Chế độ Read-Only (Chỉ cho phép đọc, cấm mọi thao tác ghi / chạy lệnh)
-    if (this.mode === 'read_only') {
+    if (mode === 'read_only') {
       const descriptor = new ToolDescriptorRegistry().describe({ name: toolName, description: '', parameters: {}, execute: async () => ({}) });
       const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
       const safeCommand = toolName === 'run_command'
@@ -204,7 +236,7 @@ export class PermissionManager {
     }
 
     // 1. Chế độ Auto-Approve (Tự động duyệt tất cả nhưng vẫn in Diff View nếu là tool sửa file)
-    if (this.mode === 'auto_approve') {
+    if (mode === 'auto_approve') {
       if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
         CLI.renderSessionAutoApprovedDiff(request);
       }
@@ -212,7 +244,7 @@ export class PermissionManager {
     }
 
     // Nếu rủi ro LOW và ở chế độ ask_sensitive -> Cho phép tự động
-    if (this.mode === 'ask_sensitive' && request.riskLevel === 'LOW') {
+    if (mode === 'ask_sensitive' && request.riskLevel === 'LOW') {
       return { allowed: true };
     }
 

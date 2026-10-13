@@ -49,6 +49,7 @@ import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.j
 import { CriticGate, type ExplorationSufficiencyDecision } from './critic-gate.js';
 import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
 import { registerReportFindingsTool } from '../tools/report-findings.js';
+import { registerWorktreeTools } from '../tools/worktree-tools.js';
 import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
@@ -463,6 +464,7 @@ export class AgentLoop {
       this.sessionPersistence = options?.sessionPersistence;
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
       registerReportFindingsTool(this.toolRegistry, this._workspace);
+      registerWorktreeTools(this.toolRegistry, this._workspace);
       this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
       this.toolRegistry.attachGitTools(this._workspace);
       this.kernel.init().catch(() => { });
@@ -511,6 +513,7 @@ export class AgentLoop {
       this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
       registerSubmitSolutionTool(this.toolRegistry, this._workspace);
       registerReportFindingsTool(this.toolRegistry, this._workspace);
+      registerWorktreeTools(this.toolRegistry, this._workspace);
       this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
       this.toolRegistry.attachGitTools(this._workspace);
 
@@ -626,6 +629,7 @@ export class AgentLoop {
     this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
     registerSubmitSolutionTool(this.toolRegistry, this._workspace);
     registerReportFindingsTool(this.toolRegistry, this._workspace);
+    registerWorktreeTools(this.toolRegistry, this._workspace);
   }
 
   setLLM(llm: any, modelName?: string) {
@@ -2357,16 +2361,13 @@ export class AgentLoop {
       });
       let paretoGateReminder: string | undefined;
       if (['bugfix', 'refactor', 'security'].includes(classification.taskClass)) {
-        const inTransitionPhase = ['explore', 'plan'].includes(classification.phase);
-        const transitionNotice = inTransitionPhase
-          ? ' In explore/plan, request_phase_transition before editing and wait for the next model response.'
-          : '';
+        // Phase advance lives in the P1.5 tool-authority directive; restate only the live score here.
         if (classification.risk === 'R1') {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file before editing.${transitionNotice}`;
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file before editing.`;
         } else if (classification.risk === 'R2') {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file and run diagnostics before editing.${transitionNotice}`;
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file and run diagnostics before editing.`;
         } else {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target (including every file in apply_patch).${transitionNotice} R3 bugfix/security need observed reproduction; a planned R3 refactor may proceed after target inspection.`;
+          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target. R3 bugfix/security need observed reproduction; planned R3 refactor may proceed after target inspection.`;
         }
       }
       let warmStartTopoMap: string | undefined;
@@ -2404,28 +2405,34 @@ export class AgentLoop {
               : undefined,
           ].filter(Boolean).join('\n');
 
+      // Resend-skip: a stable block already sent in a prior step's suffix adds
+      // no information by repeating (same tradeoff as the P4/P6 history
+      // dedup). Step 1 always sends since prior suffixes are empty.
+      const sentSuffixes = [...this.stepDynamicSuffixes.values()].join('\n');
+      const resendIfNew = (text?: string) => (text && sentSuffixes.includes(text) ? undefined : text);
+
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
-        responseLanguageDirective: '[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.',
+        responseLanguageDirective: resendIfNew('[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.'),
         completionDirective,
         advicePrompt: trimmedAdvicePrompt,
         testVerificationEncouragement,
         reflectionContext,
         strongAdvisory: promptDecision.strongAdvisoryPrompt,
-        cognitiveScaffold: trimmedScaffoldText,
+        cognitiveScaffold: resendIfNew(trimmedScaffoldText),
         warmStartTopoMap: trimmedWarmStartTopoMap,
         toolPlaybooks: trimmedToolPlaybooks,
         gitPlaybook: trimmedGitPlaybook,
         harnessGuidance: trimmedHarnessGuidance,
         epistemicVerdictContext,
-        hypothesisContext,
+        hypothesisContext: resendIfNew(hypothesisContext),
         hypothesisGuidance,
         domainContractContext,
         paretoGateReminder,
         phaseGuidance: [phaseGuidance, this.verificationPolicy.formatVerificationGuidance({
           hasCallers: this.editTouchedCallers, blastRisk: this.maxEditBlastRisk,
         }, isUserExplicitlyExemptingTests(turnUserRequest))].filter(Boolean).join('\n'),
-        phaseToolAuthority: phaseToolDirective,
+        phaseToolAuthority: resendIfNew(phaseToolDirective),
         phaseHandoff: phaseHandoff?.text,
         rawPlanContext,
         recalledTurnContext,
@@ -3063,7 +3070,7 @@ export class AgentLoop {
             `Model stream ended with ${finishDetail}; partial output was not accepted as final. Continuing the same user turn.`,
           );
           session.addUserMessage(
-            `[SYSTEM STREAM CONTINUATION]: The previous model response ended with ${finishDetail} before a confirmed final answer. Continue from the preserved text prefix. Re-issue any intended tool call in full; no partial tool call was executed.`,
+            `[SYSTEM STREAM CONTINUATION (${finishDetail})]: Continue from the preserved text prefix. Re-issue any cut-off tool call in full.`,
             'system',
           );
           CLI.renderStepFooter();

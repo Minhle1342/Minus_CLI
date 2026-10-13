@@ -13,6 +13,19 @@ test('preserves the response-language directive under a constrained dynamic-cont
   assert.ok(result.sourcesIncluded.includes('Response Language Directive (P0.85)'));
 });
 
+test('dedups P3 re-injected lines already present in history without touching unique lines', () => {
+  const arbiter = new DynamicContextArbiter(2000);
+  const duplicateLine = 'Anti-pattern observed in prior turn: never repeat identical failing shell commands';
+  const result = arbiter.arbitrate({
+    recalledTurnContext: ['# Selective Re-injection', duplicateLine, 'A brand-new finding about the router module timeout'].join('\n'),
+  }, {
+    existingHistoryContext: `warm start\n${duplicateLine}`,
+  });
+
+  assert.doesNotMatch(result.renderedContext, /never repeat identical failing shell commands/);
+  assert.match(result.renderedContext, /brand-new finding about the router module timeout/);
+});
+
 test('preserves guaranteed token floor for repositoryContext when minRepoMapFloorTokens is specified (R3 anti-inversion)', () => {
   const arbiter = new DynamicContextArbiter(500);
   const repoMapContent = [

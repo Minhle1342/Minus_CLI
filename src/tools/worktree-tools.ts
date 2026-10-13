@@ -2,6 +2,7 @@ import { ToolDefinition } from './types.js';
 import { Type } from '@google/genai';
 import { WorktreeManager } from '../workspace/worktree-manager.js';
 import { Workspace } from '../workspace/workspace.js';
+import type { ToolRegistry } from './registry.js';
 
 export function createWorktreeTools(worktreeManager: WorktreeManager): ToolDefinition[] {
   const createWorktreeTool: ToolDefinition = {
@@ -96,4 +97,11 @@ export function createWorktreeTools(worktreeManager: WorktreeManager): ToolDefin
   };
 
   return [createWorktreeTool, listWorktreesTool, removeWorktreeTool];
+}
+
+export function registerWorktreeTools(registry: ToolRegistry, workspace: Workspace): void {
+  const manager = new WorktreeManager(workspace.rootDir);
+  for (const tool of createWorktreeTools(manager)) {
+    if (!registry.has(tool.name)) registry.register(tool);
+  }
 }
