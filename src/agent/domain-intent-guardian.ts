@@ -60,7 +60,10 @@ export class DomainIntentGuardian {
 
     // 1. Nhận diện quyền sửa file test hoặc bổ sung kiểm thử
     const forbidsTests = isUserExplicitlyExemptingTests(userRequest) || /(?:do not|don't|must not|never|không|khong|đừng|dung)\s+(?:modify|change|edit|delete|update|fix|write|add|create|sửa|sua|đổi|doi|xóa|xoa|viết|viet|thêm|them|tạo|tao)\s+(?:existing\s+|các\s+|cac\s+)?(?:tests?|kiểm thử|kiem thu)/iu.test(userRequest);
+    const upgradeIntent = /(nâng cấp|nang cap|upgrade|update assertion|nâng cấp assertion)/i.test(userRequest)
+      && /(test|assert|kiểm thử|kiem thu)/i.test(userRequest);
     const explicitlyAllowsTestModification = !forbidsTests && (
+      upgradeIntent ||
       lower.includes('update test') ||
       lower.includes('fix test') ||
       lower.includes('sửa test') ||
@@ -73,14 +76,11 @@ export class DomainIntentGuardian {
       lower.includes('thêm test') ||
       lower.includes('tạo test') ||
       lower.includes('đồng bộ test') ||
-      lower.includes('nâng cấp') ||
-      lower.includes('nang cap') ||
-      lower.includes('update assertion') ||
-      lower.includes('upgrade test') ||
-      lower.includes('assertion') ||
-      lower.includes('expected') ||
-      lower.includes('tdd') ||
-      lower.includes('tdd'));
+      lower.includes('update test file') ||
+      lower.includes('modify test') ||
+      lower.includes('change test') ||
+      lower.includes('sửa file test') ||
+      lower.includes('sửa đổi test'));
 
     // 2. Trích xuất Non-Negotiable Constraints
     const constraints: string[] = [];

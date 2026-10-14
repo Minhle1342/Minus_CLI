@@ -2270,6 +2270,7 @@ async function runUnitTests() {
       if (this.call === 4) {
         return {
           toolCalls: [
+            { name: 'replace_text', args: { path: 'package.json', oldText: 'before', newText: 'after' } },
             { name: 'update_plan_task', args: { id: 2, status: 'COMPLETED', evidence: 'configuration mutation observed' } },
             { name: 'run_command', args: { command: 'npm run build' } },
           ],
@@ -2280,10 +2281,13 @@ async function runUnitTests() {
       }
       if (this.call === 6) {
         return {
-          toolCalls: [{
-            name: 'update_plan_task',
-            args: { id: 3, status: 'COMPLETED', evidence: 'build command exited successfully' },
-          }],
+          toolCalls: [
+            { name: 'run_command', args: { command: 'npm run build' } },
+            {
+              name: 'update_plan_task',
+              args: { id: 3, status: 'COMPLETED', evidence: 'build command exited successfully' },
+            },
+          ],
         };
       }
       return submittedMockAnswer('Completed every execution-plan step with observed tool evidence.');
@@ -4494,7 +4498,7 @@ Luồng thực thi diễn ra tuần tự qua các giai đoạn trong src/agent/a
   assert(
     fallbackTimeoutRes.provider === 'duckduckgo_fallback'
     && fallbackTimeoutRes.returnedResults === 2
-    && fallbackTimeoutRes.extractedTopContent?.length === 1
+    && fallbackTimeoutRes.extractedTopContent?.length === 2
     && fallbackTimeoutRes.extractedTopContent[0].codeBlocks[0].includes('node:test'),
     'web_search tự động fallback sang DuckDuckGo và trích xuất top content mà không bị crash bởi AbortSignal của SearXNG',
   );
@@ -4560,7 +4564,7 @@ export function runInContext&lt;T&gt;(store: Map&lt;string, any&gt;, fn: () =&gt
     'web_search sinh investigationLeads phân loại rõ ràng official_documentation và issue_tracker',
   );
   assert(
-    deepSearchRes.extractedTopContent?.length === 1
+    deepSearchRes.extractedTopContent?.length === 2
     && deepSearchRes.extractedTopContent[0].codeBlocks?.length >= 1
     && deepSearchRes.extractedTopContent[0].codeBlocks[0].includes('AsyncLocalStorage'),
     'web_search tự động trích xuất code blocks và clean markdown từ top results khi fetch_top_content=true',
@@ -4975,7 +4979,7 @@ Always write tests first!`;
   );
 
   // 4.1 Dedicated Git mutation tools with per-turn authorization and a real local remote.
-  const gitFixture = await fs.mkdtemp(path.join(workspace.rootDir, '.git-tools-test-'));
+  const gitFixture = await fs.mkdtemp(path.join(os.tmpdir(), '.git-tools-test-'));
   try {
     const repoPath = path.join(gitFixture, 'repo');
     const remotePath = path.join(gitFixture, 'remote.git');
@@ -5133,7 +5137,7 @@ Always write tests first!`;
     assert(genericFetch.success === true && genericFetch.risk === 'network', 'git_command thực thi network command khi được yêu cầu rõ ràng');
   } finally {
     const resolvedFixture = path.resolve(gitFixture);
-    if (resolvedFixture.startsWith(path.resolve(workspace.rootDir) + path.sep)) {
+    if (resolvedFixture.startsWith(path.resolve(os.tmpdir()) + path.sep)) {
       await fs.rm(resolvedFixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }

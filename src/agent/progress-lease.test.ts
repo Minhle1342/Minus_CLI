@@ -58,7 +58,7 @@ describe('Progress-Leased Step Extension', () => {
         e.type === 'control/decision' && e.data?.controlDecision?.mode === 'step-lease-extension',
       );
       assert.ok(leaseEvents.length > 0, 'Expected at least one step-lease-extension control decision');
-      assert.equal(leaseEvents[0].data.controlDecision.reason, 'file_mutated');
+      assert.equal(leaseEvents[0]?.data?.controlDecision?.reason, 'file_mutated');
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
