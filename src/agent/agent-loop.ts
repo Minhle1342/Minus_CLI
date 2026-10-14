@@ -4740,7 +4740,7 @@ export class AgentLoop {
           const currentMutatedFilesCount = this.targetFilesModifiedInTurn.size;
           const hasNewCompletedTask = currentCompletedTasks > lastProgressCompletedTasks;
           const hasNewMutatedFile = currentMutatedFilesCount > lastProgressMutatedFilesCount;
-          const isVerified = !hasGrantedVerificationLease && this.verificationPolicy.canComplete().allowed;
+          const isVerified = !hasGrantedVerificationLease && this.targetFilesModifiedInTurn.size > 0 && this.verificationPolicy.canComplete().allowed;
 
           if (hasNewCompletedTask || hasNewMutatedFile || isVerified) {
             lastProgressCompletedTasks = currentCompletedTasks;

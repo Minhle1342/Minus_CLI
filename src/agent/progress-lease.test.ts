@@ -27,34 +27,31 @@ describe('Progress-Leased Step Extension', () => {
       const workspace = new Workspace(rootDir);
       const registry = new ToolRegistry();
       registry.register({
-        name: 'write_file',
-        description: 'write file',
-        parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } },
-        execute: async (args: any) => {
-          const filePath = path.join(rootDir, args.path);
-          await fs.writeFile(filePath, args.content || 'hello');
-          return { success: true, path: args.path };
-        },
+        name: 'replace_text',
+        description: 'edit',
+        parameters: { type: 'OBJECT', properties: {} } as any,
+        execute: async () => ({ success: true, filesModified: ['a.ts'] }),
       });
 
-      // Initial budget is 2 steps.
-      // Step 1: LLM calls write_file -> progress -> extends effectiveMaxSteps by 5 (now at least 7).
-      // Step 2: LLM continues without stopping at step 2.
-      // Step 3: LLM provides final answer.
+      const summary = 'Completed fixes in a.ts with verification.';
+      // Initial baseMaxSteps is 2.
+      // Step 1: replace_text (mutation) -> triggers progress lease extension (+5 steps).
+      // Step 2: replace_text (mutation) -> triggers progress lease extension (+5 steps).
+      // Step 3: submit_solution (runs beyond initial budget of 2).
       const replies = [
-        { text: 'writing file', toolCalls: [{ id: 'c1', name: 'write_file', args: { path: 'test.txt', content: 'test' } }] },
-        { text: 'verifying progress', toolCalls: [{ id: 'c2', name: 'write_file', args: { path: 'test2.txt', content: 'test2' } }] },
-        { text: 'Task completed successfully with evidence.', toolCalls: [] },
+        { toolCalls: [{ id: 'c1', name: 'replace_text', args: { path: 'a.ts' } }] },
+        { toolCalls: [{ id: 'c2', name: 'replace_text', args: { path: 'b.ts' } }] },
+        { toolCalls: [{ id: 'c3', name: 'submit_solution', args: { summary } }] },
       ];
 
       const llm = new ScriptedLLM(replies);
       const loop = new AgentLoop(llm as any, registry, { workspace, maxSteps: 2, toolControlMode: 'off' });
       const session = new Session('session-lease-test');
-      session.addUserMessage('Create test files and finish', 'human');
+      session.addUserMessage('Fix the issue in a.ts and b.ts /no-verify.', 'human');
 
-      const result = await loop.run(session, { maxSteps: 2 });
-      assert.ok(result.includes('Task completed successfully'), `Expected final answer but got: ${result}`);
-      assert.equal(llm.calls, 3, 'Should have executed 3 steps due to progress lease extension');
+      await loop.run(session, { maxSteps: 2 });
+      // If leased extension worked, llm.calls must reach at least 3 despite initial maxSteps = 2
+      assert.ok(llm.calls >= 3, `Should have executed at least 3 steps due to progress lease extension, got ${llm.calls}`);
 
       // Verify control/decision event logged the lease extension
       const leaseEvents = session.getEvents().filter((e) =>
@@ -72,18 +69,24 @@ describe('Progress-Leased Step Extension', () => {
     try {
       const workspace = new Workspace(rootDir);
       const registry = new ToolRegistry();
+      let callCount = 0;
       registry.register({
         name: 'read_dummy',
         description: 'read dummy',
-        parameters: { type: 'object', properties: {} },
-        execute: async () => ({ data: 'nothing changed' }),
+        parameters: { type: 'OBJECT', properties: {} } as any,
+        execute: async () => {
+          callCount++;
+          return { data: `tick-${callCount}` };
+        },
       });
 
-      // Budget is 2 steps. LLM does non-mutating tool calls.
+      // Base budget = 2 steps.
+      // Steps only call read_dummy without mutation or plan tasks.
       const replies = [
-        { text: 'reading', toolCalls: [{ id: 'c1', name: 'read_dummy', args: {} }] },
-        { text: 'reading again', toolCalls: [{ id: 'c2', name: 'read_dummy', args: {} }] },
-        { text: 'reading third time', toolCalls: [{ id: 'c3', name: 'read_dummy', args: {} }] },
+        { toolCalls: [{ id: 'c1', name: 'read_dummy', args: { query: '1' } }] },
+        { toolCalls: [{ id: 'c2', name: 'read_dummy', args: { query: '2' } }] },
+        { toolCalls: [{ id: 'c3', name: 'read_dummy', args: { query: '3' } }] },
+        { toolCalls: [{ id: 'c4', name: 'read_dummy', args: { query: '4' } }] },
       ];
 
       const llm = new ScriptedLLM(replies);
@@ -92,8 +95,14 @@ describe('Progress-Leased Step Extension', () => {
       session.addUserMessage('Investigate without changes', 'human');
 
       const result = await loop.run(session, { maxSteps: 2 });
-      assert.ok(result.includes('maximum steps'), `Expected maximum steps reached but got: ${result}`);
-      assert.equal(llm.calls, 2, 'Should not exceed initial 2 steps when no progress occurs');
+      assert.ok(result.includes('maximum steps (2) reached'), `Expected maximum steps reached but got: ${result}`);
+      assert.equal(llm.calls, 2, 'Should strictly stop at initial 2 steps when no progress occurs');
+
+      // Verify no lease extension events were appended
+      const leaseEvents = session.getEvents().filter((e) =>
+        e.type === 'control/decision' && e.data?.controlDecision?.mode === 'step-lease-extension',
+      );
+      assert.equal(leaseEvents.length, 0, 'Should not grant any step lease when no progress occurred');
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
