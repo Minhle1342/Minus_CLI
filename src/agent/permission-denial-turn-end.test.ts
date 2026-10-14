@@ -114,3 +114,54 @@ test('Agent loop ends the turn (no workaround attempts) after explicit user deni
     await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('Agent loop gracefully continues and adapts when permission is denied in non-interactive/headless mode (OpenCode v2.0.20 parity)', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'graceful-deny-loop-'));
+  try {
+    const workspace = new Workspace(rootDir);
+    const llm = new ScriptedCompletionLLM([
+      {
+        text: '',
+        toolCalls: [{ id: 'call-deny-headless', name: 'run_command', args: { command: 'rm -rf /tmp/denied-probe-xyz' } }],
+      },
+      {
+        text: 'Alternative safe inspection completed without running terminal commands.',
+        toolCalls: [
+          {
+            id: 'call-submit',
+            name: 'submit_solution',
+            args: { summary: 'Task finished: destructive command was skipped due to permission denial.' },
+          },
+        ],
+      },
+    ]);
+    const registry = new ToolRegistry();
+    // Configure loop in non-interactive / headless mode
+    const loop = new AgentLoop(llm as any, registry, { workspace, maxSteps: 4, headless: true });
+    const runner = (loop as any).toolRunner;
+    let pm = runner.getPermissionManager?.();
+    if (!pm) {
+      const { PermissionManager: PM } = await import('../security/permission-manager.js');
+      pm = new PM('always_ask');
+      runner.setPermissionManager(pm);
+    } else {
+      pm.setMode('always_ask');
+    }
+    pm.setPromptHandler(async (req) => (req.toolName === 'run_command' ? 'reject' : 'approve'));
+
+    const session = new Session('session-graceful-deny-loop');
+    session.addUserMessage('Execute the temp directory cleanup command if permitted, otherwise report status.');
+    const result = await loop.run(session);
+
+    assert.equal(llm.calls, 2, 'LLM must be prompted again to choose an alternative strategy');
+    assert.match(String(result), /destructive command was skipped/i);
+    const toolResults = session.getEvents().filter((e: any) => e.type === 'tool/result');
+    assert.ok(
+      toolResults.some((e: any) => e.data?.result?.deniedByUser === true),
+      'denial must be recorded in session history for LLM to see',
+    );
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+

@@ -11,6 +11,9 @@ import type { StepPromptGatingMode } from './step-prompt-policy.js';
 import type { ContextManagementMode } from './context-budget-manager.js';
 
 export interface AgentLoopOptions {
+  /** Run in non-interactive / headless mode where permission denials gracefully continue instead of killing the turn. */
+  headless?: boolean;
+  nonInteractive?: boolean;
   maxSteps?: number;
   workspace?: Workspace;
   checkpointManager?: CheckpointManager;

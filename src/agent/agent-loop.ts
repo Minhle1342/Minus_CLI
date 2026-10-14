@@ -4643,16 +4643,24 @@ export class AgentLoop {
           }
 
           // Explicit user denial ([n]/Esc/Ctrl+C at the permission prompt):
-          // stop dispatching further tools this step; the turn ends below
-          // instead of letting the model route around the denial.
+          // In interactive mode, stop dispatching further tools and end the turn.
+          // In non-interactive/headless mode (OpenCode v2.0.20 parity), gracefully let the model adapt and seek an alternative.
           if (executionResult.result?.deniedByUser === true) {
-            userDeniedPermission = {
-              toolName,
-              detail: String(
-                executionResult.result?.error || executionResult.result?.summary || executionResult.result?.errorCode || 'permission denied',
-              ).slice(0, 240),
-            };
-            break;
+            const isNonInteractive = Boolean(
+              this.loopOptions?.headless
+              || this.loopOptions?.nonInteractive
+              || process.env.MINUS_NON_INTERACTIVE === '1'
+              || process.env.MINUS_HEADLESS === '1'
+            );
+            if (!isNonInteractive) {
+              userDeniedPermission = {
+                toolName,
+                detail: String(
+                  executionResult.result?.error || executionResult.result?.summary || executionResult.result?.errorCode || 'permission denied',
+                ).slice(0, 240),
+              };
+              break;
+            }
           }
           // Post-submit lock: further calls are blocked by design. Finalize
           // from the submitted summary below instead of burning another
