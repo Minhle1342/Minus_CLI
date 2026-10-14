@@ -440,10 +440,21 @@ const MODEL_TOKEN_PROFILES: Record<string, Partial<ModelTokenProfile>> = {
 };
 
 /**
+ * Aliases for retired model IDs: stale saved configs keep tuned limits instead
+ * of silently falling back to defaults.
+ */
+const MODEL_TOKEN_PROFILE_ALIASES: Record<string, string> = {
+  'poolside/laguna-s-2.1:free': 'nvidia/nemotron-3.5-lightning:free',
+  'poolside/laguna-xs-2.1:free': 'liquid/lfm-2.5-2.6b:free',
+  'cohere/north-mini-code:free': 'dots-studio/dots-3-note-preview:free',
+};
+
+/**
  * Lấy Profile Token mặc định cho một mô hình bất kỳ
  */
 export function getModelTokenProfile(modelName: string, baseURL?: string): ModelTokenProfile {
-  const normalized = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex|anthropic|openrouter)\//, '');
+  const raw = (modelName || '').toLowerCase().replace(/^(google|deepseek|groq|cerebras|sambanova|mistral|github|siliconflow|pollinations|codex|anthropic|openrouter)\//, '');
+  const normalized = MODEL_TOKEN_PROFILE_ALIASES[raw] ?? raw;
 
   let matchedKey = Object.keys(MODEL_TOKEN_PROFILES).find((key) => key.toLowerCase() === normalized);
   if (!matchedKey) {

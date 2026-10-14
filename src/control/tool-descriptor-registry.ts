@@ -320,7 +320,7 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'ask_user') {
+    } else if (name === 'ask_user' || name === 'ask_question') {
       descriptor = {
         name,
         capabilities: ['plan', 'inspect'],

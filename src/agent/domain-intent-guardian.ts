@@ -73,13 +73,12 @@ export class DomainIntentGuardian {
       lower.includes('thêm test') ||
       lower.includes('tạo test') ||
       lower.includes('đồng bộ test') ||
-      lower.includes('nâng cấp') ||
-      lower.includes('nang cap') ||
       lower.includes('update assertion') ||
       lower.includes('upgrade test') ||
-      lower.includes('assertion') ||
-      lower.includes('expected') ||
-      lower.includes('tdd') ||
+      ((lower.includes('nâng cấp') || lower.includes('nang cap') ||
+        lower.includes('assertion') || lower.includes('expected')) &&
+        (lower.includes('test') || lower.includes('assert') ||
+          lower.includes('kiểm thử') || lower.includes('kiem thu'))) ||
       lower.includes('tdd'));
 
     // 2. Trích xuất Non-Negotiable Constraints

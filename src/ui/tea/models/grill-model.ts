@@ -52,7 +52,7 @@ export function grillKey(msg: KeyMsg, model: RootModel): [RootModel, Cmd[]] | un
 export function grillView(grill: GrillModel, width: number, height: number): string[] {
   const panelWidth = Math.max(20, Math.min(width - 4, 72));
   const lines: string[] = [];
-  lines.push(color(tokyoNight.purple, 'GRILL-ME · thống nhất lựa chọn với LLM') + color(tokyoNight.muted, ' · Esc hủy'));
+  lines.push(color(tokyoNight.purple, 'ELICITATION / GRILL-ME · Thống nhất lựa chọn') + color(tokyoNight.muted, ' · Esc hủy'));
   lines.push(...wrap(color(tokyoNight.text, grill.question || '(không có câu hỏi)'), panelWidth));
   lines.push('');
   if (grill.loading) {

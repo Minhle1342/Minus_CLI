@@ -7,6 +7,8 @@ export interface GrillSuggestContext {
   recentTranscript?: string[];
   /** Session id của tab đang route — phiên gợi ý ephemeral mang id này để trace. */
   sessionId?: string;
+  /** Explicit options provided by MCP Elicitation / V2 Form */
+  providedOptions?: Array<string | { label: string; detail?: string; text?: string }>;
 }
 
 /** Heuristic fallback khi LLM offline — luôn trả về ít nhất 2 phương án. */
@@ -42,7 +44,7 @@ export interface GrillUI {
   dismissGrill(): void;
 }
 
-/** Shared open-loading-then-fill flow for /grill-me and model-initiated ask_user. */
+/** Shared open-loading-then-fill flow for /grill-me and model-initiated ask_user / ask_question (MCP Elicitation). */
 export async function runGrillFlow(
   ui: GrillUI,
   llm: GrillLLM | undefined,
@@ -52,6 +54,32 @@ export async function runGrillFlow(
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (signal?.aborted) return undefined;
+
+  // MCP Elicitation & V2 Form: If explicit options are provided, open modal immediately with options
+  if (ctx.providedOptions && ctx.providedOptions.length > 0) {
+    const directOptions: GrillOption[] = ctx.providedOptions.map((opt, i) => {
+      const label = typeof opt === 'string' ? opt.trim() : String(opt?.label || opt?.text || '').trim();
+      const detail = typeof opt === 'object' && opt?.detail ? String(opt.detail).trim() : undefined;
+      return {
+        id: `opt-${i + 1}`,
+        label,
+        detail,
+        source: 'llm' as const,
+      };
+    }).filter((opt) => opt.label.length > 0);
+
+    if (directOptions.length > 0) {
+      const pickPromise = ui.grillChoose(question, directOptions, sessionId);
+      const onAbort = () => ui.dismissGrill();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        return await pickPromise;
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+      }
+    }
+  }
+
   const pickPromise = ui.grillChoose(question, [], sessionId);
   const onAbort = () => ui.dismissGrill();
   signal?.addEventListener('abort', onAbort, { once: true });

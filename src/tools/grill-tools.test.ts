@@ -62,5 +62,33 @@ test('ask_user passes the turn gate in explore without approval friction', () =>
   const classification = new ClassificationEngine().classify({ request: 'Add a login page' });
   const decision = gate.decide(classification, createGrillTools(new GrillService()));
   assert.ok(decision.allowedToolNames.includes('ask_user'));
+  assert.ok(decision.allowedToolNames.includes('ask_question'));
   assert.ok(!decision.approvalToolNames.includes('ask_user'));
+  assert.ok(!decision.approvalToolNames.includes('ask_question'));
+});
+
+test('ask_user / ask_question passes explicit options for MCP Elicitation & V2 Form', async () => {
+  const service = new GrillService();
+  let receivedCtx: any;
+  service.setPromptHandler(async (question, ctx, sessionId) => {
+    receivedCtx = ctx;
+    return 'PostgreSQL';
+  });
+  const tools = createGrillTools(service);
+  const askQuestionTool = tools.find((t) => t.name === 'ask_question');
+  assert.ok(askQuestionTool, 'ask_question must be registered');
+
+  const result = await askQuestionTool.execute(
+    {
+      question: 'Which database should we use?',
+      options: ['SQLite', 'PostgreSQL', 'MySQL'],
+      context: 'Production workload',
+    },
+    {} as any,
+    { sessionId: 's2', turn: 1 } as any,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.picked, 'PostgreSQL');
+  assert.deepEqual(receivedCtx.providedOptions, ['SQLite', 'PostgreSQL', 'MySQL']);
 });
