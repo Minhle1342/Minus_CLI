@@ -150,6 +150,8 @@ export function formatAnswer(text: string, width = 80): string {
     const prev = lines.length > 0 ? lines[lines.length - 1] : '';
     const prevIsProse = prev.trim() !== ''
       && !/^[╭├╰─┬┼┴]/.test(prev.trim())
+      && !prev.includes('│')
+      && !/^(?: {4}|\t)/.test(prev)
       && !/^\s{0,3}(#{1,6}\s|>+\s*|(?:[-*•]|\d+\.)\s|(`{3,}|~{3,}))/.test(prev);
     if (!inFence && /^\s{0,3}=+\s*$/.test(line) && prevIsProse) {
       lines[lines.length - 1] = `# ${prev.trim()}`;
@@ -372,8 +374,6 @@ export function shortTabTitle(id: string): string {
 const HIDDEN_TRANSCRIPT_LEADERS = [
   '[SUBMISSION REQUIRED]',
   '[STRONG ADVISORY',
-  '[SYSTEM LOOP ADVISORY]',
-  '[SYSTEM COMPLETION RECOVERY',
   '[ADAPTIVE REASONING',
   '🧠 [ADAPTIVE REASONING',
   '[EVIDENCE_GATE_OBSERVE]',
@@ -693,7 +693,10 @@ function hideTab(model: RootModel, index: number, keepOpen = false): [RootModel,
   }
   const tabs = snapshotActive(model).map(t => t.id === target.id ? { ...t, hidden: true } : t);
   const hidingActive = state.activeId === target.id;
-  const fallback = tabs.filter(t => !t.hidden)[Math.min(state.selected, tabs.filter(t => !t.hidden).length - 1)];
+  // Tab dự phòng: vị trí tab vừa ẩn trong strip (tab sau trượt lên, hoặc tab trước nếu ẩn tab cuối).
+  const targetPos = Math.max(0, visible.findIndex(t => t.id === target.id));
+  const visibleAfter = tabs.filter(t => !t.hidden);
+  const fallback = visibleAfter[Math.min(targetPos, visibleAfter.length - 1)];
   const shown = { ...fallback, unread: 0 };
   const shownTabs = tabs.map(t => t.id === fallback.id ? shown : t);
   const chrome = restoreTabChrome(shown);
@@ -785,8 +788,11 @@ export function sessionTabsKey(msg: KeyMsg, model: RootModel): [RootModel, Cmd[]
       return switchToTab(model, state.selected);
     }
     default: {
+      // Số hiển thị trong modal theo đúng thứ tự đã sort (awaiting lên trước):
+      // map về index gốc trước khi switch, kẻo sang nhầm tab.
       const digit = msg.text && /^[1-9]$/.test(msg.text) ? Number(msg.text) - 1 : -1;
-      if (digit >= 0 && digit < count) return switchToTab(model, digit);
+      const ordered = modalTabOrder(state);
+      if (digit >= 0 && digit < ordered.length) return switchToTab(model, ordered[digit]);
       const letter = (msg.text || (msg.key.length === 1 ? msg.key : '')).toLowerCase();
       if (letter === 'n') return createNewTab(model);
       if (letter === 'x' || letter === 'd') return smartCloseTab(model, state.selected, true);
@@ -796,21 +802,31 @@ export function sessionTabsKey(msg: KeyMsg, model: RootModel): [RootModel, Cmd[]
   }
 }
 
+/** Xếp tab đang chờ user input lên trước (OpenCode v2 UX). Stable: giữ thứ tự gốc giữa các tab cùng loại. */
+export function sortAwaitingFirst<T extends { tab: SessionTab }>(state: SessionTabsModel, list: T[]): T[] {
+  const rank = (tab: SessionTab) => (tab.awaitingInput || (state.activeQuestionSessionId && tab.id === state.activeQuestionSessionId) ? 0 : 1);
+  return [...list].sort((a, b) => rank(a.tab) - rank(b.tab));
+}
+
+/** Index gốc của các tab hiển thị (bỏ hidden), theo đúng thứ tự strip (awaiting lên trước, tối đa 6). */
+export function visibleTabOrder(state: SessionTabsModel): number[] {
+  return sortAwaitingFirst(state, state.tabs.map((tab, index) => ({ tab, index })))
+    .filter(({ tab }) => !tab.hidden)
+    .map(({ index }) => index);
+}
+
+/** Index gốc theo đúng thứ tự modal (awaiting lên trước, gồm cả tab hidden) — dùng cho phím số. */
+export function modalTabOrder(state: SessionTabsModel): number[] {
+  return sortAwaitingFirst(state, state.tabs.map((tab, index) => ({ tab, index }))).map(({ index }) => index);
+}
+
 /** Segment plain (chưa tô màu) của tab-strip — nguồn duy nhất cho cả render lẫn hit-test click chuột. */
 export interface StripSegment { text: string; tab: number; zone: 'tab' | 'close' | 'new' | 'none' }
 const STRIP_SEP: StripSegment = { text: ' │ ', tab: -1, zone: 'none' };
 
 export function sessionStripSegments(state: SessionTabsModel, width: number): StripSegment[] {
   // Ưu tiên: tab đang chờ user input (awaitingInput) được ghim lên đầu strip (OpenCode v2 UX)
-  const sortedTabs = state.tabs.map((tab, index) => ({ tab, index })).filter(({ tab }) => !tab.hidden);
-  sortedTabs.sort((a, b) => {
-    const aAwaiting = Boolean(a.tab.awaitingInput || (state.activeQuestionSessionId && a.tab.id === state.activeQuestionSessionId));
-    const bAwaiting = Boolean(b.tab.awaitingInput || (state.activeQuestionSessionId && b.tab.id === state.activeQuestionSessionId));
-    if (aAwaiting && !bAwaiting) return -1;
-    if (!aAwaiting && bAwaiting) return 1;
-    return 0;
-  });
-  const visible = sortedTabs.slice(0, 6);
+  const visible = visibleTabOrder(state).slice(0, 6).map((index) => ({ tab: state.tabs[index], index }));
   const suffix: StripSegment[] = [{ text: '+ new', tab: -1, zone: 'new' }, { text: ' · Ctrl+T', tab: -1, zone: 'none' }];
   const hiddenCount = state.tabs.length - state.tabs.filter(t => !t.hidden).length;
   const overflow = state.tabs.filter(t => !t.hidden).length - visible.length;
@@ -835,7 +851,10 @@ export function sessionStripSegments(state: SessionTabsModel, width: number): St
     let dropAt = -1;
     for (let i = body.length - 1; i >= 0; i--) if (body[i].zone === 'close') { dropAt = i; break; }
     if (dropAt < 0) break;
-    body.splice(dropAt - 1, 2); // gỡ "tab ×" cuối (kèm sep trước nó)
+    // Gỡ cặp "tab ×" cuối cùng separator đi kèm (trước nó, hoặc sau nó khi cặp đứng đầu).
+    const hasSepBefore = dropAt - 2 >= 0 && body[dropAt - 2].zone === 'none';
+    const hasSepAfter = Boolean(body[dropAt + 1]) && body[dropAt + 1].zone === 'none';
+    body.splice(hasSepBefore ? dropAt - 2 : dropAt - 1, hasSepBefore || hasSepAfter ? 3 : 2);
   }
   return body;
 }
@@ -899,14 +918,7 @@ export function sessionTabsView(state: SessionTabsModel, width: number, height: 
     lines.push(...wrap(color(tokyoNight.muted, 'Chưa có session. Nhấn n để tạo tab mới.'), panelWidth));
   } else {
     // Sắp xếp hiển thị modal: ưu tiên tab awaitingInput lên đầu (OpenCode v2 UX)
-    const indexedTabs = state.tabs.map((tab, originalIndex) => ({ tab, originalIndex }));
-    indexedTabs.sort((a, b) => {
-      const aAwaiting = Boolean(a.tab.awaitingInput || (state.activeQuestionSessionId && a.tab.id === state.activeQuestionSessionId));
-      const bAwaiting = Boolean(b.tab.awaitingInput || (state.activeQuestionSessionId && b.tab.id === state.activeQuestionSessionId));
-      if (aAwaiting && !bAwaiting) return -1;
-      if (!aAwaiting && bAwaiting) return 1;
-      return 0;
-    });
+    const indexedTabs = sortAwaitingFirst(state, state.tabs.map((tab, originalIndex) => ({ tab, originalIndex })));
 
     indexedTabs.forEach(({ tab, originalIndex }, displayIndex) => {
       const isSelected = originalIndex === state.selected;
