@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { ToolRegistry, ToolScope } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
@@ -3143,7 +3144,17 @@ export class AgentLoop {
         if (hasValidText) {
           // Persist only the visible text prefix. Partial/unconfirmed tool calls
           // must not enter history or execute.
-          session.addModelMessage({ text: response.text });
+          session.addModelMessage({ text: response.text, rawContent: response.rawContent });
+        } else if (hasReasoning) {
+          session.addModelMessage({
+            text: '[Interrupted during reasoning phase]',
+            rawContent: response.rawContent,
+          });
+        } else {
+          session.addModelMessage({
+            text: '[Stream connection interrupted before output]',
+            rawContent: response.rawContent,
+          });
         }
 
         const finishDetail = response.rawFinishReason
@@ -3157,10 +3168,26 @@ export class AgentLoop {
             consecutiveIncompleteFinishes,
             `Model stream ended with ${finishDetail}; partial output was not accepted as final. Continuing the same user turn.`,
           );
-          session.addUserMessage(
-            `[SYSTEM STREAM CONTINUATION (${finishDetail})]: Continue from the preserved text prefix. Re-issue any cut-off tool call in full.`,
-            'system',
-          );
+
+          if (consecutiveIncompleteFinishes > 1) {
+            await delay(Math.min(1000 * consecutiveIncompleteFinishes, 3000));
+          }
+
+          let continuationPrompt: string;
+          const activeTask = this.planManager?.getActiveTask?.();
+          const taskContext = activeTask
+            ? `\n[ACTIVE TASK IN PROGRESS]: Task #${activeTask.id} (${activeTask.title}). Proceed with completing this task.`
+            : '';
+
+          if (finishReason === 'transport_eof') {
+            continuationPrompt = `[STREAM CONNECTION INTERRUPTED (${finishDetail})]: The stream connection stalled or was terminated by watchdog. Your partial response has been saved above. Continue the task seamlessly from where you were interrupted without repeating completed steps.${taskContext}\nRe-issue any cut-off tool call in full.`;
+          } else if (finishReason === 'max_tokens') {
+            continuationPrompt = `[OUTPUT TOKEN LIMIT REACHED (max_tokens)]: Your output was truncated by the token limit. Continue directly from the preserved text prefix without repeating previous content.${taskContext}\nRe-issue any cut-off tool call in full.`;
+          } else {
+            continuationPrompt = `[SYSTEM STREAM CONTINUATION (${finishDetail})]: Continue from the preserved text prefix.${taskContext}\nRe-issue any cut-off tool call in full.`;
+          }
+
+          session.addUserMessage(continuationPrompt, 'system');
           CLI.renderStepFooter();
           const continuationReason = `${finishReason}-continuation`;
           session.append('step/end', { turn, step, reason: continuationReason });
