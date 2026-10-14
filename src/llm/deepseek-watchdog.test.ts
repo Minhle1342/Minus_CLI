@@ -82,6 +82,7 @@ test('headerTimeoutMs triggers HeaderTimeoutError when initial headers stall', a
       apiKey: 'k',
       baseURL: 'https://example.test/v1',
       headerTimeoutMs: 3000,
+      maxRetries: 0,
     });
 
     let caughtError: any;

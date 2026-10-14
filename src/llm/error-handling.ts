@@ -69,13 +69,19 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     || (statusCode === 429 && !rawMessage.includes('daily_limit_reached') && !rawMessage.includes('check your plan and billing details') && !rawMessage.includes('insufficient_quota') && !rawMessage.includes('credit_balance_too_low') && !rawMessage.includes('limit: 0'));
 
   if (isTransientRateLimit) {
-    // Trích xuất retry-after nếu có trong header hoặc message (vd: "Please retry in 5.2s" hoặc "retryDelay": "22s")
-    let retryAfterMs: number | undefined;
-    const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
-    if (retryMatch) {
-      const value = parseFloat(retryMatch[1]);
-      const unit = retryMatch[2]?.toLowerCase() || 's';
-      retryAfterMs = unit.startsWith('ms') ? value : Math.round(value * 1000);
+    // Trích xuất retry-after nếu có trong error object hoặc message (vd: "Please retry in 5.2s" hoặc "retryDelay": "22s")
+    let retryAfterMs: number | undefined = typeof error?.retryAfterMs === 'number'
+      ? error.retryAfterMs
+      : typeof error?.retryDelayMs === 'number'
+      ? error.retryDelayMs
+      : undefined;
+    if (retryAfterMs === undefined) {
+      const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
+      if (retryMatch) {
+        const value = parseFloat(retryMatch[1]);
+        const unit = retryMatch[2]?.toLowerCase() || 's';
+        retryAfterMs = unit.startsWith('ms') ? value : Math.round(value * 1000);
+      }
     }
 
     return {
@@ -151,12 +157,18 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     || (typeof error?.status === 'string' && error.status.toUpperCase() === 'UNAVAILABLE');
 
   if (isServerError) {
-    let retryAfterMs: number | undefined;
-    const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
-    if (retryMatch) {
-      const value = parseFloat(retryMatch[1]);
-      const unit = retryMatch[2]?.toLowerCase() || 's';
-      retryAfterMs = unit.startsWith('ms') ? value : Math.round(value * 1000);
+    let retryAfterMs: number | undefined = typeof error?.retryAfterMs === 'number'
+      ? error.retryAfterMs
+      : typeof error?.retryDelayMs === 'number'
+      ? error.retryDelayMs
+      : undefined;
+    if (retryAfterMs === undefined) {
+      const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
+      if (retryMatch) {
+        const value = parseFloat(retryMatch[1]);
+        const unit = retryMatch[2]?.toLowerCase() || 's';
+        retryAfterMs = unit.startsWith('ms') ? value : Math.round(value * 1000);
+      }
     }
 
     return {
@@ -218,16 +230,21 @@ export interface RetryOptions {
 }
 
 /**
- * Thực thi hàm bất đồng bộ với cơ chế Exponential Backoff with Full Jitter
+ * Thực thi hàm bất đồng bộ với cơ chế Exponential Backoff with Jitter
+ * Chuẩn OpenCode v2.0.6 (PR #49441):
+ * - maxRetries: 10 (11 attempts)
+ * - baseDelayMs: 2000 (2s)
+ * - maxDelayMs: 10000 (10s gap cap)
+ * - Jitter: ±20%
+ * - Tổng thời gian chịu lỗi mạng / rate-limit lũy kế đạt ~84 giây mà không crash session
  */
 export async function retryWithExponentialBackoff<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {},
 ): Promise<T> {
-  const maxRetries = options.maxRetries ?? 3;
-  const baseDelayMs = options.baseDelayMs ?? 1500;
-  const maxDelayMs = options.maxDelayMs ?? 15000;
-  const jitterMs = options.jitterMs ?? 500;
+  const maxRetries = options.maxRetries ?? 10;
+  const baseDelayMs = options.baseDelayMs ?? 2000;
+  const maxDelayMs = options.maxDelayMs ?? 10000;
   const sleep = options.sleepFn ?? ((ms: number) => delay(ms, undefined, { signal: options.signal }));
   const abortError = () => new DOMException('LLM request cancelled.', 'AbortError');
 
@@ -271,15 +288,23 @@ export async function retryWithExponentialBackoff<T>(
         throw err;
       }
 
-      // Tính toán delay: Exponential backoff + Full Jitter
+      // Tính toán delay: Exponential backoff + Gap Cap 10s + ±20% Jitter (OpenCode v2.0.6 PR #49441)
       const calculatedDelay = Math.min(
         maxDelayMs,
         baseDelayMs * Math.pow(2, attempt - 1),
       );
-      const jitter = Math.random() * jitterMs;
+      const jitteredDelay = options.jitterMs !== undefined
+        ? calculatedDelay + Math.random() * options.jitterMs
+        : calculatedDelay * (0.8 + Math.random() * 0.4);
+
       const finalDelayMs = classified.retryAfterMs && classified.retryAfterMs > 0
-        ? Math.min(maxDelayMs, Math.max(classified.retryAfterMs, calculatedDelay + jitter))
-        : calculatedDelay + jitter;
+        ? Math.min(
+            maxDelayMs,
+            options.jitterMs !== undefined
+              ? classified.retryAfterMs + Math.random() * options.jitterMs
+              : classified.retryAfterMs,
+          )
+        : jitteredDelay;
 
       if (options.onRetry) {
         options.onRetry(attempt, finalDelayMs, classified);

@@ -6,6 +6,7 @@ import { TokenConfig, resolveTokenConfig } from './token-config.js';
 import { fetchCodexResponse } from './codex-responses.js';
 import { createPromptCacheKey } from './cache-envelope.js';
 import { openAIPromptCacheFields } from './provider-capabilities.js';
+import { retryWithExponentialBackoff } from './error-handling.js';
 
 /**
  * Stall watchdog for SSE streams: a silent stream (no chunk within the
@@ -25,6 +26,7 @@ export interface DeepseekLLMOptions {
   tokenConfig?: Partial<TokenConfig>;
   headerTimeoutMs?: number;
   chunkTimeoutMs?: number;
+  maxRetries?: number;
 }
 
 /**
@@ -37,6 +39,7 @@ export interface DeepseekLLMOptions {
  * 4. Tự động hỗ trợ headers tùy chỉnh (như chatgpt-account-id cho ChatGPT Plus OAuth).
  * 5. Tự động điều chỉnh Input, Output và Thinking/Reasoning Tokens cho từng nhà cung cấp.
  * 6. Reasoning Stream Watchdog (headerTimeout & chunkTimeout) chống treo kết nối khi mô hình suy luận lâu.
+ * 7. Lũy kế retry schedule 84s với trần 10s backoff gap cap, chống ngắt quãng mạng và rate-limit transient.
  */
 export class DeepseekLLM {
   readonly modelName: string;
@@ -46,6 +49,7 @@ export class DeepseekLLM {
   readonly extraHeaders: Record<string, string>;
   readonly headerTimeoutMs?: number;
   readonly chunkTimeoutMs?: number;
+  readonly maxRetries: number;
   private tokenConfig: TokenConfig;
 
   constructor(
@@ -64,6 +68,7 @@ export class DeepseekLLM {
       this.extraHeaders = apiKeyOrOptions.extraHeaders || {};
       this.headerTimeoutMs = apiKeyOrOptions.headerTimeoutMs;
       this.chunkTimeoutMs = apiKeyOrOptions.chunkTimeoutMs;
+      this.maxRetries = apiKeyOrOptions.maxRetries !== undefined ? apiKeyOrOptions.maxRetries : 10;
       this.tokenConfig = resolveTokenConfig(this.modelName, apiKeyOrOptions.tokenConfig, this.baseURL);
     } else {
       this.apiKey = apiKeyOrOptions || process.env.DEEPSEEK_API_KEY || '';
@@ -71,6 +76,7 @@ export class DeepseekLLM {
       this.systemPrompt = systemPrompt || createStandardSystemPrompt();
       this.baseURL = baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
       this.extraHeaders = extraHeaders || {};
+      this.maxRetries = 10;
       this.tokenConfig = resolveTokenConfig(this.modelName, tokenConfig, this.baseURL);
     }
 
@@ -88,6 +94,7 @@ export class DeepseekLLM {
       extraHeaders: this.extraHeaders,
       headerTimeoutMs: this.headerTimeoutMs,
       chunkTimeoutMs: this.chunkTimeoutMs,
+      maxRetries: this.maxRetries,
       tokenConfig: this.tokenConfig,
     });
   }
@@ -470,9 +477,40 @@ export class DeepseekLLM {
   }
 
   /**
-   * Sinh phản hồi thời gian thực qua Real-time Streaming
+   * Sinh phản hồi thời gian thực qua Real-time Streaming với retry schedule chịu lỗi 84s
    */
   async generateStream(
+    session: Session,
+    tools: FunctionDeclaration[],
+    callbacks?: StreamCallbacks,
+    request?: LLMRequestOptions,
+  ): Promise<LLMResponse> {
+    const maxRetries = request?.maxRetries !== undefined
+      ? request.maxRetries
+      : (this.maxRetries !== undefined ? this.maxRetries : 10);
+
+    return retryWithExponentialBackoff(
+      () => this.generateStreamInternal(session, tools, callbacks, request),
+      {
+        maxRetries,
+        baseDelayMs: 2000,
+        maxDelayMs: 10000,
+        signal: request?.signal,
+        onRetry: (attempt, delayMs, classified) => {
+          const payload = {
+            attempt,
+            maxRetries,
+            delayMs,
+            message: classified?.message,
+          };
+          callbacks?.onRetry?.(payload);
+          request?.onRetry?.(payload);
+        },
+      },
+    );
+  }
+
+  private async generateStreamInternal(
     session: Session,
     tools: FunctionDeclaration[],
     callbacks?: StreamCallbacks,
@@ -667,6 +705,13 @@ export class DeepseekLLM {
       const err: any = new Error(`LLM API error (${response.status}): ${errorText}`);
       err.status = response.status;
       err.statusCode = response.status;
+      const retryAfter = response.headers.get('retry-after');
+      if (retryAfter) {
+        const seconds = parseInt(retryAfter, 10);
+        if (!isNaN(seconds)) {
+          err.retryAfterMs = seconds * 1000;
+        }
+      }
       try {
         const parsed = JSON.parse(errorText);
         err.errorResponse = parsed;

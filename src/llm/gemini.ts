@@ -44,6 +44,7 @@ export interface LLMRequestOptions {
   functionCallingMode?: 'AUTO' | 'ANY' | 'NONE';
   headerTimeoutMs?: number;
   chunkTimeoutMs?: number;
+  maxRetries?: number;
   onRetry?: (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string }) => void;
 }
 
@@ -385,15 +386,14 @@ export class GeminiLLM {
         };
       },
       {
-        maxRetries: 3,
-        baseDelayMs: 1500,
-        maxDelayMs: 12000,
-        jitterMs: 500,
+        maxRetries: request?.maxRetries !== undefined ? request.maxRetries : 10,
+        baseDelayMs: 2000,
+        maxDelayMs: 10000,
         signal: request?.signal,
         onRetry: (attempt, delayMs, classified) => {
           const payload = {
             attempt,
-            maxRetries: 3,
+            maxRetries: request?.maxRetries !== undefined ? request.maxRetries : 10,
             delayMs,
             message: classified?.message,
           };
