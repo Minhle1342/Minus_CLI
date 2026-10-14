@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createPatch } from 'diff';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -69,12 +70,22 @@ export const createFileTool: ToolDefinition = {
       const contentHash = computeStringHash(content);
       const bytes = Buffer.byteLength(content, 'utf-8');
 
+      // Diff từ rỗng cho TEA diff viewer + khung inline (capped như write_file).
+      let unifiedDiff: string | undefined;
+      try {
+        if (content) {
+          const patch = createPatch(rawPath, '', content, 'before', 'after');
+          unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
+        }
+      } catch {}
+
       return toolSuccess({
         path: workspace.toRelativePath(safePath),
         created: true,
         bytes,
         contentHash,
         message: `Successfully created file "${rawPath}" (${bytes} bytes).`,
+        ...(unifiedDiff ? { diff: unifiedDiff, unifiedDiff } : {}),
       });
     } catch (err: any) {
       return toolError(`Failed to create file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });

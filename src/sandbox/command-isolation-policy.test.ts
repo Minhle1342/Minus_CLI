@@ -23,6 +23,8 @@ test('read-only and test/build/lint/typecheck commands may use an automatic loca
   assert.equal(requiresIsolatedExecution('pytest'), false);
   assert.equal(requiresIsolatedExecution('cargo test'), false);
   assert.equal(requiresIsolatedExecution('dotnet test'), false);
+  assert.equal(requiresIsolatedExecution('Get-Content .minus/scratch/step_contexts/turn_1.log -Head 50'), false);
+  assert.equal(requiresIsolatedExecution('gc .minus/scratch/step_contexts/turn_1.log | Select-String "error"'), false);
   assert.equal(requiresIsolatedExecution('npm install malicious-pkg'), true);
   assert.equal(requiresIsolatedExecution('node script.js'), true);
   assert.equal(requiresIsolatedExecution('echo ok > marker.txt'), true);

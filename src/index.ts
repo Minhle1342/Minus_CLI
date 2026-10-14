@@ -975,6 +975,7 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         riskLevel: request.riskLevel,
         category: request.category,
         suggestedTool: request.details?.misuse?.tool,
+        diff: request.diff,
       }, activeSession.id);
       if (answer === undefined) return 'reject';
       const normalized = answer.trim().toLowerCase();

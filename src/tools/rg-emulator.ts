@@ -21,6 +21,14 @@ export interface RgParsedOptions {
   targetPaths: string[];
 }
 
+/** Cap độ dài text mỗi match để 1 dòng minified không nổ context (cả 2 engines). */
+export const MAX_MATCH_LINE_CHARS = 500;
+export function truncateMatchLine(line: string): string {
+  return line.length > MAX_MATCH_LINE_CHARS
+    ? line.slice(0, MAX_MATCH_LINE_CHARS) + '… [line truncated]'
+    : line;
+}
+
 /**
  * Phân tích dòng lệnh rg / ripgrep / grep thành các tham số cấu hình tìm kiếm
  */
@@ -312,7 +320,7 @@ export async function executeRipgrepEmulation(
         } else {
           for (const lineIdx of matchingLineIndices) {
             const lineNum = lineIdx + 1;
-            const lineContent = lines[lineIdx];
+            const lineContent = truncateMatchLine(lines[lineIdx]);
             if (options.showLineNumbers) {
               outputLines.push(`${relPath}:${lineNum}:${lineContent}`);
             } else {

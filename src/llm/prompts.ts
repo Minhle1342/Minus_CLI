@@ -40,6 +40,7 @@ import {
   clearPromptContextCache,
 } from './prompt-sections.js';
 import { PromptAssembler } from './prompt-assembler.js';
+import { ROOT_CAUSE_STEPS } from '../agent/tool-synergy-advisor.js';
 
 export {
   CORE_SYSTEM_PROMPT,
@@ -145,16 +146,10 @@ export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT C
   * Recognize anti-patterns: NULL_DEREFERENCE, MISSING_IMPORT_OR_SYMBOL, SIGNATURE_MISMATCH, TYPE_INCOMPATIBILITY, ASSERTION_FAILURE.
 - TWO-TIER TRIAGING:
   * Tier 1 - Environment/Sandbox Failure (\`COMMAND_NOT_FOUND\`, \`NATIVE_DEPENDENCY_MISSING\`, \`PACKAGE_DEPENDENCY_MISSING\`, timeout): fix the environment or runtime profile; DO NOT modify app source.
-  * Tier 2 - Application/Logic Failure (assertion failure, typecheck error, runtime exception): enter the 5-stage protocol below.
-- 5-STAGE ERROR DETECTIVE PROTOCOL (EVIDENCE-ADAPTIVE PARETO):
-  1. [Extract Coordinates]: Parse exact file, line number, column, and diagnostic code from error output or \`get_diagnostics\`.
-  2. [Backward Causal Trace]: Inspect the crash frame and trace backward through caller functions using \`read_file\` and \`run_command "git diff"\` to find the origin of invalid state.
-  3. [Falsifiable Hypothesis & Empirical Proof]:
-     * State a falsifiable causal hypothesis with supporting evidence. Use \`formulate_and_verify_hypothesis\` when a durable record or reproduction is useful.
-     * Reproduce before high-risk changes. For low-risk reversible edits, direct source evidence plus exact-target inspection may suffice.
-     * The Pre-Mutation Gate compares evidence with risk; no fixed investigation percentage required.
-  4. [Surgical Root Invariant Fix]: Apply the smallest coherent change at the root that restores the intended invariant.
-  5. [Empirical Verification & Anti-Regression]: Run the Verification Ladder to prove the fix with no new regressions.
+  * Tier 2 - Application/Logic Failure (assertion failure, typecheck error, runtime exception): enter the protocol below (same steps as dynamic [ROOT-CAUSE:*] advice; that advice only adds tool routing).
+- ROOT-CAUSE PROTOCOL (canonical, shared with ToolSynergyAdvisor):
+  ${ROOT_CAUSE_STEPS}
+  * Detail: parse exact file/line/column via \`get_diagnostics\`; trace backward through callers via \`read_file\`; state a falsifiable hypothesis (use \`formulate_and_verify_hypothesis\` when a durable record helps); apply the smallest coherent root fix; run the Verification Ladder with no new regressions.
 - ANTI-LOOP & REPAIR BUDGET:
   * Never repeat the same failing command or tool arguments unchanged.
   * After repeated equivalent failures or lower confidence, reflect on the newest feedback and pivot hypotheses. Keep productive evidence-gaining steps while they reduce uncertainty.`;
@@ -206,7 +201,7 @@ export function resolveSubagentPromptSections(options: SubagentPromptResolutionO
 
   // 3. Chuyên gia Gỡ lỗi / Root Cause / Verification (Debugger / SWE-bench)
   const isDebugger = caps.some((c) => c.includes('debug') || c.includes('swe-bench') || c.includes('test'))
-    || brief.includes('debug') || brief.includes('fix');
+    || /\bdebug\b/.test(brief) || /\bfix\b/.test(brief);
   if (isDebugger) {
     sections.push({ id: 'error-detective', content: SECTION_ERROR_DETECTIVE_PROTOCOL, priority: 250 });
   }

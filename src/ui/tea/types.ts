@@ -65,7 +65,7 @@ export interface ComposerModel {
   value: string; cursorOffset: number; history: string[]; historyIndex: number;
   draft: string; completions: Completion[]; selected: number; completionDismissed: boolean;
 }
-export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string }
+export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string; diff?: string }
 export interface TranscriptEntry { kind: 'user' | 'answer' | 'thought' | 'tool' | 'step' | 'log' | 'permission'; text: string; permission?: PermissionCard }
 /** Một tab = một session chạy song song trong cùng cửa sổ terminal. Entries cache giữ transcript riêng mỗi tab. */
 export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[] }

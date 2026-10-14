@@ -606,7 +606,7 @@ export function checkGitPolicyForShell(
           ? 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
           : 'GIT_OPERATION_NOT_AUTHORIZED',
         suggestion: approvalAvailable
-          ? `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}.`
+          ? `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior (e.g. "git clean -fdx")' : ''}; verify first with status/diff or ls-files --others.`
           : `No approval channel is available in this session: re-run with arguments matching the current task intent, or use an allowlisted read-only git command (status/diff/log).`,
       };
     }
@@ -1344,7 +1344,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             errorCode: 'ISOLATED_SANDBOX_REQUIRED',
             message: 'Docker isolation is unavailable; this command is not classified as read-only, so it requires an isolated execution environment and will not silently fall back to the host.',
             preflightCode: 'ISOLATED_SANDBOX_REQUIRED',
-            suggestion: 'The command itself was not judged dangerous. Restore Docker, or explicitly retry with execution_target: "host" (host policy, the allowlist, and approval still apply).',
+            suggestion: 'The command itself was not judged dangerous. Check `docker info`, start Docker Desktop and wait for ready, or explicitly retry with execution_target: "host" (host policy, the allowlist, and approval still apply).',
             commandOutcome: 'blocked_preflight',
             processStarted: false,
             success: false,

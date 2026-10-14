@@ -18,7 +18,7 @@ export interface HostCommandPolicyResult {
  * stay fail-closed here. Network subcommands (ls-remote, fetch, pull, push,
  * clone) are deliberately excluded.
  */
-const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--(?:get(?:-all|-regexp|-urlmatch)?|list|-l)|check-ignore|blame|shortlog|ls-files|grep|show-ref|rev-list|ls-tree|name-rev|merge-base|version|var|help|tag\s+(?:--list|-l|--verify|-v)|worktree\s+list|stash\s+(?:list|show)|reflog\s+(?:show|exists)|notes\s+(?:list|show)|submodule\s+(?:status|summary)|bundle\s+(?:list-heads|verify)|bisect\s+log|sparse-checkout\s+list|--version|--help)|node\s+(?:--version|-v|--check\b|-c\b|(?:[^\r\n]*\s+)?--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
+const READ_ONLY_COMMAND = /^(?:cat|type|head|tail|less|more|ls|dir|tree|pwd|rg|ripgrep|grep|findstr|select-string|get-content|gc|where|which|git\s+(?:status|log|diff|show|branch|rev-parse|describe|remote|config\s+--(?:get(?:-all|-regexp|-urlmatch)?|list|-l)|check-ignore|blame|shortlog|ls-files|grep|show-ref|rev-list|ls-tree|name-rev|merge-base|version|var|help|tag\s+(?:--list|-l|--verify|-v)|worktree\s+list|stash\s+(?:list|show)|reflog\s+(?:show|exists)|notes\s+(?:list|show)|submodule\s+(?:status|summary)|bundle\s+(?:list-heads|verify)|bisect\s+log|sparse-checkout\s+list|--version|--help)|node\s+(?:--version|-v|--check\b|-c\b|(?:[^\r\n]*\s+)?--test\b)|bun\s+(?:--version|-v|test\b)|(?:npx\s+)?tsc(?:\.cmd|\.exe)?\s+--noEmit\b|npm\s+--version|python(?:3)?\s+(?:--version|-V)|dotnet\s+--version|echo)\b/i;
 
 /**
  * Test, build, lint, and typecheck commands that are safe to run when Docker
@@ -43,6 +43,13 @@ const HOST_SYSTEM_RISK = [
 function isReadOnlySegment(segment: string): boolean {
   const normalized = segment.trim();
   if (!normalized || /(?:^|[^<])>>?|\b(?:tee|out-file|set-content|add-content)\b/i.test(normalized)) {
+    return false;
+  }
+  // shortcut: `git clean -n/--dry-run` without -f only previews, safe without Docker; -f stays fail-closed
+  if (/^git\s+clean\b/i.test(normalized)) {
+    const hasDryRun = /(?:^|\s)(?:--dry-run|-[a-z]*n[a-z]*)(?:\s|$)/i.test(normalized);
+    const hasForce = /(?:^|\s)(?:--force|-[a-z]*f[a-z]*)(?:\s|$)/i.test(normalized);
+    if (hasDryRun && !hasForce) return true;
     return false;
   }
   return READ_ONLY_COMMAND.test(normalized) || SAFE_DEV_COMMAND.test(normalized);

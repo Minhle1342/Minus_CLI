@@ -279,6 +279,13 @@ function isNetworkInvocation(command: string, firstArg?: string): boolean {
 }
 
 function isDestructiveInvocation(command: string, args: string[], firstArg?: string): boolean {
+  // shortcut: `git clean -n/--dry-run` without -f previews only, never deletes; keep -f fail-closed
+  if (command === 'clean') {
+    const hasDryRun = args.some((arg) => arg === '-n' || arg === '--dry-run' || /^-[a-z]*n[a-z]*$/.test(arg));
+    const hasForce = args.some((arg) => arg === '-f' || arg === '--force' || /^-[a-z]*f[a-z]*$/.test(arg));
+    if (hasDryRun && !hasForce) return false;
+    return true;
+  }
   if (ALWAYS_DESTRUCTIVE_COMMANDS.has(command)) return true;
   if (command === 'reset' && args.some((arg) => ['--hard', '--merge', '--keep'].includes(arg))) return true;
   if (command === 'push' && args.some((arg) => arg === '--force' || arg === '-f' || arg.startsWith('--force-with-lease') || arg === '--delete')) return true;

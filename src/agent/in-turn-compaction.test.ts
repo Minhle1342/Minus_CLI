@@ -76,11 +76,14 @@ describe('Satellite 2: In-Turn Microcompaction', () => {
     const step1Response = compacted[2].parts?.[0]?.functionResponse?.response as Record<string, any>;
     assert.strictEqual(step1Response.status, 'masked');
     assert.ok(step1Response.observationMask?.includes('OBSERVATION MASKED'));
+    assert.ok(step1Response.logPath?.startsWith('.minus/scratch/step_contexts/'));
+    assert.ok(step1Response.observationMask?.includes('Spilled to: .minus/scratch/step_contexts/'));
 
     // Step 2 (run_command) should be masked/compacted
     const step2Response = compacted[4].parts?.[0]?.functionResponse?.response as Record<string, any>;
     assert.strictEqual(step2Response.status, 'masked');
     assert.strictEqual(step2Response.exitCode, 0);
+    assert.ok(step2Response.logPath?.startsWith('.minus/scratch/step_contexts/'));
 
     // Step 3 (replace_text - step N-1) should remain intact
     const step3Response = compacted[6].parts?.[0]?.functionResponse?.response as Record<string, any>;

@@ -891,6 +891,8 @@ export class Session {
           error: 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown.',
           errorCode: 'TOOL_OUTCOME_UNKNOWN',
           retryable: false,
+          // shortcut: outcome unknown, never auto-retry; verify external state first, upgrade to idempotency keys if auto-retry needed
+          suggestion: 'Verify external state (git status, target file exists) before any manual retry; do not assume success or failure.',
         },
         call.data.toolCallId,
         'crash-recovery',

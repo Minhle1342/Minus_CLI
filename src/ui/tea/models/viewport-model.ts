@@ -1,7 +1,7 @@
 import type { ViewportModel, TranscriptEntry, SessionTab, SessionTabsModel, RootModel, Cmd, KeyMsg, ComposerModel, DiffViewerModel } from '../types.js';
 import { color, displayWidth, fit, lipGlossTheme, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 import { formatMarkdownTablesWithTea } from '../styles/table.js';
-import { toolCallEntry, toolResultEntry } from './tool-entry.js';
+import { toolCallEntry, toolResultEntry, diffFrame, diffLineTone } from './tool-entry.js';
 import { createComposer } from './composer-model.js';
 import { createDiffViewer } from './diff-model.js';
 import type { PermissionCard } from '../types.js';
@@ -32,7 +32,16 @@ function highlightCode(line: string): string {
 }
 
 function formatTool(text: string): string {
+  // shortcut: tô màu markdown-diff trong khung (đỏ xóa/xanh thêm); bảng │ thường giữ nguyên
+  let inFrame = false;
   return stripTerminalControls(text).split('\n').map((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('╭─ diff ')) { inFrame = true; return color(tokyoNight.border, line); }
+    if (inFrame && trimmed.startsWith('╰─')) { inFrame = false; return color(tokyoNight.border, line); }
+    if (inFrame) {
+      const tone = diffLineTone(line);
+      if (tone) return color(tone, line);
+    }
     if (index === 0) {
       if (line.startsWith('✖')) return color(tokyoNight.red, line);
       // TUI: read-only call lines (›) are subordinate to the conversation —
@@ -218,6 +227,8 @@ export function formatAnswer(text: string, width = 80): string {
 function permissionLines(request: PermissionCard, width: number): string[] {
   const risk = request.riskLevel.toUpperCase();
   const riskColor = /HIGH|CRITICAL/.test(risk) ? tokyoNight.red : risk === 'MEDIUM' ? tokyoNight.yellow : tokyoNight.green;
+  // Khung diff inline ngay cuối card (capped 12 dòng); full xem bằng Ctrl+X D.
+  const frame = request.diff ? diffFrame(request.target || request.toolName, request.diff) : undefined;
   const fields = [
     color(tokyoNight.purple, 'Permission request') + '  ' + color(riskColor, `[${risk}]`),
     color(tokyoNight.muted, 'Tool     ') + color(tokyoNight.cyan, stripTerminalControls(request.toolName)),
@@ -225,6 +236,7 @@ function permissionLines(request: PermissionCard, width: number): string[] {
     color(tokyoNight.muted, 'Target   ') + color(tokyoNight.blue, stripTerminalControls(request.target)),
     ...(request.summary ? ['', color(tokyoNight.text, stripTerminalControls(request.summary))] : []),
     ...(request.suggestedTool ? [color(tokyoNight.yellow, 'Suggested tool: ') + color(tokyoNight.cyan, stripTerminalControls(request.suggestedTool))] : []),
+    ...(frame ? frame.split('\n').map((line) => color(diffLineTone(line) ?? tokyoNight.text, line)) : []),
   ];
   if (width < 6) return fields.flatMap(line => wrap(line, width));
   const innerWidth = width - 4;

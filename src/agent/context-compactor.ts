@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ContentPart, SessionMessage } from '../session/session.js';
@@ -51,6 +52,8 @@ export interface MaskedObservationRecord {
   truncated?: boolean;
   /** Serialized byte size of the untruncated original payload. */
   fullPayloadBytes?: number;
+  /** Relative path to spilled log file in .minus/scratch/step_contexts/*.log */
+  logPath?: string;
 }
 
 /**
@@ -164,6 +167,45 @@ function serializeHistory(messages: SessionMessage[]): string {
   }
 }
 
+function spillMaskedObservationToScratch(
+  id: string,
+  rawPayload: any,
+  workspaceRoot: string = process.cwd(),
+): string {
+  try {
+    const scratchDir = path.join(workspaceRoot, '.minus', 'scratch', 'step_contexts');
+    fs.mkdirSync(scratchDir, { recursive: true });
+    const safeId = String(id || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `${safeId}.log`;
+    const fullLogPath = path.join(scratchDir, fileName);
+    const relLogPath = path.join('.minus', 'scratch', 'step_contexts', fileName).replace(/\\/g, '/');
+
+    let textContent = '';
+    if (typeof rawPayload === 'string') {
+      textContent = rawPayload;
+    } else if (rawPayload && typeof rawPayload === 'object') {
+      if (typeof rawPayload.content === 'string') {
+        textContent = rawPayload.content;
+      } else if (rawPayload.stdout !== undefined || rawPayload.stderr !== undefined) {
+        textContent = [
+          rawPayload.command ? `=== COMMAND ===\n${rawPayload.command}\n` : '',
+          rawPayload.stdout ? `=== STDOUT ===\n${rawPayload.stdout}\n` : '',
+          rawPayload.stderr ? `=== STDERR ===\n${rawPayload.stderr}\n` : '',
+        ].filter(Boolean).join('\n');
+      } else {
+        textContent = JSON.stringify(rawPayload, null, 2);
+      }
+    } else {
+      textContent = String(rawPayload ?? '');
+    }
+
+    fs.writeFileSync(fullLogPath, textContent, 'utf8');
+    return relLogPath;
+  } catch {
+    return '';
+  }
+}
+
 function createMaskedObservationRecord(
   response: any,
   originalPayload: any,
@@ -179,6 +221,7 @@ function createMaskedObservationRecord(
   // mapping distinct payloads onto one archive key.
   const id = toolCallId
     ?? `${fallbackIdBase}-${slugToolName(response?.name)}-${payloadHash.slice(0, 12)}`;
+  const relLogPath = spillMaskedObservationToScratch(id, originalPayload);
   return {
     id,
     toolName: response?.name || 'unknown',
@@ -191,6 +234,7 @@ function createMaskedObservationRecord(
     ...(toolCallId ? { toolCallId } : {}),
     payloadHash,
     version: 1,
+    ...(relLogPath ? { logPath: relLogPath } : {}),
   };
 }
 
@@ -1399,7 +1443,12 @@ export class ContextCompactor {
               'obs-masked',
               compressedPayload.observationMask || `Masked observation of ${resp.name}`,
             ));
-            compressedPayload.archiveId = maskedObservations[maskedObservations.length - 1].id;
+            const record = maskedObservations[maskedObservations.length - 1];
+            compressedPayload.archiveId = record.id;
+            if (record.logPath) {
+              compressedPayload.logPath = record.logPath;
+              compressedPayload.observationMask = `${compressedPayload.observationMask} [Spilled to: ${record.logPath} — Inspect via read_file, search_text, or head/tail/grep]`;
+            }
 
             return {
               functionResponse: {

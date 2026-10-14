@@ -8739,13 +8739,13 @@ Always write tests first!`;
   );
 
   // 2. SCAFFOLD-CEGIS Test Tampering Protection
-  // Cố tình sửa file test khi không được phép
+  // Cố tình sửa file test bằng cách comment out assert khi không được phép
   const tamperIntervention = intentGuardian.observeToolCall({
     toolName: 'replace_file_content',
     args: {
       TargetFile: 'src/tests/finance.test.ts',
       TargetContent: 'expect(res).toBe(100)',
-      ReplacementContent: 'expect(res).toBe(90)',
+      ReplacementContent: '// expect(res).toBe(100)',
     },
   });
   assert(
@@ -8756,6 +8756,29 @@ Always write tests first!`;
     Boolean(tamperIntervention?.courseCorrectionGuidance?.includes('Preserve existing assertions') && tamperIntervention?.courseCorrectionGuidance?.includes('Fix production logic')),
     'Hướng dẫn chỉnh hướng yêu cầu Agent tập trung sửa mã nguồn thay vì sửa test case để ép pass',
   );
+
+  // 2b. Assertion Strength Check: Cho phép sửa nếu số lượng assert tăng lên hoặc tương đương
+  const allowedStrengthMutation = intentGuardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/finance.test.ts',
+      TargetContent: 'expect(res).toBe(100)',
+      ReplacementContent: 'expect(res).toBe(100); expect(res).toBeGreaterThan(50);',
+    },
+  });
+  assert(allowedStrengthMutation === null, 'Assertion Strength Check cho phép bổ sung assert mới hoặc tăng độ mạnh');
+
+  // 2c. Provenance-aware: File test do chính Agent sinh ra trong phiên làm việc thì Agent được quyền sửa
+  intentGuardian.recordAgentCreatedFile('src/tests/agent-generated.test.ts');
+  const allowedAgentFileMutation = intentGuardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/agent-generated.test.ts',
+      TargetContent: 'expect(1).toBe(1)',
+      ReplacementContent: '// commented out',
+    },
+  });
+  assert(allowedAgentFileMutation === null, 'Provenance-aware cho phép Agent sửa file test do chính Agent sinh ra trong phiên làm việc');
 
   // Thử lại khi người dùng cho phép sửa test
   const permissiveGuardian = new DomainIntentGuardian();

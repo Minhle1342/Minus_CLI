@@ -6,6 +6,7 @@ import { ToolDefinition } from "./types.js";
 import { Workspace } from "../workspace/workspace.js";
 import {
   executeRipgrepEmulation,
+  truncateMatchLine,
   type RgParsedOptions,
 } from "./rg-emulator.js";
 
@@ -284,11 +285,11 @@ export const searchTextTool: ToolDefinition = {
         // Guard against NaN/Infinity from malformed line numbers
         const safeLine = Number.isFinite(lineNum) ? lineNum : 1;
 
-        allMatches.push({ file, line: safeLine, text });
+        allMatches.push({ file, line: safeLine, text: truncateMatchLine(text) });
         fileSummaryMap.set(file, (fileSummaryMap.get(file) || 0) + 1);
       } else {
         // Fallback nếu định dạng chỉ có file:text hoặc đơn dòng
-        allMatches.push({ file: rawPath, line: 1, text: line });
+        allMatches.push({ file: rawPath, line: 1, text: truncateMatchLine(line) });
       }
     }
 

@@ -15,6 +15,7 @@ import { isMutationTool } from '../tools/diff-generator.js';
 import { isScratchPath } from '../skills/verification-policy.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { isUserExplicitlyExemptingTests } from './completion-evidence.js';
 
 export interface DomainIntentContract {
@@ -47,6 +48,7 @@ export class DomainIntentGuardian {
   private contract: DomainIntentContract | null = null;
   private consecutiveDriftWarnings = 0;
   private blockedTamperAttempts = 0;
+  private agentCreatedTestFiles = new Set<string>();
 
   constructor() {}
 
@@ -136,6 +138,7 @@ export class DomainIntentGuardian {
 
     this.consecutiveDriftWarnings = 0;
     this.blockedTamperAttempts = 0;
+    this.agentCreatedTestFiles.clear();
     return this.contract;
   }
 
@@ -154,6 +157,184 @@ export class DomainIntentGuardian {
     if (!filePath) return false;
     const normalized = filePath.replace(/\\/g, '/');
     return TEST_FILE_PATTERNS.some((pattern) => pattern.test(normalized));
+  }
+
+  private normalizePath(p: string): string {
+    return p.replace(/\\/g, '/').toLowerCase().trim();
+  }
+
+  /**
+   * Đánh dấu file test được tạo bởi Agent trong phiên làm việc hiện tại
+   */
+  public recordAgentCreatedFile(filePath: string): void {
+    if (!filePath) return;
+    this.agentCreatedTestFiles.add(this.normalizePath(filePath));
+  }
+
+  /**
+   * Kiểm tra xem file test có nguồn gốc từ Agent hay từ commit gốc của con người
+   */
+  public isAgentCreatedTestFile(filePath: string, workspaceRoot?: string): boolean {
+    if (!filePath) return false;
+    const normalized = this.normalizePath(filePath);
+    if (this.agentCreatedTestFiles.has(normalized)) return true;
+    for (const created of this.agentCreatedTestFiles) {
+      if (normalized.endsWith(created) || created.endsWith(normalized)) return true;
+    }
+    if (workspaceRoot) {
+      try {
+        const abs = path.resolve(workspaceRoot, filePath);
+        const rel = path.relative(workspaceRoot, abs).replace(/\\/g, '/');
+        const gitDir = path.join(workspaceRoot, '.git');
+        if (fs.existsSync(gitDir) && rel && !rel.startsWith('..')) {
+          const res = spawnSync('git', ['cat-file', '-e', `HEAD:${rel}`], {
+            cwd: workspaceRoot,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          // Mã thoát != 0 chứng minh file chưa từng tồn tại trong commit gốc của con người (HEAD)
+          if (res.status !== 0) {
+            return true;
+          }
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  /**
+   * Trích xuất số lượng assertions hoạt động (active) và assertions bị comment out
+   */
+  public extractAssertionStats(code: string): { active: number; commented: number } {
+    if (!code || typeof code !== 'string') return { active: 0, commented: 0 };
+
+    const lines = code.split(/\r?\n/);
+    let active = 0;
+    let commented = 0;
+    let inBlockComment = false;
+
+    const assertPattern = /\b(?:assert(?:\.[a-zA-Z0-9_$]+|\s*\()|expect(?:\.[a-zA-Z0-9_$]+|\s*\()|should(?:\.[a-zA-Z0-9_$]+)?|self\.assert[a-zA-Z0-9_]*\s*\(|t\.(?:Error|Fatal)[a-zA-Z0-9_]*\s*\(|ASSERT_[A-Z0-9_]+\s*\(|EXPECT_[A-Z0-9_]+\s*\(|assert!\s*\(|assert_eq!\s*\(|assert_ne!\s*\()/i;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (inBlockComment) {
+        if (assertPattern.test(trimmed)) commented++;
+        if (trimmed.includes('*/')) inBlockComment = false;
+        continue;
+      }
+
+      if (trimmed.startsWith('/*')) {
+        if (!trimmed.includes('*/')) inBlockComment = true;
+        if (assertPattern.test(trimmed)) commented++;
+        continue;
+      }
+
+      if (trimmed.startsWith('//') || trimmed.startsWith('#')) {
+        if (assertPattern.test(trimmed)) commented++;
+        continue;
+      }
+
+      const inlineCommentMatch = /\/\/|#/.exec(trimmed);
+      let codePart = trimmed;
+      let commentPart = '';
+      if (inlineCommentMatch) {
+        codePart = trimmed.slice(0, inlineCommentMatch.index);
+        commentPart = trimmed.slice(inlineCommentMatch.index);
+      }
+
+      if (commentPart && assertPattern.test(commentPart)) {
+        commented++;
+      }
+
+      if (codePart && assertPattern.test(codePart)) {
+        const matches = codePart.match(new RegExp(assertPattern.source, 'gi')) || [];
+        active += matches.length;
+      }
+    }
+
+    return { active, commented };
+  }
+
+  /**
+   * Phân tích độ mạnh của Assert: Cho phép sửa nếu số lượng assert tăng lên hoặc tương đương,
+   * chỉ chặn khi Agent cố tình comment out hoặc xóa bớt assert.
+   */
+  public checkAssertionStrength(
+    toolName: string,
+    args: Record<string, any>,
+    targetFile: string,
+    workspaceRoot?: string
+  ): { isTampering: boolean; reason: string; oldAsserts: number; newAsserts: number } {
+    let oldCode = '';
+    let newCode = '';
+
+    if (toolName === 'replace_file_content' || toolName === 'replace_text') {
+      oldCode = String(args.TargetContent ?? args.oldText ?? '');
+      newCode = String(args.ReplacementContent ?? args.newText ?? '');
+    } else if (toolName === 'multi_replace_file_content') {
+      const chunks = Array.isArray(args.ReplacementChunks) ? args.ReplacementChunks : [];
+      oldCode = chunks.map((c: any) => c.TargetContent ?? '').join('\n');
+      newCode = chunks.map((c: any) => c.ReplacementContent ?? '').join('\n');
+    } else if (toolName === 'apply_patch') {
+      const patchText = String(args.patch || args.Patch || args.patchText || '');
+      const lines = patchText.split(/\r?\n/);
+      const oldLines: string[] = [];
+      const newLines: string[] = [];
+      for (const line of lines) {
+        if (line.startsWith('-') && !line.startsWith('---')) {
+          oldLines.push(line.slice(1));
+        } else if (line.startsWith('+') && !line.startsWith('+++')) {
+          newLines.push(line.slice(1));
+        }
+      }
+      oldCode = oldLines.join('\n');
+      newCode = newLines.join('\n');
+    } else if (['write_file', 'write_to_file'].includes(toolName)) {
+      newCode = String(args.content ?? args.CodeContent ?? '');
+      if (workspaceRoot) {
+        const absPath = path.resolve(workspaceRoot, targetFile);
+        try {
+          if (fs.existsSync(absPath)) {
+            oldCode = fs.readFileSync(absPath, 'utf8');
+          }
+        } catch {}
+      }
+    } else if (toolName === 'delete_file') {
+      oldCode = 'assert(true);';
+      newCode = '';
+    }
+
+    const oldStats = this.extractAssertionStats(oldCode);
+    const newStats = this.extractAssertionStats(newCode);
+
+    // 1. Chặn hành vi cố tình comment out assertions
+    if (newStats.commented > oldStats.commented) {
+      return {
+        isTampering: true,
+        reason: `Commented out assertion detected (${newStats.commented} commented assertion(s))`,
+        oldAsserts: oldStats.active,
+        newAsserts: newStats.active,
+      };
+    }
+
+    // 2. Chặn hành vi xóa bớt assertions
+    if (oldStats.active > 0 && newStats.active < oldStats.active) {
+      return {
+        isTampering: true,
+        reason: `Assertion count decreased from ${oldStats.active} to ${newStats.active}`,
+        oldAsserts: oldStats.active,
+        newAsserts: newStats.active,
+      };
+    }
+
+    return {
+      isTampering: false,
+      reason: 'Assertions preserved or strengthened',
+      oldAsserts: oldStats.active,
+      newAsserts: newStats.active,
+    };
   }
 
   /**
@@ -176,8 +357,8 @@ export class DomainIntentGuardian {
       // Cho phép tự do tạo scratch tests để thử nghiệm
       const testTargets = targets.filter(target => !isScratchPath(target) && this.isTestFile(target));
       const forbidden = testTargets[0];
-      // New regression tests are permitted; existing assertions need explicit
-      // authorization. Creating tests must never disguise replacing old tests.
+
+      // Ghi nhận nguồn gốc file: phát hiện các file test mới được tạo bởi Agent
       const createsNewTest = Boolean(forbidden && ['create_file', 'write_file', 'write_to_file'].includes(toolName)
         && options?.workspaceRoot && testTargets.every(target => {
           const absolute = path.resolve(options.workspaceRoot!, target);
@@ -186,14 +367,65 @@ export class DomainIntentGuardian {
           try { fs.lstatSync(absolute); return false; }
           catch (error: any) { return error?.code === 'ENOENT'; }
         })) && !this.contract.prohibitedMutations.includes('all test files');
-      if (forbidden && !createsNewTest && !this.contract.allowTestFileModification) {
-        this.blockedTamperAttempts++;
-        return {
-          type: 'TEST_TAMPERING',
-          severity: 'BLOCKING',
-          message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] You are attempting to modify existing test file '${forbidden}' without authorization. Preserve existing assertions; add an independent regression test or request explicit scope to change this test.`,
-          courseCorrectionGuidance: `Preserve existing assertions. Fix production logic and add an independent regression test where appropriate.`,
-        };
+
+      if (createsNewTest) {
+        for (const t of testTargets) {
+          this.recordAgentCreatedFile(t);
+          if (options?.workspaceRoot) {
+            const rel = path.relative(options.workspaceRoot, path.resolve(options.workspaceRoot, t));
+            this.recordAgentCreatedFile(rel);
+          }
+        }
+      }
+
+      // Ghi nhận file test được thêm mới từ patch
+      const addedPatchPaths = String(args.patch || args.Patch || args.patchText || '').split(/\r?\n/)
+        .flatMap(line => /^\*\*\* Add File: (.+)$/.exec(line)?.slice(1) || []);
+      for (const added of addedPatchPaths) {
+        if (this.isTestFile(added)) {
+          this.recordAgentCreatedFile(added);
+          if (options?.workspaceRoot) {
+            const rel = path.relative(options.workspaceRoot, path.resolve(options.workspaceRoot, added));
+            this.recordAgentCreatedFile(rel);
+          }
+        }
+      }
+
+      if (forbidden) {
+        // Cấm tuyệt đối nếu hợp đồng người dùng yêu cầu không đụng đến bất kỳ test nào
+        if (this.contract.prohibitedMutations.includes('all test files')) {
+          this.blockedTamperAttempts++;
+          return {
+            type: 'TEST_TAMPERING',
+            severity: 'BLOCKING',
+            message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] Modifying test files is explicitly prohibited by contract.`,
+            courseCorrectionGuidance: `Preserve existing assertions. Fix production logic instead.`,
+          };
+        }
+
+        // 1. Provenance-aware: File test do chính Agent sinh ra trong phiên làm việc thì Agent được quyền sửa
+        const isAgentCreated = createsNewTest || this.isAgentCreatedTestFile(forbidden, options?.workspaceRoot);
+        if (isAgentCreated) {
+          return null;
+        }
+
+        // Nếu người dùng đã cho phép sửa test thì không chặn
+        if (this.contract.allowTestFileModification) {
+          return null;
+        }
+
+        // 2. Assertion Strength Check: Cho phép sửa nếu số lượng assert tăng lên hoặc tương đương,
+        // chỉ chặn khi Agent cố tình comment out hoặc xóa bớt assert.
+        const strengthCheck = this.checkAssertionStrength(toolName, args, forbidden, options?.workspaceRoot);
+        if (strengthCheck.isTampering) {
+          this.blockedTamperAttempts++;
+          return {
+            type: 'TEST_TAMPERING',
+            severity: 'BLOCKING',
+            message: `[SCAFFOLD-CEGIS: TEST TAMPERING BLOCKED] You are attempting to modify existing test file '${forbidden}' without authorization (${strengthCheck.reason}). Preserve existing assertions; add an independent regression test or request explicit scope to change this test.`,
+            courseCorrectionGuidance: `Preserve existing assertions. Fix production logic and add an independent regression test where appropriate.`,
+          };
+        }
       }
     }
 

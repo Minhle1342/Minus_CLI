@@ -1,5 +1,7 @@
 /** A short, user-facing projection of tool events for the viewport. */
 import { CONCURRENT_READ_ONLY_TOOLS } from '../../../agent/tool-execution-scheduler.js';
+import { FILE_MUTATION_TOOLS } from '../../../tools/diff-generator.js';
+import { tokyoNight } from '../styles/theme.js';
 const MAX_RESULT_CHARS = 2400;
 const MAX_LIST_ITEMS = 8;
 const MAX_RESULT_LINES = 5;
@@ -126,6 +128,42 @@ export function toolCallEntry(name: string, args: Record<string, unknown>): stri
   return details.length ? `● ${name} · ${preview(details.join(' · '), 240)}` : `● ${name}`;
 }
 
+/** Khung diff text thuần (12 dòng, border nhà đang dùng) — dùng chung cho transcript và permission card. */
+export function diffFrame(target: string, raw: unknown, maxLines = 12): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const all = raw.trim().split(/\r?\n/);
+  const shown = all.slice(0, maxLines).map((line) => `│ ${line.slice(0, 76)}`);
+  const added = all.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+  const removed = all.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+  const omitted = all.length > shown.length ? ` · +${all.length - shown.length} lines` : '';
+  return [
+    `╭─ diff ${target} ─`,
+    ...shown,
+    `╰─ +${added} -${removed}${omitted} · Ctrl+X D full ─╯`,
+  ].join('\n');
+}
+
+/** Màu chuẩn markdown-diff cho 1 dòng khung: đỏ dòng xóa, xanh lá dòng thêm, cyan header/hunk. */
+export function diffLineTone(line: string): string | undefined {
+  const content = line.trimStart().startsWith('│') ? line.trimStart().slice(1).trimStart() : line.trimStart();
+  if (content.startsWith('+++') || content.startsWith('---')) return tokyoNight.cyan;
+  if (content.startsWith('+')) return tokyoNight.green;
+  if (content.startsWith('-')) return tokyoNight.red;
+  if (content.startsWith('@@')) return tokyoNight.cyan;
+  return undefined;
+}
+
+/** Khung diff inline cuối tool result cho mọi file-mutation tool (session-approve không hiện card). */
+function inlineDiffFrame(name: string, result: Record<string, unknown>, args?: Record<string, unknown>): string | undefined {
+  // shortcut: session-approve không hiện card nên frame là chỗ duy nhất thấy change; apply_patch đưa patch ở args
+  if (!FILE_MUTATION_TOOLS.has(name)) return undefined;
+  const raw = result?.diff ?? result?.patch ?? (result as any)?.unifiedDiff ?? (args as any)?.patch;
+  const argPath = (args as any)?.path ?? (args as any)?.filePath ?? (args as any)?.targetFile;
+  const path = typeof result?.path === 'string' && result.path.trim()
+    ? result.path.trim()
+    : typeof argPath === 'string' && argPath.trim() ? argPath.trim() : name;
+  return diffFrame(path, raw);
+}
 export function toolResultEntry(name: string, result: Record<string, unknown>, _durationMs?: number, args?: Record<string, unknown>): string {
   // P1: text badges ([OK]/[FAIL]/[DENIED]) so status never depends on color alone.
   const denied = result?.denied === true || result?.status === 'denied';
@@ -158,10 +196,13 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, _
   }
 
   const details = visibleValue(result);
-  const hasDiff = typeof result?.diff === 'string' || typeof result?.patch === 'string';
+  const hasDiff = typeof result?.diff === 'string' || typeof result?.patch === 'string' || typeof (result as any)?.unifiedDiff === 'string';
+  // Khung inline cho mutation thành công; failures vẫn chỉ hint để khỏi ồn.
+  const frame = !failed && !denied ? inlineDiffFrame(name, result, args) : undefined;
   // P1: failures point at the Diff view when there is a patch to inspect.
   const hint = (failed || denied) && hasDiff ? '\n→ Open Diff (Ctrl+X D) to review' : '';
-  if (details) return `${heading}\n${resultPreview(details)}${hint}`;
+  if (details) return `${heading}\n${resultPreview(details)}${frame ? `\n${frame}` : ''}${hint}`;
+  if (frame) return `${heading}\n${frame}`;
   if (hasDiff) return `${heading}\nDiff available — open with Ctrl+X D`;
   return heading;
 }

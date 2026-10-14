@@ -99,3 +99,82 @@ test('latent EDCP acceptance diagnostics are scoped to changed files', () => {
   assert.equal(AcceptancePolicy.checkHardInvariants({ diagnostics, changedFiles: [] }).passed, true);
   assert.equal(AcceptancePolicy.checkHardInvariants({ diagnostics, changedFiles: [{ path: 'unrelated.ts' } as any] }).passed, false);
 });
+test('Provenance-aware: Agent-created test files are allowed to be modified while human base files are guarded', () => {
+  const guardian = new DomainIntentGuardian();
+  guardian.extractAndFreezeContract('Fix logic error in src/calculator.ts');
+  assert.equal(guardian.getContract()?.allowTestFileModification, false);
+
+  // File do Agent tạo ra trong phiên làm việc
+  guardian.recordAgentCreatedFile('src/tests/agent-new.test.ts');
+  const agentFileEdit = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/agent-new.test.ts',
+      TargetContent: 'expect(a).toBe(1)',
+      ReplacementContent: '// commented out',
+    },
+  });
+  assert.equal(agentFileEdit, null, 'Agent được toàn quyền sửa file test do chính Agent sinh ra trong phiên làm việc');
+
+  // File test gốc của con người bị chặn khi comment out assert
+  const humanFileTamper = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/human-origin.test.ts',
+      TargetContent: 'expect(a).toBe(1)',
+      ReplacementContent: '// expect(a).toBe(1)',
+    },
+  });
+  assert.equal(humanFileTamper?.severity, 'BLOCKING', 'File test gốc của con người bị chặn khi Agent cố tình comment out assert');
+});
+test('Assertion Strength Check: Allows adding/maintaining assert count, blocks commenting out or deleting asserts', () => {
+  const guardian = new DomainIntentGuardian();
+  guardian.extractAndFreezeContract('Fix calculateTax function in src/tax.ts');
+
+  // 1. Tăng số lượng assert (1 -> 2): CHO PHÉP
+  const addAssert = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/tax.test.ts',
+      TargetContent: 'assert.equal(tax, 10);',
+      ReplacementContent: 'assert.equal(tax, 10);\nassert.equal(total, 110);',
+    },
+  });
+  assert.equal(addAssert, null, 'Cho phép sửa nếu số lượng assert tăng lên');
+
+  // 2. Giữ nguyên số lượng assert (1 -> 1): CHO PHÉP
+  const keepAssert = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/tax.test.ts',
+      TargetContent: 'assert.equal(tax, 10);',
+      ReplacementContent: 'assert.strictEqual(tax, 10);',
+    },
+  });
+  assert.equal(keepAssert, null, 'Cho phép sửa nếu số lượng assert tương đương');
+
+  // 3. Comment out assert: CHẶN
+  const commentOut = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/tax.test.ts',
+      TargetContent: 'assert.equal(tax, 10);',
+      ReplacementContent: '// assert.equal(tax, 10);',
+    },
+  });
+  assert.equal(commentOut?.type, 'TEST_TAMPERING');
+  assert.equal(commentOut?.severity, 'BLOCKING');
+
+  // 4. Xóa bớt assert (2 -> 1): CHẶN
+  const deleteAssert = guardian.observeToolCall({
+    toolName: 'replace_file_content',
+    args: {
+      TargetFile: 'src/tests/tax.test.ts',
+      TargetContent: 'assert.equal(tax, 10);\nassert.equal(rate, 0.1);',
+      ReplacementContent: 'assert.equal(tax, 10);',
+    },
+  });
+  assert.equal(deleteAssert?.type, 'TEST_TAMPERING');
+  assert.equal(deleteAssert?.severity, 'BLOCKING');
+});
+

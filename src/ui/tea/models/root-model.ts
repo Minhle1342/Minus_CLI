@@ -349,7 +349,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         case 'tool:after': {
           const [name, result, duration, args] = msg.args;
           const target = args?.path || args?.filePath || args?.targetFile;
-          const diff = result.diff || result.patch;
+          const diff = result.diff || result.patch || (result as any).unifiedDiff || (args as any)?.patch;
           // files giữ global (workspace-level); diff + tools theo tab sở hữu.
           const withSidebar = { ...model, sidebar: { ...model.sidebar, tools: ownerActive ? model.sidebar.tools.filter(t => t !== name) : model.sidebar.tools, files: target && /write|replace|edit|patch/.test(name) ? [...new Set([...model.sidebar.files, String(target)])] : model.sidebar.files },
             diff: ownerActive && typeof diff === 'string' ? { ...model.diff, text: diff } : model.diff };

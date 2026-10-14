@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createPatch } from 'diff';
 import { Type } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -119,6 +120,15 @@ export const writeFileTool: ToolDefinition = {
       const bytesWritten = Buffer.byteLength(content, 'utf-8');
       const contentHash = computeStringHash(content);
 
+      // Unified diff cho TEA diff viewer + khung inline (capped như replace_text).
+      let unifiedDiff: string | undefined;
+      try {
+        if (oldContent !== undefined && oldContent !== content) {
+          const patch = createPatch(rawPath, oldContent, content, 'before', 'after');
+          unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
+        }
+      } catch {}
+
       let diagnosticWarning: string | undefined;
       let syntaxErrors: any[] | undefined;
       try {
@@ -140,6 +150,7 @@ export const writeFileTool: ToolDefinition = {
           ? `Successfully overwrote file "${rawPath}".`
           : `Successfully created file "${rawPath}".`,
         ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
+        ...(unifiedDiff ? { diff: unifiedDiff, unifiedDiff } : {}),
         ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
       });
     } catch (err: any) {

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
 import { StepPromptPolicy } from './step-prompt-policy.js';
-import { detectBugReportIntent } from './tool-synergy-advisor.js';
+import { detectBugReportIntent, ToolSynergyAdvisor, ROOT_CAUSE_STEPS } from './tool-synergy-advisor.js';
+import { resolveSubagentPromptSections, SECTION_ERROR_DETECTIVE_PROTOCOL } from '../llm/prompts.js';
 import type { ClassificationDecision } from '../control/classification-types.js';
 
 test('DynamicContextArbiter deduplicates memoryPrompt against existingHistoryContext', () => {
@@ -138,5 +139,22 @@ test('DynamicContextArbiter places instructionHierarchyAnchor at top priority P0
   });
   assert.ok(result.renderedContext.startsWith(anchor), 'Anchor is placed at top priority');
   assert.ok(result.sourcesIncluded.includes('Instruction Hierarchy Anchor (P0.8)'));
+});
+
+test('Root-cause guidance shares one canonical protocol without false triggers', () => {
+  const advisor = new ToolSynergyAdvisor();
+  // 1. Real bug inside an excluded phrase still triggers debugging.
+  assert.equal(detectBugReportIntent('Fix crash in error handling middleware'), true);
+  // 2. Pure feature phrase with no bug signal stays silent.
+  assert.equal(detectBugReportIntent('Add error handling middleware'), false);
+  // 3. All dynamic branches share the canonical steps with distinct labels.
+  const report = advisor.advise({ userRequest: 'Fix bug where login crashes' }).guidance;
+  assert.ok(report.startsWith('[ROOT-CAUSE:REPORT]') && report.includes(ROOT_CAUSE_STEPS));
+  const diag = advisor.advise({ lastToolName: 'get_diagnostics', lastToolResult: { totalErrors: 1, diagnostics: [{ file: 'a.ts' }] } }).guidance;
+  assert.ok(diag.startsWith('[ROOT-CAUSE:DIAG]') && diag.includes(ROOT_CAUSE_STEPS));
+  // 4. Static section shares the same steps; word-boundary gating ignores prefix/suffix.
+  assert.ok(SECTION_ERROR_DETECTIVE_PROTOCOL.includes(ROOT_CAUSE_STEPS));
+  assert.equal(resolveSubagentPromptSections({ brief: 'list prefix tokens' }).some((s) => s.id === 'error-detective'), false);
+  assert.equal(resolveSubagentPromptSections({ brief: 'fix login crash' }).some((s) => s.id === 'error-detective'), true);
 });
 
