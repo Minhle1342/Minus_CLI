@@ -1,7 +1,7 @@
 import { GoogleGenAI, type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { createStandardSystemPrompt } from './prompts.js';
-import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { TokenConfig, EffortScope, resolveTokenConfig } from './token-config.js';
 import { retryWithExponentialBackoff } from './error-handling.js';
 import { createPromptCacheKey } from './cache-envelope.js';
 import { promptCacheV2Mode } from './provider-capabilities.js';
@@ -80,6 +80,7 @@ export class GeminiLLM {
   readonly modelName: string;
   readonly systemPrompt: string;
   private tokenConfig: TokenConfig;
+  private effortScope: EffortScope;
   private explicitCaches = new Map<string, { name: string; expiresAt: number }>();
 
   constructor(
@@ -96,6 +97,7 @@ export class GeminiLLM {
     this.modelName = modelName;
     this.systemPrompt = systemPrompt;
     this.tokenConfig = resolveTokenConfig(modelName, tokenConfig);
+    this.effortScope = new EffortScope(this.tokenConfig.reasoningEffort);
   }
 
   cloneWithModel(modelName: string): GeminiLLM {
@@ -111,6 +113,8 @@ export class GeminiLLM {
       ...this.tokenConfig,
       ...config,
     });
+    // Explicit reconfig re-baselines the freeze (root cause: frozen value must not drift implicitly).
+    this.effortScope = new EffortScope(this.tokenConfig.reasoningEffort);
   }
 
   /**
@@ -127,6 +131,8 @@ export class GeminiLLM {
       ...this.tokenConfig,
       ...request?.tokenConfig,
     });
+    // shortcut: frozen session effort wins on providers without per-message updates (keeps prefix cache).
+    effectiveTokenConfig.reasoningEffort = this.effortScope.forRequest(effectiveTokenConfig.reasoningEffort, 'gemini');
 
     const sortedTools = tools.length > 0
       ? [...tools].sort((a, b) => (a.name || '').localeCompare(b.name || ''))

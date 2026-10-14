@@ -32,15 +32,26 @@ function highlightCode(line: string): string {
 }
 
 function formatTool(text: string): string {
-  // shortcut: tô màu markdown-diff trong khung (đỏ xóa/xanh thêm); bảng │ thường giữ nguyên
-  let inFrame = false;
-  return stripTerminalControls(text).split('\n').map((line, index) => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('╭─ diff ')) { inFrame = true; return color(tokyoNight.border, line); }
-    if (inFrame && trimmed.startsWith('╰─')) { inFrame = false; return color(tokyoNight.border, line); }
-    if (inFrame) {
-      const tone = diffLineTone(line);
-      if (tone) return color(tone, line);
+  const raw = stripTerminalControls(text).split('\n');
+  // shortcut: khung diff có viewer riêng (Ctrl+X D) — gọn thành 1 dòng tóm tắt thay vì tô màu từng dòng.
+  const skip = new Set<number>();
+  const summaryAt = new Map<number, string>();
+  for (let i = 0; i < raw.length; i++) {
+    const header = /^\s*╭─ diff (.+?)\s*─\s*$/.exec(raw[i]);
+    if (!header) continue;
+    let end = -1;
+    for (let j = i + 1; j < raw.length; j++) {
+      if (raw[j].trim().startsWith('╰─')) { end = j; break; }
+    }
+    if (end < 0) continue; // khung không đóng: giữ nguyên, không nuốt tail
+    const stats = /\+(\d+)\s+-(\d+)/.exec(raw[end]);
+    for (let j = i; j <= end; j++) skip.add(j);
+    summaryAt.set(i, `⋯ diff ${header[1]}${stats ? ` (+${stats[1]} -${stats[2]})` : ''} · Ctrl+X D`);
+  }
+  return raw.map((line, index): string | null => {
+    if (skip.has(index)) {
+      const summary = summaryAt.get(index);
+      return summary ? color(tokyoNight.muted, summary) : null;
     }
     if (index === 0) {
       if (line.startsWith('✖')) return color(tokyoNight.red, line);
@@ -59,7 +70,7 @@ function formatTool(text: string): string {
       }).join(color(tokyoNight.border, '│'));
     }
     return highlightCode(line);
-  }).join('\n');
+  }).filter((l): l is string => l !== null).join('\n');
 }
 
 function decodeHtmlEntities(text: string): string {

@@ -772,22 +772,22 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   // 8. OpenRouter (Free Coding Models)
   {
     id: '25',
-    name: 'openrouter/poolside/laguna-s-2.1:free',
-    provider: 'OpenRouter (Poolside)',
-    desc: 'Laguna S 2.1 (118B MoE): top-tier dedicated Coding Agent model from Poolside AI, 256K context',
+    name: 'openrouter/nvidia/nemotron-3.5-lightning:free',
+    provider: 'OpenRouter (Nvidia)',
+    desc: 'Nemotron 3.5 Lightning: fast free coding model from Nvidia, 1M context',
     recommended: true,
   },
   {
     id: '26',
-    name: 'openrouter/poolside/laguna-xs-2.1:free',
-    provider: 'OpenRouter (Poolside)',
-    desc: 'Laguna XS 2.1 (33B MoE): ultra-fast Coding Agent model with low latency, 256K context',
+    name: 'openrouter/dots-studio/dots-3-note-preview:free',
+    provider: 'OpenRouter (Dots Studio)',
+    desc: 'Dots 3 Note preview: free coding model via OpenRouter',
   },
   {
     id: '27',
-    name: 'openrouter/cohere/north-mini-code:free',
-    provider: 'OpenRouter (Cohere)',
-    desc: 'North Mini Code (30B MoE): specialized agentic coding model from Cohere, 256K context',
+    name: 'openrouter/google/gemma-4-31b-it:free',
+    provider: 'OpenRouter (Google DeepMind)',
+    desc: 'Gemma 4 31B: Reasoning mode, accurate function calling, 256K context',
   },
   {
     id: '28',
@@ -797,15 +797,9 @@ export const AVAILABLE_MODELS: ModelOption[] = [
   },
   {
     id: '29',
-    name: 'openrouter/google/gemma-4-31b-it:free',
-    provider: 'OpenRouter (Google DeepMind)',
-    desc: 'Gemma 4 31B: Reasoning mode, accurate function calling, 256K context',
-  },
-  {
-    id: '29f',
-    name: 'openrouter/free',
-    provider: 'OpenRouter (Free)',
-    desc: 'Auto-routes to the best available free model on OpenRouter',
+    name: 'openrouter/liquid/lfm-2.5-2.6b:free',
+    provider: 'OpenRouter (Liquid AI)',
+    desc: 'LFM 2.5 2.6B: compact fast free model via OpenRouter',
   },
 
   // 9. Pollinations AI

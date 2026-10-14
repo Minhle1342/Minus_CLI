@@ -554,7 +554,7 @@ export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-AD
 - Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
 - Tool Strategy by Use Case:
   * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
-  * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
+  * Fast Lexical Search: Use \`search_text\` for ripgrep search (file names & content regex) with scoped path; use \`search_codebase_fast\` (global only, no path param, filter via filePattern) when repo is unindexed or searching literal tokens/configs.
   * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
   * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout; use \`get_diagnostics\` to capture baseline compiler errors.
   * Parallel Inspection: Emit multiple read-only tool calls (read_file, search_text, inspect_symbol, get_diagnostics) in a single turn to run them concurrently in parallel.
@@ -565,7 +565,7 @@ export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (RE
 - Goal: Gather relevant context and directly answer or explain with zero mutation risk.
 - Tool Strategy by Use Case:
   * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
-  * Fast Lexical Search: Use \`search_codebase_fast\` for ripgrep search (file names & content regex) when repo is unindexed or searching literal tokens/configs; use \`search_text\` for scoped folder/file text search.
+  * Fast Lexical Search: Use \`search_text\` for ripgrep search (file names & content regex) with scoped path; use \`search_codebase_fast\` (global only, no path param, filter via filePattern) when repo is unindexed or searching literal tokens/configs.
   * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
   * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout.
   * Parallel Inspection: Emit multiple read-only tool calls in a single turn to execute them concurrently in parallel.

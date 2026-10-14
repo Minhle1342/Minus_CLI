@@ -483,6 +483,7 @@ export class AgentLoop {
       registerWorktreeTools(this.toolRegistry, this._workspace);
       this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
       this.toolRegistry.attachGitTools(this._workspace);
+      this.toolRegistry.attachSessionDiff(() => this.checkpointManager);
       this.kernel.init().catch(() => { });
     } else {
       this.llm = kernelOrLLM;
@@ -532,6 +533,7 @@ export class AgentLoop {
       registerWorktreeTools(this.toolRegistry, this._workspace);
       this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
       this.toolRegistry.attachGitTools(this._workspace);
+      this.toolRegistry.attachSessionDiff(() => this.checkpointManager);
 
       this.checkpointManager.init().catch(() => { });
       this.memoryManager.init(this._workspace).catch(() => { });
@@ -1238,9 +1240,17 @@ export class AgentLoop {
           'WORKSPACE_MUTATION_INTENT', 'REFACTOR_INTENT', 'PARETO_UNCERTAINTY_REQUIRES_EVIDENCE',
         ].includes(reason)));
     const taskComplexity = calculateTaskComplexity(retrievalUserRequest, initialTurnClassification.taskClass);
-    const effectiveMaxSteps = Number.isFinite(baseMaxSteps)
+    let effectiveMaxSteps = Number.isFinite(baseMaxSteps)
       ? (baseMaxSteps > 5 ? Math.max(1, Math.round(baseMaxSteps * taskComplexity.scaleFactor)) : baseMaxSteps)
       : baseMaxSteps;
+    let lastProgressCompletedTasks = this.planManager.getTasks().filter((t) => t.status === 'COMPLETED').length;
+    let lastProgressMutatedFilesCount = this.targetFilesModifiedInTurn.size;
+    let hasGrantedVerificationLease = false;
+    // ponytail: ceiling on dynamic progress leases to prevent infinite mutation drift
+    const maxLeasedSteps = Number.isFinite(effectiveMaxSteps)
+      ? Math.max(effectiveMaxSteps * 3, 100)
+      : Infinity;
+    const leaseBonus = parseInt(process.env.MINUS_STEP_LEASE_BONUS || '5', 10);
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
     const gitCodeChangeRequested = !isReadOnlyRequest(turnUserRequest)
       && ['bugfix', 'feature', 'refactor'].includes(initialTurnClassification.taskClass)
@@ -4723,6 +4733,35 @@ export class AgentLoop {
         // in compact mode so consecutive steps remain scannable.
         CLI.renderStepFooter();
         this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+
+        // Progress-Leased Step Extension (ponytail: lease extension bounded by maxLeasedSteps)
+        if (Number.isFinite(effectiveMaxSteps) && effectiveMaxSteps < maxLeasedSteps) {
+          const currentCompletedTasks = this.planManager.getTasks().filter((t) => t.status === 'COMPLETED').length;
+          const currentMutatedFilesCount = this.targetFilesModifiedInTurn.size;
+          const hasNewCompletedTask = currentCompletedTasks > lastProgressCompletedTasks;
+          const hasNewMutatedFile = currentMutatedFilesCount > lastProgressMutatedFilesCount;
+          const isVerified = !hasGrantedVerificationLease && this.verificationPolicy.canComplete().allowed;
+
+          if (hasNewCompletedTask || hasNewMutatedFile || isVerified) {
+            lastProgressCompletedTasks = currentCompletedTasks;
+            lastProgressMutatedFilesCount = currentMutatedFilesCount;
+            if (isVerified) hasGrantedVerificationLease = true;
+            const grantedExtension = Math.min(leaseBonus, maxLeasedSteps - effectiveMaxSteps);
+            if (grantedExtension > 0) {
+              effectiveMaxSteps += grantedExtension;
+              session.append('control/decision', {
+                turn,
+                step,
+                controlDecision: {
+                  mode: 'step-lease-extension',
+                  grantedExtension,
+                  extendedMaxSteps: effectiveMaxSteps,
+                  reason: hasNewCompletedTask ? 'task_completed' : isVerified ? 'verification_passed' : 'file_mutated',
+                },
+              });
+            }
+          }
+        }
 
         if (strategyChangeRequired) {
           CLI.renderReflectionAlert(

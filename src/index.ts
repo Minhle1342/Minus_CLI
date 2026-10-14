@@ -232,16 +232,34 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
     }
     if (openrouterApiKey) {
       tiers.push({
-        name: 'openrouter/z-ai/glm-5.3-flash',
-        provider: 'OpenRouter (Z.ai GLM-5.3 Flash)',
+        name: 'openrouter/nvidia/nemotron-3.5-lightning:free',
+        provider: 'OpenRouter (Nvidia Nemotron 3.5 Lightning)',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'z-ai/glm-5.3-flash', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'nvidia/nemotron-3.5-lightning:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
       tiers.push({
-        name: 'openrouter/free',
-        provider: 'OpenRouter Free',
+        name: 'openrouter/dots-studio/dots-3-note-preview:free',
+        provider: 'OpenRouter (Dots Studio Dots 3 Note)',
         tier: 3,
-        createClient: () => new DeepseekLLM(openrouterApiKey, 'free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'dots-studio/dots-3-note-preview:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+      });
+      tiers.push({
+        name: 'openrouter/google/gemma-4-31b-it:free',
+        provider: 'OpenRouter (Google Gemma 4 31B)',
+        tier: 3,
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'google/gemma-4-31b-it:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+      });
+      tiers.push({
+        name: 'openrouter/thinkingmachines/inkling:free',
+        provider: 'OpenRouter (Thinking Machines Inkling)',
+        tier: 3,
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'thinkingmachines/inkling:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
+      });
+      tiers.push({
+        name: 'openrouter/liquid/lfm-2.5-2.6b:free',
+        provider: 'OpenRouter (Liquid LFM 2.5 2.6B)',
+        tier: 3,
+        createClient: () => new DeepseekLLM(openrouterApiKey, 'liquid/lfm-2.5-2.6b:free', undefined, 'https://openrouter.ai/api/v1', undefined, tokenConfig),
       });
     }
     // Always attach Pollinations Zero-Key as ultimate fail-safe

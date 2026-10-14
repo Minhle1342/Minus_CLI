@@ -135,8 +135,8 @@ export class SkillRegistry {
   /**
    * Quét và đăng ký skills từ một thư mục
    */
-  discoverFromDirectory(directory: string, source: 'builtin' | 'workspace' | 'external' = 'workspace'): number {
-    const { manifests, errors } = SkillLoader.discoverSkills(directory, source);
+  discoverFromDirectory(directory: string, source: 'builtin' | 'workspace' | 'external' = 'workspace', limits?: { maxDepth?: number; maxDirs?: number; maxManifests?: number }): number {
+    const { manifests, errors } = SkillLoader.discoverSkills(directory, source, limits);
     let count = 0;
 
     for (const manifest of manifests) {

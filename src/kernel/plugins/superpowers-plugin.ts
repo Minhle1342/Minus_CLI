@@ -7,6 +7,7 @@ import { CapabilityPolicy } from '../../capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from '../../capabilities/default-capabilities.js';
 import { WorktreeManager } from '../../workspace/worktree-manager.js';
 import { createWorktreeTools } from '../../tools/worktree-tools.js';
+import { createSkillTools } from '../../tools/skill-tools.js';
 import { ApprovalManager } from '../../agent/approval-manager.js';
 import { createApprovalTools } from '../../tools/approval-tools.js';
 import { ReviewManager } from '../../agent/review-manager.js';
@@ -68,6 +69,13 @@ export class SuperpowersPlugin implements AgentPlugin {
     for (const tool of worktreeTools) {
       ctx.tools.register(tool);
     }
+    for (const tool of createSkillTools(this.skillRegistry)) ctx.tools.register(tool);
+    ctx.systemPrompt.unregister('dynamic-skill-loading');
+    ctx.systemPrompt.register({
+      id: 'dynamic-skill-loading',
+      priority: 95,
+      content: 'When a task needs a skill/plugin not listed by list_skills (e.g. user points to a linked repo path), call load_workspace_skills with that directory first, then list_skills to confirm. Only SKILL.md markdown is loaded, never executed code.',
+    });
 
     // Dedicated git_* tools stay unregistered by design: all Git flows through
     // run_command, which enforces the same scope/intent policy (see
@@ -174,6 +182,7 @@ export class SuperpowersPlugin implements AgentPlugin {
       this.onToolAfter = undefined;
     }
     ctx.agentHooks.unregister('superpowers-activator');
+    ctx.systemPrompt.unregister('dynamic-skill-loading');
     for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
     this.registeredSkillSections.clear();
   }

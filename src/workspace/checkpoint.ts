@@ -1,12 +1,18 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { computeLineDiff } from '../tools/diff-generator.js';
+import { nativeBatchReadFilesAsync, nativeScanManifest } from '../native/index.js';
 
 export interface Checkpoint {
   id: string; index: number; timestamp: string; description: string;
   commitHash?: string; diffSummary?: string; isTaskCheckpoint?: boolean; taskId?: string; workspaceDigest?: string;
 }
-type FileState = { content?: Buffer; mode?: number };
+type FileState = { content?: Buffer; mode?: number; mtimeMs?: number; size?: number };
+
+/** Bulk-read cap per file for the native fast path; misses fall back to exact readState. */
+const DIFF_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+// shortcut: full-tree manifest scan only pays off above this fallback size; tune from turn profiles.
+const MANIFEST_PREFILTER_THRESHOLD = 25;
 
 export interface FileDiffItem {
   filePath: string;
@@ -48,9 +54,11 @@ export class CheckpointManager {
       const absolute = path.join(this.workspaceDir, safe);
       const stat = await fs.lstat(absolute);
       if (!stat.isFile()) throw new Error(`Checkpoint target is not a regular file: ${file}`);
-      return { content: await fs.readFile(absolute), mode: stat.mode };
+      // mtimeMs/size ride along for free (same lstat) to feed the manifest prefilter.
+      return { content: await fs.readFile(absolute), mode: stat.mode, mtimeMs: stat.mtimeMs, size: stat.size };
     } catch (error: any) { if (error?.code === 'ENOENT') return {}; throw error; }
   }
+  get rootDir(): string { return this.workspaceDir; }
   private same(left: FileState, right: FileState): boolean {
     return left.content === undefined ? right.content === undefined : right.content !== undefined && left.content.equals(right.content) && left.mode === right.mode;
   }
@@ -142,5 +150,78 @@ export class CheckpointManager {
   }
   getHistory(): Checkpoint[] { return this.checkpoints.map(cp => ({ ...cp })); }
   getTaskCheckpoints(): Checkpoint[] { return this.getHistory().filter(cp => cp.isTaskCheckpoint); }
+  /** Turn diff: before vs owned snapshots in memory (zero disk I/O); disk read only for files with no recorded harness mutation. Skips unchanged files. */
+  async diffTurn(checkpointId?: string): Promise<FileDiffItem[]> {
+    const target = checkpointId ? this.checkpoints.find(cp => cp.id === checkpointId) : this.checkpoints.at(-1);
+    if (!target) return [];
+    const snapshot = this.snapshots.get(target.id);
+    if (!snapshot) return [];
+    const diffs: FileDiffItem[] = [];
+    const diskReads: string[] = [];
+    for (const [file, before] of snapshot.before) {
+      const owned = snapshot.owned.get(file);
+      // recordMutation swaps in a new state object; same reference means no harness mutation.
+      if (owned && owned !== before) {
+        if (!this.same(before, owned)) diffs.push(this.toDiffItem(file, before, owned));
+      } else diskReads.push(file);
+    }
+    // Parallel fallback for external changes only; harness-tracked files never touch disk.
+    // ① Manifest prefilter (one stat-only Rust walk): skip content reads for fingerprint-unchanged files.
+    let needRead = diskReads;
+    if (diskReads.length >= MANIFEST_PREFILTER_THRESHOLD) {
+      const entries = nativeScanManifest(this.workspaceDir, []);
+      if (entries) {
+        const fingerprints = new Map(entries.map(e => [e.relPath, e.fingerprint]));
+        needRead = diskReads.filter(file => {
+          const before = snapshot.before.get(file)!;
+          // shortcut: floor both sides (Rust truncates to whole ms); missing entry or >500KB skip → must read.
+          const baseline = before.size !== undefined && before.mtimeMs !== undefined
+            ? `${before.size}:${Math.floor(before.mtimeMs)}`
+            : undefined;
+          // Rust rel paths always use forward slashes; safe paths use the OS separator.
+          return baseline === undefined || fingerprints.get(file.replace(/\\/g, '/')) !== baseline;
+        });
+      }
+    }
+    // ② Bulk content reads on a libuv worker; misses (binary/too-large/missing) degrade to exact reads.
+    const states = new Map((await this.readCurrentStates(needRead)).map(r => [r.file, r]));
+    for (const file of needRead) {
+      const hit = states.get(file)!;
+      const before = snapshot.before.get(file)!;
+      const unchanged = hit.exact ? this.same(before, hit.state) : this.sameContent(before, hit.state);
+      if (!unchanged) diffs.push(this.toDiffItem(file, before, hit.state));
+    }
+    return diffs;
+  }
+  private sameContent(left: FileState, right: FileState): boolean {
+    return left.content === undefined ? right.content === undefined : right.content !== undefined && left.content.equals(right.content);
+  }
+  /** Current disk states: one native bulk crossing first, exact per-file reads only for misses. */
+  private async readCurrentStates(files: string[]): Promise<Array<{ file: string; state: FileState; exact: boolean }>> {
+    if (files.length === 0) return [];
+    const batch = await nativeBatchReadFilesAsync(this.workspaceDir, files, DIFF_BATCH_MAX_BYTES);
+    if (!batch) {
+      return Promise.all(files.map(async (file) => ({ file, state: await this.readState(file), exact: true })));
+    }
+    const byPath = new Map(batch.map(r => [r.relPath, r]));
+    const out: Array<{ file: string; state: FileState; exact: boolean }> = [];
+    const misses: string[] = [];
+    for (const file of files) {
+      const hit = byPath.get(file);
+      if (hit && !hit.error && hit.content != null) {
+        // shortcut: batch carries no mode; mode-only changes skip here (cosmetic, no content diff).
+        out.push({ file, state: { content: Buffer.from(hit.content, 'utf8') }, exact: false });
+      } else misses.push(file);
+    }
+    const exact = await Promise.all(misses.map(async (file) => ({ file, state: await this.readState(file), exact: true })));
+    return [...out, ...exact];
+  }
+  private toDiffItem(file: string, before: FileState, after: FileState): FileDiffItem {
+    const beforeText = before.content?.toString('utf8') ?? '';
+    const afterText = after.content?.toString('utf8') ?? '';
+    if (before.content === undefined && after.content !== undefined) return { filePath: file, diff: computeLineDiff('', afterText, file), status: 'CREATED' };
+    if (before.content !== undefined && after.content === undefined) return { filePath: file, diff: computeLineDiff(beforeText, '', file), status: 'DELETED' };
+    return { filePath: file, diff: computeLineDiff(beforeText, afterText, file), status: 'MODIFIED' };
+  }
   getLastCheckpoint(): Checkpoint | undefined { const cp = this.checkpoints.at(-1); return cp ? { ...cp } : undefined; }
 }

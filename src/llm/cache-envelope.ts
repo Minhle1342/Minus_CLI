@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { nativeComputeStringHash } from '../native/index.js';
 
 export type PromptCacheTier = 'T0' | 'T1' | 'T2' | 'T3';
 
@@ -97,5 +97,6 @@ function canonicalJson(value: Record<string, unknown>): string {
 }
 
 function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+  // Same SHA-256 hex digest as node:crypto; Rust fast path with identical output (no key rotation).
+  return nativeComputeStringHash(value);
 }

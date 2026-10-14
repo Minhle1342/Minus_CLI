@@ -540,7 +540,7 @@ export class CognitiveHarness {
       if (phase === 'verify') {
         const negativeGate = [
           '🔒 [PHASE LOCK: VERIFY] NEVER implement new features or refactor unrelated code during VERIFICATION.',
-          'NEVER disable, delete, or comment out failing assertions to achieve green test passes.',
+          'NEVER disable, delete, or comment out failing assertions to bypass test failures — fix production logic instead. Legitimate assertion upgrades are allowed only as a separate edit before running tests, preserving or increasing assertion count.',
           'NEVER declare victory without running empirical verification (e.g. npm run build / test suite).',
         ];
 

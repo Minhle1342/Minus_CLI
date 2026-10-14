@@ -3,8 +3,16 @@ import { promisify } from 'node:util';
 import { ISandboxProvider, SandboxExecutionResult, SandboxOptions, SandboxStatus } from './types.js';
 import { getNativeCore, nativeExecuteSandboxed } from '../native/index.js';
 import { sanitizeTerminalOutput } from '../tools/terminal-sanitizer.js';
+import { nativeTruncateToolOutput } from '../native/index.js';
+import { MAX_STRING_LENGTH, checkStringLength } from './output-limits.js';
 
 const execAsync = promisify(exec);
+
+// shortcut: byte-based head/tail truncation via Rust (TS fallback inside); fixes UTF-16-vs-bytes mismatch.
+function capOutput(text: string): { text: string; truncated: boolean } {
+  const res = nativeTruncateToolOutput(text, 2000, MAX_STRING_LENGTH, true);
+  return { text: res.text, truncated: res.wasTruncated };
+}
 
 /**
  * LocalProcessSandbox - Môi trường thực thi tiến trình cục bộ với cách ly biến môi trường
@@ -28,6 +36,10 @@ export class LocalProcessSandbox implements ISandboxProvider {
 
   async exec(command: string, options?: SandboxOptions): Promise<SandboxExecutionResult> {
     const startTime = Date.now();
+    // shortcut: fail fast before spawning when the command itself exceeds the string cap (bytes, not UTF-16 units).
+    try { checkStringLength(Buffer.byteLength(command, 'utf8')); } catch {
+      return { stdout: '', stderr: `Command exceeds ${MAX_STRING_LENGTH} chars; refused before spawn.`, exitCode: 1, durationMs: 0, sandboxType: 'local', success: false, errorCode: 'COMMAND_TOO_LARGE' };
+    }
     const requestedTimeout = options?.timeoutMs ?? 30000;
     // Convention: timeoutMs === 0 disables the timeout. Node exec treats 0 as
     // disabled, but the Rust core takes u32 milliseconds, so map disabled to
@@ -83,15 +95,17 @@ export class LocalProcessSandbox implements ISandboxProvider {
       sanitizedEnv,
     );
     if (sandboxedRes) {
+      const out = capOutput(sanitizeTerminalOutput(sandboxedRes.stdout));
+      const err = capOutput(sanitizeTerminalOutput(sandboxedRes.stderr));
       return {
-        stdout: sanitizeTerminalOutput(sandboxedRes.stdout),
-        stderr: sanitizeTerminalOutput(sandboxedRes.stderr),
+        stdout: out.text,
+        stderr: err.text,
         exitCode: sandboxedRes.exitCode,
         durationMs: sandboxedRes.durationMs,
         sandboxType: 'local',
         success: sandboxedRes.exitCode === 0 && !sandboxedRes.cancelled,
         timedOut: sandboxedRes.timedOut,
-        ...(sandboxedRes.outputIncomplete ? { outputIncomplete: true } : {}),
+        ...(sandboxedRes.outputIncomplete || out.truncated || err.truncated ? { outputIncomplete: true } : {}),
         ...(sandboxedRes.cancelled ? { errorCode: 'COMMAND_CANCELLED' } : {}),
       };
     }
@@ -105,26 +119,32 @@ export class LocalProcessSandbox implements ISandboxProvider {
         maxBuffer: 1024 * 1024 * 5, // 5MB buffer
       });
 
+      const okOut = capOutput(sanitizeTerminalOutput(stdout || ''));
+      const okErr = capOutput(sanitizeTerminalOutput(stderr || ''));
       return {
-        stdout: sanitizeTerminalOutput(stdout || ''),
-        stderr: sanitizeTerminalOutput(stderr || ''),
+        stdout: okOut.text,
+        stderr: okErr.text,
         exitCode: 0,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
         success: true,
+        ...((okOut.truncated || okErr.truncated) ? { outputIncomplete: true } : {}),
       };
     } catch (err: any) {
       const isCancelled = options?.signal?.aborted || err?.name === 'AbortError';
       const exitCode = isCancelled ? 130 : typeof err.code === 'number' ? err.code : 1;
+      const out = capOutput(sanitizeTerminalOutput(err.stdout || ''));
+      const errText = capOutput(sanitizeTerminalOutput(err.stderr || err.message || ''));
       return {
-        stdout: sanitizeTerminalOutput(err.stdout || ''),
-        stderr: isCancelled ? 'Command was cancelled by user.' : sanitizeTerminalOutput(err.stderr || err.message || ''),
+        stdout: out.text,
+        stderr: isCancelled ? 'Command was cancelled by user.' : errText.text,
         exitCode,
         durationMs: Date.now() - startTime,
         sandboxType: 'local',
         success: false,
         timedOut: !isCancelled && Boolean(err?.killed && err?.signal === 'SIGTERM'),
         ...(isCancelled ? { errorCode: 'COMMAND_CANCELLED' } : {}),
+        ...((out.truncated || errText.truncated) ? { outputIncomplete: true } : {}),
       };
     }
   }

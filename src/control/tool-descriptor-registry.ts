@@ -38,6 +38,8 @@ export const READ_TOOL_NAMES = new Set([
   'codegraph_callees',
   'codegraph_impact',
   'codegraph_status',
+  'session_diff',
+  'list_skills',
 ]);
 export const EDIT_TOOL_NAMES = new Set([
   'apply_patch',
@@ -480,6 +482,18 @@ export class ToolDescriptorRegistry {
         reversible: true,
         requiresApproval: false,
         deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
+    } else if (name === 'load_workspace_skills') {
+      descriptor = {
+        name,
+        capabilities: ['execute', 'inspect'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: false,
         schemaCost: this.cost(tool),
       };
     } else {

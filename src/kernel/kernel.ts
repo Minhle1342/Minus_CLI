@@ -251,6 +251,7 @@ export class AgentKernel {
     tools.attachScheduleManager(schedules);
     tools.attachSharedContextService(sharedContext);
     tools.attachAgentEventBus(agentEvents);
+    tools.attachSessionDiff(() => this.ctx?.checkpoints);
     tools.attachAgentOrchestrator(orchestrator);
     tools.attachGitTools(workspace);
     const browserMcp = new McpManager();

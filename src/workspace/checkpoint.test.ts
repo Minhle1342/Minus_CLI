@@ -66,6 +66,27 @@ test('snapshot capture rejects escaping paths', async () => fixture(async (manag
   assert.equal(manager.getHistory().length, 0);
 }));
 
+test('diffTurn reports only changed files in the turn', async () => fixture(async (manager, root) => {
+  await fs.writeFile(path.join(root, 'a.ts'), 'old');
+  await fs.writeFile(path.join(root, 'b.ts'), 'same');
+  await manager.createCheckpoint('turn', { files: ['a.ts', 'b.ts'] });
+  await fs.writeFile(path.join(root, 'a.ts'), 'new');
+  await manager.recordMutation(['a.ts']);
+  const diffs = await manager.diffTurn();
+  assert.equal(diffs.length, 1);
+  assert.equal(diffs[0].filePath, 'a.ts');
+  assert.match(diffs[0].diff, /\+new/);
+}));
+
+test('diffTurn falls back to disk for unrecorded external edits', async () => fixture(async (manager, root) => {
+  await fs.writeFile(path.join(root, 'a.ts'), 'old');
+  await manager.createCheckpoint('turn', { files: ['a.ts'] });
+  await fs.writeFile(path.join(root, 'a.ts'), 'external');
+  const diffs = await manager.diffTurn();
+  assert.equal(diffs.length, 1);
+  assert.match(diffs[0].diff, /\+external/);
+}));
+
 test('rollback returns line diffs and deletes newly created files', async () => fixture(async (manager, root) => {
   await fs.writeFile(path.join(root, 'edit.ts'), 'line 1\nold line\nline 3\n');
   await manager.createCheckpoint('before mutation', { files: ['edit.ts', 'created.ts'] });

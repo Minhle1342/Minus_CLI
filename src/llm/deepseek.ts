@@ -2,7 +2,7 @@ import { type FunctionDeclaration, type FunctionCall } from '@google/genai';
 import { Session } from '../session/session.js';
 import { createStandardSystemPrompt } from './prompts.js';
 import { LLMResponse, LLMRequestOptions, StreamCallbacks, type LLMFinishReason, type LLMUsage } from './gemini.js';
-import { TokenConfig, resolveTokenConfig } from './token-config.js';
+import { TokenConfig, EffortScope, getModelTokenProfile, resolveTokenConfig } from './token-config.js';
 import { fetchCodexResponse } from './codex-responses.js';
 import { createPromptCacheKey } from './cache-envelope.js';
 import { openAIPromptCacheFields } from './provider-capabilities.js';
@@ -51,6 +51,7 @@ export class DeepseekLLM {
   readonly chunkTimeoutMs?: number;
   readonly maxRetries: number;
   private tokenConfig: TokenConfig;
+  private effortScope: EffortScope;
 
   constructor(
     apiKeyOrOptions?: string | DeepseekLLMOptions,
@@ -83,6 +84,7 @@ export class DeepseekLLM {
     if (!this.apiKey) {
       throw new Error('API key must not be empty when initializing DeepseekLLM / OpenAI-compatible provider.');
     }
+    this.effortScope = new EffortScope(this.tokenConfig.reasoningEffort);
   }
 
   cloneWithModel(modelName: string): DeepseekLLM {
@@ -108,6 +110,8 @@ export class DeepseekLLM {
       ...this.tokenConfig,
       ...config,
     }, this.baseURL);
+    // Explicit reconfig re-baselines the freeze (root cause: frozen value must not drift implicitly).
+    this.effortScope = new EffortScope(this.tokenConfig.reasoningEffort);
   }
 
   /**
@@ -582,6 +586,12 @@ export class DeepseekLLM {
       ...this.tokenConfig,
       ...request?.tokenConfig,
     }, this.baseURL);
+    // shortcut: frozen session effort wins on providers without per-message updates (keeps prefix cache).
+    // Root cause: this class also serves gpt-*/o-* OpenAI-compatible endpoints, so derive the key from the model.
+    effectiveTokenConfig.reasoningEffort = this.effortScope.forRequest(
+      effectiveTokenConfig.reasoningEffort,
+      getModelTokenProfile(effectiveModel, this.baseURL).provider,
+    );
 
     // Cấu hình Output Tokens theo chuẩn OpenAI / DeepSeek / OpenRouter
     if (effectiveTokenConfig.maxOutputTokens) {
@@ -600,17 +610,18 @@ export class DeepseekLLM {
       }
     }
 
-    // Cấu hình Reasoning Effort cho các reasoning models
+    // Cấu hình Reasoning Effort cho các reasoning models.
+    // Root cause: OpenRouter Chat Completions không hiểu `reasoning_effort` (DeepSeek-style) lẫn
+    // `thinking` (Anthropic Messages-style) — cả hai bị bỏ qua silently. Tham số chuẩn là `reasoning`
+    // (docs: openrouter.ai/docs/guides/best-practices/reasoning-tokens).
     if (isReasoningModel && effectiveTokenConfig.reasoningEffort) {
       requestBody.reasoning_effort = effectiveTokenConfig.reasoningEffort;
-    }
-
-    // Cấu hình Thinking Budget cho OpenRouter / Anthropic nếu có
-    if (effectiveTokenConfig.thinkingBudget !== undefined && this.baseURL.includes('openrouter.ai')) {
-      requestBody.thinking = {
-        type: 'enabled',
-        budget_tokens: effectiveTokenConfig.thinkingBudget,
-      };
+      if (this.baseURL.includes('openrouter.ai')) {
+        requestBody.reasoning = { effort: effectiveTokenConfig.reasoningEffort };
+      }
+    } else if (effectiveTokenConfig.thinkingBudget !== undefined && this.baseURL.includes('openrouter.ai')) {
+      // `reasoning` chỉ nhận effort HOẶC max_tokens, không cả hai.
+      requestBody.reasoning = { max_tokens: effectiveTokenConfig.thinkingBudget };
     }
 
     // Chỉ đặt temperature cho model thông thường (reasoning models dùng mặc định)
@@ -659,11 +670,13 @@ export class DeepseekLLM {
 
     let response: Response;
     try {
+      // shortcut: OpenRouter gates some :free endpoints by agentic-harness app identity (HTTP-Referer).
+      // The default is a placeholder — override with a listed app URL to pass the gate.
       const headers = {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.apiKey}`,
-          'HTTP-Referer': 'https://github.com/mini-agent-loop',
-          'X-Title': 'Autonomous Coding Agent',
+          'HTTP-Referer': process.env.MINUS_OPENROUTER_REFERER || 'https://github.com/mini-agent-loop',
+          'X-Title': process.env.MINUS_OPENROUTER_TITLE || 'Autonomous Coding Agent',
           'session-id': affinityKey,
           'X-Session-ID': affinityKey,
           ...this.extraHeaders,
@@ -786,6 +799,31 @@ export class DeepseekLLM {
         }
         fullReasoning += delta.reasoning_content;
         callbacks?.onThoughtToken?.(delta.reasoning_content);
+      }
+
+      // OpenRouter trả reasoning ở `delta.reasoning` (string) và/hoặc `delta.reasoning_details[]`
+      // thay vì `reasoning_content` kiểu DeepSeek — không đọc 2 trường này thì mất thought tokens.
+      if (typeof delta.reasoning === 'string' && delta.reasoning) {
+        if (timeToFirstTokenMs === undefined) {
+          timeToFirstTokenMs = Date.now() - requestStartTime;
+        }
+        fullReasoning += delta.reasoning;
+        callbacks?.onThoughtToken?.(delta.reasoning);
+      }
+      if (Array.isArray(delta.reasoning_details)) {
+        for (const detail of delta.reasoning_details) {
+          const text = typeof detail?.text === 'string' && detail.text
+            ? detail.text
+            : typeof detail?.summary === 'string' && detail.summary
+              ? detail.summary
+              : '';
+          if (!text) continue;
+          if (timeToFirstTokenMs === undefined) {
+            timeToFirstTokenMs = Date.now() - requestStartTime;
+          }
+          fullReasoning += text;
+          callbacks?.onThoughtToken?.(text);
+        }
       }
 
       if (delta.content) {

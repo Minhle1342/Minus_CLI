@@ -159,8 +159,14 @@ export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT C
  * This is the single default system prompt: providers fall back to it when the
  * caller passes no explicit system prompt (the agent loop always passes one).
  */
-export function createStandardSystemPrompt(ctx?: PromptAssemblyContext): string {
+export function buildModelIdentitySection(provider: string, modelId: string, displayName?: string): { id: string; content: string; priority: number } {
+  const name = (displayName || modelId).trim() || 'unknown model';
+  return { id: 'model-identity', content: `You are powered by ${name} (${provider.trim()}/${modelId.trim()}).`, priority: 0 };
+}
+
+export function createStandardSystemPrompt(ctx?: PromptAssemblyContext, modelInfo?: { provider: string; modelId: string; displayName?: string }): string {
   const assembler = new PromptAssembler();
+  if (modelInfo?.modelId) assembler.register(buildModelIdentitySection(modelInfo.provider, modelInfo.modelId, modelInfo.displayName));
   for (const s of DEFAULT_PROMPT_SECTIONS) {
     assembler.register(s);
   }

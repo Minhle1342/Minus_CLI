@@ -387,35 +387,35 @@ const MODEL_TOKEN_PROFILES: Record<string, Partial<ModelTokenProfile>> = {
   },
 
   // OpenRouter Free Coding Models
-  'poolside/laguna-s-2.1:free': {
+  'nvidia/nemotron-3.5-lightning:free': {
     provider: 'other',
-    defaultMaxOutputTokens: 16384,
-    defaultMaxInputTokens: 200000,
-    maxSupportedOutputTokens: 65536,
-    maxSupportedInputTokens: 262144,
+    defaultMaxOutputTokens: 8192,
+    defaultMaxInputTokens: 500000,
+    maxSupportedOutputTokens: 32768,
+    maxSupportedInputTokens: 1048576,
     supportsThinkingBudget: false,
     supportsReasoningEffort: false,
     isReasoningModel: false,
   },
-  'poolside/laguna-xs-2.1:free': {
-    provider: 'other',
-    defaultMaxOutputTokens: 16384,
-    defaultMaxInputTokens: 200000,
-    maxSupportedOutputTokens: 65536,
-    maxSupportedInputTokens: 262144,
-    supportsThinkingBudget: false,
-    supportsReasoningEffort: false,
-    isReasoningModel: false,
-  },
-  'cohere/north-mini-code:free': {
+  'dots-studio/dots-3-note-preview:free': {
     provider: 'other',
     defaultMaxOutputTokens: 8192,
     defaultMaxInputTokens: 200000,
     maxSupportedOutputTokens: 32768,
-    maxSupportedInputTokens: 256000,
+    maxSupportedInputTokens: 524288,
     supportsThinkingBudget: false,
     supportsReasoningEffort: false,
     isReasoningModel: false,
+  },
+  'google/gemma-4-31b-it:free': {
+    provider: 'gemini',
+    defaultMaxOutputTokens: 16384,
+    defaultMaxInputTokens: 200000,
+    maxSupportedOutputTokens: 65536,
+    maxSupportedInputTokens: 262144,
+    supportsThinkingBudget: true,
+    supportsReasoningEffort: false,
+    isReasoningModel: true,
   },
   'thinkingmachines/inkling:free': {
     provider: 'other',
@@ -427,15 +427,15 @@ const MODEL_TOKEN_PROFILES: Record<string, Partial<ModelTokenProfile>> = {
     supportsReasoningEffort: true,
     isReasoningModel: true,
   },
-  'google/gemma-4-31b-it:free': {
-    provider: 'gemini',
-    defaultMaxOutputTokens: 16384,
-    defaultMaxInputTokens: 200000,
-    maxSupportedOutputTokens: 65536,
-    maxSupportedInputTokens: 262144,
-    supportsThinkingBudget: true,
+  'liquid/lfm-2.5-2.6b:free': {
+    provider: 'other',
+    defaultMaxOutputTokens: 4096,
+    defaultMaxInputTokens: 32000,
+    maxSupportedOutputTokens: 8192,
+    maxSupportedInputTokens: 66000,
+    supportsThinkingBudget: false,
     supportsReasoningEffort: false,
-    isReasoningModel: true,
+    isReasoningModel: false,
   },
 };
 
@@ -733,4 +733,25 @@ export function getPresetTokenConfig(tier: TokenPresetTier, profile: ModelTokenP
     includeThoughts: true,
     dynamicContextBudget: def.dynamicContextBudget,
   };
+}
+
+/** Providers with per-message effort updates (prefix cache stays intact). */
+export const SUPPORTS_EFFORT_UPDATES: Record<string, boolean> = { anthropic: true, openai: true };
+
+/** Freeze top-level effort at session start; only allowlisted providers send mid-session updates. */
+export function resolveEffortForRequest(frozen: TokenConfig['reasoningEffort'], requested: TokenConfig['reasoningEffort'], provider: string): TokenConfig['reasoningEffort'] {
+  if (requested === undefined || requested === frozen) return requested ?? frozen;
+  if (frozen === undefined) return requested;
+  return SUPPORTS_EFFORT_UPDATES[provider.trim().toLowerCase()] ? requested : frozen;
+}
+
+/** Session-scoped effort: first value wins unless the provider supports per-message updates. */
+export class EffortScope {
+  private frozen: TokenConfig['reasoningEffort'];
+  constructor(initial?: TokenConfig['reasoningEffort']) { this.frozen = initial; }
+  forRequest(requested: TokenConfig['reasoningEffort'], provider: string): TokenConfig['reasoningEffort'] {
+    const resolved = resolveEffortForRequest(this.frozen, requested, provider);
+    if (this.frozen === undefined) this.frozen = resolved;
+    return resolved;
+  }
 }

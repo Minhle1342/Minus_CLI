@@ -59,7 +59,7 @@ describe('Antigravity CLI Collapse & Explore Mechanism', () => {
       const workspace = new Workspace(currentWorkspaceDir);
       const toolRegistry = new ToolRegistry();
       const mockLLM: any = {
-        name: 'openrouter/poolside/laguna-s-2.1:free',
+        name: 'openrouter/nvidia/nemotron-3.5-lightning:free',
         generateText: async () => ({ text: 'mock' }),
       };
       const agentLoop = new AgentLoop(mockLLM, toolRegistry, { workspace });
@@ -82,9 +82,9 @@ describe('Antigravity CLI Collapse & Explore Mechanism', () => {
         } as any,
       });
 
-      const report = inspectContext(session, agentLoop, 'openrouter/poolside/laguna-s-2.1:free');
+      const report = inspectContext(session, agentLoop, 'openrouter/nvidia/nemotron-3.5-lightning:free');
       assert.strictEqual(report.sessionId, session.id);
-      assert.strictEqual(report.modelName, 'openrouter/poolside/laguna-s-2.1:free');
+      assert.strictEqual(report.modelName, 'openrouter/nvidia/nemotron-3.5-lightning:free');
       assert.ok(report.maxInputTokens > 0);
       assert.ok(report.totalEstimatedTokens > 0);
       assert.strictEqual(report.layers.length, 5);

@@ -57,7 +57,8 @@ export function createSearchCodebaseFastTool(): ToolDefinition {
     name: 'search_codebase_fast',
     description:
       'Search source code globally with BM25/fuzzy and an optional semantic symbol index. ' +
-      'Auto mode keeps lexical matching for identifier/path/error literals and uses hybrid only for natural-language intent queries.',
+      'Auto mode keeps lexical matching for identifier/path/error literals and uses hybrid only for natural-language intent queries. ' +
+      'No path param. Global only. Use filePattern to filter, use search_text(path=...) for scoped dir search.',
     parameters: {
       type: Type.OBJECT,
       properties: {

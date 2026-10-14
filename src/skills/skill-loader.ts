@@ -142,23 +142,34 @@ export class SkillLoader {
   /**
    * Quét và nạp tất cả các file SKILL.md trong một thư mục
    */
-  static discoverSkills(directory: string, source: 'builtin' | 'workspace' | 'external' = 'workspace'): { manifests: SkillManifest[]; errors: { path: string; error: string }[] } {
+  static discoverSkills(directory: string, source: 'builtin' | 'workspace' | 'external' = 'workspace', limits?: { maxDepth?: number; maxDirs?: number; maxManifests?: number }): { manifests: SkillManifest[]; errors: { path: string; error: string }[] } {
     const manifests: SkillManifest[] = [];
     const errors: { path: string; error: string }[] = [];
+    const maxDepth = limits?.maxDepth ?? Infinity;
+    const maxDirs = limits?.maxDirs ?? Infinity;
+    const maxManifests = limits?.maxManifests ?? Infinity;
+    let dirsVisited = 0;
 
     const resolvedDir = path.resolve(directory);
     if (!fs.existsSync(resolvedDir)) {
       return { manifests, errors };
     }
 
-    const scanDir = (dir: string) => {
+    const scanDir = (dir: string, depth: number) => {
+      if (manifests.length >= maxManifests || depth > maxDepth) return;
+      if (dirsVisited >= maxDirs) {
+        errors.push({ path: dir, error: `Directory scan capped at ${maxDirs} directories` });
+        return;
+      }
+      dirsVisited++;
       try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
+          if (manifests.length >= maxManifests) return;
           const fullPath = path.join(dir, entry.name);
           if (entry.isDirectory()) {
             if (entry.name === 'node_modules' || entry.name === '.git') continue;
-            scanDir(fullPath);
+            scanDir(fullPath, depth + 1);
           } else if (entry.isFile()) {
             if (entry.name === 'SKILL.md' || entry.name.endsWith('.skill.md')) {
               const res = this.loadSkillFile(fullPath, source, resolvedDir);
@@ -175,7 +186,7 @@ export class SkillLoader {
       }
     };
 
-    scanDir(resolvedDir);
+    scanDir(resolvedDir, 0);
     return { manifests, errors };
   }
 }

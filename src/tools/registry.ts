@@ -28,6 +28,8 @@ import { createWebSearchTool, searchWebTool, webSearchTool } from './web-search.
 import { createWebFetchTool, readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
 import { createPublishAgentEventTool } from './agent-event-tools.js';
+import { createSessionDiffTool } from './session-diff.js';
+import type { CheckpointManager } from '../workspace/checkpoint.js';
 import { queryCallGraphTool } from './query-call-graph.js';
 import { getRouteMapTool } from './get-route-map.js';
 import { getSymbolContext360Tool } from './symbol-context-360.js';
@@ -272,6 +274,10 @@ export class ToolRegistry implements ToolProvider {
     this.register(createPublishAgentEventTool(eventBus));
   }
 
+  attachSessionDiff(getManager: () => CheckpointManager | undefined): void {
+    if (!this.tools.has('session_diff')) this.register(createSessionDiffTool(getManager));
+  }
+
   attachAgentOrchestrator(orchestrator: AgentOrchestrator): void {
     this.register(createAllocateAgentTaskTool(orchestrator));
     this.register(createVerifySubagentQualityTool(orchestrator));
@@ -304,6 +310,8 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'read_url_content') return this.tools.has('web_fetch');
     if (name === 'web_fetch') return this.tools.has('read_url_content');
     if (name === 'search_text') return this.tools.has('search_codebase_fast') || this.tools.has('search_text');
+    // shortcut: Code Mode built-in name; resolves to the fast search implementation.
+    if (name === 'tools_search') return this.tools.has('search_codebase_fast');
     return false;
   }
 
@@ -315,6 +323,7 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'read_url_content') return this.tools.get('web_fetch');
     if (name === 'web_fetch') return this.tools.get('read_url_content');
     if (name === 'search_text') return this.tools.get('search_codebase_fast') || searchTextTool;
+    if (name === 'tools_search') return this.tools.get('search_codebase_fast');
     return undefined;
   }
 
@@ -382,6 +391,8 @@ export class ToolRegistry implements ToolProvider {
         }
       } else if (name === 'search_text') {
         resolvedName = 'search_text';
+      } else if (name === 'tools_search') {
+        resolvedName = 'search_codebase_fast';
       }
     }
 
@@ -442,6 +453,7 @@ export class ToolScope implements ToolProvider {
         : name === 'read_url_content' ? 'web_fetch'
         : name === 'web_fetch' ? 'read_url_content'
         : name === 'search_text' ? 'search_codebase_fast'
+        : name === 'tools_search' ? 'search_codebase_fast'
         : name === 'write_to_file' ? 'write_file'
         : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
         : undefined;
@@ -452,7 +464,9 @@ export class ToolScope implements ToolProvider {
 
   getAll(): ToolDefinition[] {
     const visible = this.allowed
-      ? this.base.getAll().filter((tool) => this.allowed!.has(tool.name))
+      ? this.base.getAll().filter((tool) => this.allowed!.has(tool.name)
+        // shortcut: alias allowlist (tools_search) exposes the built-in target, matching get().
+        || (tool.name === 'search_codebase_fast' && this.allowed!.has('tools_search')))
       : this.base.getAll();
     const byName = new Map(visible.map((tool) => [tool.name, tool]));
     for (const [name, tool] of this.localTools) byName.set(name, tool);
