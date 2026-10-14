@@ -600,7 +600,19 @@ export class DeepseekLLM {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`LLM API error (${response.status}): ${errorText}`);
+      const err: any = new Error(`LLM API error (${response.status}): ${errorText}`);
+      err.status = response.status;
+      err.statusCode = response.status;
+      try {
+        const parsed = JSON.parse(errorText);
+        err.errorResponse = parsed;
+        if (parsed?.error) {
+          if (parsed.error.code) err.code = parsed.error.code;
+          if (parsed.error.type) err.type = parsed.error.type;
+          if (parsed.error.message) err.providerMessage = parsed.error.message;
+        }
+      } catch {}
+      throw err;
     }
 
     let fullText = '';

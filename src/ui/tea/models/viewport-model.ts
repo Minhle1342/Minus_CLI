@@ -790,15 +790,25 @@ export interface StripSegment { text: string; tab: number; zone: 'tab' | 'close'
 const STRIP_SEP: StripSegment = { text: ' │ ', tab: -1, zone: 'none' };
 
 export function sessionStripSegments(state: SessionTabsModel, width: number): StripSegment[] {
-  const visible = state.tabs.map((tab, index) => ({ tab, index })).filter(({ tab }) => !tab.hidden).slice(0, 6);
+  // Ưu tiên: tab đang chờ user input (awaitingInput) được ghim lên đầu strip (OpenCode v2 UX)
+  const sortedTabs = state.tabs.map((tab, index) => ({ tab, index })).filter(({ tab }) => !tab.hidden);
+  sortedTabs.sort((a, b) => {
+    const aAwaiting = Boolean(a.tab.awaitingInput || (state.activeQuestionSessionId && a.tab.id === state.activeQuestionSessionId));
+    const bAwaiting = Boolean(b.tab.awaitingInput || (state.activeQuestionSessionId && b.tab.id === state.activeQuestionSessionId));
+    if (aAwaiting && !bAwaiting) return -1;
+    if (!aAwaiting && bAwaiting) return 1;
+    return 0;
+  });
+  const visible = sortedTabs.slice(0, 6);
   const suffix: StripSegment[] = [{ text: '+ new', tab: -1, zone: 'new' }, { text: ' · Ctrl+T', tab: -1, zone: 'none' }];
   const hiddenCount = state.tabs.length - state.tabs.filter(t => !t.hidden).length;
   const overflow = state.tabs.filter(t => !t.hidden).length - visible.length;
   const segs: StripSegment[] = [];
   visible.forEach(({ tab, index }, i) => {
-    const dot = tab.busy ? '●' : tab.id === state.activeId ? '●' : '○';
+    const isAwaiting = Boolean(tab.awaitingInput || (state.activeQuestionSessionId && tab.id === state.activeQuestionSessionId));
+    const dot = isAwaiting ? '⚡' : tab.busy ? '●' : tab.id === state.activeId ? '●' : '○';
     const marker = tab.id === state.activeId ? '▸ ' : '  ';
-    const fresh = tab.unread ? ` +${tab.unread}` : '';
+    const fresh = isAwaiting ? ' ?' : tab.unread ? ` +${tab.unread}` : '';
     segs.push({ text: `${dot} ${marker}${i + 1}:${tab.title}${fresh} `, tab: index, zone: 'tab' });
     segs.push({ text: '×', tab: index, zone: 'close' });
   });
@@ -825,9 +835,10 @@ export function sessionTabStripView(state: SessionTabsModel, width: number): str
     if (seg.zone === 'tab') {
       const tab = state.tabs[seg.tab];
       const isActive = tab.id === state.activeId;
-      const dot = tab.busy ? color(tokyoNight.yellow, '●') : isActive ? color(tokyoNight.green, '●') : color(tokyoNight.muted, '○');
+      const isAwaiting = Boolean(tab.awaitingInput || (state.activeQuestionSessionId && tab.id === state.activeQuestionSessionId));
+      const dot = isAwaiting ? color(tokyoNight.purple, '⚡') : tab.busy ? color(tokyoNight.yellow, '●') : isActive ? color(tokyoNight.green, '●') : color(tokyoNight.muted, '○');
       const rest = seg.text.slice(2); // giữ marker "▸ "/"  " + label, chỉ tách dot ra tô màu
-      return dot + ' ' + (isActive ? color(tokyoNight.cyan, rest) : color(tokyoNight.muted, rest));
+      return dot + ' ' + (isAwaiting ? color(tokyoNight.yellow, rest) : isActive ? color(tokyoNight.cyan, rest) : color(tokyoNight.muted, rest));
     }
     if (seg.zone === 'close') return color(tokyoNight.muted, '×');
     if (seg.zone === 'new') return color(tokyoNight.blue, seg.text);
@@ -870,18 +881,31 @@ export function sessionTabsView(state: SessionTabsModel, width: number, height: 
   const panelWidth = Math.max(24, Math.min(width - 4, 72));
   const lines: string[] = [];
   const parallel = state.tabs.filter(t => t.busy).length;
-  lines.push(color(tokyoNight.purple, `SESSIONS · ${state.tabs.length} tab${state.tabs.length === 1 ? '' : 's'}${parallel ? ` · ${parallel} đang chạy` : ''}`) + color(tokyoNight.muted, ' · Esc đóng'));
+  const awaitingCount = state.tabs.filter(t => t.awaitingInput || (state.activeQuestionSessionId && t.id === state.activeQuestionSessionId)).length;
+  lines.push(color(tokyoNight.purple, `SESSIONS · ${state.tabs.length} tab${state.tabs.length === 1 ? '' : 's'}${parallel ? ` · ${parallel} đang chạy` : ''}${awaitingCount ? ` · ${awaitingCount} chờ input` : ''}`) + color(tokyoNight.muted, ' · Esc đóng'));
   lines.push('');
   if (!state.tabs.length) {
     lines.push(...wrap(color(tokyoNight.muted, 'Chưa có session. Nhấn n để tạo tab mới.'), panelWidth));
   } else {
-    state.tabs.forEach((tab, i) => {
-      const marker = i === state.selected ? color(tokyoNight.cyan, '› ') : '  ';
-      const dot = tab.hidden ? color(tokyoNight.muted, '○ ') : tab.busy ? color(tokyoNight.yellow, '● ') : tab.id === state.activeId ? color(tokyoNight.green, '● ') : color(tokyoNight.muted, '○ ');
+    // Sắp xếp hiển thị modal: ưu tiên tab awaitingInput lên đầu (OpenCode v2 UX)
+    const indexedTabs = state.tabs.map((tab, originalIndex) => ({ tab, originalIndex }));
+    indexedTabs.sort((a, b) => {
+      const aAwaiting = Boolean(a.tab.awaitingInput || (state.activeQuestionSessionId && a.tab.id === state.activeQuestionSessionId));
+      const bAwaiting = Boolean(b.tab.awaitingInput || (state.activeQuestionSessionId && b.tab.id === state.activeQuestionSessionId));
+      if (aAwaiting && !bAwaiting) return -1;
+      if (!aAwaiting && bAwaiting) return 1;
+      return 0;
+    });
+
+    indexedTabs.forEach(({ tab, originalIndex }, displayIndex) => {
+      const isSelected = originalIndex === state.selected;
+      const marker = isSelected ? color(tokyoNight.cyan, '› ') : '  ';
+      const isAwaiting = Boolean(tab.awaitingInput || (state.activeQuestionSessionId && tab.id === state.activeQuestionSessionId));
+      const dot = isAwaiting ? color(tokyoNight.purple, '⚡') : tab.hidden ? color(tokyoNight.muted, '○ ') : tab.busy ? color(tokyoNight.yellow, '● ') : tab.id === state.activeId ? color(tokyoNight.green, '● ') : color(tokyoNight.muted, '○ ');
       const count = tab.entries?.length ?? 0;
-      const title = tab.hidden ? color(tokyoNight.muted, `${tab.title} (ẩn)`) : color(tokyoNight.text, tab.title);
-      const meta = color(tokyoNight.muted, `${tab.id}${count ? ` · ${count} msgs` : ''}${tab.id === state.activeId ? ' · active' : ''}${tab.busy ? ' · busy' : ''}${tab.hidden ? ' · ẩn khỏi strip' : ''}${tab.unread ? ` · ${tab.unread} chưa đọc` : ''}`) + color(tokyoNight.cyan, ` · ${tab.model ?? state.defaultModel ?? 'default'}`);
-      lines.push(...wrap(`${marker}${color(tokyoNight.cyan, `${i + 1}.`)} ${dot}${title}`, panelWidth));
+      const title = tab.hidden ? color(tokyoNight.muted, `${tab.title} (ẩn)`) : isAwaiting ? color(tokyoNight.yellow, `${tab.title} [CHỜ INPUT]`) : color(tokyoNight.text, tab.title);
+      const meta = color(tokyoNight.muted, `${tab.id}${count ? ` · ${count} msgs` : ''}${tab.id === state.activeId ? ' · active' : ''}${isAwaiting ? ' · awaiting input' : ''}${tab.busy ? ' · busy' : ''}${tab.hidden ? ' · ẩn khỏi strip' : ''}${tab.unread ? ` · ${tab.unread} chưa đọc` : ''}`) + color(tokyoNight.cyan, ` · ${tab.model ?? state.defaultModel ?? 'default'}`);
+      lines.push(...wrap(`${marker}${color(tokyoNight.cyan, `${displayIndex + 1}.`)} ${dot} ${title}`, panelWidth));
       lines.push(...wrap(`    ${meta}`, panelWidth));
     });
   }

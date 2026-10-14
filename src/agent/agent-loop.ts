@@ -309,6 +309,21 @@ export class AgentLoop {
       this.circuitBreakerRetriesBySession.set(sessionId, count);
     }
   }
+
+  readonly MAX_EMERGENCY_COMPACTION_ATTEMPTS = 2;
+  private emergencyCompactionRetriesBySession = new Map<string, number>();
+
+  private getEmergencyCompactionRetries(sessionId: string): number {
+    return this.emergencyCompactionRetriesBySession.get(sessionId) || 0;
+  }
+
+  private setEmergencyCompactionRetries(sessionId: string, count: number): void {
+    if (count <= 0) {
+      this.emergencyCompactionRetriesBySession.delete(sessionId);
+    } else {
+      this.emergencyCompactionRetriesBySession.set(sessionId, count);
+    }
+  }
   private circuitBreakerTrippedTools = new Set<string>();
   private sessionInspectedFiles = new Set<string>();
   private activeSession?: Session;
@@ -883,6 +898,7 @@ export class AgentLoop {
           isCircuitBreakerRetry: retries > 0,
         });
         this.setCircuitBreakerRetries(session.id, 0);
+        this.setEmergencyCompactionRetries(session.id, 0);
         return result;
       } catch (error: any) {
         // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
@@ -896,10 +912,82 @@ export class AgentLoop {
 
         if (isCancelled) {
           this.setCircuitBreakerRetries(session.id, 0);
+          this.setEmergencyCompactionRetries(session.id, 0);
           throw error;
         }
 
         const errClassification = classifyLLMError(error);
+        // Emergency Context Compaction: kích hoạt ngay khi LLM Provider trả lỗi tràn context (Gemini & DeepSeek/OpenAI)
+        const isContextOverflow = errClassification.kind === 'CONTEXT_LENGTH_EXCEEDED';
+        const emergencyCompactionAttempts = this.getEmergencyCompactionRetries(session.id);
+
+        if (isContextOverflow && emergencyCompactionAttempts < this.MAX_EMERGENCY_COMPACTION_ATTEMPTS) {
+          const nextAttempt = emergencyCompactionAttempts + 1;
+          this.setEmergencyCompactionRetries(session.id, nextAttempt);
+
+          CLI.renderArchiveWarning({
+            scope: 'Context-Overflow',
+            error: `Detected Context Length Exceeded (${errClassification.statusCode || 400}: ${errClassification.message || 'token limit exceeded'}). Triggering emergency ContextCompactor...`,
+          });
+
+          // 1. Phục hồi an toàn session invariants (đóng open step/turn dở dang)
+          try {
+            if (session.recoverInterrupted()) {
+              await this.persistSession(session);
+            }
+          } catch {}
+
+          // 2. Kích hoạt ContextCompactor nén khẩn cấp toàn bộ lịch sử
+          const history = session.getHistory();
+          const activeTokenConfig = typeof llm?.getTokenConfig === 'function' ? (llm.getTokenConfig() || {}) : {};
+          const maxInputTokens = activeTokenConfig.maxInputTokens || 32000;
+          // Target budget giảm còn 60% ở lần 1, 40% ở lần 2 để đảm bảo payload chắc chắn vừa context window
+          const reductionRatio = nextAttempt === 1 ? 0.60 : 0.40;
+          const emergencyBudget = Math.floor(maxInputTokens * reductionRatio);
+
+          const compactResult = this.contextCompactor.compact(history, {
+            force: true,
+            enforceBudget: true,
+            protectActiveTurn: false,
+            maxInputTokens: emergencyBudget,
+            modelName: llm?.modelName,
+          });
+
+          if (compactResult.stats.maskedObservations?.length) {
+            try {
+              await this.turnMemoryRetriever.archiveMaskedObservations(compactResult.stats.maskedObservations);
+            } catch (err: any) {
+              CLI.renderArchiveWarning({ scope: 'Emergency-Archive', error: String(err?.message || err) });
+            }
+          }
+
+          session.setHistory(
+            compactResult.messages,
+            'emergency-compaction-context-overflow',
+            {
+              archiveStatus: { maskedObservations: compactResult.stats.maskedObservations?.length ?? 0 },
+              providerError: errClassification.message,
+              tokensSaved: compactResult.stats.tokensSaved,
+            },
+          );
+
+          await this.persistSession(session);
+          CLI.renderAutoCompactionNotice(compactResult.stats.tokensSaved, compactResult.stats.compactedTokens);
+
+          // 3. Tiếp tục lặp ngay để gửi lại request với context đã được nén gọn
+          continue;
+        }
+
+        if (isContextOverflow && emergencyCompactionAttempts >= this.MAX_EMERGENCY_COMPACTION_ATTEMPTS) {
+          this.setEmergencyCompactionRetries(session.id, 0);
+          const overflowError = new Error(
+            `Context length exceeded provider limit: Emergency compaction was attempted ${this.MAX_EMERGENCY_COMPACTION_ATTEMPTS} times, but the payload still exceeds the model's context window (${errClassification.message}). Please clear history with /clear or switch to a model with a larger context window using /model.`,
+          );
+          (overflowError as any).isContextOverflow = true;
+          (overflowError as any).originalClassification = errClassification;
+          throw overflowError;
+        }
+
         const isQuotaOrRateLimit = errClassification.kind === 'HARD_QUOTA_EXHAUSTED' || errClassification.kind === 'TRANSIENT_RATE_LIMIT';
         const isServerError = errClassification.kind === 'SERVER_ERROR';
         const isRetryableLLMError = isQuotaOrRateLimit || isServerError;

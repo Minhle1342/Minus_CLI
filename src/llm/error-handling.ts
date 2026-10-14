@@ -166,21 +166,37 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     };
   }
 
-  // 5. Kiểm tra Context Length Exceeded
-  if (
-    rawMessage.includes('context length')
+  // 5. Kiểm tra Context Length Exceeded (Google Gemini & DeepSeek / OpenAI-compatible)
+  const errorCode = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+  const errorType = typeof error?.type === 'string' ? error.type.toLowerCase() : '';
+  const isContextLengthExceeded =
+    errorCode === 'context_length_exceeded'
+    || errorType === 'context_length_exceeded'
+    || rawMessage.includes('context_length_exceeded')
+    || rawMessage.includes('context length')
     || rawMessage.includes('maximum context length')
     || rawMessage.includes('token limit exceeded')
     || rawMessage.includes('prompt is too long')
-  ) {
+    || rawMessage.includes('too many tokens')
+    || rawMessage.includes('reduce the length of the messages or completion')
+    || rawMessage.includes('exceeds the maximum number of tokens allowed')
+    || rawMessage.includes('exceeds the maximum number of tokens')
+    || rawMessage.includes('the input token count')
+    || rawMessage.includes('token count exceeds')
+    || rawMessage.includes('maximum number of tokens allowed')
+    || rawMessage.includes('request contains too many tokens')
+    || ((statusCode === 400 || rawMessage.includes('invalid_argument'))
+        && (rawMessage.includes('token') || rawMessage.includes('context'))
+        && (rawMessage.includes('exceed') || rawMessage.includes('maximum') || rawMessage.includes('too large') || rawMessage.includes('limit')));
+
+  if (isContextLengthExceeded) {
     return {
       kind: 'CONTEXT_LENGTH_EXCEEDED',
       message: error.message || 'Context length exceeded maximum token limit.',
       retryable: false,
-      statusCode: 400,
+      statusCode: statusCode || 400,
     };
   }
-
   return {
     kind: 'OTHER',
     message: error.message || String(error),

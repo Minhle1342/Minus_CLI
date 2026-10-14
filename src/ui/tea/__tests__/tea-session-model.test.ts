@@ -214,3 +214,41 @@ test('workspace-switch to empty workspace initializes single active tab with no 
   assert.equal(m.viewport.thinking, '');
   assert.equal(m.viewport.answerStream, '');
 });
+
+test('session awaiting input is prioritized and pinned in tab strip and sessions modal', () => {
+  let m = twoTabs(); // tabs: 'a', 'b'. activeId: 'a'
+  // Tab 'b' nhận question (permission / user input prompt)
+  [m] = update({
+    type: 'question',
+    prompt: 'Allow deleting database?',
+    active: true,
+    sessionId: 'b',
+  }, m);
+
+  // Tab b được đánh dấu awaitingInput = true
+  const tabB = m.sessions.tabs.find((t) => t.id === 'b');
+  assert.equal(tabB?.awaitingInput, true);
+
+  // Trong strip view: tab 'b' có biểu tượng tia chớp / ? và được sort lên trước
+  const strip = plain(m);
+  assert.ok(strip.includes('⚡') || strip.includes('?'), 'tab strip indicates awaiting input');
+
+  // Trong sessions modal: tab 'b' có nhãn CHỜ INPUT
+  const rows = sessionTabsView(m.sessions, 100, 24).map((l) => stripTerminalControls(l)).join('\n');
+  assert.ok(rows.includes('[CHỜ INPUT]'), 'modal displays awaiting input badge');
+  assert.ok(rows.includes('1 chờ input'), 'modal summary reflects awaiting input count');
+  // First item listed in modal should be tab 'b'
+  const firstItemLine = rows.split('\n').find((l) => l.includes('1.'));
+  assert.ok(firstItemLine?.includes('B'), 'tab B is sorted to top of modal');
+
+  // Khi question kết thúc (active: false)
+  [m] = update({
+    type: 'question',
+    prompt: '',
+    active: false,
+    sessionId: 'b',
+  }, m);
+  const tabBAfter = m.sessions.tabs.find((t) => t.id === 'b');
+  assert.equal(tabBAfter?.awaitingInput, false);
+});
+

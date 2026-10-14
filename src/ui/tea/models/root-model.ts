@@ -254,22 +254,26 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       const owner = msg.active ? (msg.sessionId ?? model.sessions.activeId) : (model.question.sessionId ?? model.sessions.activeId);
       if (!msg.active) {
         const closed = { active: false as const, prompt: '', selected: 0 };
+        const baseTabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, awaitingInput: false } : t);
+        const updatedSessions = { ...model.sessions, tabs: baseTabs, activeQuestionSessionId: undefined };
         // Chỉ stash draft khi question đã clear composer (owner là tab đang xem).
         // Question của tab nền không đụng composer nên lúc đóng không trả gì —
         // text mỗi tab ở yên trong tab của nó.
         const draft = model.question.draft;
-        if (!draft) return [{ ...model, question: closed }, []];
+        if (!draft) return [{ ...model, sessions: updatedSessions, question: closed }, []];
         // Draft trả đúng tab sở hữu question — không ghi đè composer tab đang xem.
-        if (owner === model.sessions.activeId) return [{ ...model, composer: draft, question: closed }, []];
-        const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, composer: sanitizeComposer(draft) } : t);
-        return [{ ...model, sessions: { ...model.sessions, tabs }, question: closed }, []];
+        if (owner === model.sessions.activeId) return [{ ...model, sessions: updatedSessions, composer: draft, question: closed }, []];
+        const tabs = baseTabs.map(t => t.id === owner ? { ...t, composer: sanitizeComposer(draft) } : t);
+        return [{ ...model, sessions: { ...updatedSessions, tabs }, question: closed }, []];
       }
       const card: TranscriptEntry = { kind: msg.permission ? 'permission' : 'log', text: msg.prompt, permission: msg.permission };
       const withCard = owner === model.sessions.activeId
         ? { ...model, viewport: { ...appendEntry(model.viewport, card), offset: 0, pinned: true } }
         : ownerAppendEntry(model, card, owner);
       const ownerActive = owner === model.sessions.activeId;
-      return [{ ...withCard, focus: 'composer', palette: { ...withCard.palette, open: false },
+      const tabsWithInput = withCard.sessions.tabs.map(t => t.id === owner ? { ...t, awaitingInput: true } : t);
+      const sessionsWithInput = { ...withCard.sessions, tabs: tabsWithInput, activeQuestionSessionId: owner };
+      return [{ ...withCard, sessions: sessionsWithInput, focus: 'composer', palette: { ...withCard.palette, open: false },
         composer: ownerActive ? createComposer() : withCard.composer,
         question: { active: true, prompt: msg.prompt, draft: ownerActive ? model.composer : undefined, permission: msg.permission, selected: 0, sessionId: owner } }, []];
     }
