@@ -12,7 +12,9 @@ import { openAIPromptCacheFields } from './provider-capabilities.js';
  * window) is cut and reported as transport_eof so the agent loop's existing
  * stream-continuation retry resumes it, instead of hanging forever.
  */
-const STREAM_STALL_TIMEOUT_MS = 15 * 60 * 1000;
+export const DEFAULT_HEADER_TIMEOUT_MS = 5 * 60 * 1000;
+export const DEFAULT_CHUNK_TIMEOUT_MS = 15 * 60 * 1000;
+const STREAM_STALL_TIMEOUT_MS = DEFAULT_CHUNK_TIMEOUT_MS;
 
 export interface DeepseekLLMOptions {
   modelName?: string;
@@ -21,6 +23,8 @@ export interface DeepseekLLMOptions {
   systemPrompt?: string;
   extraHeaders?: Record<string, string>;
   tokenConfig?: Partial<TokenConfig>;
+  headerTimeoutMs?: number;
+  chunkTimeoutMs?: number;
 }
 
 /**
@@ -32,6 +36,7 @@ export interface DeepseekLLMOptions {
  * 3. Real-time Streaming & SSE Chunk Parsing cho cả System 2 Thinking và System 1 Actions.
  * 4. Tự động hỗ trợ headers tùy chỉnh (như chatgpt-account-id cho ChatGPT Plus OAuth).
  * 5. Tự động điều chỉnh Input, Output và Thinking/Reasoning Tokens cho từng nhà cung cấp.
+ * 6. Reasoning Stream Watchdog (headerTimeout & chunkTimeout) chống treo kết nối khi mô hình suy luận lâu.
  */
 export class DeepseekLLM {
   readonly modelName: string;
@@ -39,6 +44,8 @@ export class DeepseekLLM {
   readonly baseURL: string;
   readonly systemPrompt: string;
   readonly extraHeaders: Record<string, string>;
+  readonly headerTimeoutMs?: number;
+  readonly chunkTimeoutMs?: number;
   private tokenConfig: TokenConfig;
 
   constructor(
@@ -55,6 +62,8 @@ export class DeepseekLLM {
       this.baseURL = apiKeyOrOptions.baseURL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
       this.systemPrompt = apiKeyOrOptions.systemPrompt || createStandardSystemPrompt();
       this.extraHeaders = apiKeyOrOptions.extraHeaders || {};
+      this.headerTimeoutMs = apiKeyOrOptions.headerTimeoutMs;
+      this.chunkTimeoutMs = apiKeyOrOptions.chunkTimeoutMs;
       this.tokenConfig = resolveTokenConfig(this.modelName, apiKeyOrOptions.tokenConfig, this.baseURL);
     } else {
       this.apiKey = apiKeyOrOptions || process.env.DEEPSEEK_API_KEY || '';
@@ -567,6 +576,36 @@ export class DeepseekLLM {
       };
     }
 
+    const isLocalBaseUrl = /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)(:\d+)?/i.test(this.baseURL);
+    const effectiveHeaderTimeoutMs = request?.headerTimeoutMs !== undefined
+      ? request.headerTimeoutMs
+      : this.headerTimeoutMs !== undefined
+        ? this.headerTimeoutMs
+        : DEFAULT_HEADER_TIMEOUT_MS;
+    const effectiveChunkTimeoutMs = request?.chunkTimeoutMs !== undefined
+      ? request.chunkTimeoutMs
+      : this.chunkTimeoutMs !== undefined
+        ? this.chunkTimeoutMs
+        : (isLocalBaseUrl ? 0 : DEFAULT_CHUNK_TIMEOUT_MS);
+
+    const headerAbortController = new AbortController();
+    let headerTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let didHeaderTimeout = false;
+
+    if (effectiveHeaderTimeoutMs > 0) {
+      headerTimeoutTimer = setTimeout(() => {
+        didHeaderTimeout = true;
+        headerAbortController.abort();
+      }, effectiveHeaderTimeoutMs);
+    }
+
+    const onUserAbort = () => {
+      headerAbortController.abort();
+    };
+    if (request?.signal) {
+      request.signal.addEventListener('abort', onUserAbort, { once: true });
+    }
+
     let response: Response;
     try {
       const headers = {
@@ -579,14 +618,21 @@ export class DeepseekLLM {
           ...this.extraHeaders,
         };
       response = this.baseURL.includes('/backend-api/codex') || this.extraHeaders.originator === 'codex_cli_rs'
-        ? await fetchCodexResponse(this.baseURL, requestBody, headers, request?.signal)
+        ? await fetchCodexResponse(this.baseURL, requestBody, headers, headerAbortController.signal)
         : await fetch(endpoint, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-        signal: request?.signal,
+        signal: headerAbortController.signal,
       });
     } catch (err: any) {
+      if (didHeaderTimeout) {
+        const timeoutErr: any = new Error(`LLM API header timeout: Server did not return response headers within ${effectiveHeaderTimeoutMs}ms`);
+        timeoutErr.name = 'HeaderTimeoutError';
+        timeoutErr.code = 'HEADER_TIMEOUT';
+        timeoutErr.statusCode = 408;
+        throw timeoutErr;
+      }
       if (err.name === 'AbortError' || request?.signal?.aborted) {
         return {
           text: '',
@@ -596,6 +642,11 @@ export class DeepseekLLM {
         };
       }
       throw err;
+    } finally {
+      if (headerTimeoutTimer) clearTimeout(headerTimeoutTimer);
+      if (request?.signal) {
+        request.signal.removeEventListener('abort', onUserAbort);
+      }
     }
 
     if (!response.ok) {
@@ -615,6 +666,8 @@ export class DeepseekLLM {
       throw err;
     }
 
+    const requestStartTime = Date.now();
+    let timeToFirstTokenMs: number | undefined;
     let fullText = '';
     let fullReasoning = '';
     const toolCallMap = new Map<number, { id: string; name: string; argsText: string }>();
@@ -670,11 +723,17 @@ export class DeepseekLLM {
       if (!delta) return;
 
       if (delta.reasoning_content) {
+        if (timeToFirstTokenMs === undefined) {
+          timeToFirstTokenMs = Date.now() - requestStartTime;
+        }
         fullReasoning += delta.reasoning_content;
         callbacks?.onThoughtToken?.(delta.reasoning_content);
       }
 
       if (delta.content) {
+        if (timeToFirstTokenMs === undefined) {
+          timeToFirstTokenMs = Date.now() - requestStartTime;
+        }
         fullText += delta.content;
         callbacks?.onContentToken?.(delta.content);
       }
@@ -702,7 +761,9 @@ export class DeepseekLLM {
       let stalled = false;
       const resetStallTimer = () => {
         if (stallTimer) clearTimeout(stallTimer);
-        stallTimer = setTimeout(() => { stalled = true; void reader.cancel().catch(() => {}); }, STREAM_STALL_TIMEOUT_MS);
+        if (effectiveChunkTimeoutMs > 0) {
+          stallTimer = setTimeout(() => { stalled = true; void reader.cancel().catch(() => {}); }, effectiveChunkTimeoutMs);
+        }
       };
       try {
         resetStallTimer();
@@ -771,13 +832,24 @@ export class DeepseekLLM {
           ? 'unknown'
           : 'transport_eof';
 
+    const requestDurationMs = Date.now() - requestStartTime;
+    const usage: LLMUsage | undefined = parsedUsage
+      ? {
+          ...parsedUsage,
+          timeToFirstTokenMs: parsedUsage.timeToFirstTokenMs ?? timeToFirstTokenMs,
+          requestDurationMs: parsedUsage.requestDurationMs ?? requestDurationMs,
+        }
+      : (timeToFirstTokenMs !== undefined || requestDurationMs > 0)
+        ? { timeToFirstTokenMs, requestDurationMs }
+        : undefined;
+
     return {
       text: fullText || undefined,
       reasoningContent: fullReasoning || undefined,
       toolCalls: request?.signal?.aborted ? [] : toolCalls,
       finishReason,
       rawFinishReason: request?.signal?.aborted ? 'aborted' : rawFinishReason,
-      usage: parsedUsage,
+      usage,
     };
   }
 

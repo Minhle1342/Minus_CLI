@@ -122,9 +122,11 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
     };
   }
 
-  // 4. Kiểm tra Server Error (500, 502, 503, 504, 529, UNAVAILABLE, Overloaded, High Demand, Stream Fragmentation)
+  // 4. Kiểm tra Server Error (500, 502, 503, 504, 529, 408, UNAVAILABLE, Overloaded, High Demand, Stream Fragmentation)
   const isServerError =
-    (statusCode && statusCode >= 500 && statusCode < 600)
+    (statusCode && ((statusCode >= 500 && statusCode < 600) || statusCode === 408))
+    || rawMessage.includes('header timeout')
+    || rawMessage.includes('headertimeout')
     || rawMessage.includes('unavailable')
     || rawMessage.includes('high demand')
     || rawMessage.includes('spikes in demand')

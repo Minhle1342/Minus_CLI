@@ -147,7 +147,7 @@ test('Agent loop gracefully continues and adapts when permission is denied in no
     } else {
       pm.setMode('always_ask');
     }
-    pm.setPromptHandler(async (req) => (req.toolName === 'run_command' ? 'reject' : 'approve'));
+    pm.setPromptHandler(async (req: any) => (req.toolName === 'run_command' ? 'reject' : 'approve'));
 
     const session = new Session('session-graceful-deny-loop');
     session.addUserMessage('Execute the temp directory cleanup command if permitted, otherwise report status.');

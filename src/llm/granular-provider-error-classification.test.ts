@@ -145,7 +145,7 @@ describe('Granular Provider Error Classification & Emergency Compaction', () => 
 
       const workspace = new Workspace(process.cwd());
       const registry = new ToolRegistry();
-      const loop = new AgentLoop(mockLLM as any, registry, workspace);
+      const loop = new AgentLoop(mockLLM as any, registry, { workspace });
 
       const session = new Session('test-emergency-compaction');
       session.addUserMessage('Start long task');

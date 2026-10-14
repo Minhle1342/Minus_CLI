@@ -42,6 +42,8 @@ export interface LLMRequestOptions {
   stepSuffixes?: Map<number, string> | Record<number, string>;
   allowedFunctionNames?: string[];
   functionCallingMode?: 'AUTO' | 'ANY' | 'NONE';
+  headerTimeoutMs?: number;
+  chunkTimeoutMs?: number;
   onRetry?: (payload: { attempt: number; maxRetries: number; delayMs: number; message?: string }) => void;
 }
 
@@ -225,6 +227,8 @@ export class GeminiLLM {
           config: generateConfig,
         });
 
+        const requestStartTime = Date.now();
+        let timeToFirstTokenMs: number | undefined;
         const thoughtParts: string[] = [];
         const regularTextParts: string[] = [];
         const toolCalls: FunctionCall[] = [];
@@ -279,6 +283,9 @@ export class GeminiLLM {
           if (candidate?.content?.parts) {
             for (const part of candidate.content.parts) {
               if ('text' in part && typeof (part as any).text === 'string') {
+                if (timeToFirstTokenMs === undefined) {
+                  timeToFirstTokenMs = Date.now() - requestStartTime;
+                }
                 const token = (part as any).text;
                 if ((part as any).thought) {
                   thoughtParts.push(token);
@@ -350,6 +357,17 @@ export class GeminiLLM {
           ? { role: 'model' as const, parts: [...nonFunctionCallParts, ...normalizedFunctionCallParts] }
           : undefined;
 
+        const requestDurationMs = Date.now() - requestStartTime;
+        const usage: LLMUsage | undefined = lastUsage
+          ? {
+              ...lastUsage,
+              timeToFirstTokenMs: lastUsage.timeToFirstTokenMs ?? timeToFirstTokenMs,
+              requestDurationMs: lastUsage.requestDurationMs ?? requestDurationMs,
+            }
+          : (timeToFirstTokenMs !== undefined || requestDurationMs > 0)
+            ? { timeToFirstTokenMs, requestDurationMs }
+            : undefined;
+
         return {
           text: regularTextParts.length > 0 ? regularTextParts.join('') : undefined,
           reasoningContent: thoughtParts.length > 0 ? thoughtParts.join('') : undefined,
@@ -357,7 +375,7 @@ export class GeminiLLM {
           rawContent,
           finishReason: normalizeGeminiFinishReason(rawFinishReason, uniqueToolCalls.length > 0),
           rawFinishReason,
-          usage: lastUsage,
+          usage,
         };
       },
       {
