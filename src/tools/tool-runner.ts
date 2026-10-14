@@ -17,6 +17,11 @@ import {
   deterministicBlockCode,
   deterministicCallFingerprint,
 } from './deterministic-failure-dedup.js';
+import {
+  type PreToolUseInterceptor,
+  type PreToolUseHookFn,
+  evaluatePreToolUse,
+} from './pre-tool-use.js';
 
 /**
  * Satellite 1: Observation Virtualization / Spill-to-Disk Constants
@@ -237,6 +242,7 @@ export class ToolRunner {
    * thêm block ✖ FAIL. Shared qua createScoped để mọi scoped runner cùng thấy.
    */
   private deterministicDedup = new Map<string, { errorCode: string; result: Record<string, any>; turn: number | undefined; sessionId?: string }>();
+  private preToolUseInterceptors: PreToolUseInterceptor[] = [];
 
   constructor(
     registry: ToolProvider,
@@ -259,6 +265,26 @@ export class ToolRunner {
     if (this.permissionManager && typeof (this.permissionManager as any).setWorkspaceRoot === 'function') {
       (this.permissionManager as any).setWorkspaceRoot(this.workspace.rootDir);
     }
+  }
+
+  /** Đăng ký PreToolUse interceptor hook (hỗ trợ Claude Code & OpenCode tool.execute.before) */
+  registerPreToolUseInterceptor(
+    interceptor: PreToolUseInterceptor | PreToolUseHookFn,
+    matcher?: string | RegExp,
+  ): void {
+    if (typeof interceptor === 'function') {
+      this.preToolUseInterceptors.push({ matcher, execute: interceptor });
+    } else {
+      this.preToolUseInterceptors.push(interceptor);
+    }
+  }
+
+  clearPreToolUseInterceptors(): void {
+    this.preToolUseInterceptors = [];
+  }
+
+  getPreToolUseInterceptors(): PreToolUseInterceptor[] {
+    return [...this.preToolUseInterceptors];
   }
 
   /** Xóa per-turn deterministic-dedup cache (gọi khi chuyển turn). */
@@ -306,6 +332,7 @@ export class ToolRunner {
       this.rootRegistry || this.registry,
     );
     scoped.deterministicDedup = this.deterministicDedup;
+    scoped.preToolUseInterceptors = this.preToolUseInterceptors;
     return scoped;
   }
 
@@ -498,8 +525,35 @@ export class ToolRunner {
       };
     }
 
+    // Stage 1.25: PreToolUse Execution Interceptors (Claude Code PreToolUse & OpenCode tool.execute.before parity)
+    let candidateArgs = args;
+    const preCheck = await evaluatePreToolUse(
+      this.preToolUseInterceptors,
+      toolName,
+      candidateArgs,
+      executionContext,
+      this.workspace.rootDir,
+    );
+    if (!preCheck.allowed) {
+      const errRes = {
+        error: preCheck.message || `Execution blocked by PreToolUse hook for tool "${toolName}".`,
+        errorCode: preCheck.errorCode || 'PRE_TOOL_USE_BLOCKED',
+        suggestion: preCheck.suggestion,
+      };
+      this.trackDeterministicResult(toolName, candidateArgs, errRes, context);
+      return {
+        toolName,
+        args: candidateArgs,
+        result: errRes,
+        durationMs: Date.now() - startTime,
+      };
+    }
+    if (preCheck.modifiedArgs) {
+      candidateArgs = preCheck.modifiedArgs;
+    }
+
     // Stage 1.5: Guardian Pre-Call Validation (Payload Size, Auto-Coercion, Reliability Check)
-    const guardianPreCheck = this.guardian.preCallValidate(toolName, args, tool.parameters);
+    const guardianPreCheck = this.guardian.preCallValidate(toolName, candidateArgs, tool.parameters);
     if (!guardianPreCheck.valid) {
       const errRes = { error: guardianPreCheck.error, errorCode: guardianPreCheck.errorCode || 'INVALID_ARGS' };
       // Policy denial (Post-Submission Gate / Pre-Mutation Pareto Gate) is not counted as a technical tool error.
@@ -509,16 +563,16 @@ export class ToolRunner {
         || (isPolicyDenial
           ? classifyToolFailure(toolName, errRes.error, errRes)
           : this.guardian.recordExecution(toolName, errRes, Date.now() - startTime));
-      this.trackDeterministicResult(toolName, args, errRes, context);
+      this.trackDeterministicResult(toolName, candidateArgs, errRes, context);
       return {
         toolName,
-        args,
+        args: candidateArgs,
         result: errRes,
         durationMs: Date.now() - startTime,
         guardianDiagnosis: diagnosis,
       };
     }
-    const candidateArgs = guardianPreCheck.coercedArgs;
+    candidateArgs = guardianPreCheck.coercedArgs;
 
     // Stage 2: lossless JSON snapshot + recursive schema validation.
     let executionArgs: Record<string, any>;
