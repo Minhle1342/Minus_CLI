@@ -75,6 +75,7 @@ export interface LLMResponse {
  */
 export class GeminiLLM {
   private client: GoogleGenAI;
+  readonly apiKey: string;
   readonly modelName: string;
   readonly systemPrompt: string;
   private tokenConfig: TokenConfig;
@@ -89,10 +90,15 @@ export class GeminiLLM {
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY must not be empty.');
     }
+    this.apiKey = apiKey;
     this.client = new GoogleGenAI({ apiKey });
     this.modelName = modelName;
     this.systemPrompt = systemPrompt;
     this.tokenConfig = resolveTokenConfig(modelName, tokenConfig);
+  }
+
+  cloneWithModel(modelName: string): GeminiLLM {
+    return new GeminiLLM(this.apiKey, modelName, this.systemPrompt, this.tokenConfig);
   }
 
   getTokenConfig(): TokenConfig {

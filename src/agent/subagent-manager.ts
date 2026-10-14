@@ -11,6 +11,7 @@ export interface SubagentOptions {
   toolNames?: string[];
   brief?: string;
   modelName?: string;
+  model?: string;
   worktreePath?: string;
   capabilities?: string[];
   requiredCapabilities?: string[];
@@ -27,6 +28,8 @@ export interface SubagentOptions {
 export interface IsolatedTaskOptions {
   allowedTools?: string[];
   maxSteps?: number;
+  modelName?: string;
+  model?: string;
   verificationCommand?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -319,6 +322,7 @@ export class SubagentManager {
       childLoop = this.factory(id, session, {
         maxSteps: options.maxSteps ?? 6,
         toolNames: options.allowedTools,
+        modelName: options.modelName || options.model,
         verificationCommand: options.verificationCommand,
       }, controller.signal);
     } catch (err: any) {

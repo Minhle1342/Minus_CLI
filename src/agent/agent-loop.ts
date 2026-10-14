@@ -37,7 +37,7 @@ import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, col
 import { resolveGitWorkflow, checkGitWorkflowCall } from './git-workflow.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
-import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool } from '../tools/subagent-tools.js';
+import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool, createModelsTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
@@ -577,6 +577,7 @@ export class AgentLoop {
       this.toolRegistry.register(createBrainstormDesignTool());
       this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
       this.toolRegistry.register(createScheduleDagParallelTool(this.orchestrator));
+      this.toolRegistry.register(createModelsTool());
     }
 
     this.registerGameToolsIfApplicable(this._workspace);
@@ -1386,9 +1387,9 @@ export class AgentLoop {
       }
     }
 
-    // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới
+    // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới (Bỏ qua cho subagent - OpenCode v2.0.6 PR #49387)
     const history = session.getHistory();
-    if (history.length === 1 && history[0].role === 'user') {
+    if (history.length === 1 && history[0].role === 'user' && !isSubagent) {
       const userText = history[0].parts?.[0]?.text || '';
       if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
         const digest = this.memoryManager.getProjectDigest({ query: userText });
@@ -2460,7 +2461,7 @@ export class AgentLoop {
         }
       }
       let warmStartTopoMap: string | undefined;
-      if (step === 1 && !this._collapsePreferences.compactSteps) {
+      if (step === 1 && !this._collapsePreferences.compactSteps && !isSubagent) {
         try {
           const topoResult = await generateWarmStartTopology({
             workspaceRootDir: this._workspace.rootDir,
@@ -3045,12 +3046,6 @@ export class AgentLoop {
       });
 
       // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
-      const isRootAgent = this.agentId === 'main'
-        || this.agentId === 'interactive-agent'
-        || this.agentId === 'coding-agent'
-        || this.agentId === 'delegation-parent'
-        || this.agentId === 'delegation-recovery-parent';
-      const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
       const isMockLLM = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
 
       let userGoal: string | undefined = this.goalManager?.getState()?.objective;
@@ -5761,12 +5756,34 @@ export class AgentLoop {
     const parentLLM = options.parentSessionId
       ? (this.sessionModels.get(options.parentSessionId)?.llm ?? this.llm)
       : this.llm;
+
+    // Subagent model picking (OpenCode v2.0.5 PR #49194): allow subagent to run on a fast/flash model
+    let childLLM = parentLLM;
+    const requestedModel = (options.modelName || options.model || '').trim();
+    if (requestedModel) {
+      const cached = this.modelInstances.get(requestedModel);
+      if (cached) {
+        childLLM = cached;
+      } else if (parentLLM && typeof (parentLLM as any).cloneWithModel === 'function') {
+        childLLM = (parentLLM as any).cloneWithModel(requestedModel);
+      } else if (parentLLM && parentLLM.constructor && (parentLLM as any).apiKey) {
+        try {
+          childLLM = new (parentLLM.constructor as any)({
+            ...parentLLM,
+            modelName: requestedModel,
+          });
+        } catch {
+          childLLM = parentLLM;
+        }
+      }
+    }
+
     const subagentSections = resolveSubagentPromptSections({
       capabilities: options.capabilities || options.requiredCapabilities,
       toolNames: allowedNames,
       brief: options.brief,
     });
-    const childLoop = new AgentLoop(parentLLM, childRegistry, {
+    const childLoop = new AgentLoop(childLLM, childRegistry, {
       workspace: options.worktreePath ? new Workspace(options.worktreePath) : this._workspace,
       maxSteps: options.maxSteps ?? this.maxSteps,
       toolScope: childScope,

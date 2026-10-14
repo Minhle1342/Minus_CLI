@@ -79,6 +79,19 @@ export class DeepseekLLM {
     }
   }
 
+  cloneWithModel(modelName: string): DeepseekLLM {
+    return new DeepseekLLM({
+      apiKey: this.apiKey,
+      modelName,
+      systemPrompt: this.systemPrompt,
+      baseURL: this.baseURL,
+      extraHeaders: this.extraHeaders,
+      headerTimeoutMs: this.headerTimeoutMs,
+      chunkTimeoutMs: this.chunkTimeoutMs,
+      tokenConfig: this.tokenConfig,
+    });
+  }
+
   getTokenConfig(): TokenConfig {
     return { ...this.tokenConfig };
   }

@@ -5,6 +5,8 @@ import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { MultiAgentBrainstormingEngine } from '../agent/multi-agent-brainstorming.js';
 import { Workspace } from '../workspace/workspace.js';
 
+import { AVAILABLE_MODELS } from '../ui/cli-ui.js';
+
 export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'delegate_agent',
@@ -13,6 +15,7 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
       type: Type.OBJECT,
       properties: {
         objective: { type: Type.STRING, description: 'Independent objective for the subagent to perform.' },
+        model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
         maxSteps: { type: Type.INTEGER, description: 'Subagent step limit (agent default).' },
         toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional tool allowlist for the subagent.' },
         fileScope: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Scope of files allowed to change (safe file locking to avoid concurrent conflicts).' },
@@ -24,6 +27,7 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
       const objective = String(args.objective || '').trim();
       if (!objective) return { error: 'The "objective" parameter is required.' };
       const handle = manager.start(objective, {
+        modelName: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
         fileScope: Array.isArray(args.fileScope) ? args.fileScope.map(String) : undefined,
@@ -45,6 +49,10 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
           type: Type.STRING,
           description: 'Clear description of the subtask to perform.',
         },
+        model: {
+          type: Type.STRING,
+          description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.',
+        },
         allowedTools: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
@@ -65,11 +73,13 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
       const task = String(args.task || '').trim();
       if (!task) return { error: 'The "task" parameter is required.' };
       const maxSteps = typeof args.maxSteps === 'number' ? args.maxSteps : 6;
+      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
       const allowedTools = Array.isArray(args.allowedTools) ? args.allowedTools.map(String) : undefined;
       const verificationCommand = typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined;
 
       const result = await manager.executeIsolatedTask(task, {
         maxSteps,
+        modelName: model,
         allowedTools,
         verificationCommand,
         signal: context?.signal,
@@ -88,6 +98,7 @@ export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
       type: Type.OBJECT,
       properties: {
         brief: { type: Type.STRING, description: 'Detailed prompt brief and task instructions for the child agent.' },
+        model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
         maxSteps: { type: Type.INTEGER, description: 'Maximum step budget for the child agent.' },
         toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional list of allowed tool names.' },
         worktreePath: { type: Type.STRING, description: 'Optional isolated worktree path for this agent.' },
@@ -97,12 +108,60 @@ export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
       const brief = String(args.brief || '').trim();
       if (!brief) return { error: 'Param "brief" is required.' };
+      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
       const handle = manager.spawn(brief, {
+        modelName: model,
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
         worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
       });
       return { success: true, agentId: handle.id, agent: handle };
+    },
+  };
+}
+
+export function createModelsTool(): ToolDefinition {
+  return {
+    name: 'models',
+    description: 'List available models and providers (OpenCode v2.0.5 parity). Use to inspect available models when selecting a fast/flash model for subagents or session switching.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: {
+          type: Type.STRING,
+          description: 'Optional search filter to match model ID, name, or provider (e.g. "flash", "deepseek", "gemini", "groq").',
+        },
+        limit: {
+          type: Type.INTEGER,
+          description: 'Maximum number of models to return (default: 20).',
+        },
+      },
+    },
+    async execute(args: Record<string, any>): Promise<Record<string, any>> {
+      const q = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 20;
+
+      let list = AVAILABLE_MODELS;
+      if (q) {
+        list = list.filter((m) =>
+          m.name.toLowerCase().includes(q)
+          || m.id.toLowerCase().includes(q)
+          || m.provider.toLowerCase().includes(q)
+          || (m.desc && m.desc.toLowerCase().includes(q)),
+        );
+      }
+
+      return {
+        success: true,
+        total: list.length,
+        models: list.slice(0, limit).map((m) => ({
+          id: m.id,
+          name: m.name,
+          provider: m.provider,
+          description: m.desc,
+          recommended: m.recommended ?? false,
+        })),
+      };
     },
   };
 }
