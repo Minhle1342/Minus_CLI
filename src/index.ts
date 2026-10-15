@@ -9,6 +9,8 @@ import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import { GeminiLLM } from './llm/gemini.js';
 import { GeminiWebLLM } from './llm/gemini-web.js';
+import { GeminiWebBridge } from './llm/gemini-web-bridge.js';
+import { PlaywrightTransport } from './llm/gemini-web-playwright.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { AnthropicLLM } from './llm/anthropic.js';
 import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
@@ -303,7 +305,9 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
 
   // 0.4. Gemini Web tab (không cần API key, dùng tab đã đăng nhập)
   if (model.startsWith('gemini-web')) {
-    return new GeminiWebLLM(model, undefined, null, tokenConfig);
+    // shortcut: mỗi lần đổi model mở 1 kết nối CDP riêng; serialize liên-tab để bản sau
+    const bridge = new GeminiWebBridge(new PlaywrightTransport());
+    return new GeminiWebLLM(model, undefined, bridge, tokenConfig);
   }
 
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)

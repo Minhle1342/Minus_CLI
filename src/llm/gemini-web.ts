@@ -35,7 +35,7 @@ export class GeminiWebLLM {
   }
 
   async generateStream(session: Session, tools: FunctionDeclaration[], callbacks?: StreamCallbacks, request?: LLMRequestOptions): Promise<LLMResponse> {
-    if (!this.bridge) throw new Error('GeminiWeb bridge not connected. Open gemini.google.com tab first.');
+    if (!this.bridge) throw new Error('GeminiWeb bridge not connected (no transport). Mở Chrome với --remote-debugging-port=9222 rồi thử lại.');
     if (request?.signal?.aborted) return { text: '', toolCalls: [], finishReason: 'aborted', rawFinishReason: 'aborted' };
     if (request?.tokenConfig) this.setTokenConfig(request.tokenConfig);
     const noneMode = request?.functionCallingMode === 'NONE'
