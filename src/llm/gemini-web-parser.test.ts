@@ -23,3 +23,15 @@ test('parser accepts single-line fence and validates tool names', () => {
 test('strip helper removes buttons and extra artifacts', () => {
   assert.doesNotMatch(stripGeminiWebArtifacts('x Copy code y'), /Copy code/);
 });
+
+test('parser catches bare JSON tool call from rendered code blocks', () => {
+  const raw = 'Đoạn mã\n{"name":"read_file","args":{"limit":60,"offset":1,"path":"package.json"}}';
+  const r = parseGeminiWebResponse(raw, { allowedNames: ['read_file'] });
+  assert.equal(r.toolCalls[0].name, 'read_file');
+  assert.deepEqual((r.toolCalls[0].args as any).path, 'package.json');
+});
+
+test('bare JSON with unknown tool stays text, not a call', () => {
+  const r = parseGeminiWebResponse('{"name":"evil","args":{}}', { allowedNames: ['read_file'] });
+  assert.equal(r.toolCalls.length, 0);
+});
