@@ -1,6 +1,6 @@
 {
   "chatInput": ["div.ql-editor[contenteditable=\"true\"]", "div[role=\"textbox\"]", "div[contenteditable=\"true\"]"],
   "sendButton": ["button.send-button", "button[aria-label*=\"Send\"]", "button[aria-label*=\"Gửi\"]", "button[aria-label*=\"gui\"]", "button.mat-focus-indicator:has(mat-icon)", "button[type=\"submit\"]"],
-  "stopButton": ["button[aria-label*=\"Stop\"]", "button[aria-label*=\"Dừng\"]", "button[aria-label*=\"dung\"]"],
+  "stopButton": ["button[aria-label*=\"Stop\"]", "button[aria-label*=\"Dừng\"]"],
   "responseContainer": [".model-response-text", "[data-message-author=\"model\"]", "message-content"]
 }

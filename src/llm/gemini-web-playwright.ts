@@ -146,7 +146,7 @@ export class PlaywrightTransport implements IWebTransport {
 
   constructor(
     private provider: PageProvider = () => connectChromeTab(Number(process.env.GEMINI_WEB_DEBUG_PORT ?? 9222)),
-    private opts?: { pollMs?: number; stableMs?: number },
+    private opts?: { pollMs?: number; stableMs?: number; roundTimeoutMs?: number },
   ) {}
 
   private async page(): Promise<GeminiWebPage> {
@@ -174,9 +174,14 @@ export class PlaywrightTransport implements IWebTransport {
     await page.clickSend();
     const pollMs = this.opts?.pollMs ?? 500;
     const stableMs = this.opts?.stableMs ?? 800;
+    const roundTimeoutMs = this.opts?.roundTimeoutMs ?? 100_000;
+    const start = Date.now();
     let last = '';
     let stableSince = 0;
     for (;;) {
+      if (Date.now() - start > roundTimeoutMs) {
+        throw new Error('Gemini Web turn timed out (still generating or no stable text). Tab có thể kẹt nút Stop — kiểm tra selectors.config.json.');
+      }
       const generating = await page.isGenerating();
       const cur = await page.responseText();
       if (cur.length > last.length) {

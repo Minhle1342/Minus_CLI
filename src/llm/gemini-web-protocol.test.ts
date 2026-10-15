@@ -40,3 +40,17 @@ test('empty model response fails fast instead of silent empty', async () => {
   const t = new PlaywrightTransport(async () => fakePage({ generating: [false, false], texts: ['', ''] }, log), { pollMs: 10, stableMs: 20 });
   await assert.rejects(async () => { for await (const _ of t.send('x')) {} }, /empty response/i);
 });
+
+test('stuck generating state times out instead of hanging forever', async () => {
+  const page: GeminiWebPage = {
+    url: () => 'https://gemini.google.com/app',
+    bringToFront: async () => {},
+    fillInput: async () => {},
+    clickSend: async () => {},
+    clickStop: async () => {},
+    isGenerating: async () => true,
+    responseText: async () => 'READY',
+  };
+  const t = new PlaywrightTransport(async () => page, { pollMs: 10, stableMs: 20, roundTimeoutMs: 150 });
+  await assert.rejects(async () => { for await (const _ of t.send('x')) {} }, /timed out/i);
+});
