@@ -1,5 +1,7 @@
 import type { AgentPlugin, KernelContext } from '../kernel.js';
 import { createCodeGraphTools } from '../../tools/codegraph-tools.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export const CODEGRAPH_PROMPT_SECTION_ID = 'codegraph-usage-policy';
 
@@ -30,12 +32,17 @@ export const CodeGraphPlugin: AgentPlugin = {
     for (const tool of createCodeGraphTools()) {
       if (!ctx.tools.get(tool.name)) ctx.registerTool(tool);
     }
-    ctx.systemPrompt.unregister(CODEGRAPH_PROMPT_SECTION_ID);
-    ctx.systemPrompt.register({
-      id: CODEGRAPH_PROMPT_SECTION_ID,
-      content: CODEGRAPH_USAGE_POLICY,
-      priority: -90,
-    });
+    const codegraphDir = path.join(ctx.workspace.rootDir, '.codegraph');
+    if (fs.existsSync(codegraphDir)) {
+      ctx.systemPrompt.unregister(CODEGRAPH_PROMPT_SECTION_ID);
+      ctx.systemPrompt.register({
+        id: CODEGRAPH_PROMPT_SECTION_ID,
+        content: CODEGRAPH_USAGE_POLICY,
+        priority: -90,
+      });
+    } else {
+      ctx.systemPrompt.unregister(CODEGRAPH_PROMPT_SECTION_ID);
+    }
   },
   dispose(ctx: KernelContext) {
     ctx.systemPrompt.unregister(CODEGRAPH_PROMPT_SECTION_ID);
