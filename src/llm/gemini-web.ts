@@ -8,6 +8,11 @@ import { parseGeminiWebResponse } from './gemini-web-parser.js';
 import { GeminiWebBridge } from './gemini-web-bridge.js';
 import type { LLMRequestOptions, LLMResponse, StreamCallbacks } from './gemini.js';
 
+/** Web-tab models share one browser tab — extra calls (e.g. session naming) would double-submit and race the main turn. */
+export function isGeminiWebModel(modelName: string): boolean {
+  return (modelName || '').startsWith('gemini-web');
+}
+
 /** Adapter drop-in cho tab gemini.google.com, cùng chữ ký GeminiLLM. */
 export class GeminiWebLLM {
   readonly modelName: string;

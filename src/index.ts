@@ -8,7 +8,7 @@ import { sessionHistoryToTranscript } from './ui/tea/models/viewport-model.js';
 import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import { GeminiLLM } from './llm/gemini.js';
-import { GeminiWebLLM } from './llm/gemini-web.js';
+import { GeminiWebLLM, isGeminiWebModel } from './llm/gemini-web.js';
 import { GeminiWebBridge } from './llm/gemini-web-bridge.js';
 import { PlaywrightTransport } from './llm/gemini-web-playwright.js';
 import { DeepseekLLM } from './llm/deepseek.js';
@@ -858,6 +858,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     const { entry, created } = await names.ensure(session.id, request, session.createdAt);
     tui?.setMetadata({ session: entry.name });
     if (!created) return;
+    // Đặt tên session qua web tab = 1 submit dư ngay đầu task, lại đua tab với turn chính (còn ăn nút Stop của nhau) → giữ tên tức thì
+    if (isGeminiWebModel((llm as any)?.modelName ?? '')) return;
     const namingModel = llm;
     void (async () => {
       const controller = new AbortController();
