@@ -33,9 +33,10 @@ test('transport fills, sends, then streams deltas until stable', async () => {
 });
 
 test('transport cancel clicks stop on the live tab', async () => {
-  const { page, log } = fakePage({ generating: [false, false], texts: ['', ''] });
+  const { page, log } = fakePage({ generating: [false, false], texts: ['r', 'r'] });
   const t = new PlaywrightTransport(async () => page, { pollMs: 10, stableMs: 20 });
   for await (const _ of t.send('hi')) { /* kết nối tab */ }
+  log.length = 0;
   await t.cancel();
   assert.ok(log.includes('stop'));
 });

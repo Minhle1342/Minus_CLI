@@ -6,6 +6,7 @@ export const GEMINI_WEB_OUTPUT_CONTRACT = [
   '{"name":"<tool>","args":{...}}',
   '```',
   'No other tool syntax. Plain text goes outside blocks.',
+  'When the task is fully done, reply with plain text only (no tool blocks). That text is your final answer.',
 ].join('\n');
 
 export interface WebPayloadInput {

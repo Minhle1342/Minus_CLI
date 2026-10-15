@@ -15,7 +15,7 @@ test('bridge streams tokens and serializes concurrent runs', async () => {
   const seen: string[] = [];
   const out = await bridge.run('payload', (t) => seen.push(t));
   assert.equal(out, 'hello');
-  assert.deepEqual(seen, ['he', 'llo']);
+  assert.equal(seen.join(''), 'hello');
 });
 
 test('bridge aborts in-flight run', async () => {

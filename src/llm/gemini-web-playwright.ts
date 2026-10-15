@@ -127,9 +127,22 @@ export async function connectChromeTab(port = 9222): Promise<GeminiWebPage> {
   };
 }
 
+/** Giao ước turn đầu với tab web: ép model trả tool bằng fenced block, xong việc trả text thuần. */
+export const PROTOCOL_BOOTSTRAP = [
+  'You are an autonomous coding agent driven by a local harness. Rules:',
+  '1. When you need a local action, emit exactly one fenced block per call:',
+  '```toolcall-json',
+  '{"name":"<tool>","args":{...}}',
+  '```',
+  '2. You may emit several blocks across turns; wait for harness results between turns.',
+  '3. When the task is fully done, reply with plain text only (no tool blocks). That text is your final answer.',
+  'Reply "READY" if you accept.',
+].join('\n');
+
 /** Transport chạy trên 1 tab Gemini: điền prompt, gửi, stream delta tới khi ổn định. */
 export class PlaywrightTransport implements IWebTransport {
   private cached: GeminiWebPage | null = null;
+  private protocolInstalled = false;
 
   constructor(
     private provider: PageProvider = () => connectChromeTab(Number(process.env.GEMINI_WEB_DEBUG_PORT ?? 9222)),
@@ -144,7 +157,20 @@ export class PlaywrightTransport implements IWebTransport {
   async *send(payload: string): AsyncIterable<string> {
     const page = await this.page();
     await page.bringToFront();
-    await page.fillInput(payload);
+    if (!this.protocolInstalled) {
+      await this.submitAndWait(page, PROTOCOL_BOOTSTRAP);
+      this.protocolInstalled = true;
+    }
+    const full = await this.submitAndWait(page, payload);
+    if (!full.trim()) throw new Error('Gemini Web returned an empty response (selectors may not match this UI). Check selectors.config.json.');
+    let last = '';
+    // Phát lại toàn văn thành 1 delta để bridge stream như cũ
+    yield full.slice(last.length);
+  }
+
+  /** Điền 1 lượt, gửi, đợi tới khi text ổn định; trả toàn văn lượt đó. */
+  private async submitAndWait(page: GeminiWebPage, text: string): Promise<string> {
+    await page.fillInput(text);
     await page.clickSend();
     const pollMs = this.opts?.pollMs ?? 500;
     const stableMs = this.opts?.stableMs ?? 800;
@@ -152,12 +178,11 @@ export class PlaywrightTransport implements IWebTransport {
     let stableSince = 0;
     for (;;) {
       const generating = await page.isGenerating();
-      const text = await page.responseText();
-      if (text.length > last.length) {
-        yield text.slice(last.length);
-        last = text;
+      const cur = await page.responseText();
+      if (cur.length > last.length) {
+        last = cur;
         stableSince = 0;
-      } else if (!generating && text === last) {
+      } else if (!generating && cur === last) {
         if (!stableSince) stableSince = Date.now();
         else if (Date.now() - stableSince >= stableMs) break;
       } else {
@@ -165,6 +190,7 @@ export class PlaywrightTransport implements IWebTransport {
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
+    return last;
   }
 
   async cancel(): Promise<void> {
