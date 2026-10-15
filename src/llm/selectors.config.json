@@ -1,0 +1,6 @@
+{
+  "chatInput": ["div.ql-editor[contenteditable=\"true\"]", "div[role=\"textbox\"]"],
+  "sendButton": ["button.send-button", "button[aria-label*=\"Send\"]"],
+  "stopButton": ["button[aria-label*=\"Stop\"]"],
+  "responseContainer": [".model-response-text", "[data-message-author=\"model\"]"]
+}
