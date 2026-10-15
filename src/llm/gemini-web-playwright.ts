@@ -18,6 +18,26 @@ function first(sel: string[]): string {
   return sel[0];
 }
 
+/** Phạm vi click tối thiểu để bấm nút gửi — tách riêng để test được fallback. */
+export interface ClickScope {
+  click(sel: string): Promise<void>;
+  pressEnter(): Promise<void>;
+}
+
+/** Thử từng selector, rớt hết thì Enter trên ô input (Gemini Enter = gửi). */
+export async function clickSendRobust(scope: ClickScope, sels: string[]): Promise<void> {
+  let lastErr: any = new Error('No send selectors configured');
+  for (const s of sels) {
+    try {
+      await scope.click(s);
+      return;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  await scope.pressEnter().catch((e: any) => { lastErr = e; throw lastErr; });
+}
+
 /** Adapter page Playwright thật sang GeminiWebPage (selectors có fallback). */
 export async function connectChromeTab(port = 9222): Promise<GeminiWebPage> {
   let chromium: typeof import('playwright').chromium;
@@ -72,7 +92,19 @@ export async function connectChromeTab(port = 9222): Promise<GeminiWebPage> {
         );
       }
     },
-    clickSend: async () => { await tryAll(GEMINI_WEB_SELECTORS.sendButton, (loc) => loc.click()); },
+    clickSend: async () => {
+      await clickSendRobust(
+        {
+          click: async (s: string) => { await raw.locator(s).first().click({ timeout: 3000 }); },
+          pressEnter: async () => {
+            const input = first(GEMINI_WEB_SELECTORS.chatInput);
+            await raw.locator(input).first().click({ timeout: 3000 });
+            await raw.keyboard.press('Enter');
+          },
+        },
+        GEMINI_WEB_SELECTORS.sendButton,
+      );
+    },
     clickStop: async () => { await tryAll(GEMINI_WEB_SELECTORS.stopButton, (loc) => loc.click()); },
     isGenerating: async () => {
       for (const s of GEMINI_WEB_SELECTORS.stopButton) {
