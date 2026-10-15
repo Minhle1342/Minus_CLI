@@ -143,6 +143,8 @@ export const PROTOCOL_BOOTSTRAP = [
 export class PlaywrightTransport implements IWebTransport {
   private cached: GeminiWebPage | null = null;
   private protocolInstalled = false;
+  /** Toàn văn lượt trước — poll đầu lượt sau hay đọc nhầm container cũ, phải bỏ qua. */
+  private lastRoundText = '';
 
   constructor(
     private provider: PageProvider = () => connectChromeTab(Number(process.env.GEMINI_WEB_DEBUG_PORT ?? 9222)),
@@ -176,14 +178,30 @@ export class PlaywrightTransport implements IWebTransport {
     const stableMs = this.opts?.stableMs ?? 800;
     const roundTimeoutMs = this.opts?.roundTimeoutMs ?? 100_000;
     const start = Date.now();
+    const prevTail = this.lastRoundText;
     let last = '';
+    let synced = !prevTail;
     let stableSince = 0;
+    let tailMatchCount = 0;
     for (;;) {
       if (Date.now() - start > roundTimeoutMs) {
         throw new Error('Gemini Web turn timed out (still generating or no stable text). Tab có thể kẹt nút Stop — kiểm tra selectors.config.json.');
       }
       const generating = await page.isGenerating();
       const cur = await page.responseText();
+      if (!synced) {
+        // Container lượt trước chưa nhường chỗ cho lượt mới — bỏ qua, chưa phải tin mới.
+        // Ngoại lệ: model trả trùng حرف lượt trước — sau 30 poll đứng yên thì chấp nhận.
+        if (cur === '' || cur === prevTail) {
+          if (cur === prevTail && !generating && ++tailMatchCount >= 30) {
+            synced = true;
+            last = cur;
+          }
+          await new Promise((r) => setTimeout(r, pollMs));
+          continue;
+        }
+        synced = true;
+      }
       if (cur.length > last.length) {
         last = cur;
         stableSince = 0;
@@ -195,6 +213,7 @@ export class PlaywrightTransport implements IWebTransport {
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
+    this.lastRoundText = last;
     return last;
   }
 

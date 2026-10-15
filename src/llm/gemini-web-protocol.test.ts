@@ -54,3 +54,28 @@ test('stuck generating state times out instead of hanging forever', async () => 
   const t = new PlaywrightTransport(async () => page, { pollMs: 10, stableMs: 20, roundTimeoutMs: 150 });
   await assert.rejects(async () => { for await (const _ of t.send('x')) {} }, /timed out/i);
 });
+
+test('next round ignores previous round tail instead of lagging one turn', async () => {
+  const LONG = 'L'.repeat(50);
+  const SHORT = 'S'.repeat(10);
+  const ACK = 'A'.repeat(20);
+  const texts = [...Array(10).fill(ACK), ...Array(20).fill(LONG), ...Array(20).fill(SHORT)];
+  let polls = 0;
+  const page: GeminiWebPage = {
+    url: () => 'https://gemini.google.com/app',
+    bringToFront: async () => {},
+    fillInput: async () => {},
+    clickSend: async () => {},
+    clickStop: async () => {},
+    isGenerating: async () => false,
+    responseText: async () => texts[Math.min(polls++, texts.length - 1)],
+  };
+  const t = new PlaywrightTransport(async () => page, { pollMs: 10, stableMs: 20 });
+  let first = '';
+  for await (const c of t.send('one')) first += c;
+  let second = '';
+  for await (const c of t.send('two')) second += c;
+  assert.ok(first.includes('L'), `first round wrong, got: ${first.slice(0, 20)}`);
+  assert.ok(second.includes('S'), `second round lagged one turn, got: ${second.slice(0, 20)}`);
+  assert.doesNotMatch(second, /L/);
+});
