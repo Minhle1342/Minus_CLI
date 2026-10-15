@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GeminiWebBridge, type IWebTransport } from './gemini-web-bridge.js';
+import { GeminiWebBridge, GEMINI_WEB_SELECTORS, type IWebTransport } from './gemini-web-bridge.js';
 
 class MockTransport implements IWebTransport {
   constructor(private chunks: string[]) {}
@@ -23,4 +23,21 @@ test('bridge aborts in-flight run', async () => {
   const c = new AbortController();
   c.abort();
   await assert.rejects(() => bridge.run('x', undefined, c.signal), /abort/i);
+});
+
+test('bridge cancels stuck transport on mid-run abort and exposes selectors', async () => {
+  let cancelled = false;
+  const stuck: IWebTransport = {
+    async *send() {
+      await new Promise((r) => setTimeout(r, 300));
+      yield 'late';
+    },
+    async cancel() { cancelled = true; },
+  };
+  const bridge = new GeminiWebBridge(stuck, { timeoutMs: 2000 });
+  const c = new AbortController();
+  setTimeout(() => c.abort(), 20);
+  await assert.rejects(() => bridge.run('x', undefined, c.signal), /abort/i);
+  assert.equal(cancelled, true);
+  assert.ok(Array.isArray(GEMINI_WEB_SELECTORS.stopButton));
 });

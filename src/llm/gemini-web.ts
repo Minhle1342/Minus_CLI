@@ -37,10 +37,16 @@ export class GeminiWebLLM {
   async generateStream(session: Session, tools: FunctionDeclaration[], callbacks?: StreamCallbacks, request?: LLMRequestOptions): Promise<LLMResponse> {
     if (!this.bridge) throw new Error('GeminiWeb bridge not connected. Open gemini.google.com tab first.');
     if (request?.signal?.aborted) return { text: '', toolCalls: [], finishReason: 'aborted', rawFinishReason: 'aborted' };
+    if (request?.tokenConfig) this.setTokenConfig(request.tokenConfig);
+    const noneMode = request?.functionCallingMode === 'NONE'
+      || (request?.allowedFunctionNames !== undefined && request.allowedFunctionNames.length === 0);
+    const allowed = noneMode ? [] : (request?.functionCallingMode === 'ANY' && request.allowedFunctionNames
+      ? tools.filter((t) => request.allowedFunctionNames!.includes(t.name || ''))
+      : tools);
     const payload = serializeGeminiWebPayload({
-      systemPrompt: request?.systemPrompt || this.systemPrompt,
+      systemPrompt: (request?.systemPrompt || this.systemPrompt) + (noneMode ? '\nDo not emit any toolcall-json blocks. Answer in plain text only.' : ''),
       history: session.getHistory() as any,
-      tools,
+      tools: allowed,
       dynamicContext: request?.dynamicContext,
       stepSuffixes: request?.stepSuffixes,
     });
@@ -53,7 +59,7 @@ export class GeminiWebLLM {
       }, request?.signal),
       { maxRetries: request?.maxRetries ?? 2, baseDelayMs: 1000, maxDelayMs: 5000, signal: request?.signal },
     );
-    const parsed = parseGeminiWebResponse(raw);
+    const parsed = parseGeminiWebResponse(raw, { allowedNames: allowed.map((t) => t.name || '') });
     const duration = Date.now() - start;
     return {
       text: parsed.text,

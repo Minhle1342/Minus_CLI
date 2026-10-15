@@ -19,3 +19,12 @@ test('gemini-web generateStream returns toolCalls+usage like GeminiLLM', async (
   assert.equal(res.toolCalls[0].name, 'read_file');
   assert.ok(res.usage?.requestDurationMs !== undefined);
 });
+
+test('adapter rejects hallucinated tool and honors functionCallingMode NONE', async () => {
+  const llm = new GeminiWebLLM('gemini-web-flash', 'SYS', new GeminiWebBridge(new MockTransport(['```toolcall-json\n{"name":"evil","args":{}}\n```'])));
+  await assert.rejects(() => llm.generateStream(fakeSession(), [{ name: 'read_file' } as any]), /unknown tool/i);
+  const noneLlm = new GeminiWebLLM('gemini-web-flash', 'SYS', new GeminiWebBridge(new MockTransport(['plain text'])));
+  const res = await noneLlm.generateStream(fakeSession(), [{ name: 'read_file' } as any], undefined, { functionCallingMode: 'NONE' });
+  assert.equal(res.toolCalls.length, 0);
+  assert.equal(res.text, 'plain text');
+});
