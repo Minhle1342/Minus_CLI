@@ -76,7 +76,7 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
       ? error.retryDelayMs
       : undefined;
     if (retryAfterMs === undefined) {
-      const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
+      const retryMatch = rawMessage.match(/retry(?:[-_ ]?after|[-_ ]?delay| in)?"?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
       if (retryMatch) {
         const value = parseFloat(retryMatch[1]);
         const unit = retryMatch[2]?.toLowerCase() || 's';
@@ -163,7 +163,7 @@ export function classifyLLMError(error: any): ClassifiedLLMError {
       ? error.retryDelayMs
       : undefined;
     if (retryAfterMs === undefined) {
-      const retryMatch = rawMessage.match(/retry(?:[-_ ]after|[-_ ]delay| in)?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
+      const retryMatch = rawMessage.match(/retry(?:[-_ ]?after|[-_ ]?delay| in)?"?\s*[:=]?\s*"?([0-9.]+)\s*(s|sec|seconds|ms)?"?/i);
       if (retryMatch) {
         const value = parseFloat(retryMatch[1]);
         const unit = retryMatch[2]?.toLowerCase() || 's';

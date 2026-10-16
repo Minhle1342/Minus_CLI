@@ -394,7 +394,9 @@ export class GeminiLLM {
       {
         maxRetries: request?.maxRetries !== undefined ? request.maxRetries : 10,
         baseDelayMs: 2000,
-        maxDelayMs: 10000,
+        // Gemini RPM/TPM quotas roll over a 60s window and RetryInfo asks for up to ~60s.
+        // Capping the gap below that keeps re-hitting the same exhausted window (Google caps backoff at 60s).
+        maxDelayMs: 60_000,
         signal: request?.signal,
         onRetry: (attempt, delayMs, classified) => {
           const payload = {
