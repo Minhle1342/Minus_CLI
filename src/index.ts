@@ -8,6 +8,9 @@ import { sessionHistoryToTranscript } from './ui/tea/models/viewport-model.js';
 import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import { GeminiLLM } from './llm/gemini.js';
+import { GeminiWebLLM, isGeminiWebModel } from './llm/gemini-web.js';
+import { GeminiWebBridge } from './llm/gemini-web-bridge.js';
+import { PlaywrightTransport } from './llm/gemini-web-playwright.js';
 import { DeepseekLLM } from './llm/deepseek.js';
 import { AnthropicLLM } from './llm/anthropic.js';
 import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
@@ -298,6 +301,13 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
       throw new Error(`INTERNAI_API_KEY is not configured in .env!\n👉 Paste your discovery-api key into INTERNAI_API_KEY in .env.`);
     }
     return new DeepseekLLM(key, rawModel, undefined, baseUrl, undefined, tokenConfig);
+  }
+
+  // 0.4. Gemini Web tab (không cần API key, dùng tab đã đăng nhập)
+  if (model.startsWith('gemini-web')) {
+    // shortcut: mỗi lần đổi model mở 1 kết nối CDP riêng; serialize liên-tab để bản sau
+    const bridge = new GeminiWebBridge(new PlaywrightTransport());
+    return new GeminiWebLLM(model, undefined, bridge, tokenConfig);
   }
 
   // 1. Google Gemini chính thức (Google AI Studio Free Tier)
@@ -848,6 +858,8 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     const { entry, created } = await names.ensure(session.id, request, session.createdAt);
     tui?.setMetadata({ session: entry.name });
     if (!created) return;
+    // Đặt tên session qua web tab = 1 submit dư ngay đầu task, lại đua tab với turn chính (còn ăn nút Stop của nhau) → giữ tên tức thì
+    if (isGeminiWebModel((llm as any)?.modelName ?? '')) return;
     const namingModel = llm;
     void (async () => {
       const controller = new AbortController();

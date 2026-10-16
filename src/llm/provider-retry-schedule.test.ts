@@ -1,8 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { retryWithExponentialBackoff } from './error-handling.js';
+import { retryWithExponentialBackoff, classifyLLMError } from './error-handling.js';
 import { DeepseekLLM } from './deepseek.js';
 import { Session } from '../session/session.js';
+
+test('classifyLLMError: parses Gemini RetryInfo retryDelay and honours it within the 60s Gemini cap', async () => {
+  const geminiError: any = new Error(
+    'got status: RESOURCE_EXHAUSTED. {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"22s"}]}}',
+  );
+  geminiError.status = 429;
+
+  const classified = classifyLLMError(geminiError);
+  assert.equal(classified.kind, 'TRANSIENT_RATE_LIMIT');
+  assert.equal(classified.retryAfterMs, 22_000);
+
+  const recordedDelays: number[] = [];
+  await retryWithExponentialBackoff(
+    async () => { throw geminiError; },
+    {
+      maxRetries: 1,
+      baseDelayMs: 2000,
+      maxDelayMs: 60_000,
+      jitterMs: 0,
+      sleepFn: async (ms: number) => { recordedDelays.push(ms); },
+    },
+  ).catch(() => {});
+
+  assert.equal(recordedDelays.length, 1);
+  assert.equal(recordedDelays[0], 22_000);
+});
 
 test('retryWithExponentialBackoff: backs off up to 10 retries with 10s gap cap and recovers', async () => {
   let attempts = 0;

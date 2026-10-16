@@ -70,7 +70,7 @@ test('ask_user passes the turn gate in explore without approval friction', () =>
 test('ask_user / ask_question passes explicit options for MCP Elicitation & V2 Form', async () => {
   const service = new GrillService();
   let receivedCtx: any;
-  service.setPromptHandler(async (question, ctx, sessionId) => {
+  service.setPromptHandler(async (ctx) => {
     receivedCtx = ctx;
     return 'PostgreSQL';
   });

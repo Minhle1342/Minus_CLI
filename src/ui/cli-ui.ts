@@ -653,6 +653,12 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     provider: 'Google AI Studio',
     desc: 'Alias that always points to the latest Google Gemini Flash model',
   },
+  {
+    id: 'gw',
+    name: 'gemini-web-flash',
+    provider: 'Gemini Web Tab (no API key)',
+    desc: 'Routes via your logged-in gemini.google.com tab — free, for mid-cost intermediate tasks',
+  },
 
   // 2. Groq Cloud (Free Tier: Siêu tốc độ LPU >500 tokens/s)
   {
