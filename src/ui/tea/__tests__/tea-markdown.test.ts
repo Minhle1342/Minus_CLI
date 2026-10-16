@@ -195,6 +195,77 @@ test('sessionHistoryToTranscript: hides system steering blocks, unwraps user tex
   assert.equal(userVisibleText('[USER INSTRUCTION]:\nmy request'), 'my request');
 });
 
+test('sessionHistoryToTranscript: strips warm start memory and cognitive scaffold from reopened session', () => {
+  const warmStartMsg = [
+    '[PROJECT KNOWLEDGE BASE - WARM START MEMORY]',
+    '- Architecture: Mini Agent CLI',
+    '',
+    '[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]',
+    '- [session/test; confidence=0.90] prior context',
+    '',
+    '[PREVIOUS SESSION HANDOFF - CONTINUATION CONTEXT]',
+    '- Handoff notes',
+    '',
+    '🧠 [COGNITIVE TASK SCAFFOLD - EXPLORE PHASE]:',
+    '- Scaffold breakdown',
+    '',
+    '[USER INSTRUCTION]:',
+    'Reopened session initial user query',
+  ].join('\n');
+
+  const entries = sessionHistoryToTranscript([
+    { role: 'user', parts: [{ text: warmStartMsg }] },
+    { role: 'model', parts: [{ text: 'Here is the answer.' }] },
+  ]);
+
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].kind, 'user');
+  assert.equal(entries[0].text, 'Reopened session initial user query');
+  assert.doesNotMatch(entries[0].text, /PROJECT KNOWLEDGE BASE/);
+  assert.doesNotMatch(entries[0].text, /WARM START MEMORY/);
+  assert.doesNotMatch(entries[0].text, /COGNITIVE TASK SCAFFOLD/);
+  assert.doesNotMatch(entries[0].text, /USER INSTRUCTION/);
+});
+
+test('sessionHistoryToTranscript: strips user attached workspace context from prompt display', () => {
+  const promptWithAttachment = [
+    '[PROJECT KNOWLEDGE BASE - WARM START MEMORY]',
+    'repo info',
+    '',
+    '[USER INSTRUCTION]:',
+    'Check this file @src/index.ts',
+    '',
+    '[User Attached Workspace Context]',
+    '--- File: src/index.ts ---',
+    'console.log("hello");',
+  ].join('\n');
+
+  const entries = sessionHistoryToTranscript([
+    { role: 'user', parts: [{ text: promptWithAttachment }] },
+  ]);
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, 'user');
+  assert.equal(entries[0].text, 'Check this file @src/index.ts');
+  assert.doesNotMatch(entries[0].text, /User Attached Workspace Context/);
+  assert.doesNotMatch(entries[0].text, /console\.log/);
+});
+
+test('sessionHistoryToTranscript: hides pure harness/memory synthetic prompts without user instruction', () => {
+  const entries = sessionHistoryToTranscript([
+    { role: 'user', parts: [{ text: '[PROJECT KNOWLEDGE BASE - WARM START MEMORY]\nstandalone dump' }] },
+    { role: 'user', parts: [{ text: '[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]\nstandalone memory' }] },
+    { role: 'user', parts: [{ text: '[RESUME INTERRUPTED SESSION]:\nResume after crash' }] },
+    { role: 'user', parts: [{ text: '[RESUME INCOMPLETE PLAN]:\nTask #2' }] },
+    { role: 'user', parts: [{ text: '[IMPLEMENTATION MODE REQUEST] [RESUME INCOMPLETE PLAN]:\nPlan details' }] },
+    { role: 'user', parts: [{ text: 'Actual user follow up' }] },
+  ]);
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, 'user');
+  assert.equal(entries[0].text, 'Actual user follow up');
+});
+
 test('formatAnswer: renders markdown tables with <br> and inline code with aligned borders (no jagged indent)', () => {
   const tableMarkdown = [
     '| Các tệp mã nguồn chính (Source Files) |',

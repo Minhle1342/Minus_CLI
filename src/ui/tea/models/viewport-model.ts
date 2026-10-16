@@ -387,6 +387,21 @@ const HIDDEN_TRANSCRIPT_LEADERS = [
   '[RESPONSE LANGUAGE]',
   '[SYSTEM ',
   '[CRITIC ',
+  '[PROJECT KNOWLEDGE BASE',
+  '[SESSION / GOAL MEMORY',
+  '[PREVIOUS SESSION HANDOFF',
+  '[AUTONOMOUS GOAL MODE',
+  '[DYNAMIC CONVERGENCE',
+  '🧠 [COGNITIVE TASK SCAFFOLD',
+  '[COGNITIVE TASK SCAFFOLD',
+  '[User Attached Workspace Context]',
+  '[RESUME INCOMPLETE PLAN]',
+  '[RESUME INTERRUPTED SESSION]',
+  '[IMPLEMENTATION MODE REQUEST]',
+  '[PLANNING MODE REQUEST]',
+  '[AUTONOMOUS GOAL EXECUTION',
+  '[TASK ORCHESTRATOR MANDATE',
+  '[CITATION-VALIDATED REPOSITORY MEMORY]',
 ];
 const UNWRAP_TRANSCRIPT_LEADERS = [
   '[USER QUEUED MESSAGE (MID-TURN STEERING)]:',
@@ -397,14 +412,38 @@ const UNWRAP_TRANSCRIPT_LEADERS = [
 export function userVisibleText(text: string): string | undefined {
   const trimmed = text.trim();
   if (!trimmed || trimmed === 'Continue') return undefined;
+
+  // 1. Unwrap user instruction if embedded within warm-start / memory / scaffold prefix
+  const userInstructionIdx = text.lastIndexOf('[USER INSTRUCTION]:');
+  if (userInstructionIdx !== -1) {
+    let inner = text.slice(userInstructionIdx + '[USER INSTRUCTION]:'.length).trim();
+    const attachedIdx = inner.indexOf('\n\n[User Attached Workspace Context]');
+    if (attachedIdx !== -1) {
+      inner = inner.slice(0, attachedIdx).trim();
+    } else if (inner.startsWith('[User Attached Workspace Context]')) {
+      inner = '';
+    }
+    if (!inner || inner === 'Continue') return undefined;
+    for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
+      if (inner.startsWith(leader)) return undefined;
+    }
+    return inner;
+  }
+
+  // 2. Unwrap mid-turn steering message
+  const steerIdx = text.lastIndexOf('[USER QUEUED MESSAGE (MID-TURN STEERING)]:');
+  if (steerIdx !== -1) {
+    const inner = text.slice(steerIdx + '[USER QUEUED MESSAGE (MID-TURN STEERING)]:'.length).trim();
+    if (!inner || inner === 'Continue') return undefined;
+    for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
+      if (inner.startsWith(leader)) return undefined;
+    }
+    return inner;
+  }
+
+  // 3. Filter standalone system steering / harness / memory blocks
   for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
     if (trimmed.startsWith(leader)) return undefined;
-  }
-  for (const leader of UNWRAP_TRANSCRIPT_LEADERS) {
-    if (trimmed.startsWith(leader)) {
-      const inner = trimmed.slice(leader.length).trim();
-      return inner || undefined;
-    }
   }
   return text;
 }

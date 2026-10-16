@@ -9,6 +9,13 @@ import {
   resolveVerifyPlaybookPrompt,
   GIT_WORKFLOW_PROMPTS,
   type GitWorkflowPromptId,
+  SECTION_GIT_OPERATIONS,
+  SECTION_FRONTEND_UI,
+  SECTION_CODEBASE_INTELLIGENCE,
+  SECTION_TASK_ORCHESTRATOR_BOUNDARIES,
+  needsFrontendGuidance,
+  needsCodebaseIntelligenceGuidance,
+  needsSubagentOrchestratorGuidance,
 } from '../llm/prompt-sections.js';
 
 export type StepPromptGatingMode = 'off' | 'shadow' | 'enforce';
@@ -63,6 +70,14 @@ export interface StepPromptPolicyContext {
   evidenceReasons?: string[];
   reproductionEnforced?: boolean;
   hasPostFixPass?: boolean;
+  /** Whether the workspace has frontend/UI dependencies (React, Vue, Tailwind, etc.). */
+  isFrontendWorkspace?: boolean;
+  /** File paths touched or referenced in the active turn. */
+  touchedFiles?: string[];
+  /** Whether codebase intelligence tools are registered and available. */
+  hasCodebaseTools?: boolean;
+  /** Whether subagent / task delegation tools are registered and available. */
+  hasSubagentTools?: boolean;
 }
 
 export interface StepPromptDecision {
@@ -74,8 +89,15 @@ export interface StepPromptDecision {
   selectedGitPlaybook?: GitWorkflowPromptId;
   gitWorkflow?: GitWorkflowState;
   includeStaticToolPlaybooks: boolean;
+  includeStaticGitOperations: boolean;
+  includeStaticFrontendUI: boolean;
+  includeStaticCodebaseIntelligence: boolean;
+  includeStaticTaskOrchestrator: boolean;
   toolPlaybookPrompt: string;
   gitPlaybookPrompt: string;
+  dynamicFrontendGuidance?: string;
+  dynamicCodebaseIntelligenceGuidance?: string;
+  dynamicOrchestratorGuidance?: string;
   planContext: string;
   advicePrompt: string;
   harnessGuidance: string;
@@ -320,6 +342,20 @@ export class StepPromptPolicy {
       for (const code of strongAdvisory.codes) reasonCodes.push(`STRONG_ADVISORY_${code}`);
     }
 
+    const includeFrontend = needsFrontendGuidance(query, context.touchedFiles, context.isFrontendWorkspace ?? true);
+    const includeCodebase = needsCodebaseIntelligenceGuidance(query, context.classification.phase, context.hasCodebaseTools ?? true);
+    const includeOrchestrator = needsSubagentOrchestratorGuidance(query, context.hasSubagentTools ?? false, context.activeAgentCount);
+
+    const dynamicFrontendGuidance = (!useLegacyInjection && includeFrontend) ? SECTION_FRONTEND_UI : '';
+    const dynamicCodebaseIntelligenceGuidance = (!useLegacyInjection && includeCodebase) ? SECTION_CODEBASE_INTELLIGENCE : '';
+    const dynamicOrchestratorGuidance = (!useLegacyInjection && includeOrchestrator) ? SECTION_TASK_ORCHESTRATOR_BOUNDARIES : '';
+
+    if (!useLegacyInjection) {
+      if (includeFrontend) reasonCodes.push('DYNAMIC_FRONTEND_GUIDANCE');
+      if (includeCodebase) reasonCodes.push('DYNAMIC_CODEBASE_INTELLIGENCE');
+      if (includeOrchestrator) reasonCodes.push('DYNAMIC_ORCHESTRATOR_GUIDANCE');
+    }
+
     const targetPlaybookPrompt = selectedPlaybooks
       .map((id) => (id === 'verifyDiff' ? resolveVerifyPlaybookPrompt(context.classification.risk) : TOOL_PLAYBOOK_PROMPTS[id]))
       .join('\n\n');
@@ -342,6 +378,9 @@ export class StepPromptPolicy {
       includeHarnessGuidance ? context.candidates.harnessGuidance : '',
       includeScaffold ? context.candidates.scaffoldPrompt : '',
       strongAdvisory.text,
+      dynamicFrontendGuidance,
+      dynamicCodebaseIntelligenceGuidance,
+      dynamicOrchestratorGuidance,
     ]);
     const injectedAfterTokens = useLegacyInjection ? beforeTokens : targetAfterTokens;
     const reportedAfterTokens = mode === 'off' || conservativeFallback
@@ -358,8 +397,15 @@ export class StepPromptPolicy {
       selectedGitPlaybook,
       gitWorkflow,
       includeStaticToolPlaybooks: useLegacyInjection,
+      includeStaticGitOperations: useLegacyInjection,
+      includeStaticFrontendUI: useLegacyInjection,
+      includeStaticCodebaseIntelligence: useLegacyInjection,
+      includeStaticTaskOrchestrator: useLegacyInjection,
       toolPlaybookPrompt: useLegacyInjection ? '' : targetPlaybookPrompt,
       gitPlaybookPrompt,
+      dynamicFrontendGuidance,
+      dynamicCodebaseIntelligenceGuidance,
+      dynamicOrchestratorGuidance,
       planContext: useLegacyInjection
         ? context.candidates.legacyPlanContext
         : includePlanContext ? context.candidates.stepPlanContext : '',

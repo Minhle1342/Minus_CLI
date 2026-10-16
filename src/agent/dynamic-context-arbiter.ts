@@ -19,6 +19,12 @@ export interface DynamicContextInputs {
   toolPlaybooks?: string;
   /** P1.35: On-demand Git workflow playbook (Inspect, Branch, Commit, PR Enhance, Rollback). */
   gitPlaybook?: string;
+  /** P1.36: Dynamic Frontend & UI design guidance when editing styling or UI components. */
+  frontendGuidance?: string;
+  /** P1.37: Dynamic Codebase Intelligence & call graph guidance for structural/DAG tasks. */
+  codebaseIntelligenceGuidance?: string;
+  /** P1.38: Dynamic Subagent Orchestration & task delegation boundary rules. */
+  orchestratorGuidance?: string;
   /** P1.4: Step-relevant textual guidance from the active runtime harness profile. */
   harnessGuidance?: string;
   /** P1.43: GitNexus Warm-Start Topo-Map (Aider Repo Map Pattern) */
@@ -211,6 +217,27 @@ export class DynamicContextArbiter {
         allowTruncation: false,
       },
       {
+        key: 'frontendGuidance',
+        name: 'Dynamic Frontend Guidance (P1.36)',
+        content: (inputs.frontendGuidance || '').trim(),
+        priority: 1.36,
+        allowTruncation: false,
+      },
+      {
+        key: 'codebaseIntelligenceGuidance',
+        name: 'Dynamic Codebase Intelligence Guidance (P1.37)',
+        content: (inputs.codebaseIntelligenceGuidance || '').trim(),
+        priority: 1.37,
+        allowTruncation: false,
+      },
+      {
+        key: 'orchestratorGuidance',
+        name: 'Dynamic Orchestrator Guidance (P1.38)',
+        content: (inputs.orchestratorGuidance || '').trim(),
+        priority: 1.38,
+        allowTruncation: false,
+      },
+      {
         key: 'harnessGuidance',
         name: 'Harness Guidance (P1.4)',
         content: (inputs.harnessGuidance || '').trim(),
@@ -355,7 +382,7 @@ export class DynamicContextArbiter {
     for (const source of rawSources) {
       if (source.key === 'rawPlanContext') source.priority = 1;
       if (['hypothesisContext', 'hypothesisGuidance', 'domainContractContext'].includes(source.key)) source.priority = 1.05;
-      if (['advicePrompt', 'reflectionContext', 'strongAdvisory', 'cognitiveScaffold', 'toolPlaybooks', 'gitPlaybook', 'harnessGuidance', 'latencyGuidance', 'testVerificationEncouragement'].includes(source.key)) source.priority += 1;
+      if (['advicePrompt', 'reflectionContext', 'strongAdvisory', 'cognitiveScaffold', 'toolPlaybooks', 'gitPlaybook', 'frontendGuidance', 'codebaseIntelligenceGuidance', 'orchestratorGuidance', 'harnessGuidance', 'latencyGuidance', 'testVerificationEncouragement'].includes(source.key)) source.priority += 1;
     }
     const rankedSources: RankedSource[] = rawSources.filter((s) => s.content.length > 0).sort((a, b) => a.priority - b.priority);
 

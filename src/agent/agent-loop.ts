@@ -2016,10 +2016,15 @@ export class AgentLoop {
       });
       const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
       const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
+      const detectedPromptCtx = detectPromptContext(this._workspace, this.toolProvider, turnUserRequest);
       const promptDecision = this.stepPromptPolicy.decide({
         activeStepQuery,
         userRequest: turnUserRequest,
         fingerprint: retrievalState.fingerprint,
+        isFrontendWorkspace: detectedPromptCtx.isFrontend,
+        touchedFiles: Array.from(this.targetFilesModifiedInTurn),
+        hasCodebaseTools: detectedPromptCtx.hasCodebaseTools,
+        hasSubagentTools: detectedPromptCtx.hasSubagentTools,
         gitWorkflowObservations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
         gitWorkflowMayEdit: !isReadOnlyRequest(turnUserRequest),
         gitWorkflowImplementationRequested: gitCodeChangeRequested,
@@ -2099,8 +2104,12 @@ export class AgentLoop {
       // Keep the static prefix cacheable. Enforced step playbooks are selected below and
       // placed in the budgeted dynamic suffix; off/shadow retain the legacy section.
       const promptAssemblyCtx = {
-        ...detectPromptContext(this._workspace, this.toolProvider, turnUserRequest),
+        ...detectedPromptCtx,
         includeStaticToolPlaybooks: promptDecision.includeStaticToolPlaybooks,
+        includeStaticGitOperations: promptDecision.includeStaticGitOperations,
+        includeStaticFrontendUI: promptDecision.includeStaticFrontendUI,
+        includeStaticCodebaseIntelligence: promptDecision.includeStaticCodebaseIntelligence,
+        includeStaticTaskOrchestrator: promptDecision.includeStaticTaskOrchestrator,
       };
       const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
       const rawPlanContext = promptDecision.planContext;
@@ -2523,6 +2532,9 @@ export class AgentLoop {
         warmStartTopoMap: trimmedWarmStartTopoMap,
         toolPlaybooks: trimmedToolPlaybooks,
         gitPlaybook: trimmedGitPlaybook,
+        frontendGuidance: promptDecision.dynamicFrontendGuidance,
+        codebaseIntelligenceGuidance: promptDecision.dynamicCodebaseIntelligenceGuidance,
+        orchestratorGuidance: promptDecision.dynamicOrchestratorGuidance,
         harnessGuidance: trimmedHarnessGuidance,
         epistemicVerdictContext,
         hypothesisContext: resendIfNew(hypothesisContext),

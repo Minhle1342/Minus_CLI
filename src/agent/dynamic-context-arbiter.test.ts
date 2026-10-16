@@ -51,3 +51,24 @@ test('preserves guaranteed token floor for repositoryContext when minRepoMapFloo
   assert.ok(result.sourcesIncluded.includes('Graph Repository Map (P7)'));
   assert.match(result.renderedContext, /Graph Repository Map/);
 });
+
+test('ranks and includes dynamic guidance sources (frontend P1.36, codebase intelligence P1.37, orchestrator P1.38)', () => {
+  const arbiter = new DynamicContextArbiter(1000);
+  const result = arbiter.arbitrate({
+    frontendGuidance: '[FRONTEND & UI DESIGN STANDARD]: Inspect CSS tokens and components.',
+    codebaseIntelligenceGuidance: '[CODEBASE ARCHITECTURE]: codegraph_explore first for structural questions.',
+    orchestratorGuidance: '[TASK ORCHESTRATOR BOUNDARIES]: Delegate to subagents.',
+  });
+
+  assert.ok(result.sourcesIncluded.includes('Dynamic Frontend Guidance (P1.36)'));
+  assert.ok(result.sourcesIncluded.includes('Dynamic Codebase Intelligence Guidance (P1.37)'));
+  assert.ok(result.sourcesIncluded.includes('Dynamic Orchestrator Guidance (P1.38)'));
+
+  const frontendIdx = result.renderedContext.indexOf('FRONTEND & UI DESIGN STANDARD');
+  const codebaseIdx = result.renderedContext.indexOf('CODEBASE ARCHITECTURE');
+  const orchestratorIdx = result.renderedContext.indexOf('TASK ORCHESTRATOR BOUNDARIES');
+
+  assert.ok(frontendIdx !== -1 && codebaseIdx !== -1 && orchestratorIdx !== -1);
+  assert.ok(frontendIdx < codebaseIdx, 'P1.36 should precede P1.37');
+  assert.ok(codebaseIdx < orchestratorIdx, 'P1.37 should precede P1.38');
+});
