@@ -599,6 +599,7 @@ function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
   return [{
     ...model,
     focus: 'composer' as const,
+    selection: undefined, // Bôi đen text là của tab cũ — bỏ khi chuyển tab, kẻo viewport vẫn vẽ ảnh chụp cũ.
     sessions: { ...model.sessions, open: false, tabs, activeId: target.id, pendingActiveId: target.id, selected: tabs.findIndex(t => t.id === target.id) },
     viewport: { ...model.viewport, entries: target.entries || [], thinking: target.thinking || '', answerStream: target.answerStream || '', offset: 0, pinned: true },
     composer: chrome.composer,
