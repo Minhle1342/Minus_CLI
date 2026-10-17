@@ -507,7 +507,7 @@ export function parseMojeekHtml(html: string): NormalizedSearchResult[] {
 }
 
 /** Mojeek search fallback — no API key, no self-hosted instance required. */
-async function fetchMojeekSearch(
+export async function fetchMojeekSearch(
   query: string,
   options: { timeoutMs?: number; fetchImpl?: FetchImplementation } = {},
 ): Promise<{ ok: boolean; results: NormalizedSearchResult[]; error?: string }> {
@@ -529,6 +529,14 @@ async function fetchMojeekSearch(
       return { ok: false, results: [], error: `Mojeek returned HTTP ${res.status}` };
     }
     const html = await res.text();
+    const captchaSignals = ['captcha', 'javascript is required', 'enable it and reload'];
+    if (captchaSignals.some((s) => html.toLowerCase().includes(s))) {
+      return {
+        ok: false,
+        results: [],
+        error: 'Mojeek returned a CAPTCHA challenge. Mojeek requires JavaScript and blocks automated fetch; switch to another provider (searxng or duckduckgo) or retry later.',
+      };
+    }
     const results = parseMojeekHtml(html);
     return { ok: true, results, error: results.length === 0 ? 'No matching results found.' : undefined };
   } catch (err: any) {

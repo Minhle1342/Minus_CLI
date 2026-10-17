@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMojeekHtml, createWebSearchTool } from './web-search.js';
+import { parseMojeekHtml, createWebSearchTool, fetchMojeekSearch } from './web-search.js';
 
 test('parseMojeekHtml extracts title, url and snippet from Mojeek HTML results', () => {
   const html = `
@@ -41,6 +41,18 @@ test('parseMojeekHtml skips results missing title or url', () => {
     </body></html>`;
   const results = parseMojeekHtml(html);
   assert.deepEqual(results, []);
+});
+
+test('fetchMojeekSearch detects captcha HTML and returns clear error', async () => {
+  const fetchImpl = (async () => ({
+    ok: true,
+    status: 200,
+    text: async () => '<html><body>Captcha<br>JavaScript is required to complete this challenge. Please enable it and reload.</body></html>',
+  } as any)) as any;
+  const res = await fetchMojeekSearch('test', { fetchImpl, timeoutMs: 5000 });
+  assert.equal(res.ok, false);
+  assert.match(res.error ?? '', /captcha/i);
+  assert.equal(res.results.length, 0);
 });
 
 test('provider mojeek returns mojeek results without searxng', async () => {
