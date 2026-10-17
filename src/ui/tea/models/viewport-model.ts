@@ -387,6 +387,7 @@ const HIDDEN_TRANSCRIPT_LEADERS = [
   '[RESPONSE LANGUAGE]',
   '[SYSTEM ',
   '[CRITIC ',
+  '[ROLLING DIALOGUE SYNOPSIS',
 ];
 const UNWRAP_TRANSCRIPT_LEADERS = [
   '[USER QUEUED MESSAGE (MID-TURN STEERING)]:',
@@ -399,6 +400,11 @@ export function userVisibleText(text: string): string | undefined {
   if (!trimmed || trimmed === 'Continue') return undefined;
   for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
     if (trimmed.startsWith(leader)) return undefined;
+  }
+  if (trimmed.includes('[USER INSTRUCTION]:')) {
+    const parts = trimmed.split('[USER INSTRUCTION]:');
+    const inner = parts[parts.length - 1].trim();
+    return inner || undefined;
   }
   for (const leader of UNWRAP_TRANSCRIPT_LEADERS) {
     if (trimmed.startsWith(leader)) {

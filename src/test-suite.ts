@@ -198,6 +198,11 @@ process.env.SANDBOX_MODE = 'local';
 if (!process.env.MINUS_TOOL_CONTROL_MODE || process.env.MINUS_TOOL_CONTROL_MODE === 'enforce') {
   process.env.MINUS_TOOL_CONTROL_MODE = 'shadow';
 }
+// The suite asserts the verification-before-completion gate directly, so pin it on
+// regardless of a developer .env kill-switch (MINUS_VERIFICATION_GATE).
+process.env.MINUS_VERIFICATION_GATE = 'on';
+// Same for the CriticGate verdict assertions below.
+process.env.MINUS_CRITIC_GATE = 'on';
 
 const execFileAsync = promisify(execFile);
 

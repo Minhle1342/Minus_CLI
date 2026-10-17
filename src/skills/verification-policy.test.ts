@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { VerificationPolicy, isCommentOnlyChange } from './verification-policy.js';
+import { VerificationPolicy, isCommentOnlyChange, isVerificationPolicyEnabled } from './verification-policy.js';
 import { isNonExecutableFile } from '../agent/completion-evidence.js';
 
 test('VerificationPolicy blocks mutation in bugfix mode when reproduction proof is missing and gate is enforced', () => {
@@ -130,6 +130,27 @@ test('User-explicit test exemption bypasses the gate', () => {
   policy.recordModification('src/index.ts');
   assert.equal(policy.canComplete().allowed, false);
   assert.equal(policy.canComplete([], undefined, { userExemptsTesting: true }).allowed, true);
+});
+
+test('MINUS_VERIFICATION_GATE=off is a kill-switch for the completion gate', () => {
+  const previous = process.env.MINUS_VERIFICATION_GATE;
+  try {
+    assert.equal(isVerificationPolicyEnabled({}), true);
+    assert.equal(isVerificationPolicyEnabled({ MINUS_VERIFICATION_GATE: 'off' }), false);
+
+    process.env.MINUS_VERIFICATION_GATE = 'off';
+    const policy = new VerificationPolicy();
+    policy.recordModification('src/index.ts');
+    assert.equal(policy.canComplete().allowed, true);
+
+    delete process.env.MINUS_VERIFICATION_GATE;
+    const gated = new VerificationPolicy();
+    gated.recordModification('src/index.ts');
+    assert.equal(gated.canComplete().allowed, false);
+  } finally {
+    if (previous === undefined) delete process.env.MINUS_VERIFICATION_GATE;
+    else process.env.MINUS_VERIFICATION_GATE = previous;
+  }
 });
 
 test('Net-zero diff and deleted scratch bypass via git status', () => {

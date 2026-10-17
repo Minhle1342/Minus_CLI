@@ -186,6 +186,20 @@ export interface ExplorationExhaustionDecision {
   remediationHint?: string;
 }
 
+/**
+ * Kill-switch for the independent Critic/Verifier gate.
+ * `MINUS_CRITIC_GATE=off|0|false|no|disabled` makes evaluate()/evaluateAsync()
+ * always approve, suppressing the [CRITIC GATE REJECTION - CRITIQUE] verdict.
+ * Any other value (or unset) keeps the gate active.
+ */
+export function isCriticGateEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.MINUS_CRITIC_GATE?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return true;
+  return !['off', '0', 'false', 'no', 'disabled'].includes(raw);
+}
+
 export class CriticGate {
   private evidenceGate: CompletionEvidenceGate;
   readonly auditLedger: AuditLedger = new AuditLedger();
@@ -414,6 +428,9 @@ export class CriticGate {
     evidenceDecision?: CompletionEvidenceDecision;
     risk?: string;
   }, recordAudit = true): CriticEvaluation {
+    if (!isCriticGateEnabled()) {
+      return { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] };
+    }
     const { finalAnswer, session, workspace, hypothesisTracker, domainGuardian, userRequest, filesModified, turn, hasSubmittedSolution } = params;
     const reasons: string[] = [];
     const invariantViolations: string[] = [];
@@ -620,6 +637,9 @@ export class CriticGate {
     evidenceDecision?: CompletionEvidenceDecision;
     risk?: string;
   }): Promise<CriticEvaluation> {
+    if (!isCriticGateEnabled()) {
+      return { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] };
+    }
     // The runtime and async API share the same verdict; async validation adds
     // language syntax diagnostics without dropping synchronous invariants.
     const sharedDecision = this.evaluate(params, false);
