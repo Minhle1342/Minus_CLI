@@ -130,3 +130,26 @@ test('manage_task emits terminal command evidence only for completed tasks', asy
   assert.equal(running.commandCompletion, undefined);
   assert.deepEqual(classifyToolEvidence('manage_task', { Action: 'status' }, running), []);
 });
+
+test('classifyToolEvidence treats web_search as external inspection evidence', () => {
+  const result = classifyToolEvidence('web_search', { query: 'typescript web search' }, {
+    provider: 'mojeek',
+    results: [{ title: 'TS Web Search', url: 'https://example.com', snippet: '...' }],
+  });
+  assert.deepEqual(result, ['external', 'inspection']);
+});
+
+test('classifyToolEvidence treats web_fetch as external inspection evidence', () => {
+  const result = classifyToolEvidence('web_fetch', { url: 'https://example.com' }, {
+    url: 'https://example.com',
+    markdown: '# Example',
+  });
+  assert.deepEqual(result, ['external', 'inspection']);
+});
+
+test('classifyToolEvidence treats search_web as external inspection evidence', () => {
+  const result = classifyToolEvidence('search_web', { query: 'test' }, {
+    results: [{ title: 'Test', url: 'https://example.com' }],
+  });
+  assert.deepEqual(result, ['external', 'inspection']);
+});

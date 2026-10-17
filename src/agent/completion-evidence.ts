@@ -40,6 +40,10 @@ const INSPECTION_TOOLS = new Set([
   'report_investigation_findings',
   'hypothesis_tool',
   'formulate_and_verify_hypothesis',
+  'web_search',
+  'web_fetch',
+  'search_web',
+  'read_url_content',
 ]);
 
 const GIT_TOOLS = new Set(['git_add', 'git_commit', 'git_push', 'git_command']);
