@@ -17,6 +17,7 @@ import type {
   ComposeState,
   ComposeTaskMatrixItem,
 } from './compose-types.js';
+import { type GrillContext } from './grill-gate.js';
 
 const execFileAsync = promisify(execFile);
 const MUTATION_TOOLS = new Set(['create_file', 'write_file', 'replace_text', 'apply_patch', 'delete_file', 'move_file']);
@@ -83,7 +84,7 @@ export class ComposeController {
     return Boolean(this.state && !['COMPLETED', 'ABORTED'].includes(this.state.phase));
   }
 
-  async start(objective: string): Promise<ComposeAdvanceResult> {
+  async start(objective: string, context: GrillContext = {}): Promise<ComposeAdvanceResult> {
     if (this.isActive()) throw new Error(`Compose ${this.state!.id} is already active in phase ${this.state!.phase}.`);
     const now = new Date().toISOString();
     const id = randomUUID();
@@ -96,7 +97,7 @@ export class ComposeController {
       objective: objective.trim(),
       phase: 'GRILL',
       specPath: this.specs.getDraftPath(name, id),
-      grillQnA: this.grill.createQuestions(objective),
+      grillQnA: this.grill.createQuestions(objective, context),
       implementationTasks: [
         'Inspect the registered blast radius and preserve existing contracts.',
         'Implement the locked specification in the isolated worktree.',
@@ -119,6 +120,9 @@ export class ComposeController {
 
   async answerGrill(answer: string): Promise<ComposeState> {
     const state = this.requirePhase('GRILL');
+    const next = this.grill.nextQuestion(state.grillQnA);
+    if (!next) throw new Error('All Grill questions are already answered.');
+    // Không chặn câu trả lời ngắn: người dùng có quyền trả lời ngắn gọn, GrillGate chỉ gợi ý, không cưỡng chế.
     state.grillQnA = this.grill.answerNext(state.grillQnA, answer);
     await this.persist();
     return this.getState()!;
