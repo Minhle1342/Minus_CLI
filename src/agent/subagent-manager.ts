@@ -23,7 +23,38 @@ export interface SubagentOptions {
   verificationCommand?: string;
   /** Session cha sở hữu delegation (task nền ghi đúng log cha dù đã switch tab). */
   parentSessionId?: string;
+  /** OpenCode Scout parity: 'scout' giới hạn subagent vào bộ tool chỉ đọc (deny-mặc định). */
+  mode?: 'default' | 'scout';
 }
+
+/**
+ * OpenCode Scout parity: allowlist chỉ-đọc cho subagent (mode='scout').
+ * Deny-mặc định: mọi tool ngoài danh sách (kể cả run_command, write_file) bị loại.
+ * Tool không tồn tại trong registry con tự bị bỏ qua khi tạo ToolScope.
+ */
+export const SCOUT_TOOL_NAMES: readonly string[] = [
+  'read_file',
+  'list_files',
+  'search_text',
+  'search_codebase_fast',
+  'read_compressed_code',
+  'read_shared_context',
+  'read_memory',
+  'get_diagnostics',
+  'inspect_symbol',
+  'inspect_image',
+  'find_references',
+  'lsp_query',
+  'analyze_impact',
+  'query_call_graph',
+  'get_route_map',
+  'get_symbol_context_360',
+  'get_task_output',
+  'list_worktrees',
+  'list_skills',
+  'search_web',
+  'read_url_content',
+];
 
 export interface IsolatedTaskOptions {
   allowedTools?: string[];
@@ -33,6 +64,7 @@ export interface IsolatedTaskOptions {
   verificationCommand?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  mode?: SubagentOptions['mode'];
 }
 
 export interface IsolatedTaskResult {
@@ -68,6 +100,8 @@ export class SubagentManager {
     private readonly agents: AgentRegistry,
     private readonly factory: SubagentFactory,
     private readonly persistSession?: (session: Session) => Promise<void>,
+    /** OpenCode v1.18.20 parity: surface failed subagent to the parent loop while it can still steer. */
+    private readonly onSubagentFailure?: (handle: SubagentHandle, parentSessionId?: string) => void,
   ) {}
 
   bindSession(session: Session): void {
@@ -324,6 +358,7 @@ export class SubagentManager {
         toolNames: options.allowedTools,
         modelName: options.modelName || options.model,
         verificationCommand: options.verificationCommand,
+        mode: options.mode,
       }, controller.signal);
     } catch (err: any) {
       clearTimeout(timeoutTimer);
@@ -395,6 +430,8 @@ export class SubagentManager {
     this.agents.update(handle.id, { status: 'error' });
     this.recordState(handle);
     this.notifyCompletion(handle);
+    // Surface resumable failure thay vì để parent chờ kết quả rỗng.
+    this.onSubagentFailure?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
   }
 
   private notifyCompletion(handle: SubagentHandle): void {

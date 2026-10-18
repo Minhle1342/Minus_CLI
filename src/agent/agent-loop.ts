@@ -27,7 +27,8 @@ import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, buildPhaseToolAuthorityDirective, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
-import { SubagentManager, SubagentOptions } from './subagent-manager.js';
+import { SubagentManager, SubagentOptions, SCOUT_TOOL_NAMES } from './subagent-manager.js';
+import type { SubagentHandle } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
@@ -564,6 +565,7 @@ export class AgentLoop {
       this.agentRegistry,
       (agentId, session, subagentOptions, signal) => this.createSubagentLoop(agentId, session, subagentOptions, signal),
       (session) => this.persistSession(session),
+      (handle, parentSessionId) => this.notifySubagentFailure(handle, parentSessionId),
     );
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     this.orchestrator.bindPlanManager(this.planManager);
@@ -5789,6 +5791,20 @@ export class AgentLoop {
     this.kernel?.ctx.events.emit('agent/status', record);
   }
 
+  /**
+   * OpenCode v1.18.20 parity: subagent lỗi được surface ngay vào inbox của session cha
+   * như một steering message kèm resumable task_id, thay vì parent phải poll kết quả rỗng.
+   */
+  private notifySubagentFailure(handle: SubagentHandle, parentSessionId?: string): void {
+    if (!parentSessionId) return;
+    this.inbox.enqueue(
+      parentSessionId,
+      `[SUBAGENT FAILED (resumable)]: Task "${handle.objective}" failed (task_id=${handle.id}): ${handle.error || 'unknown error'}. Fix the cause, then call resume_agent(task_id="${handle.id}") to retry, or re-scope the task.`,
+      'system',
+      { isSteering: true },
+    );
+  }
+
   private createSubagentLoop(
     agentId: string,
     _session: Session,
@@ -5802,7 +5818,11 @@ export class AgentLoop {
     }
 
     const availableNames = childRegistry.getAll().map((tool) => tool.name);
-    const allowedNames = (options.toolNames || availableNames).filter((name) => !forbidden.has(name));
+    // OpenCode Scout parity: mode='scout' intersect với allowlist chỉ-đọc — deny-mặc định mọi tool khác.
+    const requestedNames = options.mode === 'scout'
+      ? (options.toolNames || availableNames).filter((name) => SCOUT_TOOL_NAMES.includes(name))
+      : (options.toolNames || availableNames);
+    const allowedNames = requestedNames.filter((name) => !forbidden.has(name));
     const childScope = childRegistry.createScope(`subagent-scope:${agentId}`, allowedNames);
     // Subagent inherits its parent tab's model (parallel tabs stay on their own models).
     const parentLLM = options.parentSessionId
@@ -5852,6 +5872,13 @@ export class AgentLoop {
       signal.addEventListener('abort', () => {
         childLoop.subagentManager.stopAll();
       }, { once: true });
+    }
+    // Permission gate cho subagent: ToolRunner của child vốn được tạo rỗng (không PM),
+    // đính PM của parent để các mutation/approval request của subagent được surfacing
+    // qua cùng approval channel của user (OpenCode v1.18.20 "answer subagent permission requests").
+    const parentPm = this.kernel?.ctx.permissions ?? this.toolRunner.getPermissionManager();
+    if (parentPm) {
+      childLoop.toolRunner.setPermissionManager(parentPm);
     }
     return childLoop;
   }

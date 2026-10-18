@@ -1531,6 +1531,34 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
           continue;
         }
 
+        if (subCmd === 'view' && targetId) {
+          // OpenCode session navigation parity: xem transcript của session con trực tiếp
+          // (read-only — dùng /sessions open <handle.sessionId> nếu muốn switch hẳn).
+          const handle = agentLoop.subagentManager.get(targetId);
+          if (!handle) {
+            console.log(`\n${c.yellow}⚠️ No subagent/task with ID "${targetId}". Use /agents to list.\n${c.reset}`);
+          } else {
+            console.log(`\n${c.brightCyan}Subagent ${handle.id}${c.reset} ${c.gray}[${handle.status}]${c.reset} ${handle.objective}`);
+            const childSession = agentLoop.subagentManager.getExecutionSession(targetId);
+            if (!childSession) {
+              console.log(`${c.gray}No live execution session (task likely finished). Try:${c.reset} /sessions open ${handle.sessionId}`);
+            } else {
+              const history = childSession.getHistory().slice(-20);
+              if (history.length === 0) {
+                console.log(`${c.gray}(transcript is empty — subagent may not have started yet)${c.reset}`);
+              } else {
+                for (const msg of history) {
+                  const role = (msg as any).role ?? 'message';
+                  const content = String((msg as any).content ?? '').slice(-1200);
+                  console.log(`\n${c.bold}[${handle.sessionId} · ${role}]${c.reset}\n${content}`);
+                }
+              }
+            }
+            if (handle.error) console.log(`${c.crimson}✖ Error:${c.reset} ${handle.error}`);
+          }
+          continue;
+        }
+
         if (subCmd === 'locks') {
           CLI.renderFileLocks(agentLoop.orchestrator.fileLockManager.getLocks());
           continue;
@@ -1995,7 +2023,6 @@ Please focus on executing and verifying this task, and update its status to COMP
               // Outer switch: swap viewport/tab theo + hydrate lịch sử cũ (kẻo trắng).
               tui?.adoptSession(activeSession.id);
               tui?.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory()));
-              console.log(`\n${c.green}✔ Opened session:${c.reset} ${activeSession.id} (${activeSession.seq} events)\n`);
             }
           } else if (action === 'delete' && targetId) {
             try {
@@ -2046,10 +2073,6 @@ Please focus on executing and verifying this task, and update its status to COMP
           activeSession = newSession;
           saveSession({ activeSessionId: activeSession.id });
           tui?.adoptSession(activeSession.id);
-          console.log(`\n${c.green}✔ Saved the Episodic Memory summary from the previous session and created a clean new session:${c.reset} ${activeSession.id}`);
-          if (episodicRecord) {
-            console.log(`  ${c.dim}${episodicRecord.insight}${c.reset}`);
-          }
           console.log('');
         } catch (err: any) {
           // Kernel tạo thất bại (vd. id đã tồn tại): trả viewport về session cũ,

@@ -17,6 +17,7 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
         objective: { type: Type.STRING, description: 'Independent objective for the subagent to perform.' },
         model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
         maxSteps: { type: Type.INTEGER, description: 'Subagent step limit (agent default).' },
+        mode: { type: Type.STRING, description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).' },
         toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional tool allowlist for the subagent.' },
         fileScope: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Scope of files allowed to change (safe file locking to avoid concurrent conflicts).' },
         verificationCommand: { type: Type.STRING, description: 'Test command to verify results when the subagent completes.' },
@@ -29,6 +30,7 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
       const handle = manager.start(objective, {
         modelName: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
+        mode: args.mode === 'scout' ? 'scout' : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
         fileScope: Array.isArray(args.fileScope) ? args.fileScope.map(String) : undefined,
         verificationCommand: typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined,
@@ -62,6 +64,10 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
           type: Type.INTEGER,
           description: 'Maximum step budget for this subtask (default: 6).',
         },
+        mode: {
+          type: Type.STRING,
+          description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).',
+        },
         verificationCommand: {
           type: Type.STRING,
           description: 'Optional verification command to execute before finishing.',
@@ -81,6 +87,7 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
         maxSteps,
         modelName: model,
         allowedTools,
+        mode: args.mode === 'scout' ? 'scout' : undefined,
         verificationCommand,
         signal: context?.signal,
       });
@@ -100,6 +107,7 @@ export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
         brief: { type: Type.STRING, description: 'Detailed prompt brief and task instructions for the child agent.' },
         model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
         maxSteps: { type: Type.INTEGER, description: 'Maximum step budget for the child agent.' },
+        mode: { type: Type.STRING, description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).' },
         toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional list of allowed tool names.' },
         worktreePath: { type: Type.STRING, description: 'Optional isolated worktree path for this agent.' },
       },
@@ -112,6 +120,7 @@ export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
       const handle = manager.spawn(brief, {
         modelName: model,
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
+        mode: args.mode === 'scout' ? 'scout' : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
         worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
       });

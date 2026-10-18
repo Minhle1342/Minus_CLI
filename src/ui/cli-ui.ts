@@ -129,7 +129,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/tools', description: 'List registered tools', category: 'Tools' },
   { command: '/cache', description: 'Show Prompt Caching diagnostics (MINUS standard)', category: 'Telemetry', aliases: ['/prompt-cache'] },
   { command: '/status', description: 'Show session status', category: 'Telemetry' },
-  { command: '/agents', usage: '/agents [resume|stop|spawn|allocate|locks|heartbeats|inspect] [args]', description: 'View or control subagents, file locks & heartbeat monitoring', category: 'Subagents', aliases: ['/subagents'] },
+  { command: '/agents', usage: '/agents [resume|stop|spawn|allocate|locks|heartbeats|inspect|view] [args]', description: 'View or control subagents, file locks & heartbeat monitoring', category: 'Subagents', aliases: ['/subagents'] },
   { command: '/goal', usage: '/goal [on|off|status|plan|resume|pause|complete|objective]', description: 'Long-running autonomous loop (Ralph Loop) linked to the /plan task tree', category: 'Goal Mode' },
   { command: '/skills', usage: '/skills [inspect] [id]', description: 'Show Superpowers skills', category: 'Superpowers' },
   { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Show capability catalog', category: 'Superpowers' },
@@ -2424,8 +2424,6 @@ export class CLI {
     }>,
   ): void {
     console.clear();
-    console.log(`\n${c.brightCyan}${c.bold}Session ${sessionId} · conversation history${c.reset}\n`);
-
     let renderedMessages = 0;
     for (const message of messages) {
       if (message.parts?.some((part) => part.functionResponse)) continue;

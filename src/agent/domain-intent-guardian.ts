@@ -59,7 +59,9 @@ export class DomainIntentGuardian {
     const lower = (userRequest || '').toLowerCase();
 
     // 1. Nhận diện quyền sửa file test hoặc bổ sung kiểm thử
-    const forbidsTests = isUserExplicitlyExemptingTests(userRequest) || /(?:do not|don't|must not|never|không|khong|đừng|dung)\s+(?:modify|change|edit|delete|update|fix|write|add|create|sửa|sua|đổi|doi|xóa|xoa|viết|viet|thêm|them|tạo|tao)\s+(?:existing\s+|các\s+|cac\s+)?(?:tests?|kiểm thử|kiem thu)/iu.test(userRequest);
+    // "keep/preserve assertions unchanged" = NGƯỢC LẠI với quyền sửa test: người dùng muốn bảo toàn assertions, không được động vào test.
+    const preservesTests = /(?:keep|preserve|maintain|giữ|bảo toàn)\s+(?:existing\s+)?(?:test\s+)?(?:assertions?|tests?|kiểm thử)\s+(?:unchanged|intact|as is|nguyên vẹn|không đổi|khong doi)/i.test(userRequest);
+    const forbidsTests = isUserExplicitlyExemptingTests(userRequest) || preservesTests || /(?:do not|don't|must not|never|không|khong|đừng|dung)\s+(?:modify|change|edit|delete|update|fix|write|add|create|sửa|sua|đổi|doi|xóa|xoa|viết|viet|thêm|them|tạo|tao)\s+(?:existing\s+|các\s+|cac\s+)?(?:tests?|kiểm thử|kiem thu)/iu.test(userRequest);
     const upgradeIntent = /(nâng cấp|nang cap|upgrade|update assertion|nâng cấp assertion)/i.test(userRequest)
       && /(test|assert|kiểm thử|kiem thu)/i.test(userRequest);
     const explicitlyAllowsTestModification = !forbidsTests && (
@@ -405,8 +407,21 @@ export class DomainIntentGuardian {
       }
 
       if (forbidden) {
-        // Cấm tuyệt đối nếu hợp đồng người dùng yêu cầu không đụng đến bất kỳ test nào
+        // Provenance-aware ƯU TIÊN CAO NHẤT: file test do chính Agent sinh ra trong phiên
+        // không thuộc "existing tests" của con người mà hợp đồng bảo vệ, nên quyền sửa của Agent
+        // không thể bị thu hồi kể cả với contract cấm tuyệt đối (case 2c & 2b trong test #52).
+        const isAgentCreated = createsNewTest || this.isAgentCreatedTestFile(forbidden, options?.workspaceRoot);
+        if (isAgentCreated) {
+          return null;
+        }
+
         if (this.contract.prohibitedMutations.includes('all test files')) {
+          // "keep existing test assertions unchanged" chỉ cấm SỬA/ẨN/bớt assertions của test hiện có
+          // (tampering thật), không cấm việc BỔ SUNG assert — thêm bảo vệ không phải là phá rào.
+          const check = this.checkAssertionStrength(toolName, args, forbidden, options?.workspaceRoot);
+          if (!check.isTampering) {
+            return null;
+          }
           this.blockedTamperAttempts++;
           return {
             type: 'TEST_TAMPERING',
@@ -416,18 +431,12 @@ export class DomainIntentGuardian {
           };
         }
 
-        // 1. Provenance-aware: File test do chính Agent sinh ra trong phiên làm việc thì Agent được quyền sửa
-        const isAgentCreated = createsNewTest || this.isAgentCreatedTestFile(forbidden, options?.workspaceRoot);
-        if (isAgentCreated) {
-          return null;
-        }
-
         // Nếu người dùng đã cho phép sửa test thì không chặn
         if (this.contract.allowTestFileModification) {
           return null;
         }
 
-        // 2. Assertion Strength Check: Cho phép sửa nếu số lượng assert tăng lên hoặc tương đương,
+        // Assertion Strength Check: Cho phép sửa nếu số lượng assert tăng lên hoặc tương đương,
         // chỉ chặn khi Agent cố tình comment out hoặc xóa bớt assert.
         const strengthCheck = this.checkAssertionStrength(toolName, args, forbidden, options?.workspaceRoot);
         if (strengthCheck.isTampering) {

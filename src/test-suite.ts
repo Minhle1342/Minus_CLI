@@ -2315,6 +2315,18 @@ async function runUnitTests() {
     } as any,
     execute: async () => ({ success: true, replacements: 1 }),
   });
+  planExecutorRegistry.register({
+    name: 'run_command',
+    description: 'Mock a successful verification command for plan executor test.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        command: { type: 'STRING' },
+      },
+      required: ['command'],
+    } as any,
+    execute: async () => ({ success: true, exitCode: 0, stdout: 'Build successful', commandExecuted: 'npm run build' }),
+  });
   const planExecutorLoop = new AgentLoop(planExecutorLLM, planExecutorRegistry, {
     maxSteps: 8,
     workspace,
