@@ -211,7 +211,9 @@ export class ToolRetriever {
     const lowerQ = cleanedQuery.toLowerCase();
     const isGameQuery = /\b(game|pixel|sprite|tilemap|physics|unity|engine|scaffold|asset)\b/i.test(lowerQ);
     const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
-    const isMultiAgentQuery = /\b(subagent|delegate|swarm|dag|shared_context|event_bus|orchestrat|blackboard|state|occ|lock)\b/i.test(lowerQ);
+    // Multi-agent intent: thêm bare "agent(s)", "multi-agent" + VI phrasing ("phân rã", "song song",
+    // "ủy thác", "giao việc", "điều phối") — thiếu những từ này model KHÔNG BAO GIỜ thấy delegate/spawn schemas.
+    const isMultiAgentQuery = /\b(sub-?agent|agents?|multi-?agent|delegat|swarm|dag|shared_context|event_bus|orchestrat|blackboard|state|occ|lock)\b|ph[ âa]n r[ãao a]a|uy[ tr]th[áaàc]+|giao vi[ệe]c|đi[ềe]u ph[ốo]i|song song|phan ra|uy thac|giao viec|dieu phoi/i.test(lowerQ);
     const isNetworkQuery = hasNetworkIntent(cleanedQuery);
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
@@ -260,6 +262,13 @@ export class ToolRetriever {
     // model actually receives the only tool that can attach an image to its context.
     if (isVisionQuery && activePoolMap.has('inspect_image')) {
       selectedToolNames.add('inspect_image');
+    }
+    // Multi-agent intent khớp → force-include TOÀN BỘ bộ delegation tools (delegate_task bị BM25
+    // xếp dưới topK dù intent rõ rang), thay vì tùy hứng rank quyết định tool nào model nhìn thấy.
+    if (isMultiAgentQuery) {
+      for (const tool of activePool) {
+        if (this.inferCategory(tool) === 'multi_agent') selectedToolNames.add(tool.name);
+      }
     }
 
     // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph + Local Cross-Encoder Reranker

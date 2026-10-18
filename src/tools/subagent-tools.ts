@@ -40,6 +40,41 @@ export function createDelegateAgentTool(manager: SubagentManager): ToolDefinitio
   };
 }
 
+export function createMessageAgentTool(manager: SubagentManager): ToolDefinition {
+  return {
+    name: 'message_agent',
+    description: 'Send a mid-flight instruction to a RUNNING background subagent. Queued as mid-turn steering: the subagent reads it at its NEXT step, without interrupting the current tool call. Track the effect via wait_agent/get_agent_result.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        agentId: {
+          type: Type.STRING,
+          description: 'Subagent id returned by delegate_agent / spawn_agent / allocate_agent_task.',
+        },
+        message: {
+          type: Type.STRING,
+          description: 'Instruction to inject at the subagent\'s next step (e.g. "skip section B", "scope down to X", "stop after the first file").',
+        },
+      },
+      required: ['agentId', 'message'],
+    },
+    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+      const agentId = String(args.agentId || '').trim();
+      const message = String(args.message || '').trim();
+      if (!agentId) return { error: 'The "agentId" parameter is required.' };
+      if (!message) return { error: 'The "message" parameter is required.' };
+      const result = manager.sendMessage(agentId, `[MESSAGE FROM PARENT AGENT (mid-turn steering)]:\n${message}`);
+      if (!result.sent) return { error: result.reason };
+      return {
+        success: true,
+        agentId,
+        delivered: 'queued-for-next-step',
+        note: 'The subagent reads this at its next step; use wait_agent or get_agent_result to await its outcome.',
+      };
+    },
+  };
+}
+
 export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'delegate_task',

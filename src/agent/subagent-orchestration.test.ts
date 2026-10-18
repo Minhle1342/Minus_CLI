@@ -88,3 +88,30 @@ test('toolNames tuỳ ý + mode=scout bị intersect về bộ chỉ đọc', ()
   const names = childLoop.toolProvider.getAll().map((t: any) => t.name);
   assert.deepEqual(names, ['read_file'], `intersect phải loại mọiMutation/exec, got: ${names.join(', ')}`);
 });
+
+test('message_agent hơi (steering) vào inbox của subagent đang chạy, claim được ở step kế tiếp', async () => {
+  const childInbox = new AgentInbox();
+  const manager = new SubagentManager(
+    new AgentRegistry(),
+    (() => ({ inbox: childInbox, submit: () => new Promise(() => {}) }) as any) as any, // submit treo → giữ trạng thái running
+    undefined,
+  );
+  const parentSession = new Session('parent-sess-message-agent');
+  manager.bindSession(parentSession);
+
+  const handle = manager.start('Quét auth flow (dài)');
+  const sent = manager.sendMessage(handle.id, '[MESSAGE FROM PARENT AGENT (mid-turn steering)]:\nChỉ tập trung vào middleware, bỏ qua guard.');
+  assert.equal(sent.sent, true, `phải gửi được: ${sent.reason}`);
+
+  const steer = (childInbox as any).claimSteerMessage(handle.sessionId);
+  assert.ok(steer, 'Child inbox phải có steering message');
+  assert.match(steer!.text, /\[MESSAGE FROM PARENT AGENT/);
+  assert.match(steer!.text, /bỏ qua guard/);
+
+  // Sai id → từ chối; subagent chưa kịp loop → từ chối có lý do.
+  assert.equal(manager.sendMessage('subagent-unknown', 'hi').sent, false);
+  const pending = new SubagentManager(new AgentRegistry(), () => { throw new Error('no launch'); }, undefined);
+  pending.bindSession(parentSession);
+  const h2 = pending.start('không khởi động');
+  assert.equal(pending.sendMessage(h2.id, 'hi').sent, false);
+});

@@ -88,7 +88,7 @@ export type SubagentFactory = (
  * the parent session event log, so completion survives process boundaries.
  */
 export class SubagentManager {
-  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session; parentSessionId?: string }>();
+  private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session; parentSessionId?: string; childLoop?: AgentLoop }>();
   private completionListeners = new Map<string, Array<(handle: SubagentHandle) => void>>();
   private counter = 0;
   private boundSession?: Session;
@@ -283,6 +283,23 @@ export class SubagentManager {
     return this.handles.get(id)?.executionSession;
   }
 
+  /**
+   * LLM → subagent messaging (OpenCode v2.0 parity): enqueue vào inbox riêng của child loop
+   * dưới dạng mid-turn steering — child tự claim ở BƯỚC KẾ TIẾP, không gián đoạn tool đang chạy.
+   */
+  sendMessage(id: string, text: string): { sent: boolean; reason?: string } {
+    const entry = this.handles.get(id);
+    if (!entry) return { sent: false, reason: `No subagent with id "${id}".` };
+    if (entry.handle.status !== 'running') {
+      return { sent: false, reason: `Subagent "${id}" is ${entry.handle.status}; only running subagents accept messages.` };
+    }
+    const loop = entry.childLoop;
+    if (!loop) return { sent: false, reason: `Subagent "${id}" has not started its loop yet; retry shortly.` };
+    if (!text.trim()) return { sent: false, reason: 'Message must not be empty.' };
+    loop.inbox.enqueue(entry.handle.sessionId, text, 'system', { isSteering: true });
+    return { sent: true };
+  }
+
   list(): SubagentHandle[] {
     return Array.from(this.handles.values()).map(({ handle }) => ({ ...handle }));
   }
@@ -454,6 +471,7 @@ export class SubagentManager {
       this.finishFailure(handle, error);
       return;
     }
+    if (entry) entry.childLoop = loop;
 
     void loop.submit(session, handle.objective, 'human', {
       maxSteps: options.maxSteps,
