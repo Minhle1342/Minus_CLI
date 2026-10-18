@@ -606,6 +606,7 @@ export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VER
 - Review the expected workspace diff without requiring a clean working tree or discarding existing user work. Git inspection does not authorize stage, commit, push or rollback.
 - Tier discipline: run the tier named in DYNAMIC VERIFICATION (diagnostics/typecheck/targeted/full) — a lighter check never satisfies a heavier requirement.
 - Impacted suites: when DYNAMIC VERIFICATION names pending suites, run each of them (or the full suite) — one suite passing does not discharge the others.
+- Flaky test handling: You are NOT required to run full test suites or test commands if they are known to be flaky, unstable, or prone to environmental failure; static diagnostics, typecheck, or targeted verification are sufficient when test execution is unreliable.
 - Completion Gate: Call submit_solution with the observed evidence and disclose any verification limitation. A successful isolated check does not prove every acceptance criterion or workflow stage is complete.`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:

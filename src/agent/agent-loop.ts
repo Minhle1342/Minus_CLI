@@ -4971,12 +4971,10 @@ export class AgentLoop {
 
       const completionState = getTurnCompletionState(session, turn);
       const hasCodeMutations = completionState.hasMutations;
-      const onlyReadOnlyToolsUsed = this.editToolCallsInTurn === 0 && this.targetFilesModifiedInTurn.size === 0;
       const isExplorationOrReadOnly = !hasCodeMutations && (
         initialTurnClassification.taskClass === 'exploration'
         || initialTurnClassification.phase === 'explore'
         || isReadOnlyRequest(turnUserRequest)
-        || onlyReadOnlyToolsUsed
       );
       const codeChangeRequired = !isExplorationOrReadOnly && (
         initialTurnClassification.requiredCapabilities.includes('edit')

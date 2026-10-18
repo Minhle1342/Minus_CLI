@@ -109,7 +109,10 @@ const COMMON_FRAMEWORK_IMPORTS: Record<string, string> = {
  * và các lỗi compiler/LSP trên toàn bộ các ngôn ngữ (TypeScript, JavaScript, Python, JSON).
  */
 export class CodeSyntaxValidator {
-  private static speculativeCache = new Map<string, { mtime: number; contentHash?: string; diagnostics: DiagnosticItem[] }>();
+  private static speculativeCache = new Map<string, { mtime: number; contentHash?: string; cachedAt: number; diagnostics: DiagnosticItem[] }>();
+
+  // speculative diagnostics cache TTL (ms): evict stale entries to bound memory in long sessions
+  private static readonly SPECULATIVE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   /**
    * Chạy suy đoán ngầm (Speculative Diagnostics) trong RAM ngay sau mutation
@@ -134,9 +137,15 @@ export class CodeSyntaxValidator {
       const stats = await fs.stat(safePath).catch(() => null);
       if (stats && !forceRefresh) {
         const cached = this.speculativeCache.get(safePath);
-        if (cached && cached.mtime === stats.mtimeMs) {
+        if (
+          cached &&
+          cached.mtime === stats.mtimeMs &&
+          Date.now() - cached.cachedAt < this.SPECULATIVE_CACHE_TTL_MS
+        ) {
           return cached.diagnostics;
         }
+        // expired or stale: drop so it gets re-validated below
+        this.speculativeCache.delete(safePath);
       }
 
       let diags: DiagnosticItem[] = [];
@@ -152,6 +161,7 @@ export class CodeSyntaxValidator {
       if (stats) {
         this.speculativeCache.set(safePath, {
           mtime: stats.mtimeMs,
+          cachedAt: Date.now(),
           diagnostics: diags,
         });
       }

@@ -365,7 +365,7 @@ async function createLLM(model: string, tokenConfig?: Partial<TokenConfig>, logi
     if (!key) {
       throw new Error(`GITHUB_TOKEN is not configured in .env!\n👉 Create a Personal Access Token at https://github.com/settings/tokens and paste it into GITHUB_TOKEN in .env.`);
     }
-    return new DeepseekLLM(key, rawModel, undefined, 'https://models.inference.ai.azure.com', undefined, tokenConfig);
+    return new DeepseekLLM(key, rawModel, undefined, 'https://models.github.ai/inference', undefined, tokenConfig);
   }
 
   // 6. SiliconFlow (Free Tier)

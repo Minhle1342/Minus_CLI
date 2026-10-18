@@ -533,82 +533,6 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Routes via the 9Router Proxy (localhost:20128/v1) with RTK Token Saver & 40+ providers',
   },
 
-  // 0.2. Cheaper Inference hosted coding models (OmniRoute integration)
-  {
-    id: 'or',
-    name: 'omniroute/deepseek-v4.1-flash',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'DeepSeek V4.1 Flash: fast coding model from the live hosted catalog',
-    recommended: true,
-  },
-  {
-    id: 'or1',
-    name: 'omniroute/deepseek-v4-pro',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'DeepSeek V4 Pro: deep reasoning and coding',
-    recommended: true,
-  },
-  {
-    id: 'or2',
-    name: 'omniroute/deepseek-v4-flash',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'DeepSeek V4 Flash: fast responses for everyday coding',
-  },
-  {
-    id: 'or3',
-    name: 'omniroute/qwen-3-8-max',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'Qwen 3.8 Max: coding and agentic workflows',
-  },
-  {
-    id: 'or4',
-    name: 'omniroute/qwen-3-8-27b',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'Qwen 3.8 27B: a lightweight, fast coding pick',
-  },
-  {
-    id: 'or5',
-    name: 'omniroute/kimi-k3',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'Kimi K3: coding agent with long context',
-  },
-  {
-    id: 'or6',
-    name: 'omniroute/glm-5.3',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'GLM 5.3: reasoning and coding',
-  },
-  {
-    id: 'or7',
-    name: 'omniroute/glm-5.3-flash',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'GLM 5.3 Flash: fast responses for coding tasks',
-  },
-  {
-    id: 'or8',
-    name: 'omniroute/gpt-5.4-mini',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'GPT-5.4 Mini: everyday coding with low latency',
-  },
-  {
-    id: 'or9',
-    name: 'omniroute/gpt-5.4',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'GPT-5.4: coding and complex task handling',
-  },
-  {
-    id: 'ora',
-    name: 'omniroute/claude-sonnet-4.6',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'Claude Sonnet 4.6: high-quality coding agent',
-  },
-  {
-    id: 'orb',
-    name: 'omniroute/minimax-m2.7',
-    provider: 'Cheaper Inference (OmniRoute Hosted)',
-    desc: 'MiniMax M2.7: hosted coding model balancing cost and capability',
-  },
-
   // 1. Google AI Studio
   {
     id: '1',
@@ -660,73 +584,13 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Routes via your logged-in gemini.google.com tab — free, for mid-cost intermediate tasks',
   },
 
-  // 2. Groq Cloud (Free Tier: Siêu tốc độ LPU >500 tokens/s)
-  {
-    id: '8',
-    name: 'groq/llama-3.3-70b-versatile',
-    provider: 'Groq Cloud (Free)',
-    desc: 'Llama 3.3 70B on ultra-fast LPU chips (~300 tok/s), highly capable',
-    recommended: true,
-  },
-  {
-    id: '9',
-    name: 'groq/deepseek-r1-distill-llama-70b',
-    provider: 'Groq Cloud (Free)',
-    desc: 'DeepSeek R1 step-by-step reasoning at ultra speed on Groq',
-  },
-  {
-    id: '10',
-    name: 'groq/llama-3.1-8b-instant',
-    provider: 'Groq Cloud (Free)',
-    desc: 'Llama 3.1 8B with instant responses (~600 tokens/s), extremely light',
-  },
-  {
-    id: '11',
-    name: 'groq/gemma2-9b-it',
-    provider: 'Groq Cloud (Free)',
-    desc: 'Google Gemma 2 9B running on Groq LPU',
-  },
-
-  // 3. Cerebras Cloud
-  {
-    id: '12',
-    name: 'cerebras/llama-3.3-70b',
-    provider: 'Cerebras Cloud (Free)',
-    desc: 'Llama 3.3 70B at record speed (~1,800 tok/s), 1M tokens/day quota',
-  },
-  {
-    id: '13',
-    name: 'cerebras/llama3.1-8b',
-    provider: 'Cerebras Cloud (Free)',
-    desc: 'Llama 3.1 8B at ultra speed (~2,000 tok/s), 1M tokens/day',
-  },
-
-  // 4. SambaNova Cloud
-  {
-    id: '14',
-    name: 'sambanova/Meta-Llama-3.1-405B-Instruct',
-    provider: 'SambaNova Cloud (Free)',
-    desc: 'Giant 405B Llama model, free for developers',
-  },
-  {
-    id: '15',
-    name: 'sambanova/Meta-Llama-3.3-70B-Instruct',
-    provider: 'SambaNova Cloud (Free)',
-    desc: 'Llama 3.3 70B on the powerful SN40L chip architecture',
-  },
-  {
-    id: '16',
-    name: 'sambanova/DeepSeek-R1-Distill-Llama-70B',
-    provider: 'SambaNova Cloud (Free)',
-    desc: 'DeepSeek R1 70B reasoning on SambaNova infrastructure',
-  },
-
-  // 5. GitHub Models
+  // 2. GitHub Models (Free)
   {
     id: '17',
     name: 'github/gpt-4o',
     provider: 'GitHub Models (Free)',
-    desc: 'Official GPT-4o, free via GitHub Token / Azure endpoint',
+    desc: 'Official GPT-4o, free via GitHub Token / GitHub Models endpoint',
+    recommended: true,
   },
   {
     id: '18',
@@ -741,41 +605,16 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Mistral Large 128k context via GitHub Models',
   },
 
-  // 6. SiliconFlow
-  {
-    id: '20',
-    name: 'siliconflow/deepseek-ai/DeepSeek-V3',
-    provider: 'SiliconFlow (Free)',
-    desc: 'DeepSeek V3 671B via SiliconFlow infrastructure',
-  },
-  {
-    id: '21',
-    name: 'siliconflow/deepseek-ai/DeepSeek-R1',
-    provider: 'SiliconFlow (Free)',
-    desc: 'DeepSeek R1 in-depth reasoning',
-  },
-  {
-    id: '22',
-    name: 'siliconflow/Qwen/Qwen2.5-Coder-32B-Instruct',
-    provider: 'SiliconFlow (Free)',
-    desc: 'Qwen 2.5 Coder 32B, a top-tier programming expert',
-  },
-
-  // 7. Mistral AI
+  // 3. Mistral AI (Free)
   {
     id: '23',
     name: 'mistral/codestral-latest',
     provider: 'Mistral AI (Free)',
     desc: 'Codestral, a Mistral programming expert (Free dev key)',
-  },
-  {
-    id: '24',
-    name: 'mistral/mistral-large-latest',
-    provider: 'Mistral AI (Free)',
-    desc: 'Mistral Large, the most powerful Mistral model',
+    recommended: true,
   },
 
-  // 8. OpenRouter (Free Coding Models)
+  // 4. OpenRouter (Free Coding Models)
   {
     id: '25',
     name: 'openrouter/nvidia/nemotron-3.5-lightning:free',
@@ -790,113 +629,18 @@ export const AVAILABLE_MODELS: ModelOption[] = [
     desc: 'Dots 3 Note preview: free coding model via OpenRouter',
   },
   {
-    id: '27',
-    name: 'openrouter/google/gemma-4-31b-it:free',
-    provider: 'OpenRouter (Google DeepMind)',
-    desc: 'Gemma 4 31B: Reasoning mode, accurate function calling, 256K context',
-  },
-  {
-    id: '28',
-    name: 'openrouter/thinkingmachines/inkling:free',
-    provider: 'OpenRouter (Thinking Machines)',
-    desc: 'Inkling (975B MoE): 1-million-token mega context (1M context), deep reasoning & coding',
-  },
-  {
     id: '29',
     name: 'openrouter/liquid/lfm-2.5-2.6b:free',
     provider: 'OpenRouter (Liquid AI)',
     desc: 'LFM 2.5 2.6B: compact fast free model via OpenRouter',
   },
 
-  // 9. Pollinations AI
+  // 5. Pollinations AI (Zero-Key)
   {
     id: '30',
     name: 'pollinations/openai',
     provider: 'Pollinations.ai (Zero-Key)',
     desc: 'GPT-4o-mini 100% free, no account or API key needed',
-  },
-  {
-    id: '31',
-    name: 'pollinations/mistral',
-    provider: 'Pollinations.ai (Zero-Key)',
-    desc: 'Mistral 100% free, no account or API key needed',
-  },
-
-  // 10. DeepSeek Direct
-  {
-    id: '32',
-    name: 'deepseek-chat',
-    provider: 'DeepSeek Direct',
-    desc: 'Official DeepSeek V3 (requires a platform.deepseek.com key)',
-  },
-  {
-    id: '33',
-    name: 'deepseek-reasoner',
-    provider: 'DeepSeek Direct',
-    desc: 'Official DeepSeek R1 reasoning (requires a platform.deepseek.com key)',
-  },
-
-  // 11. Anthropic Claude API (active models)
-  {
-    id: '34',
-    name: 'claude-fable-5',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Fable 5: the strongest Anthropic model for long-running agents and complex tasks',
-    recommended: true,
-  },
-  {
-    id: '35',
-    name: 'claude-opus-5',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Opus 5: premium reasoning and agentic coding',
-  },
-  {
-    id: '36',
-    name: 'claude-opus-4-8',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Opus 4.8: agentic coding and complex enterprise work',
-  },
-  {
-    id: '37',
-    name: 'claude-opus-4-7',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Opus 4.7: powerful Opus for reasoning and coding',
-  },
-  {
-    id: '38',
-    name: 'claude-opus-4-6',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Opus 4.6: high capability for long, multi-step tasks',
-  },
-  {
-    id: '39',
-    name: 'claude-opus-4-5-20251101',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Opus 4.5: stable snapshot for coding agents',
-  },
-  {
-    id: '40',
-    name: 'claude-sonnet-5',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Sonnet 5: balancing speed, quality, and agentic coding',
-  },
-  {
-    id: '41',
-    name: 'claude-sonnet-4-6',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Sonnet 4.6: fast, strong, and great for everyday coding',
-  },
-  {
-    id: '42',
-    name: 'claude-sonnet-4-5-20250929',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Sonnet 4.5: stable snapshot for coding and automation',
-  },
-  {
-    id: '43',
-    name: 'claude-haiku-4-5-20251001',
-    provider: 'Anthropic Claude API',
-    desc: 'Claude Haiku 4.5: fast, economical responses for light tasks',
   },
 
   // 12. MINUS CLI Models (OpenAI / ChatGPT Plus)

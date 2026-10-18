@@ -421,6 +421,21 @@ export function sessionHistoryToTranscript(messages: Array<{
   parts?: Array<{ text?: string; thought?: boolean; functionCall?: unknown; functionResponse?: unknown }>;
 }>): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
+  // Index tool-call args by call ID so hydrated tool results can render diff
+  // frames and line ranges identically to live rendering. functionCall and
+  // functionResponse live in separate messages (model → user), so we build the
+  // map in a first pass before projecting entries.
+  const callArgsById = new Map<string, Record<string, unknown>>();
+  for (const message of messages) {
+    for (const part of message.parts || []) {
+      const call = part.functionCall;
+      if (call && typeof call === 'object' && call.id) {
+        const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+          ? call.args as Record<string, unknown> : {};
+        callArgsById.set(String(call.id), args);
+      }
+    }
+  }
   for (const message of messages) {
     const parts = ((message.parts || []) as HistoryPart[]);
     const isAssistant = message.role === 'model' || message.role === 'assistant';
@@ -463,13 +478,23 @@ export function sessionHistoryToTranscript(messages: Array<{
       if (resp && typeof resp === 'object') {
         const name = typeof resp.name === 'string' && resp.name ? resp.name : 'unknown_tool';
         const raw = (resp as { response?: unknown }).response;
-        const result = raw && typeof raw === 'object' && !Array.isArray(raw)
+        let result = raw && typeof raw === 'object' && !Array.isArray(raw)
           ? raw as Record<string, unknown> : { output: raw };
-        entries.push({ kind: 'tool', text: toolResultEntry(name, result, 0) });
+        // ponytail: Với các session cũ có tool output khổng lồ, cắt bớt output dài quá 2000 ký tự để tiết kiệm RAM & tránh lag wrap
+        if (typeof result.output === 'string' && result.output.length > 2000) {
+          result = { ...result, output: result.output.slice(0, 2000) + '\n… (output omitted from history)' };
+        } else if (typeof result.content === 'string' && result.content.length > 2000) {
+          result = { ...result, content: result.content.slice(0, 2000) + '\n… (content omitted from history)' };
+        }
+        // Truyền args (tương ứng với live path) để diff frame + line range
+        // hiển thị đúng khi khôi phục session cũ.
+        const args = resp.id ? callArgsById.get(String(resp.id)) : undefined;
+        entries.push({ kind: 'tool', text: toolResultEntry(name, result, 0, args) });
       }
     }
   }
-  return entries.slice(-500);
+  const maxEntries = Number.parseInt(process.env.MINUS_TRANSCRIPT_MAX_ENTRIES || '', 10) || 1000;
+  return entries.length > maxEntries ? entries.slice(-maxEntries) : entries;
 }
 
 /** Đồng bộ tab list từ sidebar.sessions (persisted ids) mà không mất cache entries. */
@@ -601,7 +626,14 @@ function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     focus: 'composer' as const,
     selection: undefined, // Bôi đen text là của tab cũ — bỏ khi chuyển tab, kẻo viewport vẫn vẽ ảnh chụp cũ.
     sessions: { ...model.sessions, open: false, tabs, activeId: target.id, pendingActiveId: target.id, selected: tabs.findIndex(t => t.id === target.id) },
-    viewport: { ...model.viewport, entries: target.entries || [], thinking: target.thinking || '', answerStream: target.answerStream || '', offset: 0, pinned: true },
+    viewport: {
+      ...model.viewport,
+      entries: target.entries || [],
+      thinking: target.busy ? (target.thinking || '') : '',
+      answerStream: target.busy ? (target.answerStream || '') : '',
+      offset: 0,
+      pinned: true,
+    },
     composer: chrome.composer,
     diff: chrome.diff,
     sidebar: { ...model.sidebar, session: target.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, target) },
@@ -632,7 +664,14 @@ export function adoptAfterSync(model: RootModel, sessions: SessionTabsModel, pre
   const withSessions = { ...model, sessions: { ...sessions, tabs } };
   return {
     ...withSessions,
-    viewport: { ...model.viewport, entries: restored.entries || [], thinking: restored.thinking || '', answerStream: restored.answerStream || '', offset: 0, pinned: true },
+    viewport: {
+      ...model.viewport,
+      entries: restored.entries || [],
+      thinking: restored.busy ? (restored.thinking || '') : '',
+      answerStream: restored.busy ? (restored.answerStream || '') : '',
+      offset: 0,
+      pinned: true,
+    },
     composer: chrome.composer,
     diff: chrome.diff,
     sidebar: { ...model.sidebar, session: restored.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(withSessions, restored) },
@@ -658,7 +697,14 @@ export function adoptActiveTab(model: RootModel, newActiveId: string): RootModel
   return {
     ...model,
     sessions: { ...model.sessions, tabs, activeId: newActiveId, pendingActiveId: undefined, selected: Math.max(0, tabs.findIndex(t => t.id === newActiveId)) },
-    viewport: { ...model.viewport, entries: restored.entries || [], thinking: restored.thinking || '', answerStream: restored.answerStream || '', offset: 0, pinned: true },
+    viewport: {
+      ...model.viewport,
+      entries: restored.entries || [],
+      thinking: restored.busy ? (restored.thinking || '') : '',
+      answerStream: restored.busy ? (restored.answerStream || '') : '',
+      offset: 0,
+      pinned: true,
+    },
     composer: chrome.composer,
     diff: chrome.diff,
     sidebar: { ...model.sidebar, session: restored.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, restored) },

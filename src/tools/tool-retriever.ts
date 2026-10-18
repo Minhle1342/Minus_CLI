@@ -215,7 +215,10 @@ export class ToolRetriever {
     const isNetworkQuery = hasNetworkIntent(cleanedQuery);
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
-    const isVisionQuery = /\b(image|screenshot|photo|picture|vision|diagram|pixel)\b/i.test(lowerQ);
+    // Vision intent must fire for non-English phrasing (VI "ảnh", "hình ảnh") and
+    // for bare image filenames ("images.jpg"), not only English keywords — otherwise
+    // inspect_image is pruned and the model never sees the one tool that can attach pixels.
+    const isVisionQuery = /(image|images|screenshot|photo|picture|vision|diagram|pixel|ảnh|hình\s?ảnh|hình vẽ|biểu đồ|\.(?:png|jpe?g|gif|webp|bmp|svg)\b)/i.test(lowerQ);
     // Structural/flow query (EN + VI): câu hỏi về cấu trúc, luồng gọi, callers/callees, impact.
     const isStructuralQuery = /(how does|how do|call graph|call path|callers|callees|blast radius|impact\b|architect|trace|tracing|reach(es)?\b|dependenc|flow\b|where\b.*(called|used|defined)|luồng|luong|đồ thị gọi|do thi goi|ai gọi|ai goi|ảnh hưởng|anh huong|phụ thuộc|phu thuoc|kiến trúc|kien truc|truy vết|truy vet|khảo sát|khao sat|cấu trúc|cau truc)/i.test(lowerQ);
     // Chỉ prune khi graph thật sự sẵn sàng: pool có codegraph_explore VÀ workspace đã init
@@ -251,6 +254,12 @@ export class ToolRetriever {
     // Bảo lưu công cụ cập nhật tiến độ công việc nếu đã được cấp quyền trong activePool
     if (activePoolMap.has('update_plan_task')) {
       selectedToolNames.add('update_plan_task');
+    }
+    // Being in activePool is not enough: relevance scoring can rank inspect_image
+    // below topK for non-English queries or a bare filename. Force-include it so the
+    // model actually receives the only tool that can attach an image to its context.
+    if (isVisionQuery && activePoolMap.has('inspect_image')) {
+      selectedToolNames.add('inspect_image');
     }
 
     // 2. Hybrid Graph-RRF retrieval: lexical BM25 + dense semantic + Markov transition graph + Local Cross-Encoder Reranker

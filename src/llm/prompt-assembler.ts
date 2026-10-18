@@ -27,12 +27,8 @@ interface RegisteredPromptSection extends PromptSection {
  * - T3 (Priority >= 1000): Dynamic Context & Ephemeral Step Tail.
  */
 export function resolveSectionTier(section: PromptSection): PromptCacheTier {
-  if (section.tier) return section.tier;
   const p = section.priority ?? 0;
-  if (p < 0) return 'T0';
-  if (p < 500) return 'T1';
-  if (p < 1000) return 'T2';
-  return 'T3';
+  return section.tier ?? (p < 0 ? 'T0' : p < 500 ? 'T1' : p < 1000 ? 'T2' : 'T3');
 }
 
 /**
@@ -44,9 +40,7 @@ export class PromptAssembler {
   private nextOrder = 0;
 
   constructor(basePrompt = '') {
-    if (basePrompt) {
-      this.register({ id: 'core', content: basePrompt, priority: -1000, tier: 'T0' });
-    }
+    if (basePrompt) this.register({ id: 'core', content: basePrompt, priority: -1000, tier: 'T0' });
   }
 
   register(section: PromptSection): () => void {
@@ -58,7 +52,7 @@ export class PromptAssembler {
 
     this.sections.set(section.id, {
       ...section,
-      tier: section.tier || resolveSectionTier(section),
+      tier: resolveSectionTier(section),
       order: this.nextOrder++,
     });
     return () => this.unregister(section.id);
@@ -88,14 +82,11 @@ export class PromptAssembler {
   }
 
   private sortedSections(): RegisteredPromptSection[] {
-    return Array.from(this.sections.values()).sort((a, b) => {
-      const tierDiff = TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier);
-      if (tierDiff !== 0) return tierDiff;
-      const priorityDiff = (a.priority || 0) - (b.priority || 0);
-      if (priorityDiff !== 0) return priorityDiff;
-      const orderDiff = a.order - b.order;
-      if (orderDiff !== 0) return orderDiff;
-      return a.id.localeCompare(b.id);
-    });
+    return Array.from(this.sections.values()).sort((a, b) =>
+      (TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier)) ||
+      ((a.priority ?? 0) - (b.priority ?? 0)) ||
+      (a.order - b.order) ||
+      a.id.localeCompare(b.id)
+    );
   }
 }
