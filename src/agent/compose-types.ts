@@ -16,6 +16,10 @@ export interface ComposeGrillAnswer {
   id: string;
   question: string;
   answer?: string;
+  /** 0..1: trọng số ưu tiên hỏi sớm (GrillGate điền khi có context). */
+  priority?: number;
+  /** Nhóm câu hỏi: 'success' | 'failure' | 'compatibility' | 'verification' | 'domain'. */
+  category?: string;
 }
 
 export interface ComposeTaskMatrixItem {

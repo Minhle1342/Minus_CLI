@@ -168,8 +168,9 @@ export class PipelinedToolDispatcher {
 
   constructor(options?: { maxConcurrentSpeculative?: number }) {
     const envVal = Number(process.env.MINUS_MAX_SPECULATIVE_TASKS);
+    // plan 2026-10-07 PASTE: trần K=2 speculative task đồng thời tránh nghẽn CPU/Disk I/O
     this.maxConcurrentSpeculative = options?.maxConcurrentSpeculative
-      ?? (Number.isFinite(envVal) && envVal > 0 ? envVal : 4);
+      ?? (Number.isFinite(envVal) && envVal > 0 ? envVal : 2);
   }
 
   /**
@@ -266,10 +267,18 @@ export class PipelinedToolDispatcher {
 
     const promise = toolRunner.run(toolName, args, context).then((res: any) => {
       this.inFlightExecutions.delete(key);
+      // speculative task may have been cancelled while running; discard its result (zero side-effects)
+      if (!this.speculativeKeySet.has(key)) {
+        return res;
+      }
       this.completedExecutions.set(key, { result: res, readyAt: Date.now() });
       return res;
     }).catch((err: any) => {
       this.inFlightExecutions.delete(key);
+      // speculative task may have been cancelled while running; discard its error (zero side-effects)
+      if (!this.speculativeKeySet.has(key)) {
+        return { toolName, args, durationMs: Date.now() - startTime, result: { error: err.message, errorCode: 'SPECULATIVE_CANCELLED' } };
+      }
       const fallbackResult: ToolExecutionResult = {
         toolName,
         args,

@@ -12,7 +12,7 @@ const MAX_ADDITIONAL_QUERIES = 4;
 const MAX_FILTER_VALUES = 10;
 const RRF_RANK_CONSTANT = 60;
 
-type FetchImplementation = typeof fetch;
+export type FetchImplementation = typeof fetch;
 
 export interface WebSearchToolOptions {
   baseUrl?: string;
@@ -484,6 +484,73 @@ const PRESET_SHORTCUTS: Record<string, { categories?: string; engine_shortcuts?:
   science: { categories: 'science', engine_shortcuts: ['arxiv', 'semantic_scholar', 'pubmed'] },
 };
 
+/** Parse Mojeek HTML search results — no API key, no instance config required. */
+export function parseMojeekHtml(html: string): NormalizedSearchResult[] {
+  const results: NormalizedSearchResult[] = [];
+  const articleRe = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = articleRe.exec(html)) !== null) {
+    const article = m[1];
+    const titleMatch = article.match(/<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/a>/i)
+      || article.match(/<a[^>]*href="([^"]+)"[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+    const snippetMatch = article.match(/<p[^>]*class="[^"]*snippet[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+    if (!titleMatch) continue;
+    const rawUrl = titleMatch[1];
+    const cleanTitle = (titleMatch[2] || '').replace(/<[^>]+>/g, '').trim();
+    if (!cleanTitle || !rawUrl) continue;
+    const url = normalizeResultUrl(rawUrl);
+    if (!url) continue;
+    const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').trim() : undefined;
+    results.push({ title: cleanTitle, url, ...(snippet ? { snippet } : {}), engines: ['mojeek'], category: 'general' });
+  }
+  return results;
+}
+
+/** Mojeek search fallback — no API key, no self-hosted instance required. */
+export async function fetchMojeekSearch(
+  query: string,
+  options: { timeoutMs?: number; fetchImpl?: FetchImplementation } = {},
+): Promise<{ ok: boolean; results: NormalizedSearchResult[]; error?: string }> {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const url = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      return { ok: false, results: [], error: `Mojeek returned HTTP ${res.status}` };
+    }
+    const html = await res.text();
+    const captchaSignals = ['captcha', 'javascript is required', 'enable it and reload'];
+    if (captchaSignals.some((s) => html.toLowerCase().includes(s))) {
+      return {
+        ok: false,
+        results: [],
+        error: 'Mojeek returned a CAPTCHA challenge. Mojeek requires JavaScript and blocks automated fetch; switch to another provider (searxng or duckduckgo) or retry later.',
+      };
+    }
+    const results = parseMojeekHtml(html);
+    return { ok: true, results, error: results.length === 0 ? 'No matching results found.' : undefined };
+  } catch (err: any) {
+    const timedOut = err?.name === 'AbortError' || controller.signal.aborted;
+    return {
+      ok: false,
+      results: [],
+      error: timedOut ? `Mojeek timed out after ${timeoutMs}ms.` : (err?.message || String(err)),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /** Creates a web_search tool backed by an operator-controlled SearXNG instance. */
 export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDefinition {
   const baseUrl = options.baseUrl ?? process.env.SEARXNG_BASE_URL ?? DEFAULT_BASE_URL;
@@ -498,6 +565,11 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
       type: Type.OBJECT,
       properties: {
         query: { type: Type.STRING, description: 'The primary web search query. Raw search operators may be used when needed.' },
+        provider: {
+          type: Type.STRING,
+          description: 'Optional search provider: "searxng" (self-hosted SearXNG, default), "mojeek" (no API key), or "duckduckgo" (no API key). If the chosen provider returns no results, call web_search again with a different provider.',
+          enum: ['searxng', 'mojeek', 'duckduckgo'],
+        },
         domain: {
           type: Type.STRING,
           description: 'Optional single domain to prioritize or filter (e.g. "github.com", "nodejs.org"). Alias for site_domains.',
@@ -572,6 +644,20 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
         return { error: 'This Node.js runtime does not provide fetch(). Use Node.js 18 or newer.', errorCode: 'FETCH_UNAVAILABLE' };
       }
 
+      const provider = typeof args.provider === 'string' ? args.provider.toLowerCase() : undefined;
+      const allowedProviders = ['searxng', 'mojeek', 'duckduckgo'];
+      if (provider && !allowedProviders.includes(provider)) {
+        return { error: `Provider "${args.provider}" không hỗ trợ. Chọn một trong: ${allowedProviders.join(', ')}.`, errorCode: 'INVALID_PROVIDER' };
+      }
+
+      if (provider === 'mojeek') {
+        return runMojeekOnly(primaryQuery, args, timeoutMs, fetchImpl, args.format === 'concise');
+      }
+
+      if (provider === 'duckduckgo') {
+        return runDuckDuckGoOnly(primaryQuery, args, timeoutMs, fetchImpl, args.format === 'concise');
+      }
+
       const preset = typeof args.preset === 'string' ? PRESET_SHORTCUTS[args.preset] : undefined;
       const effectiveArgs = preset
         ? {
@@ -581,11 +667,13 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           }
         : args;
       const queries = buildAdvancedQueries(effectiveArgs, primaryQuery);
-      let urls: URL[];
-      try {
-        urls = queries.map((query) => buildSearchUrl(baseUrl, query, effectiveArgs));
-      } catch (error: any) {
-        return { error: `Invalid SearXNG configuration: ${error.message}`, errorCode: 'SEARXNG_CONFIG_ERROR' };
+      let urls: URL[] = [];
+      if (provider !== 'mojeek' && provider !== 'duckduckgo') {
+        try {
+          urls = queries.map((query) => buildSearchUrl(baseUrl, query, effectiveArgs));
+        } catch (error: any) {
+          return { error: `Invalid SearXNG configuration: ${error.message}`, errorCode: 'SEARXNG_CONFIG_ERROR' };
+        }
       }
 
       const controller = new AbortController();
@@ -643,6 +731,52 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
           // If JSON format is explicitly disabled in SearXNG settings (HTTP 403), return error directly so operator can configure it
           if (failures[0]?.error?.errorCode === 'SEARXNG_JSON_DISABLED') {
             return { ...failures[0]?.error, queries, queryCount: queries.length };
+          }
+
+          // Mojeek fallback — no API key, no self-hosted instance required
+          const mojeekRes = await fetchMojeekSearch(primaryQuery, {
+            timeoutMs: Math.min(timeoutMs, 10_000),
+            fetchImpl,
+          });
+          if (mojeekRes.ok && mojeekRes.results.length > 0) {
+            const maxResults = clampInteger(args.max_results, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
+            const mojeekResults = mojeekRes.results.slice(0, maxResults).map((item) => ({
+              title: item.title,
+              url: item.url,
+              snippet: item.snippet,
+              engines: ['mojeek'],
+              category: 'general',
+            }));
+            const leads = buildInvestigationLeads(mojeekResults);
+            let mojeekTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
+            if (Boolean(args.fetch_top_content)) {
+              mojeekTopContent = await extractTopContentFromResults(mojeekResults, fetchImpl);
+            }
+            if (isConcise) {
+              return {
+                provider: 'mojeek',
+                query: primaryQuery,
+                returnedResults: mojeekResults.length,
+                results: mojeekResults.map((r, i) => ({ position: i + 1, title: r.title, url: r.url, snippet: r.snippet })),
+                investigationLeads: leads,
+                ...(mojeekTopContent ? { extractedTopContent: mojeekTopContent } : {}),
+                fallbackNote: 'SearXNG unavailable; results retrieved via Mojeek (no API key required).',
+              };
+            }
+            return {
+              provider: 'mojeek',
+              query: primaryQuery,
+              queries: [primaryQuery],
+              queryCount: 1,
+              successfulQueries: 1,
+              page: 1,
+              returnedResults: mojeekResults.length,
+              estimatedTotalResults: mojeekResults.length,
+              results: mojeekResults.map((r, i) => ({ position: i + 1, ...r })),
+              investigationLeads: leads,
+              ...(mojeekTopContent ? { extractedTopContent: mojeekTopContent } : {}),
+              fallbackNote: 'SearXNG unavailable; results retrieved via Mojeek (no API key required).',
+            };
           }
 
           // Automatic Graceful Fallback: SearXNG unavailable or timed out -> DuckDuckGo fallback
@@ -825,6 +959,135 @@ export function createSearchWebTool(options: WebSearchToolOptions = {}): ToolDef
     name: 'search_web',
     description:
       'Search the public web through the operator-configured self-hosted SearXNG instance or fallback engine. Supports advanced filtering by keywords, exact phrases, domain/site, file types, and freshness. (Unified tool delegating to web_search).',
+  };
+}
+
+async function runMojeekOnly(
+  primaryQuery: string,
+  args: Record<string, any>,
+  timeoutMs: number,
+  fetchImpl: FetchImplementation,
+  isConcise: boolean,
+): Promise<Record<string, any>> {
+  const mojeekRes = await fetchMojeekSearch(primaryQuery, {
+    timeoutMs: Math.min(timeoutMs, 10_000),
+    fetchImpl,
+  });
+  if (!mojeekRes.ok || mojeekRes.results.length === 0) {
+    return {
+      success: false,
+      error: mojeekRes.error || 'Mojeek returned no results.',
+      errorCode: 'MOJEEK_NO_RESULTS',
+      provider: 'mojeek',
+      query: primaryQuery,
+      retryable: true,
+      hint: 'Thử lại với provider khác (searxng hoặc duckduckgo) hoặc chỉnh sửa từ khóa tìm kiếm.',
+    };
+  }
+  const maxResults = clampInteger(args.max_results, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
+  const mojeekResults = mojeekRes.results.slice(0, maxResults).map((item) => ({
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+    engines: ['mojeek'],
+    category: 'general',
+  }));
+  const leads = buildInvestigationLeads(mojeekResults);
+  let mojeekTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
+  if (Boolean(args.fetch_top_content)) {
+    mojeekTopContent = await extractTopContentFromResults(mojeekResults, fetchImpl);
+  }
+  if (isConcise) {
+    return {
+      provider: 'mojeek',
+      query: primaryQuery,
+      returnedResults: mojeekResults.length,
+      results: mojeekResults.map((r, i) => ({ position: i + 1, title: r.title, url: r.url, snippet: r.snippet })),
+      investigationLeads: leads,
+      ...(mojeekTopContent ? { extractedTopContent: mojeekTopContent } : {}),
+      fallbackNote: 'Results retrieved via Mojeek (no API key required).',
+    };
+  }
+  return {
+    provider: 'mojeek',
+    query: primaryQuery,
+    queries: [primaryQuery],
+    queryCount: 1,
+    successfulQueries: 1,
+    page: 1,
+    returnedResults: mojeekResults.length,
+    estimatedTotalResults: mojeekResults.length,
+    results: mojeekResults.map((r, i) => ({ position: i + 1, ...r })),
+    investigationLeads: leads,
+    ...(mojeekTopContent ? { extractedTopContent: mojeekTopContent } : {}),
+    fallbackNote: 'Results retrieved via Mojeek (no API key required).',
+  };
+}
+
+async function runDuckDuckGoOnly(
+  primaryQuery: string,
+  args: Record<string, any>,
+  timeoutMs: number,
+  fetchImpl: FetchImplementation,
+  isConcise: boolean,
+): Promise<Record<string, any>> {
+  const rawDomains = [
+    ...(args.domain ? [String(args.domain).trim()] : []),
+    ...(Array.isArray(args.site_domains) ? args.site_domains : []),
+  ];
+  const ddgRes = await executeDuckDuckGoFallback(primaryQuery, {
+    timeoutMs: Math.min(timeoutMs, 10_000),
+    fetchImpl,
+    siteDomains: rawDomains,
+  });
+  if (!ddgRes.ok || ddgRes.results.length === 0) {
+    return {
+      success: false,
+      error: ddgRes.error || 'DuckDuckGo returned no results.',
+      errorCode: 'DUCKDUCKGO_NO_RESULTS',
+      provider: 'duckduckgo',
+      query: primaryQuery,
+      retryable: true,
+      hint: 'Thử lại với provider khác (searxng hoặc mojeek) hoặc chỉnh sửa từ khóa tìm kiếm.',
+    };
+  }
+  const maxResults = clampInteger(args.max_results, DEFAULT_MAX_RESULTS, 1, MAX_RESULTS);
+  const ddgResults = ddgRes.results.slice(0, maxResults).map((item) => ({
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+    engines: ['duckduckgo'],
+    category: 'general',
+  }));
+  const leads = buildInvestigationLeads(ddgResults);
+  let ddgTopContent: Array<{ url: string; title: string; markdown: string; codeBlocks: string[] }> | undefined;
+  if (Boolean(args.fetch_top_content)) {
+    ddgTopContent = await extractTopContentFromResults(ddgResults, fetchImpl);
+  }
+  if (isConcise) {
+    return {
+      provider: 'duckduckgo',
+      query: primaryQuery,
+      returnedResults: ddgResults.length,
+      results: ddgResults.map((r, i) => ({ position: i + 1, title: r.title, url: r.url, snippet: r.snippet })),
+      investigationLeads: leads,
+      ...(ddgTopContent ? { extractedTopContent: ddgTopContent } : {}),
+      fallbackNote: 'Results retrieved via DuckDuckGo (no API key required).',
+    };
+  }
+  return {
+    provider: 'duckduckgo',
+    query: primaryQuery,
+    queries: [primaryQuery],
+    queryCount: 1,
+    successfulQueries: 1,
+    page: 1,
+    returnedResults: ddgResults.length,
+    estimatedTotalResults: ddgResults.length,
+    results: ddgResults.map((r, i) => ({ position: i + 1, ...r })),
+    investigationLeads: leads,
+    ...(ddgTopContent ? { extractedTopContent: ddgTopContent } : {}),
+    fallbackNote: 'Results retrieved via DuckDuckGo (no API key required).',
   };
 }
 

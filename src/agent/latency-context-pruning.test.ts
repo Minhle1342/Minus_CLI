@@ -36,6 +36,26 @@ test('ToolRetriever - Adaptive Tool Schema Pruning removes heavy game tools on r
   assert.equal(hasGameToolInGameQuery, true, 'Game tools must be dynamically included when query explicitly asks for game/unity');
 });
 
+test('ToolRetriever - exposes inspect_image for Vietnamese vision queries and image filenames', () => {
+  const registry = new ToolRegistry();
+  const allTools = registry.getAll();
+  const retriever = new ToolRetriever({ enabled: true, activationThreshold: 5, topK: 3 });
+  retriever.indexTools(allTools);
+
+  for (const query of [
+    'phân tích ảnh này giúp tôi',
+    'xem nội dung hình ảnh đính kèm',
+    'what is in images.jpg',
+    'describe screenshot.png',
+  ]) {
+    const names = retriever.retrieve(query, allTools).map((d) => d.name);
+    assert.ok(names.includes('inspect_image'), `inspect_image must be visible for query: ${query}`);
+  }
+
+  const codeQuery = retriever.retrieve('fix authentication bug in src/auth.ts', allTools).map((d) => d.name);
+  assert.equal(codeQuery.includes('inspect_image'), false, 'inspect_image stays pruned for unrelated code queries');
+});
+
 test('ToolRetriever - Schema token reduction preserves anchor tools and stays within budget', async () => {
   const registry = new ToolRegistry(undefined, undefined, undefined, { enableGameTools: true });
   await registry.registerGameTools();

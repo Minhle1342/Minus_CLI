@@ -30,6 +30,21 @@ export interface VerificationRecord {
 
 export { isScratchPath } from '../agent/completion-evidence.js';
 
+/**
+ * Kill-switch for the verification-before-completion gate (VerificationPolicy).
+ * `MINUS_VERIFICATION_GATE=off|0|false|no|disabled` makes canComplete() always allow,
+ * disabling VERIFICATION_REQUIRED / VERIFICATION_FAILED / VERIFICATION_EMPTY /
+ * IMPACTED_TESTS_REQUIRED / VERIFICATION_TIER_REQUIRED. Any other value (or unset) keeps
+ * the gate active.
+ */
+export function isVerificationPolicyEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.MINUS_VERIFICATION_GATE?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return true;
+  return !['off', '0', 'false', 'no', 'disabled'].includes(raw);
+}
+
 /** Heuristic comment-line check across common languages: slash-slash, hash, dash-dash, percent, semicolon, quote, html, block and star lines. */
 function isCommentLine(line: string): boolean {
   const t = line.trim();
@@ -321,6 +336,10 @@ export class VerificationPolicy {
     measured?: { changedFileCount?: number; hasCallers?: boolean; blastRisk?: string; sensitivePathTouched?: boolean },
     options?: { userExemptsTesting?: boolean },
   ): { allowed: boolean; reason?: string; errorCode?: string } {
+    if (!isVerificationPolicyEnabled()) {
+      return { allowed: true };
+    }
+
     // Miễn trừ kiểm thử bắt buộc nếu toàn bộ các file đã can thiệp là file phi thực thi (docs/markdown/configs)
     // hoặc chỉ sửa ghi chú/comment (không đổi code, không chạm sensitive path)
     const hasOnlyBypassableModifications =

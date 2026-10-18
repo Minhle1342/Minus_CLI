@@ -309,8 +309,13 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       const liveThinking = viewed ? model.viewport.thinking : (prev.thinking || '');
       const liveAnswer = viewed ? model.viewport.answerStream : (prev.answerStream || '');
       const hasLive = Boolean(prev.busy || liveThinking || liveAnswer);
+      // Chỉ khi tab KHÔNG đang xem VÀ đang bận/streaming (task nền) thì giữ entries
+      // cũ, kẻo lịch sử hydration đè mất nội dung đang live. Mọi trường hợp khác
+      // (đặc biệt là quay lại tab cũ) áp dụng msg.entries để render lại markdown
+      // mới nhất theo thời gian thực.
+      const entries = (!viewed && hasLive) ? (prev.entries ?? msg.entries) : msg.entries;
       const tabs = model.sessions.tabs.map(t => t.id === msg.sessionId ? { ...t,
-        entries: msg.entries,
+        entries,
         thinking: hasLive ? liveThinking : '',
         answerStream: hasLive ? liveAnswer : '',
         unread: viewed ? 0 : (t.unread ?? 0),
@@ -319,7 +324,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       if (!viewed) return [{ ...model, sessions }, []];
       const tab = tabs.find(t => t.id === msg.sessionId);
       return [{ ...model, sessions,
-        viewport: { ...model.viewport, entries: msg.entries, thinking: liveThinking, answerStream: liveAnswer, offset: 0, pinned: true },
+        viewport: { ...model.viewport, entries: viewed ? entries : model.viewport.entries, thinking: liveThinking, answerStream: liveAnswer, offset: 0, pinned: true },
         sidebar: { ...model.sidebar, session: tab?.title || model.sidebar.session, model: tab ? tabDisplayModel(model, tab) : model.sidebar.model },
         status: msg.entries.length ? { ...model.status, notice: `Đã khôi phục lịch sử session (${msg.entries.length} msgs)` } : model.status,
       }, []];

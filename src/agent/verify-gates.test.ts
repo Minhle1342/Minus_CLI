@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 import { SolutionGroundingAuditor } from './solution-grounding-auditor.js';
-import { CriticGate } from './critic-gate.js';
+import { CriticGate, isCriticGateEnabled } from './critic-gate.js';
 import { Session } from '../session/session.js';
 
 function record(session: Session, turn: number, toolName: string, args: Record<string, any>, result: Record<string, any>): void {
@@ -10,6 +10,31 @@ function record(session: Session, turn: number, toolName: string, args: Record<s
   session.append('tool/call', { turn, step: 1, toolCallId, toolName, args });
   session.append('tool/result', { turn, step: 1, toolCallId, toolName, result });
 }
+
+test('MINUS_CRITIC_GATE=off is a kill-switch for the critic verdict', () => {
+  const previous = process.env.MINUS_CRITIC_GATE;
+  try {
+    assert.equal(isCriticGateEnabled({}), true);
+    assert.equal(isCriticGateEnabled({ MINUS_CRITIC_GATE: 'off' }), false);
+
+    const session = new Session();
+    record(session, 1, 'apply_patch', {}, { success: true, filesModified: ['a.ts'] });
+    const params = { finalAnswer: 'Done.', session, workspace: {} as any, userRequest: 'Fix auth and verify with tests', turn: 1 };
+
+    process.env.MINUS_CRITIC_GATE = 'off';
+    const off = new CriticGate().evaluate(params);
+    assert.equal(off.approved, true);
+    assert.equal(off.critiquePrompt, undefined);
+
+    delete process.env.MINUS_CRITIC_GATE;
+    const gated = new CriticGate().evaluate(params);
+    assert.equal(gated.approved, false);
+    assert.ok(gated.critiquePrompt?.includes('[CRITIC GATE REJECTION'));
+  } finally {
+    if (previous === undefined) delete process.env.MINUS_CRITIC_GATE;
+    else process.env.MINUS_CRITIC_GATE = previous;
+  }
+});
 
 test('policy dynamically requires behavioral checks for multi-file changes', () => {
   const policy = new VerificationPolicy();

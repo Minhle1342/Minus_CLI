@@ -2498,7 +2498,7 @@ export class AgentLoop {
 
       // Satellite 4: Dynamic Harness Zero-Base Trimming
       const trimmedAdvicePrompt = isHighHistoryPressure ? undefined : effectiveAdvicePrompt;
-      const trimmedScaffoldText = isHighHistoryPressure ? undefined : effectiveScaffoldText;
+      const trimmedScaffoldText = effectiveScaffoldText;
       const trimmedToolPlaybooks = isHighHistoryPressure ? undefined : promptDecision.toolPlaybookPrompt;
       const trimmedGitPlaybook = isHighHistoryPressure ? undefined : promptDecision.gitPlaybookPrompt;
       const trimmedWarmStartTopoMap = isHighHistoryPressure ? undefined : warmStartTopoMap;
@@ -2517,8 +2517,9 @@ export class AgentLoop {
       // Resend-skip: a stable block already sent in a prior step's suffix adds
       // no information by repeating (same tradeoff as the P4/P6 history
       // dedup). Step 1 always sends since prior suffixes are empty.
-      const sentSuffixes = [...this.stepDynamicSuffixes.values()].join('\n');
-      const resendIfNew = (text?: string) => (text && sentSuffixes.includes(text) ? undefined : text);
+      const priorSuffixes = [...this.stepDynamicSuffixes.values()];
+      const resendIfNew = (text?: string) =>
+        text && priorSuffixes.some((suffix) => suffix.includes(text)) ? undefined : text;
 
       const arbitrationInputs = {
         instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,

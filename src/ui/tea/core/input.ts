@@ -8,7 +8,13 @@ const sequences: Record<string, string> = {
 export class KeyDecoder {
   private pending = '';
   private paste = false;
+  private lastTime = 0;
   feed(data: string, now = Date.now()): KeyMsg[] {
+    if (now - this.lastTime > 250 && this.pending.startsWith('\x1b') && this.pending.length > 1) {
+      this.pending = '';
+      this.paste = false;
+    }
+    this.lastTime = now;
     this.pending += data;
     const messages: KeyMsg[] = [];
     const key = (name: string, text?: string) => messages.push({ type: 'key', key: name, text, now });

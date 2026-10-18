@@ -109,150 +109,168 @@ export class MutationTransaction {
 
   /**
    * Chạy Preflight trên RAM: kiểm tra path, hash, existence, protected files mà chưa ghi đĩa
+   * Các op được kiểm tra song song vì chúng chỉ đọc trạng thái hệ thống tệp, độc lập lẫn nhau.
    */
   async preflight(): Promise<{ valid: true; plannedChanges: ChangedFileRecord[] } | ToolErrorResult> {
-    const plannedChanges: ChangedFileRecord[] = [];
+    const results = await Promise.all(this.ops.map((op) => this.preflightOp(op)));
 
-    for (const op of this.ops) {
-      if (op.type === 'create') {
-        const safePath = this.workspace.resolveSafePath(op.path);
-        if (this.workspace.isProtectedFile(safePath)) {
-          return toolError(
-            `Security violation: Cannot create or overwrite protected configuration file "${op.path}".`,
-            'SECURITY_VIOLATION',
-          );
-        }
+    for (const res of results) {
+      if ('success' in res && !res.success) {
+        return res;
+      }
+    }
 
-        const currentHash = await computeFileHash(safePath);
-        if (currentHash !== 'sha256:absent' && op.expectedAbsent !== false) {
-          return toolError(
-            `File "${op.path}" already exists on disk. create_file does not allow blind overwrite. Use replace_text or apply_patch to update.`,
-            'FILE_ALREADY_EXISTS',
-            { path: op.path, currentHash },
-            'Inspect file with read_file before modifying, or use replace_text/apply_patch.',
-          );
-        }
+    const plannedChanges = results.map((r) => r.plannedChange);
+    return { valid: true, plannedChanges };
+  }
 
-        plannedChanges.push({
+  private async preflightOp(op: StagedMutationOp): Promise<{ plannedChange: ChangedFileRecord } | ToolErrorResult> {
+    if (op.type === 'create') {
+      const safePath = this.workspace.resolveSafePath(op.path);
+      if (this.workspace.isProtectedFile(safePath)) {
+        return toolError(
+          `Security violation: Cannot create or overwrite protected configuration file "${op.path}".`,
+          'SECURITY_VIOLATION',
+        );
+      }
+
+      const currentHash = await computeFileHash(safePath);
+      if (currentHash !== 'sha256:absent' && op.expectedAbsent !== false) {
+        return toolError(
+          `File "${op.path}" already exists on disk. create_file does not allow blind overwrite. Use replace_text or apply_patch to update.`,
+          'FILE_ALREADY_EXISTS',
+          { path: op.path, currentHash },
+          'Inspect file with read_file before modifying, or use replace_text/apply_patch.',
+        );
+      }
+
+      return {
+        plannedChange: {
           path: this.workspace.toRelativePath(safePath),
           operation: 'create',
           beforeHash: currentHash,
           afterHash: computeStringHash(op.content),
           bytes: Buffer.byteLength(op.content, 'utf8'),
-        });
-      } else if (op.type === 'update') {
-        const safePath = this.workspace.resolveSafePath(op.path);
-        if (this.workspace.isProtectedFile(safePath)) {
-          return toolError(
-            `Security violation: Cannot modify protected configuration file "${op.path}".`,
-            'SECURITY_VIOLATION',
-          );
-        }
+        },
+      };
+    } else if (op.type === 'update') {
+      const safePath = this.workspace.resolveSafePath(op.path);
+      if (this.workspace.isProtectedFile(safePath)) {
+        return toolError(
+          `Security violation: Cannot modify protected configuration file "${op.path}".`,
+          'SECURITY_VIOLATION',
+        );
+      }
 
-        const currentHash = await computeFileHash(safePath);
-        if (currentHash === 'sha256:absent') {
-          return toolError(
-            `File "${op.path}" does not exist to update.`,
-            'FILE_NOT_FOUND',
-            { path: op.path },
-          );
-        }
+      const currentHash = await computeFileHash(safePath);
+      if (currentHash === 'sha256:absent') {
+        return toolError(
+          `File "${op.path}" does not exist to update.`,
+          'FILE_NOT_FOUND',
+          { path: op.path },
+        );
+      }
 
-        if (op.expectedFileHash && op.expectedFileHash !== currentHash) {
-          return toolError(
-            `Content conflict (Stale File Hash) for "${op.path}". On-disk hash (${currentHash}) does not match expected hash (${op.expectedFileHash}).`,
-            'STALE_FILE_HASH',
-            { path: op.path, expectedHash: op.expectedFileHash, currentHash },
-            'Use read_file to inspect latest content and hash before modifying.',
-          );
-        }
+      if (op.expectedFileHash && op.expectedFileHash !== currentHash) {
+        return toolError(
+          `Content conflict (Stale File Hash) for "${op.path}". On-disk hash (${currentHash}) does not match expected hash (${op.expectedFileHash}).`,
+          'STALE_FILE_HASH',
+          { path: op.path, expectedHash: op.expectedFileHash, currentHash },
+          'Use read_file to inspect latest content and hash before modifying.',
+        );
+      }
 
-        plannedChanges.push({
+      return {
+        plannedChange: {
           path: this.workspace.toRelativePath(safePath),
           operation: 'update',
           beforeHash: currentHash,
           afterHash: computeStringHash(op.newContent),
           bytes: Buffer.byteLength(op.newContent, 'utf8'),
-        });
-      } else if (op.type === 'delete') {
-        const safePath = this.workspace.resolveSafePath(op.path);
-        if (this.workspace.isProtectedFile(safePath)) {
-          return toolError(
-            `Security: Deleting sensitive configuration file "${op.path}" is not allowed.`,
-            'SECURITY_VIOLATION',
-          );
-        }
+        },
+      };
+    } else if (op.type === 'delete') {
+      const safePath = this.workspace.resolveSafePath(op.path);
+      if (this.workspace.isProtectedFile(safePath)) {
+        return toolError(
+          `Security: Deleting sensitive configuration file "${op.path}" is not allowed.`,
+          'SECURITY_VIOLATION',
+        );
+      }
 
-        const currentHash = await computeFileHash(safePath);
-        if (currentHash === 'sha256:absent') {
-          return toolError(
-            `File "${op.path}" does not exist to delete.`,
-            'FILE_NOT_FOUND',
-            { path: op.path },
-          );
-        }
+      const currentHash = await computeFileHash(safePath);
+      if (currentHash === 'sha256:absent') {
+        return toolError(
+          `File "${op.path}" does not exist to delete.`,
+          'FILE_NOT_FOUND',
+          { path: op.path },
+        );
+      }
 
-        if (op.expectedFileHash && op.expectedFileHash !== currentHash) {
-          return toolError(
-            `Content conflict when deleting file "${op.path}". Actual hash (${currentHash}) differs from expectedFileHash (${op.expectedFileHash}).`,
-            'STALE_FILE_HASH',
-            { path: op.path, expectedHash: op.expectedFileHash, currentHash },
-          );
-        }
+      if (op.expectedFileHash && op.expectedFileHash !== currentHash) {
+        return toolError(
+          `Content conflict when deleting file "${op.path}". Actual hash (${currentHash}) differs from expectedFileHash (${op.expectedFileHash}).`,
+          'STALE_FILE_HASH',
+          { path: op.path, expectedHash: op.expectedFileHash, currentHash },
+        );
+      }
 
-        plannedChanges.push({
+      return {
+        plannedChange: {
           path: this.workspace.toRelativePath(safePath),
           operation: 'delete',
           beforeHash: currentHash,
           afterHash: 'sha256:absent',
-        });
-      } else if (op.type === 'move') {
-        const safeSource = this.workspace.resolveSafePath(op.sourcePath);
-        const safeTarget = this.workspace.resolveSafePath(op.targetPath);
+        },
+      };
+    } else if (op.type === 'move') {
+      const safeSource = this.workspace.resolveSafePath(op.sourcePath);
+      const safeTarget = this.workspace.resolveSafePath(op.targetPath);
 
-        if (this.workspace.isProtectedFile(safeSource) || this.workspace.isProtectedFile(safeTarget)) {
-          return toolError(
-            `Security: Moving sensitive configuration files is not allowed.`,
-            'SECURITY_VIOLATION',
-          );
-        }
+      if (this.workspace.isProtectedFile(safeSource) || this.workspace.isProtectedFile(safeTarget)) {
+        return toolError(
+          `Security: Moving sensitive configuration files is not allowed.`,
+          'SECURITY_VIOLATION',
+        );
+      }
 
-        const sourceHash = await computeFileHash(safeSource);
-        if (sourceHash === 'sha256:absent') {
-          return toolError(
-            `Source file "${op.sourcePath}" does not exist.`,
-            'FILE_NOT_FOUND',
-            { path: op.sourcePath },
-          );
-        }
+      const sourceHash = await computeFileHash(safeSource);
+      if (sourceHash === 'sha256:absent') {
+        return toolError(
+          `Source file "${op.sourcePath}" does not exist.`,
+          'FILE_NOT_FOUND',
+          { path: op.sourcePath },
+        );
+      }
 
-        if (op.expectedSourceHash && op.expectedSourceHash !== sourceHash) {
-          return toolError(
-            `Content conflict for source file "${op.sourcePath}". Actual hash (${sourceHash}) differs from expectedSourceHash (${op.expectedSourceHash}).`,
-            'STALE_FILE_HASH',
-            { path: op.sourcePath, expectedHash: op.expectedSourceHash, currentHash: sourceHash },
-          );
-        }
+      if (op.expectedSourceHash && op.expectedSourceHash !== sourceHash) {
+        return toolError(
+          `Content conflict for source file "${op.sourcePath}". Actual hash (${sourceHash}) differs from expectedSourceHash (${op.expectedSourceHash}).`,
+          'STALE_FILE_HASH',
+          { path: op.sourcePath, expectedHash: op.expectedSourceHash, currentHash: sourceHash },
+        );
+      }
 
-        const targetHash = await computeFileHash(safeTarget);
-        if (targetHash !== 'sha256:absent') {
-          return toolError(
-            `Target file "${op.targetPath}" already exists. Cannot overwrite.`,
-            'FILE_ALREADY_EXISTS',
-            { path: op.targetPath },
-          );
-        }
+      const targetHash = await computeFileHash(safeTarget);
+      if (targetHash !== 'sha256:absent') {
+        return toolError(
+          `Target file "${op.targetPath}" already exists. Cannot overwrite.`,
+          'FILE_ALREADY_EXISTS',
+          { path: op.targetPath },
+        );
+      }
 
-        plannedChanges.push({
+      return {
+        plannedChange: {
           path: this.workspace.toRelativePath(safeTarget),
           operation: 'move',
           beforeHash: sourceHash,
           afterHash: sourceHash,
-        });
-      }
+        },
+      };
     }
 
-    return { valid: true, plannedChanges };
+    return toolError('Unsupported mutation op type', 'EXECUTION_ERROR');
   }
 
   /**
