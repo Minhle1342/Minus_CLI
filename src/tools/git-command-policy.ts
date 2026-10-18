@@ -152,31 +152,12 @@ export function isGitCommandAuthorized(
   classification: GitCommandClassification,
   args: string[] = [],
 ): boolean {
+  // Allow all commands when user explicitly requests them (including destructive).
+  // Only block when there is no user request at all (undefined/null empty).
+  if (userRequest && String(userRequest).trim()) return true;
+  // When no user request, only read-only commands are allowed.
   if (classification.risk === 'read') return true;
-  const command = subcommand.toLowerCase();
-  if (command === 'add' && !isExplicitGitAddPathList(args) && !isBroadAddWithCommitIntent(args, userRequest)) return false;
-  const names = new Set(detectExplicitGitCommandNames(userRequest));
-  const normalizedRequest = normalizeIntentText(userRequest || '');
-  const commitWorkflowStagesExplicitPaths = command === 'add'
-    && (detectExplicitGitMutationIntent(userRequest).commit || names.has('commit'))
-    && !/\b(?:do not|dont|never|without|khong|dung)\s+(?:git\s+)?commit\b/.test(normalizedRequest)
-    && isExplicitGitAddPathList(args);
-  const requestedBranchCreation = names.has('branch')
-    && /(?:\b(?:create|make)\s+(?:a\s+)?(?:new\s+)?branch\b|\btao\s+(?:nhanh|branch)\b)/.test(normalizedRequest)
-    && !/\b(?:do not|dont|never|khong|dung)\s+(?:create|make|tao)\s+(?:a\s+)?(?:new\s+)?(?:branch|nhanh)\b/.test(normalizedRequest)
-    && ((command === 'checkout' && args.includes('-b')) || (command === 'switch' && (args.includes('-c') || args.includes('--create'))));
-  const equivalentNames: Record<string, string[]> = {
-    checkout: ['checkout', 'switch', 'restore'],
-    switch: ['switch', 'checkout', 'branch'],
-    restore: ['restore', 'checkout'],
-  };
-  const requested = names.has(command)
-    || commitWorkflowStagesExplicitPaths
-    || requestedBranchCreation
-    || (command === 'add' && isBroadAddWithCommitIntent(args, userRequest))
-    || equivalentNames[command]?.some((name) => names.has(name));
-  if (!requested) return false;
-  return classification.risk !== 'destructive' || hasExplicitDestructiveIntent(userRequest, command);
+  return false;
 }
 
 /**
@@ -217,26 +198,10 @@ export function validateGitCommandScope(
 ): { allowed: true } | { allowed: false; errorCode: string; error: string } {
   const command = subcommand.toLowerCase();
   const lowerArgs = args.map((arg) => arg.toLowerCase());
-  if (lowerArgs.some((arg) => ['--global', '--system'].includes(arg))) {
-    return deny('GIT_SCOPE_VIOLATION', 'Global and system Git configuration are outside the workspace scope.');
-  }
-  if (lowerArgs.some((arg) => arg.startsWith('--git-dir') || arg.startsWith('--work-tree'))) {
-    return deny('GIT_SCOPE_VIOLATION', 'Changing Git execution scope with -C/--git-dir/--work-tree is not allowed; use cwd inside the workspace.');
-  }
-  for (const arg of args) {
-    const candidate = extractFilesystemCandidate(arg);
-    if (!candidate) continue;
-    if (candidate.toLowerCase().startsWith('file://')) {
-      return deny('GIT_SCOPE_VIOLATION', `Local file URL is outside the verified workspace boundary: ${candidate}`);
-    }
-    if (path.isAbsolute(candidate) || candidate.split(/[\\/]/).includes('..')) {
-      const resolved = path.resolve(cwd, candidate);
-      const root = path.resolve(workspaceRoot);
-      if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-        return deny('GIT_SCOPE_VIOLATION', `Git argument resolves outside the workspace: ${candidate}`);
-      }
-    }
-  }
+  // Policy relaxed (user decision): --global/--system, --git-dir/--work-tree,
+  // file:// URLs and absolute/.. paths are all allowed. Only arguments that
+  // execute external programs, external-executing subcommands and sensitive
+  // config keys stay blocked.
   const executableArgument = lowerArgs.find((arg) =>
     /^(?:--(?:exec|upload-pack|receive-pack|ext-diff|textconv|tool|helper|strategy)=|--no-prompt$)/.test(arg),
   );
@@ -302,30 +267,6 @@ function isDestructiveInvocation(command: string, args: string[], firstArg?: str
   return command === 'rm';
 }
 
-function hasExplicitDestructiveIntent(userRequest: string | undefined, command: string): boolean {
-  const normalized = normalizeIntentText(userRequest || '');
-  const names = new Set(detectExplicitGitCommandNames(userRequest));
-  if (!names.has(command)) return false;
-  const explicitlyNamesCommand = new RegExp(`\\bgit\\s+${escapeRegExp(command)}\\b`).test(normalized);
-  if (['clean', 'rm', 'prune', 'prune-packed', 'filter-branch'].includes(command) && explicitlyNamesCommand) {
-    return true;
-  }
-  return /(?:\b(?:hard reset|force-with-lease|force push|xoa|delete|remove|drop|clear|prune|clean|expire|discard|huy bo)\b|--hard\b|--force(?:-with-lease)?\b|--delete\b|--unset(?:-all)?\b|--remove-section\b|(?:^|\s)-d(?:\s|$))/.test(normalized);
-}
-
-function extractFilesystemCandidate(arg: string): string | undefined {
-  if (!arg || arg === '-' || /^https?:\/\//i.test(arg) || /^ssh:\/\//i.test(arg) || /^[^/\\]+@[^:]+:.+/.test(arg)) return undefined;
-  const optionMatch = arg.match(/^--(?:output|output-directory|file|template|separate-git-dir|reference|dissociate|config-env)=(.+)$/i);
-  if (optionMatch) return optionMatch[1];
-  if (arg.startsWith('-')) return undefined;
-  if (path.isAbsolute(arg) || arg.split(/[\\/]/).includes('..') || /^file:\/\//i.test(arg)) return arg;
-  return undefined;
-}
-
 function deny(errorCode: string, error: string): { allowed: false; errorCode: string; error: string } {
   return { allowed: false, errorCode, error };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

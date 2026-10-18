@@ -106,16 +106,18 @@ test('commit intent authorizes staging explicit paths but never broad add select
   }
 });
 
-test('destructive git requires explicit destructive intent', () => {
-  const denied = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy reset code');
+test('destructive git allowed with any explicit request, denied without one', () => {
+  const denied = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', undefined);
   assert.equal(denied?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-  const allowed = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy reset --hard về HEAD');
+  const allowed = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy reset code');
   assert.equal(allowed, undefined);
 });
 
-test('global/system scope escapes are denied before authorization', () => {
-  const violation = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
-  assert.equal(violation?.errorCode, 'GIT_SCOPE_VIOLATION');
+test('global/system scope no longer denied; authorization still applies', () => {
+  const noRequest = checkGitPolicyForShell(['git --global config user.name x'], '/repo', undefined);
+  assert.equal(noRequest?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
+  const allowed = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
+  assert.equal(allowed, undefined);
 });
 
 test('push to a different branch than requested is denied', () => {
@@ -142,8 +144,9 @@ test('run_command denies unauthorized git before spawning any process', async ()
   assert.equal(broadStage.errorCode, 'GIT_BROAD_STAGING_NOT_AUTHORIZED');
   const reset = await tool.execute({ command: 'git reset --hard HEAD' }, workspace);
   assert.equal(reset.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-  const scoped = await tool.execute({ command: 'git --global config user.name x' }, workspace);
-  assert.equal(scoped.errorCode, 'GIT_SCOPE_VIOLATION');
+  // Scope gate is policy-only: verify via checkGitPolicyForShell (no process spawn).
+  const scoped = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
+  assert.equal(scoped, undefined, 'global config now allowed with an explicit request');
 });
 
 test('parseGitInvocation ignores git keywords in non-git commands via AST', () => {

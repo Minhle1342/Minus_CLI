@@ -21,6 +21,15 @@ export interface PromptAssemblyContext {
   hasCodebaseTools?: boolean;
   /** Keep the legacy all-playbooks system section. Step-aware AgentLoop requests disable it. */
   includeStaticToolPlaybooks?: boolean;
+  /** Keep static Git operations section. Gated AgentLoop requests can defer to dynamic tail. */
+  includeStaticGitOperations?: boolean;
+  /** Keep static Frontend UI section. Gated AgentLoop requests can defer to dynamic tail. */
+  includeStaticFrontendUI?: boolean;
+  /** Keep static Codebase Intelligence section. Gated AgentLoop requests can defer to dynamic tail. */
+  includeStaticCodebaseIntelligence?: boolean;
+  /** Keep static Task Orchestrator section. Gated AgentLoop requests can defer to dynamic tail. */
+  includeStaticTaskOrchestrator?: boolean;
+
 
   // Polyglot & Monorepo Fingerprinting
   isMonorepo?: boolean;
@@ -525,25 +534,109 @@ export function needsTabularOutput(request?: string): boolean {
   return /\b(?:tabular (?:data|output|format)|tabulate|(?:as|in) (?:a |an )?(?:markdown |pipe )?table|(?:create|make|show|generate) (?:me )?(?:a |an )?(?:markdown |comparison )?table\s*(?:$|showing|listing|summarizing|with columns)|table (?:of|format)|(?:comparison|feature|pricing) (?:table|matrix)|lap bang|tao bang (?:so sanh|thong ke|tong hop|du lieu)|(?:dang|duoi dang|dinh dang) bang|bang (?:markdown|so sanh|thong ke|tong hop))\b/.test(text);
 }
 
+/**
+ * Detects whether the active step requires frontend and UI design guidance.
+ * Returns true if the workspace is frontend-capable and the query or files involve UI.
+ */
+export function needsFrontendGuidance(
+  query?: string,
+  touchedFiles?: string[],
+  isFrontendWorkspace = true,
+): boolean {
+  if (!isFrontendWorkspace) return false;
+  if (touchedFiles && touchedFiles.length > 0) {
+    const isUIFile = touchedFiles.some((f) => {
+      const lower = f.toLowerCase();
+      return /\.(?:tsx|jsx|vue|svelte|css|scss|sass|less|html|htm)$/.test(lower)
+        || /(?:[\/\\]components[\/\\]|[\/\\]views[\/\\]|[\/\\]pages[\/\\]|[\/\\]styles[\/\\])/.test(lower);
+    });
+    if (isUIFile) return true;
+  }
+  if (!query?.trim()) return false;
+  const text = query
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
+    .toLowerCase();
+  return /\b(?:ui|ux|component|components|button|modal|dialog|tailwind|css|scss|style|styles|styling|theme|layout|render|html|dom|view|page|screen|giao dien|man hinh|phan tu|nut bam|the|mau sac)\b/.test(text);
+}
+
+/**
+ * Detects whether the active step requires codebase intelligence & call graph guidance.
+ */
+export function needsCodebaseIntelligenceGuidance(
+  query?: string,
+  phase?: string,
+  hasCodebaseTools = true,
+): boolean {
+  if (!hasCodebaseTools) return false;
+  if (phase === 'plan') return true;
+  if (!query?.trim()) return false;
+  const text = query
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
+    .toLowerCase();
+  return /\b(?:architecture|architectural|topology|call[ -]?graph|callers?|callees?|dependencies|dependency|route[ -]?map|symbol context|blast radius|dien rong|anh huong|kien truc|phu thuoc|luong goi|do thi|cau truc ma nguon)\b/.test(text);
+}
+
+/**
+ * Detects whether the active step requires task orchestrator & subagent delegation guidance.
+ */
+export function needsSubagentOrchestratorGuidance(
+  query?: string,
+  hasSubagentTools = true,
+  activeSubagents = 0,
+): boolean {
+  if (!hasSubagentTools) return false;
+  if (activeSubagents > 0) return true;
+  if (!query?.trim()) return false;
+  const text = query
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
+    .toLowerCase();
+  return /\b(?:subagent|sub-agent|multi-agent|delegate|delegation|orchestrat|parallel agent|brainstorm|phan ra|uy thac|giao viec|dieu phoi)\b/.test(text);
+}
+
+
 /** Default prompt-section configuration registered into PromptAssembler. */
 export const DEFAULT_PROMPT_SECTIONS = [
   { id: 'core', content: CORE_SYSTEM_PROMPT, priority: -1000 },
-  { id: 'git-operations', content: SECTION_GIT_OPERATIONS, priority: 100, condition: (ctx: PromptAssemblyContext) => ctx.hasGitTools ?? true },
-  { id: 'frontend-ui', content: SECTION_FRONTEND_UI, priority: 200, condition: (ctx: PromptAssemblyContext) => ctx.isFrontend ?? false },
+  {
+    id: 'git-operations',
+    content: SECTION_GIT_OPERATIONS,
+    priority: 100,
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticGitOperations ?? true) && (ctx.hasGitTools ?? true),
+  },
+  {
+    id: 'frontend-ui',
+    content: SECTION_FRONTEND_UI,
+    priority: 200,
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticFrontendUI ?? true) && (ctx.isFrontend ?? false),
+  },
   { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300, condition: (ctx: PromptAssemblyContext) => ctx.hasAntigravityTools ?? true },
-  { id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE, priority: 400, condition: (ctx: PromptAssemblyContext) => ctx.hasCodebaseTools ?? true },
+  {
+    id: 'codebase-intelligence',
+    content: SECTION_CODEBASE_INTELLIGENCE,
+    priority: 400,
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticCodebaseIntelligence ?? true) && (ctx.hasCodebaseTools ?? true),
+  },
   {
     id: 'tool-playbooks',
     content: SECTION_TOOL_PLAYBOOKS,
     priority: 500,
     condition: (ctx: PromptAssemblyContext) => ctx.includeStaticToolPlaybooks ?? true,
   },
-  { id: 'task-orchestrator-boundaries', content: SECTION_TASK_ORCHESTRATOR_BOUNDARIES, priority: 550, condition: (ctx: PromptAssemblyContext) => ctx.hasSubagentTools ?? false },
+  {
+    id: 'task-orchestrator-boundaries',
+    content: SECTION_TASK_ORCHESTRATOR_BOUNDARIES,
+    priority: 550,
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticTaskOrchestrator ?? true) && (ctx.hasSubagentTools ?? false),
+  },
   { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },
   { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },
   { id: 'architecture-analysis', content: SECTION_ARCHITECTURE_ANALYSIS, priority: 1000, condition: (ctx: PromptAssemblyContext) => ctx.isArchitectureAnalysis ?? false },
   { id: 'tabular-output', content: SECTION_TABULAR_OUTPUT, priority: 1010, condition: (ctx: PromptAssemblyContext) => needsTabularOutput(ctx.request) },
 ];
+
 
 /**
  * TIER 2: PHASE-SPECIFIC DYNAMIC GUIDANCE (Pareto 80/20 & cache-safe tail injection)

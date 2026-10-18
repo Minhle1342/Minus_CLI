@@ -429,11 +429,13 @@ export function sessionHistoryToTranscript(messages: Array<{
   for (const message of messages) {
     for (const part of message.parts || []) {
       const call = part.functionCall;
-      if (call && typeof call === 'object' && call.id) {
-        const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
-          ? call.args as Record<string, unknown> : {};
-        callArgsById.set(String(call.id), args);
+      if (call && typeof call === 'object' && 'id' in call && (call as { id?: unknown }).id) {
+        const callObj = call as { id: unknown; args?: unknown };
+        const args = callObj.args && typeof callObj.args === 'object' && !Array.isArray(callObj.args)
+          ? callObj.args as Record<string, unknown> : {};
+        callArgsById.set(String(callObj.id), args);
       }
+
     }
   }
   for (const message of messages) {
