@@ -1,12 +1,12 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer } from './diff-model.js';
 import { headerView, statuslineView } from './statusline-model.js';
-import { toolCallEntry, toolErrorEntry, toolResultEntry } from './tool-entry.js';
+import { toolCallEntry, toolErrorEntry, toolResultEntry, mergedToolEntry } from './tool-entry.js';
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
 import { createModelPickerModel, modelPickerKey, modelPickerLayout } from './model-picker-model.js';
@@ -367,6 +367,14 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
             const next = { ...t, tools: (t.tools ?? []).filter(tool => tool !== name) };
             return typeof diff === 'string' ? { ...next, diff: { ...createDiffViewer(), ...(t.diff ?? {}), text: diff, offset: 0 } } : next;
           }) } };
+          // Explore tools thành công: gộp call entry + result thành MỘT dòng (thay thế chỗ call).
+          // Không tìm thấy call entry (tool:after mồ côi / hydrate lệch) → fallback push result entry.
+          const merged = mergedToolEntry(name, args, result);
+          if (merged) {
+            const callText = toolCallEntry(name, args);
+            const replaced = ownerReplaceLastEntry(withTabs, e => e.kind === 'tool' && e.text === callText, { kind: 'tool' as const, text: merged }, explicitOwner);
+            if (replaced !== withTabs) return [replaced, []];
+          }
           return [ownerAppendEntry(withTabs, { kind: 'tool', text: toolResultEntry(name, result, duration, args) }, explicitOwner), []];
         }
         case 'tool:error': {

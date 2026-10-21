@@ -217,6 +217,9 @@ export class ToolRetriever {
     const isNetworkQuery = hasNetworkIntent(cleanedQuery);
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
+    // Reverse-engineering intent: REA tools are dynamic and numerous, so force them
+    // into the visible set only when the request actually asks for binary analysis.
+    const isReverseQuery = /\b(rea|reverse[\s-]?engineer\w*|decompil\w*|disassembl\w*|binary|executable|apk|ipa|dylib|mach-?o|hopper|xrefs?|pseudocode|malware|firmware)\b|dịch\s?ngược|dich\s?nguoc|mã\s?máy|ma\s?may|soi\s?app|phân\s?tích\s?(app|binary|ứng\s?dụng)|phan\s?tich\s?(app|binary)/i.test(lowerQ);
     // Vision intent must fire for non-English phrasing (VI "ảnh", "hình ảnh") and
     // for bare image filenames ("images.jpg"), not only English keywords — otherwise
     // inspect_image is pruned and the model never sees the one tool that can attach pixels.
@@ -268,6 +271,13 @@ export class ToolRetriever {
     if (isMultiAgentQuery) {
       for (const tool of activePool) {
         if (this.inferCategory(tool) === 'multi_agent') selectedToolNames.add(tool.name);
+      }
+    }
+    // REA exposes ~42 dynamic tools; pin the whole set on reverse-engineering intent
+    // instead of letting topK pick a random few.
+    if (isReverseQuery) {
+      for (const tool of activePool) {
+        if (this.inferCategory(tool) === 'reverse_engineering') selectedToolNames.add(tool.name);
       }
     }
 
@@ -450,6 +460,7 @@ export class ToolRetriever {
 
   private inferCategory(tool: ToolDefinition): string {
     const name = tool.name.toLowerCase();
+    if (name.startsWith('rea_')) return 'reverse_engineering';
     if (name === 'verify_edit') return 'filesystem_verification';
     if (name.startsWith('browser_')) return 'browser';
     if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
@@ -506,6 +517,9 @@ export class ToolRetriever {
     }
     if (text.includes('browser') || text.includes('playwright') || text.includes('snapshot') || text.includes('navigate')) {
       tags.add('browser playwright automation spa login form navigate snapshot click type e2e dynamic render');
+    }
+    if (text.includes('reverse engineering') || text.includes('binary') || text.includes('decompil') || text.includes('hopper')) {
+      tags.add('reverse engineering binary apk ipa executable decompile disassemble pseudocode strings symbols xrefs call graph malware firmware');
     }
     if (text.includes('read') || text.includes('view') || text.includes('inspect') || text.includes('list')) {
       tags.add('read inspect explore view list');

@@ -500,6 +500,44 @@ export function isBoundedAllowlistedPipeline(analysis: ReturnType<typeof analyze
   return analysis.segments.every((segment) => !/[><]|`|\$\(/.test(segment));
 }
 
+const SAFE_DEVICE_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty', 'nul', 'con']);
+const HOME_EXPANSION = /^(?:~(?=$|[\\/])|\$HOME(?=$|[\\/])|\$\{HOME\}|\$env:USERPROFILE|%USERPROFILE%|%HOMEPATH%|%APPDATA%)/i;
+
+/**
+ * Workspace Security Sandbox for shell text: every path-shaped token must stay
+ * inside the workspace. This blocks absolute paths, `..` traversal and home
+ * expansion on local/host targets; Docker isolation is skipped because the
+ * container itself is the boundary.
+ */
+export function findWorkspaceEscapeViolations(command: string, workspace: Workspace, cwd: string = workspace.rootDir): string[] {
+  const violations: string[] = [];
+  const tokens = command.match(/"[^"]*"|'[^']*'|[^\s"'`;|&()<>]+/g) || [];
+  const unquote = (value: string) => value.replace(/^["'`]+|["'`]+$/g, '').trim();
+  for (const raw of tokens) {
+    const token = unquote(raw);
+    if (!token || token.includes('://')) continue;
+    const candidates = [token];
+    const eq = token.indexOf('=');
+    if (eq > 0 && eq < token.length - 1) candidates.push(unquote(token.slice(eq + 1)));
+    for (const candidate of candidates) {
+      if (!candidate || SAFE_DEVICE_TARGETS.has(candidate.toLowerCase())) continue;
+      if (HOME_EXPANSION.test(candidate)) {
+        violations.push(candidate);
+        continue;
+      }
+      const absolute = path.isAbsolute(candidate) || path.win32.isAbsolute(candidate);
+      const traverses = candidate.split(/[\\/]+/).includes('..');
+      if (!absolute && !traverses && !/[\\/]/.test(candidate)) continue;
+      try {
+        workspace.resolveSafePath(absolute ? candidate : path.resolve(cwd, candidate));
+      } catch {
+        violations.push(candidate);
+      }
+    }
+  }
+  return [...new Set(violations)];
+}
+
 export interface GitShellPolicyViolation {
   error: string;
   errorCode: string;
@@ -1284,6 +1322,30 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
 
+      // Enforce non-bypassable host system-risk policy before emulation or any
+      // other dispatch route, not only immediately before native host spawn.
+      const hostPolicy = executionTarget === 'host'
+        ? evaluateHostCommandPolicy(effectiveCommand, workspace.rootDir)
+        : { allowed: true as const };
+      if (!hostPolicy.allowed) {
+        return {
+          command: effectiveCommand,
+          message: hostPolicy.reason,
+          preflightCode: hostPolicy.errorCode,
+          commandOutcome: 'blocked_preflight',
+          processStarted: false,
+          success: false,
+          durationMs: 1,
+        };
+      }
+
+      // Workspace Security Sandbox: reject paths outside the workspace before
+      // emulation, background dispatch or spawn. Approval never bypasses it;
+      // Docker isolation is the stronger boundary, so container paths are left
+      // alone when it is active.
+      const sessionCwd = resolveSessionCwd(workspace);
+      const isolatedTarget = executionTarget !== 'host' && Boolean(sandboxManager?.getStatus?.()?.isIsolated);
+
       // Persistent shell: bare `cd <dir>` sticks for later calls (no spawn).
       const cdTarget = tryHandleCdCommand(effectiveCommand, workspace);
       if (cdTarget) {
@@ -1308,23 +1370,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const hookAdvisory = hookVerdict.advisory;
       const preflightAdvisories: string[] = [];
       if (hookAdvisory) preflightAdvisories.push(hookAdvisory);
-
-      // Enforce non-bypassable host system-risk policy before emulation or any
-      // other dispatch route, not only immediately before native host spawn.
-      const hostPolicy = executionTarget === 'host'
-        ? evaluateHostCommandPolicy(effectiveCommand, workspace.rootDir)
-        : { allowed: true as const };
-      if (!hostPolicy.allowed) {
-        return {
-          command: effectiveCommand,
-          message: hostPolicy.reason,
-          preflightCode: hostPolicy.errorCode,
-          commandOutcome: 'blocked_preflight',
-          processStarted: false,
-          success: false,
-          durationMs: 1,
-        };
-      }
 
       // Parse and authorize the entire command before any synchronous or background dispatch.
       const shellAnalysis = analyzeShellCommand(effectiveCommand);
@@ -1409,6 +1454,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             : 'Pushing to main requires a direct user request, and no approval channel is available in this session: retarget the push to the user-requested branch instead.',
         };
       }
+      // Workspace Security Sandbox: never let an approved command read or write
+      // outside the workspace on local/host targets.
+      if (!isolatedTarget) {
+        const violations = findWorkspaceEscapeViolations(rawCommand, workspace, sessionCwd);
+        if (violations.length > 0) {
+          return {
+            command: rawCommand,
+            error: `Command rejected by Workspace Security Sandbox: path(s) outside the workspace: ${violations.join(', ')}`,
+            errorCode: 'SECURITY_VIOLATION',
+            preflightCode: 'SECURITY_VIOLATION',
+            violations,
+            suggestion: `Keep command paths inside ${workspace.rootDir}, or enable the Docker sandbox for isolated filesystem access.`,
+            commandOutcome: 'blocked_preflight',
+            processStarted: false,
+            success: false,
+            durationMs: 1,
+          };
+        }
+      }
+
       // Pre-spawn missing-binary probe: fail fast without spawning a shell
       // (e.g. `ruff` absent from PATH cost ~2s per attempt before this gate).
       // Skipped when Docker isolation owns PATH, or via MINUS_BINARY_PROBE=off.
@@ -1462,7 +1527,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const mergedAdvisory = [...preflightAdvisories, ...(binaryAdvisory ? [binaryAdvisory] : [])].join('\n') || undefined;
       const advisoryExtra = mergedAdvisory ? { preflightAdvisory: mergedAdvisory } : undefined;
       // Session-aware dispatch context: persistent cwd + accumulated env.
-      const sessionCwd = resolveSessionCwd(workspace);
       const dispatchEnv = { ...sessionEnv };
 
       if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {

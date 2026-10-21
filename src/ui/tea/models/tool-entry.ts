@@ -75,7 +75,7 @@ export function visibleValue(value: unknown, depth = 0): string {
 }
 
 function primaryTarget(args: Record<string, unknown>): string | undefined {
-  for (const key of ['path', 'filePath', 'targetFile', 'query', 'search_query', 'pattern', 'symbol', 'target', 'url', 'cmd', 'command', 'subcommand']) {
+  for (const key of ['path', 'filePath', 'targetFile', 'dirPath', 'query', 'search_query', 'pattern', 'symbol', 'target', 'url', 'cmd', 'command', 'subcommand']) {
     const value = args?.[key];
     if (typeof value === 'string' && value.trim()) return preview(value, MAX_COMPACT_TARGET_CHARS);
   }
@@ -164,6 +164,33 @@ function inlineDiffFrame(name: string, result: Record<string, unknown>, args?: R
     : typeof argPath === 'string' && argPath.trim() ? argPath.trim() : name;
   return diffFrame(path, raw);
 }
+/**
+ * Explore/read-only tools: call + result gộp thành MỘT entry duy nhất
+ * ('› name target' của call lặp y hệt info trong result line '✔ name…' — bỏ dòng call,
+ * kết quả nạp target vào chỗ badge). Token này chỉ áp dụng read-only THÀNH CÔNG:
+ * lỗi/fail giữ nguyên 2-entry (call + full block) cho debug; mutation giữ full detail.
+ * Trả undefined khi không gộp được (caller fallback sang render 2-entry cũ).
+ */
+export function mergedToolEntry(name: string, args: Record<string, unknown> | undefined, result: Record<string, unknown>): string | undefined {
+  if (!isReadOnlyTool(name)) return undefined;
+  const denied = result?.denied === true || result?.status === 'denied';
+  const failed = !denied && Boolean(result?.error || result?.errorCode || result?.isError || result?.success === false ||
+    (typeof result?.exitCode === 'number' && result.exitCode !== 0) ||
+    (typeof result?.exit_code === 'number' && result.exit_code !== 0));
+  if (failed || denied) return undefined;
+
+  const target = args ? primaryTarget(args) : undefined;
+  const range = args ? lineRangeSuffix(args, result) : undefined;
+  const head = `✔ ${name} [OK]`;
+  if (range) return target ? `${head} ${target}${range}` : `${head}${range}`;
+  const firstLine = visibleValue(result).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0] ?? '';
+  const flat = firstLine.replace(/\s+/g, ' ');
+  const brief = flat.length > MAX_COMPACT_SUMMARY_CHARS ? `${flat.slice(0, MAX_COMPACT_SUMMARY_CHARS - 1).trimEnd()}…` : flat;
+  if (target && brief) return `${head} · ${target} · ${brief}`;
+  if (target || brief) return `${head} ${target ?? ''} · ${brief}`.trim();
+  return head;
+}
+
 export function toolResultEntry(name: string, result: Record<string, unknown>, _durationMs?: number, args?: Record<string, unknown>): string {
   // P1: text badges ([OK]/[FAIL]/[DENIED]) so status never depends on color alone.
   const denied = result?.denied === true || result?.status === 'denied';

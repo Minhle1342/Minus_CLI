@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRootModel, update } from '../models/root-model.js';
-import { lineRangeSuffix, toolResultEntry } from '../models/tool-entry.js';
+import { lineRangeSuffix, toolResultEntry, mergedToolEntry } from '../models/tool-entry.js';
 
-test('viewport keeps each tool call and result visible without submit_solution control metadata', () => {
+test('explore tools merge tool call + result into ONE entry; others keep both', () => {
   let model = createRootModel();
   [model] = update({ type: 'kernel', event: 'tool:before', args: ['read_file', { path: 'src/a.ts' }] }, model);
   [model] = update({ type: 'kernel', event: 'tool:after', args: ['read_file', { content: 'export const answer = 42;' }, 5, { path: 'src/a.ts' }] }, model);
@@ -13,12 +13,31 @@ test('viewport keeps each tool call and result visible without submit_solution c
     message: 'Internal final answer instruction', _untrusted_context: { level: 5 },
   }, 8, { summary: 'Một câu trả lời dài' }] }, model);
 
-  assert.equal(model.viewport.entries.length, 4);
-  assert.match(model.viewport.entries[0].text, /read_file.*src\/a\.ts/);
-  assert.match(model.viewport.entries[1].text, /read_file[\s\S]*export const answer = 42/);
-  assert.equal(model.viewport.entries[2].text, '● submit_solution');
-  assert.match(model.viewport.entries[3].text, /Câu trả lời đã được gửi/);
-  assert.doesNotMatch(model.viewport.entries[3].text, /_untrusted_context|timestamp|Internal final answer instruction/);
+  // read_file (explore + thành công) gộp: entry call '›' bị THAY THẾ thành merged 1 dòng — tổng 3 entries.
+  assert.equal(model.viewport.entries.length, 3);
+  assert.match(model.viewport.entries[0].text, /✔ read_file \[OK\] · src\/a\.ts · export const answer = 42/);
+  assert.doesNotMatch(model.viewport.entries[0].text, /^›/);
+  assert.match(model.viewport.entries[0].text, /export const answer = 42/);
+  assert.equal(model.viewport.entries[1].text, '● submit_solution');
+  assert.match(model.viewport.entries[2].text, /Câu trả lời đã được gửi/);
+  assert.doesNotMatch(model.viewport.entries[2].text, /_untrusted_context|timestamp|Internal final answer instruction/);
+});
+
+test('mergedToolEntry chỉ gộp read-only thành công; lỗi trả undefined (giữ 2-entry)', () => {
+  // Thành công read-only: 1 dòng chứa target + brief
+  assert.equal(
+    mergedToolEntry('read_file', { path: 'a.ts', startLine: 10, endLine: 20 }, { content: 'const x = 1;' }),
+    '✔ read_file [OK] a.ts (startLine: 10, endLine: 20)',
+  );
+  assert.equal(
+    mergedToolEntry('list_files', { dirPath: 'src' }, { files: ['a.ts'] }),
+    '✔ list_files [OK] · src · a.ts',
+  );  // Mutation tool → không gộp
+  assert.equal(mergedToolEntry('write_file', { path: 'a.ts' }, { ok: true }), undefined);
+  // Read-only FAIL → không gộp (caller fallback 2-entry: call + full FAIL block)
+  assert.equal(mergedToolEntry('read_file', { path: 'a.ts' }, { error: 'ENOENT', errorCode: 'ENOENT' }), undefined);
+  // Denied → không gộp
+  assert.equal(mergedToolEntry('run_command', { command: 'x' }, { denied: true }), undefined);
 });
 
 test('read-only results show normalized line range instead of content excerpt', () => {
@@ -63,13 +82,14 @@ test('lineRangeSuffix resolves explicit args, aliases, result echo, and partial 
   assert.equal(lineRangeSuffix(undefined, {}), undefined);
 });
 
-test('live read with line range renders the range on the result row', () => {
+test('live read with line range renders ONE merged entry (call entry replaced)', () => {
   let model = createRootModel();
   [model] = update({ type: 'kernel', event: 'tool:before', args: ['read_file', { path: 'src/a.ts', startLine: 10, endLine: 20 }] }, model);
   [model] = update({ type: 'kernel', event: 'tool:after', args: ['read_file', {
     path: 'src/a.ts', content: 'const x = 1;', startLine: 10, endLine: 20,
   }, 5, { path: 'src/a.ts', startLine: 10, endLine: 20 }] }, model);
-  assert.equal(model.viewport.entries[1].text, '✔ read_file [OK] (startLine: 10, endLine: 20)');
+  assert.equal(model.viewport.entries.length, 1);
+  assert.equal(model.viewport.entries[0].text, '✔ read_file [OK] src/a.ts (startLine: 10, endLine: 20)');
 });
 
 test('tool failures retain diagnostic output', () => {

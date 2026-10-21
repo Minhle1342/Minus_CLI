@@ -59,6 +59,8 @@ import { requestPhaseTransitionTool } from './request-phase-transition.js';
 import { ComputerController, createComputerTool } from '../computer/index.js';
 import type { McpManager } from '../mcp/mcp-manager.js';
 import { createBrowserTools } from './browser-tools.js';
+import type { ReaMcpManager } from '../mcp/rea-mcp-manager.js';
+import { createReaTools } from './rea-tools.js';
 
 
 export interface ToolProvider {
@@ -205,6 +207,19 @@ export class ToolRegistry implements ToolProvider {
     for (const tool of createBrowserTools(manager)) {
       if (!this.tools.has(tool.name)) this.register(tool);
     }
+  }
+
+  /** Discovers REA's tool surface at runtime; safe to retry, existing names are kept. */
+  async attachReaManager(manager: ReaMcpManager): Promise<number> {
+    const tools = createReaTools(manager, await manager.listTools());
+    let added = 0;
+    for (const tool of tools) {
+      if (!this.tools.has(tool.name)) {
+        this.register(tool);
+        added++;
+      }
+    }
+    return added;
   }
 
   getComputerController(): ComputerController {

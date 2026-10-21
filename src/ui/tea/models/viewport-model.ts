@@ -1,7 +1,7 @@
 import type { ViewportModel, TranscriptEntry, SessionTab, SessionTabsModel, RootModel, Cmd, KeyMsg, ComposerModel, DiffViewerModel } from '../types.js';
 import { color, displayWidth, fit, lipGlossTheme, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 import { formatMarkdownTablesWithTea } from '../styles/table.js';
-import { toolCallEntry, toolResultEntry, diffFrame, diffLineTone } from './tool-entry.js';
+import { toolCallEntry, toolResultEntry, mergedToolEntry, diffFrame, diffLineTone } from './tool-entry.js';
 import { createComposer } from './composer-model.js';
 import { createDiffViewer } from './diff-model.js';
 import type { PermissionCard } from '../types.js';
@@ -388,29 +388,59 @@ const HIDDEN_TRANSCRIPT_LEADERS = [
   '[SYSTEM ',
   '[CRITIC ',
   '[ROLLING DIALOGUE SYNOPSIS',
-];
-const UNWRAP_TRANSCRIPT_LEADERS = [
-  '[USER QUEUED MESSAGE (MID-TURN STEERING)]:',
-  '[USER INSTRUCTION]:',
+  '[PROJECT KNOWLEDGE BASE',
+  '[SESSION / GOAL MEMORY',
+  '[PREVIOUS SESSION HANDOFF',
+  '[AUTONOMOUS GOAL MODE',
+  '[DYNAMIC CONVERGENCE',
+  '🧠 [COGNITIVE TASK SCAFFOLD',
+  '[COGNITIVE TASK SCAFFOLD',
+  '[User Attached Workspace Context]',
+  '[RESUME INCOMPLETE PLAN]',
+  '[RESUME INTERRUPTED SESSION]',
+  '[IMPLEMENTATION MODE REQUEST]',
+  '[PLANNING MODE REQUEST]',
+  '[AUTONOMOUS GOAL EXECUTION',
+  '[TASK ORCHESTRATOR MANDATE',
+  '[CITATION-VALIDATED REPOSITORY MEMORY]',
 ];
 
 /** User-visible text for a hydrated user bubble; undefined = hide the bubble. */
 export function userVisibleText(text: string): string | undefined {
   const trimmed = text.trim();
   if (!trimmed || trimmed === 'Continue') return undefined;
+
+  // 1. Unwrap user instruction if embedded within warm-start / memory / scaffold prefix
+  const userInstructionIdx = text.lastIndexOf('[USER INSTRUCTION]:');
+  if (userInstructionIdx !== -1) {
+    let inner = text.slice(userInstructionIdx + '[USER INSTRUCTION]:'.length).trim();
+    const attachedIdx = inner.indexOf('\n\n[User Attached Workspace Context]');
+    if (attachedIdx !== -1) {
+      inner = inner.slice(0, attachedIdx).trim();
+    } else if (inner.startsWith('[User Attached Workspace Context]')) {
+      inner = '';
+    }
+    if (!inner || inner === 'Continue') return undefined;
+    for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
+      if (inner.startsWith(leader)) return undefined;
+    }
+    return inner;
+  }
+
+  // 2. Unwrap mid-turn steering message
+  const steerIdx = text.lastIndexOf('[USER QUEUED MESSAGE (MID-TURN STEERING)]:');
+  if (steerIdx !== -1) {
+    const inner = text.slice(steerIdx + '[USER QUEUED MESSAGE (MID-TURN STEERING)]:'.length).trim();
+    if (!inner || inner === 'Continue') return undefined;
+    for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
+      if (inner.startsWith(leader)) return undefined;
+    }
+    return inner;
+  }
+
+  // 3. Filter standalone system steering / harness / memory blocks
   for (const leader of HIDDEN_TRANSCRIPT_LEADERS) {
     if (trimmed.startsWith(leader)) return undefined;
-  }
-  if (trimmed.includes('[USER INSTRUCTION]:')) {
-    const parts = trimmed.split('[USER INSTRUCTION]:');
-    const inner = parts[parts.length - 1].trim();
-    return inner || undefined;
-  }
-  for (const leader of UNWRAP_TRANSCRIPT_LEADERS) {
-    if (trimmed.startsWith(leader)) {
-      const inner = trimmed.slice(leader.length).trim();
-      return inner || undefined;
-    }
   }
   return text;
 }
@@ -426,14 +456,14 @@ export function sessionHistoryToTranscript(messages: Array<{
   // functionResponse live in separate messages (model → user), so we build the
   // map in a first pass before projecting entries.
   const callArgsById = new Map<string, Record<string, unknown>>();
+  const callEntryIndexById = new Map<string, number>();
   for (const message of messages) {
     for (const part of message.parts || []) {
-      const call = part.functionCall;
-      if (call && typeof call === 'object' && 'id' in call && (call as { id?: unknown }).id) {
-        const callObj = call as { id: unknown; args?: unknown };
-        const args = callObj.args && typeof callObj.args === 'object' && !Array.isArray(callObj.args)
-          ? callObj.args as Record<string, unknown> : {};
-        callArgsById.set(String(callObj.id), args);
+      const call = part.functionCall as { id?: string; args?: unknown } | undefined;
+      if (call && typeof call === 'object' && call.id) {
+        const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+          ? call.args as Record<string, unknown> : {};
+        callArgsById.set(String(call.id), args);
       }
 
     }
@@ -441,17 +471,21 @@ export function sessionHistoryToTranscript(messages: Array<{
   for (const message of messages) {
     const parts = ((message.parts || []) as HistoryPart[]);
     const isAssistant = message.role === 'model' || message.role === 'assistant';
-    if (!isAssistant && message.role !== 'user') continue;
-    for (const part of parts) {
+    if (!isAssistant && message.role !== 'user') continue;    for (const part of parts) {
       if (part.thought && typeof part.text === 'string' && part.text.trim()) {
         entries.push({ kind: 'thought', text: part.text.trim() });
       }
     }
-    const text = parts
+    const proseParts = parts
       .filter((part) => !part.thought && !part.functionCall && !part.functionResponse && typeof part.text === 'string')
-      .map((part) => (part.text as string).trim())
-      .filter(Boolean)
-      .join('\n');
+      .map((part) => part.text as string);
+    // Assistant prose is persisted as many streaming deltas (Gemini emits one text
+    // part per chunk) — concatenate verbatim so hydrated history mirrors the live
+    // answer. Joining with '\n' split words mid-character. User parts (prompt +
+    // attachment captions) stay on their own lines.
+    const text = isAssistant
+      ? proseParts.join('')
+      : proseParts.map((part) => part.trim()).filter(Boolean).join('\n');
     if (text) {
       if (!isAssistant) {
         const visible = userVisibleText(text);
@@ -471,6 +505,10 @@ export function sessionHistoryToTranscript(messages: Array<{
           const name = typeof call.name === 'string' && call.name ? call.name : 'unknown_tool';
           const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
             ? call.args as Record<string, unknown> : {};
+          // Ghi nhớ vị trí entry call theo callId để tool:after (hydrated) GÁN LẠI entry này
+          // thành merged 1 dòng thay vì push thêm result entry.
+          const callId = typeof (call as { id?: unknown }).id === 'string' ? String((call as { id?: unknown }).id) : undefined;
+          if (callId) callEntryIndexById.set(callId, entries.length);
           entries.push({ kind: 'tool', text: toolCallEntry(name, args) });
         }
       }
@@ -491,7 +529,14 @@ export function sessionHistoryToTranscript(messages: Array<{
         // Truyền args (tương ứng với live path) để diff frame + line range
         // hiển thị đúng khi khôi phục session cũ.
         const args = resp.id ? callArgsById.get(String(resp.id)) : undefined;
-        entries.push({ kind: 'tool', text: toolResultEntry(name, result, 0, args) });
+        // Explore tools success: gộp call entry + result thành MỘT entry (thay thế đúng chỗ call).
+        const callIdx = resp.id ? callEntryIndexById.get(String(resp.id)) : undefined;
+        const merged = mergedToolEntry(name, args, result);
+        if (callIdx !== undefined && merged) {
+          entries[callIdx] = { kind: 'tool', text: merged };
+        } else {
+          entries.push({ kind: 'tool', text: toolResultEntry(name, result, 0, args) });
+        }
       }
     }
   }
@@ -576,6 +621,32 @@ export function ownerAppendEntry(model: RootModel, entry: TranscriptEntry, owner
   const tabs = model.sessions.tabs.map(t => t.id === owner
     ? { ...t, entries: [...(t.entries || []).slice(-999), entry], unread: (t.unread || 0) + 1, lastActive: Date.now() }
     : t);
+  return { ...model, sessions: { ...model.sessions, tabs } };
+}
+
+/** Thay entry cuối cùng khớp (live tool:after gộp vào entry call của explore tools). */
+export function ownerReplaceLastEntry(
+  model: RootModel,
+  match: (entry: TranscriptEntry) => boolean,
+  next: TranscriptEntry,
+  ownerOverride?: string,
+): RootModel {
+  const owner = eventOwnerId(model, ownerOverride);
+  if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
+    const list = [...model.viewport.entries];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (match(list[i])) { list[i] = next; return { ...model, viewport: { ...model.viewport, entries: list } }; }
+    }
+    return model;
+  }
+  const tabs = model.sessions.tabs.map(t => {
+    if (t.id !== owner) return t;
+    const list = [...(t.entries || [])];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (match(list[i])) { list[i] = next; return { ...t, entries: list, lastActive: Date.now() }; }
+    }
+    return t;
+  });
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 

@@ -166,11 +166,13 @@ test('sessionHistoryToTranscript: keeps text-less tool calls and results', () =>
     { role: 'user', parts: [{ functionResponse: { name: 'read_file', id: 'c1', response: { content: 'const x = 1;' } } }] },
     { role: 'model', parts: [{ text: 'Got it' }, { functionCall: { name: 'list_files', args: {}, id: 'c2' } }] },
   ]);
+  // Explore tool thành công: call + result gộp thành MỘT entry (entry call replaced);
+  // list_files chưa có response giữ nguyên entry call.
   const kinds = entries.map((e) => e.kind);
-  assert.deepEqual(kinds, ['user', 'tool', 'tool', 'answer', 'tool']);
-  assert.match(entries[1].text, /read_file/);
-  assert.match(entries[2].text, /read_file/);
-  assert.match(entries[4].text, /list_files/);
+  assert.deepEqual(kinds, ['user', 'tool', 'answer', 'tool']);
+  assert.match(entries[1].text, /✔ read_file \[OK\] · a\.ts · const x = 1;/);
+  assert.match(entries[1].text, /const x = 1;/);
+  assert.match(entries[3].text, /list_files/);
 });
 
 test('sessionHistoryToTranscript: hides system steering blocks, unwraps user text', () => {
@@ -291,6 +293,21 @@ test('formatAnswer: renders markdown tables with <br> and inline code with align
       `Table line must have consistent display width ${expectedWidth}: "${line}"`,
     );
   }
+});
+
+test('sessionHistoryToTranscript: concatenates streamed assistant deltas without inserting line breaks', () => {
+  const entries = sessionHistoryToTranscript([
+    { role: 'model', parts: [{ text: 'Quản lý Tập ' }, { text: 'trung Hệ thống ' }, { text: 'Ngữ cảnh' }] },
+  ]);
+  assert.equal(entries[0].text, 'Quản lý Tập trung Hệ thống Ngữ cảnh');
+  assert.ok(!entries[0].text.includes('\n'), 'must not break the answer at delta boundaries');
+});
+
+test('sessionHistoryToTranscript: keeps user prompt and attachment caption on separate lines', () => {
+  const entries = sessionHistoryToTranscript([
+    { role: 'user', parts: [{ text: 'Xem ảnh này' }, { text: '[Visual attachment context: screenshot]' }] },
+  ]);
+  assert.equal(entries[0].text, 'Xem ảnh này\n[Visual attachment context: screenshot]');
 });
 
 test('sessionHistoryToTranscript: trims heavy tool outputs and respects maxEntries', () => {

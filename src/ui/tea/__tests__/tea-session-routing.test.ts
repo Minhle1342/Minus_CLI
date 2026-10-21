@@ -32,8 +32,8 @@ test('tool events with background ctx do not leak into viewed viewport', () => {
   assert.ok(!bView.includes('DATA-A'), 'viewport B phải sạch tool-entry của A');
   assert.ok(!bView.includes('read_file'), 'viewport B không thấy tên tool của A');
   const tabA = m.sessions.tabs.find((t) => t.id === 'a')!;
-  assert.equal(tabA.entries?.length, 3); // work-A (snapshot lúc switch) + tool call + tool result
-  assert.equal(tabA.unread, 2);
+  assert.equal(tabA.entries?.length, 2); // work-A (snapshot lúc switch) + merged tool entry (call+result gộp 1 dòng)
+  assert.equal(tabA.unread, 1); // tool:before tăng 1; merged replace không tăng lại
   // Quay lại A thấy đủ tool boxes, unread clear.
   [m] = update(key('ctrl+t'), m);
   [m] = update(key('1', '1'), m);

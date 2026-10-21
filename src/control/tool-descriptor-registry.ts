@@ -484,6 +484,20 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
+    } else if (name.startsWith('rea_')) {
+      // REA reads a binary via Hopper; it never writes the workspace, so treat it
+      // as read-only or the explore/plan gate would deny it.
+      descriptor = {
+        name,
+        capabilities: ['inspect', 'search'],
+        phases: ALL_PHASES,
+        minimumRisk: 'R0',
+        mutates: false,
+        reversible: true,
+        requiresApproval: false,
+        deferLoading: true,
+        schemaCost: this.cost(tool),
+      };
     } else if (name === 'load_workspace_skills') {
       descriptor = {
         name,
