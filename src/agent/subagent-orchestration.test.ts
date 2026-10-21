@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SubagentManager } from './subagent-manager.js';
@@ -115,4 +116,161 @@ test('message_agent hơi (steering) vào inbox của subagent đang chạy, clai
   pending.bindSession(parentSession);
   const h2 = pending.start('không khởi động');
   assert.equal(pending.sendMessage(h2.id, 'hi').sent, false);
+});
+
+test('Ưu tiên 1 & 3: Subagent hoàn tất thành công tự push notification vào inbox cha kèm structured resultBundle', async () => {
+  const parentInbox = new AgentInbox();
+  const parentSession = new Session('parent-sess-success-surface');
+  let notifiedHandle: any;
+
+  const manager = new SubagentManager(
+    new AgentRegistry(),
+    ((_id: string, childSession: Session) => {
+      // Giả lập subagent gọi tool sửa file
+      childSession.append('tool/call', { name: 'replace_text', args: { filePath: 'src/core.ts' } });
+      childSession.append('tool/call', { name: 'write_file', args: { targetFile: 'src/helper.ts' } });
+      return {
+        submit: async () => 'Refactored core logic cleanly.',
+      };
+    }) as any,
+    undefined,
+    undefined,
+    (handle, parentId) => {
+      if (!parentId) return;
+      notifiedHandle = handle;
+      const files = handle.resultBundle?.touchedFiles?.length
+        ? ` | modified: [${handle.resultBundle.touchedFiles.join(', ')}]`
+        : '';
+      parentInbox.enqueue(
+        parentId,
+        `[SUBAGENT COMPLETED]: Task "${handle.objective}" (task_id=${handle.id}) finished successfully.${files}\nResult: ${handle.resultBundle?.summary || handle.answer}`,
+        'system',
+        { isSteering: true },
+      );
+    },
+  );
+  manager.bindSession(parentSession);
+
+  const handle = manager.start('Refactor core module');
+  const finished = await manager.waitFor(handle.id, 2000);
+
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.answer, 'Refactored core logic cleanly.');
+  assert.ok(finished.resultBundle, 'Phải có resultBundle');
+  assert.equal(finished.resultBundle.summary, 'Refactored core logic cleanly.');
+  assert.deepEqual(finished.resultBundle.touchedFiles.sort(), ['src/core.ts', 'src/helper.ts'].sort());
+  assert.ok(finished.resultBundle.durationMs >= 0);
+
+  // Kiểm tra inbox cha nhận được thông báo
+  const steer = parentInbox.claimSteerMessage(parentSession.id);
+  assert.ok(steer, 'Parent inbox phải nhận được completion steering message');
+  assert.match(steer!.text, /\[SUBAGENT COMPLETED\]/);
+  assert.match(steer!.text, /src\/core\.ts/);
+  assert.match(steer!.text, /Refactored core logic/);
+});
+
+test('Ưu tiên 2: Subagent timeout tự kích hoạt AbortController và kết thúc với status stopped', async () => {
+  const manager = new SubagentManager(
+    new AgentRegistry(),
+    ((_id: string, _session: Session, _opts: any, signal: AbortSignal) => {
+      return {
+        submit: () => new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted by timeout')), { once: true });
+        }),
+      };
+    }) as any,
+    undefined,
+  );
+  const parentSession = new Session('parent-sess-timeout');
+  manager.bindSession(parentSession);
+
+  // Đặt timeoutMs siêu ngắn: 25ms
+  const handle = manager.start('Long running task', { timeoutMs: 25 });
+  const finished = await manager.waitFor(handle.id, 1000);
+
+  assert.equal(finished.status, 'stopped');
+  assert.match(String(finished.error), /timed out/);
+});
+
+test('Benchmark Specialists được thay thế thành provider InternAI (Discovery API) và kế thừa model/prompt', async () => {
+  const { BENCHMARK_SPECIALISTS, findSpecialistForBenchmark, registerBenchmarkSpecialists } = await import('./benchmark-agents.js');
+  
+  // 1. Kiểm tra toàn bộ 6 specialist thuộc provider InternAI
+  assert.equal(BENCHMARK_SPECIALISTS.length, 6);
+  for (const s of BENCHMARK_SPECIALISTS) {
+    assert.equal(s.provider, 'InternAI (Discovery API)', `Specialist ${s.id} phải dùng provider InternAI`);
+    assert.ok(s.model.startsWith('internai/'), `Specialist ${s.id} phải dùng model internai/*, got ${s.model}`);
+    assert.ok(s.aliasId, `Specialist ${s.id} phải có aliasId`);
+  }
+
+  // 2. Kiểm tra các model cụ thể
+  const math = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-deepseek-r1-math');
+  assert.equal(math?.model, 'internai/deepseek-v4-pro-0813');
+  const coder = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-qwen25-coder-synthesis');
+  assert.equal(coder?.model, 'internai/qwen3.8-27b');
+  const swe = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-gemini-swe-architect');
+  assert.equal(swe?.model, 'internai/deepseek-v4-flash-0731');
+  const governor = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-llama33-instruction-governor');
+  assert.equal(governor?.model, 'internai/Agents-A1');
+  const fim = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-codestral-fim-surgeon');
+  assert.equal(fim?.model, 'internai/kimi-k2.6');
+  const adversary = BENCHMARK_SPECIALISTS.find((s) => s.id === 'subagent-skeptical-adversary');
+  assert.equal(adversary?.model, 'internai/glm-5.3');
+
+  // 3. Đăng ký vào AgentRegistry
+  const registry = new AgentRegistry();
+  const registered = registerBenchmarkSpecialists(registry);
+  assert.ok(registered.length >= 12, 'Phải đăng ký cả 6 primary IDs và 6 alias IDs');
+  assert.ok(registry.get('subagent-deepseek-r1-math'));
+  assert.ok(registry.get('subagent-internai-deepseek-v4-pro-math'));
+
+  // 4. Tra cứu theo benchmark và InternAI model
+  assert.equal(findSpecialistForBenchmark('humaneval')?.model, 'internai/qwen3.8-27b');
+  assert.equal(findSpecialistForBenchmark('deepseek-v4-pro')?.id, 'subagent-deepseek-r1-math');
+  assert.equal(findSpecialistForBenchmark('Agents-A1')?.id, 'subagent-llama33-instruction-governor');
+
+  // 5. Kiểm tra SubagentLoop kế thừa model và prompt từ specialist
+  let childModel: string | undefined;
+  const mockParentLLM = {
+    modelName: 'gemini-3.7-flash',
+    cloneWithModel: (m: string) => {
+      childModel = m;
+      return { modelName: m, generateStream: async () => ({ text: 'ok', toolCalls: [] }) };
+    },
+  };
+  const parentLoop = new AgentLoop(mockParentLLM as any, new ToolRegistry(), { agentRegistry: registry });
+  const childLoop = (parentLoop as any).createSubagentLoop(
+    'subagent-deepseek-r1-math',
+    new Session('session-internai-test'),
+    { specialistId: 'subagent-deepseek-r1-math' },
+    new AbortController().signal,
+  );
+
+  assert.equal(childModel, 'internai/deepseek-v4-pro-0813', 'Child loop phải được tạo với model InternAI của specialist');
+  const specialistPrompt = (childLoop as any).promptAssembler?.sections?.get('specialist-instruction');
+  assert.ok(specialistPrompt, 'Child loop phải nhận được chỉ dẫn hệ thống của specialist');
+  assert.match(specialistPrompt.content, /DeepSeek V4 Pro/);
+});
+
+test('Schema của subagent tools hướng dẫn rõ ràng LLM khả năng chạy subagent song song (Parallel Delegation)', async () => {
+  const { createSpawnAgentTool, createDelegateTaskTool, createAllocateAgentTaskTool } = await import('../tools/subagent-tools.js');
+  const manager = new SubagentManager(new AgentRegistry(), (() => ({})) as any);
+
+  // 1. spawn_agent schema
+  const spawnTool = createSpawnAgentTool(manager);
+  assert.match(spawnTool.description, /PARALLEL/i, 'spawn_agent description phải nêu bật khả năng chạy song song');
+  assert.match(spawnTool.description, /MULTIPLE TIMES IN PARALLEL/i, 'spawn_agent description phải chỉ rõ gọi nhiều lần cùng lượt');
+  assert.match(spawnTool.parameters.properties.brief.description, /parallel/i, 'brief description phải hướng dẫn emit song song');
+  assert.match(spawnTool.parameters.properties.fileScope.description, /parallel/i, 'fileScope description phải hướng dẫn non-overlapping scopes');
+  assert.match(spawnTool.parameters.properties.mode.description, /scout/i, 'mode description phải gợi ý scout cho parallel');
+
+  // 2. delegate_task schema
+  const delegateTaskTool = createDelegateTaskTool(manager);
+  assert.match(delegateTaskTool.description, /SYNCHRONOUS/i, 'delegate_task phải nêu rõ tính đồng bộ blocking');
+  assert.match(delegateTaskTool.description, /spawn_agent.*PARALLEL/i, 'delegate_task phải gợi ý spawn_agent song song khi có 2+ subtasks');
+
+  // 3. allocate_agent_task schema
+  const orchestrator = new (await import('./agent-orchestrator.js')).AgentOrchestrator(new AgentRegistry(), manager);
+  const allocateTool = createAllocateAgentTaskTool(orchestrator);
+  assert.match(allocateTool.description, /PARALLEL/i, 'allocate_agent_task phải nêu bật khả năng phân bổ chuyên gia song song');
 });

@@ -44,6 +44,7 @@ import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateE
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
 import { shouldPersistReasoning } from './reasoning-persistence.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
+import { DeepseekLLM } from '../llm/deepseek.js';
 import { getModelTokenProfile } from '../llm/token-config.js';
 import { HypothesisTracker, type BlastRadiusRisk } from './hypothesis-tracker.js';
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
@@ -591,6 +592,7 @@ export class AgentLoop {
       (agentId, session, subagentOptions, signal) => this.createSubagentLoop(agentId, session, subagentOptions, signal),
       (session) => this.persistSession(session),
       (handle, parentSessionId) => this.notifySubagentFailure(handle, parentSessionId),
+      (handle, parentSessionId) => this.notifySubagentCompletion(handle, parentSessionId),
     );
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     this.orchestrator.bindPlanManager(this.planManager);
@@ -617,7 +619,7 @@ export class AgentLoop {
     if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
       try {
         if (detectPromptContext(workspace).isUnity) {
-          (this.toolRegistry as any).registerGameTools().catch(() => {});
+          (this.toolRegistry as any).registerGameTools().catch(() => { });
         }
       } catch { }
     }
@@ -703,7 +705,7 @@ export class AgentLoop {
     this.sessionModels.set(session.id, { llm, modelName: name });
     this.modelInstances.set(name, llm);
     session.append('model/change', { modelName: name });
-    await this.persistSession(session).catch(() => {});
+    await this.persistSession(session).catch(() => { });
     this.eventBus?.emit('model:changed', name, { sessionId: session.id });
   }
 
@@ -967,7 +969,7 @@ export class AgentLoop {
             if (session.recoverInterrupted()) {
               await this.persistSession(session);
             }
-          } catch {}
+          } catch { }
 
           // 2. Kích hoạt ContextCompactor nén khẩn cấp toàn bộ lịch sử
           const history = session.getHistory();
@@ -1149,10 +1151,10 @@ export class AgentLoop {
           const suspensionAdvice = (error as any)?.isQuotaExhausted || (error as any)?.isServerUnavailable
             ? error.message
             : (isQuotaOrRateLimit
-                ? (errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
-                    ? `LLM quota exhausted (API quota depleted). You can switch to another model with the /model command, or check your billing plan before continuing.`
-                    : `LLM Rate Limit Exceeded (429 frequency limit). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume or /plan resume.`)
-                : `LLM Provider Server Unavailable (server overload 503). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume, or switch models with the /model command.`);
+              ? (errClassification.kind === 'HARD_QUOTA_EXHAUSTED'
+                ? `LLM quota exhausted (API quota depleted). You can switch to another model with the /model command, or check your billing plan before continuing.`
+                : `LLM Rate Limit Exceeded (429 frequency limit). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume or /plan resume.`)
+              : `LLM Provider Server Unavailable (server overload 503). The system has automatically saved plan progress. You can wait a few minutes and then use /goal resume, or switch models with the /model command.`);
           await CLI.renderExecutionStopped(
             `Agent suspended: ${suspensionAdvice}\nDetails: ${detail}`,
             'CIRCUIT_BREAKER_TRIGGERED',
@@ -1320,12 +1322,14 @@ export class AgentLoop {
       || this.agentId === 'delegation-parent'
       || this.agentId === 'delegation-recovery-parent';
     const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
-    const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
+    const submissionSnapshot = () => ({
+      session, turn, workspaceRoot: this._workspace.rootDir,
       userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
       planBlocker: isPlanOrReadOnlyMode() ? undefined : this.planManager.getCompletionBlocker(),
       // Subagent không được chặn vì agent cha đang chạy (parent luôn "running" khi chờ con).
       activeAgents: isSubagent ? 0 : this.agentRegistry.list().filter(agent => agent.id !== this.agentId
-        && ['running', 'waiting'].includes(agent.status)).length });
+        && ['running', 'waiting'].includes(agent.status)).length
+    });
     const submissionCodeChangeRequired = () => !isPlanOrReadOnlyMode() && ((initialTurnClassification.phase !== 'explore' && initialTurnClassification.phase !== 'plan' && initialTurnClassification.requiredCapabilities.includes('edit'))
       || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
       || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
@@ -1395,391 +1399,391 @@ export class AgentLoop {
     try {
       this.setAgentStatus('running', session, turn);
 
-    this.latencyOrchestrator.resetTurn();
+      this.latencyOrchestrator.resetTurn();
 
-    session.append('turn/start', { turn });
-    if (!batchPersistenceEnabled) {
-      await this.persistSession(session);
-    }
-    const turnStartDecision = await this.agentHooks.run('agent/turn-start', {
-      session,
-      turn,
-      maxSteps: effectiveMaxSteps,
-      isGoalMode: isGoal,
-      metadata: {},
-    });
-    if (!turnStartDecision.allow) {
-      const rejectionMessage = `Agent turn rejected: ${turnStartDecision.reason || 'turn hook rejected execution.'}`;
-      await CLI.renderExecutionStopped(rejectionMessage, 'TURN_REJECTED');
-      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, turnStartDecision.reason || 'turn-rejected');
-      this.goalManager.disarm();
-      rejectSteerItems(new Error(rejectionMessage));
-      return rejectionMessage;
-    }
-
-    // 0. Context Drift & Inter-Task Semantic Handoff (context-management-context-save)
-    const latestSnapshot = await this.contextSnapshotManager.getLatestSnapshot().catch(() => undefined);
-    if (latestSnapshot) {
-      const drift = await this.contextSnapshotManager.detectDrift(latestSnapshot).catch(() => undefined);
-      if (drift?.hasDrift) {
-        CLI.renderContextDriftWarning(drift);
-      }
-    }
-
-    // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới (Bỏ qua cho subagent - OpenCode v2.0.6 PR #49387)
-    const history = session.getHistory();
-    if (history.length === 1 && history[0].role === 'user' && !isSubagent) {
-      const userText = history[0].parts?.[0]?.text || '';
-      if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
-        const digest = this.memoryManager.getProjectDigest({ query: userText });
-        const relevantMemory = this.memoryManager
-          .getRelevantMemory(userText, session, 4)
-          .filter((item) => item.scope !== 'project');
-        const scopedMemory = relevantMemory.length > 0
-          ? `\n[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]\n${relevantMemory
-            .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
-            .join('\n')}\n`
-          : '';
-        let prefix = `${digest}\n\n`;
-        prefix += scopedMemory;
-        if (latestSnapshot) {
-          prefix += `${this.contextSnapshotManager.generateHandoffDigest([latestSnapshot])}\n\n`;
-        }
-        if (isGoal) {
-          prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
-        } else if (!isFinite(effectiveMaxSteps)) {
-          prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
-        }
-        if (resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode) !== 'enforce') {
-          const initialScaffold = this.cognitiveHarness.createScaffold({
-            request: userText,
-            phase: 'explore',
-            hasAttachments: hasAttachmentAnchors,
-            anchorPaths: attachmentAnchors,
-          });
-          prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
-        }
-        const rewrittenHistory = history.map((message, index) =>
-          index === 0
-            ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
-            : message
-        );
-        session.replaceHistory(rewrittenHistory, 'warm-start');
-        if (!batchPersistenceEnabled) {
-          await this.persistSession(session);
-        }
-      }
-    }
-
-    for (let step = 1; step <= effectiveMaxSteps; step++) {
-      if (options?.signal?.aborted) {
-        const cancellationMessage = 'Agent stopped: cancellation requested.';
-        this.subagentManager.stopAll();
-        await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
-        this.goalManager.disarm();
-        rejectSteerItems(new Error(cancellationMessage));
-        // NOTE: queued (not yet claimed) steering messages are preserved when a
-        // drain loop owns this session, so the post-turn drain can execute them
-        // with a fresh signal. Without a drainer (direct run), clear to avoid
-        // hanging promises.
-        if (!this.drainingInbox || this.drainingSessionId !== session.id) {
-          this.inbox.clear(session.id, cancellationMessage);
-        }
-        return cancellationMessage;
-      }
-
-      // Next-Step Hot Swap: Check if user switched model while loop/tool was executing
-      const stepPending = this.pendingModelSwitches.get(session.id) || this.pendingGlobalLLM;
-      if (stepPending) {
-        this.pendingModelSwitches.delete(session.id);
-        if (this.pendingGlobalLLM === stepPending) {
-          this.pendingGlobalLLM = null;
-        }
-        await this.setSessionLLM(session, stepPending.llm, stepPending.modelName);
-        this.setLLM(stepPending.llm, stepPending.modelName);
-        llm = stepPending.llm;
-      }
-
-      // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
-      // Check if user submitted a queued steering message while the loop was executing
-      const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
-      if (steerItem) {
-        submissionReadiness.clear();
-        claimedSteerItems.push(steerItem);
-        const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
-        session.addUserMessage(steerPrompt, steerItem.source, steerItem.id);
-        session.append('input/claimed', {
-          inputId: steerItem.id,
-          isSteering: true,
-          step,
-          turn,
-        });
-        await this.persistSession(session);
-        CLI.renderSteeringNotice(steerItem.text);
-        this.eventBus?.emit('model:steered', {
-          sessionId: session.id,
-          inputId: steerItem.id,
-          text: steerItem.text,
-          step,
-          turn,
-        });
-        consecutiveEmptyTurns = 0;
-        consecutiveIncompleteFinals = 0;
-        consecutivePlanCompletionRejects = 0;
-        consecutiveIncompleteFinishes = 0;
-        consecutiveNoProgressStrategyChanges = 0;
-      }
-
-      session.append('step/start', { turn, step });
+      session.append('turn/start', { turn });
       if (!batchPersistenceEnabled) {
         await this.persistSession(session);
       }
-      this.setAgentStatus('running', session, turn, step);
-      const hookContext: AgentHookContext = {
+      const turnStartDecision = await this.agentHooks.run('agent/turn-start', {
         session,
         turn,
-        step,
         maxSteps: effectiveMaxSteps,
         isGoalMode: isGoal,
         metadata: {},
-      };
-      const preStepDecision = await this.agentHooks.run('agent/pre-step', hookContext);
-      if (!preStepDecision.allow) {
-        const rejectionMessage = `Agent step rejected: ${preStepDecision.reason || 'pre-step hook rejected execution.'}`;
-        session.append('step/end', { turn, step, reason: preStepDecision.reason || 'pre-step-rejected' });
-        await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
-          ...hookContext,
-          reason: preStepDecision.reason || 'pre-step-rejected',
-        });
-        await CLI.renderExecutionStopped(rejectionMessage, 'PRE_STEP_REJECTED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, preStepDecision.reason || 'pre-step-rejected');
+      });
+      if (!turnStartDecision.allow) {
+        const rejectionMessage = `Agent turn rejected: ${turnStartDecision.reason || 'turn hook rejected execution.'}`;
+        await CLI.renderExecutionStopped(rejectionMessage, 'TURN_REJECTED');
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, turnStartDecision.reason || 'turn-rejected');
         this.goalManager.disarm();
-        return rejectionMessage;
-      }
-      // A single whole-request budget gate runs immediately before the provider
-      // call, after tools and dynamic context are known.
-      const userConfiguredInput = typeof llm?.getTokenConfig === 'function'
-        ? llm.getTokenConfig()?.maxInputTokens
-        : undefined;
-      const maxBudget = userConfiguredInput || this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
-      // Tự động căn chỉnh workingHistoryBudget theo tỷ lệ 75% cấu hình người dùng (từ /token low/medium/high/max)
-      const workingHistoryBudget = userConfiguredInput
-        ? Math.floor(userConfiguredInput * 0.75)
-        : Math.min(maxBudget, 24000);
-
-      const requestDecision = await this.agentHooks.run('agent/request', hookContext);
-      if (!requestDecision.allow) {
-        const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
-        session.append('step/end', { turn, step, reason: requestDecision.reason || 'request-rejected' });
-        await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
-          ...hookContext,
-          reason: requestDecision.reason || 'request-rejected',
-        });
-        CLI.renderStepFooter();
-        await CLI.renderExecutionStopped(rejectionMessage, 'REQUEST_REJECTED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, requestDecision.reason || 'request-rejected');
-        this.goalManager.disarm();
+        rejectSteerItems(new Error(rejectionMessage));
         return rejectionMessage;
       }
 
-      // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
-      // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
-      const activeTask = this.planManager.getActiveTask();
-      const validatedHypotheses = this.hypothesisTracker.getValidatedHypotheses();
-      const supportedHypotheses = this.hypothesisTracker.getSupportedHypotheses();
-      const hasValidatedHypothesis = validatedHypotheses.length > 0;
-      const supportedHypothesisCount = supportedHypotheses.length;
-      const minimumHypothesisRisk = hypothesisBlastRadiusRisk([
-        ...validatedHypotheses,
-        ...supportedHypotheses,
-      ]);
-      const priorClassification = previousClassification;
-      const classificationInput = {
-        request: retrievalUserRequest,
-        activeTask: activeTask?.title,
-        activeAcceptance: activeTask?.acceptanceCriteria,
-        hasPlan: this.planManager.hasPlan(),
-        hasUnverifiedChanges: this.verificationPolicy.hasPendingModifications(),
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolFailed: Boolean(this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})),
-        previous: previousClassification,
-        hasValidatedHypothesis,
-        minimumRisk: minimumHypothesisRisk,
-      };
-      const provisionalClassification = this.classificationEngine.classify(classificationInput);
-      let paretoEvidence = assessParetoEvidence({
-        session,
-        turn,
-        taskClass: provisionalClassification.taskClass,
-        risk: provisionalClassification.risk,
-        validatedHypothesisCount: validatedHypotheses.length,
-        supportedHypothesisCount,
-      });
-      let inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
-        && paretoEvidence.inspectedFiles.length > 0;
-      const classified = this.classificationEngine.classify({
-        ...classificationInput,
-        hasDirectEvidence: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
-        evidenceScore: paretoEvidence.score,
-        evidenceThreshold: paretoEvidence.threshold,
-      });
-      const lifecycleClassification = applyPhaseLifecycle(classified, session, turn);
-      const classification = applyPhaseAuthority(lifecycleClassification, session, turn);
-      const exploreCompletedNow = false;
-      previousClassification = classification;
+      // 0. Context Drift & Inter-Task Semantic Handoff (context-management-context-save)
+      const latestSnapshot = await this.contextSnapshotManager.getLatestSnapshot().catch(() => undefined);
+      if (latestSnapshot) {
+        const drift = await this.contextSnapshotManager.detectDrift(latestSnapshot).catch(() => undefined);
+        if (drift?.hasDrift) {
+          CLI.renderContextDriftWarning(drift);
+        }
+      }
 
-      const configuredReproMode = configuredEvidenceGateMode()
-        || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
+      // 1. Warm-Start: Nạp tóm tắt trí nhớ Repo vào đầu Session nếu là phiên mới (Bỏ qua cho subagent - OpenCode v2.0.6 PR #49387)
+      const history = session.getHistory();
+      if (history.length === 1 && history[0].role === 'user' && !isSubagent) {
+        const userText = history[0].parts?.[0]?.text || '';
+        if (!userText.includes('[PROJECT KNOWLEDGE BASE')) {
+          const digest = this.memoryManager.getProjectDigest({ query: userText });
+          const relevantMemory = this.memoryManager
+            .getRelevantMemory(userText, session, 4)
+            .filter((item) => item.scope !== 'project');
+          const scopedMemory = relevantMemory.length > 0
+            ? `\n[SESSION / GOAL MEMORY - RETRIEVED BY RELEVANCE]\n${relevantMemory
+              .map((item) => `- [${item.scope}/${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`)
+              .join('\n')}\n`
+            : '';
+          let prefix = `${digest}\n\n`;
+          prefix += scopedMemory;
+          if (latestSnapshot) {
+            prefix += `${this.contextSnapshotManager.generateHandoffDigest([latestSnapshot])}\n\n`;
+          }
+          if (isGoal) {
+            prefix += `[AUTONOMOUS GOAL MODE ACTIVE - UNLIMITED STEPS]:\nYou are operating in autonomous Goal Mode without step limits. Continue executing tools, inspecting, decomposing plans, writing/modifying code, and verifying results until the entire goal is completely achieved. Only return your final response once all steps and empirical verifications have succeeded.\n\n`;
+          } else if (!isFinite(effectiveMaxSteps)) {
+            prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
+          }
+          if (resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode) !== 'enforce') {
+            const initialScaffold = this.cognitiveHarness.createScaffold({
+              request: userText,
+              phase: 'explore',
+              hasAttachments: hasAttachmentAnchors,
+              anchorPaths: attachmentAnchors,
+            });
+            prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
+          }
+          const rewrittenHistory = history.map((message, index) =>
+            index === 0
+              ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
+              : message
+          );
+          session.replaceHistory(rewrittenHistory, 'warm-start');
+          if (!batchPersistenceEnabled) {
+            await this.persistSession(session);
+          }
+        }
+      }
 
-      // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng & Reproduction Verification cho ToolUseGuardian
-      this.toolRunner.guardian.setPreMutationGateContext({
-        isBugfixTask: classification.taskClass === 'bugfix',
-        taskIntent: classification.taskClass,
-        taskClass: classification.taskClass,
-        phase: classification.phase,
-        hasPlan: this.planManager.hasPlan(),
-        evidenceGateMode: configuredEvidenceGateMode()
-          // Item 14: light refactors (R0-R2) observe instead of enforcing; the
-          // Pareto gate still advises, it just stops hard-blocking them.
-          || (classification.taskClass === 'refactor' && ['R0', 'R1', 'R2'].includes(classification.risk)
-            ? 'observe' : 'enforce'),
-        hasValidatedHypothesis,
-        supportedHypothesisCount,
-        targetFiles: [
+      for (let step = 1; step <= effectiveMaxSteps; step++) {
+        if (options?.signal?.aborted) {
+          const cancellationMessage = 'Agent stopped: cancellation requested.';
+          this.subagentManager.stopAll();
+          await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
+          this.goalManager.disarm();
+          rejectSteerItems(new Error(cancellationMessage));
+          // NOTE: queued (not yet claimed) steering messages are preserved when a
+          // drain loop owns this session, so the post-turn drain can execute them
+          // with a fresh signal. Without a drainer (direct run), clear to avoid
+          // hanging promises.
+          if (!this.drainingInbox || this.drainingSessionId !== session.id) {
+            this.inbox.clear(session.id, cancellationMessage);
+          }
+          return cancellationMessage;
+        }
+
+        // Next-Step Hot Swap: Check if user switched model while loop/tool was executing
+        const stepPending = this.pendingModelSwitches.get(session.id) || this.pendingGlobalLLM;
+        if (stepPending) {
+          this.pendingModelSwitches.delete(session.id);
+          if (this.pendingGlobalLLM === stepPending) {
+            this.pendingGlobalLLM = null;
+          }
+          await this.setSessionLLM(session, stepPending.llm, stepPending.modelName);
+          this.setLLM(stepPending.llm, stepPending.modelName);
+          llm = stepPending.llm;
+        }
+
+        // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
+        // Check if user submitted a queued steering message while the loop was executing
+        const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
+        if (steerItem) {
+          submissionReadiness.clear();
+          claimedSteerItems.push(steerItem);
+          const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
+          session.addUserMessage(steerPrompt, steerItem.source, steerItem.id);
+          session.append('input/claimed', {
+            inputId: steerItem.id,
+            isSteering: true,
+            step,
+            turn,
+          });
+          await this.persistSession(session);
+          CLI.renderSteeringNotice(steerItem.text);
+          this.eventBus?.emit('model:steered', {
+            sessionId: session.id,
+            inputId: steerItem.id,
+            text: steerItem.text,
+            step,
+            turn,
+          });
+          consecutiveEmptyTurns = 0;
+          consecutiveIncompleteFinals = 0;
+          consecutivePlanCompletionRejects = 0;
+          consecutiveIncompleteFinishes = 0;
+          consecutiveNoProgressStrategyChanges = 0;
+        }
+
+        session.append('step/start', { turn, step });
+        if (!batchPersistenceEnabled) {
+          await this.persistSession(session);
+        }
+        this.setAgentStatus('running', session, turn, step);
+        const hookContext: AgentHookContext = {
+          session,
+          turn,
+          step,
+          maxSteps: effectiveMaxSteps,
+          isGoalMode: isGoal,
+          metadata: {},
+        };
+        const preStepDecision = await this.agentHooks.run('agent/pre-step', hookContext);
+        if (!preStepDecision.allow) {
+          const rejectionMessage = `Agent step rejected: ${preStepDecision.reason || 'pre-step hook rejected execution.'}`;
+          session.append('step/end', { turn, step, reason: preStepDecision.reason || 'pre-step-rejected' });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', {
+            ...hookContext,
+            reason: preStepDecision.reason || 'pre-step-rejected',
+          });
+          await CLI.renderExecutionStopped(rejectionMessage, 'PRE_STEP_REJECTED');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, preStepDecision.reason || 'pre-step-rejected');
+          this.goalManager.disarm();
+          return rejectionMessage;
+        }
+        // A single whole-request budget gate runs immediately before the provider
+        // call, after tools and dynamic context are known.
+        const userConfiguredInput = typeof llm?.getTokenConfig === 'function'
+          ? llm.getTokenConfig()?.maxInputTokens
+          : undefined;
+        const maxBudget = userConfiguredInput || this.contextCompactor.getConfig().maxTotalHistoryTokens || 32000;
+        // Tự động căn chỉnh workingHistoryBudget theo tỷ lệ 75% cấu hình người dùng (từ /token low/medium/high/max)
+        const workingHistoryBudget = userConfiguredInput
+          ? Math.floor(userConfiguredInput * 0.75)
+          : Math.min(maxBudget, 24000);
+
+        const requestDecision = await this.agentHooks.run('agent/request', hookContext);
+        if (!requestDecision.allow) {
+          const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
+          session.append('step/end', { turn, step, reason: requestDecision.reason || 'request-rejected' });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', {
+            ...hookContext,
+            reason: requestDecision.reason || 'request-rejected',
+          });
+          CLI.renderStepFooter();
+          await CLI.renderExecutionStopped(rejectionMessage, 'REQUEST_REJECTED');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, requestDecision.reason || 'request-rejected');
+          this.goalManager.disarm();
+          return rejectionMessage;
+        }
+
+        // 3. Gửi session hiện tại cho LLM (ưu tiên Real-time Streaming)
+        // Dynamic Tool Retrieval: Duy trì Tool Declarations ổn định (Stable Prefix) theo chuẩn OpenAI Codex
+        const activeTask = this.planManager.getActiveTask();
+        const validatedHypotheses = this.hypothesisTracker.getValidatedHypotheses();
+        const supportedHypotheses = this.hypothesisTracker.getSupportedHypotheses();
+        const hasValidatedHypothesis = validatedHypotheses.length > 0;
+        const supportedHypothesisCount = supportedHypotheses.length;
+        const minimumHypothesisRisk = hypothesisBlastRadiusRisk([
           ...validatedHypotheses,
           ...supportedHypotheses,
-        ].flatMap((h) => h.targetFiles || []),
-        validatedTargetFiles: validatedHypotheses.flatMap((h) => h.targetFiles || []),
-        risk: classification.risk,
-        evidenceScore: paretoEvidence.score,
-        evidenceThreshold: paretoEvidence.threshold,
-        evidenceReasons: paretoEvidence.reasons,
-        inspectedFiles: Array.from(new Set([
-          ...(paretoEvidence.inspectedFiles || []),
-          ...this.sessionInspectedFiles,
-        ])),
-        hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
-        hasSubmittedSolution,
-        cascadeFrozen: this.cascadeFreeze !== undefined,
-        ...(this.cascadeFreeze
-          ? { cascadeReason: `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}` }
-          : {}),
-        allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
-        userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(retrievalUserRequest),
-        reproductionStatus: {
-          enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
-          hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
-          hasPreFixRepro: paretoEvidence.hasFailureEvidence || hasValidatedHypothesis,
-        },
-      });
-
-      const activeTargetFile = activeTask?.writeSet?.[0]
-        || validatedHypotheses[0]?.targetFiles?.[0]
-        || supportedHypotheses[0]?.targetFiles?.[0]
-        || paretoEvidence.inspectedFiles?.[0]
-        || (typeof this.lastToolExecution?.result?.path === 'string' ? this.lastToolExecution.result.path : undefined)
-        || (typeof this.lastToolExecution?.result?.filePath === 'string' ? this.lastToolExecution.result.filePath : undefined);
-
-      let activeCallGraphContext: { symbol?: string; callers?: string[]; callees?: string[] } | undefined;
-      const lastRes = this.lastToolExecution?.result;
-      if (lastRes) {
-        if (lastRes.symbol) {
-          activeCallGraphContext = {
-            symbol: lastRes.symbol,
-            callers: Array.isArray(lastRes.callers) ? lastRes.callers.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
-            callees: Array.isArray(lastRes.callees) ? lastRes.callees.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
-          };
-        } else if (lastRes.blastRadius?.modifiedSymbols?.length > 0) {
-          activeCallGraphContext = {
-            symbol: lastRes.blastRadius.modifiedSymbols[0],
-            callers: Array.isArray(lastRes.blastRadius.directConsumers) ? lastRes.blastRadius.directConsumers : undefined,
-          };
-        }
-      }
-      if (!activeCallGraphContext) {
-        const hypSymbol = (validatedHypotheses[0] as any)?.symbol || (supportedHypotheses[0] as any)?.symbol;
-        if (hypSymbol) {
-          activeCallGraphContext = { symbol: hypSymbol };
-        }
-      }
-
-      const adviceInfo = this.toolAdvisor.advise({
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolResult: this.lastToolExecution?.result,
-        hasErrors: this.lastToolExecution?.result?.error !== undefined,
-        activeTaskTitle: activeTask?.title,
-        hasSubmittedSolution,
-        lastTargetFile: activeTargetFile,
-        callGraphContext: activeCallGraphContext,
-      });
-
-      // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
-      if (!this._collapsePreferences.compactSteps) {
-        CLI.renderStepHeader(step, effectiveMaxSteps, {
-          phase: classification.phase,
+        ]);
+        const priorClassification = previousClassification;
+        const classificationInput = {
+          request: retrievalUserRequest,
           activeTask: activeTask?.title,
-          playbook: adviceInfo.playbook,
-          risk: classification.risk,
-          isGoal,
+          activeAcceptance: activeTask?.acceptanceCriteria,
+          hasPlan: this.planManager.hasPlan(),
+          hasUnverifiedChanges: this.verificationPolicy.hasPendingModifications(),
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolFailed: Boolean(this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})),
+          previous: previousClassification,
+          hasValidatedHypothesis,
+          minimumRisk: minimumHypothesisRisk,
+        };
+        const provisionalClassification = this.classificationEngine.classify(classificationInput);
+        let paretoEvidence = assessParetoEvidence({
+          session,
+          turn,
+          taskClass: provisionalClassification.taskClass,
+          risk: provisionalClassification.risk,
+          validatedHypothesisCount: validatedHypotheses.length,
+          supportedHypothesisCount,
         });
-      }
+        let inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(provisionalClassification.risk)
+          && paretoEvidence.inspectedFiles.length > 0;
+        const classified = this.classificationEngine.classify({
+          ...classificationInput,
+          hasDirectEvidence: paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
+          evidenceScore: paretoEvidence.score,
+          evidenceThreshold: paretoEvidence.threshold,
+        });
+        const lifecycleClassification = applyPhaseLifecycle(classified, session, turn);
+        const classification = applyPhaseAuthority(lifecycleClassification, session, turn);
+        const exploreCompletedNow = false;
+        previousClassification = classification;
 
-      this.eventBus?.emit('step:before', step, effectiveMaxSteps, classification.phase, { sessionId: session.id });
-      this.verificationPolicy.setRequiredRisk(classification.risk);
-      const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
-        workspaceDir: this._workspace.rootDir,
-        userRequest: turnUserRequest,
-      });
-      const gateToolSurface = recommendedToolDecision.toolSurface;
-      this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
-      const candidateProvider = toolControlMode === 'enforce'
-        ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, gateToolSurface.authorizedToolNames)
-        : this.toolProvider;
-      const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
-        && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
-      const providerSize = candidateProvider.getAll().length;
-      const currentHypothesis = this.hypothesisTracker.getActiveHypothesis()
-        || this.hypothesisTracker.getSupportedHypotheses().slice(-1)[0]
-        || this.hypothesisTracker.getValidatedHypotheses().slice(-1)[0];
-      const retrievalState = this.stepRetrievalQueryBuilder.build({
-        userRequest: retrievalUserRequest,
-        activeTask,
-        phase: classification.phase,
-        taskClass: classification.taskClass,
-        hypothesis: currentHypothesis,
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolResult: this.lastToolExecution?.result,
-        allowedToolNames: toolControlMode === 'enforce'
-          ? gateToolSurface.authorizedToolNames
-          : candidateProvider.getAll().map((tool) => tool.name),
-      });
-      const activeStepQuery = retrievalState.query;
-      const stepCompletionState = getTurnCompletionState(session, turn);
+        const configuredReproMode = configuredEvidenceGateMode()
+          || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
 
-      const canRequestPhaseTransition = ['explore', 'plan', 'implement'].includes(classification.phase)
-        && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
+        // Cập nhật ngữ cảnh Cổng Pareto 80/20 Thích Ứng & Reproduction Verification cho ToolUseGuardian
+        this.toolRunner.guardian.setPreMutationGateContext({
+          isBugfixTask: classification.taskClass === 'bugfix',
+          taskIntent: classification.taskClass,
+          taskClass: classification.taskClass,
+          phase: classification.phase,
+          hasPlan: this.planManager.hasPlan(),
+          evidenceGateMode: configuredEvidenceGateMode()
+            // Item 14: light refactors (R0-R2) observe instead of enforcing; the
+            // Pareto gate still advises, it just stops hard-blocking them.
+            || (classification.taskClass === 'refactor' && ['R0', 'R1', 'R2'].includes(classification.risk)
+              ? 'observe' : 'enforce'),
+          hasValidatedHypothesis,
+          supportedHypothesisCount,
+          targetFiles: [
+            ...validatedHypotheses,
+            ...supportedHypotheses,
+          ].flatMap((h) => h.targetFiles || []),
+          validatedTargetFiles: validatedHypotheses.flatMap((h) => h.targetFiles || []),
+          risk: classification.risk,
+          evidenceScore: paretoEvidence.score,
+          evidenceThreshold: paretoEvidence.threshold,
+          evidenceReasons: paretoEvidence.reasons,
+          inspectedFiles: Array.from(new Set([
+            ...(paretoEvidence.inspectedFiles || []),
+            ...this.sessionInspectedFiles,
+          ])),
+          hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
+          hasSubmittedSolution,
+          cascadeFrozen: this.cascadeFreeze !== undefined,
+          ...(this.cascadeFreeze
+            ? { cascadeReason: `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}` }
+            : {}),
+          allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
+          userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(retrievalUserRequest),
+          reproductionStatus: {
+            enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
+            hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
+            hasPreFixRepro: paretoEvidence.hasFailureEvidence || hasValidatedHypothesis,
+          },
+        });
 
-      let activeToolDeclarations: any[];
-      if (hasSubmittedSolution) {
-        // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
-        activeToolDeclarations = [];
-      } else if (
-        this.cachedTurnNumber === turn
-        && this.cachedTurnToolDeclarations
-        && this.cachedTurnToolProviderSize === providerSize
-        && this.cachedTurnToolPhase === classification.phase
-        && this.cachedTurnToolPhaseVersion === classification.phaseVersion
-        && this.cachedHasPlan === this.planManager.hasPlan()
-      ) {
-        // KV Cache Preservation: Tái sử dụng 100% Tool Declarations cố định của phase trong turn này,
-        // ngăn chặn việc re-retrieval sau mỗi tool call làm thay đổi thứ tự/danh sách tool prefix token.
-        activeToolDeclarations = [...this.cachedTurnToolDeclarations];
-      } else {
-        activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
-          ? candidateProvider.getRelevantTools({
+        const activeTargetFile = activeTask?.writeSet?.[0]
+          || validatedHypotheses[0]?.targetFiles?.[0]
+          || supportedHypotheses[0]?.targetFiles?.[0]
+          || paretoEvidence.inspectedFiles?.[0]
+          || (typeof this.lastToolExecution?.result?.path === 'string' ? this.lastToolExecution.result.path : undefined)
+          || (typeof this.lastToolExecution?.result?.filePath === 'string' ? this.lastToolExecution.result.filePath : undefined);
+
+        let activeCallGraphContext: { symbol?: string; callers?: string[]; callees?: string[] } | undefined;
+        const lastRes = this.lastToolExecution?.result;
+        if (lastRes) {
+          if (lastRes.symbol) {
+            activeCallGraphContext = {
+              symbol: lastRes.symbol,
+              callers: Array.isArray(lastRes.callers) ? lastRes.callers.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
+              callees: Array.isArray(lastRes.callees) ? lastRes.callees.map((c: any) => typeof c === 'string' ? c : c.name || c.symbol).filter(Boolean) : undefined,
+            };
+          } else if (lastRes.blastRadius?.modifiedSymbols?.length > 0) {
+            activeCallGraphContext = {
+              symbol: lastRes.blastRadius.modifiedSymbols[0],
+              callers: Array.isArray(lastRes.blastRadius.directConsumers) ? lastRes.blastRadius.directConsumers : undefined,
+            };
+          }
+        }
+        if (!activeCallGraphContext) {
+          const hypSymbol = (validatedHypotheses[0] as any)?.symbol || (supportedHypotheses[0] as any)?.symbol;
+          if (hypSymbol) {
+            activeCallGraphContext = { symbol: hypSymbol };
+          }
+        }
+
+        const adviceInfo = this.toolAdvisor.advise({
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolResult: this.lastToolExecution?.result,
+          hasErrors: this.lastToolExecution?.result?.error !== undefined,
+          activeTaskTitle: activeTask?.title,
+          hasSubmittedSolution,
+          lastTargetFile: activeTargetFile,
+          callGraphContext: activeCallGraphContext,
+        });
+
+        // Hiển thị Step Header kèm Workflow Pipeline breadcrumb
+        if (!this._collapsePreferences.compactSteps) {
+          CLI.renderStepHeader(step, effectiveMaxSteps, {
+            phase: classification.phase,
+            activeTask: activeTask?.title,
+            playbook: adviceInfo.playbook,
+            risk: classification.risk,
+            isGoal,
+          });
+        }
+
+        this.eventBus?.emit('step:before', step, effectiveMaxSteps, classification.phase, { sessionId: session.id });
+        this.verificationPolicy.setRequiredRisk(classification.risk);
+        const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
+          workspaceDir: this._workspace.rootDir,
+          userRequest: turnUserRequest,
+        });
+        const gateToolSurface = recommendedToolDecision.toolSurface;
+        this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
+        const candidateProvider = toolControlMode === 'enforce'
+          ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, gateToolSurface.authorizedToolNames)
+          : this.toolProvider;
+        const dynamicRetrievalEnabled = this.loopOptions?.enableDynamicToolRetrieval !== false
+          && (toolControlMode === 'enforce' || candidateProvider.getAll().length >= 10);
+        const providerSize = candidateProvider.getAll().length;
+        const currentHypothesis = this.hypothesisTracker.getActiveHypothesis()
+          || this.hypothesisTracker.getSupportedHypotheses().slice(-1)[0]
+          || this.hypothesisTracker.getValidatedHypotheses().slice(-1)[0];
+        const retrievalState = this.stepRetrievalQueryBuilder.build({
+          userRequest: retrievalUserRequest,
+          activeTask,
+          phase: classification.phase,
+          taskClass: classification.taskClass,
+          hypothesis: currentHypothesis,
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolResult: this.lastToolExecution?.result,
+          allowedToolNames: toolControlMode === 'enforce'
+            ? gateToolSurface.authorizedToolNames
+            : candidateProvider.getAll().map((tool) => tool.name),
+        });
+        const activeStepQuery = retrievalState.query;
+        const stepCompletionState = getTurnCompletionState(session, turn);
+
+        const canRequestPhaseTransition = ['explore', 'plan', 'implement'].includes(classification.phase)
+          && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
+
+        let activeToolDeclarations: any[];
+        if (hasSubmittedSolution) {
+          // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
+          activeToolDeclarations = [];
+        } else if (
+          this.cachedTurnNumber === turn
+          && this.cachedTurnToolDeclarations
+          && this.cachedTurnToolProviderSize === providerSize
+          && this.cachedTurnToolPhase === classification.phase
+          && this.cachedTurnToolPhaseVersion === classification.phaseVersion
+          && this.cachedHasPlan === this.planManager.hasPlan()
+        ) {
+          // KV Cache Preservation: Tái sử dụng 100% Tool Declarations cố định của phase trong turn này,
+          // ngăn chặn việc re-retrieval sau mỗi tool call làm thay đổi thứ tự/danh sách tool prefix token.
+          activeToolDeclarations = [...this.cachedTurnToolDeclarations];
+        } else {
+          activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
+            ? candidateProvider.getRelevantTools({
               query: retrievalState.query,
               denseQuery: retrievalState.denseQuery,
               lexicalQuery: retrievalState.lexicalQuery,
@@ -1788,842 +1792,844 @@ export class AgentLoop {
               phase: classification.phase,
               codegraphIndexed: hasCodeGraphIndexSync(this._workspace.rootDir),
             })
-          : candidateProvider.getFunctionDeclarations();
+            : candidateProvider.getFunctionDeclarations();
 
-        // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
-        // In explore and plan phases, mutation tools are withheld from model-visible schemas so LLM physically cannot mutate
-        // before requesting a phase transition to implement.
-        if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-            ['run_command', 'git_command'].includes(tool.name)
-            || isOrchestrationTool(tool.name)
-            || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
-        }
+          // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
+          // In explore and plan phases, mutation tools are withheld from model-visible schemas so LLM physically cannot mutate
+          // before requesting a phase transition to implement.
+          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+              ['run_command', 'git_command'].includes(tool.name)
+              || isOrchestrationTool(tool.name)
+              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
+          }
 
-        // A transition request is a control primitive, not a retrieved task tool.
-        // Keep it visible whenever the current coding phase can accept one so the
-        // model never has to guess an unauthorized edit to advance its workflow.
-        if (!canRequestPhaseTransition) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
-        } else if (
-          candidateProvider.get('request_phase_transition')
-          && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
-        ) {
-          const transitionDeclaration = candidateProvider.getFunctionDeclarations()
-            .find((tool: any) => tool.name === 'request_phase_transition');
-          if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
-        }
+          // A transition request is a control primitive, not a retrieved task tool.
+          // Keep it visible whenever the current coding phase can accept one so the
+          // model never has to guess an unauthorized edit to advance its workflow.
+          if (!canRequestPhaseTransition) {
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
+          } else if (
+            candidateProvider.get('request_phase_transition')
+            && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
+          ) {
+            const transitionDeclaration = candidateProvider.getFunctionDeclarations()
+              .find((tool: any) => tool.name === 'request_phase_transition');
+            if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
+          }
 
-        if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
-          const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
-          if (!hasUpdatePlan) {
-            const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
-            if (updatePlanDecl) {
-              activeToolDeclarations.push(updatePlanDecl);
+          if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
+            const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
+            if (!hasUpdatePlan) {
+              const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
+              if (updatePlanDecl) {
+                activeToolDeclarations.push(updatePlanDecl);
+              }
+            }
+            // One-way state transition: Once a plan exists, hide create_plan so the model
+            // updates existing tasks with update_plan_task instead of overwriting the whole plan.
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'create_plan');
+          }
+
+          // Planning is opt-in, but once the user explicitly enters the plan
+          // phase without an existing plan, create_plan must be model-visible and runtime-authorized. Pin
+          // it after route filtering so declaration visibility and ToolScope stay
+          // aligned instead of producing an authorization loop.
+          if (classification.phase === 'plan' && !this.planManager.hasPlan() && candidateProvider.get('create_plan')
+            && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
+            const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
+              .find((tool: any) => tool.name === 'create_plan');
+            if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
+          }
+
+          // Keep a small, phase-appropriate exploration set visible even when
+          // relevance retrieval ranks it below task-specific tools.
+          if (gateToolSurface.visibleToolNames.length > 0) {
+            const declarationsByName = new Map(
+              candidateProvider.getFunctionDeclarations().map((tool: any) => [tool.name, tool]),
+            );
+            for (const name of gateToolSurface.visibleToolNames) {
+              const declaration = declarationsByName.get(name);
+              if (declaration && !activeToolDeclarations.some((tool: any) => tool.name === name)) {
+                activeToolDeclarations.push(declaration);
+              }
             }
           }
-          // One-way state transition: Once a plan exists, hide create_plan so the model
-          // updates existing tasks with update_plan_task instead of overwriting the whole plan.
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'create_plan');
-        }
 
-        // Planning is opt-in, but once the user explicitly enters the plan
-        // phase without an existing plan, create_plan must be model-visible and runtime-authorized. Pin
-        // it after route filtering so declaration visibility and ToolScope stay
-        // aligned instead of producing an authorization loop.
-        if (classification.phase === 'plan' && !this.planManager.hasPlan() && candidateProvider.get('create_plan')
-          && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
-          const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
-            .find((tool: any) => tool.name === 'create_plan');
-          if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
-        }
-
-        // Keep a small, phase-appropriate exploration set visible even when
-        // relevance retrieval ranks it below task-specific tools.
-        if (gateToolSurface.visibleToolNames.length > 0) {
-          const declarationsByName = new Map(
-            candidateProvider.getFunctionDeclarations().map((tool: any) => [tool.name, tool]),
-          );
-          for (const name of gateToolSurface.visibleToolNames) {
-            const declaration = declarationsByName.get(name);
-            if (declaration && !activeToolDeclarations.some((tool: any) => tool.name === name)) {
-              activeToolDeclarations.push(declaration);
-            }
+          // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
+          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+              ['run_command', 'git_command'].includes(tool.name)
+              || isOrchestrationTool(tool.name)
+              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
           }
+
+          // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
+          if (this.circuitBreakerTrippedTools.size > 0) {
+            activeToolDeclarations = activeToolDeclarations.filter(
+              (tool: any) => !this.circuitBreakerTrippedTools.has(tool.name),
+            );
+          }
+
+          // Canonical alphabetical sort: Đảm bảo thứ tự tool schemas luôn nhất quán tuyệt đối,
+          // bảo tồn nguyên vẹn KV Cache prefix qua từng step.
+          activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+
+          this.cachedTurnNumber = turn;
+          this.cachedTurnToolDeclarations = [...activeToolDeclarations];
+          this.cachedTurnToolProviderSize = providerSize;
+          this.cachedTurnToolPhase = classification.phase;
+          this.cachedTurnToolPhaseVersion = classification.phaseVersion;
+          this.cachedHasPlan = this.planManager.hasPlan();
         }
 
-        // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
-        if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-          activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-            ['run_command', 'git_command'].includes(tool.name)
-            || isOrchestrationTool(tool.name)
-            || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
-        }
-
-        // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
-        if (this.circuitBreakerTrippedTools.size > 0) {
-          activeToolDeclarations = activeToolDeclarations.filter(
-            (tool: any) => !this.circuitBreakerTrippedTools.has(tool.name),
-          );
-        }
-
-        // Canonical alphabetical sort: Đảm bảo thứ tự tool schemas luôn nhất quán tuyệt đối,
-        // bảo tồn nguyên vẹn KV Cache prefix qua từng step.
-        activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
-
-        this.cachedTurnNumber = turn;
-        this.cachedTurnToolDeclarations = [...activeToolDeclarations];
-        this.cachedTurnToolProviderSize = providerSize;
-        this.cachedTurnToolPhase = classification.phase;
-        this.cachedTurnToolPhaseVersion = classification.phaseVersion;
-        this.cachedHasPlan = this.planManager.hasPlan();
-      }
-
-      // Verification State tracking:
-      const completionVerificationSatisfied = this.verificationPolicy.canComplete([], undefined, {
-        userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest),
-      }).allowed
-        && stepCompletionState.hasMutations
-        && !hasSubmittedSolution;
-      const hasVerifiedTests = completionVerificationSatisfied && collectCompletionObservations(session, turn).some(item =>
-        item.result.seq > stepCompletionState.latestMutationSeq && !isToolResultFailure(item.payload)
-        && item.payload.exitCode === 0 && !item.payload.isBackgroundTask && item.payload.processStarted !== false
-        && (item.toolName === 'run_test_suite' || (item.toolName === 'run_command'
-          && /\b(?:test|pytest|vitest|jest)\b/.test(extractCommandString(item.args))
-          && isVerificationCommand(extractCommandString(item.args)))));
-      const evaluateTurnCritic = (answer: string, evidence?: ReturnType<CompletionEvidenceGate['evaluate']>) => {
-        const state = getTurnCompletionState(session, turn);
-        return (isSubagent || isMockLLM)
-          ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
-          : this.criticGate.evaluate({ finalAnswer: answer, session, workspace: this._workspace,
+        // Verification State tracking:
+        const completionVerificationSatisfied = this.verificationPolicy.canComplete([], undefined, {
+          userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest),
+        }).allowed
+          && stepCompletionState.hasMutations
+          && !hasSubmittedSolution;
+        const hasVerifiedTests = completionVerificationSatisfied && collectCompletionObservations(session, turn).some(item =>
+          item.result.seq > stepCompletionState.latestMutationSeq && !isToolResultFailure(item.payload)
+          && item.payload.exitCode === 0 && !item.payload.isBackgroundTask && item.payload.processStarted !== false
+          && (item.toolName === 'run_test_suite' || (item.toolName === 'run_command'
+            && /\b(?:test|pytest|vitest|jest)\b/.test(extractCommandString(item.args))
+            && isVerificationCommand(extractCommandString(item.args)))));
+        const evaluateTurnCritic = (answer: string, evidence?: ReturnType<CompletionEvidenceGate['evaluate']>) => {
+          const state = getTurnCompletionState(session, turn);
+          return (isSubagent || isMockLLM)
+            ? { approved: true, score: 100, invariantViolations: [], lspErrors: [], reasons: [] }
+            : this.criticGate.evaluate({
+              finalAnswer: answer, session, workspace: this._workspace,
               hypothesisTracker: this.hypothesisTracker, domainGuardian: this.domainIntentGuardian,
               userRequest: turnUserRequest, turn, hasSubmittedSolution, filesModified: state.filesModified,
-              completionState: state, evidenceDecision: evidence, risk: initialTurnClassification.risk });
-      };
+              completionState: state, evidenceDecision: evidence, risk: initialTurnClassification.risk
+            });
+        };
 
-      const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
-      const reliableRouteDecision = decideReliableToolRoute({
-        userRequest: turnUserRequest,
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolResult: this.lastToolExecution?.result,
-        visibleToolNames: activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean),
-        trajectory: this.trajectorySteps,
-        evidenceSufficient: this.isEvidenceSufficient(),
-      });
-      this.reliableToolOrchestrationTelemetry.recordDecision(reliableRouteDecision);
-      this.eventBus?.emit('router:decision', reliableRouteDecision);
-      activeToolDeclarations = applyReliableToolRouteToDeclarations(
-        activeToolDeclarations,
-        reliableRouteDecision,
-        reliableToolOrchestrationMode,
-      );
+        const reliableToolOrchestrationMode = resolveReliableToolOrchestrationMode();
+        const reliableRouteDecision = decideReliableToolRoute({
+          userRequest: turnUserRequest,
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolResult: this.lastToolExecution?.result,
+          visibleToolNames: activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean),
+          trajectory: this.trajectorySteps,
+          evidenceSufficient: this.isEvidenceSufficient(),
+        });
+        this.reliableToolOrchestrationTelemetry.recordDecision(reliableRouteDecision);
+        this.eventBus?.emit('router:decision', reliableRouteDecision);
+        activeToolDeclarations = applyReliableToolRouteToDeclarations(
+          activeToolDeclarations,
+          reliableRouteDecision,
+          reliableToolOrchestrationMode,
+        );
 
-      // Completion is a control primitive, not an optional relevance match.
-      // Pin the same declaration on every pre-submission step (cache-stable),
-      // including read-only investigation and plan phases.
-      if (!hasSubmittedSolution && candidateProvider.get('submit_solution')
-        && !activeToolDeclarations.some((tool: any) => tool.name === 'submit_solution')) {
-        const declaration = candidateProvider.getFunctionDeclarations()
-          .find((tool: any) => tool.name === 'submit_solution');
-        if (declaration) activeToolDeclarations.push(declaration);
-        activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
-      }
+        // Completion is a control primitive, not an optional relevance match.
+        // Pin the same declaration on every pre-submission step (cache-stable),
+        // including read-only investigation and plan phases.
+        if (!hasSubmittedSolution && candidateProvider.get('submit_solution')
+          && !activeToolDeclarations.some((tool: any) => tool.name === 'submit_solution')) {
+          const declaration = candidateProvider.getFunctionDeclarations()
+            .find((tool: any) => tool.name === 'submit_solution');
+          if (declaration) activeToolDeclarations.push(declaration);
+          activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
+        }
 
-      const readySubmission = !hasSubmittedSolution && candidateProvider.get('submit_solution')
-        ? submissionReadiness.current(submissionSnapshot()) : undefined;
-      // Keep declarations cache-stable; expose only submit through tool choice
-      // and enforce the identical runtime scope, including control mode off.
-      const retrievedVisibleToolNames = readySubmission ? ['submit_solution']
-        : activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
-      const expectedToolNames = gateToolSurface.authorizedToolNames.filter((name) => {
-        if (hasSubmittedSolution) return false;
-        return true;
-      });
-      this.contextQualityEvaluator.recordToolRetrieval(retrievedVisibleToolNames, expectedToolNames);
-      // P1: runtime authorization uses the gate allowlist + control pins, not the
-      // retrieval-pruned visible subset. Retrieval stays a soft relevance hint for
-      // the model; hard denial only applies to tools the gate never authorized
-      // (or to intentional hard locks below). This removes allowed-vs-visible
-      // desync that previously wasted a model step on TOOL_NOT_ALLOWED_THIS_TURN.
-      const reliableConstrainsScope = reliableToolOrchestrationMode === 'enforce'
-        && reliableRouteDecision.constrainSafe
-        && !reliableRouteDecision.failOpen;
-      let runtimeAuthorizedToolNames: string[];
-      if (hasSubmittedSolution) {
-        runtimeAuthorizedToolNames = [];
-      } else if (readySubmission || reliableConstrainsScope) {
-        runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
-      } else {
-        const authorizedSet = new Set<string>(gateToolSurface.authorizedToolNames);
-        for (const name of retrievedVisibleToolNames) authorizedSet.add(name);
-        runtimeAuthorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
-        if (runtimeAuthorizedToolNames.length === 0) runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
-      }
-      const toolSurface = createToolSurface(runtimeAuthorizedToolNames, retrievedVisibleToolNames);
-      const { authorizedToolNames: authorizedToolNames, visibleToolNames } = toolSurface;
-      const activeToolSetHash = hashAllowedToolSet(authorizedToolNames);
-      const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
-      const hasRuntimeToolScope = toolControlMode === 'enforce'
-        || reliableConstrainsScope || Boolean(readySubmission);
-      const stepToolProvider = hasRuntimeToolScope
-        ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, authorizedToolNames)
-        : this.toolProvider;
-      const stepToolRunner = hasRuntimeToolScope
-        ? this.toolRunner.createScoped(stepToolProvider)
-        : this.toolRunner;
-      if (toolControlMode !== 'off') {
+        const readySubmission = !hasSubmittedSolution && candidateProvider.get('submit_solution')
+          ? submissionReadiness.current(submissionSnapshot()) : undefined;
+        // Keep declarations cache-stable; expose only submit through tool choice
+        // and enforce the identical runtime scope, including control mode off.
+        const retrievedVisibleToolNames = readySubmission ? ['submit_solution']
+          : activeToolDeclarations.map((tool: any) => String(tool.name)).filter(Boolean).sort();
+        const expectedToolNames = gateToolSurface.authorizedToolNames.filter((name) => {
+          if (hasSubmittedSolution) return false;
+          return true;
+        });
+        this.contextQualityEvaluator.recordToolRetrieval(retrievedVisibleToolNames, expectedToolNames);
+        // P1: runtime authorization uses the gate allowlist + control pins, not the
+        // retrieval-pruned visible subset. Retrieval stays a soft relevance hint for
+        // the model; hard denial only applies to tools the gate never authorized
+        // (or to intentional hard locks below). This removes allowed-vs-visible
+        // desync that previously wasted a model step on TOOL_NOT_ALLOWED_THIS_TURN.
+        const reliableConstrainsScope = reliableToolOrchestrationMode === 'enforce'
+          && reliableRouteDecision.constrainSafe
+          && !reliableRouteDecision.failOpen;
+        let runtimeAuthorizedToolNames: string[];
+        if (hasSubmittedSolution) {
+          runtimeAuthorizedToolNames = [];
+        } else if (readySubmission || reliableConstrainsScope) {
+          runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
+        } else {
+          const authorizedSet = new Set<string>(gateToolSurface.authorizedToolNames);
+          for (const name of retrievedVisibleToolNames) authorizedSet.add(name);
+          runtimeAuthorizedToolNames = [...authorizedSet].filter((name) => candidateProvider.get(name) !== undefined).sort();
+          if (runtimeAuthorizedToolNames.length === 0) runtimeAuthorizedToolNames = [...retrievedVisibleToolNames];
+        }
+        const toolSurface = createToolSurface(runtimeAuthorizedToolNames, retrievedVisibleToolNames);
+        const { authorizedToolNames: authorizedToolNames, visibleToolNames } = toolSurface;
+        const activeToolSetHash = hashAllowedToolSet(authorizedToolNames);
+        const activeDecisionId = `${recommendedToolDecision.id}-p${classification.phaseVersion}-${activeToolSetHash.slice(0, 8)}`;
+        const hasRuntimeToolScope = toolControlMode === 'enforce'
+          || reliableConstrainsScope || Boolean(readySubmission);
+        const stepToolProvider = hasRuntimeToolScope
+          ? new ToolScope(`turn-${turn}-step-${step}-runtime`, candidateProvider, authorizedToolNames)
+          : this.toolProvider;
+        const stepToolRunner = hasRuntimeToolScope
+          ? this.toolRunner.createScoped(stepToolProvider)
+          : this.toolRunner;
+        if (toolControlMode !== 'off') {
+          session.append('control/decision', {
+            turn,
+            step,
+            controlDecision: {
+              mode: toolControlMode,
+              classification,
+              paretoEvidence,
+              toolDecision: {
+                ...recommendedToolDecision,
+                toolSurface,
+                id: activeDecisionId,
+                phaseVersion: classification.phaseVersion,
+                visibleToolNames,
+                authorizedToolNames,
+                allowedToolNames: authorizedToolNames,
+                allowedToolSetHash: activeToolSetHash,
+              },
+            },
+          });
+        }
+        if (reliableToolOrchestrationMode !== 'off') {
+          session.append('control/decision', {
+            turn,
+            step,
+            controlDecision: {
+              kind: 'reliable-tool-orchestration',
+              mode: reliableToolOrchestrationMode,
+              route: reliableRouteDecision,
+              visibleToolNames,
+              metrics: this.reliableToolOrchestrationTelemetry.snapshot(),
+            },
+          });
+        }
+
+        const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
+        const activeScaffold = this.cognitiveHarness.createScaffold({
+          request: turnUserRequest,
+          phase: classification.phase,
+          activeTask: activeTask?.title,
+          consecutiveFailures: consecutiveFails,
+          hasAttachments: hasAttachmentAnchors,
+          anchorPaths: attachmentAnchors,
+        });
+        const compactScaffoldPrompt = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
+        const legacyScaffoldPrompt = step === 1 || consecutiveFails > 1
+          ? compactScaffoldPrompt
+          : '';
+        const legacyPlanContext = this.planManager.renderExecutionContext();
+        const planRequirements = this.planManager.getRequirements();
+        const isStepPlanOrReadOnly = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+        const stepPlanBlocker = isStepPlanOrReadOnly ? undefined : this.planManager.getCompletionBlocker();
+        const planBlocked = Boolean(stepPlanBlocker?.includes('graph-blocked'));
+        const stepPlanContext = this.planManager.renderStepPromptContext({
+          phase: classification.phase,
+          includeFull: classification.phase === 'plan'
+            || planBlocked
+            || this.planManager.getReadyTasks().length > 1,
+        });
+        const candidateAdvicePrompt = this.toolAdvisor.formatAdvicePrompt({
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolResult: this.lastToolExecution?.result,
+          hasErrors: this.lastToolExecution?.result?.error !== undefined,
+          activeTaskTitle: activeTask?.title,
+          activeTaskAcceptance: activeTask?.acceptanceCriteria,
+          guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
+          userRequest: turnUserRequest,
+          hasSubmittedSolution,
+          trajectory: this.trajectorySteps,
+          evidenceSufficient: this.isEvidenceSufficient(),
+          repairCyclesExhausted: this.verificationPolicy.isRepairExhausted(),
+          lastTargetFile: activeTargetFile,
+          callGraphContext: activeCallGraphContext,
+        });
+        const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
+        const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
+        const detectedPromptCtx = detectPromptContext(this._workspace, this.toolProvider, turnUserRequest);
+        const promptDecision = this.stepPromptPolicy.decide({
+          activeStepQuery,
+          userRequest: turnUserRequest,
+          fingerprint: retrievalState.fingerprint,
+          isFrontendWorkspace: detectedPromptCtx.isFrontend,
+          touchedFiles: Array.from(this.targetFilesModifiedInTurn),
+          hasCodebaseTools: detectedPromptCtx.hasCodebaseTools,
+          hasSubagentTools: detectedPromptCtx.hasSubagentTools,
+          gitWorkflowObservations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
+          gitWorkflowMayEdit: !isReadOnlyRequest(turnUserRequest),
+          gitWorkflowImplementationRequested: gitCodeChangeRequested,
+          gitWorkflowImplementationReady: gitImplementationReady(),
+          failureSignature: this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})
+            ? `${this.lastToolExecution.toolName}:failed`
+            : undefined,
+          classification,
+          previousPhase: priorClassification?.phase,
+          activeTask,
+          hasPlan: this.planManager.hasPlan(),
+          planRequired: planRequirements.required,
+          planIncomplete: this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted(),
+          planBlocked,
+          readyTaskCount: this.planManager.getReadyTasks().length,
+          visibleToolNames,
+          lastToolName: this.lastToolExecution?.toolName,
+          lastToolResult: this.lastToolExecution?.result,
+          consecutiveFailures: consecutiveFails,
+          hasValidatedHypothesis,
+          paretoEvidenceSufficient: paretoEvidence.hasSufficientEvidence,
+          paretoUncertainty: paretoEvidence.uncertainty,
+          hasSubmittedSolution,
+          hasVerifiedTests,
+          activeAgentCount: this.agentRegistry.list().filter((agent) => (
+            agent.id !== this.agentId && ['running', 'waiting'].includes(agent.status)
+          )).length,
+          hasAttachments: hasAttachmentAnchors,
+          harnessProfileName: harnessProfile.profileName,
+          cascadeFrozen: this.cascadeFreeze !== undefined,
+          cascadeReason: this.cascadeFreeze
+            ? `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}`
+            : undefined,
+          evidenceScore: paretoEvidence.score,
+          evidenceThreshold: paretoEvidence.threshold,
+          evidenceReasons: paretoEvidence.reasons,
+          reproductionEnforced: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn) === false
+            && classification.taskClass === 'bugfix'
+            && (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce'
+              || configuredEvidenceGateMode() === 'enforce'),
+          hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
+          candidates: {
+            legacyPlanContext,
+            stepPlanContext,
+            advicePrompt: candidateAdvicePrompt,
+            advicePlaybook: adviceInfo.playbook,
+            harnessGuidance: harnessProfile.guidance,
+            scaffoldPrompt: compactScaffoldPrompt,
+            legacyScaffoldPrompt,
+          },
+        }, stepPromptMode);
         session.append('control/decision', {
           turn,
           step,
           controlDecision: {
-            mode: toolControlMode,
-            classification,
-            paretoEvidence,
-            toolDecision: {
-              ...recommendedToolDecision,
-              toolSurface,
-              id: activeDecisionId,
-              phaseVersion: classification.phaseVersion,
-              visibleToolNames,
-              authorizedToolNames,
-              allowedToolNames: authorizedToolNames,
-              allowedToolSetHash: activeToolSetHash,
+            stepPromptDecision: {
+              requestedMode: promptDecision.requestedMode,
+              effectiveMode: promptDecision.effectiveMode,
+              conservativeFallback: promptDecision.conservativeFallback,
+              reasonCodes: promptDecision.reasonCodes,
+              selectedPlaybooks: promptDecision.selectedPlaybooks,
+              selectedGitPlaybook: promptDecision.selectedGitPlaybook,
+              gitWorkflow: promptDecision.gitWorkflow,
+              fingerprint: retrievalState.fingerprint,
+              estimatedTokensBefore: promptDecision.estimatedTokensBefore,
+              estimatedTokensAfter: promptDecision.estimatedTokensAfter,
+              estimatedTokensSaved: promptDecision.estimatedTokensSaved,
+              injectedEstimatedTokens: promptDecision.injectedEstimatedTokens,
             },
           },
         });
-      }
-      if (reliableToolOrchestrationMode !== 'off') {
-        session.append('control/decision', {
-          turn,
-          step,
-          controlDecision: {
-            kind: 'reliable-tool-orchestration',
-            mode: reliableToolOrchestrationMode,
-            route: reliableRouteDecision,
-            visibleToolNames,
-            metrics: this.reliableToolOrchestrationTelemetry.snapshot(),
-          },
-        });
-      }
+        if (promptDecision.scaffoldPrompt && !this._collapsePreferences.compactSteps) {
+          CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
+        }
 
-      const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
-      const activeScaffold = this.cognitiveHarness.createScaffold({
-        request: turnUserRequest,
-        phase: classification.phase,
-        activeTask: activeTask?.title,
-        consecutiveFailures: consecutiveFails,
-        hasAttachments: hasAttachmentAnchors,
-        anchorPaths: attachmentAnchors,
-      });
-      const compactScaffoldPrompt = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
-      const legacyScaffoldPrompt = step === 1 || consecutiveFails > 1
-        ? compactScaffoldPrompt
-        : '';
-      const legacyPlanContext = this.planManager.renderExecutionContext();
-      const planRequirements = this.planManager.getRequirements();
-      const isStepPlanOrReadOnly = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
-      const stepPlanBlocker = isStepPlanOrReadOnly ? undefined : this.planManager.getCompletionBlocker();
-      const planBlocked = Boolean(stepPlanBlocker?.includes('graph-blocked'));
-      const stepPlanContext = this.planManager.renderStepPromptContext({
-        phase: classification.phase,
-        includeFull: classification.phase === 'plan'
-          || planBlocked
-          || this.planManager.getReadyTasks().length > 1,
-      });
-      const candidateAdvicePrompt = this.toolAdvisor.formatAdvicePrompt({
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolResult: this.lastToolExecution?.result,
-        hasErrors: this.lastToolExecution?.result?.error !== undefined,
-        activeTaskTitle: activeTask?.title,
-        activeTaskAcceptance: activeTask?.acceptanceCriteria,
-        guardianDiagnosis: this.lastToolExecution?.guardianDiagnosis,
-        userRequest: turnUserRequest,
-        hasSubmittedSolution,
-        trajectory: this.trajectorySteps,
-        evidenceSufficient: this.isEvidenceSufficient(),
-        repairCyclesExhausted: this.verificationPolicy.isRepairExhausted(),
-        lastTargetFile: activeTargetFile,
-        callGraphContext: activeCallGraphContext,
-      });
-      const harnessProfile = resolveRuntimeHarnessProfile(classification.taskClass, classification.phase);
-      const stepPromptMode = resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode);
-      const detectedPromptCtx = detectPromptContext(this._workspace, this.toolProvider, turnUserRequest);
-      const promptDecision = this.stepPromptPolicy.decide({
-        activeStepQuery,
-        userRequest: turnUserRequest,
-        fingerprint: retrievalState.fingerprint,
-        isFrontendWorkspace: detectedPromptCtx.isFrontend,
-        touchedFiles: Array.from(this.targetFilesModifiedInTurn),
-        hasCodebaseTools: detectedPromptCtx.hasCodebaseTools,
-        hasSubagentTools: detectedPromptCtx.hasSubagentTools,
-        gitWorkflowObservations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
-        gitWorkflowMayEdit: !isReadOnlyRequest(turnUserRequest),
-        gitWorkflowImplementationRequested: gitCodeChangeRequested,
-        gitWorkflowImplementationReady: gitImplementationReady(),
-        failureSignature: this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})
-          ? `${this.lastToolExecution.toolName}:failed`
-          : undefined,
-        classification,
-        previousPhase: priorClassification?.phase,
-        activeTask,
-        hasPlan: this.planManager.hasPlan(),
-        planRequired: planRequirements.required,
-        planIncomplete: this.planManager.hasPlan() && !this.planManager.isAllTasksCompleted(),
-        planBlocked,
-        readyTaskCount: this.planManager.getReadyTasks().length,
-        visibleToolNames,
-        lastToolName: this.lastToolExecution?.toolName,
-        lastToolResult: this.lastToolExecution?.result,
-        consecutiveFailures: consecutiveFails,
-        hasValidatedHypothesis,
-        paretoEvidenceSufficient: paretoEvidence.hasSufficientEvidence,
-        paretoUncertainty: paretoEvidence.uncertainty,
-        hasSubmittedSolution,
-        hasVerifiedTests,
-        activeAgentCount: this.agentRegistry.list().filter((agent) => (
-          agent.id !== this.agentId && ['running', 'waiting'].includes(agent.status)
-        )).length,
-        hasAttachments: hasAttachmentAnchors,
-        harnessProfileName: harnessProfile.profileName,
-        cascadeFrozen: this.cascadeFreeze !== undefined,
-        cascadeReason: this.cascadeFreeze
-          ? `${this.cascadeFreeze.count} consecutive failures share one error signature: ${this.cascadeFreeze.signature.slice(0, 200)}`
-          : undefined,
-        evidenceScore: paretoEvidence.score,
-        evidenceThreshold: paretoEvidence.threshold,
-        evidenceReasons: paretoEvidence.reasons,
-        reproductionEnforced: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn) === false
-          && classification.taskClass === 'bugfix'
-          && (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce'
-            || configuredEvidenceGateMode() === 'enforce'),
-        hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
-        candidates: {
-          legacyPlanContext,
-          stepPlanContext,
-          advicePrompt: candidateAdvicePrompt,
-          advicePlaybook: adviceInfo.playbook,
-          harnessGuidance: harnessProfile.guidance,
-          scaffoldPrompt: compactScaffoldPrompt,
-          legacyScaffoldPrompt,
-        },
-      }, stepPromptMode);
-      session.append('control/decision', {
-        turn,
-        step,
-        controlDecision: {
-          stepPromptDecision: {
-            requestedMode: promptDecision.requestedMode,
-            effectiveMode: promptDecision.effectiveMode,
-            conservativeFallback: promptDecision.conservativeFallback,
-            reasonCodes: promptDecision.reasonCodes,
-            selectedPlaybooks: promptDecision.selectedPlaybooks,
-            selectedGitPlaybook: promptDecision.selectedGitPlaybook,
-            gitWorkflow: promptDecision.gitWorkflow,
-            fingerprint: retrievalState.fingerprint,
-            estimatedTokensBefore: promptDecision.estimatedTokensBefore,
-            estimatedTokensAfter: promptDecision.estimatedTokensAfter,
-            estimatedTokensSaved: promptDecision.estimatedTokensSaved,
-            injectedEstimatedTokens: promptDecision.injectedEstimatedTokens,
-          },
-        },
-      });
-      if (promptDecision.scaffoldPrompt && !this._collapsePreferences.compactSteps) {
-        CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
-      }
+        let response;
+        // Keep the static prefix cacheable. Enforced step playbooks are selected below and
+        // placed in the budgeted dynamic suffix; off/shadow retain the legacy section.
+        const promptAssemblyCtx = {
+          ...detectedPromptCtx,
+          includeStaticToolPlaybooks: promptDecision.includeStaticToolPlaybooks,
+          includeStaticGitOperations: promptDecision.includeStaticGitOperations,
+          includeStaticFrontendUI: promptDecision.includeStaticFrontendUI,
+          includeStaticCodebaseIntelligence: promptDecision.includeStaticCodebaseIntelligence,
+          includeStaticTaskOrchestrator: promptDecision.includeStaticTaskOrchestrator,
+        };
+        const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
+        const rawPlanContext = promptDecision.planContext;
+        const advicePrompt = promptDecision.advicePrompt;
+        const cognitiveScaffoldText = promptDecision.scaffoldPrompt;
+        // Intent-Gated Memory Retrieval:
+        // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
+        // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
+        //   + Tắt Graph Repository Map (tiết kiệm 1.600 tokens)
+        //   + Thu nhỏ ngân sách Repository Memory xuống ~300 tokens
+        //   + Giảm số lượng relevantMemory xuống tối đa 2
+        // - Phase 'explore' / 'plan' hoặc complexity 'large' -> Tác vụ bao quát: Nạp đầy đủ ngân sách
+        const isLocalizedExecution = classification.phase === 'implement'
+          || classification.phase === 'verify'
+          || classification.phase === 'release'
+          || classification.complexity === 'trivial'
+          || classification.complexity === 'small'
+          || classification.fastPath;
 
-      let response;
-      // Keep the static prefix cacheable. Enforced step playbooks are selected below and
-      // placed in the budgeted dynamic suffix; off/shadow retain the legacy section.
-      const promptAssemblyCtx = {
-        ...detectedPromptCtx,
-        includeStaticToolPlaybooks: promptDecision.includeStaticToolPlaybooks,
-        includeStaticGitOperations: promptDecision.includeStaticGitOperations,
-        includeStaticFrontendUI: promptDecision.includeStaticFrontendUI,
-        includeStaticCodebaseIntelligence: promptDecision.includeStaticCodebaseIntelligence,
-        includeStaticTaskOrchestrator: promptDecision.includeStaticTaskOrchestrator,
-      };
-      const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
-      const rawPlanContext = promptDecision.planContext;
-      const advicePrompt = promptDecision.advicePrompt;
-      const cognitiveScaffoldText = promptDecision.scaffoldPrompt;
-      // Intent-Gated Memory Retrieval:
-      // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
-      // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
-      //   + Tắt Graph Repository Map (tiết kiệm 1.600 tokens)
-      //   + Thu nhỏ ngân sách Repository Memory xuống ~300 tokens
-      //   + Giảm số lượng relevantMemory xuống tối đa 2
-      // - Phase 'explore' / 'plan' hoặc complexity 'large' -> Tác vụ bao quát: Nạp đầy đủ ngân sách
-      const isLocalizedExecution = classification.phase === 'implement'
-        || classification.phase === 'verify'
-        || classification.phase === 'release'
-        || classification.complexity === 'trivial'
-        || classification.complexity === 'small'
-        || classification.fastPath;
+        const configuredRepoMemTokens = this.loopOptions?.repositoryMemoryTokens ?? 1_000;
+        const configuredRepoMapTokens = this.loopOptions?.repositoryMapTokens ?? 1_600;
 
-      const configuredRepoMemTokens = this.loopOptions?.repositoryMemoryTokens ?? 1_000;
-      const configuredRepoMapTokens = this.loopOptions?.repositoryMapTokens ?? 1_600;
+        const explicitRepoMap = this.loopOptions?.enableGraphRepositoryMap === true;
+        const explicitRepoMem = this.loopOptions?.enableRepositoryMemory === true;
 
-      const explicitRepoMap = this.loopOptions?.enableGraphRepositoryMap === true;
-      const explicitRepoMem = this.loopOptions?.enableRepositoryMemory === true;
+        // Step 1 Adaptive Footprint:
+        // Tại step 1 của turn, agent chưa khoanh vùng được file/symbol mục tiêu.
+        // Dù tác vụ non-localized, việc bung toàn bộ 1.600 tokens Graph Map hoặc 1.000 tokens Repo Mem là quá sớm và gây nghẽn ngân sách.
+        // Cấp soft footprint: Graph Map tối đa 400 tokens, Repo Mem tối đa 300 tokens ở Step 1.
+        // Khi step >= 2 hoặc khi chuyển sang phase 'plan' (cần DAG đa file), bung đầy đủ ngân sách cấu hình.
+        const isStepOneExploration = step === 1 && classification.phase === 'explore';
 
-      // Step 1 Adaptive Footprint:
-      // Tại step 1 của turn, agent chưa khoanh vùng được file/symbol mục tiêu.
-      // Dù tác vụ non-localized, việc bung toàn bộ 1.600 tokens Graph Map hoặc 1.000 tokens Repo Mem là quá sớm và gây nghẽn ngân sách.
-      // Cấp soft footprint: Graph Map tối đa 400 tokens, Repo Mem tối đa 300 tokens ở Step 1.
-      // Khi step >= 2 hoặc khi chuyển sang phase 'plan' (cần DAG đa file), bung đầy đủ ngân sách cấu hình.
-      const isStepOneExploration = step === 1 && classification.phase === 'explore';
-
-      const effectiveRepoMemTokens = (isLocalizedExecution && !explicitRepoMem)
-        ? Math.min(300, configuredRepoMemTokens)
-        : (isStepOneExploration && !explicitRepoMem)
+        const effectiveRepoMemTokens = (isLocalizedExecution && !explicitRepoMem)
           ? Math.min(300, configuredRepoMemTokens)
-          : configuredRepoMemTokens;
-      const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
-        ? 0
-        : (isStepOneExploration && !explicitRepoMap)
-          ? Math.min(400, configuredRepoMapTokens)
-          : configuredRepoMapTokens;
+          : (isStepOneExploration && !explicitRepoMem)
+            ? Math.min(300, configuredRepoMemTokens)
+            : configuredRepoMemTokens;
+        const effectiveRepoMapTokens = (isLocalizedExecution && !explicitRepoMap)
+          ? 0
+          : (isStepOneExploration && !explicitRepoMap)
+            ? Math.min(400, configuredRepoMapTokens)
+            : configuredRepoMapTokens;
 
-      const activeTokenConfig = typeof llm.getTokenConfig === 'function'
-        ? (llm.getTokenConfig() || {})
-        : {};
-      const activeModelName = llm?.getActiveProvider?.()?.name
-        || llm?.modelName
-        || llm?.constructor?.name
-        || 'unknown';
+        const activeTokenConfig = typeof llm.getTokenConfig === 'function'
+          ? (llm.getTokenConfig() || {})
+          : {};
+        const activeModelName = llm?.getActiveProvider?.()?.name
+          || llm?.modelName
+          || llm?.constructor?.name
+          || 'unknown';
 
-      // Satellite 4: Dynamic Harness Zero-Base Trimming
-      const inputBudgetMax = activeTokenConfig.maxInputTokens || 128_000;
-      const historyTokens = ContextCompactor.countHistoryTokens(session.getHistory(), activeModelName);
-      const historyPressureRatio = historyTokens / inputBudgetMax;
-      const isHighHistoryPressure = historyPressureRatio >= 0.50;
+        // Satellite 4: Dynamic Harness Zero-Base Trimming
+        const inputBudgetMax = activeTokenConfig.maxInputTokens || 128_000;
+        const historyTokens = ContextCompactor.countHistoryTokens(session.getHistory(), activeModelName);
+        const historyPressureRatio = historyTokens / inputBudgetMax;
+        const isHighHistoryPressure = historyPressureRatio >= 0.50;
 
-      const mockModel = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
-      const shouldRecallRepoMem = explicitRepoMem
-        ? (effectiveRepoMemTokens > 0)
-        : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
-      const shouldRenderRepoMap = explicitRepoMap
-        ? (effectiveRepoMapTokens > 0)
-        : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && !isHighHistoryPressure && effectiveRepoMapTokens > 0);
+        const mockModel = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+        const shouldRecallRepoMem = explicitRepoMem
+          ? (effectiveRepoMemTokens > 0)
+          : (this.loopOptions?.enableRepositoryMemory !== false && effectiveRepoMemTokens > 0);
+        const shouldRenderRepoMap = explicitRepoMap
+          ? (effectiveRepoMapTokens > 0)
+          : (this.loopOptions?.enableGraphRepositoryMap !== false && !mockModel && !isHighHistoryPressure && effectiveRepoMapTokens > 0);
 
-      const memoryLimit = isLocalizedExecution ? 2 : 4;
-      const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
-      const memoryPrompt = relevantMemory.length > 0
-        ? [
-          '[VERIFIED RELEVANT PROJECT MEMORY]',
-          ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
-        ].join('\n')
-        : '';
-      const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
-      const composeState = this.kernel?.ctx.compose.getState();
-      let repositoryMemoryContext = '';
-      let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
-      let repositoryContext = '';
-      const dynamicCacheEnabled = this.loopOptions?.enableDynamicContextCache
-        ?? envFeatureEnabled('MINUS_DYNAMIC_CONTEXT_CACHE');
-      const dynamicCacheKey = JSON.stringify({
-        workspace: this._workspace.rootDir,
-        // Source acquisition is stable across read-only steps. Query-specific
-        // ranking remains in the lightweight arbitration/retrieval layer.
-        taskIntent: turnUserRequest,
-        activeTask: activeTask ? {
-          id: activeTask.id,
-          writeSet: activeTask.writeSet,
-          symbols: activeTask.symbols,
-        } : undefined,
-        registeredFiles: composeState?.registeredFiles || [],
-        repositoryMemoryEnabled: shouldRecallRepoMem,
-        repositoryMemoryTokens: effectiveRepoMemTokens,
-        repositoryMapEnabled: shouldRenderRepoMap,
-        repositoryMapTokens: effectiveRepoMapTokens,
-      });
-      const cachedDynamicContext = dynamicCacheEnabled
-        ? this.dynamicContextCache.get(dynamicCacheKey)
-        : undefined;
-      if (cachedDynamicContext) {
-        repositoryMemoryContext = cachedDynamicContext.repositoryMemoryContext;
-        repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
-        repositoryContext = cachedDynamicContext.repositoryContext;
-      } else {
-        // Tối ưu hóa Latency: Thực thi song song Repository Memory Recall và Repository Map Render
-        const repoMemPromise = shouldRecallRepoMem
-          ? this.repositoryMemory.recall(activeStepQuery, {
+        const memoryLimit = isLocalizedExecution ? 2 : 4;
+        const relevantMemory = this.memoryManager.getRelevantMemory(activeStepQuery, session, memoryLimit);
+        const memoryPrompt = relevantMemory.length > 0
+          ? [
+            '[VERIFIED RELEVANT PROJECT MEMORY]',
+            ...relevantMemory.map((item) => `- [${item.key}; confidence=${item.confidence.toFixed(2)}] ${item.insight}`),
+          ].join('\n')
+          : '';
+        const composeContext = this.kernel?.ctx.compose.renderExecutionContext() || '';
+        const composeState = this.kernel?.ctx.compose.getState();
+        let repositoryMemoryContext = '';
+        let repositoryMemoryRecords: Awaited<ReturnType<CitationValidatedRepositoryMemory['recall']>>['records'] = [];
+        let repositoryContext = '';
+        const dynamicCacheEnabled = this.loopOptions?.enableDynamicContextCache
+          ?? envFeatureEnabled('MINUS_DYNAMIC_CONTEXT_CACHE');
+        const dynamicCacheKey = JSON.stringify({
+          workspace: this._workspace.rootDir,
+          // Source acquisition is stable across read-only steps. Query-specific
+          // ranking remains in the lightweight arbitration/retrieval layer.
+          taskIntent: turnUserRequest,
+          activeTask: activeTask ? {
+            id: activeTask.id,
+            writeSet: activeTask.writeSet,
+            symbols: activeTask.symbols,
+          } : undefined,
+          registeredFiles: composeState?.registeredFiles || [],
+          repositoryMemoryEnabled: shouldRecallRepoMem,
+          repositoryMemoryTokens: effectiveRepoMemTokens,
+          repositoryMapEnabled: shouldRenderRepoMap,
+          repositoryMapTokens: effectiveRepoMapTokens,
+        });
+        const cachedDynamicContext = dynamicCacheEnabled
+          ? this.dynamicContextCache.get(dynamicCacheKey)
+          : undefined;
+        if (cachedDynamicContext) {
+          repositoryMemoryContext = cachedDynamicContext.repositoryMemoryContext;
+          repositoryMemoryRecords = cachedDynamicContext.repositoryMemoryRecords;
+          repositoryContext = cachedDynamicContext.repositoryContext;
+        } else {
+          // Tối ưu hóa Latency: Thực thi song song Repository Memory Recall và Repository Map Render
+          const repoMemPromise = shouldRecallRepoMem
+            ? this.repositoryMemory.recall(activeStepQuery, {
               limit: isLocalizedExecution && !explicitRepoMem ? 4 : 12,
               maxTokens: effectiveRepoMemTokens,
             }).catch(() => ({ rendered: '', records: [] }))
-          : Promise.resolve({ rendered: '', records: [] });
+            : Promise.resolve({ rendered: '', records: [] });
 
-        const baseRepoQuery = [
-          activeStepQuery,
-          ...relevantMemory.map((item) => item.insight),
-        ].filter(Boolean).join('\n');
+          const baseRepoQuery = [
+            activeStepQuery,
+            ...relevantMemory.map((item) => item.insight),
+          ].filter(Boolean).join('\n');
 
-        const baseSeedFiles = [
-          ...(activeTask?.readSet || []),
-          ...(activeTask?.writeSet || []),
-          ...(currentHypothesis?.targetFiles || []),
-          ...retrievalState.discoveredFiles,
-          ...(composeState?.registeredFiles || []),
-          // @-attached anchors steer the graph map toward the attachment neighborhood.
-          ...attachmentAnchors,
-        ];
+          const baseSeedFiles = [
+            ...(activeTask?.readSet || []),
+            ...(activeTask?.writeSet || []),
+            ...(currentHypothesis?.targetFiles || []),
+            ...retrievalState.discoveredFiles,
+            ...(composeState?.registeredFiles || []),
+            // @-attached anchors steer the graph map toward the attachment neighborhood.
+            ...attachmentAnchors,
+          ];
 
-        const baseSeedSymbols = [
-          ...(activeTask?.symbols || []),
-          ...retrievalState.discoveredSymbols,
-        ];
+          const baseSeedSymbols = [
+            ...(activeTask?.symbols || []),
+            ...retrievalState.discoveredSymbols,
+          ];
 
-        const repoMapPromise = shouldRenderRepoMap
-          ? this.repositoryMap.renderContext(baseRepoQuery, {
+          const repoMapPromise = shouldRenderRepoMap
+            ? this.repositoryMap.renderContext(baseRepoQuery, {
               maxTokens: effectiveRepoMapTokens,
               seedFiles: baseSeedFiles,
               seedSymbols: baseSeedSymbols,
             }).catch((error: any) => `[GRAPH-RANKED REPOSITORY MAP DEGRADED]\n${error?.message || String(error)}`)
-          : Promise.resolve('');
+            : Promise.resolve('');
 
-        const [recalled, renderedMap] = await Promise.all([repoMemPromise, repoMapPromise]);
+          const [recalled, renderedMap] = await Promise.all([repoMemPromise, repoMapPromise]);
 
-        repositoryMemoryContext = recalled.rendered;
-        repositoryMemoryRecords = recalled.records;
-        repositoryContext = renderedMap;
+          repositoryMemoryContext = recalled.rendered;
+          repositoryMemoryRecords = recalled.records;
+          repositoryContext = renderedMap;
 
-        if (dynamicCacheEnabled) {
-          this.dynamicContextCache.set(dynamicCacheKey, {
-            repositoryMemoryContext,
-            repositoryMemoryRecords,
-            repositoryContext,
-          });
+          if (dynamicCacheEnabled) {
+            this.dynamicContextCache.set(dynamicCacheKey, {
+              repositoryMemoryContext,
+              repositoryMemoryRecords,
+              repositoryContext,
+            });
+          }
         }
-      }
-      // Selective Re-injection: Truy hồi các turn cũ, observation đã bị mask hoặc anti-pattern nếu có độ tương đồng cao với query bước hiện tại
-      let recalledTurnContext = '';
-      if (
-        this.turnMemoryRetriever.getArchivedTurnCount() > 0 ||
-        this.turnMemoryRetriever.getMaskedObservationCount() > 0 ||
-        this.turnMemoryRetriever.getAntiPatternCount() > 0 ||
-        this.turnMemoryRetriever.getLivingPlaybook().getBulletCount() > 0
-      ) {
-        try {
-          recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
-            topK: 2,
-            minScore: 0.65,
-            activeFiles: [
-              ...(activeTask?.readSet || []),
-              ...(activeTask?.writeSet || []),
-              ...(currentHypothesis?.targetFiles || []),
-              ...retrievalState.discoveredFiles,
-            ],
-          });
-        } catch {
-          // Fail-open
+        // Selective Re-injection: Truy hồi các turn cũ, observation đã bị mask hoặc anti-pattern nếu có độ tương đồng cao với query bước hiện tại
+        let recalledTurnContext = '';
+        if (
+          this.turnMemoryRetriever.getArchivedTurnCount() > 0 ||
+          this.turnMemoryRetriever.getMaskedObservationCount() > 0 ||
+          this.turnMemoryRetriever.getAntiPatternCount() > 0 ||
+          this.turnMemoryRetriever.getLivingPlaybook().getBulletCount() > 0
+        ) {
+          try {
+            recalledTurnContext = await this.turnMemoryRetriever.retrieveContextSnippet(activeStepQuery, {
+              topK: 2,
+              minScore: 0.65,
+              activeFiles: [
+                ...(activeTask?.readSet || []),
+                ...(activeTask?.writeSet || []),
+                ...(currentHypothesis?.targetFiles || []),
+                ...retrievalState.discoveredFiles,
+              ],
+            });
+          } catch {
+            // Fail-open
+          }
         }
-      }
 
-      // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
-      const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
-        taskClass: classification.taskClass,
-        risk: classification.risk,
-        reversibility: classification.reversibility,
-        hasValidatedHypothesis,
-        hasSupportedHypothesis: supportedHypothesisCount > 0,
-        evidenceSufficient: paretoEvidence.hasSufficientEvidence,
-        evidenceScore: paretoEvidence.score,
-        evidenceThreshold: paretoEvidence.threshold,
-        targetFile: activeTargetFile,
-      });
-
-      // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
-      const phaseTransitionRecovery = this.lastToolExecution?.toolName === 'request_phase_transition'
-        ? this.lastToolExecution.result?._system_phase_transition_recovery
-        : undefined;
-      // P2: surface the cheap authorization-denial recovery on the next step
-      // without counting it as a consecutive failure.
-      const authorizationRecovery = this.lastToolExecution?.result?._system_tool_authorization_recovery;
-      const rawReflection = [
-        phaseTransitionRecovery,
-        authorizationRecovery,
-        this.reflectionEngine.getLastReflectionPrompt(),
-      ].filter(Boolean).join('\n\n');
-      let strategicPivotGuidance: string | undefined;
-      if (consecutiveFails >= 2) {
-        strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: ${consecutiveFails} consecutive failures provide feedback that the current approach is weak. Do not repeat the same action. Inspect the newest failure, compare it with the current hypothesis, run the smallest discriminating check, then revise or replace the hypothesis before another mutation.`;
-      }
-      if (consecutiveFails >= 3) {
-        // Tự động đúc kết lỗi lặp lại thành Anti-Pattern lưu vào bộ nhớ dài hạn
-        this.turnMemoryRetriever.recordAntiPattern({
-          id: `ap-${turn}-${step}`,
-          triggerPattern: turnUserRequest.slice(0, 80),
-          failedApproach: `Consecutive failures (${consecutiveFails}) in phase ${classification.phase} while handling: ${turnUserRequest.slice(0, 60)}`,
-          negativeConstraint: 'Avoid repeated unverified edits; verify each hypothesis with isolated test reproduction first.',
+        // Tier 2: Dynamic Phase Guidance (Pareto 80/20 & Cache-Safe Dynamic Tail Injection)
+        const phaseGuidance = resolvePhaseDynamicGuidance(classification.phase, {
           taskClass: classification.taskClass,
-          timestamp: new Date().toISOString(),
-        }).catch(() => {});
-      }
-      const snapshotNudge = this.pendingSnapshotNudge;
-      this.pendingSnapshotNudge = undefined;
-      const reflectionContext = [rawReflection, strategicPivotGuidance, snapshotNudge].filter(Boolean).join('\n\n');
+          risk: classification.risk,
+          reversibility: classification.reversibility,
+          hasValidatedHypothesis,
+          hasSupportedHypothesis: supportedHypothesisCount > 0,
+          evidenceSufficient: paretoEvidence.hasSufficientEvidence,
+          evidenceScore: paretoEvidence.score,
+          evidenceThreshold: paretoEvidence.threshold,
+          targetFile: activeTargetFile,
+        });
 
-      // Phase 4: Auto-Convergence Directive when all verification tests passed
-      let completionDirective: string | undefined;
-      if (readySubmission) {
-        const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
-        completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
-      } else if (completionVerificationSatisfied) {
-        completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
-      } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
-        completionDirective = '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: When the answer is ready, return it directly as the final answer — do not call submit_solution for read-only answers. No code edit or test is required. A concise answer is valid; do not invent edits or verification. Return the answer in the user\'s language.';
-      }
-
-      // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
-      // Gated to prevent context dilution and latency/accuracy degradation
-      const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
-      const baselineRisk: BlastRadiusRisk =
-        (classification.risk === 'R5' || classification.risk === 'R4') ? 'CRITICAL' :
-        classification.risk === 'R3' ? 'HIGH' :
-        classification.risk === 'R2' ? 'MEDIUM' : 'LOW';
-      const effectiveEpistemicRisk: BlastRadiusRisk = activeHypothesis?.blastRadius
-        || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
-
-      const isInvestigativeExplore = (classification.phase === 'explore' || (classification.phase as string) === 'investigate') && (
-        detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery
-        || detectLeadingQuery(turnUserRequest).isLeading
-        || classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-      );
-
-      const epistemicResult = this.epistemicEngine.investigate({
-        hypothesis: activeHypothesis,
-        phase: classification.phase === 'release' ? 'verify' : classification.phase,
-        risk: effectiveEpistemicRisk,
-        consecutiveFailures: consecutiveFails,
-        recentError: rawReflection || undefined,
-        targetFiles: activeHypothesis?.targetFiles,
-        proposedFixSummary: activeHypothesis?.proposedFix,
-        workspaceRoot: this._workspace.rootDir,
-        skepticalCriticActive: isInvestigativeExplore,
-      });
-
-      if (epistemicResult.activated) {
-        if (epistemicResult.dialecticalVerdict) {
-          this.hypothesisTracker.attachEpistemicVerdict(
-            activeHypothesis?.id,
-            epistemicResult.dialecticalVerdict,
-            epistemicResult.speculativeRollout,
-          );
+        // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
+        const phaseTransitionRecovery = this.lastToolExecution?.toolName === 'request_phase_transition'
+          ? this.lastToolExecution.result?._system_phase_transition_recovery
+          : undefined;
+        // P2: surface the cheap authorization-denial recovery on the next step
+        // without counting it as a consecutive failure.
+        const authorizationRecovery = this.lastToolExecution?.result?._system_tool_authorization_recovery;
+        const rawReflection = [
+          phaseTransitionRecovery,
+          authorizationRecovery,
+          this.reflectionEngine.getLastReflectionPrompt(),
+        ].filter(Boolean).join('\n\n');
+        let strategicPivotGuidance: string | undefined;
+        if (consecutiveFails >= 2) {
+          strategicPivotGuidance = `🛑 [STRATEGIC PIVOT DIRECTIVE]: ${consecutiveFails} consecutive failures provide feedback that the current approach is weak. Do not repeat the same action. Inspect the newest failure, compare it with the current hypothesis, run the smallest discriminating check, then revise or replace the hypothesis before another mutation.`;
         }
-        if (process.env.MINUS_SHOW_EPISTEMIC === 'true' || process.env.MINUS_SHOW_EPISTEMIC === '1') {
-          CLI.renderEpistemicProgress({
-            hypothesisId: activeHypothesis?.id,
-            targetFiles: activeHypothesis?.targetFiles,
-            dialecticalVerdict: epistemicResult.dialecticalVerdict,
-            speculativeRollout: epistemicResult.speculativeRollout,
-            distilledTokens: epistemicResult.dialecticalVerdict?.distilledTokens,
-          });
+        if (consecutiveFails >= 3) {
+          // Tự động đúc kết lỗi lặp lại thành Anti-Pattern lưu vào bộ nhớ dài hạn
+          this.turnMemoryRetriever.recordAntiPattern({
+            id: `ap-${turn}-${step}`,
+            triggerPattern: turnUserRequest.slice(0, 80),
+            failedApproach: `Consecutive failures (${consecutiveFails}) in phase ${classification.phase} while handling: ${turnUserRequest.slice(0, 60)}`,
+            negativeConstraint: 'Avoid repeated unverified edits; verify each hypothesis with isolated test reproduction first.',
+            taskClass: classification.taskClass,
+            timestamp: new Date().toISOString(),
+          }).catch(() => { });
         }
-      }
-      const epistemicVerdictContext = epistemicResult.activated ? epistemicResult.distilledContext : undefined;
+        const snapshotNudge = this.pendingSnapshotNudge;
+        this.pendingSnapshotNudge = undefined;
+        const reflectionContext = [rawReflection, strategicPivotGuidance, snapshotNudge].filter(Boolean).join('\n\n');
 
-      const hypothesisContext = this.hypothesisTracker.toScratchpad();
-      const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
-      const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
-      // Retain the handoff across subsequent steps: a boundary compaction can mask
-      // the underlying observations in model history, while the phase event remains durable.
-      const phaseHandoff = buildPhaseContextHandoff(
-        session,
-        turn,
-        classification.phase,
-        this.hypothesisTracker.getLatestHypothesis(),
-        this.verificationPolicy.getPendingTargetedTests(),
-      );
-      const phaseJustChanged = exploreCompletedNow
-        || Boolean(priorClassification && priorClassification.phase !== classification.phase);
+        // Phase 4: Auto-Convergence Directive when all verification tests passed
+        let completionDirective: string | undefined;
+        if (readySubmission) {
+          const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
+          completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
+        } else if (completionVerificationSatisfied) {
+          completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
+        } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
+          completionDirective = '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: When the answer is ready, return it directly as the final answer — do not call submit_solution for read-only answers. No code edit or test is required. A concise answer is valid; do not invent edits or verification. Return the answer in the user\'s language.';
+        }
 
-      // Khử trùng lặp chéo giữa history[0] (Warm-Start) và Dynamic Tail ở Step 1:
-      const historyZeroText = session.getHistory()[0]?.parts?.[0]?.text || '';
-      const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE SCAFFOLD ACTIVE');
-      const historyHasWarmMemory = historyZeroText.includes('[SESSION / GOAL MEMORY');
+        // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
+        // Gated to prevent context dilution and latency/accuracy degradation
+        const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+        const baselineRisk: BlastRadiusRisk =
+          (classification.risk === 'R5' || classification.risk === 'R4') ? 'CRITICAL' :
+            classification.risk === 'R3' ? 'HIGH' :
+              classification.risk === 'R2' ? 'MEDIUM' : 'LOW';
+        const effectiveEpistemicRisk: BlastRadiusRisk = activeHypothesis?.blastRadius
+          || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
 
-      // 1. Khử trùng lặp Cognitive Scaffold: Nếu history[0] đã chứa khung System 2 từ Warm-Start
-      // và không có lỗi liên tiếp (consecutiveFails < 2), thì tại Step 1 không nạp lại ở đuôi dynamic context.
-      const effectiveScaffoldText = (step === 1 && historyHasWarmScaffold && consecutiveFails < 2)
-        ? undefined
-        : cognitiveScaffoldText;
+        const isInvestigativeExplore = (classification.phase === 'explore' || (classification.phase as string) === 'investigate') && (
+          detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery
+          || detectLeadingQuery(turnUserRequest).isLeading
+          || classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+        );
 
-      // 2. Khử trùng lặp Project Memory: Nếu history[0] đã chứa [SESSION / GOAL MEMORY],
-      // thì tại Step 1 các mục memory insight đã được nạp ở đầu tin nhắn.
-      const effectiveMemoryPrompt = (step === 1 && historyHasWarmMemory)
-        ? ''
-        : memoryPrompt;
+        const epistemicResult = this.epistemicEngine.investigate({
+          hypothesis: activeHypothesis,
+          phase: classification.phase === 'release' ? 'verify' : classification.phase,
+          risk: effectiveEpistemicRisk,
+          consecutiveFailures: consecutiveFails,
+          recentError: rawReflection || undefined,
+          targetFiles: activeHypothesis?.targetFiles,
+          proposedFixSummary: activeHypothesis?.proposedFix,
+          workspaceRoot: this._workspace.rootDir,
+          skepticalCriticActive: isInvestigativeExplore,
+        });
 
-      // 3. Step 1 Tool Advice Gating: Khi chưa có tool nào chạy và người dùng không báo lỗi,
-      // lời khuyên discovery chỉ lặp lại Core System Prompt và Phase Explore Guidance. Bỏ qua ở Step 1.
-      const hasInitialBugIntent = !this.lastToolExecution?.toolName && detectBugReportIntent(turnUserRequest);
-      const effectiveAdvicePrompt = (step === 1 && !this.lastToolExecution?.toolName && !hasInitialBugIntent)
-        ? undefined
-        : advicePrompt;
-
-      // Khối prompt khuyến khích LLM chạy lệnh test thông qua run_command trong các trường hợp cần thiết
-      // (khi LLM gọi các công cụ Edit chỉ 1 đến 2 lần thì không truyền khối prompt này)
-      let testVerificationEncouragement: string | undefined;
-      if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0
-        && !isUserExplicitlyExemptingTests(turnUserRequest)) {
-        if (classification.risk === 'R1') {
-          testVerificationEncouragement = `[VERIFICATION OPTIONS]: Inspect diagnostics and follow the measured DYNAMIC VERIFICATION requirement; classification R1 alone does not waive impacted behavioral tests.`;
-        } else {
-          const [detectedCmd, detectedBuildCmd, detectedIntegrationCmd] = await Promise.all([
-            detectWorkspaceTestCommand(this._workspace.rootDir),
-            detectWorkspaceBuildCommand(this._workspace.rootDir),
-            detectWorkspaceIntegrationTestCommand(this._workspace.rootDir),
-          ]);
-          const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
-          const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
-          const touchesIntegration = touchesIntegrationLayer(this.targetFilesModifiedInTurn);
-
-          let integrationGuidance = '';
-          if (detectedIntegrationCmd && touchesIntegration) {
-            integrationGuidance = `\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration layers. If needed by the current verification contract and user scope, the workspace offers \`${detectedIntegrationCmd}\`. Select the relevant checks and report the results actually observed.`;
-          } else if (touchesIntegration) {
-            integrationGuidance = '\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration components. Choose a relevant check within the user scope when required by the current verification contract; do not start services or claim cross-service correctness without authorization and observed results.';
+        if (epistemicResult.activated) {
+          if (epistemicResult.dialecticalVerdict) {
+            this.hypothesisTracker.attachEpistemicVerdict(
+              activeHypothesis?.id,
+              epistemicResult.dialecticalVerdict,
+              epistemicResult.speculativeRollout,
+            );
           }
-
-          testVerificationEncouragement = `[VERIFICATION OPTIONS]: You have made ${this.editToolCallsInTurn} source-code edits. Follow the current verification contract and user scope. Available checks include static diagnostics/build${buildHint} or relevant project tests${cmdHint}; their availability does not require a full test suite. Report only verification actually performed.${integrationGuidance}`;
-        }
-      }
-
-      // Every model-visible dynamic block enters one arbiter. A preliminary pass
-      // provides the footprint used by latency guidance; the final pass includes it.
-      const dynamicBudgetTokens = this.dynamicContextArbiter.getBudget();
-      // P0: phase/tool authority directive rides inside the non-truncatable P1.5
-      // phaseGuidance slot so the model always sees the exact authorized list.
-      const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
-        canRequestPhaseTransition,
-        hasSubmittedSolution,
-        isReadOnly: classification.risk === 'R0' || classification.reversibility === 'read-only',
-      });
-      let paretoGateReminder: string | undefined;
-      if (['bugfix', 'refactor', 'security'].includes(classification.taskClass)) {
-        // Phase advance lives in the P1.5 tool-authority directive; restate only the live score here.
-        if (classification.risk === 'R1') {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file before editing.`;
-        } else if (classification.risk === 'R2') {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file and run diagnostics before editing.`;
-        } else {
-          paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target. R3 bugfix/security need observed reproduction; planned R3 refactor may proceed after target inspection.`;
-        }
-      }
-      let warmStartTopoMap: string | undefined;
-      if (step === 1 && !this._collapsePreferences.compactSteps && !isSubagent) {
-        try {
-          const topoResult = await generateWarmStartTopology({
-            workspaceRootDir: this._workspace.rootDir,
-            userPrompt: turnUserRequest,
-            maxFiles: 4,
-            maxTokens: 220,
-          });
-          if (topoResult.rendered) {
-            warmStartTopoMap = topoResult.rendered;
+          if (process.env.MINUS_SHOW_EPISTEMIC === 'true' || process.env.MINUS_SHOW_EPISTEMIC === '1') {
+            CLI.renderEpistemicProgress({
+              hypothesisId: activeHypothesis?.id,
+              targetFiles: activeHypothesis?.targetFiles,
+              dialecticalVerdict: epistemicResult.dialecticalVerdict,
+              speculativeRollout: epistemicResult.speculativeRollout,
+              distilledTokens: epistemicResult.dialecticalVerdict?.distilledTokens,
+            });
           }
-        } catch {
-          // Graceful fallback
         }
-      }
+        const epistemicVerdictContext = epistemicResult.activated ? epistemicResult.distilledContext : undefined;
 
-      // Satellite 4: Dynamic Harness Zero-Base Trimming
-      const trimmedAdvicePrompt = isHighHistoryPressure ? undefined : effectiveAdvicePrompt;
-      const trimmedScaffoldText = effectiveScaffoldText;
-      const trimmedToolPlaybooks = isHighHistoryPressure ? undefined : promptDecision.toolPlaybookPrompt;
-      const trimmedGitPlaybook = isHighHistoryPressure ? undefined : promptDecision.gitPlaybookPrompt;
-      const trimmedWarmStartTopoMap = isHighHistoryPressure ? undefined : warmStartTopoMap;
-      const trimmedRepositoryContext = isHighHistoryPressure ? '' : repositoryContext;
-      const trimmedHarnessGuidance = isHighHistoryPressure
-        ? (classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
+        const hypothesisContext = this.hypothesisTracker.toScratchpad();
+        const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
+        const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
+        // Retain the handoff across subsequent steps: a boundary compaction can mask
+        // the underlying observations in model history, while the phase event remains durable.
+        const phaseHandoff = buildPhaseContextHandoff(
+          session,
+          turn,
+          classification.phase,
+          this.hypothesisTracker.getLatestHypothesis(),
+          this.verificationPolicy.getPendingTargetedTests(),
+        );
+        const phaseJustChanged = exploreCompletedNow
+          || Boolean(priorClassification && priorClassification.phase !== classification.phase);
+
+        // Khử trùng lặp chéo giữa history[0] (Warm-Start) và Dynamic Tail ở Step 1:
+        const historyZeroText = session.getHistory()[0]?.parts?.[0]?.text || '';
+        const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE SCAFFOLD ACTIVE');
+        const historyHasWarmMemory = historyZeroText.includes('[SESSION / GOAL MEMORY');
+
+        // 1. Khử trùng lặp Cognitive Scaffold: Nếu history[0] đã chứa khung System 2 từ Warm-Start
+        // và không có lỗi liên tiếp (consecutiveFails < 2), thì tại Step 1 không nạp lại ở đuôi dynamic context.
+        const effectiveScaffoldText = (step === 1 && historyHasWarmScaffold && consecutiveFails < 2)
+          ? undefined
+          : cognitiveScaffoldText;
+
+        // 2. Khử trùng lặp Project Memory: Nếu history[0] đã chứa [SESSION / GOAL MEMORY],
+        // thì tại Step 1 các mục memory insight đã được nạp ở đầu tin nhắn.
+        const effectiveMemoryPrompt = (step === 1 && historyHasWarmMemory)
+          ? ''
+          : memoryPrompt;
+
+        // 3. Step 1 Tool Advice Gating: Khi chưa có tool nào chạy và người dùng không báo lỗi,
+        // lời khuyên discovery chỉ lặp lại Core System Prompt và Phase Explore Guidance. Bỏ qua ở Step 1.
+        const hasInitialBugIntent = !this.lastToolExecution?.toolName && detectBugReportIntent(turnUserRequest);
+        const effectiveAdvicePrompt = (step === 1 && !this.lastToolExecution?.toolName && !hasInitialBugIntent)
+          ? undefined
+          : advicePrompt;
+
+        // Khối prompt khuyến khích LLM chạy lệnh test thông qua run_command trong các trường hợp cần thiết
+        // (khi LLM gọi các công cụ Edit chỉ 1 đến 2 lần thì không truyền khối prompt này)
+        let testVerificationEncouragement: string | undefined;
+        if (this.editToolCallsInTurn > 2 && !hasVerifiedTests && this.targetFilesModifiedInTurn.size > 0
+          && !isUserExplicitlyExemptingTests(turnUserRequest)) {
+          if (classification.risk === 'R1') {
+            testVerificationEncouragement = `[VERIFICATION OPTIONS]: Inspect diagnostics and follow the measured DYNAMIC VERIFICATION requirement; classification R1 alone does not waive impacted behavioral tests.`;
+          } else {
+            const [detectedCmd, detectedBuildCmd, detectedIntegrationCmd] = await Promise.all([
+              detectWorkspaceTestCommand(this._workspace.rootDir),
+              detectWorkspaceBuildCommand(this._workspace.rootDir),
+              detectWorkspaceIntegrationTestCommand(this._workspace.rootDir),
+            ]);
+            const cmdHint = detectedCmd ? ` (e.g.: \`${detectedCmd}\`)` : '';
+            const buildHint = detectedBuildCmd ? ` (e.g.: \`${detectedBuildCmd}\`)` : '';
+            const touchesIntegration = touchesIntegrationLayer(this.targetFilesModifiedInTurn);
+
+            let integrationGuidance = '';
+            if (detectedIntegrationCmd && touchesIntegration) {
+              integrationGuidance = `\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration layers. If needed by the current verification contract and user scope, the workspace offers \`${detectedIntegrationCmd}\`. Select the relevant checks and report the results actually observed.`;
+            } else if (touchesIntegration) {
+              integrationGuidance = '\n[INTEGRATION VERIFICATION OPTION]: The changed files touch integration components. Choose a relevant check within the user scope when required by the current verification contract; do not start services or claim cross-service correctness without authorization and observed results.';
+            }
+
+            testVerificationEncouragement = `[VERIFICATION OPTIONS]: You have made ${this.editToolCallsInTurn} source-code edits. Follow the current verification contract and user scope. Available checks include static diagnostics/build${buildHint} or relevant project tests${cmdHint}; their availability does not require a full test suite. Report only verification actually performed.${integrationGuidance}`;
+          }
+        }
+
+        // Every model-visible dynamic block enters one arbiter. A preliminary pass
+        // provides the footprint used by latency guidance; the final pass includes it.
+        const dynamicBudgetTokens = this.dynamicContextArbiter.getBudget();
+        // P0: phase/tool authority directive rides inside the non-truncatable P1.5
+        // phaseGuidance slot so the model always sees the exact authorized list.
+        const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
+          canRequestPhaseTransition,
+          hasSubmittedSolution,
+          isReadOnly: classification.risk === 'R0' || classification.reversibility === 'read-only',
+        });
+        let paretoGateReminder: string | undefined;
+        if (['bugfix', 'refactor', 'security'].includes(classification.taskClass)) {
+          // Phase advance lives in the P1.5 tool-authority directive; restate only the live score here.
+          if (classification.risk === 'R1') {
+            paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file before editing.`;
+          } else if (classification.risk === 'R2') {
+            paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect target with read_file and run diagnostics before editing.`;
+          } else {
+            paretoGateReminder = `[PRE-MUTATION GATE]: Turn evidence ${paretoEvidence.score}/${paretoEvidence.threshold}; inspect each exact target. R3 bugfix/security need observed reproduction; planned R3 refactor may proceed after target inspection.`;
+          }
+        }
+        let warmStartTopoMap: string | undefined;
+        if (step === 1 && !this._collapsePreferences.compactSteps && !isSubagent) {
+          try {
+            const topoResult = await generateWarmStartTopology({
+              workspaceRootDir: this._workspace.rootDir,
+              userPrompt: turnUserRequest,
+              maxFiles: 4,
+              maxTokens: 220,
+            });
+            if (topoResult.rendered) {
+              warmStartTopoMap = topoResult.rendered;
+            }
+          } catch {
+            // Graceful fallback
+          }
+        }
+
+        // Satellite 4: Dynamic Harness Zero-Base Trimming
+        const trimmedAdvicePrompt = isHighHistoryPressure ? undefined : effectiveAdvicePrompt;
+        const trimmedScaffoldText = effectiveScaffoldText;
+        const trimmedToolPlaybooks = isHighHistoryPressure ? undefined : promptDecision.toolPlaybookPrompt;
+        const trimmedGitPlaybook = isHighHistoryPressure ? undefined : promptDecision.gitPlaybookPrompt;
+        const trimmedWarmStartTopoMap = isHighHistoryPressure ? undefined : warmStartTopoMap;
+        const trimmedRepositoryContext = isHighHistoryPressure ? '' : repositoryContext;
+        const trimmedHarnessGuidance = isHighHistoryPressure
+          ? (classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
             ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
             : undefined)
-        : [
+          : [
             promptDecision.harnessGuidance,
             classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
               ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
               : undefined,
           ].filter(Boolean).join('\n');
 
-      // Resend-skip: a stable block already sent in a prior step's suffix adds
-      // no information by repeating (same tradeoff as the P4/P6 history
-      // dedup). Step 1 always sends since prior suffixes are empty.
-      const priorSuffixes = [...this.stepDynamicSuffixes.values()];
-      const resendIfNew = (text?: string) =>
-        text && priorSuffixes.some((suffix) => suffix.includes(text)) ? undefined : text;
+        // Resend-skip: a stable block already sent in a prior step's suffix adds
+        // no information by repeating (same tradeoff as the P4/P6 history
+        // dedup). Step 1 always sends since prior suffixes are empty.
+        const priorSuffixes = [...this.stepDynamicSuffixes.values()];
+        const resendIfNew = (text?: string) =>
+          text && priorSuffixes.some((suffix) => suffix.includes(text)) ? undefined : text;
 
-      const arbitrationInputs = {
-        instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
-        responseLanguageDirective: resendIfNew('[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.'),
-        completionDirective,
-        advicePrompt: trimmedAdvicePrompt,
-        testVerificationEncouragement,
-        reflectionContext,
-        strongAdvisory: promptDecision.strongAdvisoryPrompt,
-        cognitiveScaffold: resendIfNew(trimmedScaffoldText),
-        warmStartTopoMap: trimmedWarmStartTopoMap,
-        toolPlaybooks: trimmedToolPlaybooks,
-        gitPlaybook: trimmedGitPlaybook,
-        frontendGuidance: promptDecision.dynamicFrontendGuidance,
-        codebaseIntelligenceGuidance: promptDecision.dynamicCodebaseIntelligenceGuidance,
-        orchestratorGuidance: promptDecision.dynamicOrchestratorGuidance,
-        harnessGuidance: trimmedHarnessGuidance,
-        epistemicVerdictContext,
-        hypothesisContext: resendIfNew(hypothesisContext),
-        hypothesisGuidance,
-        domainContractContext,
-        paretoGateReminder,
-        phaseGuidance: [phaseGuidance, this.verificationPolicy.formatVerificationGuidance({
-          hasCallers: this.editTouchedCallers, blastRisk: this.maxEditBlastRisk,
-        }, isUserExplicitlyExemptingTests(turnUserRequest))].filter(Boolean).join('\n'),
-        phaseToolAuthority: resendIfNew(phaseToolDirective),
-        phaseHandoff: phaseHandoff?.text,
-        rawPlanContext,
-        recalledTurnContext,
-        memoryPrompt: effectiveMemoryPrompt,
-        composeContext,
-        repositoryMemoryContext,
-        repositoryContext: trimmedRepositoryContext,
-      };
-      const arbitrationOptions = {
-        maxBudgetTokens: dynamicBudgetTokens,
-        modelName: activeModelName,
-        consecutiveFailures: consecutiveFails,
-        retrievalQuery: activeStepQuery,
-        existingHistoryContext: historyZeroText,
-        risk: classification.risk,
-        minRepoMapFloorTokens: (classification.risk === 'R3' || classification.taskClass === 'refactor') ? 350 : undefined,
-      };
-      // Single-pass arbitration (KV-cache stable): arbitrate once without latency
-      // guidance, reserving headroom for it when it will certainly be appended
-      // (step > 1). The guidance is appended verbatim instead of re-arbitrating
-      // the whole context, so the dynamic prefix stays byte-identical and the
-      // second full arbitrate (dedup + recounts) is skipped.
-      const LATENCY_GUIDANCE_RESERVE_TOKENS = 150;
-      const latencyGuidanceReserved = step > 1;
-      const baseArbitration = this.dynamicContextArbiter.arbitrate(
-        arbitrationInputs,
-        latencyGuidanceReserved
-          ? { ...arbitrationOptions, maxBudgetTokens: Math.max(300, dynamicBudgetTokens - LATENCY_GUIDANCE_RESERVE_TOKENS) }
-          : arbitrationOptions,
-      );
-      // One history projection per step: getHistory() rebuilds + clones the full
-      // event log, so capture once and reuse for footprint + budget input.
-      // No session appends affecting the projection happen before the request.
-      const preCompactionHistory = session.getHistory();
-      const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
-      const preliminaryFootprint = this.latencyOrchestrator.estimateRequest({
-        systemPrompt: assembledSystemPrompt,
-        tools: activeToolDeclarations,
-        history: preCompactionHistory,
-        dynamicContext: baseArbitration.renderedContext,
-        maxInputTokens: activeTokenConfig.maxInputTokens,
-        maxOutputTokens: activeTokenConfig.maxOutputTokens,
-      });
-      const shouldIncludeLatencyGuidance = step > 1
-        || preliminaryFootprint.estimatedInputTokens > (activeTokenConfig.maxInputTokens || 128000) * 0.7;
-      const latencyGuidance = shouldIncludeLatencyGuidance
-        ? this.latencyOrchestrator.buildGuidance({
+        const arbitrationInputs = {
+          instructionHierarchyAnchor: SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
+          responseLanguageDirective: resendIfNew('[RESPONSE LANGUAGE]: Respond to the user in the same natural language as their current request. This applies to every user-facing explanation and the final answer. Do not let the language of system instructions, tool output, source code, or prior assistant messages override the current user request. Keep code, commands, paths, identifiers, and quoted external text unchanged unless translation is explicitly requested.'),
+          completionDirective,
+          advicePrompt: trimmedAdvicePrompt,
+          testVerificationEncouragement,
+          reflectionContext,
+          strongAdvisory: promptDecision.strongAdvisoryPrompt,
+          cognitiveScaffold: resendIfNew(trimmedScaffoldText),
+          warmStartTopoMap: trimmedWarmStartTopoMap,
+          toolPlaybooks: trimmedToolPlaybooks,
+          gitPlaybook: trimmedGitPlaybook,
+          frontendGuidance: promptDecision.dynamicFrontendGuidance,
+          codebaseIntelligenceGuidance: promptDecision.dynamicCodebaseIntelligenceGuidance,
+          orchestratorGuidance: promptDecision.dynamicOrchestratorGuidance,
+          harnessGuidance: trimmedHarnessGuidance,
+          epistemicVerdictContext,
+          hypothesisContext: resendIfNew(hypothesisContext),
+          hypothesisGuidance,
+          domainContractContext,
+          paretoGateReminder,
+          phaseGuidance: [phaseGuidance, this.verificationPolicy.formatVerificationGuidance({
+            hasCallers: this.editTouchedCallers, blastRisk: this.maxEditBlastRisk,
+          }, isUserExplicitlyExemptingTests(turnUserRequest))].filter(Boolean).join('\n'),
+          phaseToolAuthority: resendIfNew(phaseToolDirective),
+          phaseHandoff: phaseHandoff?.text,
+          rawPlanContext,
+          recalledTurnContext,
+          memoryPrompt: effectiveMemoryPrompt,
+          composeContext,
+          repositoryMemoryContext,
+          repositoryContext: trimmedRepositoryContext,
+        };
+        const arbitrationOptions = {
+          maxBudgetTokens: dynamicBudgetTokens,
+          modelName: activeModelName,
+          consecutiveFailures: consecutiveFails,
+          retrievalQuery: activeStepQuery,
+          existingHistoryContext: historyZeroText,
+          risk: classification.risk,
+          minRepoMapFloorTokens: (classification.risk === 'R3' || classification.taskClass === 'refactor') ? 350 : undefined,
+        };
+        // Single-pass arbitration (KV-cache stable): arbitrate once without latency
+        // guidance, reserving headroom for it when it will certainly be appended
+        // (step > 1). The guidance is appended verbatim instead of re-arbitrating
+        // the whole context, so the dynamic prefix stays byte-identical and the
+        // second full arbitrate (dedup + recounts) is skipped.
+        const LATENCY_GUIDANCE_RESERVE_TOKENS = 150;
+        const latencyGuidanceReserved = step > 1;
+        const baseArbitration = this.dynamicContextArbiter.arbitrate(
+          arbitrationInputs,
+          latencyGuidanceReserved
+            ? { ...arbitrationOptions, maxBudgetTokens: Math.max(300, dynamicBudgetTokens - LATENCY_GUIDANCE_RESERVE_TOKENS) }
+            : arbitrationOptions,
+        );
+        // One history projection per step: getHistory() rebuilds + clones the full
+        // event log, so capture once and reuse for footprint + budget input.
+        // No session appends affecting the projection happen before the request.
+        const preCompactionHistory = session.getHistory();
+        const latencyProfile = this.latencyOrchestrator.getModelProfile(activeModelName, activeTokenConfig);
+        const preliminaryFootprint = this.latencyOrchestrator.estimateRequest({
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          history: preCompactionHistory,
+          dynamicContext: baseArbitration.renderedContext,
+          maxInputTokens: activeTokenConfig.maxInputTokens,
+          maxOutputTokens: activeTokenConfig.maxOutputTokens,
+        });
+        const shouldIncludeLatencyGuidance = step > 1
+          || preliminaryFootprint.estimatedInputTokens > (activeTokenConfig.maxInputTokens || 128000) * 0.7;
+        const latencyGuidance = shouldIncludeLatencyGuidance
+          ? this.latencyOrchestrator.buildGuidance({
             step,
             footprint: preliminaryFootprint,
             modelName: activeModelName,
@@ -2632,1200 +2638,1206 @@ export class AgentLoop {
             verificationReady: this.verificationPolicy.canComplete().allowed
               && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()),
           })
-        : undefined;
-      let arbitration = baseArbitration;
-      let dynamicExecutionContext = baseArbitration.renderedContext;
-      if (latencyGuidance) {
-        if (!latencyGuidanceReserved) {
-          // Rare path (step 1 under high pressure, no reserve): fall back to a
-          // second budgeted pass so the guidance still fits without overflow.
-          const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
-          arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
-          dynamicExecutionContext = arbitration.renderedContext;
-        } else {
-          dynamicExecutionContext = baseArbitration.renderedContext
-            ? `${baseArbitration.renderedContext}\n\n${latencyGuidance}`
-            : latencyGuidance;
-          const guidanceTokens = ExactTokenizer.countTokens(latencyGuidance, activeModelName);
-          arbitration = {
-            ...baseArbitration,
-            renderedContext: dynamicExecutionContext,
-            totalTokens: baseArbitration.totalTokens + guidanceTokens,
-            sourcesIncluded: [...baseArbitration.sourcesIncluded, 'Latency Guidance (P1.49)'],
-            stats: {
-              ...baseArbitration.stats,
-              afterTokens: baseArbitration.stats.afterTokens + guidanceTokens,
-            },
-          };
-        }
-      }
-      this.contextQualityEvaluator.recordContextArbitration({
-        sourceCount: Object.values({ ...arbitrationInputs, latencyGuidance }).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
-        retainedSourceCount: arbitration.sourcesIncluded.length,
-        beforeTokens: arbitration.stats.beforeTokens,
-        afterTokens: arbitration.stats.afterTokens,
-      });
-      // The pre-compaction projection captured above is reused for footprint +
-      // budget input, so the pre-compaction digest below describes exactly
-      // what compaction consumed.
-      let requestFootprint = this.latencyOrchestrator.estimateRequest({
-        systemPrompt: assembledSystemPrompt,
-        tools: activeToolDeclarations,
-        history: preCompactionHistory,
-        dynamicContext: dynamicExecutionContext,
-        maxInputTokens: activeTokenConfig.maxInputTokens,
-        maxOutputTokens: activeTokenConfig.maxOutputTokens,
-      });
-
-      // Budget the complete serialized request once all dynamic inputs are known.
-      const previousCompactionState = session.findLatestEventOfType(
-        'session/compaction',
-        (event) => Boolean(event.data.compactionState),
-      )?.data.compactionState as CompactionStateV1 | undefined;
-      const requestEnvelope: ModelRequestEnvelope = {
-        provider: getModelTokenProfile(activeModelName, llm?.baseURL).provider,
-        model: activeModelName,
-        systemPrompt: assembledSystemPrompt,
-        tools: activeToolDeclarations,
-        history: preCompactionHistory,
-        dynamicContext: dynamicExecutionContext,
-        maxInputTokens: Math.max(1, activeTokenConfig.maxInputTokens || maxBudget),
-        targetInputTokens: workingHistoryBudget,
-        outputReserveTokens: Math.max(0, activeTokenConfig.maxOutputTokens || 0),
-      };
-      const { history: _requestHistory, ...requestMetadata } = requestEnvelope;
-      this.lastRequestEnvelope = { sessionId: session.id, envelope: requestMetadata };
-      const contextPreparation = await this.contextBudgetManager.prepareRequest(requestEnvelope, {
-        mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-        cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
-        enableObservationMasking: true,
-        protectActiveTurn: true,
-        plan: this.planManager.getTaskGraph(),
-        recoveryWindow: {
-          entries: session.getProjectionWithTurns(),
-          completedTurns: session.getCompletedTurnNumbers(),
-          openTurn: session.getOpenTurn(),
-        },
-        replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
-        protectedMessages: (() => {
-          const currentTurnEntries = session.getProjectionWithTurns().filter((entry) => entry.turn === turn);
-          if (currentTurnEntries.length <= 4) {
-            return currentTurnEntries.map((entry) => entry.message);
-          }
-          const userPrompts = currentTurnEntries.filter((e) => e.message.role === 'user' && !e.message.parts?.some((p) => p.functionResponse));
-          const lastExchanges = currentTurnEntries.slice(-4);
-          const preserved = new Set([...userPrompts, ...lastExchanges]);
-          return Array.from(preserved).map((e) => e.message);
-        })(),
-        protectedPaths: [
-          ...(this.planManager.getActiveTask()?.readSet || []),
-          ...(this.planManager.getActiveTask()?.writeSet || []),
-          ...this.targetFilesModifiedInTurn,
-        ],
-        previousState: previousCompactionState,
-        onCompactionStart: () => CLI.startCompaction('step'),
-        ...(phaseJustChanged && phaseHandoff && arbitration.sourcesIncluded.includes('Phase Handoff (P1.5)')
-          ? { phaseTransition: {} }
-          : {}),
-      });
-      const compactionStats = contextPreparation.compactionStats;
-      if (!contextPreparation.changed) CLI.finishCompaction(contextPreparation.failureReason ? 'failed' : 'skipped');
-      const observationsToArchive = [
-        ...(contextPreparation.checkpointObservations || []),
-        ...(compactionStats?.maskedObservations || []),
-      ];
-      // Archive + guardian persistence (KV-cache safe). The synchronous
-      // extraction prefix inside protectPreCompaction runs immediately at
-      // invocation, so the background task is launched BEFORE setHistory to
-      // snapshot pre-compaction state. Disk I/O then overlaps the request
-      // path instead of blocking it. context/snapshot events never enter the
-      // model history projection, so late arrival cannot break prefix cache
-      // or replay invariants; originals remain in the append-only event log.
-      // Opt out with MINUS_BG_GUARDIAN=off.
-      const archiveStatus: Record<string, unknown> = {};
-      let didCompactThisStep = false;
-      // Archive-only checkpoints may overlap the request; destructive history
-      // replacement must wait for durable archives and the original event log.
-      const backgroundGuardianEnabled = !contextPreparation.changed && process.env.MINUS_BG_GUARDIAN !== 'off';
-      let guardianTask: Promise<void> | undefined;
-      if (!backgroundGuardianEnabled) {
-        if (observationsToArchive.length > 0) {
-          try {
-            archiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
-          } catch (error) {
-            const message = String((error as Error)?.message || error);
-            archiveStatus.maskedObservations = { error: message };
-            CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
-            if (contextPreparation.changed) throw error;
+          : undefined;
+        let arbitration = baseArbitration;
+        let dynamicExecutionContext = baseArbitration.renderedContext;
+        if (latencyGuidance) {
+          if (!latencyGuidanceReserved) {
+            // Rare path (step 1 under high pressure, no reserve): fall back to a
+            // second budgeted pass so the guidance still fits without overflow.
+            const finalArbitrationInputs = { ...arbitrationInputs, latencyGuidance };
+            arbitration = this.dynamicContextArbiter.arbitrate(finalArbitrationInputs, arbitrationOptions);
+            dynamicExecutionContext = arbitration.renderedContext;
+          } else {
+            dynamicExecutionContext = baseArbitration.renderedContext
+              ? `${baseArbitration.renderedContext}\n\n${latencyGuidance}`
+              : latencyGuidance;
+            const guidanceTokens = ExactTokenizer.countTokens(latencyGuidance, activeModelName);
+            arbitration = {
+              ...baseArbitration,
+              renderedContext: dynamicExecutionContext,
+              totalTokens: baseArbitration.totalTokens + guidanceTokens,
+              sourcesIncluded: [...baseArbitration.sourcesIncluded, 'Latency Guidance (P1.49)'],
+              stats: {
+                ...baseArbitration.stats,
+                afterTokens: baseArbitration.stats.afterTokens + guidanceTokens,
+              },
+            };
           }
         }
-      }
-      if (contextPreparation.changed && compactionStats) {
-        await this.persistSession(session);
-        didCompactThisStep = true;
-        if (backgroundGuardianEnabled) {
-          // Launch BEFORE setHistory: the synchronous extraction prefix inside
-          // protectPreCompaction runs immediately at invocation, snapshotting
-          // pre-compaction state, while saveSnapshot + archive I/O overlap the
-          // request path in the background.
-          let guardianPromise: ReturnType<ContextGuardian['protectPreCompaction']> | undefined;
-          try {
-            guardianPromise = this.contextGuardian.protectPreCompaction(session, {
-              mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-              projectPhase: `Turn ${turn} ${classification.phase}`,
-            });
-          } catch {}
-          guardianTask = (async () => {
-            const bgArchiveStatus: Record<string, unknown> = {};
-            if (observationsToArchive.length > 0) {
-              try {
-                bgArchiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
-              } catch (error) {
-                const message = String((error as Error)?.message || error);
-                bgArchiveStatus.maskedObservations = { error: message };
-                CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
-              }
-            }
-            try {
-              const guardianResult = guardianPromise ? await guardianPromise : undefined;
-              if (guardianResult) {
-                if (compactionStats.archivedTurns?.length) {
-                  try {
-                    bgArchiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
-                  } catch (error) {
-                    const message = String((error as Error)?.message || error);
-                    bgArchiveStatus.archivedTurns = { error: message };
-                    CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
-                  }
-                }
-                session.append('context/snapshot', {
-                  reason: 'Context Guardian captured evidence before whole-request compaction.',
-                  snapshotId: guardianResult.snapshotId,
-                  contextFingerprint: contextPreparation.state?.sourceFingerprint,
-                  archiveStatus: bgArchiveStatus,
-                });
-              }
-            } catch {}
-          })().catch(() => {});
-          archiveStatus.deferred = true;
-        } else {
-          try {
-            const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
-              mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
-              projectPhase: `Turn ${turn} ${classification.phase}`,
-            });
-            session.append('context/snapshot', {
-              reason: 'Context Guardian captured evidence before whole-request compaction.',
-              snapshotId: guardianResult.snapshotId,
-              contextFingerprint: contextPreparation.state?.sourceFingerprint,
-            });
-          } catch {}
-          if (compactionStats.archivedTurns?.length) {
-            try {
-              archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
-            } catch (error) {
-              const message = String((error as Error)?.message || error);
-              archiveStatus.archivedTurns = { error: message };
-              CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
-              throw error;
-            }
-          }
-        }
-        session.setHistory(
-          contextPreparation.history,
-          `context-budget-${contextPreparation.mode}`,
-          { ...(contextPreparation.state as unknown as Record<string, unknown> | undefined), archiveStatus } as unknown as Record<string, unknown> | undefined,
-        );
-        await this.persistSession(session);
-        CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
-        requestFootprint = this.latencyOrchestrator.estimateRequest({
+        this.contextQualityEvaluator.recordContextArbitration({
+          sourceCount: Object.values({ ...arbitrationInputs, latencyGuidance }).filter((value) => typeof value === 'string' && value.trim().length > 0).length,
+          retainedSourceCount: arbitration.sourcesIncluded.length,
+          beforeTokens: arbitration.stats.beforeTokens,
+          afterTokens: arbitration.stats.afterTokens,
+        });
+        // The pre-compaction projection captured above is reused for footprint +
+        // budget input, so the pre-compaction digest below describes exactly
+        // what compaction consumed.
+        let requestFootprint = this.latencyOrchestrator.estimateRequest({
           systemPrompt: assembledSystemPrompt,
           tools: activeToolDeclarations,
-          history: session.getHistory(),
+          history: preCompactionHistory,
           dynamicContext: dynamicExecutionContext,
           maxInputTokens: activeTokenConfig.maxInputTokens,
           maxOutputTokens: activeTokenConfig.maxOutputTokens,
         });
-      }
-      if (contextPreparation.failureReason) {
-        const inputLimit = Math.max(1, (activeTokenConfig.maxInputTokens || 128000) - (activeTokenConfig.maxOutputTokens || 0));
-        const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${inputLimit} input budget after output reserve).`;
-        console.error(`${message} Recovery could not fit the current request and task state. Use /context status to inspect the budget or /new-session to start a separate session.`);
-        session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
-        await this.persistSession(session);
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
-        return message;
-      }
-      session.recordRequestHeader({
-        turn,
-        step,
-        systemPrompt: assembledSystemPrompt,
-        tools: activeToolDeclarations,
-        // Reuse the pre-compaction projection when history was not replaced;
-        // identical content, skips a full event-log rebuild + clone.
-        history: didCompactThisStep ? session.getHistory() : preCompactionHistory,
-      }, {
-        compactHistory: true,
-        ...(didCompactThisStep ? {
-          compaction: {
-            preCompactionHistoryDigest: computeRequestValueDigest(preCompactionHistory),
-            preCompactionMessages: preCompactionHistory.length,
-            archivedTurns: compactionStats?.archivedTurns?.length ?? 0,
-            maskedObservations: compactionStats?.maskedObservations?.length ?? 0,
-            archiveStatus,
+
+        // Budget the complete serialized request once all dynamic inputs are known.
+        const previousCompactionState = session.findLatestEventOfType(
+          'session/compaction',
+          (event) => Boolean(event.data.compactionState),
+        )?.data.compactionState as CompactionStateV1 | undefined;
+        const requestEnvelope: ModelRequestEnvelope = {
+          provider: getModelTokenProfile(activeModelName, llm?.baseURL).provider,
+          model: activeModelName,
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          history: preCompactionHistory,
+          dynamicContext: dynamicExecutionContext,
+          maxInputTokens: Math.max(1, activeTokenConfig.maxInputTokens || maxBudget),
+          targetInputTokens: workingHistoryBudget,
+          outputReserveTokens: Math.max(0, activeTokenConfig.maxOutputTokens || 0),
+        };
+        const { history: _requestHistory, ...requestMetadata } = requestEnvelope;
+        this.lastRequestEnvelope = { sessionId: session.id, envelope: requestMetadata };
+        const contextPreparation = await this.contextBudgetManager.prepareRequest(requestEnvelope, {
+          mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+          cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
+          enableObservationMasking: true,
+          protectActiveTurn: true,
+          plan: this.planManager.getTaskGraph(),
+          recoveryWindow: {
+            entries: session.getProjectionWithTurns(),
+            completedTurns: session.getCompletedTurnNumbers(),
+            openTurn: session.getOpenTurn(),
           },
-        } : {}),
-      });
-      session.assertRuntimeInvariantsIncremental({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
-      await this.persistSession(session);
-      this.stepDynamicSuffixes.set(step, dynamicExecutionContext);
-      const requestOptions: LLMRequestOptions = {
-        systemPrompt: assembledSystemPrompt,
-        dynamicContext: dynamicExecutionContext,
-        turn,
-        step,
-        stepSuffixes: new Map(this.stepDynamicSuffixes),
-        sessionId: session.id,
-        promptCacheKey: session.id,
-        enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
-        signal: options?.signal,
-        allowedFunctionNames: visibleToolNames,
-        ...(readySubmission ? { functionCallingMode: 'ANY' as const } : {}),
-        onRetry: (retryPayload: any) => {
-          this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
-        },
-      };
-      const requestStartedAt = Date.now();
-      let firstTokenAt: number | undefined;
-      this.eventBus?.emit('model:thinking:start', {
-        agentId: this.agentId,
-        turn,
-        step,
-        startedAt: requestStartedAt,
-        sessionId: session.id,
-      });
-
-      // PASTE: Inter-Step Pattern Prediction
-      if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
-        const speculativeCandidates = predictObservationCandidates(
-          this.lastToolExecution?.toolName,
-          this.lastToolExecution?.result,
-          this._workspace.rootDir,
-        );
-        for (const candidate of speculativeCandidates) {
-          this.pipelinedDispatcher.dispatchSpeculative(
-            candidate.toolName,
-            candidate.args,
-            this.toolRunner,
-            {
-              sessionId: session.id,
-              agentId: this.agentId,
-              turn,
-              userRequest: turnUserRequest,
-              signal: options?.signal,
-            },
-            candidate.source,
-          );
+          replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
+          protectedMessages: (() => {
+            const currentTurnEntries = session.getProjectionWithTurns().filter((entry) => entry.turn === turn);
+            if (currentTurnEntries.length <= 4) {
+              return currentTurnEntries.map((entry) => entry.message);
+            }
+            const userPrompts = currentTurnEntries.filter((e) => e.message.role === 'user' && !e.message.parts?.some((p) => p.functionResponse));
+            const lastExchanges = currentTurnEntries.slice(-4);
+            const preserved = new Set([...userPrompts, ...lastExchanges]);
+            return Array.from(preserved).map((e) => e.message);
+          })(),
+          protectedPaths: [
+            ...(this.planManager.getActiveTask()?.readSet || []),
+            ...(this.planManager.getActiveTask()?.writeSet || []),
+            ...this.targetFilesModifiedInTurn,
+          ],
+          previousState: previousCompactionState,
+          onCompactionStart: () => CLI.startCompaction('step'),
+          ...(phaseJustChanged && phaseHandoff && arbitration.sourcesIncluded.includes('Phase Handoff (P1.5)')
+            ? { phaseTransition: {} }
+            : {}),
+        });
+        const compactionStats = contextPreparation.compactionStats;
+        if (!contextPreparation.changed) CLI.finishCompaction(contextPreparation.failureReason ? 'failed' : 'skipped');
+        const observationsToArchive = [
+          ...(contextPreparation.checkpointObservations || []),
+          ...(compactionStats?.maskedObservations || []),
+        ];
+        // Archive + guardian persistence (KV-cache safe). The synchronous
+        // extraction prefix inside protectPreCompaction runs immediately at
+        // invocation, so the background task is launched BEFORE setHistory to
+        // snapshot pre-compaction state. Disk I/O then overlaps the request
+        // path instead of blocking it. context/snapshot events never enter the
+        // model history projection, so late arrival cannot break prefix cache
+        // or replay invariants; originals remain in the append-only event log.
+        // Opt out with MINUS_BG_GUARDIAN=off.
+        const archiveStatus: Record<string, unknown> = {};
+        let didCompactThisStep = false;
+        // Archive-only checkpoints may overlap the request; destructive history
+        // replacement must wait for durable archives and the original event log.
+        const backgroundGuardianEnabled = !contextPreparation.changed && process.env.MINUS_BG_GUARDIAN !== 'off';
+        let guardianTask: Promise<void> | undefined;
+        if (!backgroundGuardianEnabled) {
+          if (observationsToArchive.length > 0) {
+            try {
+              archiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
+            } catch (error) {
+              const message = String((error as Error)?.message || error);
+              archiveStatus.maskedObservations = { error: message };
+              CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
+              if (contextPreparation.changed) throw error;
+            }
+          }
         }
-      }
-
-      // Satellite 3: Token Pacer & Leaky-Bucket Rate Limiter
-      const estimatedTokensForPacing = requestFootprint?.estimatedInputTokens ?? contextPreparation.after.upperBoundTokens;
-      await this.rateLimitPacer.throttleBeforeRequest(
-        activeModelName,
-        activeModelName,
-        estimatedTokensForPacing,
-        options?.signal,
-        (paceEvent) => {
-          CLI.renderPacerNotice(paceEvent.delayMs, paceEvent.projectedTokens, paceEvent.tpmLimit);
-        },
-      );
-
-      let accumulatedThought = '';
-      let thoughtTokenCount = 0;
-      try {
-        if (typeof llm.generateStream === 'function') {
-          response = await llm.generateStream(session, activeToolDeclarations, {
-            onRetry: (retryPayload: any) => {
-              this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
-            },
-            onThoughtToken: (token: string) => {
-              if (firstTokenAt === undefined) {
-                this.eventBus?.emit('model:retry', null, { sessionId: session.id });
-              }
-              firstTokenAt ??= Date.now();
-              this.eventBus?.emit('model:thought', token, { sessionId: session.id });
-              accumulatedThought += token;
-              thoughtTokenCount++;
-              if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
-                if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
-                  const candidatePaths = extractThoughtPaths(accumulatedThought, this._workspace.rootDir);
-                  for (const candidatePath of candidatePaths) {
-                    this.pipelinedDispatcher.dispatchSpeculative(
-                      'read_file',
-                      { path: candidatePath },
-                      this.toolRunner,
-                      {
-                        sessionId: session.id,
-                        agentId: this.agentId,
-                        turn,
-                        userRequest: turnUserRequest,
-                        signal: options?.signal,
-                      },
-                      'thought-stream-intent',
-                    );
-                  }
+        if (contextPreparation.changed && compactionStats) {
+          await this.persistSession(session);
+          didCompactThisStep = true;
+          if (backgroundGuardianEnabled) {
+            // Launch BEFORE setHistory: the synchronous extraction prefix inside
+            // protectPreCompaction runs immediately at invocation, snapshotting
+            // pre-compaction state, while saveSnapshot + archive I/O overlap the
+            // request path in the background.
+            let guardianPromise: ReturnType<ContextGuardian['protectPreCompaction']> | undefined;
+            try {
+              guardianPromise = this.contextGuardian.protectPreCompaction(session, {
+                mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+                projectPhase: `Turn ${turn} ${classification.phase}`,
+              });
+            } catch { }
+            guardianTask = (async () => {
+              const bgArchiveStatus: Record<string, unknown> = {};
+              if (observationsToArchive.length > 0) {
+                try {
+                  bgArchiveStatus.maskedObservations = await this.turnMemoryRetriever.archiveMaskedObservations(observationsToArchive);
+                } catch (error) {
+                  const message = String((error as Error)?.message || error);
+                  bgArchiveStatus.maskedObservations = { error: message };
+                  CLI.renderArchiveWarning({ scope: 'Masked-observation', error: message });
                 }
               }
-            },
-            onContentToken: (token: string) => {
-              if (firstTokenAt === undefined) {
-                this.eventBus?.emit('model:retry', null, { sessionId: session.id });
+              try {
+                const guardianResult = guardianPromise ? await guardianPromise : undefined;
+                if (guardianResult) {
+                  if (compactionStats.archivedTurns?.length) {
+                    try {
+                      bgArchiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
+                    } catch (error) {
+                      const message = String((error as Error)?.message || error);
+                      bgArchiveStatus.archivedTurns = { error: message };
+                      CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+                    }
+                  }
+                  session.append('context/snapshot', {
+                    reason: 'Context Guardian captured evidence before whole-request compaction.',
+                    snapshotId: guardianResult.snapshotId,
+                    contextFingerprint: contextPreparation.state?.sourceFingerprint,
+                    archiveStatus: bgArchiveStatus,
+                  });
+                }
+              } catch { }
+            })().catch(() => { });
+            archiveStatus.deferred = true;
+          } else {
+            try {
+              const guardianResult = await this.contextGuardian.protectPreCompaction(session, {
+                mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
+                projectPhase: `Turn ${turn} ${classification.phase}`,
+              });
+              session.append('context/snapshot', {
+                reason: 'Context Guardian captured evidence before whole-request compaction.',
+                snapshotId: guardianResult.snapshotId,
+                contextFingerprint: contextPreparation.state?.sourceFingerprint,
+              });
+            } catch { }
+            if (compactionStats.archivedTurns?.length) {
+              try {
+                archiveStatus.archivedTurns = await this.turnMemoryRetriever.archiveTurns(compactionStats.archivedTurns);
+              } catch (error) {
+                const message = String((error as Error)?.message || error);
+                archiveStatus.archivedTurns = { error: message };
+                CLI.renderArchiveWarning({ scope: 'Archived-turn', error: message });
+                throw error;
               }
-              firstTokenAt ??= Date.now();
-              this.eventBus?.emit('model:token', token, { sessionId: session.id });
-            },
-            onToolCallEarly: (earlyCall: any) => {
-              if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
-                const runContext = {
-                  sessionId: session.id,
-                  agentId: this.agentId,
-                  turn,
-                  userRequest: turnUserRequest,
-                  signal: options?.signal,
-                };
-                this.pipelinedDispatcher.dispatchEarly(
-                  earlyCall.name,
-                  earlyCall.args,
-                  this.toolRunner,
-                  runContext,
-                  earlyCall.id,
-                );
-              }
-            },
-          }, requestOptions);
-        } else {
-          response = await llm.generate(session, activeToolDeclarations, requestOptions);
+            }
+          }
+          session.setHistory(
+            contextPreparation.history,
+            `context-budget-${contextPreparation.mode}`,
+            { ...(contextPreparation.state as unknown as Record<string, unknown> | undefined), archiveStatus } as unknown as Record<string, unknown> | undefined,
+          );
+          await this.persistSession(session);
+          CLI.renderAutoCompactionNotice(compactionStats.tokensSaved, compactionStats.compactedTokens);
+          requestFootprint = this.latencyOrchestrator.estimateRequest({
+            systemPrompt: assembledSystemPrompt,
+            tools: activeToolDeclarations,
+            history: session.getHistory(),
+            dynamicContext: dynamicExecutionContext,
+            maxInputTokens: activeTokenConfig.maxInputTokens,
+            maxOutputTokens: activeTokenConfig.maxOutputTokens,
+          });
         }
-      } finally {
-        this.eventBus?.emit('model:retry', null, { sessionId: session.id });
-        this.eventBus?.emit('model:thinking:end', {
+        if (contextPreparation.failureReason) {
+          const inputLimit = Math.max(1, (activeTokenConfig.maxInputTokens || 128000) - (activeTokenConfig.maxOutputTokens || 0));
+          const message = `Agent stopped: ${contextPreparation.failureReason} (${contextPreparation.after.upperBoundTokens}/${inputLimit} input budget after output reserve).`;
+          console.error(`${message} Recovery could not fit the current request and task state. Use /context status to inspect the budget or /new-session to start a separate session.`);
+          session.append('step/end', { turn, step, reason: contextPreparation.failureReason });
+          await this.persistSession(session);
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
+          return message;
+        }
+        session.recordRequestHeader({
+          turn,
+          step,
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          // Reuse the pre-compaction projection when history was not replaced;
+          // identical content, skips a full event-log rebuild + clone.
+          history: didCompactThisStep ? session.getHistory() : preCompactionHistory,
+        }, {
+          compactHistory: true,
+          ...(didCompactThisStep ? {
+            compaction: {
+              preCompactionHistoryDigest: computeRequestValueDigest(preCompactionHistory),
+              preCompactionMessages: preCompactionHistory.length,
+              archivedTurns: compactionStats?.archivedTurns?.length ?? 0,
+              maskedObservations: compactionStats?.maskedObservations?.length ?? 0,
+              archiveStatus,
+            },
+          } : {}),
+        });
+        session.assertRuntimeInvariantsIncremental({ allowOpenLifecycle: true, verifyRequestReplay: 'latest' });
+        await this.persistSession(session);
+        this.stepDynamicSuffixes.set(step, dynamicExecutionContext);
+        const requestOptions: LLMRequestOptions = {
+          systemPrompt: assembledSystemPrompt,
+          dynamicContext: dynamicExecutionContext,
+          turn,
+          step,
+          stepSuffixes: new Map(this.stepDynamicSuffixes),
+          sessionId: session.id,
+          promptCacheKey: session.id,
+          enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
+          signal: options?.signal,
+          allowedFunctionNames: visibleToolNames,
+          ...(readySubmission ? { functionCallingMode: 'ANY' as const } : {}),
+          onRetry: (retryPayload: any) => {
+            this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
+          },
+        };
+        const requestStartedAt = Date.now();
+        let firstTokenAt: number | undefined;
+        this.eventBus?.emit('model:thinking:start', {
           agentId: this.agentId,
           turn,
           step,
-          endedAt: Date.now(),
+          startedAt: requestStartedAt,
           sessionId: session.id,
         });
-      }
-      this.setCircuitBreakerRetries(session.id, 0);
-      const requestDurationMs = Date.now() - requestStartedAt;
-      const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
-      response.usage = {
-        ...(response.usage || {}),
-        requestDurationMs,
-        ...(timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs }),
-      };
-      this.contextBudgetManager.observeActualUsage(
-        activeModelName,
-        contextPreparation.after.inputTokens,
-        response.usage.promptTokens,
-      );
-      this.latencyOrchestrator.record({
-        durationMs: requestDurationMs,
-        timeToFirstTokenMs,
-        promptTokens: response.usage.promptTokens,
-        cachedTokens: response.usage.cachedTokens,
-        profile: latencyProfile,
-      });
-      const actualTotalTokens = (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
-      if (actualTotalTokens > 0) {
-        this.rateLimitPacer.recordActualUsage(actualTotalTokens);
-      }
 
-      if (options?.signal?.aborted || response.finishReason === 'aborted') {
-        const cancellationMessage = 'Agent stopped: cancellation requested.';
-        this.pipelinedDispatcher.resetTurn();
-        this.subagentManager.stopAll();
-        session.append('step/end', { turn, step, reason: 'cancelled' });
-        await this.persistSession(session);
-        await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
-        this.goalManager.pause('Task execution cancelled by user.');
-        return cancellationMessage;
-      }
-      session.append('control/decision', {
-        turn,
-        step,
-        controlDecision: {
-          mode: 'soft-latency',
-          requestDurationMs,
-          timeToFirstTokenMs,
-          estimatedInputTokens: requestFootprint.estimatedInputTokens,
-          requestPressureRatio: requestFootprint.pressureRatio,
-          modelName: activeModelName,
-          latencyTier: latencyProfile.tier,
-          softStepTargetMs: latencyProfile.targetMs,
-          taskPhase: classification.phase,
-          dynamicContextCache: this.dynamicContextCache.getStats(),
-          dynamicContextCacheHit: Boolean(cachedDynamicContext),
-          promptTokens: response.usage?.promptTokens,
-          cachedTokens: response.usage?.cachedTokens,
-          cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
-          cacheReadInputTokens: response.usage?.cacheReadInputTokens,
-          cacheHitRate: response.usage?.cacheHitRate,
-          hardTimeoutApplied: false,
-          contextManagementMode: contextPreparation.mode,
-          contextInputUpperBound: contextPreparation.after.upperBoundTokens,
-          contextWithinBudget: contextPreparation.withinBudget,
-          shadowCandidateInputUpperBound: contextPreparation.candidateAfter?.upperBoundTokens,
-          compactionStrategies: contextPreparation.compactionStats?.strategiesApplied,
-        },
-      });
-      this.eventBus?.emit('model:request_telemetry', {
-        turn,
-        step,
-        requestDurationMs,
-        timeToFirstTokenMs,
-        requestFootprint,
-        modelName: activeModelName,
-        latencyProfile,
-        taskPhase: classification.phase,
-        dynamicContextCacheHit: Boolean(cachedDynamicContext),
-        promptTokens: response.usage?.promptTokens,
-        cachedTokens: response.usage?.cachedTokens,
-        cacheHitRate: response.usage?.cacheHitRate,
-        contextManagementMode: contextPreparation.mode,
-        contextWithinBudget: contextPreparation.withinBudget,
-        contextInputUpperBound: contextPreparation.after.upperBoundTokens,
-      });
-
-      // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
-      const isMockLLM = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
-
-      let userGoal: string | undefined = this.goalManager?.getState()?.objective;
-      if (!userGoal) {
-        const history = session.getHistory();
-        for (let i = history.length - 1; i >= 0; i--) {
-          const item = history[i];
-          if (item?.role === 'user' && item.parts) {
-            for (const p of item.parts) {
-              if (p?.text) {
-                userGoal = p.text;
-                break;
-              }
-            }
-            if (userGoal) break;
-          }
-        }
-      }
-
-      const stepSummary = generateFallbackStepSummary({
-        step,
-        userGoal,
-        text: response.text,
-        reasoningContent: response.reasoningContent,
-        toolCalls: response.toolCalls,
-      });
-      // Case 4 — always-on intent line: one cheap sentence per step, kept
-      // outside the model projection for timeline review and retrieval.
-      session.addReasoning(stepSummary, { kind: 'intent', step, turn, trigger: 'step-summary' });
-
-      if (!isSubagent && !this._collapsePreferences.compactSteps) {
-        CLI.renderLLMThinking(stepSummary);
-      }
-
-      // Giám sát và hiển thị Prompt Cache Hit Rate / Token Telemetry
-      if (response.usage) {
-        this.eventBus?.emit('model:usage', response.usage);
-        if (!this._collapsePreferences.compactSteps) {
-          CLI.renderCacheUsage(response.usage);
-        }
-      }
-
-      // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
-      if (response.reasoningContent) {
-        this._latestReasoning = {
-          thought: response.reasoningContent,
-          timestamp: new Date().toLocaleTimeString(),
-          step,
-          turn: (session as any).turnsCount || 1,
-        };
-        // Case 3 — explicit audit mode only (MINUS_REASONING_LOG=1):
-        // persist the full thought. Default off; routine thoughts stay ephemeral.
-        if (envFeatureEnabled('MINUS_REASONING_LOG', false)) {
-          this.persistStepReasoning(session, response.reasoningContent, { debugLogEnabled: true, step, turn });
-        }
-        // The [REQUEST ANALYSIS] block is short, high-signal, and explicitly
-        // user-facing: always display it, even when step output is compacted.
-        const requestAnalysis = extractRequestAnalysis(response.reasoningContent);
-        if (requestAnalysis) {
-          CLI.renderRequestAnalysis(requestAnalysis);
-        } else if (!this._collapsePreferences.compactSteps) {
-          CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
-        }
-        // Streaming providers already emitted each thought chunk. Emit the
-        // aggregate only for non-streaming providers to avoid duplicating the
-        // reasoning trace in reactive UIs.
-        if (typeof llm.generateStream !== 'function') {
-          this.eventBus?.emit('model:thought', response.reasoningContent, { sessionId: session.id });
-        }
-
-        // Wink-Style Specification Drift & Goal Substitution Nudge
-        const thoughtDrift = this.domainIntentGuardian.observeModelThoughts(response.reasoningContent);
-        if (thoughtDrift) {
-          CLI.renderReflectionAlert(1, `[Wink Course-Correction Nudge]: ${thoughtDrift.message}`);
-        }
-      }
-
-      const hasToolCalls = Boolean(response.toolCalls && response.toolCalls.length > 0);
-      const hasValidText = Boolean(response.text && response.text.trim().length > 0);
-      const hasReasoning = Boolean(response.reasoningContent && response.reasoningContent.trim().length > 0);
-      const hasExplicitFinishReason = typeof response.finishReason === 'string';
-      const finishReason = response.finishReason
-        || (hasToolCalls ? 'tool_calls' : hasValidText ? 'stop' : 'unknown');
-      const recoverableIncompleteFinish = hasExplicitFinishReason
-        && ['max_tokens', 'transport_eof', 'unknown'].includes(finishReason);
-      const terminalIncompleteFinish = hasExplicitFinishReason
-        && ['content_filter', 'error', 'aborted'].includes(finishReason);
-
-      if (recoverableIncompleteFinish || terminalIncompleteFinish) {
-        consecutiveIncompleteFinishes++;
-        if (hasValidText) {
-          // Persist only the visible text prefix. Partial/unconfirmed tool calls
-          // must not enter history or execute.
-          session.addModelMessage({ text: response.text, rawContent: response.rawContent });
-        } else if (hasReasoning) {
-          session.addModelMessage({
-            text: '[Interrupted during reasoning phase]',
-            rawContent: response.rawContent,
-          });
-        } else {
-          session.addModelMessage({
-            text: '[Stream connection interrupted before output]',
-            rawContent: response.rawContent,
-          });
-        }
-
-        const finishDetail = response.rawFinishReason
-          ? `${finishReason} (${response.rawFinishReason})`
-          : finishReason;
-        const canRetry = recoverableIncompleteFinish
-          && consecutiveIncompleteFinishes <= maxIncompleteFinishRetries;
-
-        if (canRetry) {
-          CLI.renderReflectionAlert(
-            consecutiveIncompleteFinishes,
-            `Model stream ended with ${finishDetail}; partial output was not accepted as final. Continuing the same user turn.`,
+        // PASTE: Inter-Step Pattern Prediction
+        if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+          const speculativeCandidates = predictObservationCandidates(
+            this.lastToolExecution?.toolName,
+            this.lastToolExecution?.result,
+            this._workspace.rootDir,
           );
-
-          if (consecutiveIncompleteFinishes > 1) {
-            await delay(Math.min(1000 * consecutiveIncompleteFinishes, 3000));
+          for (const candidate of speculativeCandidates) {
+            this.pipelinedDispatcher.dispatchSpeculative(
+              candidate.toolName,
+              candidate.args,
+              this.toolRunner,
+              {
+                sessionId: session.id,
+                agentId: this.agentId,
+                turn,
+                userRequest: turnUserRequest,
+                signal: options?.signal,
+              },
+              candidate.source,
+            );
           }
-
-          let continuationPrompt: string;
-          const activeTask = this.planManager?.getActiveTask?.();
-          const taskContext = activeTask
-            ? `\n[ACTIVE TASK IN PROGRESS]: Task #${activeTask.id} (${activeTask.title}). Proceed with completing this task.`
-            : '';
-
-          if (finishReason === 'transport_eof') {
-            continuationPrompt = `[STREAM CONNECTION INTERRUPTED (${finishDetail})]: The stream connection stalled or was terminated by watchdog. Your partial response has been saved above. Continue the task seamlessly from where you were interrupted without repeating completed steps.${taskContext}\nRe-issue any cut-off tool call in full.`;
-          } else if (finishReason === 'max_tokens') {
-            continuationPrompt = `[OUTPUT TOKEN LIMIT REACHED (max_tokens)]: Your output was truncated by the token limit. Continue directly from the preserved text prefix without repeating previous content.${taskContext}\nRe-issue any cut-off tool call in full.`;
-          } else {
-            continuationPrompt = `[SYSTEM STREAM CONTINUATION (${finishDetail})]: Continue from the preserved text prefix.${taskContext}\nRe-issue any cut-off tool call in full.`;
-          }
-
-          session.addUserMessage(continuationPrompt, 'system');
-          CLI.renderStepFooter();
-          const continuationReason = `${finishReason}-continuation`;
-          session.append('step/end', { turn, step, reason: continuationReason });
-          await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
-            ...hookContext,
-            reason: continuationReason,
-          });
-          this.eventBus?.emit('step:after', step, { sessionId: session.id });
-          continue;
         }
 
-        const incompleteMessage = terminalIncompleteFinish
-          ? `Agent stopped: model response ended with ${finishDetail}. No partial response was accepted as completion.`
-          : `Agent stopped: model response remained incomplete after ${maxIncompleteFinishRetries} continuation attempts (last reason: ${finishDetail}).`;
-        CLI.renderReflectionAlert(consecutiveIncompleteFinishes, incompleteMessage);
-        CLI.renderStepFooter();
-        session.append('step/end', { turn, step, reason: `${finishReason}-terminal` });
-        await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
-          ...hookContext,
-          reason: `${finishReason}-terminal`,
-        });
-        await CLI.renderExecutionStopped(incompleteMessage, 'INCOMPLETE_RESPONSE');
-        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, `${finishReason}-terminal`);
-        this.goalManager.disarm();
-        return incompleteMessage;
-      }
-      consecutiveIncompleteFinishes = 0;
+        // Satellite 3: Token Pacer & Leaky-Bucket Rate Limiter
+        const estimatedTokensForPacing = requestFootprint?.estimatedInputTokens ?? contextPreparation.after.upperBoundTokens;
+        await this.rateLimitPacer.throttleBeforeRequest(
+          activeModelName,
+          activeModelName,
+          estimatedTokensForPacing,
+          options?.signal,
+          (paceEvent) => {
+            CLI.renderPacerNotice(paceEvent.delayMs, paceEvent.projectedTokens, paceEvent.tpmLimit);
+          },
+        );
 
-      // 4. Nếu model muốn gọi tool (System 1: Action)
-      if (hasToolCalls) {
-        consecutiveEmptyTurns = 0;
-        if (!this._collapsePreferences.compactSteps) {
-          CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
-        }
-
-        const normalizedToolCalls = response.toolCalls.map((call: any) => ({
-          ...call,
-          name: typeof call?.name === 'string' && call.name.trim()
-            ? call.name.trim()
-            : '__invalid_tool_call__',
-          args: call?.args ?? call?.arguments ?? {},
-        }));
-        const seenToolCallIds = new Set<string>();
-        const toolCallIds = normalizedToolCalls.map((call: any, callIndex: number) => {
-          let candidateId = (call as any).id || `call-${turn}-${step}-${callIndex}`;
-          if (seenToolCallIds.has(candidateId)) {
-            candidateId = `${candidateId}_${callIndex}`;
-          }
-          seenToolCallIds.add(candidateId);
-          return candidateId;
-        });
-        const toolCallsWithIds = normalizedToolCalls.map((call: any, callIndex: number) => ({
-          ...call,
-          id: toolCallIds[callIndex],
-        }));
-
-        // Ghi lại phản hồi gọi tool của model vào Session
-        session.addModelMessage({
-          text: response.text,
-          functionCalls: toolCallsWithIds,
-          rawContent: response.rawContent,
-        });
-        await this.persistSession(session);
-        const assistantSeq = session.lastEvent?.seq;
-        const responseFunctionCallParts = (response.rawContent?.parts || [])
-          .filter((part: any) => part.functionCall);
-
-        interface ExecutionToolCall {
-          call: any;
-          id: string;
-          name: string;
-          args: Record<string, unknown>;
-          responsePart: any;
-        }
-
-        const rawExecutionCalls: ExecutionToolCall[] = normalizedToolCalls.map((call: any, callIndex: number) => ({
-          call,
-          id: toolCallIds[callIndex],
-          name: call.name || '__invalid_tool_call__',
-          args: (call.args as Record<string, unknown>) || {},
-          responsePart: responseFunctionCallParts[callIndex],
-        }));
-
-        const orderedExecutionCalls = reorderScheduledToolCalls<ExecutionToolCall>(rawExecutionCalls);
-
-        const scheduledToolCalls: ScheduledToolCall[] = orderedExecutionCalls.map((item, callIndex: number) => ({
-          index: callIndex,
-          id: item.id,
-          name: item.name,
-          args: item.args,
-        }));
-        const concurrentReadsEnabled = this.loopOptions?.enableConcurrentReadTools
-          ?? envFeatureEnabled('MINUS_CONCURRENT_READ_TOOLS');
-        const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
-          ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
-        const toolPartitions = partitionToolCalls(scheduledToolCalls, concurrentReadsEnabled && !readySubmission);
-        const readPartitionByIndex = new Map<number, ToolCallPartition>();
-        for (const partition of toolPartitions) {
-          if (partition.mode === 'sequential') continue;
-          for (const scheduled of partition.calls) readPartitionByIndex.set(scheduled.index, partition);
-        }
-        const preexecutedReadResults = new Map<number, ToolExecutionResult>();
-        const startedConcurrentPartitions = new Set<number>();
-        const readBatchDurationMs = new Map<number, number>();
-        const readBatchToolDurationMs = new Map<number, number>();
-        const readBatchSnapshotBefore = new Map<number, ReadSnapshot>();
-        const readBatchSnapshotMismatch = new Map<number, string[]>();
-
-        let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
-        let toolBatchCancelled = false;
-        let userDeniedPermission: { toolName: string; detail: string } | undefined;
-        let postSubmissionBlocked = false;
-        let phaseTransitionAcceptedInResponse = false;
-        let parallelBatchCount = 0;
-        let parallelTotalTools = 0;
-        let parallelDurationMs = 0;
-        let parallelSavedMs = 0;
-
-        // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
-        for (const [callIndex, item] of orderedExecutionCalls.entries()) {
-          const call = item.call;
-          const readPartition = readPartitionByIndex.get(callIndex);
-          const partitionStartIndex = readPartition?.calls[0]?.index;
-          const partitionEndIndex = readPartition?.calls.at(-1)?.index;
-          const deferReadPersistence = Boolean(
-            batchPersistenceEnabled && readPartition && readPartition.calls.length > 1,
-          );
-
-          if (
-            readPartition?.mode === 'concurrent-read'
-            && !readySubmission
-            && partitionStartIndex === callIndex
-            && !startedConcurrentPartitions.has(callIndex)
-          ) {
-            startedConcurrentPartitions.add(callIndex);
-            if (hasSubmittedSolution) {
-              for (const scheduled of readPartition.calls) {
-                preexecutedReadResults.set(scheduled.index, {
-                  toolName: scheduled.name,
-                  args: scheduled.args,
-                  durationMs: 0,
-                  result: {
-                    success: false,
-                    submitted: true,
-                    summary: submittedSolutionSummary || 'Task completed and submitted.',
-                    nextAction: 'final_answer',
-                    errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
-                    message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
-                  },
-                });
-              }
-            } else {
-              for (const scheduled of readPartition.calls) {
-                const partitionItem = orderedExecutionCalls[scheduled.index];
-                session.append('tool/call', {
-                  turn,
-                  step,
-                  toolName: scheduled.name,
-                  toolCallId: scheduled.id,
-                  assistantSeq,
-                  args: scheduled.args,
-                  thoughtSignature: partitionItem?.responsePart?.thoughtSignature,
-                });
-                this.eventBus?.emit('tool:before', scheduled.name, scheduled.args, { sessionId: session.id });
-                // Mirror the sequential path below: in compact mode the completion
-                // one-liner (renderCompactOneLiner) already shows each tool, so
-                // emitting the verbose call line here would render every
-                // parallel tool twice.
-                if (!this._collapsePreferences.compactSteps) {
-                  CLI.renderToolCall(scheduled.name, scheduled.args);
-                } else {
-                  CLI.startToolDotSpinner(scheduled.name, scheduled.args);
+        let accumulatedThought = '';
+        let thoughtTokenCount = 0;
+        try {
+          if (typeof llm.generateStream === 'function') {
+            response = await llm.generateStream(session, activeToolDeclarations, {
+              onRetry: (retryPayload: any) => {
+                this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
+              },
+              onThoughtToken: (token: string) => {
+                if (firstTokenAt === undefined) {
+                  this.eventBus?.emit('model:retry', null, { sessionId: session.id });
                 }
-              }
-
-              const batchStartedAt = Date.now();
-              // Snapshot epoch: fingerprint read targets before dispatch so a
-              // mid-flight external FS change can be flagged without locking.
-              const snapshotTargets = extractReadTargets(readPartition.calls.map((scheduled) => ({
-                name: scheduled.name,
-                args: scheduled.args as Record<string, unknown>,
-              })));
-              const snapshotBefore = snapshotTargets.length > 0
-                ? await snapshotReadTargets(this._workspace.rootDir, snapshotTargets).catch(() => undefined)
-                : undefined;
-              if (snapshotBefore) readBatchSnapshotBefore.set(callIndex, snapshotBefore);
-              const settled = await Promise.allSettled(readPartition.calls.map(async (scheduled) => {
-                const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
-                  scheduled.name,
-                  scheduled.args as Record<string, unknown>,
-                  stepToolRunner,
-                  {
+                firstTokenAt ??= Date.now();
+                this.eventBus?.emit('model:thought', token, { sessionId: session.id });
+                accumulatedThought += token;
+                thoughtTokenCount++;
+                if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
+                  if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+                    const candidatePaths = extractThoughtPaths(accumulatedThought, this._workspace.rootDir);
+                    for (const candidatePath of candidatePaths) {
+                      this.pipelinedDispatcher.dispatchSpeculative(
+                        'read_file',
+                        { path: candidatePath },
+                        this.toolRunner,
+                        {
+                          sessionId: session.id,
+                          agentId: this.agentId,
+                          turn,
+                          userRequest: turnUserRequest,
+                          signal: options?.signal,
+                        },
+                        'thought-stream-intent',
+                      );
+                    }
+                  }
+                }
+              },
+              onContentToken: (token: string) => {
+                if (firstTokenAt === undefined) {
+                  this.eventBus?.emit('model:retry', null, { sessionId: session.id });
+                }
+                firstTokenAt ??= Date.now();
+                this.eventBus?.emit('model:token', token, { sessionId: session.id });
+              },
+              onToolCallEarly: (earlyCall: any) => {
+                if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
+                  const runContext = {
                     sessionId: session.id,
                     agentId: this.agentId,
                     turn,
                     userRequest: turnUserRequest,
                     signal: options?.signal,
-                    controlMode: toolControlMode,
-                    ...(toolControlMode !== 'off' ? {
-                      decisionId: activeDecisionId,
-                      allowedToolNames: authorizedToolNames,
-                      allowedToolSetHash: activeToolSetHash,
-                      classificationPhase: classification.phase,
-                      phaseVersion: classification.phaseVersion,
-                      classificationRisk: classification.risk,
-                    } : {}),
-                  },
-                  scheduled.id,
-                );
-                return pipelinedOutcome.executionResult;
-              }));
-              readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
-              const batchSnapshotBefore = readBatchSnapshotBefore.get(callIndex);
-              if (batchSnapshotBefore) {
-                const snapshotAfterEpoch = await snapshotReadTargets(
-                  this._workspace.rootDir,
-                  Object.keys(batchSnapshotBefore.entries),
-                ).catch(() => undefined);
-                if (snapshotAfterEpoch) {
-                  const changed = diffReadSnapshots(batchSnapshotBefore, snapshotAfterEpoch);
-                  if (changed.length > 0) readBatchSnapshotMismatch.set(callIndex, changed);
+                  };
+                  this.pipelinedDispatcher.dispatchEarly(
+                    earlyCall.name,
+                    earlyCall.args,
+                    this.toolRunner,
+                    runContext,
+                    earlyCall.id,
+                  );
+                }
+              },
+            }, requestOptions);
+          } else {
+            response = await llm.generate(session, activeToolDeclarations, requestOptions);
+          }
+        } finally {
+          this.eventBus?.emit('model:retry', null, { sessionId: session.id });
+          this.eventBus?.emit('model:thinking:end', {
+            agentId: this.agentId,
+            turn,
+            step,
+            endedAt: Date.now(),
+            sessionId: session.id,
+          });
+        }
+        this.setCircuitBreakerRetries(session.id, 0);
+        const requestDurationMs = Date.now() - requestStartedAt;
+        const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
+        response.usage = {
+          ...(response.usage || {}),
+          requestDurationMs,
+          ...(timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs }),
+        };
+        this.contextBudgetManager.observeActualUsage(
+          activeModelName,
+          contextPreparation.after.inputTokens,
+          response.usage.promptTokens,
+        );
+        this.latencyOrchestrator.record({
+          durationMs: requestDurationMs,
+          timeToFirstTokenMs,
+          promptTokens: response.usage.promptTokens,
+          cachedTokens: response.usage.cachedTokens,
+          profile: latencyProfile,
+        });
+        const actualTotalTokens = (response.usage?.promptTokens ?? 0) + (response.usage?.completionTokens ?? 0);
+        if (actualTotalTokens > 0) {
+          this.rateLimitPacer.recordActualUsage(actualTotalTokens);
+        }
+
+        if (options?.signal?.aborted || response.finishReason === 'aborted') {
+          const cancellationMessage = 'Agent stopped: cancellation requested.';
+          this.pipelinedDispatcher.resetTurn();
+          this.subagentManager.stopAll();
+          session.append('step/end', { turn, step, reason: 'cancelled' });
+          await this.persistSession(session);
+          await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
+          this.goalManager.pause('Task execution cancelled by user.');
+          return cancellationMessage;
+        }
+        session.append('control/decision', {
+          turn,
+          step,
+          controlDecision: {
+            mode: 'soft-latency',
+            requestDurationMs,
+            timeToFirstTokenMs,
+            estimatedInputTokens: requestFootprint.estimatedInputTokens,
+            requestPressureRatio: requestFootprint.pressureRatio,
+            modelName: activeModelName,
+            latencyTier: latencyProfile.tier,
+            softStepTargetMs: latencyProfile.targetMs,
+            taskPhase: classification.phase,
+            dynamicContextCache: this.dynamicContextCache.getStats(),
+            dynamicContextCacheHit: Boolean(cachedDynamicContext),
+            promptTokens: response.usage?.promptTokens,
+            cachedTokens: response.usage?.cachedTokens,
+            cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
+            cacheReadInputTokens: response.usage?.cacheReadInputTokens,
+            cacheHitRate: response.usage?.cacheHitRate,
+            hardTimeoutApplied: false,
+            contextManagementMode: contextPreparation.mode,
+            contextInputUpperBound: contextPreparation.after.upperBoundTokens,
+            contextWithinBudget: contextPreparation.withinBudget,
+            shadowCandidateInputUpperBound: contextPreparation.candidateAfter?.upperBoundTokens,
+            compactionStrategies: contextPreparation.compactionStats?.strategiesApplied,
+          },
+        });
+        this.eventBus?.emit('model:request_telemetry', {
+          turn,
+          step,
+          requestDurationMs,
+          timeToFirstTokenMs,
+          requestFootprint,
+          modelName: activeModelName,
+          latencyProfile,
+          taskPhase: classification.phase,
+          dynamicContextCacheHit: Boolean(cachedDynamicContext),
+          promptTokens: response.usage?.promptTokens,
+          cachedTokens: response.usage?.cachedTokens,
+          cacheHitRate: response.usage?.cacheHitRate,
+          contextManagementMode: contextPreparation.mode,
+          contextWithinBudget: contextPreparation.withinBudget,
+          contextInputUpperBound: contextPreparation.after.upperBoundTokens,
+        });
+
+        // System 2: Tóm tắt hành vi/ý định suy luận của LLM trong step này dùng mistral/codestral-latest
+        const isMockLLM = Boolean(llm?.constructor?.name?.includes('Mock') || process.env.NODE_ENV === 'test');
+
+        let userGoal: string | undefined = this.goalManager?.getState()?.objective;
+        if (!userGoal) {
+          const history = session.getHistory();
+          for (let i = history.length - 1; i >= 0; i--) {
+            const item = history[i];
+            if (item?.role === 'user' && item.parts) {
+              for (const p of item.parts) {
+                if (p?.text) {
+                  userGoal = p.text;
+                  break;
                 }
               }
-              settled.forEach((outcome, resultIndex) => {
-                const scheduled = readPartition.calls[resultIndex];
-                preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
-                  ? outcome.value
-                  : {
+              if (userGoal) break;
+            }
+          }
+        }
+
+        const stepSummary = generateFallbackStepSummary({
+          step,
+          userGoal,
+          text: response.text,
+          reasoningContent: response.reasoningContent,
+          toolCalls: response.toolCalls,
+        });
+        // Case 4 — always-on intent line: one cheap sentence per step, kept
+        // outside the model projection for timeline review and retrieval.
+        session.addReasoning(stepSummary, { kind: 'intent', step, turn, trigger: 'step-summary' });
+
+        if (!isSubagent && !this._collapsePreferences.compactSteps) {
+          CLI.renderLLMThinking(stepSummary);
+        }
+
+        // Giám sát và hiển thị Prompt Cache Hit Rate / Token Telemetry
+        if (response.usage) {
+          this.eventBus?.emit('model:usage', response.usage);
+          if (!this._collapsePreferences.compactSteps) {
+            CLI.renderCacheUsage(response.usage);
+          }
+        }
+
+        // System 2: Hiển thị mạch suy luận nội tâm sâu (Deep Reasoning / CoT) nếu có
+        if (response.reasoningContent) {
+          this._latestReasoning = {
+            thought: response.reasoningContent,
+            timestamp: new Date().toLocaleTimeString(),
+            step,
+            turn: (session as any).turnsCount || 1,
+          };
+          // Case 3 — explicit audit mode only (MINUS_REASONING_LOG=1):
+          // persist the full thought. Default off; routine thoughts stay ephemeral.
+          if (envFeatureEnabled('MINUS_REASONING_LOG', false)) {
+            this.persistStepReasoning(session, response.reasoningContent, { debugLogEnabled: true, step, turn });
+          }
+          // The [REQUEST ANALYSIS] block is short, high-signal, and explicitly
+          // user-facing: always display it, even when step output is compacted.
+          const requestAnalysis = extractRequestAnalysis(response.reasoningContent);
+          if (requestAnalysis) {
+            CLI.renderRequestAnalysis(requestAnalysis);
+          } else if (!this._collapsePreferences.compactSteps) {
+            CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
+          }
+          // Streaming providers already emitted each thought chunk. Emit the
+          // aggregate only for non-streaming providers to avoid duplicating the
+          // reasoning trace in reactive UIs.
+          if (typeof llm.generateStream !== 'function') {
+            this.eventBus?.emit('model:thought', response.reasoningContent, { sessionId: session.id });
+          }
+
+          // Wink-Style Specification Drift & Goal Substitution Nudge
+          const thoughtDrift = this.domainIntentGuardian.observeModelThoughts(response.reasoningContent);
+          if (thoughtDrift) {
+            CLI.renderReflectionAlert(1, `[Wink Course-Correction Nudge]: ${thoughtDrift.message}`);
+          }
+        }
+
+        const hasToolCalls = Boolean(response.toolCalls && response.toolCalls.length > 0);
+        const hasValidText = Boolean(response.text && response.text.trim().length > 0);
+        const hasReasoning = Boolean(response.reasoningContent && response.reasoningContent.trim().length > 0);
+        const hasExplicitFinishReason = typeof response.finishReason === 'string';
+        const finishReason = response.finishReason
+          || (hasToolCalls ? 'tool_calls' : hasValidText ? 'stop' : 'unknown');
+        const recoverableIncompleteFinish = hasExplicitFinishReason
+          && ['max_tokens', 'transport_eof', 'unknown'].includes(finishReason);
+        const terminalIncompleteFinish = hasExplicitFinishReason
+          && ['content_filter', 'error', 'aborted'].includes(finishReason);
+
+        if (recoverableIncompleteFinish || terminalIncompleteFinish) {
+          consecutiveIncompleteFinishes++;
+          if (hasValidText) {
+            // Persist only the visible text prefix. Partial/unconfirmed tool calls
+            // must not enter history or execute.
+            session.addModelMessage({ text: response.text, rawContent: response.rawContent });
+          } else if (hasReasoning) {
+            session.addModelMessage({
+              text: '[Interrupted during reasoning phase]',
+              rawContent: response.rawContent,
+            });
+          } else {
+            session.addModelMessage({
+              text: '[Stream connection interrupted before output]',
+              rawContent: response.rawContent,
+            });
+          }
+
+          const finishDetail = response.rawFinishReason
+            ? `${finishReason} (${response.rawFinishReason})`
+            : finishReason;
+          const canRetry = recoverableIncompleteFinish
+            && consecutiveIncompleteFinishes <= maxIncompleteFinishRetries;
+
+          if (canRetry) {
+            CLI.renderReflectionAlert(
+              consecutiveIncompleteFinishes,
+              `Model stream ended with ${finishDetail}; partial output was not accepted as final. Continuing the same user turn.`,
+            );
+
+            if (consecutiveIncompleteFinishes > 1) {
+              await delay(Math.min(1000 * consecutiveIncompleteFinishes, 3000));
+            }
+
+            let continuationPrompt: string;
+            const activeTask = this.planManager?.getActiveTask?.();
+            const taskContext = activeTask
+              ? `\n[ACTIVE TASK IN PROGRESS]: Task #${activeTask.id} (${activeTask.title}). Proceed with completing this task.`
+              : '';
+
+            if (finishReason === 'transport_eof') {
+              continuationPrompt = `[STREAM CONNECTION INTERRUPTED (${finishDetail})]: The stream connection stalled or was terminated by watchdog. Your partial response has been saved above. Continue the task seamlessly from where you were interrupted without repeating completed steps.${taskContext}\nRe-issue any cut-off tool call in full.`;
+            } else if (finishReason === 'max_tokens') {
+              continuationPrompt = `[OUTPUT TOKEN LIMIT REACHED (max_tokens)]: Your output was truncated by the token limit. Continue directly from the preserved text prefix without repeating previous content.${taskContext}\nRe-issue any cut-off tool call in full.`;
+            } else {
+              continuationPrompt = `[SYSTEM STREAM CONTINUATION (${finishDetail})]: Continue from the preserved text prefix.${taskContext}\nRe-issue any cut-off tool call in full.`;
+            }
+
+            session.addUserMessage(continuationPrompt, 'system');
+            CLI.renderStepFooter();
+            const continuationReason = `${finishReason}-continuation`;
+            session.append('step/end', { turn, step, reason: continuationReason });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: continuationReason,
+            });
+            this.eventBus?.emit('step:after', step, { sessionId: session.id });
+            continue;
+          }
+
+          const incompleteMessage = terminalIncompleteFinish
+            ? `Agent stopped: model response ended with ${finishDetail}. No partial response was accepted as completion.`
+            : `Agent stopped: model response remained incomplete after ${maxIncompleteFinishRetries} continuation attempts (last reason: ${finishDetail}).`;
+          CLI.renderReflectionAlert(consecutiveIncompleteFinishes, incompleteMessage);
+          CLI.renderStepFooter();
+          session.append('step/end', { turn, step, reason: `${finishReason}-terminal` });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', {
+            ...hookContext,
+            reason: `${finishReason}-terminal`,
+          });
+          await CLI.renderExecutionStopped(incompleteMessage, 'INCOMPLETE_RESPONSE');
+          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, `${finishReason}-terminal`);
+          this.goalManager.disarm();
+          return incompleteMessage;
+        }
+        consecutiveIncompleteFinishes = 0;
+
+        // 4. Nếu model muốn gọi tool (System 1: Action)
+        if (hasToolCalls) {
+          consecutiveEmptyTurns = 0;
+          if (!this._collapsePreferences.compactSteps) {
+            CLI.renderModelAction('tool_call', `Requesting ${response.toolCalls.length} tool call(s)`);
+          }
+
+          const normalizedToolCalls = response.toolCalls.map((call: any) => ({
+            ...call,
+            name: typeof call?.name === 'string' && call.name.trim()
+              ? call.name.trim()
+              : '__invalid_tool_call__',
+            args: call?.args ?? call?.arguments ?? {},
+          }));
+          const seenToolCallIds = new Set<string>();
+          const toolCallIds = normalizedToolCalls.map((call: any, callIndex: number) => {
+            let candidateId = (call as any).id || `call-${turn}-${step}-${callIndex}`;
+            if (seenToolCallIds.has(candidateId)) {
+              candidateId = `${candidateId}_${callIndex}`;
+            }
+            seenToolCallIds.add(candidateId);
+            return candidateId;
+          });
+          const toolCallsWithIds = normalizedToolCalls.map((call: any, callIndex: number) => ({
+            ...call,
+            id: toolCallIds[callIndex],
+          }));
+
+          // Ghi lại phản hồi gọi tool của model vào Session
+          session.addModelMessage({
+            text: response.text,
+            functionCalls: toolCallsWithIds,
+            rawContent: response.rawContent,
+          });
+          await this.persistSession(session);
+          const assistantSeq = session.lastEvent?.seq;
+          const responseFunctionCallParts = (response.rawContent?.parts || [])
+            .filter((part: any) => part.functionCall);
+
+          interface ExecutionToolCall {
+            call: any;
+            id: string;
+            name: string;
+            args: Record<string, unknown>;
+            responsePart: any;
+          }
+
+          const rawExecutionCalls: ExecutionToolCall[] = normalizedToolCalls.map((call: any, callIndex: number) => ({
+            call,
+            id: toolCallIds[callIndex],
+            name: call.name || '__invalid_tool_call__',
+            args: (call.args as Record<string, unknown>) || {},
+            responsePart: responseFunctionCallParts[callIndex],
+          }));
+
+          const orderedExecutionCalls = reorderScheduledToolCalls<ExecutionToolCall>(rawExecutionCalls);
+
+          const scheduledToolCalls: ScheduledToolCall[] = orderedExecutionCalls.map((item, callIndex: number) => ({
+            index: callIndex,
+            id: item.id,
+            name: item.name,
+            args: item.args,
+          }));
+          const concurrentReadsEnabled = this.loopOptions?.enableConcurrentReadTools
+            ?? envFeatureEnabled('MINUS_CONCURRENT_READ_TOOLS');
+          const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
+            ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
+          const toolPartitions = partitionToolCalls(scheduledToolCalls, concurrentReadsEnabled && !readySubmission);
+          const readPartitionByIndex = new Map<number, ToolCallPartition>();
+          for (const partition of toolPartitions) {
+            if (partition.mode === 'sequential') continue;
+            for (const scheduled of partition.calls) readPartitionByIndex.set(scheduled.index, partition);
+          }
+          const preexecutedReadResults = new Map<number, ToolExecutionResult>();
+          const startedConcurrentPartitions = new Set<number>();
+          const readBatchDurationMs = new Map<number, number>();
+          const readBatchToolDurationMs = new Map<number, number>();
+          const readBatchSnapshotBefore = new Map<number, ReadSnapshot>();
+          const readBatchSnapshotMismatch = new Map<number, string[]>();
+
+          let strategyChangeRequired: { toolName: string; repetitionCount: number } | undefined;
+          let toolBatchCancelled = false;
+          let userDeniedPermission: { toolName: string; detail: string } | undefined;
+          let postSubmissionBlocked = false;
+          let phaseTransitionAcceptedInResponse = false;
+          let parallelBatchCount = 0;
+          let parallelTotalTools = 0;
+          let parallelDurationMs = 0;
+          let parallelSavedMs = 0;
+
+          // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
+          for (const [callIndex, item] of orderedExecutionCalls.entries()) {
+            const call = item.call;
+            const readPartition = readPartitionByIndex.get(callIndex);
+            const partitionStartIndex = readPartition?.calls[0]?.index;
+            const partitionEndIndex = readPartition?.calls.at(-1)?.index;
+            const deferReadPersistence = Boolean(
+              batchPersistenceEnabled && readPartition && readPartition.calls.length > 1,
+            );
+
+            if (
+              readPartition?.mode === 'concurrent-read'
+              && !readySubmission
+              && partitionStartIndex === callIndex
+              && !startedConcurrentPartitions.has(callIndex)
+            ) {
+              startedConcurrentPartitions.add(callIndex);
+              if (hasSubmittedSolution) {
+                for (const scheduled of readPartition.calls) {
+                  preexecutedReadResults.set(scheduled.index, {
                     toolName: scheduled.name,
                     args: scheduled.args,
                     durationMs: 0,
                     result: {
-                      error: outcome.reason?.message || String(outcome.reason),
-                      errorCode: 'TOOL_EXECUTION_REJECTED',
-                      retryable: true,
+                      success: false,
+                      submitted: true,
+                      summary: submittedSolutionSummary || 'Task completed and submitted.',
+                      nextAction: 'final_answer',
+                      errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+                      message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
                     },
                   });
-              });
-            }
-          }
+                }
+              } else {
+                for (const scheduled of readPartition.calls) {
+                  const partitionItem = orderedExecutionCalls[scheduled.index];
+                  session.append('tool/call', {
+                    turn,
+                    step,
+                    toolName: scheduled.name,
+                    toolCallId: scheduled.id,
+                    assistantSeq,
+                    args: scheduled.args,
+                    thoughtSignature: partitionItem?.responsePart?.thoughtSignature,
+                  });
+                  this.eventBus?.emit('tool:before', scheduled.name, scheduled.args, { sessionId: session.id });
+                  // Mirror the sequential path below: in compact mode the completion
+                  // one-liner (renderCompactOneLiner) already shows each tool, so
+                  // emitting the verbose call line here would render every
+                  // parallel tool twice.
+                  if (!this._collapsePreferences.compactSteps) {
+                    CLI.renderToolCall(scheduled.name, scheduled.args);
+                  } else {
+                    CLI.startToolDotSpinner(scheduled.name, scheduled.args);
+                  }
+                }
 
-          if (options?.signal?.aborted && !preexecutedReadResults.has(callIndex)) {
-            // The assistant message already declared the entire batch. Record
-            // explicit results for every call that will not be dispatched so
-            // history remains valid and no call can look silently abandoned.
-            for (let pendingIndex = callIndex; pendingIndex < orderedExecutionCalls.length; pendingIndex++) {
-              const pendingCall = orderedExecutionCalls[pendingIndex];
-              const pendingToolName = pendingCall.name || '__invalid_tool_call__';
-              const pendingToolCallId = pendingCall.id;
-              const pendingArgs = (pendingCall.args as Record<string, any>) || {};
-              const abortedResult = {
-                error: 'The tool call was not started because cancellation was requested before dispatch.',
-                errorCode: 'ABORTED_BEFORE_DISPATCH',
-                retryable: true,
-              };
+                const batchStartedAt = Date.now();
+                // Snapshot epoch: fingerprint read targets before dispatch so a
+                // mid-flight external FS change can be flagged without locking.
+                const snapshotTargets = extractReadTargets(readPartition.calls.map((scheduled) => ({
+                  name: scheduled.name,
+                  args: scheduled.args as Record<string, unknown>,
+                })));
+                const snapshotBefore = snapshotTargets.length > 0
+                  ? await snapshotReadTargets(this._workspace.rootDir, snapshotTargets).catch(() => undefined)
+                  : undefined;
+                if (snapshotBefore) readBatchSnapshotBefore.set(callIndex, snapshotBefore);
+                const settled = await Promise.allSettled(readPartition.calls.map(async (scheduled) => {
+                  const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+                    scheduled.name,
+                    scheduled.args as Record<string, unknown>,
+                    stepToolRunner,
+                    {
+                      sessionId: session.id,
+                      agentId: this.agentId,
+                      turn,
+                      userRequest: turnUserRequest,
+                      signal: options?.signal,
+                      controlMode: toolControlMode,
+                      ...(toolControlMode !== 'off' ? {
+                        decisionId: activeDecisionId,
+                        allowedToolNames: authorizedToolNames,
+                        allowedToolSetHash: activeToolSetHash,
+                        classificationPhase: classification.phase,
+                        phaseVersion: classification.phaseVersion,
+                        classificationRisk: classification.risk,
+                      } : {}),
+                    },
+                    scheduled.id,
+                  );
+                  return pipelinedOutcome.executionResult;
+                }));
+                readBatchDurationMs.set(callIndex, Date.now() - batchStartedAt);
+                const batchSnapshotBefore = readBatchSnapshotBefore.get(callIndex);
+                if (batchSnapshotBefore) {
+                  const snapshotAfterEpoch = await snapshotReadTargets(
+                    this._workspace.rootDir,
+                    Object.keys(batchSnapshotBefore.entries),
+                  ).catch(() => undefined);
+                  if (snapshotAfterEpoch) {
+                    const changed = diffReadSnapshots(batchSnapshotBefore, snapshotAfterEpoch);
+                    if (changed.length > 0) readBatchSnapshotMismatch.set(callIndex, changed);
+                  }
+                }
+                settled.forEach((outcome, resultIndex) => {
+                  const scheduled = readPartition.calls[resultIndex];
+                  preexecutedReadResults.set(scheduled.index, outcome.status === 'fulfilled'
+                    ? outcome.value
+                    : {
+                      toolName: scheduled.name,
+                      args: scheduled.args,
+                      durationMs: 0,
+                      result: {
+                        error: outcome.reason?.message || String(outcome.reason),
+                        errorCode: 'TOOL_EXECUTION_REJECTED',
+                        retryable: true,
+                      },
+                    });
+                });
+              }
+            }
+
+            if (options?.signal?.aborted && !preexecutedReadResults.has(callIndex)) {
+              // The assistant message already declared the entire batch. Record
+              // explicit results for every call that will not be dispatched so
+              // history remains valid and no call can look silently abandoned.
+              for (let pendingIndex = callIndex; pendingIndex < orderedExecutionCalls.length; pendingIndex++) {
+                const pendingCall = orderedExecutionCalls[pendingIndex];
+                const pendingToolName = pendingCall.name || '__invalid_tool_call__';
+                const pendingToolCallId = pendingCall.id;
+                const pendingArgs = (pendingCall.args as Record<string, any>) || {};
+                const abortedResult = {
+                  error: 'The tool call was not started because cancellation was requested before dispatch.',
+                  errorCode: 'ABORTED_BEFORE_DISPATCH',
+                  retryable: true,
+                };
+                session.append('tool/call', {
+                  turn,
+                  step,
+                  toolName: pendingToolName,
+                  toolCallId: pendingToolCallId,
+                  assistantSeq,
+                  args: pendingArgs,
+                  thoughtSignature: pendingCall.responsePart?.thoughtSignature,
+                  reason: 'aborted-before-dispatch',
+                });
+                session.addToolResultWithId(
+                  pendingToolName,
+                  abortedResult,
+                  pendingToolCallId,
+                  'aborted-before-dispatch',
+                );
+                CLI.renderToolResult(pendingToolName, 0, abortedResult);
+                this.eventBus?.emit('tool:error', pendingToolName, abortedResult, { sessionId: session.id });
+              }
+              await this.persistSession(session);
+              toolBatchCancelled = true;
+              break;
+            }
+
+            const toolName = item.name || '';
+            const toolArgs = (item.args as Record<string, any>) || {};
+
+            const toolCallId = item.id;
+            if (readPartition?.mode !== 'concurrent-read') {
               session.append('tool/call', {
                 turn,
                 step,
-                toolName: pendingToolName,
-                toolCallId: pendingToolCallId,
+                toolName,
+                toolCallId,
                 assistantSeq,
-                args: pendingArgs,
-                thoughtSignature: pendingCall.responsePart?.thoughtSignature,
-                reason: 'aborted-before-dispatch',
-              });
-              session.addToolResultWithId(
-                pendingToolName,
-                abortedResult,
-                pendingToolCallId,
-                'aborted-before-dispatch',
-              );
-              CLI.renderToolResult(pendingToolName, 0, abortedResult);
-              this.eventBus?.emit('tool:error', pendingToolName, abortedResult, { sessionId: session.id });
-            }
-            await this.persistSession(session);
-            toolBatchCancelled = true;
-            break;
-          }
-
-          const toolName = item.name || '';
-          const toolArgs = (item.args as Record<string, any>) || {};
-
-          const toolCallId = item.id;
-          if (readPartition?.mode !== 'concurrent-read') {
-            session.append('tool/call', {
-              turn,
-              step,
-              toolName,
-              toolCallId,
-              assistantSeq,
-              args: toolArgs,
-              thoughtSignature: item.responsePart?.thoughtSignature,
-            });
-          }
-          if (!deferReadPersistence && readPartition?.mode !== 'concurrent-read') {
-            await this.persistSession(session);
-          }
-
-          if (toolName === '__invalid_tool_call__') {
-            const invalidResult = {
-              error: 'The model emitted a tool call without a valid tool name.',
-              errorCode: 'INVALID_TOOL_CALL',
-              retryable: true,
-            };
-            session.addToolResultWithId(toolName, invalidResult, toolCallId, 'invalid-tool-call');
-            if (!deferReadPersistence) await this.persistSession(session);
-            this.eventBus?.emit('tool:error', toolName, invalidResult, { sessionId: session.id });
-            continue;
-          }
-
-          // Item 15: pure reads are phase-independent (always authorized), so only
-          // state-changing calls wait for the fresh turn. submit_solution and
-          // edits still fence here.
-          if (phaseTransitionAcceptedInResponse && !READ_TOOL_NAMES.has(toolName)) {
-            const blockedResult = {
-              success: false,
-              errorCode: 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN',
-              error: 'A phase transition was accepted earlier in this response. Re-issue this tool call after the Harness provides the new phase and tool set.',
-              retryable: true,
-            };
-            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'phase-transition-requires-fresh-turn');
-            await this.persistSession(session);
-            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
-            continue;
-          }
-
-
-          // Reconstruct again for each call: earlier calls in this same batch may have completed a stage.
-          const gitWorkflowNow = resolveGitWorkflow({
-            userRequest: turnUserRequest,
-            observations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
-            mayEdit: !isReadOnlyRequest(turnUserRequest),
-            implementationRequested: gitCodeChangeRequested,
-            implementationReady: gitImplementationReady(),
-          });
-          const gitWorkflowError = checkGitWorkflowCall(gitWorkflowNow, turnUserRequest, toolName, toolArgs);
-          if (gitWorkflowError) {
-            const blockedResult = { success: false, errorCode: 'GIT_WORKFLOW_STAGE_BLOCKED', error: gitWorkflowError,
-              processStarted: false, gitWorkflow: gitWorkflowNow, retryable: true };
-            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
-            await this.persistSession(session);
-            CLI.renderToolResult(toolName, 0, blockedResult);
-            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
-            continue;
-          }
-
-          const phaseEffect = checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
-            toolArgs, classification.phase, this._workspace.rootDir);
-          const mutationPaths = scopedMutationTargets(toolName, toolArgs);
-          const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
-            this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }, { workspaceRoot: this._workspace.rootDir }))
-            .find(intervention => intervention?.severity === 'BLOCKING');
-          if (!phaseEffect.allowed || domainBlock) {
-            const blockedResult = { success: false, processStarted: false,
-              errorCode: domainBlock ? 'DOMAIN_INTENT_BLOCKED' : 'PHASE_TOOL_EFFECT_BLOCKED',
-              error: domainBlock?.message || phaseEffect.reason, retryable: true };
-            session.addToolResultWithId(toolName, blockedResult, toolCallId, 'policy-effect-blocked');
-            await this.persistSession(session);
-            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
-            continue;
-          }
-
-          const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
-            write_file: { reversible: true, checkpoint: true },
-            replace_text: { reversible: true, checkpoint: true },
-            apply_patch: { reversible: true, checkpoint: true },
-            create_file: { reversible: true, checkpoint: true },
-            delete_file: { reversible: true, checkpoint: true },
-            move_file: { reversible: true, checkpoint: true },
-            run_command: { reversible: false, checkpoint: true },
-            git_add: { reversible: true, checkpoint: true },
-            git_commit: { reversible: true, checkpoint: true },
-            git_push: { reversible: false, checkpoint: true },
-          };
-          let sideEffect: { reversible: boolean; checkpoint: boolean } | undefined = sideEffectConfig[toolName];
-          if (toolName === 'git_command') {
-            const gitRisk = classifyGitCommand(
-              String(toolArgs.subcommand || ''),
-              Array.isArray(toolArgs.args) ? toolArgs.args.map(String) : [],
-            ).risk;
-            sideEffect = gitRisk === 'read'
-              ? undefined
-              : gitRisk === 'network'
-                ? { reversible: false, checkpoint: true }
-                : { reversible: true, checkpoint: true };
-          }
-          if (!sideEffect && isMutationTool(toolName)) sideEffect = { reversible: true, checkpoint: true };
-          if (readySubmission) sideEffect = undefined;
-          const effect = sideEffect
-            ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible, session.id)
-            : undefined;
-          if (effect) await this.persistSession(session);
-
-          // Tạo Shadow Git Checkpoint trước các thao tác sửa đổi file hoặc chạy lệnh
-          if (effect && sideEffect?.checkpoint) {
-            if (mutationPaths.length && !turnMutationCheckpointId) {
-              turnMutationCheckpointId = (await this.checkpointManager.createTaskCheckpoint(`turn-${turn}`, 'Turn mutation baseline'))?.id;
-            }
-            if (turnMutationCheckpointId && mutationPaths.length) await this.checkpointManager.captureFiles(turnMutationCheckpointId, mutationPaths);
-            const checkpoint = mutationPaths.length ? await this.checkpointManager.createCheckpoint(`Tool ${toolName}`, { files: mutationPaths }) : undefined;
-            this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id, session.id);
-            await this.persistSession(session);
-          }
-
-          const preexecutedReadResult = preexecutedReadResults.get(callIndex);
-          if (!preexecutedReadResult) {
-            this.eventBus?.emit('tool:before', toolName, toolArgs, { sessionId: session.id });
-            if (!this._collapsePreferences.compactSteps) {
-              CLI.renderToolCall(toolName, toolArgs);
-            } else {
-              CLI.startToolDotSpinner(toolName, toolArgs);
-            }
-          }
-
-          // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
-          // Chặn toàn bộ các tool call dư thừa (kể cả read_file, run_command) nếu nhiệm vụ đã được submit_solution hoàn tất
-          if (callIndex > 0 && (toolName === 'request_phase_transition' || isMutationTool(toolName))) {
-            const validatedNow = this.hypothesisTracker.getValidatedHypotheses();
-            paretoEvidence = assessParetoEvidence({
-              session, turn, taskClass: classification.taskClass, risk: classification.risk,
-              validatedHypothesisCount: validatedNow.length,
-              supportedHypothesisCount: this.hypothesisTracker.getSupportedHypotheses().length,
-            });
-            inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(classification.risk)
-              && paretoEvidence.inspectedFiles.length > 0;
-            const configuredReproMode = configuredEvidenceGateMode()
-              || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
-            const previousGate = this.toolRunner.guardian.getPreMutationGateContext();
-            this.toolRunner.guardian.setPreMutationGateContext({
-              ...previousGate!,
-              hasPlan: this.planManager.hasPlan(),
-              hasValidatedHypothesis: validatedNow.length > 0,
-              validatedTargetFiles: validatedNow.flatMap((hypothesis) => hypothesis.targetFiles || []),
-              evidenceScore: paretoEvidence.score,
-              evidenceThreshold: paretoEvidence.threshold,
-              evidenceReasons: paretoEvidence.reasons,
-              inspectedFiles: paretoEvidence.inspectedFiles,
-              hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
-              allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
-              userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest || retrievalUserRequest),
-              reproductionStatus: {
-                ...previousGate?.reproductionStatus,
-                enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
-                hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
-                hasPreFixRepro: paretoEvidence.hasFailureEvidence || validatedNow.length > 0,
-              },
-            });
-          }
-          let executionResult: ToolExecutionResult;
-          if (hasSubmittedSolution) {
-            const redundantPayload = {
-              success: false,
-              submitted: true,
-              summary: submittedSolutionSummary || 'Task completed and submitted.',
-              nextAction: 'final_answer',
-              errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
-              message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
-            };
-            executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
-          } else if (readySubmission && toolName !== 'submit_solution') {
-            // ToolRunner deliberately permits root-registry recovery. A
-            // completion lock must be stricter and precede every dispatch.
-            executionResult = { toolName, args: toolArgs, durationMs: 0, result: {
-              success: false, errorCode: 'READY_TO_SUBMIT_TOOL_BLOCKED',
-              error: 'The answer passed completion preflight. Only submit_solution is callable now.',
-            } };
-          } else if (toolName === 'request_phase_transition') {
-            const schema = this.toolProvider.get(toolName)?.parameters;
-            const validation = validateSchemaValue(toolArgs, schema as any, '$', {
-              rejectUnknownProperties: true,
-            });
-            if (!validation.valid) {
-              const error = `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`;
-              const recovery = getPhaseTransitionRecoveryGuidance('INVALID_ARGS', error);
-              executionResult = {
-                toolName,
                 args: toolArgs,
-                durationMs: 0,
-                result: {
-                  success: false,
-                  error,
-                  message: error,
-                  errorCode: 'INVALID_ARGS',
-                  validationErrors: validation.errors,
-                  reason: error,
-                  suggestion: recovery,
-                  retryable: true,
-                  _system_phase_transition_recovery: recovery,
-                },
+                thoughtSignature: item.responsePart?.thoughtSignature,
+              });
+            }
+            if (!deferReadPersistence && readPartition?.mode !== 'concurrent-read') {
+              await this.persistSession(session);
+            }
+
+            if (toolName === '__invalid_tool_call__') {
+              const invalidResult = {
+                error: 'The model emitted a tool call without a valid tool name.',
+                errorCode: 'INVALID_TOOL_CALL',
+                retryable: true,
               };
-            } else {
-              const transition = requestPhaseTransition(session, turn, classification, {
-                targetPhase: toolArgs.targetPhase,
-                rationale: toolArgs.rationale,
-                evidenceRefs: toolArgs.evidenceRefs,
-              }, {
-                hasPlan: this.planManager.hasPlan(),
-                evidenceSufficient: this.hypothesisTracker.getValidatedHypotheses().length > 0
-                  || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
-              });
-              const recovery = transition.accepted
+              session.addToolResultWithId(toolName, invalidResult, toolCallId, 'invalid-tool-call');
+              if (!deferReadPersistence) await this.persistSession(session);
+              this.eventBus?.emit('tool:error', toolName, invalidResult, { sessionId: session.id });
+              continue;
+            }
+
+            // Item 15: pure reads are phase-independent (always authorized), so only
+            // state-changing calls wait for the fresh turn. submit_solution and
+            // edits still fence here.
+            if (phaseTransitionAcceptedInResponse && !READ_TOOL_NAMES.has(toolName)) {
+              const blockedResult = {
+                success: false,
+                errorCode: 'PHASE_TRANSITION_REQUIRES_FRESH_MODEL_TURN',
+                error: 'A phase transition was accepted earlier in this response. Re-issue this tool call after the Harness provides the new phase and tool set.',
+                retryable: true,
+              };
+              session.addToolResultWithId(toolName, blockedResult, toolCallId, 'phase-transition-requires-fresh-turn');
+              await this.persistSession(session);
+              this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+              continue;
+            }
+
+
+            // Reconstruct again for each call: earlier calls in this same batch may have completed a stage.
+            const gitWorkflowNow = resolveGitWorkflow({
+              userRequest: turnUserRequest,
+              observations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
+              mayEdit: !isReadOnlyRequest(turnUserRequest),
+              implementationRequested: gitCodeChangeRequested,
+              implementationReady: gitImplementationReady(),
+            });
+            const gitWorkflowError = checkGitWorkflowCall(gitWorkflowNow, turnUserRequest, toolName, toolArgs);
+            if (gitWorkflowError) {
+              const blockedResult = {
+                success: false, errorCode: 'GIT_WORKFLOW_STAGE_BLOCKED', error: gitWorkflowError,
+                processStarted: false, gitWorkflow: gitWorkflowNow, retryable: true
+              };
+              session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
+              await this.persistSession(session);
+              CLI.renderToolResult(toolName, 0, blockedResult);
+              this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+              continue;
+            }
+
+            const phaseEffect = checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
+              toolArgs, classification.phase, this._workspace.rootDir);
+            const mutationPaths = scopedMutationTargets(toolName, toolArgs);
+            const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
+              this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }, { workspaceRoot: this._workspace.rootDir }))
+              .find(intervention => intervention?.severity === 'BLOCKING');
+            if (!phaseEffect.allowed || domainBlock) {
+              const blockedResult = {
+                success: false, processStarted: false,
+                errorCode: domainBlock ? 'DOMAIN_INTENT_BLOCKED' : 'PHASE_TOOL_EFFECT_BLOCKED',
+                error: domainBlock?.message || phaseEffect.reason, retryable: true
+              };
+              session.addToolResultWithId(toolName, blockedResult, toolCallId, 'policy-effect-blocked');
+              await this.persistSession(session);
+              this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+              continue;
+            }
+
+            const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
+              write_file: { reversible: true, checkpoint: true },
+              replace_text: { reversible: true, checkpoint: true },
+              apply_patch: { reversible: true, checkpoint: true },
+              create_file: { reversible: true, checkpoint: true },
+              delete_file: { reversible: true, checkpoint: true },
+              move_file: { reversible: true, checkpoint: true },
+              run_command: { reversible: false, checkpoint: true },
+              git_add: { reversible: true, checkpoint: true },
+              git_commit: { reversible: true, checkpoint: true },
+              git_push: { reversible: false, checkpoint: true },
+            };
+            let sideEffect: { reversible: boolean; checkpoint: boolean } | undefined = sideEffectConfig[toolName];
+            if (toolName === 'git_command') {
+              const gitRisk = classifyGitCommand(
+                String(toolArgs.subcommand || ''),
+                Array.isArray(toolArgs.args) ? toolArgs.args.map(String) : [],
+              ).risk;
+              sideEffect = gitRisk === 'read'
                 ? undefined
-                : getPhaseTransitionRecoveryGuidance(transition.errorCode, transition.reason);
+                : gitRisk === 'network'
+                  ? { reversible: false, checkpoint: true }
+                  : { reversible: true, checkpoint: true };
+            }
+            if (!sideEffect && isMutationTool(toolName)) sideEffect = { reversible: true, checkpoint: true };
+            if (readySubmission) sideEffect = undefined;
+            const effect = sideEffect
+              ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible, session.id)
+              : undefined;
+            if (effect) await this.persistSession(session);
+
+            // Tạo Shadow Git Checkpoint trước các thao tác sửa đổi file hoặc chạy lệnh
+            if (effect && sideEffect?.checkpoint) {
+              if (mutationPaths.length && !turnMutationCheckpointId) {
+                turnMutationCheckpointId = (await this.checkpointManager.createTaskCheckpoint(`turn-${turn}`, 'Turn mutation baseline'))?.id;
+              }
+              if (turnMutationCheckpointId && mutationPaths.length) await this.checkpointManager.captureFiles(turnMutationCheckpointId, mutationPaths);
+              const checkpoint = mutationPaths.length ? await this.checkpointManager.createCheckpoint(`Tool ${toolName}`, { files: mutationPaths }) : undefined;
+              this.effectLedger.attachCheckpoint(effect.id, checkpoint?.id, session.id);
+              await this.persistSession(session);
+            }
+
+            const preexecutedReadResult = preexecutedReadResults.get(callIndex);
+            if (!preexecutedReadResult) {
+              this.eventBus?.emit('tool:before', toolName, toolArgs, { sessionId: session.id });
+              if (!this._collapsePreferences.compactSteps) {
+                CLI.renderToolCall(toolName, toolArgs);
+              } else {
+                CLI.startToolDotSpinner(toolName, toolArgs);
+              }
+            }
+
+            // Post-Submission Terminal Gate (OpenAI Codex CLI Standard):
+            // Chặn toàn bộ các tool call dư thừa (kể cả read_file, run_command) nếu nhiệm vụ đã được submit_solution hoàn tất
+            if (callIndex > 0 && (toolName === 'request_phase_transition' || isMutationTool(toolName))) {
+              const validatedNow = this.hypothesisTracker.getValidatedHypotheses();
+              paretoEvidence = assessParetoEvidence({
+                session, turn, taskClass: classification.taskClass, risk: classification.risk,
+                validatedHypothesisCount: validatedNow.length,
+                supportedHypothesisCount: this.hypothesisTracker.getSupportedHypotheses().length,
+              });
+              inspectedLowRiskFastPath = ['R0', 'R1', 'R2'].includes(classification.risk)
+                && paretoEvidence.inspectedFiles.length > 0;
+              const configuredReproMode = configuredEvidenceGateMode()
+                || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
+              const previousGate = this.toolRunner.guardian.getPreMutationGateContext();
+              this.toolRunner.guardian.setPreMutationGateContext({
+                ...previousGate!,
+                hasPlan: this.planManager.hasPlan(),
+                hasValidatedHypothesis: validatedNow.length > 0,
+                validatedTargetFiles: validatedNow.flatMap((hypothesis) => hypothesis.targetFiles || []),
+                evidenceScore: paretoEvidence.score,
+                evidenceThreshold: paretoEvidence.threshold,
+                evidenceReasons: paretoEvidence.reasons,
+                inspectedFiles: paretoEvidence.inspectedFiles,
+                hasEmpiricalEvidence: paretoEvidence.hasEmpiricalEvidence,
+                allMutationsAreNonExecutable: this.completionEvidenceGate.hasOnlyNonExecutableMutations(session, turn),
+                userExplicitlyExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest || retrievalUserRequest),
+                reproductionStatus: {
+                  ...previousGate?.reproductionStatus,
+                  enforceReproductionPass: configuredReproMode === 'enforce' && classification.taskClass === 'bugfix',
+                  hasPostFixPass: this.completionEvidenceGate.hasPostFixReproductionPass(session, turn),
+                  hasPreFixRepro: paretoEvidence.hasFailureEvidence || validatedNow.length > 0,
+                },
+              });
+            }
+            let executionResult: ToolExecutionResult;
+            if (hasSubmittedSolution) {
+              const redundantPayload = {
+                success: false,
+                submitted: true,
+                summary: submittedSolutionSummary || 'Task completed and submitted.',
+                nextAction: 'final_answer',
+                errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
+                message: 'submit_solution was accepted. All tool calls are locked. Do not execute further tools; conclude your turn with your final response to the user immediately.',
+              };
+              executionResult = { toolName, args: toolArgs, durationMs: 0, result: redundantPayload };
+            } else if (readySubmission && toolName !== 'submit_solution') {
+              // ToolRunner deliberately permits root-registry recovery. A
+              // completion lock must be stricter and precede every dispatch.
               executionResult = {
-                toolName,
-                args: toolArgs,
-                durationMs: 0,
-                result: {
-                  success: transition.accepted,
-                  phase: transition.phase,
-                  phaseVersion: transition.phaseVersion,
-                  reason: transition.reason,
-                  ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
-                  ...(!transition.accepted ? {
-                    error: transition.reason,
-                    message: transition.reason,
+                toolName, args: toolArgs, durationMs: 0, result: {
+                  success: false, errorCode: 'READY_TO_SUBMIT_TOOL_BLOCKED',
+                  error: 'The answer passed completion preflight. Only submit_solution is callable now.',
+                }
+              };
+            } else if (toolName === 'request_phase_transition') {
+              const schema = this.toolProvider.get(toolName)?.parameters;
+              const validation = validateSchemaValue(toolArgs, schema as any, '$', {
+                rejectUnknownProperties: true,
+              });
+              if (!validation.valid) {
+                const error = `Invalid arguments for tool "${toolName}": ${validation.errors.join('; ')}`;
+                const recovery = getPhaseTransitionRecoveryGuidance('INVALID_ARGS', error);
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  durationMs: 0,
+                  result: {
+                    success: false,
+                    error,
+                    message: error,
+                    errorCode: 'INVALID_ARGS',
+                    validationErrors: validation.errors,
+                    reason: error,
                     suggestion: recovery,
                     retryable: true,
                     _system_phase_transition_recovery: recovery,
-                  } : {}),
-                },
-              };
-              phaseTransitionAcceptedInResponse = transition.accepted;
-            }
-          } else if (preexecutedReadResult) {
-            executionResult = preexecutedReadResult;
-          } else {
-            // Chạy tool qua pipeline an toàn
-            const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
-            const originalCodeChangeRequired = isPlanModeThisStep ? false : submissionCodeChangeRequired();
-            const submissionCheck = toolName === 'submit_solution' ? evaluateSubmission({ ...toolArgs, summary: String(toolArgs.summary || '') }, {
-              session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
-              codeChangeRequired: originalCodeChangeRequired, taskClass: classification.taskClass,
-              verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
-              evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
-                changedFileCount: this.targetFilesModifiedInTurn.size,
-                hasCallers: this.editTouchedCallers,
-                blastRisk: this.maxEditBlastRisk,
-                sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
-              },
-              planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
-              activeAgents: submissionSnapshot().activeAgents,
-              evaluateCritic: evaluateTurnCritic,
-            }) : undefined;
-            let completionEvidence = submissionCheck?.evidence;
-            let policyCompletion = submissionCheck?.verification;
-
-            let ocrCompletion: OcrGateDecision = {
-              allow: true,
-              reason: 'not-applicable',
-              blockingFindings: [],
-              advisoryFindings: [],
-            };
-            if (
-              toolName === 'submit_solution'
-              && policyCompletion?.allowed === true
-              && completionEvidence?.allow === true
-              && !isSubagent
-              && !isMockLLM
-            ) {
-              const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
-              if (ocrReview) {
-                const completionState = getTurnCompletionState(session, turn);
-                ocrCompletion = await ocrReview.evaluateCompletion({
-                  session,
-                  filesModified: completionState.filesModified,
-                  background: turnUserRequest,
-                  signal: options?.signal,
+                  },
+                };
+              } else {
+                const transition = requestPhaseTransition(session, turn, classification, {
+                  targetPhase: toolArgs.targetPhase,
+                  rationale: toolArgs.rationale,
+                  evidenceRefs: toolArgs.evidenceRefs,
+                }, {
+                  hasPlan: this.planManager.hasPlan(),
+                  evidenceSufficient: this.hypothesisTracker.getValidatedHypotheses().length > 0
+                    || paretoEvidence.hasSufficientEvidence || inspectedLowRiskFastPath,
                 });
-                await this.persistSession(session);
+                const recovery = transition.accepted
+                  ? undefined
+                  : getPhaseTransitionRecoveryGuidance(transition.errorCode, transition.reason);
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  durationMs: 0,
+                  result: {
+                    success: transition.accepted,
+                    phase: transition.phase,
+                    phaseVersion: transition.phaseVersion,
+                    reason: transition.reason,
+                    ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
+                    ...(!transition.accepted ? {
+                      error: transition.reason,
+                      message: transition.reason,
+                      suggestion: recovery,
+                      retryable: true,
+                      _system_phase_transition_recovery: recovery,
+                    } : {}),
+                  },
+                };
+                phaseTransitionAcceptedInResponse = transition.accepted;
               }
-            }
-            // Phase 1 ACI Guardrails Pre-validation (SWE-agent)
-            const aciValidation = this.aciGuardrails.validate({
-              toolName,
-              args: toolArgs,
-              workspaceRoot: this._workspace.rootDir,
-            }, resolveAciGuardrailMode());
+            } else if (preexecutedReadResult) {
+              executionResult = preexecutedReadResult;
+            } else {
+              // Chạy tool qua pipeline an toàn
+              const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+              const originalCodeChangeRequired = isPlanModeThisStep ? false : submissionCodeChangeRequired();
+              const submissionCheck = toolName === 'submit_solution' ? evaluateSubmission({ ...toolArgs, summary: String(toolArgs.summary || '') }, {
+                session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
+                codeChangeRequired: originalCodeChangeRequired, taskClass: classification.taskClass,
+                verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
+                evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
+                  changedFileCount: this.targetFilesModifiedInTurn.size,
+                  hasCallers: this.editTouchedCallers,
+                  blastRisk: this.maxEditBlastRisk,
+                  sensitivePathTouched: Array.from(this.targetFilesModifiedInTurn).some((file) => !isNonExecutableFile(file) && isSensitivePath(file)),
+                },
+                planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
+                activeAgents: submissionSnapshot().activeAgents,
+                evaluateCritic: evaluateTurnCritic,
+              }) : undefined;
+              let completionEvidence = submissionCheck?.evidence;
+              let policyCompletion = submissionCheck?.verification;
 
-            // Phase 3 Dual-Agent Exploration Sufficiency & Reproduction Gate (Agentless & AutoCodeRover & Dual-Agent Verifier)
-            const targetFilePath = String(toolArgs?.path || toolArgs?.filePath || toolArgs?.file || toolArgs?.targetFile || toolArgs?.AbsolutePath || '');
-            const isScratch = isScratchFilePath(targetFilePath);
-            const reproductionMode = configuredEvidenceGateMode()
-              || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
+              let ocrCompletion: OcrGateDecision = {
+                allow: true,
+                reason: 'not-applicable',
+                blockingFindings: [],
+                advisoryFindings: [],
+              };
+              if (
+                toolName === 'submit_solution'
+                && policyCompletion?.allowed === true
+                && completionEvidence?.allow === true
+                && !isSubagent
+                && !isMockLLM
+              ) {
+                const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
+                if (ocrReview) {
+                  const completionState = getTurnCompletionState(session, turn);
+                  ocrCompletion = await ocrReview.evaluateCompletion({
+                    session,
+                    filesModified: completionState.filesModified,
+                    background: turnUserRequest,
+                    signal: options?.signal,
+                  });
+                  await this.persistSession(session);
+                }
+              }
+              // Phase 1 ACI Guardrails Pre-validation (SWE-agent)
+              const aciValidation = this.aciGuardrails.validate({
+                toolName,
+                args: toolArgs,
+                workspaceRoot: this._workspace.rootDir,
+              }, resolveAciGuardrailMode());
 
-            const explorationSufficiency: ExplorationSufficiencyDecision = isMutationTool(toolName) && !isScratch
-              ? this.criticGate.evaluateExplorationSufficiency({
+              // Phase 3 Dual-Agent Exploration Sufficiency & Reproduction Gate (Agentless & AutoCodeRover & Dual-Agent Verifier)
+              const targetFilePath = String(toolArgs?.path || toolArgs?.filePath || toolArgs?.file || toolArgs?.targetFile || toolArgs?.AbsolutePath || '');
+              const isScratch = isScratchFilePath(targetFilePath);
+              const reproductionMode = configuredEvidenceGateMode()
+                || (process.env.MINUS_REPRODUCTION_GATE?.trim().toLowerCase() === 'enforce' ? 'enforce' : 'observe');
+
+              const explorationSufficiency: ExplorationSufficiencyDecision = isMutationTool(toolName) && !isScratch
+                ? this.criticGate.evaluateExplorationSufficiency({
                   taskClass: classification.taskClass,
                   session,
                   targetFilePath,
@@ -3836,1462 +3848,1468 @@ export class AgentLoop {
                   gateMode: reproductionMode,
                   risk: classification.risk,
                 })
-              : { allowed: true, score: 100, reasons: [], inspectedFiles: [] };
+                : { allowed: true, score: 100, reasons: [], inspectedFiles: [] };
 
-            this.eventBus?.emit('gate:exploration_sufficiency', explorationSufficiency);
+              this.eventBus?.emit('gate:exploration_sufficiency', explorationSufficiency);
 
-            const reproductionCheck: { allowed: boolean; reason?: string; advisory?: string } = isMutationTool(toolName)
-              ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode, {
+              const reproductionCheck: { allowed: boolean; reason?: string; advisory?: string } = isMutationTool(toolName)
+                ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode, {
                   targetFilePath,
                   isScratchFile: isScratch,
                   criticApproved: explorationSufficiency.allowed,
                   riskLevel: classification.risk,
                 })
-              : { allowed: true };
-            if (reproductionCheck.allowed && reproductionCheck.advisory) {
-              this.eventBus?.emit('gate:reproduction_advisory', {
-                turn,
-                toolName,
-                targetFilePath,
-                advisory: reproductionCheck.advisory,
-              });
-            }
-
-            const fixationCheck = isMutationTool(toolName) && !isScratch
-              ? this.cognitiveHarness.fileFixationTracker.isFrozen(targetFilePath, turn)
-              : { frozen: false };
-
-            const readinessInvalidated = toolName === 'submit_solution' && Boolean(readySubmission)
-              && !submissionReadiness.current(submissionSnapshot(), true);
-            const submitGateBlocked = toolName === 'submit_solution' && (
-              readinessInvalidated
-              || submissionCheck?.allowed !== true
-              || submissionCheck?.audit.allowed === false
-              || policyCompletion?.allowed !== true
-              || (isCompletionEvidenceGateEnabled() && completionEvidence?.allow !== true)
-              || !ocrCompletion.allow
-            );
-            if (submitGateBlocked) {
-              const error = readinessInvalidated
-                ? 'Completion evidence, task scope or tracked artifacts changed while generating submission. Re-check the current task before submitting.'
-                : !ocrCompletion.allow
-                ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
-                : policyCompletion?.reason
-                  || completionEvidence?.continuationPrompt
-                  || submissionCheck?.blockers.join('\n')
-                  || submissionCheck?.critic?.critiquePrompt
-                  || submissionCheck?.critic?.reasons?.join('\n')
-                  || submissionCheck?.audit.reasons.join('\n')
-                  || 'Completion evidence is incomplete.';
-              executionResult = {
-                toolName,
-                args: toolArgs,
-                result: {
-                  success: false,
-                  error,
-                  errorCode: readinessInvalidated ? 'SUBMISSION_READINESS_INVALIDATED'
-                    : !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED'
-                    : submissionCheck?.audit.allowed === false ? submissionCheck.audit.errorCode : 'COMPLETION_EVIDENCE_REQUIRED',
-                  submitted: false,
-                  retryable: true,
-                  ocrRunId: ocrCompletion.run?.runId,
-                  ocrArtifact: ocrCompletion.run?.artifactRef,
-                },
-                durationMs: 1,
-              };
-              // Gate-block telemetry: durable measured fields on control/decision
-              // (not model history, so zero token cost) to tell false blocks from true ones.
-              const submitBlock = { kind: 'gate-block' as const, errorCode: (executionResult.result as any)?.errorCode,
-                taskClass: classification.taskClass,
-                resolutionType: typeof toolArgs.resolutionType === 'string' ? toolArgs.resolutionType : undefined,
-                filesModified: getTurnCompletionState(session, turn).filesModified };
-              session.append('control/decision', { turn, step, controlDecision: submitBlock });
-            } else if (!aciValidation.allowed) {
-              executionResult = {
-                toolName,
-                args: toolArgs,
-                result: {
-                  success: false,
-                  error: aciValidation.rejectionMessage,
-                  reasonCode: aciValidation.reasonCode,
-                  remediationHint: aciValidation.remediationHint,
-                },
-                durationMs: 1,
-              };
-            } else if (!explorationSufficiency.allowed) {
-              executionResult = {
-                toolName,
-                args: toolArgs,
-                result: {
-                  success: false,
-                  error: explorationSufficiency.critiquePrompt || explorationSufficiency.reasons.join('; '),
-                  reasonCode: 'EXPLORATION_SUFFICIENCY_BLOCKED',
-                  remediationHint: explorationSufficiency.remediationHint,
-                },
-                durationMs: 1,
-              };
-            } else if (!reproductionCheck.allowed) {
-              executionResult = {
-                toolName,
-                args: toolArgs,
-                result: {
-                  success: false,
-                  error: reproductionCheck.reason,
-                  reasonCode: 'REPRODUCTION_GATE_BLOCKED',
-                },
-                durationMs: 1,
-              };
-            } else if (fixationCheck.frozen) {
-              executionResult = {
-                toolName,
-                args: toolArgs,
-                result: {
-                  success: false,
-                  error: fixationCheck.reason,
-                  reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED',
-                  remediationHint: 'Target file is frozen for 1 turn after 2 consecutive failures. Inspect upstream callers, configurations, or schemas before re-attempting modification.',
-                },
-                durationMs: 1,
-              };
-            } else {
-              const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
-                toolName,
-                toolArgs,
-                stepToolRunner,
-                {
-                  sessionId: session.id,
-                  agentId: this.agentId,
+                : { allowed: true };
+              if (reproductionCheck.allowed && reproductionCheck.advisory) {
+                this.eventBus?.emit('gate:reproduction_advisory', {
                   turn,
-                  userRequest: turnUserRequest,
-                  signal: options?.signal,
-                  lastCommandExecution: this.lastCommandExecutionState,
-                  controlMode: toolControlMode,
-                  ...(toolControlMode !== 'off' ? {
-                    decisionId: activeDecisionId,
-                    allowedToolNames: authorizedToolNames,
-                    allowedToolSetHash: activeToolSetHash,
-                    classificationPhase: classification.phase,
-                    phaseVersion: classification.phaseVersion,
-                    classificationRisk: classification.risk,
-                  } : {}),
-                  ...(toolName === 'submit_solution' ? {
-                    completionEvidenceVerified: true,
-                    completionEvidenceReason: ocrCompletion.run?.runId,
-                  } : {}),
-                },
-                toolCallId,
+                  toolName,
+                  targetFilePath,
+                  advisory: reproductionCheck.advisory,
+                });
+              }
+
+              const fixationCheck = isMutationTool(toolName) && !isScratch
+                ? this.cognitiveHarness.fileFixationTracker.isFrozen(targetFilePath, turn)
+                : { frozen: false };
+
+              const readinessInvalidated = toolName === 'submit_solution' && Boolean(readySubmission)
+                && !submissionReadiness.current(submissionSnapshot(), true);
+              const submitGateBlocked = toolName === 'submit_solution' && (
+                readinessInvalidated
+                || submissionCheck?.allowed !== true
+                || submissionCheck?.audit.allowed === false
+                || policyCompletion?.allowed !== true
+                || (isCompletionEvidenceGateEnabled() && completionEvidence?.allow !== true)
+                || !ocrCompletion.allow
               );
-              executionResult = pipelinedOutcome.executionResult;
-            }
-            if (executionResult.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN'
-              || executionResult.result?.errorCode === 'INVALID_TOOL_DECISION_BINDING') {
-              this.toolControlTelemetry.recordDeniedCall();
-              // P2: attach cheap recovery carrying the authorized list. The next
-              // step surfaces it via authorizationRecovery + reflection prompt
-              // without failure-streak, budget, or cascade-freeze cost.
-              try {
-                const recoveryText = `🔧 [TOOL AUTHORIZATION RECOVERY]: Tool "${toolName}" is not authorized in phase "${classification.phase}". Authorized: [${authorizedToolNames.join(', ')}]. Visible to model: [${visibleToolNames.join(', ')}]. Pick the closest authorized tool; do not repeat the denied call unchanged.`;
-                if (executionResult.result && typeof executionResult.result === 'object') {
-                  if (Object.isExtensible(executionResult.result)) {
-                    (executionResult.result as any)._system_tool_authorization_recovery = recoveryText;
-                  } else {
-                    executionResult = {
-                      ...executionResult,
-                      result: { ...executionResult.result, _system_tool_authorization_recovery: recoveryText },
-                    };
+              if (submitGateBlocked) {
+                const error = readinessInvalidated
+                  ? 'Completion evidence, task scope or tracked artifacts changed while generating submission. Re-check the current task before submitting.'
+                  : !ocrCompletion.allow
+                    ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
+                    : policyCompletion?.reason
+                    || completionEvidence?.continuationPrompt
+                    || submissionCheck?.blockers.join('\n')
+                    || submissionCheck?.critic?.critiquePrompt
+                    || submissionCheck?.critic?.reasons?.join('\n')
+                    || submissionCheck?.audit.reasons.join('\n')
+                    || 'Completion evidence is incomplete.';
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  result: {
+                    success: false,
+                    error,
+                    errorCode: readinessInvalidated ? 'SUBMISSION_READINESS_INVALIDATED'
+                      : !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED'
+                        : submissionCheck?.audit.allowed === false ? submissionCheck.audit.errorCode : 'COMPLETION_EVIDENCE_REQUIRED',
+                    submitted: false,
+                    retryable: true,
+                    ocrRunId: ocrCompletion.run?.runId,
+                    ocrArtifact: ocrCompletion.run?.artifactRef,
+                  },
+                  durationMs: 1,
+                };
+                // Gate-block telemetry: durable measured fields on control/decision
+                // (not model history, so zero token cost) to tell false blocks from true ones.
+                const submitBlock = {
+                  kind: 'gate-block' as const, errorCode: (executionResult.result as any)?.errorCode,
+                  taskClass: classification.taskClass,
+                  resolutionType: typeof toolArgs.resolutionType === 'string' ? toolArgs.resolutionType : undefined,
+                  filesModified: getTurnCompletionState(session, turn).filesModified
+                };
+                session.append('control/decision', { turn, step, controlDecision: submitBlock });
+              } else if (!aciValidation.allowed) {
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  result: {
+                    success: false,
+                    error: aciValidation.rejectionMessage,
+                    reasonCode: aciValidation.reasonCode,
+                    remediationHint: aciValidation.remediationHint,
+                  },
+                  durationMs: 1,
+                };
+              } else if (!explorationSufficiency.allowed) {
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  result: {
+                    success: false,
+                    error: explorationSufficiency.critiquePrompt || explorationSufficiency.reasons.join('; '),
+                    reasonCode: 'EXPLORATION_SUFFICIENCY_BLOCKED',
+                    remediationHint: explorationSufficiency.remediationHint,
+                  },
+                  durationMs: 1,
+                };
+              } else if (!reproductionCheck.allowed) {
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  result: {
+                    success: false,
+                    error: reproductionCheck.reason,
+                    reasonCode: 'REPRODUCTION_GATE_BLOCKED',
+                  },
+                  durationMs: 1,
+                };
+              } else if (fixationCheck.frozen) {
+                executionResult = {
+                  toolName,
+                  args: toolArgs,
+                  result: {
+                    success: false,
+                    error: fixationCheck.reason,
+                    reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED',
+                    remediationHint: 'Target file is frozen for 1 turn after 2 consecutive failures. Inspect upstream callers, configurations, or schemas before re-attempting modification.',
+                  },
+                  durationMs: 1,
+                };
+              } else {
+                const pipelinedOutcome = await this.pipelinedDispatcher.awaitOrExecute(
+                  toolName,
+                  toolArgs,
+                  stepToolRunner,
+                  {
+                    sessionId: session.id,
+                    agentId: this.agentId,
+                    turn,
+                    userRequest: turnUserRequest,
+                    signal: options?.signal,
+                    lastCommandExecution: this.lastCommandExecutionState,
+                    controlMode: toolControlMode,
+                    ...(toolControlMode !== 'off' ? {
+                      decisionId: activeDecisionId,
+                      allowedToolNames: authorizedToolNames,
+                      allowedToolSetHash: activeToolSetHash,
+                      classificationPhase: classification.phase,
+                      phaseVersion: classification.phaseVersion,
+                      classificationRisk: classification.risk,
+                    } : {}),
+                    ...(toolName === 'submit_solution' ? {
+                      completionEvidenceVerified: true,
+                      completionEvidenceReason: ocrCompletion.run?.runId,
+                    } : {}),
+                  },
+                  toolCallId,
+                );
+                executionResult = pipelinedOutcome.executionResult;
+              }
+              if (executionResult.result?.errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN'
+                || executionResult.result?.errorCode === 'INVALID_TOOL_DECISION_BINDING') {
+                this.toolControlTelemetry.recordDeniedCall();
+                // P2: attach cheap recovery carrying the authorized list. The next
+                // step surfaces it via authorizationRecovery + reflection prompt
+                // without failure-streak, budget, or cascade-freeze cost.
+                try {
+                  const recoveryText = `🔧 [TOOL AUTHORIZATION RECOVERY]: Tool "${toolName}" is not authorized in phase "${classification.phase}". Authorized: [${authorizedToolNames.join(', ')}]. Visible to model: [${visibleToolNames.join(', ')}]. Pick the closest authorized tool; do not repeat the denied call unchanged.`;
+                  if (executionResult.result && typeof executionResult.result === 'object') {
+                    if (Object.isExtensible(executionResult.result)) {
+                      (executionResult.result as any)._system_tool_authorization_recovery = recoveryText;
+                    } else {
+                      executionResult = {
+                        ...executionResult,
+                        result: { ...executionResult.result, _system_tool_authorization_recovery: recoveryText },
+                      };
+                    }
                   }
-                }
-              } catch { }
+                } catch { }
+              }
             }
-          }
 
-          // Attach only verified pre-edit attribution; never infer ownership from exit code alone.
-          const commandForAttribution = extractCommandString(toolArgs, executionResult.result);
-          const mutationBeforeCommand = toolName === 'run_command' && isVerificationCommand(commandForAttribution)
-            ? getTurnCompletionState(session, turn)
-            : undefined;
-          if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
-            && mutationBeforeCommand?.hasMutations && executionResult.result?.commandOutcome === 'failed_unexpected') {
-            const regressionEvidence = await attributeCommandFailure(
-              session, turn, commandForAttribution, executionResult.result,
-              this._workspace, mutationBeforeCommand.filesModified, mutationBeforeCommand.latestMutationSeq,
+            // Attach only verified pre-edit attribution; never infer ownership from exit code alone.
+            const commandForAttribution = extractCommandString(toolArgs, executionResult.result);
+            const mutationBeforeCommand = toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+              ? getTurnCompletionState(session, turn)
+              : undefined;
+            if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+              && mutationBeforeCommand?.hasMutations && executionResult.result?.commandOutcome === 'failed_unexpected') {
+              const regressionEvidence = await attributeCommandFailure(
+                session, turn, commandForAttribution, executionResult.result,
+                this._workspace, mutationBeforeCommand.filesModified, mutationBeforeCommand.latestMutationSeq,
+              );
+              executionResult = { ...executionResult, result: { ...executionResult.result, regressionEvidence } };
+            }
+
+            CLI.stopToolDotSpinner();
+            if ((executionResult.result as any)?.deduped === true) {
+              // Option 2: deterministic repeat bị short-circuit — chỉ render 1 dòng
+              // gọn thay vì lặp lại full FAIL block.
+              CLI.renderCompactStepLine(toolName, toolArgs, executionResult.durationMs, executionResult.result);
+            } else if (this._collapsePreferences.compactSteps) {
+              CLI.renderCompactOneLiner({
+                step,
+                maxSteps: effectiveMaxSteps,
+                phase: classification.phase,
+                toolName,
+                args: toolArgs,
+                durationMs: executionResult.durationMs,
+                result: executionResult.result,
+                tokens: response.usage?.totalTokens,
+                cachedTokens: response.usage?.cachedTokens,
+              });
+            } else {
+              CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
+            }
+            this.eventBus?.emit(
+              'tool:after',
+              toolName,
+              executionResult.result,
+              executionResult.durationMs,
+              toolArgs,
+              { sessionId: session.id, agentId: this.agentId, turn },
             );
-            executionResult = { ...executionResult, result: { ...executionResult.result, regressionEvidence } };
-          }
 
-          CLI.stopToolDotSpinner();
-          if ((executionResult.result as any)?.deduped === true) {
-            // Option 2: deterministic repeat bị short-circuit — chỉ render 1 dòng
-            // gọn thay vì lặp lại full FAIL block.
-            CLI.renderCompactStepLine(toolName, toolArgs, executionResult.durationMs, executionResult.result);
-          } else if (this._collapsePreferences.compactSteps) {
-            CLI.renderCompactOneLiner({
-              step,
-              maxSteps: effectiveMaxSteps,
-              phase: classification.phase,
+            // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol + LSP Diagnostics)
+            const hasMutationsSoFar = getTurnCompletionState(session, turn).hasMutations
+              || hasObservedMutation(toolName, executionResult.result);
+            const reflectionAnalysis = this.reflectionEngine.analyze({
               toolName,
               args: toolArgs,
-              durationMs: executionResult.durationMs,
               result: executionResult.result,
-              tokens: response.usage?.totalTokens,
-              cachedTokens: response.usage?.cachedTokens,
+              durationMs: executionResult.durationMs,
+            }, this._workspace, {
+              hasCodeMutations: hasMutationsSoFar,
+              modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
             });
-          } else {
-            CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
-          }
-          this.eventBus?.emit(
-            'tool:after',
-            toolName,
-            executionResult.result,
-            executionResult.durationMs,
-            toolArgs,
-            { sessionId: session.id, agentId: this.agentId, turn },
-          );
-
-          // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol + LSP Diagnostics)
-          const hasMutationsSoFar = getTurnCompletionState(session, turn).hasMutations
-            || hasObservedMutation(toolName, executionResult.result);
-          const reflectionAnalysis = this.reflectionEngine.analyze({
-            toolName,
-            args: toolArgs,
-            result: executionResult.result,
-            durationMs: executionResult.durationMs,
-          }, this._workspace, {
-            hasCodeMutations: hasMutationsSoFar,
-            modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
-          });
-          // Cascade-repair freeze: latch when ≥3 consecutive failures share one
-          // error signature; auto-clears when the signature changes or success
-          // lands (the streak tracker resets on both).
-          const failStreak = this.reflectionEngine.getSameSignatureFailStreak();
-          const freezeThreshold = Math.max(2, parseInt(process.env.MINUS_CASCADE_FREEZE_STREAK || '3', 10) || 3);
-          if (failStreak && failStreak.count >= freezeThreshold) {
-            if (!this.cascadeFreeze) this.cascadeFreeze = { ...failStreak };
-          } else if (!failStreak || failStreak.signature !== this.cascadeFreeze?.signature) {
-            this.cascadeFreeze = undefined;
-          }
-          // Signature-novelty repair budget: only same-signature repeats consume
-          // budget; novel failures and successes reset it (feeds LATS backtracking).
-          this.verificationPolicy.recordRepairAttempt(
-            reflectionAnalysis.isFailure ? (failStreak?.count ?? 0) : 0,
-          );
-          this.finalAnswerGuard.observeToolResult(toolName, executionResult.result, toolArgs);
-          this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
-            granted: executionResult.permission?.status === 'granted',
-            requestId: executionResult.permission?.requestId,
-          });
-          this.repositoryMap.observeToolResult(toolName, toolArgs, executionResult.result);
-          if (sideEffect && !isToolResultFailure(executionResult.result)) {
-            this.dynamicContextCache.invalidate();
-          }
-          if (isMutationTool(toolName) || hasObservedMutation(toolName, executionResult.result)) {
-            this.editToolCallsInTurn++;
-          }
-          if (hasObservedMutation(toolName, executionResult.result)) {
-            if (this.lastCommandExecutionState) {
-              this.lastCommandExecutionState.filesModifiedSince++;
+            // Cascade-repair freeze: latch when ≥3 consecutive failures share one
+            // error signature; auto-clears when the signature changes or success
+            // lands (the streak tracker resets on both).
+            const failStreak = this.reflectionEngine.getSameSignatureFailStreak();
+            const freezeThreshold = Math.max(2, parseInt(process.env.MINUS_CASCADE_FREEZE_STREAK || '3', 10) || 3);
+            if (failStreak && failStreak.count >= freezeThreshold) {
+              if (!this.cascadeFreeze) this.cascadeFreeze = { ...failStreak };
+            } else if (!failStreak || failStreak.signature !== this.cascadeFreeze?.signature) {
+              this.cascadeFreeze = undefined;
             }
-            const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
-            await this.checkpointManager.recordMutation(mutationPaths);
-            this.lastMutationForInvestigation = {
-              toolName,
-              args: { ...toolArgs },
-              result: { ...executionResult.result },
-              files: mutatedFiles,
-            };
-            for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
-            const mutatedPath = mutatedFiles[0] || '';
-            const blast = executionResult.result?.blastRadius;
-            // ponytail: replace_text carrying only comment/note changes bypasses the test gate.
-            const oldBlock = toolName === 'replace_text'
-              ? String(toolArgs?.oldText ?? toolArgs?.old_text ?? toolArgs?.TargetContent ?? toolArgs?.targetContent ?? toolArgs?.searchContent ?? toolArgs?.searchText ?? '')
-              : '';
-            const newBlock = toolName === 'replace_text'
-              ? String(toolArgs?.newText ?? toolArgs?.new_text ?? toolArgs?.ReplacementContent ?? toolArgs?.replacementContent ?? toolArgs?.replaceWith ?? '')
-              : '';
-            const commentOnlyEdit = toolName === 'replace_text' && Boolean(newBlock)
-              && isCommentOnlyChange(oldBlock, newBlock);
-            this.verificationPolicy.recordModification(mutatedPath, {
-              impactedTestSuites: blast?.impactedTestSuites,
-              risk: blast?.risk,
-              hasCallers: Array.isArray(blast?.directConsumers || blast?.callers)
-                && (blast.directConsumers || blast.callers).length > 0,
-              commentOnly: commentOnlyEdit,
+            // Signature-novelty repair budget: only same-signature repeats consume
+            // budget; novel failures and successes reset it (feeds LATS backtracking).
+            this.verificationPolicy.recordRepairAttempt(
+              reflectionAnalysis.isFailure ? (failStreak?.count ?? 0) : 0,
+            );
+            this.finalAnswerGuard.observeToolResult(toolName, executionResult.result, toolArgs);
+            this.planManager.recordToolEvidence(toolName, toolArgs, executionResult.result, {
+              granted: executionResult.permission?.status === 'granted',
+              requestId: executionResult.permission?.requestId,
             });
-            // ponytail: move_file is fs.rename — content identical by construction.
-            if (toolName === 'move_file' && !isToolResultFailure(executionResult.result)) {
-              this.verificationPolicy.recordContentPreservedMove(
-                String(toolArgs?.sourcePath || ''),
-                String(toolArgs?.targetPath || ''),
-              );
+            this.repositoryMap.observeToolResult(toolName, toolArgs, executionResult.result);
+            if (sideEffect && !isToolResultFailure(executionResult.result)) {
+              this.dynamicContextCache.invalidate();
             }
-            const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
-            if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
-            else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
-            // Case 2 — high-risk mutation: persist the thought behind a
-            // HIGH/CRITICAL-blast or sensitive-path edit for audit/rollback.
-            const sensitiveTouched = mutatedFiles.some((f) => !isNonExecutableFile(f) && isSensitivePath(f));
-            if (blastRisk === 'CRITICAL' || blastRisk === 'HIGH' || sensitiveTouched) {
-              this.persistStepReasoning(session, this._latestReasoning?.thought, {
-                highRisk: true,
-                highRiskTrigger: `blast-${(blastRisk || 'sensitive-path').toLowerCase()}:${mutatedPath}`,
-                step,
-                turn,
+            if (isMutationTool(toolName) || hasObservedMutation(toolName, executionResult.result)) {
+              this.editToolCallsInTurn++;
+            }
+            if (hasObservedMutation(toolName, executionResult.result)) {
+              if (this.lastCommandExecutionState) {
+                this.lastCommandExecutionState.filesModifiedSince++;
+              }
+              const mutatedFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+              await this.checkpointManager.recordMutation(mutationPaths);
+              this.lastMutationForInvestigation = {
+                toolName,
+                args: { ...toolArgs },
+                result: { ...executionResult.result },
+                files: mutatedFiles,
+              };
+              for (const file of mutatedFiles) this.targetFilesModifiedInTurn.add(file);
+              const mutatedPath = mutatedFiles[0] || '';
+              const blast = executionResult.result?.blastRadius;
+              // ponytail: replace_text carrying only comment/note changes bypasses the test gate.
+              const oldBlock = toolName === 'replace_text'
+                ? String(toolArgs?.oldText ?? toolArgs?.old_text ?? toolArgs?.TargetContent ?? toolArgs?.targetContent ?? toolArgs?.searchContent ?? toolArgs?.searchText ?? '')
+                : '';
+              const newBlock = toolName === 'replace_text'
+                ? String(toolArgs?.newText ?? toolArgs?.new_text ?? toolArgs?.ReplacementContent ?? toolArgs?.replacementContent ?? toolArgs?.replaceWith ?? '')
+                : '';
+              const commentOnlyEdit = toolName === 'replace_text' && Boolean(newBlock)
+                && isCommentOnlyChange(oldBlock, newBlock);
+              this.verificationPolicy.recordModification(mutatedPath, {
+                impactedTestSuites: blast?.impactedTestSuites,
+                risk: blast?.risk,
+                hasCallers: Array.isArray(blast?.directConsumers || blast?.callers)
+                  && (blast.directConsumers || blast.callers).length > 0,
+                commentOnly: commentOnlyEdit,
               });
-            }
-            const blastConsumers = blast?.directConsumers || blast?.callers || [];
-            if (Array.isArray(blastConsumers) && blastConsumers.length > 0) this.editTouchedCallers = true;
-            hasSubmittedSolution = false;
-            hasReportedFindings = false;
-            reportedFindingsMarkdown = '';
-            if (mutatedPath) {
-              if (isScratchFilePath(mutatedPath)) {
-                this.ephemeralScratchFiles.add(mutatedPath);
+              // ponytail: move_file is fs.rename — content identical by construction.
+              if (toolName === 'move_file' && !isToolResultFailure(executionResult.result)) {
+                this.verificationPolicy.recordContentPreservedMove(
+                  String(toolArgs?.sourcePath || ''),
+                  String(toolArgs?.targetPath || ''),
+                );
               }
-              this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);
-            }
-          }
-          if (toolName === 'run_command') {
-            const regressionEvidence = executionResult.result.regressionEvidence;
-            const commandExecuted = executionResult.result?.processStarted !== false
-              && executionResult.result?.commandOutcome !== 'blocked_preflight'
-              && typeof executionResult.result?.exitCode === 'number';
-            if (commandExecuted) {
-              const cmdSuccess = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
-              // Coverage report (lcov/cobertura/…) when the repo produces one:
-              // read once after a green verification command; any failure to
-              // locate or parse it is fail-open (evaluator ignores absence).
-              let fileCoverage: FileCoverage[] | undefined;
-              let coverageSource: string | undefined;
-              if (cmdSuccess && isVerificationCommand(commandForAttribution)) {
-                try {
-                  const report = readCoverageReport(this._workspace.rootDir);
-                  if (report) {
-                    fileCoverage = report.files;
-                    coverageSource = report.source;
-                  }
-                } catch {
-                  // Fail-open: stdout parsing still applies without the report.
-                }
-              }
-              this.verificationPolicy.recordVerification(
-                commandForAttribution,
-                cmdSuccess,
-                String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
-                executionResult.result.exitCode,
-                {
-                  hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined,
-                  // Full tails (not the 240-char digest) so the coverage
-                  // evaluator can parse runner summaries and zero-test runs.
-                  stdout: typeof executionResult.result.stdout === 'string' ? executionResult.result.stdout.slice(-20000) : undefined,
-                  stderr: typeof executionResult.result.stderr === 'string' ? executionResult.result.stderr.slice(-20000) : undefined,
-                  ...(fileCoverage ? { fileCoverage, coverageSource } : {}),
-                },
-              );
-            }
-            if (commandExecuted && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
-              const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
-              for (const modifiedF of this.targetFilesModifiedInTurn) {
-                if (isVerifOk) {
-                  this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedF);
-                } else {
-                  this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedF, turn, 'Verification command failed');
-                }
-              }
-              // Case 1a — failed verification: keep the thought that led to it.
-              if (!isVerifOk) {
+              const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
+              if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
+              else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
+              // Case 2 — high-risk mutation: persist the thought behind a
+              // HIGH/CRITICAL-blast or sensitive-path edit for audit/rollback.
+              const sensitiveTouched = mutatedFiles.some((f) => !isNonExecutableFile(f) && isSensitivePath(f));
+              if (blastRisk === 'CRITICAL' || blastRisk === 'HIGH' || sensitiveTouched) {
                 this.persistStepReasoning(session, this._latestReasoning?.thought, {
-                  failure: true,
-                  failureTrigger: `verification-failed:${commandForAttribution}`,
+                  highRisk: true,
+                  highRiskTrigger: `blast-${(blastRisk || 'sensitive-path').toLowerCase()}:${mutatedPath}`,
                   step,
                   turn,
                 });
               }
-            }
-            this.lastCommandExecutionState = {
-              command: commandForAttribution,
-              success: commandExecuted && !isToolResultFailure(executionResult.result)
-                && executionResult.result?.exitCode === 0,
-              exitCode: executionResult.result?.exitCode,
-              commandOutcome: executionResult.result?.commandOutcome,
-              filesModifiedSince: 0,
-            };
-
-            // AUTO-CLEANUP: Tự động xóa các file scratch tạm ngay khi lệnh kiểm thử chạy thành công mà không tốn thêm step xóa
-            if (commandExecuted && !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0) {
-              const cmd = commandForAttribution;
-              const cleanedFiles: string[] = [];
-              for (const scratchFile of Array.from(this.ephemeralScratchFiles)) {
-                const baseName = path.basename(scratchFile);
-                const normScratch = scratchFile.replace(/\\/g, '/');
-                if (cmd.includes(scratchFile) || cmd.includes(normScratch) || cmd.includes(baseName)) {
-                  try {
-                    const fullPath = path.isAbsolute(scratchFile) ? scratchFile : path.resolve(this._workspace.rootDir, scratchFile);
-                    if (fs.existsSync(fullPath)) {
-                      fs.unlinkSync(fullPath);
-                      cleanedFiles.push(scratchFile);
-                    }
-                    this.ephemeralScratchFiles.delete(scratchFile);
-                    this.targetFilesModifiedInTurn.delete(scratchFile);
-                  } catch {}
+              const blastConsumers = blast?.directConsumers || blast?.callers || [];
+              if (Array.isArray(blastConsumers) && blastConsumers.length > 0) this.editTouchedCallers = true;
+              hasSubmittedSolution = false;
+              hasReportedFindings = false;
+              reportedFindingsMarkdown = '';
+              if (mutatedPath) {
+                if (isScratchFilePath(mutatedPath)) {
+                  this.ephemeralScratchFiles.add(mutatedPath);
                 }
-              }
-              if (cleanedFiles.length > 0) {
-                const cleanupNotice = `\n[AUTO-CLEANUP]: Automatically cleaned up temporary test files (${cleanedFiles.join(', ')}) after successful tests. You do not need to perform an extra file-deletion step.`;
-                const currentResult = executionResult.result;
-                const mergedResult = {
-                  ...currentResult,
-                  stdout: typeof currentResult.stdout === 'string' ? currentResult.stdout + cleanupNotice : currentResult.stdout,
-                  output: typeof currentResult.output === 'string' ? currentResult.output + cleanupNotice : currentResult.output,
-                  autoCleanedFiles: cleanedFiles,
-                  cleanupNotice: cleanupNotice.trim(),
-                };
-                executionResult.result = mergedResult;
+                this.pipelinedDispatcher.triggerSpeculativeDiagnostics(mutatedPath, this._workspace);
               }
             }
-          }
-          if (toolName === 'manage_task' && String(toolArgs.Action || toolArgs.action || '').toLowerCase() === 'status') {
-            const completion = executionResult.result?.commandCompletion;
-            const completedCommand = typeof completion?.command === 'string' ? completion.command : '';
-            if (completion?.completed === true && isVerificationCommand(completedCommand)) {
-              const passed = completion.terminalStatus === 'completed'
-                && completion.commandOutcome === 'succeeded'
-                && completion.exitCode === 0
-                && !isToolResultFailure(executionResult.result);
-              this.verificationPolicy.recordVerification(
-                completedCommand,
-                passed,
-                String(executionResult.result?.logTail || '').slice(0, 240),
-                typeof completion.exitCode === 'number' ? completion.exitCode : undefined,
-                typeof executionResult.result?.logTail === 'string' && executionResult.result.logTail
-                  ? { stdout: executionResult.result.logTail.slice(-20000) }
-                  : undefined,
-              );
-              if (this.targetFilesModifiedInTurn.size > 0) {
-                for (const modifiedFile of this.targetFilesModifiedInTurn) {
-                  if (passed) this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedFile);
-                  else this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedFile, turn, 'Background verification command failed');
+            if (toolName === 'run_command') {
+              const regressionEvidence = executionResult.result.regressionEvidence;
+              const commandExecuted = executionResult.result?.processStarted !== false
+                && executionResult.result?.commandOutcome !== 'blocked_preflight'
+                && typeof executionResult.result?.exitCode === 'number';
+              if (commandExecuted) {
+                const cmdSuccess = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
+                // Coverage report (lcov/cobertura/…) when the repo produces one:
+                // read once after a green verification command; any failure to
+                // locate or parse it is fail-open (evaluator ignores absence).
+                let fileCoverage: FileCoverage[] | undefined;
+                let coverageSource: string | undefined;
+                if (cmdSuccess && isVerificationCommand(commandForAttribution)) {
+                  try {
+                    const report = readCoverageReport(this._workspace.rootDir);
+                    if (report) {
+                      fileCoverage = report.files;
+                      coverageSource = report.source;
+                    }
+                  } catch {
+                    // Fail-open: stdout parsing still applies without the report.
+                  }
+                }
+                this.verificationPolicy.recordVerification(
+                  commandForAttribution,
+                  cmdSuccess,
+                  String(executionResult.result.stdout || executionResult.result.stderr || '').slice(0, 240),
+                  executionResult.result.exitCode,
+                  {
+                    hasNewFailures: regressionEvidence?.classification === 'new_failures_detected' ? true : undefined,
+                    // Full tails (not the 240-char digest) so the coverage
+                    // evaluator can parse runner summaries and zero-test runs.
+                    stdout: typeof executionResult.result.stdout === 'string' ? executionResult.result.stdout.slice(-20000) : undefined,
+                    stderr: typeof executionResult.result.stderr === 'string' ? executionResult.result.stderr.slice(-20000) : undefined,
+                    ...(fileCoverage ? { fileCoverage, coverageSource } : {}),
+                  },
+                );
+              }
+              if (commandExecuted && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
+                const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0;
+                for (const modifiedF of this.targetFilesModifiedInTurn) {
+                  if (isVerifOk) {
+                    this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedF);
+                  } else {
+                    this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedF, turn, 'Verification command failed');
+                  }
+                }
+                // Case 1a — failed verification: keep the thought that led to it.
+                if (!isVerifOk) {
+                  this.persistStepReasoning(session, this._latestReasoning?.thought, {
+                    failure: true,
+                    failureTrigger: `verification-failed:${commandForAttribution}`,
+                    step,
+                    turn,
+                  });
                 }
               }
               this.lastCommandExecutionState = {
-                command: completedCommand,
-                success: passed,
-                exitCode: completion.exitCode,
-                commandOutcome: completion.commandOutcome,
+                command: commandForAttribution,
+                success: commandExecuted && !isToolResultFailure(executionResult.result)
+                  && executionResult.result?.exitCode === 0,
+                exitCode: executionResult.result?.exitCode,
+                commandOutcome: executionResult.result?.commandOutcome,
                 filesModifiedSince: 0,
               };
-            }
-          }
-          if (toolName === 'get_diagnostics') {
-            const isClean = !isToolResultFailure(executionResult.result)
-              && executionResult.result?.clean === true
-              && (!executionResult.result?.totalErrors || executionResult.result?.totalErrors === 0);
-            const target = toolArgs.path ? `get_diagnostics (${toolArgs.path})` : 'get_diagnostics';
-            const detail = isClean
-              ? `Diagnostics clean (0 errors, ${executionResult.result?.totalWarnings || 0} warnings)`
-              : `Diagnostics found ${executionResult.result?.totalErrors || 1} error(s)`;
-            this.verificationPolicy.recordVerification(
-              target,
-              isClean,
-              detail,
-              isClean ? 0 : 1,
-              { tier: 'diagnostics' },
-            );
-          }
-          if (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace) {
-            const passed = executionResult.result?.isPassed === true
-              && executionResult.result?.exitCode === 0
-              && !isToolResultFailure(executionResult.result);
-            this.verificationPolicy.recordVerification(
-              String(executionResult.result?.commandExecuted || toolArgs.command || 'run_test_suite'),
-              passed,
-              String(executionResult.result?.summary || '').slice(0, 240),
-              executionResult.result?.exitCode,
-              { stdout: String(executionResult.result?.rawOutputSnippet || executionResult.result?.summary || '') },
-            );
-          }
-          if (toolName === 'submit_solution') submissionReadiness.clear();
-          if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
-            hasSubmittedSolution = true;
-            this.cleanupEphemeralScratchFiles();
-            const summaryText = String(toolArgs.summary || '').trim();
-            submittedValidatedDraft = Boolean(readySubmission && summaryText === readySubmission.summary.trim());
-            const rootCauseText = toolArgs.rootCause ? String(toolArgs.rootCause).trim() : '';
-            const filesModifiedList = Array.isArray(toolArgs.filesModified)
-              ? toolArgs.filesModified.map((f: any) => String(f).trim()).filter(Boolean)
-              : [];
-            const verificationText = toolArgs.verificationEvidence ? String(toolArgs.verificationEvidence).trim() : '';
 
-            // Xây dựng bản tóm tắt giải pháp giàu cấu trúc để dự phòng và hiển thị
-            const richSummaryParts: string[] = [];
-            if (summaryText) richSummaryParts.push(summaryText);
-            const readOnlyAnswer = executionResult.result?.resolutionType === 'investigation_only'
-              || (isReadOnlyAnswerTask && filesModifiedList.length === 0);
-            if (rootCauseText && !readOnlyAnswer) richSummaryParts.push(`\n**Root Cause:**\n${rootCauseText}`);
-            if (filesModifiedList.length > 0) {
-              richSummaryParts.push(`\n**Modified Files:**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
-            }
-            if (verificationText) {
-              richSummaryParts.push(`\n**Verification Evidence:**\n\`${verificationText}\``);
-            }
-            submittedSolutionSummary = richSummaryParts.length > 0 ? richSummaryParts.join('\n') : summaryText;
-
-          }
-          if (toolName === 'report_investigation_findings' && !isToolResultFailure(executionResult.result)) {
-            hasReportedFindings = true;
-            reportedFindingsMarkdown = String(toolArgs.userFacingReport || '').trim();
-
-          }
-          if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
-            const hId = executionResult.result?.hypothesisId || 'H';
-            const hStatus = executionResult.result?.status;
-            if (hStatus === 'refuted' || hStatus === 'falsified') {
-              // Case 1b — falsified hypothesis: keep the thought for post-mortem.
-              this.persistStepReasoning(session, this._latestReasoning?.thought, {
-                failure: true,
-                failureTrigger: `hypothesis-${hStatus}:${hId}`,
-                step,
-                turn,
-              });
-              const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
-                hId,
-                this.hypothesisTracker,
-              ).catch(() => undefined);
-              if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
-              if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
-                try {
-                  if (Object.isExtensible(executionResult.result)) {
-                    executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
-                  } else {
-                    executionResult.result = {
-                      ...executionResult.result,
-                      _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
-                    };
+              // AUTO-CLEANUP: Tự động xóa các file scratch tạm ngay khi lệnh kiểm thử chạy thành công mà không tốn thêm step xóa
+              if (commandExecuted && !isToolResultFailure(executionResult.result) && executionResult.result.exitCode === 0) {
+                const cmd = commandForAttribution;
+                const cleanedFiles: string[] = [];
+                for (const scratchFile of Array.from(this.ephemeralScratchFiles)) {
+                  const baseName = path.basename(scratchFile);
+                  const normScratch = scratchFile.replace(/\\/g, '/');
+                  if (cmd.includes(scratchFile) || cmd.includes(normScratch) || cmd.includes(baseName)) {
+                    try {
+                      const fullPath = path.isAbsolute(scratchFile) ? scratchFile : path.resolve(this._workspace.rootDir, scratchFile);
+                      if (fs.existsSync(fullPath)) {
+                        fs.unlinkSync(fullPath);
+                        cleanedFiles.push(scratchFile);
+                      }
+                      this.ephemeralScratchFiles.delete(scratchFile);
+                      this.targetFilesModifiedInTurn.delete(scratchFile);
+                    } catch { }
                   }
-                } catch { }
+                }
+                if (cleanedFiles.length > 0) {
+                  const cleanupNotice = `\n[AUTO-CLEANUP]: Automatically cleaned up temporary test files (${cleanedFiles.join(', ')}) after successful tests. You do not need to perform an extra file-deletion step.`;
+                  const currentResult = executionResult.result;
+                  const mergedResult = {
+                    ...currentResult,
+                    stdout: typeof currentResult.stdout === 'string' ? currentResult.stdout + cleanupNotice : currentResult.stdout,
+                    output: typeof currentResult.output === 'string' ? currentResult.output + cleanupNotice : currentResult.output,
+                    autoCleanedFiles: cleanedFiles,
+                    cleanupNotice: cleanupNotice.trim(),
+                  };
+                  executionResult.result = mergedResult;
+                }
               }
             }
-          }
-
-          if (reflectionAnalysis.isFailure) {
-            CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
-            if (reflectionAnalysis.detectiveReport
-              && this.reflectionEngine.shouldRenderDetectiveReport(reflectionAnalysis.detectiveReport)) {
-              // Lược bỏ edge case lặp: cùng fingerprint (defect+location) thì không render lại khối RCA
-              CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
-            }
-            // NOTE: không emit `tool:error` ở đây — `tool:after` đã phát ở trên
-            // với cùng result và TEA đã render full [FAIL] block. Emit thêm gây
-            // duplicate dòng `✖ <tool>: [object Object]`. `tool:error` chỉ dành
-            // cho các nhánh blocked/aborted không có `tool:after`.
-          } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
-            this.reflectionEngine.reset();
-            if (isVerificationCommand(commandForAttribution)) {
-              if (this.targetFilesModifiedInTurn.size > 0 && !executionResult.result?.isBackgroundTask) {
-                const green = await this.checkpointManager.createCheckpoint('Verified scoped workspace', { files: [...this.targetFilesModifiedInTurn] });
-                if (green) this.rollbackOrchestrator.markGreenCheckpoint(green);
-              }
-            }
-          }
-
-          const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
-          const falsifiedCount = this.hypothesisTracker.getFalsifiedHypotheses().length;
-          const cognitiveBrake = this.cognitiveHarness.evaluateCognitiveBrake({
-            consecutiveFailures: reflectionAnalysis.consecutiveFailures,
-            hypothesisFailedCount: falsifiedCount,
-            currentHypothesis: activeHypothesis?.statement,
-          });
-
-          if (cognitiveBrake.active) {
-            CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
-            if (activeHypothesis) {
-              this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
-              const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
-                activeHypothesis.id,
-                this.hypothesisTracker,
-              ).catch(() => undefined);
-              if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
-              if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
-                try {
-                  if (Object.isExtensible(executionResult.result)) {
-                    executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
-                  } else {
-                    executionResult.result = {
-                      ...executionResult.result,
-                      _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
-                    };
+            if (toolName === 'manage_task' && String(toolArgs.Action || toolArgs.action || '').toLowerCase() === 'status') {
+              const completion = executionResult.result?.commandCompletion;
+              const completedCommand = typeof completion?.command === 'string' ? completion.command : '';
+              if (completion?.completed === true && isVerificationCommand(completedCommand)) {
+                const passed = completion.terminalStatus === 'completed'
+                  && completion.commandOutcome === 'succeeded'
+                  && completion.exitCode === 0
+                  && !isToolResultFailure(executionResult.result);
+                this.verificationPolicy.recordVerification(
+                  completedCommand,
+                  passed,
+                  String(executionResult.result?.logTail || '').slice(0, 240),
+                  typeof completion.exitCode === 'number' ? completion.exitCode : undefined,
+                  typeof executionResult.result?.logTail === 'string' && executionResult.result.logTail
+                    ? { stdout: executionResult.result.logTail.slice(-20000) }
+                    : undefined,
+                );
+                if (this.targetFilesModifiedInTurn.size > 0) {
+                  for (const modifiedFile of this.targetFilesModifiedInTurn) {
+                    if (passed) this.cognitiveHarness.fileFixationTracker.recordSuccess(modifiedFile);
+                    else this.cognitiveHarness.fileFixationTracker.recordFailure(modifiedFile, turn, 'Background verification command failed');
                   }
-                } catch { }
-              }
-            }
-          }
-
-          const progressDecision = this.progressGuard.observe({
-            toolName,
-            args: toolArgs,
-            result: executionResult.result,
-          });
-          if (progressDecision.message && typeof executionResult.result === 'object' && executionResult.result !== null) {
-            try {
-              if (Object.isExtensible(executionResult.result)) {
-                (executionResult.result as any).trajectoryIntervention = progressDecision.message;
-              } else {
-                executionResult.result = {
-                  ...executionResult.result,
-                  trajectoryIntervention: progressDecision.message,
+                }
+                this.lastCommandExecutionState = {
+                  command: completedCommand,
+                  success: passed,
+                  exitCode: completion.exitCode,
+                  commandOutcome: completion.commandOutcome,
+                  filesModifiedSince: 0,
                 };
               }
-            } catch { }
-          }
+            }
+            if (toolName === 'get_diagnostics') {
+              const isClean = !isToolResultFailure(executionResult.result)
+                && executionResult.result?.clean === true
+                && (!executionResult.result?.totalErrors || executionResult.result?.totalErrors === 0);
+              const target = toolArgs.path ? `get_diagnostics (${toolArgs.path})` : 'get_diagnostics';
+              const detail = isClean
+                ? `Diagnostics clean (0 errors, ${executionResult.result?.totalWarnings || 0} warnings)`
+                : `Diagnostics found ${executionResult.result?.totalErrors || 1} error(s)`;
+              this.verificationPolicy.recordVerification(
+                target,
+                isClean,
+                detail,
+                isClean ? 0 : 1,
+                { tier: 'diagnostics' },
+              );
+            }
+            if (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace) {
+              const passed = executionResult.result?.isPassed === true
+                && executionResult.result?.exitCode === 0
+                && !isToolResultFailure(executionResult.result);
+              this.verificationPolicy.recordVerification(
+                String(executionResult.result?.commandExecuted || toolArgs.command || 'run_test_suite'),
+                passed,
+                String(executionResult.result?.summary || '').slice(0, 240),
+                executionResult.result?.exitCode,
+                { stdout: String(executionResult.result?.rawOutputSnippet || executionResult.result?.summary || '') },
+              );
+            }
+            if (toolName === 'submit_solution') submissionReadiness.clear();
+            if (toolName === 'submit_solution' && !isToolResultFailure(executionResult.result)) {
+              hasSubmittedSolution = true;
+              this.cleanupEphemeralScratchFiles();
+              const summaryText = String(toolArgs.summary || '').trim();
+              submittedValidatedDraft = Boolean(readySubmission && summaryText === readySubmission.summary.trim());
+              const rootCauseText = toolArgs.rootCause ? String(toolArgs.rootCause).trim() : '';
+              const filesModifiedList = Array.isArray(toolArgs.filesModified)
+                ? toolArgs.filesModified.map((f: any) => String(f).trim()).filter(Boolean)
+                : [];
+              const verificationText = toolArgs.verificationEvidence ? String(toolArgs.verificationEvidence).trim() : '';
 
-          const processIntervention = this.processFailureDetector.observe({
-            toolName,
-            args: toolArgs,
-            result: executionResult.result,
-          });
-          if (processIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
-            try {
-              const interventionMsg = `${processIntervention.message}\n👉 Suggested action: ${processIntervention.suggestedAction}`;
-              if (Object.isExtensible(executionResult.result)) {
-                (executionResult.result as any).processFailureIntervention = interventionMsg;
-              } else {
-                executionResult.result = {
-                  ...executionResult.result,
-                  processFailureIntervention: interventionMsg,
-                };
+              // Xây dựng bản tóm tắt giải pháp giàu cấu trúc để dự phòng và hiển thị
+              const richSummaryParts: string[] = [];
+              if (summaryText) richSummaryParts.push(summaryText);
+              const readOnlyAnswer = executionResult.result?.resolutionType === 'investigation_only'
+                || (isReadOnlyAnswerTask && filesModifiedList.length === 0);
+              if (rootCauseText && !readOnlyAnswer) richSummaryParts.push(`\n**Root Cause:**\n${rootCauseText}`);
+              if (filesModifiedList.length > 0) {
+                richSummaryParts.push(`\n**Modified Files:**\n${filesModifiedList.map((f: string) => `- \`${f}\``).join('\n')}`);
               }
-            } catch { }
-          }
+              if (verificationText) {
+                richSummaryParts.push(`\n**Verification Evidence:**\n\`${verificationText}\``);
+              }
+              submittedSolutionSummary = richSummaryParts.length > 0 ? richSummaryParts.join('\n') : summaryText;
 
-          const commandText = commandForAttribution;
-          const failureInvestigation = toolName === 'run_command'
-            && isVerificationCommand(commandText)
-            && reflectionAnalysis.isFailure
-            && executionResult.result?.regressionEvidence?.classification !== 'pre_existing_out_of_scope'
-            ? buildFailureInvestigationBrief({
+            }
+            if (toolName === 'report_investigation_findings' && !isToolResultFailure(executionResult.result)) {
+              hasReportedFindings = true;
+              reportedFindingsMarkdown = String(toolArgs.userFacingReport || '').trim();
+
+            }
+            if (toolName === 'formulate_and_verify_hypothesis' && !isToolResultFailure(executionResult.result)) {
+              const hId = executionResult.result?.hypothesisId || 'H';
+              const hStatus = executionResult.result?.status;
+              if (hStatus === 'refuted' || hStatus === 'falsified') {
+                // Case 1b — falsified hypothesis: keep the thought for post-mortem.
+                this.persistStepReasoning(session, this._latestReasoning?.thought, {
+                  failure: true,
+                  failureTrigger: `hypothesis-${hStatus}:${hId}`,
+                  step,
+                  turn,
+                });
+                const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
+                  hId,
+                  this.hypothesisTracker,
+                ).catch(() => undefined);
+                if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
+                if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
+                  try {
+                    if (Object.isExtensible(executionResult.result)) {
+                      executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
+                    } else {
+                      executionResult.result = {
+                        ...executionResult.result,
+                        _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
+                      };
+                    }
+                  } catch { }
+                }
+              }
+            }
+
+            if (reflectionAnalysis.isFailure) {
+              CLI.renderReflectionAlert(reflectionAnalysis.consecutiveFailures, reflectionAnalysis.advice);
+              if (reflectionAnalysis.detectiveReport
+                && this.reflectionEngine.shouldRenderDetectiveReport(reflectionAnalysis.detectiveReport)) {
+                // Lược bỏ edge case lặp: cùng fingerprint (defect+location) thì không render lại khối RCA
+                CLI.renderErrorDetectiveReport(reflectionAnalysis.detectiveReport);
+              }
+              // NOTE: không emit `tool:error` ở đây — `tool:after` đã phát ở trên
+              // với cùng result và TEA đã render full [FAIL] block. Emit thêm gây
+              // duplicate dòng `✖ <tool>: [object Object]`. `tool:error` chỉ dành
+              // cho các nhánh blocked/aborted không có `tool:after`.
+            } else if (toolName === 'run_command' && executionResult.result?.exitCode === 0) {
+              this.reflectionEngine.reset();
+              if (isVerificationCommand(commandForAttribution)) {
+                if (this.targetFilesModifiedInTurn.size > 0 && !executionResult.result?.isBackgroundTask) {
+                  const green = await this.checkpointManager.createCheckpoint('Verified scoped workspace', { files: [...this.targetFilesModifiedInTurn] });
+                  if (green) this.rollbackOrchestrator.markGreenCheckpoint(green);
+                }
+              }
+            }
+
+            const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
+            const falsifiedCount = this.hypothesisTracker.getFalsifiedHypotheses().length;
+            const cognitiveBrake = this.cognitiveHarness.evaluateCognitiveBrake({
+              consecutiveFailures: reflectionAnalysis.consecutiveFailures,
+              hypothesisFailedCount: falsifiedCount,
+              currentHypothesis: activeHypothesis?.statement,
+            });
+
+            if (cognitiveBrake.active) {
+              CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
+              if (activeHypothesis) {
+                this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
+                const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
+                  activeHypothesis.id,
+                  this.hypothesisTracker,
+                ).catch(() => undefined);
+                if (rollbackOutcome?.restoredFiles?.length) await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
+                if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
+                  try {
+                    if (Object.isExtensible(executionResult.result)) {
+                      executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
+                    } else {
+                      executionResult.result = {
+                        ...executionResult.result,
+                        _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
+                      };
+                    }
+                  } catch { }
+                }
+              }
+            }
+
+            const progressDecision = this.progressGuard.observe({
+              toolName,
+              args: toolArgs,
+              result: executionResult.result,
+            });
+            if (progressDecision.message && typeof executionResult.result === 'object' && executionResult.result !== null) {
+              try {
+                if (Object.isExtensible(executionResult.result)) {
+                  (executionResult.result as any).trajectoryIntervention = progressDecision.message;
+                } else {
+                  executionResult.result = {
+                    ...executionResult.result,
+                    trajectoryIntervention: progressDecision.message,
+                  };
+                }
+              } catch { }
+            }
+
+            const processIntervention = this.processFailureDetector.observe({
+              toolName,
+              args: toolArgs,
+              result: executionResult.result,
+            });
+            if (processIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
+              try {
+                const interventionMsg = `${processIntervention.message}\n👉 Suggested action: ${processIntervention.suggestedAction}`;
+                if (Object.isExtensible(executionResult.result)) {
+                  (executionResult.result as any).processFailureIntervention = interventionMsg;
+                } else {
+                  executionResult.result = {
+                    ...executionResult.result,
+                    processFailureIntervention: interventionMsg,
+                  };
+                }
+              } catch { }
+            }
+
+            const commandText = commandForAttribution;
+            const failureInvestigation = toolName === 'run_command'
+              && isVerificationCommand(commandText)
+              && reflectionAnalysis.isFailure
+              && executionResult.result?.regressionEvidence?.classification !== 'pre_existing_out_of_scope'
+              ? buildFailureInvestigationBrief({
                 command: commandText,
                 result: executionResult.result,
                 recentMutation: this.lastMutationForInvestigation,
               })
-            : undefined;
-          if (failureInvestigation && executionResult.result && typeof executionResult.result === 'object') {
-            try {
-              if (Object.isExtensible(executionResult.result)) {
-                executionResult.result.failureInvestigation = failureInvestigation;
-              } else {
-                executionResult.result = { ...executionResult.result, failureInvestigation };
-              }
-            } catch { }
-          }
-
-          // SCAFFOLD-CEGIS & Domain Intent Drift Detection
-          const domainIntentIntervention = this.domainIntentGuardian.observeToolCall({
-            toolName,
-            args: toolArgs,
-          });
-          if (domainIntentIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
-            try {
-              const driftMsg = `${domainIntentIntervention.message}\n👉 Course-correction guidance: ${domainIntentIntervention.courseCorrectionGuidance}`;
-              if (Object.isExtensible(executionResult.result)) {
-                (executionResult.result as any).domainIntentIntervention = driftMsg;
-              } else {
-                executionResult.result = {
-                  ...executionResult.result,
-                  domainIntentIntervention: driftMsg,
-                };
-              }
-            } catch { }
-          }
-
-          const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
-            || (toolName === 'run_command' && isVerificationCommand(commandForAttribution));
-          let lspPreExecutionWarning: string | undefined;
-          if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
-            const mutFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
-            for (const targetStr of mutFiles) {
-              this.targetFilesModifiedInTurn.add(targetStr);
-              if (isScratchFilePath(targetStr)) this.ephemeralScratchFiles.add(targetStr);
-            }
-            // Pre-Execution LSP Diagnostics Hook (QLCoder arXiv:2511.08462v5)
-            const codeFiles = mutFiles.filter((f) => /\.(ts|tsx|js|jsx|py)$/i.test(f));
-            if (codeFiles.length > 0) {
+              : undefined;
+            if (failureInvestigation && executionResult.result && typeof executionResult.result === 'object') {
               try {
-                const syntaxDiags = await CodeSyntaxValidator.validateFiles(codeFiles, this._workspace);
-                const errors = syntaxDiags.filter((d: any) => d.category === 'error' || !d.category);
-                if (errors.length > 0) {
-                  lspPreExecutionWarning = `⚠️ [PRE-EXECUTION LSP HOOK]: Detected ${errors.length} syntax/compile error(s) in modified file(s):\n` +
-                    errors.slice(0, 3).map((e: any) => `  • ${e.file}:${e.line} - ${e.message}`).join('\n') +
-                    `\n👉 ACTION REQUIRED: Fix these syntax/type errors immediately before running verification or submitting.`;
-                  if (executionResult.result && typeof executionResult.result === 'object') {
-                    executionResult.result.lspPreExecutionWarning = lspPreExecutionWarning;
-                  }
+                if (Object.isExtensible(executionResult.result)) {
+                  executionResult.result.failureInvestigation = failureInvestigation;
+                } else {
+                  executionResult.result = { ...executionResult.result, failureInvestigation };
                 }
-              } catch {}
+              } catch { }
             }
-          }
 
-          // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
-          if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
-            if (!this._collapsePreferences.compactSteps) {
-              CLI.renderPlan(this.planManager.getTasks());
+            // SCAFFOLD-CEGIS & Domain Intent Drift Detection
+            const domainIntentIntervention = this.domainIntentGuardian.observeToolCall({
+              toolName,
+              args: toolArgs,
+            });
+            if (domainIntentIntervention && typeof executionResult.result === 'object' && executionResult.result !== null) {
+              try {
+                const driftMsg = `${domainIntentIntervention.message}\n👉 Course-correction guidance: ${domainIntentIntervention.courseCorrectionGuidance}`;
+                if (Object.isExtensible(executionResult.result)) {
+                  (executionResult.result as any).domainIntentIntervention = driftMsg;
+                } else {
+                  executionResult.result = {
+                    ...executionResult.result,
+                    domainIntentIntervention: driftMsg,
+                  };
+                }
+              } catch { }
             }
-          }
 
-          // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
-          if (executionResult.result?._untrusted_context?.quarantined && executionResult.result?._untrusted_context?.warning) {
-            CLI.renderReflectionAlert(1, executionResult.result._untrusted_context.warning);
-          }
+            const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
+              || (toolName === 'run_command' && isVerificationCommand(commandForAttribution));
+            let lspPreExecutionWarning: string | undefined;
+            if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
+              const mutFiles = observedMutationFiles(toolName, toolArgs, executionResult.result);
+              for (const targetStr of mutFiles) {
+                this.targetFilesModifiedInTurn.add(targetStr);
+                if (isScratchFilePath(targetStr)) this.ephemeralScratchFiles.add(targetStr);
+              }
+              // Pre-Execution LSP Diagnostics Hook (QLCoder arXiv:2511.08462v5)
+              const codeFiles = mutFiles.filter((f) => /\.(ts|tsx|js|jsx|py)$/i.test(f));
+              if (codeFiles.length > 0) {
+                try {
+                  const syntaxDiags = await CodeSyntaxValidator.validateFiles(codeFiles, this._workspace);
+                  const errors = syntaxDiags.filter((d: any) => d.category === 'error' || !d.category);
+                  if (errors.length > 0) {
+                    lspPreExecutionWarning = `⚠️ [PRE-EXECUTION LSP HOOK]: Detected ${errors.length} syntax/compile error(s) in modified file(s):\n` +
+                      errors.slice(0, 3).map((e: any) => `  • ${e.file}:${e.line} - ${e.message}`).join('\n') +
+                      `\n👉 ACTION REQUIRED: Fix these syntax/type errors immediately before running verification or submitting.`;
+                    if (executionResult.result && typeof executionResult.result === 'object') {
+                      executionResult.result.lspPreExecutionWarning = lspPreExecutionWarning;
+                    }
+                  }
+                } catch { }
+              }
+            }
 
-          const payloadToRecord = {
-            ...executionResult.result,
-            ...(executionResult.result?._untrusted_context?.warning
-              ? { _system_untrusted_injection_warning: executionResult.result._untrusted_context.warning }
-              : {}),
-            ...(lspPreExecutionWarning
-              ? { _system_pre_execution_lsp_warning: lspPreExecutionWarning }
-              : {}),
-            ...(executionResult.guardianDiagnosis?.errorAs200Unmasked
-              ? { _system_guardian_unmasked_error: `[GUARDIAN UNMASKED ERROR]: Tool returned HTTP 200 / success but contained embedded error: "${executionResult.guardianDiagnosis.message}".` }
-              : {}),
-            ...(executionResult.guardianDiagnosis && isToolResultFailure(executionResult.result)
-              ? { _system_guardian_recovery: `[GUARDIAN RECOVERY GUIDANCE]: Category: ${executionResult.guardianDiagnosis.category}. Action: ${executionResult.guardianDiagnosis.recoveryAction}${executionResult.guardianDiagnosis.suggestedAlternative ? ` Recommended alternative: ${executionResult.guardianDiagnosis.suggestedAlternative}` : ''}` }
-              : {}),
-            ...(reflectionAnalysis.reflectionPrompt
-              ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
-              : {}),
-            ...(failureInvestigation
-              ? { _system_failure_investigation: failureInvestigation }
-              : {}),
-            ...(cognitiveBrake.active
-              ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
-              : {}),
-            ...(progressDecision.message
-              ? { _system_loop_guard: progressDecision.message }
-              : {}),
-          };
+            // Hiển thị Cây kế hoạch nếu có cập nhật từ planning tools
+            if (['create_plan', 'update_plan_task'].includes(toolName) && this.planManager.hasPlan()) {
+              if (!this._collapsePreferences.compactSteps) {
+                CLI.renderPlan(this.planManager.getTasks());
+              }
+            }
 
-          const sanitizedPayloadToRecord = await sanitizeToolResultPayload(
-            toolName,
-            payloadToRecord,
-            { workspaceRoot: this._workspace?.rootDir },
-          );
-          session.addToolResultWithId(toolName, sanitizedPayloadToRecord, toolCallId);
-          if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
-            && mutationBeforeCommand && !mutationBeforeCommand.hasMutations
-            && typeof executionResult.result?.exitCode === 'number') {
-            await captureCommandBaseline(session, turn, commandForAttribution, executionResult.result, this._workspace);
-          }
-          if (hasObservedMutation(toolName, executionResult.result)) {
-            invalidatePhaseOnMutation(session, turn);
-          }
-          const verificationCommand = toolName === 'get_diagnostics'
-            ? 'get_diagnostics'
-            : String(executionResult.result?.commandExecuted || commandForAttribution || 'run_test_suite');
-          const executedVerification = (toolName === 'run_command' && isVerificationCommand(verificationCommand)
-            && typeof executionResult.result?.exitCode === 'number'
-            && executionResult.result?.processStarted !== false
-            && executionResult.result?.commandOutcome !== 'blocked_preflight')
-            || (toolName === 'get_diagnostics' && !executionResult.result?.errorCode)
-            || (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace
+            // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
+            if (executionResult.result?._untrusted_context?.quarantined && executionResult.result?._untrusted_context?.warning) {
+              CLI.renderReflectionAlert(1, executionResult.result._untrusted_context.warning);
+            }
+
+            const payloadToRecord = {
+              ...executionResult.result,
+              ...(executionResult.result?._untrusted_context?.warning
+                ? { _system_untrusted_injection_warning: executionResult.result._untrusted_context.warning }
+                : {}),
+              ...(lspPreExecutionWarning
+                ? { _system_pre_execution_lsp_warning: lspPreExecutionWarning }
+                : {}),
+              ...(executionResult.guardianDiagnosis?.errorAs200Unmasked
+                ? { _system_guardian_unmasked_error: `[GUARDIAN UNMASKED ERROR]: Tool returned HTTP 200 / success but contained embedded error: "${executionResult.guardianDiagnosis.message}".` }
+                : {}),
+              ...(executionResult.guardianDiagnosis && isToolResultFailure(executionResult.result)
+                ? { _system_guardian_recovery: `[GUARDIAN RECOVERY GUIDANCE]: Category: ${executionResult.guardianDiagnosis.category}. Action: ${executionResult.guardianDiagnosis.recoveryAction}${executionResult.guardianDiagnosis.suggestedAlternative ? ` Recommended alternative: ${executionResult.guardianDiagnosis.suggestedAlternative}` : ''}` }
+                : {}),
+              ...(reflectionAnalysis.reflectionPrompt
+                ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
+                : {}),
+              ...(failureInvestigation
+                ? { _system_failure_investigation: failureInvestigation }
+                : {}),
+              ...(cognitiveBrake.active
+                ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
+                : {}),
+              ...(progressDecision.message
+                ? { _system_loop_guard: progressDecision.message }
+                : {}),
+            };
+
+            const sanitizedPayloadToRecord = await sanitizeToolResultPayload(
+              toolName,
+              payloadToRecord,
+              { workspaceRoot: this._workspace?.rootDir },
+            );
+            session.addToolResultWithId(toolName, sanitizedPayloadToRecord, toolCallId);
+            if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
+              && mutationBeforeCommand && !mutationBeforeCommand.hasMutations
+              && typeof executionResult.result?.exitCode === 'number') {
+              await captureCommandBaseline(session, turn, commandForAttribution, executionResult.result, this._workspace);
+            }
+            if (hasObservedMutation(toolName, executionResult.result)) {
+              invalidatePhaseOnMutation(session, turn);
+            }
+            const verificationCommand = toolName === 'get_diagnostics'
+              ? 'get_diagnostics'
+              : String(executionResult.result?.commandExecuted || commandForAttribution || 'run_test_suite');
+            const executedVerification = (toolName === 'run_command' && isVerificationCommand(verificationCommand)
               && typeof executionResult.result?.exitCode === 'number'
-              && !executionResult.result?.errorCode);
-          if (executedVerification && getTurnCompletionState(session, turn).hasMutations) {
-            recordImplementationCompleted(session, turn, verificationCommand);
-            recordVerificationOutcome(
-              session,
-              turn,
-              verificationCommand,
-              !isToolResultFailure(executionResult.result)
+              && executionResult.result?.processStarted !== false
+              && executionResult.result?.commandOutcome !== 'blocked_preflight')
+              || (toolName === 'get_diagnostics' && !executionResult.result?.errorCode)
+              || (toolName === 'run_test_suite' && !toolArgs.useScratchWorkspace
+                && typeof executionResult.result?.exitCode === 'number'
+                && !executionResult.result?.errorCode);
+            if (executedVerification && getTurnCompletionState(session, turn).hasMutations) {
+              recordImplementationCompleted(session, turn, verificationCommand);
+              recordVerificationOutcome(
+                session,
+                turn,
+                verificationCommand,
+                !isToolResultFailure(executionResult.result)
                 && (toolName === 'get_diagnostics' || executionResult.result.exitCode === 0)
                 && (toolName !== 'get_diagnostics' || executionResult.result?.clean === true)
                 && (toolName !== 'run_test_suite' || executionResult.result?.isPassed === true),
-              this.verificationPolicy.canComplete().allowed,
-            );
-          }
-          if (this.loopOptions?.enableRepositoryMemory !== false) {
-            await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
-          }
-          this.reliableToolOrchestrationTelemetry.recordExecution(reliableRouteDecision, toolName, executionResult.result);
-          this.trajectorySteps.push({
-            toolName,
-            args: toolArgs,
-            success: !isToolResultFailure(executionResult.result),
-            signature: `${toolName}:${JSON.stringify(toolArgs || {}).slice(0, 80)}`,
-          });
-          if (this.trajectorySteps.length > 20) this.trajectorySteps.shift();
+                this.verificationPolicy.canComplete().allowed,
+              );
+            }
+            if (this.loopOptions?.enableRepositoryMemory !== false) {
+              await this.repositoryMemory.observeToolResult(session, toolName, toolArgs, executionResult.result, session.seq).catch(() => { });
+            }
+            this.reliableToolOrchestrationTelemetry.recordExecution(reliableRouteDecision, toolName, executionResult.result);
+            this.trajectorySteps.push({
+              toolName,
+              args: toolArgs,
+              success: !isToolResultFailure(executionResult.result),
+              signature: `${toolName}:${JSON.stringify(toolArgs || {}).slice(0, 80)}`,
+            });
+            if (this.trajectorySteps.length > 20) this.trajectorySteps.shift();
 
-          const cmdStr = toolName === 'run_command'
-            ? commandForAttribution
-            : String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
-          const isVerifOrReproCommand = isVerificationCommand(cmdStr)
-            || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
-            || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
-          if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
-            const isFailure = typeof executionResult.result?.exitCode === 'number'
-              && executionResult.result.exitCode !== 0
-              && executionResult.result?.processStarted !== false
-              && executionResult.result?.commandOutcome !== 'blocked_preflight'
-              && !['COMMAND_NOT_FOUND', 'COMMAND_TIMEOUT', 'COMMAND_RESOURCE_LIMIT', 'PERMISSION_DENIED', 'COMMAND_NOT_ALLOWED'].includes(String(executionResult.result?.errorCode || ''));
-            if (isFailure) {
-              this.verificationPolicy.recordReproductionAttempt(cmdStr, true);
+            const cmdStr = toolName === 'run_command'
+              ? commandForAttribution
+              : String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
+            const isVerifOrReproCommand = isVerificationCommand(cmdStr)
+              || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
+              || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
+            if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
+              const isFailure = typeof executionResult.result?.exitCode === 'number'
+                && executionResult.result.exitCode !== 0
+                && executionResult.result?.processStarted !== false
+                && executionResult.result?.commandOutcome !== 'blocked_preflight'
+                && !['COMMAND_NOT_FOUND', 'COMMAND_TIMEOUT', 'COMMAND_RESOURCE_LIMIT', 'PERMISSION_DENIED', 'COMMAND_NOT_ALLOWED'].includes(String(executionResult.result?.errorCode || ''));
+              if (isFailure) {
+                this.verificationPolicy.recordReproductionAttempt(cmdStr, true);
+              }
             }
-          }
-          this.lastToolExecution = {
-            toolName,
-            result: executionResult.result,
-            guardianDiagnosis: executionResult.guardianDiagnosis,
-          };
-          if (
-            ['read_file', 'view_file', 'read_compressed_code'].includes(toolName)
-            && executionResult.result
-            && !executionResult.result.error
-            && executionResult.result.success !== false
-          ) {
-            const inspectedTarget = String(
-              toolArgs?.path || toolArgs?.filePath || toolArgs?.file_path || executionResult.result.path || ''
-            ).trim();
-            if (inspectedTarget) {
-              const normalized = inspectedTarget.replace(/\\/g, '/').toLowerCase();
-              this.sessionInspectedFiles.add(normalized);
-            }
-          }
-          // Tool-level circuit breaker: track external tools that failed due to rate limits or quota exhaustion
-          const toolRes = executionResult.result;
-          const isToolRateLimited = toolRes?.errorCode === 'RATE_LIMIT_EXCEEDED'
-            || toolRes?.errorCode === 'QUOTA_EXCEEDED'
-            || toolRes?.errorCode === 'RESOURCE_EXHAUSTED'
-            || /\b(?:429|rate\s*limit|quota\s*exceeded|resource_exhausted)\b/i.test(String(toolRes?.error || toolRes?.message || toolRes?.stderr || ''));
-          if (isToolRateLimited) {
-            this.circuitBreakerTrippedTools.add(toolName);
-          }
-          if (readPartition && partitionStartIndex !== undefined) {
-            readBatchToolDurationMs.set(
-              partitionStartIndex,
-              (readBatchToolDurationMs.get(partitionStartIndex) || 0) + executionResult.durationMs,
-            );
-          }
-          if (readPartition && partitionEndIndex === callIndex && partitionStartIndex !== undefined) {
-            const measuredBatchDurationMs = readPartition.mode === 'concurrent-read'
-              ? (readBatchDurationMs.get(partitionStartIndex) || 0)
-              : (readBatchToolDurationMs.get(partitionStartIndex) || 0);
-            const estimatedSerialDurationMs = readBatchToolDurationMs.get(partitionStartIndex) || measuredBatchDurationMs;
-            const snapshotChangedFiles = partitionStartIndex !== undefined
-              ? readBatchSnapshotMismatch.get(partitionStartIndex)
-              : undefined;
-            if (snapshotChangedFiles && snapshotChangedFiles.length > 0) {
-              this.pendingSnapshotNudge = formatSnapshotNudge(snapshotChangedFiles);
-            }
-            const batchTelemetry = {
-              mode: 'read-tool-batch',
-              executionMode: readPartition.mode,
-              count: readPartition.calls.length,
-              toolCallIds: readPartition.calls.map((item) => item.id),
-              originalIndexes: readPartition.calls.map((item) => item.index),
-              durationMs: measuredBatchDurationMs,
-              estimatedSerialDurationMs,
-              savedMs: Math.max(0, estimatedSerialDurationMs - measuredBatchDurationMs),
-              persistenceWrites: deferReadPersistence ? 1 : readPartition.calls.length,
-              snapshotConsistent: !snapshotChangedFiles || snapshotChangedFiles.length === 0,
-              ...(snapshotChangedFiles && snapshotChangedFiles.length > 0
-                ? { snapshotChangedFiles }
-                : {}),
+            this.lastToolExecution = {
+              toolName,
+              result: executionResult.result,
+              guardianDiagnosis: executionResult.guardianDiagnosis,
             };
-            session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
-            this.eventBus?.emit('tools:batch', batchTelemetry);
-            if (readPartition.mode === 'concurrent-read' && readPartition.calls.length > 1) {
-              parallelBatchCount++;
-              parallelTotalTools += readPartition.calls.length;
-              parallelDurationMs += measuredBatchDurationMs;
-              parallelSavedMs += batchTelemetry.savedMs;
-              CLI.renderParallelBatchSummary(readPartition.calls.length, measuredBatchDurationMs, batchTelemetry.savedMs);
+            if (
+              ['read_file', 'view_file', 'read_compressed_code'].includes(toolName)
+              && executionResult.result
+              && !executionResult.result.error
+              && executionResult.result.success !== false
+            ) {
+              const inspectedTarget = String(
+                toolArgs?.path || toolArgs?.filePath || toolArgs?.file_path || executionResult.result.path || ''
+              ).trim();
+              if (inspectedTarget) {
+                const normalized = inspectedTarget.replace(/\\/g, '/').toLowerCase();
+                this.sessionInspectedFiles.add(normalized);
+              }
             }
-          }
-          if (effect) {
-            const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
-            this.effectLedger.commit(effect.id, outcome, 'tool-result-recorded', session.id);
-          }
-          if (!deferReadPersistence || partitionEndIndex === callIndex) {
-            await this.persistSession(session);
-          }
-
-          if (progressDecision.shouldStop) {
-            strategyChangeRequired = { toolName, repetitionCount: progressDecision.repetitionCount };
-          }
-
-          // Explicit user denial ([n]/Esc/Ctrl+C at the permission prompt):
-          // In interactive mode, stop dispatching further tools and end the turn.
-          // In non-interactive/headless mode (OpenCode v2.0.20 parity), gracefully let the model adapt and seek an alternative.
-          if (executionResult.result?.deniedByUser === true) {
-            const isNonInteractive = Boolean(
-              this.loopOptions?.headless
-              || this.loopOptions?.nonInteractive
-              || process.env.MINUS_NON_INTERACTIVE === '1'
-              || process.env.MINUS_HEADLESS === '1'
-            );
-            if (!isNonInteractive) {
-              userDeniedPermission = {
-                toolName,
-                detail: String(
-                  executionResult.result?.error || executionResult.result?.summary || executionResult.result?.errorCode || 'permission denied',
-                ).slice(0, 240),
+            // Tool-level circuit breaker: track external tools that failed due to rate limits or quota exhaustion
+            const toolRes = executionResult.result;
+            const isToolRateLimited = toolRes?.errorCode === 'RATE_LIMIT_EXCEEDED'
+              || toolRes?.errorCode === 'QUOTA_EXCEEDED'
+              || toolRes?.errorCode === 'RESOURCE_EXHAUSTED'
+              || /\b(?:429|rate\s*limit|quota\s*exceeded|resource_exhausted)\b/i.test(String(toolRes?.error || toolRes?.message || toolRes?.stderr || ''));
+            if (isToolRateLimited) {
+              this.circuitBreakerTrippedTools.add(toolName);
+            }
+            if (readPartition && partitionStartIndex !== undefined) {
+              readBatchToolDurationMs.set(
+                partitionStartIndex,
+                (readBatchToolDurationMs.get(partitionStartIndex) || 0) + executionResult.durationMs,
+              );
+            }
+            if (readPartition && partitionEndIndex === callIndex && partitionStartIndex !== undefined) {
+              const measuredBatchDurationMs = readPartition.mode === 'concurrent-read'
+                ? (readBatchDurationMs.get(partitionStartIndex) || 0)
+                : (readBatchToolDurationMs.get(partitionStartIndex) || 0);
+              const estimatedSerialDurationMs = readBatchToolDurationMs.get(partitionStartIndex) || measuredBatchDurationMs;
+              const snapshotChangedFiles = partitionStartIndex !== undefined
+                ? readBatchSnapshotMismatch.get(partitionStartIndex)
+                : undefined;
+              if (snapshotChangedFiles && snapshotChangedFiles.length > 0) {
+                this.pendingSnapshotNudge = formatSnapshotNudge(snapshotChangedFiles);
+              }
+              const batchTelemetry = {
+                mode: 'read-tool-batch',
+                executionMode: readPartition.mode,
+                count: readPartition.calls.length,
+                toolCallIds: readPartition.calls.map((item) => item.id),
+                originalIndexes: readPartition.calls.map((item) => item.index),
+                durationMs: measuredBatchDurationMs,
+                estimatedSerialDurationMs,
+                savedMs: Math.max(0, estimatedSerialDurationMs - measuredBatchDurationMs),
+                persistenceWrites: deferReadPersistence ? 1 : readPartition.calls.length,
+                snapshotConsistent: !snapshotChangedFiles || snapshotChangedFiles.length === 0,
+                ...(snapshotChangedFiles && snapshotChangedFiles.length > 0
+                  ? { snapshotChangedFiles }
+                  : {}),
               };
+              session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
+              this.eventBus?.emit('tools:batch', batchTelemetry);
+              if (readPartition.mode === 'concurrent-read' && readPartition.calls.length > 1) {
+                parallelBatchCount++;
+                parallelTotalTools += readPartition.calls.length;
+                parallelDurationMs += measuredBatchDurationMs;
+                parallelSavedMs += batchTelemetry.savedMs;
+                CLI.renderParallelBatchSummary(readPartition.calls.length, measuredBatchDurationMs, batchTelemetry.savedMs);
+              }
+            }
+            if (effect) {
+              const outcome = executionResult.result.error || executionResult.result.errorCode ? 'error' : 'success';
+              this.effectLedger.commit(effect.id, outcome, 'tool-result-recorded', session.id);
+            }
+            if (!deferReadPersistence || partitionEndIndex === callIndex) {
+              await this.persistSession(session);
+            }
+
+            if (progressDecision.shouldStop) {
+              strategyChangeRequired = { toolName, repetitionCount: progressDecision.repetitionCount };
+            }
+
+            // Explicit user denial ([n]/Esc/Ctrl+C at the permission prompt):
+            // In interactive mode, stop dispatching further tools and end the turn.
+            // In non-interactive/headless mode (OpenCode v2.0.20 parity), gracefully let the model adapt and seek an alternative.
+            if (executionResult.result?.deniedByUser === true) {
+              const isNonInteractive = Boolean(
+                this.loopOptions?.headless
+                || this.loopOptions?.nonInteractive
+                || process.env.MINUS_NON_INTERACTIVE === '1'
+                || process.env.MINUS_HEADLESS === '1'
+              );
+              if (!isNonInteractive) {
+                userDeniedPermission = {
+                  toolName,
+                  detail: String(
+                    executionResult.result?.error || executionResult.result?.summary || executionResult.result?.errorCode || 'permission denied',
+                  ).slice(0, 240),
+                };
+                break;
+              }
+            }
+            // Post-submit lock: further calls are blocked by design. Finalize
+            // from the submitted summary below instead of burning another
+            // model round trip on calls that can never execute.
+            if (executionResult.result?.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED' && submittedSolutionSummary) {
+              postSubmissionBlocked = true;
               break;
             }
           }
-          // Post-submit lock: further calls are blocked by design. Finalize
-          // from the submitted summary below instead of burning another
-          // model round trip on calls that can never execute.
-          if (executionResult.result?.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED' && submittedSolutionSummary) {
-            postSubmissionBlocked = true;
-            break;
-          }
-        }
 
-        const stepReason = toolBatchCancelled
-          ? 'cancelled-before-dispatch'
-          : strategyChangeRequired
-            ? 'strategy-change-requested'
-            : 'tool-results-recorded';
-        consecutiveNoProgressStrategyChanges = strategyChangeRequired
-          ? consecutiveNoProgressStrategyChanges + 1
-          : 0;
-        const parallelToolExecution = parallelBatchCount > 0 ? {
-          batchCount: parallelBatchCount,
-          totalTools: parallelTotalTools,
-          durationMs: parallelDurationMs,
-          savedMs: parallelSavedMs,
-        } : undefined;
-        session.append('step/end', {
-          turn,
-          step,
-          reason: stepReason,
-          ...(parallelToolExecution ? { parallelToolExecution } : {}),
-        });
-        await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
-          ...hookContext,
-          reason: stepReason,
-        });
-
-        // The divider is structural navigation, not step detail: keep it visible
-        // in compact mode so consecutive steps remain scannable.
-        CLI.renderStepFooter();
-        this.eventBus?.emit('step:after', step, { sessionId: session.id });
-
-        // Progress-Leased Step Extension (ponytail: lease extension bounded by maxLeasedSteps)
-        if (Number.isFinite(effectiveMaxSteps) && effectiveMaxSteps < maxLeasedSteps) {
-          const currentCompletedTasks = this.planManager.getTasks().filter((t) => t.status === 'COMPLETED').length;
-          const currentMutatedFilesCount = this.targetFilesModifiedInTurn.size;
-          const hasNewCompletedTask = currentCompletedTasks > lastProgressCompletedTasks;
-          const hasNewMutatedFile = currentMutatedFilesCount > lastProgressMutatedFilesCount;
-          const isVerified = !hasGrantedVerificationLease && this.targetFilesModifiedInTurn.size > 0 && this.verificationPolicy.canComplete().allowed;
-
-          if (hasNewCompletedTask || hasNewMutatedFile || isVerified) {
-            lastProgressCompletedTasks = currentCompletedTasks;
-            lastProgressMutatedFilesCount = currentMutatedFilesCount;
-            if (isVerified) hasGrantedVerificationLease = true;
-            const grantedExtension = Math.min(leaseBonus, maxLeasedSteps - effectiveMaxSteps);
-            if (grantedExtension > 0) {
-              effectiveMaxSteps += grantedExtension;
-              session.append('control/decision', {
-                turn,
-                step,
-                controlDecision: {
-                  mode: 'step-lease-extension',
-                  grantedExtension,
-                  extendedMaxSteps: effectiveMaxSteps,
-                  reason: hasNewCompletedTask ? 'task_completed' : isVerified ? 'verification_passed' : 'file_mutated',
-                },
-              });
-            }
-          }
-        }
-
-        if (strategyChangeRequired) {
-          CLI.renderReflectionAlert(
-            consecutiveNoProgressStrategyChanges,
-            `Tool ${strategyChangeRequired.toolName} returned the same observation ${strategyChangeRequired.repetitionCount} times. The model must choose a different strategy on the next step.`,
-          );
-        }
-
-        if (toolBatchCancelled) {
-          const cancellationMessage = 'Agent stopped: cancellation requested. Tool calls not yet dispatched were recorded as aborted.';
-          await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
-          this.goalManager.disarm();
-          return cancellationMessage;
-        }
-
-        if (userDeniedPermission) {
-          const denialMessage = `Denied: ${userDeniedPermission.toolName} — turn ended, awaiting your direction.`;
-          await CLI.renderExecutionStopped(denialMessage, 'PERMISSION_DENIED_BY_USER');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'permission-denied-by-user');
-          this.goalManager.disarm();
-          return denialMessage;
-        }
-
-        // submit_solution already contains a comprehensive, evidence-backed
-        // summary. Reusing it avoids an otherwise redundant provider request
-        // whose only purpose is to restate the same result.
-        const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
-        const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
-        const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
-          ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
-        const isReadOnlySubmission = !getTurnCompletionState(session, turn).hasMutations;
-        if (
-          (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
-          && hasSubmittedSolution
-          && submittedSolutionSummary
-          && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked || submittedValidatedDraft)
-          && enableSubmitAutoFinalization
-        ) {
-          const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
-          CLI.renderModelAction('final_answer');
-          await CLI.renderFinalAnswer(finalAnswer);
-          this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
-          session.addModelMessage({ text: finalAnswer });
-          await this.persistSession(session);
-          if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
-            try {
-              this.goalManager.complete(this.planManager);
-            } catch {
-              this.goalManager.disarm();
-            }
-          } else {
-            this.goalManager.disarm();
-          }
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
-          return finalAnswer;
-        }
-
-        if (
-          strategyChangeRequired
-          && consecutiveNoProgressStrategyChanges >= maxNoProgressStrategyChanges
-        ) {
-          const enableNoProgressTermination = (this.loopOptions?.enableNoProgressTermination
-            ?? envFeatureEnabled('MINUS_ENABLE_NO_PROGRESS_TERMINATION', false)) === true;
-
-          if (enableNoProgressTermination) {
-            const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
-            await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
-            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
-            this.goalManager.disarm();
-            return noProgressMessage;
-          }
-
-          // Khi cơ chế dừng runtime bị bỏ/tắt: Không dừng execution, thay vào đó bổ sung lời nhắc chiến lược
-          // để định hướng model đổi cách tiếp cận và reset lại bộ đếm liên tiếp.
-          const loopGuidance = `[SYSTEM LOOP ADVISORY]: Tool '${strategyChangeRequired.toolName}' has returned identical observations ${strategyChangeRequired.repetitionCount} times. Avoid repeating this tool with the same arguments. Please choose an alternative approach, use different tool parameters, or complete the task with existing data.`;
-          session.addUserMessage(loopGuidance, 'system');
-          await this.persistSession(session);
-          consecutiveNoProgressStrategyChanges = 0;
-        }
-
-        if (!isMockLLM && process.env.NODE_ENV !== 'test' && this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})) {
-          // Pacing delay on tool failure to mitigate LLM API burst rate limiting (429)
-          await new Promise((resolve) => setTimeout(resolve, 600));
-        }
-
-        // Quay lại đầu vòng lặp để LLM xử lý kết quả
-        continue;
-      }
-
-      // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
-      // Reports and submission summaries are candidates, subject to the same gates below.
-      if (!hasValidText && !reportedFindingsMarkdown && !submittedSolutionSummary) {
-        consecutiveEmptyTurns++;
-
-        if (consecutiveEmptyTurns <= maxEmptyRetries) {
-          if (hasReasoning) {
-            CLI.renderReflectionAlert(
-              consecutiveEmptyTurns,
-              hasSubmittedSolution
-                ? 'Solution submitted successfully via submit_solution but the model has not produced a text answer yet. Activating Continuation Protocol...'
-                : 'Model produced System 2 reasoning but no tool_calls yet. Automatically activating Continuation Protocol...',
-            );
-            const noteText = hasSubmittedSolution
-              ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
-              : '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.';
-            session.addUserMessage(noteText);
-            await this.persistSession(session);
-          } else {
-            CLI.renderReflectionAlert(
-              consecutiveEmptyTurns,
-              hasSubmittedSolution
-                ? 'Model returned an empty response after submit_solution. Sending a reminder requesting a complete result report...'
-                : 'Model returned an empty response. Automatically activating Continuation Protocol to continue the task...',
-            );
-            const noteText = hasSubmittedSolution
-              ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
-              : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
-            session.addUserMessage(noteText);
-            await this.persistSession(session);
-          }
-
-          CLI.renderStepFooter();
-          session.append('step/end', { turn, step, reason: 'continuation-requested' });
+          const stepReason = toolBatchCancelled
+            ? 'cancelled-before-dispatch'
+            : strategyChangeRequired
+              ? 'strategy-change-requested'
+              : 'tool-results-recorded';
+          consecutiveNoProgressStrategyChanges = strategyChangeRequired
+            ? consecutiveNoProgressStrategyChanges + 1
+            : 0;
+          const parallelToolExecution = parallelBatchCount > 0 ? {
+            batchCount: parallelBatchCount,
+            totalTools: parallelTotalTools,
+            durationMs: parallelDurationMs,
+            savedMs: parallelSavedMs,
+          } : undefined;
+          session.append('step/end', {
+            turn,
+            step,
+            reason: stepReason,
+            ...(parallelToolExecution ? { parallelToolExecution } : {}),
+          });
           await this.persistSession(session);
           await this.agentHooks.run('agent/after-step', {
             ...hookContext,
-            reason: 'continuation-requested',
+            reason: stepReason,
           });
-          this.eventBus?.emit('step:after', step, { sessionId: session.id });
-          continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
-        }
 
-        // Reasoning is not a user-facing answer and must never bypass completion checks.
-        if (hasReasoning) {
-          const message = 'Agent stopped: the model did not produce a user-facing answer after repeated requests.';
-          await CLI.renderExecutionStopped(message, 'MISSING_FINAL_ANSWER');
+          // The divider is structural navigation, not step detail: keep it visible
+          // in compact mode so consecutive steps remain scannable.
           CLI.renderStepFooter();
-          session.append('step/end', { turn, step, reason: 'missing-final-answer' });
-          await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
           this.eventBus?.emit('step:after', step, { sessionId: session.id });
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
-          this.goalManager.disarm();
-          return message;
+
+          // Progress-Leased Step Extension (ponytail: lease extension bounded by maxLeasedSteps)
+          if (Number.isFinite(effectiveMaxSteps) && effectiveMaxSteps < maxLeasedSteps) {
+            const currentCompletedTasks = this.planManager.getTasks().filter((t) => t.status === 'COMPLETED').length;
+            const currentMutatedFilesCount = this.targetFilesModifiedInTurn.size;
+            const hasNewCompletedTask = currentCompletedTasks > lastProgressCompletedTasks;
+            const hasNewMutatedFile = currentMutatedFilesCount > lastProgressMutatedFilesCount;
+            const isVerified = !hasGrantedVerificationLease && this.targetFilesModifiedInTurn.size > 0 && this.verificationPolicy.canComplete().allowed;
+
+            if (hasNewCompletedTask || hasNewMutatedFile || isVerified) {
+              lastProgressCompletedTasks = currentCompletedTasks;
+              lastProgressMutatedFilesCount = currentMutatedFilesCount;
+              if (isVerified) hasGrantedVerificationLease = true;
+              const grantedExtension = Math.min(leaseBonus, maxLeasedSteps - effectiveMaxSteps);
+              if (grantedExtension > 0) {
+                effectiveMaxSteps += grantedExtension;
+                session.append('control/decision', {
+                  turn,
+                  step,
+                  controlDecision: {
+                    mode: 'step-lease-extension',
+                    grantedExtension,
+                    extendedMaxSteps: effectiveMaxSteps,
+                    reason: hasNewCompletedTask ? 'task_completed' : isVerified ? 'verification_passed' : 'file_mutated',
+                  },
+                });
+              }
+            }
+          }
+
+          if (strategyChangeRequired) {
+            CLI.renderReflectionAlert(
+              consecutiveNoProgressStrategyChanges,
+              `Tool ${strategyChangeRequired.toolName} returned the same observation ${strategyChangeRequired.repetitionCount} times. The model must choose a different strategy on the next step.`,
+            );
+          }
+
+          if (toolBatchCancelled) {
+            const cancellationMessage = 'Agent stopped: cancellation requested. Tool calls not yet dispatched were recorded as aborted.';
+            await CLI.renderExecutionStopped(cancellationMessage, 'CANCELLED');
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'cancelled');
+            this.goalManager.disarm();
+            return cancellationMessage;
+          }
+
+          if (userDeniedPermission) {
+            const denialMessage = `Denied: ${userDeniedPermission.toolName} — turn ended, awaiting your direction.`;
+            await CLI.renderExecutionStopped(denialMessage, 'PERMISSION_DENIED_BY_USER');
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'permission-denied-by-user');
+            this.goalManager.disarm();
+            return denialMessage;
+          }
+
+          // submit_solution already contains a comprehensive, evidence-backed
+          // summary. Reusing it avoids an otherwise redundant provider request
+          // whose only purpose is to restate the same result.
+          const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
+          const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
+          const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
+            ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
+          const isReadOnlySubmission = !getTurnCompletionState(session, turn).hasMutations;
+          if (
+            (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
+            && hasSubmittedSolution
+            && submittedSolutionSummary
+            && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked || submittedValidatedDraft)
+            && enableSubmitAutoFinalization
+          ) {
+            const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
+            CLI.renderModelAction('final_answer');
+            await CLI.renderFinalAnswer(finalAnswer);
+            this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
+            session.addModelMessage({ text: finalAnswer });
+            await this.persistSession(session);
+            if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+              try {
+                this.goalManager.complete(this.planManager);
+              } catch {
+                this.goalManager.disarm();
+              }
+            } else {
+              this.goalManager.disarm();
+            }
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed');
+            return finalAnswer;
+          }
+
+          if (
+            strategyChangeRequired
+            && consecutiveNoProgressStrategyChanges >= maxNoProgressStrategyChanges
+          ) {
+            const enableNoProgressTermination = (this.loopOptions?.enableNoProgressTermination
+              ?? envFeatureEnabled('MINUS_ENABLE_NO_PROGRESS_TERMINATION', false)) === true;
+
+            if (enableNoProgressTermination) {
+              const noProgressMessage = `Agent stopped: the model repeated tool ${strategyChangeRequired.toolName} without progress and ignored ${maxNoProgressStrategyChanges} consecutive strategy-change requests. The turn was ended explicitly to prevent an infinite loop.`;
+              await CLI.renderExecutionStopped(noProgressMessage, 'REPEATED_NO_PROGRESS');
+              await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'repeated-no-progress-terminal');
+              this.goalManager.disarm();
+              return noProgressMessage;
+            }
+
+            // Khi cơ chế dừng runtime bị bỏ/tắt: Không dừng execution, thay vào đó bổ sung lời nhắc chiến lược
+            // để định hướng model đổi cách tiếp cận và reset lại bộ đếm liên tiếp.
+            const loopGuidance = `[SYSTEM LOOP ADVISORY]: Tool '${strategyChangeRequired.toolName}' has returned identical observations ${strategyChangeRequired.repetitionCount} times. Avoid repeating this tool with the same arguments. Please choose an alternative approach, use different tool parameters, or complete the task with existing data.`;
+            session.addUserMessage(loopGuidance, 'system');
+            await this.persistSession(session);
+            consecutiveNoProgressStrategyChanges = 0;
+          }
+
+          if (!isMockLLM && process.env.NODE_ENV !== 'test' && this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})) {
+            // Pacing delay on tool failure to mitigate LLM API burst rate limiting (429)
+            await new Promise((resolve) => setTimeout(resolve, 600));
+          }
+
+          // Quay lại đầu vòng lặp để LLM xử lý kết quả
+          continue;
         }
-      }
 
-      // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
-      const rawText = response.text ? response.text.trim() : '';
-      let finalAnswer = selectFinalAnswer(rawText,
-        hasReportedFindings ? reportedFindingsMarkdown : undefined,
-        hasSubmittedSolution ? submittedSolutionSummary : undefined);
-      consecutiveEmptyTurns = 0;
+        // 5. Continuation Protocol: Tự động khôi phục khi gặp Turn rỗng (Chống dừng sớm)
+        // Reports and submission summaries are candidates, subject to the same gates below.
+        if (!hasValidText && !reportedFindingsMarkdown && !submittedSolutionSummary) {
+          consecutiveEmptyTurns++;
 
-      const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
-      const planBlocker = isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker();
-      if (planBlocker) {
-        consecutivePlanCompletionRejects++;
-        const canRetryPlan = consecutivePlanCompletionRejects <= maxPlanCompletionRetries;
-        CLI.renderReflectionAlert(
-          consecutivePlanCompletionRejects,
-          canRetryPlan
-            ? `Final Answer was rejected because the execution plan is incomplete. ${planBlocker}`
-            : `The model repeatedly tried to finish with an incomplete execution plan. ${planBlocker}`,
-        );
-        session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-        if (canRetryPlan) {
-          session.addUserMessage(this.planManager.buildContinuationPrompt(planBlocker), 'system');
+          if (consecutiveEmptyTurns <= maxEmptyRetries) {
+            if (hasReasoning) {
+              CLI.renderReflectionAlert(
+                consecutiveEmptyTurns,
+                hasSubmittedSolution
+                  ? 'Solution submitted successfully via submit_solution but the model has not produced a text answer yet. Activating Continuation Protocol...'
+                  : 'Model produced System 2 reasoning but no tool_calls yet. Automatically activating Continuation Protocol...',
+              );
+              const noteText = hasSubmittedSolution
+                ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
+                : '[SYSTEM NOTE]: You completed your internal reasoning monologue but did not provide any tool calls or final user-facing response. Please proceed immediately to execute the next tool call according to your plan or provide the final answer to the user.';
+              session.addUserMessage(noteText);
+              await this.persistSession(session);
+            } else {
+              CLI.renderReflectionAlert(
+                consecutiveEmptyTurns,
+                hasSubmittedSolution
+                  ? 'Model returned an empty response after submit_solution. Sending a reminder requesting a complete result report...'
+                  : 'Model returned an empty response. Automatically activating Continuation Protocol to continue the task...',
+              );
+              const noteText = hasSubmittedSolution
+                ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
+                : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
+              session.addUserMessage(noteText);
+              await this.persistSession(session);
+            }
+
+            CLI.renderStepFooter();
+            session.append('step/end', { turn, step, reason: 'continuation-requested' });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: 'continuation-requested',
+            });
+            this.eventBus?.emit('step:after', step, { sessionId: session.id });
+            continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
+          }
+
+          // Reasoning is not a user-facing answer and must never bypass completion checks.
+          if (hasReasoning) {
+            const message = 'Agent stopped: the model did not produce a user-facing answer after repeated requests.';
+            await CLI.renderExecutionStopped(message, 'MISSING_FINAL_ANSWER');
+            CLI.renderStepFooter();
+            session.append('step/end', { turn, step, reason: 'missing-final-answer' });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
+            this.eventBus?.emit('step:after', step, { sessionId: session.id });
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
+            this.goalManager.disarm();
+            return message;
+          }
         }
-        await this.persistSession(session);
-        CLI.renderStepFooter();
-        const planReason = canRetryPlan
-          ? 'incomplete-plan-final-answer'
-          : 'incomplete-plan-final-answer-terminal';
-        session.append('step/end', { turn, step, reason: planReason });
-        await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
-          ...hookContext,
-          reason: planReason,
-        });
-        this.eventBus?.emit('step:after', step, { sessionId: session.id });
-        if (canRetryPlan) continue;
 
-        const planAllowsReconciliation = Boolean(
-          finalAnswer
-          && finalAnswer.trim().length > 80
-          && !isCompletionStub(finalAnswer)
-          && ((!initialTurnClassification.requiredCapabilities.includes('edit') && !this.planManager.getRequirements().verificationRequired) || hasSubmittedSolution || hasVerifiedTests)
-        );
-        if (planAllowsReconciliation) {
-          this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
+        // 6. Nếu model trả về câu trả lời cuối cùng (Final Answer)
+        const rawText = response.text ? response.text.trim() : '';
+        let finalAnswer = selectFinalAnswer(rawText,
+          hasReportedFindings ? reportedFindingsMarkdown : undefined,
+          hasSubmittedSolution ? submittedSolutionSummary : undefined);
+        consecutiveEmptyTurns = 0;
+
+        const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
+        const planBlocker = isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker();
+        if (planBlocker) {
+          consecutivePlanCompletionRejects++;
+          const canRetryPlan = consecutivePlanCompletionRejects <= maxPlanCompletionRetries;
           CLI.renderReflectionAlert(
             consecutivePlanCompletionRejects,
-            `[Auto-Reconciliation]: Non-required remaining Plan tasks were marked SKIPPED after a substantive answer. Skipped tasks are not verified completions; required tasks still need their observed evidence. Proceeding to the Completion Gate.`,
+            canRetryPlan
+              ? `Final Answer was rejected because the execution plan is incomplete. ${planBlocker}`
+              : `The model repeatedly tried to finish with an incomplete execution plan. ${planBlocker}`,
           );
-        } else {
-          const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
-          await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
-          this.goalManager.disarm();
-          return incompletePlanMessage;
-        }
-      }
-      consecutivePlanCompletionRejects = 0;
-
-      const completionState = getTurnCompletionState(session, turn);
-      const hasCodeMutations = completionState.hasMutations;
-      const isExplorationOrReadOnly = !hasCodeMutations && (
-        initialTurnClassification.taskClass === 'exploration'
-        || initialTurnClassification.phase === 'explore'
-        || isReadOnlyRequest(turnUserRequest)
-      );
-      const codeChangeRequired = !isExplorationOrReadOnly && (
-        initialTurnClassification.requiredCapabilities.includes('edit')
-        || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
-      );
-      const policyDecision = isSubagent
-        ? { allow: true }
-        : this.finalAnswerGuard.evaluate(finalAnswer, {
-          userRequest: turnUserRequest,
-          availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
-          hasSubmittedSolution,
-          hasCodeMutations,
-          filesModified: Array.from(this.targetFilesModifiedInTurn),
-          workspace: this._workspace,
-        });
-      const evidenceDecision = (isSubagent || isMockLLM || !isCompletionEvidenceGateEnabled())
-        ? { allow: true, reasons: [] }
-        : this.completionEvidenceGate.evaluate(finalAnswer, session, {
-          turn,
-          codeChangeRequired,
-          userRequest: turnUserRequest,
-          taskClass: initialTurnClassification.taskClass,
-          hasReproduction: this.verificationPolicy.hasReproduction(),
-        });
-      const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
-      if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
-        activeSkills.push('verification-before-completion');
-      }
-      const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM || (!hasCodeMutations && !codeChangeRequired))
-        ? { allowed: true }
-        : this.verificationPolicy.canComplete(activeSkills, undefined, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) });
-      const criticDecision = evaluateTurnCritic(finalAnswer, evidenceDecision);
-      let ocrDecision: OcrGateDecision = {
-        allow: true,
-        reason: 'not-applicable',
-        blockingFindings: [],
-        advisoryFindings: [],
-      };
-      const priorCompletionGatesAllow = policyDecision.allow
-        && criticDecision.approved
-        && evidenceDecision.allow
-        && verificationDecision.allowed;
-      if (!isSubagent && !isMockLLM && priorCompletionGatesAllow) {
-        const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
-        if (ocrReview) {
-          ocrDecision = await ocrReview.evaluateCompletion({
-            session,
-            filesModified: completionState.filesModified,
-            background: turnUserRequest,
-            signal: options?.signal,
-          });
+          session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+          if (canRetryPlan) {
+            session.addUserMessage(this.planManager.buildContinuationPrompt(planBlocker), 'system');
+          }
           await this.persistSession(session);
+          CLI.renderStepFooter();
+          const planReason = canRetryPlan
+            ? 'incomplete-plan-final-answer'
+            : 'incomplete-plan-final-answer-terminal';
+          session.append('step/end', { turn, step, reason: planReason });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', {
+            ...hookContext,
+            reason: planReason,
+          });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
+          if (canRetryPlan) continue;
+
+          const planAllowsReconciliation = Boolean(
+            finalAnswer
+            && finalAnswer.trim().length > 80
+            && !isCompletionStub(finalAnswer)
+            && ((!initialTurnClassification.requiredCapabilities.includes('edit') && !this.planManager.getRequirements().verificationRequired) || hasSubmittedSolution || hasVerifiedTests)
+          );
+          if (planAllowsReconciliation) {
+            this.planManager.autoReconcileRemainingTasks('Remaining plan tasks auto-reconciled on substantive final answer delivery.');
+            CLI.renderReflectionAlert(
+              consecutivePlanCompletionRejects,
+              `[Auto-Reconciliation]: Non-required remaining Plan tasks were marked SKIPPED after a substantive answer. Skipped tasks are not verified completions; required tasks still need their observed evidence. Proceeding to the Completion Gate.`,
+            );
+          } else {
+            const incompletePlanMessage = `Agent stopped explicitly: ${planBlocker} The model ignored ${maxPlanCompletionRetries} plan-continuation requests.`;
+            await CLI.renderExecutionStopped(incompletePlanMessage, 'INCOMPLETE_PLAN');
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-plan-final-answer-terminal');
+            this.goalManager.disarm();
+            return incompletePlanMessage;
+          }
         }
-      }
-      let finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
-        ? (policyDecision.allow ? { allow: true } : policyDecision)
-        : (!policyDecision.allow
-          ? policyDecision
-          : (!criticDecision.approved)
-            ? {
-              allow: false,
-              reason: 'unverified-evidence' as const,
-              recovery: criticDecision.lspErrors.length ? 'verify-changes' : evidenceDecision.recovery || 'revise-answer',
-              continuationPrompt: criticDecision.critiquePrompt,
-            }
-            : (!evidenceDecision.allow)
+        consecutivePlanCompletionRejects = 0;
+
+        const completionState = getTurnCompletionState(session, turn);
+        const hasCodeMutations = completionState.hasMutations;
+        const isExplorationOrReadOnly = !hasCodeMutations && (
+          initialTurnClassification.taskClass === 'exploration'
+          || initialTurnClassification.phase === 'explore'
+          || isReadOnlyRequest(turnUserRequest)
+        );
+        const codeChangeRequired = !isExplorationOrReadOnly && (
+          initialTurnClassification.requiredCapabilities.includes('edit')
+          || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
+        );
+        const policyDecision = isSubagent
+          ? { allow: true }
+          : this.finalAnswerGuard.evaluate(finalAnswer, {
+            userRequest: turnUserRequest,
+            availableToolNames: this.toolProvider.getAll().map((tool) => tool.name || '').filter(Boolean),
+            hasSubmittedSolution,
+            hasCodeMutations,
+            filesModified: Array.from(this.targetFilesModifiedInTurn),
+            workspace: this._workspace,
+          });
+        const evidenceDecision = (isSubagent || isMockLLM || !isCompletionEvidenceGateEnabled())
+          ? { allow: true, reasons: [] }
+          : this.completionEvidenceGate.evaluate(finalAnswer, session, {
+            turn,
+            codeChangeRequired,
+            userRequest: turnUserRequest,
+            taskClass: initialTurnClassification.taskClass,
+            hasReproduction: this.verificationPolicy.hasReproduction(),
+          });
+        const activeSkills = session.getActiveSkillDecisions().map((decision) => decision.skillId);
+        if (this.planManager.getRequirements().verificationRequired && this.planManager.hasPlan()) {
+          activeSkills.push('verification-before-completion');
+        }
+        const verificationDecision = (hasSubmittedSolution || isSubagent || isMockLLM || (!hasCodeMutations && !codeChangeRequired))
+          ? { allowed: true }
+          : this.verificationPolicy.canComplete(activeSkills, undefined, { userExemptsTesting: isUserExplicitlyExemptingTests(turnUserRequest) });
+        const criticDecision = evaluateTurnCritic(finalAnswer, evidenceDecision);
+        let ocrDecision: OcrGateDecision = {
+          allow: true,
+          reason: 'not-applicable',
+          blockingFindings: [],
+          advisoryFindings: [],
+        };
+        const priorCompletionGatesAllow = policyDecision.allow
+          && criticDecision.approved
+          && evidenceDecision.allow
+          && verificationDecision.allowed;
+        if (!isSubagent && !isMockLLM && priorCompletionGatesAllow) {
+          const ocrReview = (this.kernel?.ctx as any)?.ocrReview as OcrReviewService | undefined;
+          if (ocrReview) {
+            ocrDecision = await ocrReview.evaluateCompletion({
+              session,
+              filesModified: completionState.filesModified,
+              background: turnUserRequest,
+              signal: options?.signal,
+            });
+            await this.persistSession(session);
+          }
+        }
+        let finalAnswerDecision: Omit<FinalAnswerGuardDecision, 'reason'> & { reason?: string } = (isSubagent || isMockLLM)
+          ? (policyDecision.allow ? { allow: true } : policyDecision)
+          : (!policyDecision.allow
+            ? policyDecision
+            : (!criticDecision.approved)
               ? {
                 allow: false,
                 reason: 'unverified-evidence' as const,
-                recovery: evidenceDecision.recovery,
-                continuationPrompt: evidenceDecision.continuationPrompt,
+                recovery: criticDecision.lspErrors.length ? 'verify-changes' : evidenceDecision.recovery || 'revise-answer',
+                continuationPrompt: criticDecision.critiquePrompt,
               }
-              : (!hasSubmittedSolution && !verificationDecision.allowed)
+              : (!evidenceDecision.allow)
                 ? {
                   allow: false,
                   reason: 'unverified-evidence' as const,
-                  recovery: 'verify-changes',
-                  continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification. A command the verification policy does not recognize (e.g. running a script you just created) does not satisfy this gate; read the DYNAMIC VERIFICATION requirement for the accepted tier. If the user waives tests, they can append /no-verify to the request instead of rephrasing.`,
+                  recovery: evidenceDecision.recovery,
+                  continuationPrompt: evidenceDecision.continuationPrompt,
                 }
-                : (!ocrDecision.allow)
+                : (!hasSubmittedSolution && !verificationDecision.allowed)
                   ? {
                     allow: false,
                     reason: 'unverified-evidence' as const,
                     recovery: 'verify-changes',
-                    continuationPrompt: ocrDecision.continuationPrompt,
+                    continuationPrompt: `[SYSTEM VERIFICATION GATE]: ${verificationDecision.reason}\nRun an appropriate test/build/lint/typecheck command now, after the latest modification. A command the verification policy does not recognize (e.g. running a script you just created) does not satisfy this gate; read the DYNAMIC VERIFICATION requirement for the accepted tier. If the user waives tests, they can append /no-verify to the request instead of rephrasing.`,
                   }
-                  : { allow: true });
+                  : (!ocrDecision.allow)
+                    ? {
+                      allow: false,
+                      reason: 'unverified-evidence' as const,
+                      recovery: 'verify-changes',
+                      continuationPrompt: ocrDecision.continuationPrompt,
+                    }
+                    : { allow: true });
 
-      // Read-only completions (no mutations and none required) return the
-      // final answer directly — no submit_solution round trip. Submission
-      // stays mandatory for everything else. Subagents keep the old rule:
-      // their read-only completions are still audited through
-      // submit_solution, since no other gate checks subagent output.
-      const isDirectAnswerCompletion = !hasCodeMutations && !codeChangeRequired;
-      const requiresReadOnlySubmission = isDirectAnswerCompletion && !hasSubmittedSolution;
-      const requiresSubmission = isDirectAnswerCompletion
-        ? (isSubagent && !hasSubmittedSolution && !isMockLLM)
-        : (!hasSubmittedSolution && !isSubagent && !isMockLLM);
-      if (finalAnswerDecision.allow && requiresSubmission) {
-        const candidate = evaluateSubmission({ summary: finalAnswer }, {
-          session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
-          codeChangeRequired: isPlanModeThisStep ? false : submissionCodeChangeRequired(), taskClass: classification.taskClass,
-          verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
-          evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
-            changedFileCount: this.targetFilesModifiedInTurn.size, hasCallers: this.editTouchedCallers,
-            blastRisk: this.maxEditBlastRisk,
-            sensitivePathTouched: completionState.filesModified.some(file => !isNonExecutableFile(file) && isSensitivePath(file)),
-          },
-          planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
-          activeAgents: submissionSnapshot().activeAgents,
-          evaluateCritic: evaluateTurnCritic,
-        });
-        submissionReadiness.arm(candidate.payload, submissionSnapshot(), candidate.allowed);
-        finalAnswerDecision = candidate.allowed ? {
-          allow: false,
-          reason: 'submission-required',
-          continuationPrompt: '[SUBMISSION REQUIRED]: Call submit_solution alone as the final tool with the actual answer in summary. Use observed verification for edits; read-only answers require no edits or tests.',
-        } : {
-          allow: false,
-          reason: 'submission-preflight-rejected',
-          recovery: candidate.evidence?.recovery || (!candidate.verification.allowed ? 'verify-changes' : 'revise-answer'),
-          continuationPrompt: candidate.evidence?.continuationPrompt || candidate.verification.reason
-            || candidate.audit.reasons.join('\n'),
-        };
-      }
-
-      if (!finalAnswerDecision.allow) {
-        // Same telemetry for answer-only completions; the pure
-        // submission-required redirect is routing, not a block.
-        if (finalAnswerDecision.reason !== 'submission-required') {
-          const answerBlock = { kind: 'gate-block' as const, errorCode: finalAnswerDecision.reason || 'unknown',
-            recovery: (finalAnswerDecision as any).recovery,
-            taskClass: classification.taskClass,
-            filesModified: getTurnCompletionState(session, turn).filesModified };
-          session.append('control/decision', { turn, step, controlDecision: answerBlock });
-        }
-        // Case 1c — completion-gate rejection: keep the thought that produced
-        // the rejected answer so the retry can diagnose, not guess.
-        this.persistStepReasoning(session, this._latestReasoning?.thought, {
-          failure: true,
-          failureTrigger: `gate-rejected:${finalAnswerDecision.reason || 'completion-gate'}`,
-          step,
-          turn,
-        });
-        {
-          consecutiveIncompleteFinals++;
-          const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
-          this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
-          const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt({ submissionOnly: requiresReadOnlySubmission
-            || finalAnswerDecision.reason === 'submission-required' });
-
-          const actionMandate = requiresReadOnlySubmission && !isSubagent
-            ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.'
-            : requiresReadOnlySubmission
-              ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
-            : buildCompletionRecoveryPrompt({
-            reason: finalAnswerDecision.reason,
-            recovery: finalAnswerDecision.recovery,
-            hasSubmittedSolution,
-            detail: verificationDecision.allowed ? undefined : verificationDecision.reason,
+        // Read-only completions (no mutations and none required) return the
+        // final answer directly — no submit_solution round trip. Submission
+        // stays mandatory for everything else. Subagents keep the old rule:
+        // their read-only completions are still audited through
+        // submit_solution, since no other gate checks subagent output.
+        const isDirectAnswerCompletion = !hasCodeMutations && !codeChangeRequired;
+        const requiresReadOnlySubmission = isDirectAnswerCompletion && !hasSubmittedSolution;
+        const requiresSubmission = isDirectAnswerCompletion
+          ? (isSubagent && !hasSubmittedSolution && !isMockLLM)
+          : (!hasSubmittedSolution && !isSubagent && !isMockLLM);
+        if (finalAnswerDecision.allow && requiresSubmission) {
+          const candidate = evaluateSubmission({ summary: finalAnswer }, {
+            session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,
+            codeChangeRequired: isPlanModeThisStep ? false : submissionCodeChangeRequired(), taskClass: classification.taskClass,
+            verificationPolicy: this.verificationPolicy, evidenceGate: this.completionEvidenceGate,
+            evidenceEnabled: isCompletionEvidenceGateEnabled(), measured: {
+              changedFileCount: this.targetFilesModifiedInTurn.size, hasCallers: this.editTouchedCallers,
+              blastRisk: this.maxEditBlastRisk,
+              sensitivePathTouched: completionState.filesModified.some(file => !isNonExecutableFile(file) && isSensitivePath(file)),
+            },
+            planBlocker: isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker(),
+            activeAgents: submissionSnapshot().activeAgents,
+            evaluateCritic: evaluateTurnCritic,
           });
+          submissionReadiness.arm(candidate.payload, submissionSnapshot(), candidate.allowed);
+          finalAnswerDecision = candidate.allowed ? {
+            allow: false,
+            reason: 'submission-required',
+            continuationPrompt: '[SUBMISSION REQUIRED]: Call submit_solution alone as the final tool with the actual answer in summary. Use observed verification for edits; read-only answers require no edits or tests.',
+          } : {
+            allow: false,
+            reason: 'submission-preflight-rejected',
+            recovery: candidate.evidence?.recovery || (!candidate.verification.allowed ? 'verify-changes' : 'revise-answer'),
+            continuationPrompt: candidate.evidence?.continuationPrompt || candidate.verification.reason
+              || candidate.audit.reasons.join('\n'),
+          };
+        }
 
-          const fullContinuationPrompt = [
-            actionMandate,
-            finalAnswerDecision.continuationPrompt,
-            reasoningGuidance,
-          ].filter(Boolean).join('\n\n');
-
-          CLI.renderReflectionAlert(
-            consecutiveIncompleteFinals,
-            canRetryIncompleteFinal
-              ? `Final answer did not pass the completion gate (${finalAnswerDecision.reason || 'policy'}). The agent will continue immediately within the current turn.`
-              : 'Model keeps returning Final Answers without sufficient evidence, results, or a real blocker. The turn will end with a clear notice.',
-          );
-          session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-          if (canRetryIncompleteFinal && fullContinuationPrompt) {
-            session.addUserMessage(fullContinuationPrompt, 'system');
+        if (!finalAnswerDecision.allow) {
+          // Same telemetry for answer-only completions; the pure
+          // submission-required redirect is routing, not a block.
+          if (finalAnswerDecision.reason !== 'submission-required') {
+            const answerBlock = {
+              kind: 'gate-block' as const, errorCode: finalAnswerDecision.reason || 'unknown',
+              recovery: (finalAnswerDecision as any).recovery,
+              taskClass: classification.taskClass,
+              filesModified: getTurnCompletionState(session, turn).filesModified
+            };
+            session.append('control/decision', { turn, step, controlDecision: answerBlock });
           }
-          await this.persistSession(session);
-          CLI.renderStepFooter();
-          const incompleteFinalReason = canRetryIncompleteFinal
-            ? 'incomplete-final-answer'
-            : 'incomplete-final-answer-terminal';
-          session.append('step/end', { turn, step, reason: incompleteFinalReason });
-          await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
-            ...hookContext,
-            reason: incompleteFinalReason,
+          // Case 1c — completion-gate rejection: keep the thought that produced
+          // the rejected answer so the retry can diagnose, not guess.
+          this.persistStepReasoning(session, this._latestReasoning?.thought, {
+            failure: true,
+            failureTrigger: `gate-rejected:${finalAnswerDecision.reason || 'completion-gate'}`,
+            step,
+            turn,
           });
-          this.eventBus?.emit('step:after', step, { sessionId: session.id });
-          if (canRetryIncompleteFinal) continue;
+          {
+            consecutiveIncompleteFinals++;
+            const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
+            this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
+            const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt({
+              submissionOnly: requiresReadOnlySubmission
+                || finalAnswerDecision.reason === 'submission-required'
+            });
 
-          const incompleteFinalMessage = `Agent stopped: completion remained unresolved after ${consecutiveIncompleteFinals} attempts (${finalAnswerDecision.reason || 'unknown'}).`;
-          await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
-          await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
-          this.goalManager.disarm();
-          return incompleteFinalMessage;
+            const actionMandate = requiresReadOnlySubmission && !isSubagent
+              ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.'
+              : requiresReadOnlySubmission
+                ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
+                : buildCompletionRecoveryPrompt({
+                  reason: finalAnswerDecision.reason,
+                  recovery: finalAnswerDecision.recovery,
+                  hasSubmittedSolution,
+                  detail: verificationDecision.allowed ? undefined : verificationDecision.reason,
+                });
+
+            const fullContinuationPrompt = [
+              actionMandate,
+              finalAnswerDecision.continuationPrompt,
+              reasoningGuidance,
+            ].filter(Boolean).join('\n\n');
+
+            CLI.renderReflectionAlert(
+              consecutiveIncompleteFinals,
+              canRetryIncompleteFinal
+                ? `Final answer did not pass the completion gate (${finalAnswerDecision.reason || 'policy'}). The agent will continue immediately within the current turn.`
+                : 'Model keeps returning Final Answers without sufficient evidence, results, or a real blocker. The turn will end with a clear notice.',
+            );
+            session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+            if (canRetryIncompleteFinal && fullContinuationPrompt) {
+              session.addUserMessage(fullContinuationPrompt, 'system');
+            }
+            await this.persistSession(session);
+            CLI.renderStepFooter();
+            const incompleteFinalReason = canRetryIncompleteFinal
+              ? 'incomplete-final-answer'
+              : 'incomplete-final-answer-terminal';
+            session.append('step/end', { turn, step, reason: incompleteFinalReason });
+            await this.persistSession(session);
+            await this.agentHooks.run('agent/after-step', {
+              ...hookContext,
+              reason: incompleteFinalReason,
+            });
+            this.eventBus?.emit('step:after', step, { sessionId: session.id });
+            if (canRetryIncompleteFinal) continue;
+
+            const incompleteFinalMessage = `Agent stopped: completion remained unresolved after ${consecutiveIncompleteFinals} attempts (${finalAnswerDecision.reason || 'unknown'}).`;
+            await CLI.renderExecutionStopped(incompleteFinalMessage, 'NON_TERMINAL_PROGRESS_LIMIT');
+            await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'incomplete-final-answer-terminal');
+            this.goalManager.disarm();
+            return incompleteFinalMessage;
+          }
         }
-      }
-      consecutiveIncompleteFinals = 0;
-      this.adaptiveReasoning.reset();
+        consecutiveIncompleteFinals = 0;
+        this.adaptiveReasoning.reset();
 
-      // Strip echoed system-prompt paragraphs before the answer reaches the
-      // TUI, session history, and downstream consumers. The guard above
-      // already evaluated the raw text, so pure-echo answers were rejected
-      // for revision before this point.
-      const sanitizedFinalAnswer = stripSystemPromptEcho(finalAnswer);
-      if (sanitizedFinalAnswer && sanitizedFinalAnswer !== finalAnswer) {
-        finalAnswer = sanitizedFinalAnswer;
+        // Strip echoed system-prompt paragraphs before the answer reaches the
+        // TUI, session history, and downstream consumers. The guard above
+        // already evaluated the raw text, so pure-echo answers were rejected
+        // for revision before this point.
+        const sanitizedFinalAnswer = stripSystemPromptEcho(finalAnswer);
+        if (sanitizedFinalAnswer && sanitizedFinalAnswer !== finalAnswer) {
+          finalAnswer = sanitizedFinalAnswer;
+        }
+
+        if (ocrDecision.allow && ocrDecision.advisoryFindings.length > 0) {
+          finalAnswer = [
+            finalAnswer,
+            '',
+            'OpenCodeReview advisories:',
+            ...ocrDecision.advisoryFindings.slice(0, 8).map((finding) =>
+              `- [${finding.severity.toUpperCase()}] ${finding.path}:${finding.startLine || '?'} — ${finding.content}`,
+            ),
+          ].join('\n');
+        }
+
+        CLI.renderModelAction('final_answer');
+        CLI.renderStepFooter();
+        await CLI.renderFinalAnswer(finalAnswer);
+        this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
+
+        // Ghi nhận câu trả lời cuối cùng vào Session
+        session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
+        session.append('step/end', { turn, step, reason: 'final-answer' });
+        await this.persistSession(session);
+        await this.agentHooks.run('agent/after-step', {
+          ...hookContext,
+          reason: 'final-answer',
+        });
+        if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
+          try {
+            this.goalManager.complete(this.planManager);
+          } catch {
+            this.goalManager.disarm();
+          }
+        } else {
+          this.goalManager.disarm();
+        }
+        await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed', turnUserRequest, finalAnswer);
+
+        resolveSteerItems(finalAnswer);
+        if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
+          this.drainScheduled = true;
+          void this.drainInbox(session, options);
+        }
+
+        return finalAnswer;
       }
 
-      if (ocrDecision.allow && ocrDecision.advisoryFindings.length > 0) {
-        finalAnswer = [
-          finalAnswer,
-          '',
-          'OpenCodeReview advisories:',
-          ...ocrDecision.advisoryFindings.slice(0, 8).map((finding) =>
-            `- [${finding.severity.toUpperCase()}] ${finding.path}:${finding.startLine || '?'} — ${finding.content}`,
-          ),
-        ].join('\n');
-      }
-
-      CLI.renderModelAction('final_answer');
+      // 7. Nếu đạt maxSteps mà chưa hoàn thành
+      const timeoutMessage = isGoal
+        ? `Agent stopped: Goal execution finished.`
+        : !isFinite(effectiveMaxSteps)
+          ? `Agent stopped: Dynamic convergence limit reached without final answer.`
+          : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
+      CLI.renderModelAction('max_steps');
       CLI.renderStepFooter();
-      await CLI.renderFinalAnswer(finalAnswer);
-      this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
+      await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
+      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
+      this.goalManager.disarm();
 
-      // Ghi nhận câu trả lời cuối cùng vào Session
-      session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
-      session.append('step/end', { turn, step, reason: 'final-answer' });
-      await this.persistSession(session);
-      await this.agentHooks.run('agent/after-step', {
-        ...hookContext,
-        reason: 'final-answer',
-      });
-      if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
-        try {
-          this.goalManager.complete(this.planManager);
-        } catch {
-          this.goalManager.disarm();
-        }
-      } else {
-        this.goalManager.disarm();
-      }
-      await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'completed', turnUserRequest, finalAnswer);
-
-      resolveSteerItems(finalAnswer);
+      resolveSteerItems(timeoutMessage);
       if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
         this.drainScheduled = true;
         void this.drainInbox(session, options);
       }
 
-      return finalAnswer;
-    }
-
-    // 7. Nếu đạt maxSteps mà chưa hoàn thành
-    const timeoutMessage = isGoal
-      ? `Agent stopped: Goal execution finished.`
-      : !isFinite(effectiveMaxSteps)
-        ? `Agent stopped: Dynamic convergence limit reached without final answer.`
-        : `Agent stopped: maximum steps (${effectiveMaxSteps}) reached without final answer.`;
-    CLI.renderModelAction('max_steps');
-    CLI.renderStepFooter();
-    await CLI.renderExecutionStopped(timeoutMessage, 'MAX_STEPS_REACHED');
-    await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'max-steps-reached');
-    this.goalManager.disarm();
-
-    resolveSteerItems(timeoutMessage);
-    if (!this.drainingInbox && !this.drainScheduled && this.inbox.pending(session.id) > 0) {
-      this.drainScheduled = true;
-      void this.drainInbox(session, options);
-    }
-
-    return timeoutMessage;
+      return timeoutMessage;
     } finally {
       CLI.finishCompaction('failed');
       if (options?.signal) {
@@ -5310,7 +5328,7 @@ export class AgentLoop {
       if (leftoverPending) {
         this.pendingModelSwitches.delete(session.id);
         if (this.pendingGlobalLLM === leftoverPending) this.pendingGlobalLLM = null;
-        await this.setSessionLLM(session, leftoverPending.llm, leftoverPending.modelName).catch(() => {});
+        await this.setSessionLLM(session, leftoverPending.llm, leftoverPending.modelName).catch(() => { });
         this.setLLM(leftoverPending.llm, leftoverPending.modelName);
       }
     }
@@ -5571,17 +5589,21 @@ export class AgentLoop {
         ? configuredMaxInput! : config.maxTotalHistoryTokens;
       const historyTokens = ContextCompactor.countHistoryTokens(entries.map((entry) => entry.message));
       const metadata = this.lastRequestEnvelope?.sessionId === session.id ? this.lastRequestEnvelope.envelope : undefined;
-      const envelope = metadata ? { ...metadata, maxInputTokens,
+      const envelope = metadata ? {
+        ...metadata, maxInputTokens,
         outputReserveTokens: tokenConfig?.maxOutputTokens ?? metadata.outputReserveTokens,
-        history: entries.map((entry) => entry.message) } : undefined;
+        history: entries.map((entry) => entry.message)
+      } : undefined;
       const before = envelope ? await this.contextBudgetManager.counter.count(envelope) : undefined;
       const budget = resolveRequestBudget(envelope || {
         maxInputTokens, outputReserveTokens: tokenConfig?.maxOutputTokens || 0,
       });
       if (!hasCompletedTurnPressure(before?.upperBoundTokens ?? historyTokens, budget.targetUsableInputTokens, policy)) return;
-      const turnKey = computeRequestValueDigest({ sessionId: session.id, entries, envelope, budget,
+      const turnKey = computeRequestValueDigest({
+        sessionId: session.id, entries, envelope, budget,
         config, policy, plan: this.planManager.getTaskGraph(), count: before,
-        completionReason: session.findLatestEventOfType('turn/end')?.data.reason });
+        completionReason: session.findLatestEventOfType('turn/end')?.data.reason
+      });
       if (this.rejectedTurnCandidateKey === turnKey) return;
       CLI.startCompaction('turn');
       const result = this.contextCompactor.compactCompletedTurnWindow(entries, {
@@ -5778,7 +5800,7 @@ export class AgentLoop {
             patchSummary: `Modified ${touchedFiles.length} file(s): ${touchedFiles.slice(0, 5).join(', ')}`,
             verificationCommand: String(verifiedCmd),
             verificationExitCode: 0,
-          }).catch(() => {});
+          }).catch(() => { });
         }
       } catch {
         // Non-blocking memory & playbook reflection
@@ -5805,7 +5827,7 @@ export class AgentLoop {
         }
         this.ephemeralScratchFiles.delete(scratchFile);
         this.targetFilesModifiedInTurn.delete(scratchFile);
-      } catch {}
+      } catch { }
     }
     return cleaned;
   }
@@ -5829,6 +5851,27 @@ export class AgentLoop {
     this.inbox.enqueue(
       parentSessionId,
       `[SUBAGENT FAILED (resumable)]: Task "${handle.objective}" failed (task_id=${handle.id}): ${handle.error || 'unknown error'}. Fix the cause, then call resume_agent(task_id="${handle.id}") to retry, or re-scope the task.`,
+      'system',
+      { isSteering: true },
+    );
+  }
+
+  /**
+   * OpenCode / Claude Code parity: Reactive Wakeup push notification vào inbox session cha
+   * khi subagent hoàn tất thành công, giúp agent cha tổng hợp ngay mà không cần poll.
+   */
+  private notifySubagentCompletion(handle: SubagentHandle, parentSessionId?: string): void {
+    if (!parentSessionId) return;
+    const files = handle.resultBundle?.touchedFiles?.length
+      ? ` | modified: [${handle.resultBundle.touchedFiles.join(', ')}]`
+      : '';
+    const duration = typeof handle.resultBundle?.durationMs === 'number'
+      ? ` (${Math.round(handle.resultBundle.durationMs / 1000)}s)`
+      : '';
+    const summary = handle.resultBundle?.summary || handle.answer?.slice(0, 200) || 'Task completed successfully.';
+    this.inbox.enqueue(
+      parentSessionId,
+      `[SUBAGENT COMPLETED]: Task "${handle.objective}" (task_id=${handle.id})${duration} finished successfully.${files}\nResult: ${summary}`,
       'system',
       { isSteering: true },
     );
@@ -5864,13 +5907,40 @@ export class AgentLoop {
 
     // Subagent model picking (OpenCode v2.0.5 PR #49194): allow subagent to run on a fast/flash model
     let childLLM = parentLLM;
-    const requestedModel = (options.modelName || options.model || '').trim();
+    let requestedModel = (options.modelName || options.model || '').trim();
+
+    // Specialist inheritance: if agentId or options.specialistId matches a registered specialist, inherit model and prompt
+    const specialistRecord = this.agentRegistry?.get(options.specialistId || agentId);
+    if (!requestedModel && specialistRecord?.metadata?.model) {
+      requestedModel = String(specialistRecord.metadata.model).trim();
+    }
+
     if (requestedModel) {
       const cached = this.modelInstances.get(requestedModel);
       if (cached) {
         childLLM = cached;
+      } else if (requestedModel.startsWith('internai/') && parentLLM?.constructor?.name === 'GeminiLLM') {
+        try {
+          const rawModel = requestedModel.replace(/^internai\//, '');
+          const baseUrl = process.env.INTERNAI_BASE_URL || 'https://discovery-api.intern-ai.org.cn/v1';
+          const key = process.env.INTERNAI_API_KEY || 'internai-key';
+          childLLM = new DeepseekLLM(key, rawModel, undefined, baseUrl);
+          this.modelInstances.set(requestedModel, childLLM);
+        } catch {
+          childLLM = parentLLM;
+        }
       } else if (parentLLM && typeof (parentLLM as any).cloneWithModel === 'function') {
         childLLM = (parentLLM as any).cloneWithModel(requestedModel);
+      } else if (requestedModel.startsWith('internai/')) {
+        try {
+          const rawModel = requestedModel.replace(/^internai\//, '');
+          const baseUrl = process.env.INTERNAI_BASE_URL || 'https://discovery-api.intern-ai.org.cn/v1';
+          const key = process.env.INTERNAI_API_KEY || (parentLLM as any)?.apiKey || 'internai-key';
+          childLLM = new DeepseekLLM(key, rawModel, undefined, baseUrl);
+          this.modelInstances.set(requestedModel, childLLM);
+        } catch {
+          childLLM = parentLLM;
+        }
       } else if (parentLLM && parentLLM.constructor && (parentLLM as any).apiKey) {
         try {
           childLLM = new (parentLLM.constructor as any)({
@@ -5884,10 +5954,17 @@ export class AgentLoop {
     }
 
     const subagentSections = resolveSubagentPromptSections({
-      capabilities: options.capabilities || options.requiredCapabilities,
+      capabilities: options.capabilities || options.requiredCapabilities || specialistRecord?.capabilities,
       toolNames: allowedNames,
       brief: options.brief,
     });
+    if (specialistRecord?.metadata?.systemInstruction) {
+      subagentSections.unshift({
+        id: 'specialist-instruction',
+        content: String(specialistRecord.metadata.systemInstruction),
+        priority: -500,
+      });
+    }
     const childLoop = new AgentLoop(childLLM, childRegistry, {
       workspace: options.worktreePath ? new Workspace(options.worktreePath) : this._workspace,
       maxSteps: options.maxSteps ?? this.maxSteps,

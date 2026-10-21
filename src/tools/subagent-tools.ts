@@ -7,37 +7,83 @@ import { Workspace } from '../workspace/workspace.js';
 
 import { AVAILABLE_MODELS } from '../ui/cli-ui.js';
 
-export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
+export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn_agent'): ToolDefinition {
+  const isDelegate = toolName === 'delegate_agent';
   return {
-    name: 'delegate_agent',
-    description: 'Launch a background subagent for an independent task; returns an agentId to poll for results.',
+    name: toolName,
+    description: isDelegate
+      ? 'PARALLEL SUBAGENT DELEGATION: Launch an asynchronous background subagent for an independent task. YOU CAN CALL THIS TOOL MULTIPLE TIMES IN PARALLEL within the same turn to run independent subtasks concurrently (e.g. parallel file exploration, concurrent test runs, multi-module analysis, or dividing work across benchmark specialists). Non-blocking; returns an agentId immediately without waiting, and the subagent proactively notifies you with its results upon completion.'
+      : 'PARALLEL CLEAN-CONTEXT CHILD AGENT: Spawn an asynchronous background subagent with an explicit task brief and isolated context. YOU CAN CALL THIS TOOL MULTIPLE TIMES IN PARALLEL within a single turn to run independent subtasks concurrently (parallel code search, multi-file inspection, speculative exploration, or concurrent benchmark specialists). Non-blocking; returns an agentId immediately and sends a completion notification upon finish.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        objective: { type: Type.STRING, description: 'Independent objective for the subagent to perform.' },
-        model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
-        maxSteps: { type: Type.INTEGER, description: 'Subagent step limit (agent default).' },
-        mode: { type: Type.STRING, description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).' },
-        toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional tool allowlist for the subagent.' },
-        fileScope: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Scope of files allowed to change (safe file locking to avoid concurrent conflicts).' },
-        verificationCommand: { type: Type.STRING, description: 'Test command to verify results when the subagent completes.' },
+        brief: {
+          type: Type.STRING,
+          description: 'Task brief or objective for this subagent. When breaking down a goal into independent parts, emit multiple spawn_agent calls concurrently in parallel within the same turn, each with its own focused brief.',
+        },
+        objective: {
+          type: Type.STRING,
+          description: 'Alias for brief.',
+        },
+        model: {
+          type: Type.STRING,
+          description: 'Optional model override for this subagent (e.g. "internai/deepseek-v4-flash-0731", "internai/deepseek-v4-pro-0813", "internai/qwen3.8-27b", "gemini-2.5-flash"). If omitted, inherits parent model or specialistId default. Different parallel subagents can use different models tailored to their specific subtasks.',
+        },
+        specialistId: {
+          type: Type.STRING,
+          description: 'Optional benchmark specialist ID or alias (e.g. "subagent-deepseek-r1-math" for deep reasoning/math, "subagent-qwen25-coder-synthesis" for code synthesis, "subagent-gemini-swe-architect" for full-repo bugs, "subagent-llama33-instruction-governor" for strict instruction following, "subagent-codestral-fim-surgeon" for surgical infilling, "subagent-skeptical-adversary" for adversarial critique). Automatically configures the appropriate InternAI provider model and specialized prompt instructions.',
+        },
+        maxSteps: {
+          type: Type.INTEGER,
+          description: 'Subagent step limit (agent default).',
+        },
+        mode: {
+          type: Type.STRING,
+          description: 'Optional capability preset. Use "scout" for read-only exploration and inspection (no mutations, no command execution). RECOMMENDED FOR PARALLEL RECONNAISSANCE: scout subagents run safely in parallel without any file locking conflicts.',
+        },
+        toolNames: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional tool allowlist for this subagent.',
+        },
+        fileScope: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Scope of files allowed to change. To run multiple mutating subagents concurrently in parallel, assign disjoint (non-overlapping) file scopes to each subagent to prevent file locking conflicts.',
+        },
+        worktreePath: {
+          type: Type.STRING,
+          description: 'Optional isolated git worktree path for this subagent to operate in a completely isolated branch directory.',
+        },
+        verificationCommand: {
+          type: Type.STRING,
+          description: 'Test command to verify results when this subagent completes.',
+        },
       },
-      required: ['objective'],
     },
     async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
-      const objective = String(args.objective || '').trim();
-      if (!objective) return { error: 'The "objective" parameter is required.' };
-      const handle = manager.start(objective, {
-        modelName: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
+      const task = String(args.brief || args.objective || '').trim();
+      if (!task) return { error: 'Param "brief" or "objective" is required.' };
+      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
+      const specialistId = typeof args.specialistId === 'string' && args.specialistId.trim() ? args.specialistId.trim() : undefined;
+      const handle = manager.start(task, {
+        modelName: model,
+        specialistId,
         maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
         mode: args.mode === 'scout' ? 'scout' : undefined,
         toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
         fileScope: Array.isArray(args.fileScope) ? args.fileScope.map(String) : undefined,
+        worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
         verificationCommand: typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined,
       });
-      return { success: true, agent: handle };
+      return { success: true, agentId: handle.id, agent: handle };
     },
   };
+}
+
+/** @deprecated Use spawn_agent. Kept as a 1-line alias for backwards compatibility. */
+export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
+  return createSpawnAgentTool(manager, 'delegate_agent');
 }
 
 export function createMessageAgentTool(manager: SubagentManager): ToolDefinition {
@@ -78,17 +124,21 @@ export function createMessageAgentTool(manager: SubagentManager): ToolDefinition
 export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'delegate_task',
-    description: 'Synchronously delegate an independent, bounded subtask to an isolated subagent. Runs in a separate in-memory session and returns a compact summary with touched files, preventing parent context pollution.',
+    description: 'SYNCHRONOUS SUBTASK DELEGATION (BLOCKING): Delegate a single bounded subtask to an isolated subagent and wait synchronously for its summary. IMPORTANT: If you have 2 or more independent subtasks, PREFER USING "spawn_agent" MULTIPLE TIMES IN PARALLEL instead of sequentially blocking on delegate_task!',
     parameters: {
       type: Type.OBJECT,
       properties: {
         task: {
           type: Type.STRING,
-          description: 'Clear description of the subtask to perform.',
+          description: 'Clear description of the single subtask to perform synchronously.',
         },
         model: {
           type: Type.STRING,
-          description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.',
+          description: 'Optional model override for the subagent (e.g. "internai/deepseek-v4-flash-0731", "internai/deepseek-v4-pro-0813", "internai/qwen3.8-27b", "gemini-2.5-flash"). If omitted, inherits parent model or specialist default.',
+        },
+        specialistId: {
+          type: Type.STRING,
+          description: 'Optional benchmark specialist ID or alias (e.g. "subagent-deepseek-r1-math", "subagent-internai-coder", "subagent-gemini-swe-architect") to inherit model and system instructions.',
         },
         allowedTools: {
           type: Type.ARRAY,
@@ -115,12 +165,14 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
       if (!task) return { error: 'The "task" parameter is required.' };
       const maxSteps = typeof args.maxSteps === 'number' ? args.maxSteps : 6;
       const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
+      const specialistId = typeof args.specialistId === 'string' && args.specialistId.trim() ? args.specialistId.trim() : undefined;
       const allowedTools = Array.isArray(args.allowedTools) ? args.allowedTools.map(String) : undefined;
       const verificationCommand = typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined;
 
       const result = await manager.executeIsolatedTask(task, {
         maxSteps,
         modelName: model,
+        specialistId,
         allowedTools,
         mode: args.mode === 'scout' ? 'scout' : undefined,
         verificationCommand,
@@ -132,37 +184,6 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
   };
 }
 
-export function createSpawnAgentTool(manager: SubagentManager): ToolDefinition {
-  return {
-    name: 'spawn_agent',
-    description: 'Spawn a clean-context child agent with an explicit task brief and scoped capabilities.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        brief: { type: Type.STRING, description: 'Detailed prompt brief and task instructions for the child agent.' },
-        model: { type: Type.STRING, description: 'Optional model override for the subagent (e.g. "gemini-2.5-flash", "deepseek-chat"). If omitted, inherits parent model.' },
-        maxSteps: { type: Type.INTEGER, description: 'Maximum step budget for the child agent.' },
-        mode: { type: Type.STRING, description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).' },
-        toolNames: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Optional list of allowed tool names.' },
-        worktreePath: { type: Type.STRING, description: 'Optional isolated worktree path for this agent.' },
-      },
-      required: ['brief'],
-    },
-    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
-      const brief = String(args.brief || '').trim();
-      if (!brief) return { error: 'Param "brief" is required.' };
-      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
-      const handle = manager.spawn(brief, {
-        modelName: model,
-        maxSteps: typeof args.maxSteps === 'number' ? args.maxSteps : undefined,
-        mode: args.mode === 'scout' ? 'scout' : undefined,
-        toolNames: Array.isArray(args.toolNames) ? args.toolNames.map(String) : undefined,
-        worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
-      });
-      return { success: true, agentId: handle.id, agent: handle };
-    },
-  };
-}
 
 export function createModelsTool(): ToolDefinition {
   return {
@@ -213,13 +234,13 @@ export function createModelsTool(): ToolDefinition {
 export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'wait_agent',
-    description: 'Wait for a subagent to complete with a safe event-driven timeout (no resource-wasting polling).',
+    description: 'Wait for a background subagent (or one of several parallel subagents) to finish with a safe event-driven timeout (no resource-wasting polling). Useful after launching parallel subagents with spawn_agent when you need an agent\'s result before proceeding.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         agentId: {
           type: Type.STRING,
-          description: 'ID of the subagent to wait for.',
+          description: 'ID of the subagent to wait for (returned by spawn_agent / delegate_agent / allocate_agent_task).',
         },
         timeoutMs: {
           type: Type.INTEGER,
@@ -239,6 +260,7 @@ export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
           agent: handle,
           completed: handle.status === 'completed',
           answer: handle.answer,
+          result: handle.resultBundle,
         };
       } catch (err: any) {
         return { success: false, error: err.message, agentId };
@@ -250,7 +272,7 @@ export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
 export function createGetAgentResultTool(manager: SubagentManager): ToolDefinition {
   return {
     name: 'get_agent_result',
-    description: 'Read the current status and result of a delegated subagent.',
+    description: 'Non-blocking status inspection: Check the current execution state, answer, touched files, and structured artifacts of a running or completed subagent. Useful to check progress across multiple parallel subagents without waiting.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -262,7 +284,9 @@ export function createGetAgentResultTool(manager: SubagentManager): ToolDefiniti
       const agentId = String(args.agentId || '').trim();
       if (!agentId) return { error: 'The "agentId" parameter is required.' };
       const agent = manager.get(agentId);
-      return agent ? { success: true, agent } : { success: false, error: 'SUBAGENT_NOT_FOUND', agentId };
+      return agent
+        ? { success: true, agent, answer: agent.answer, result: agent.resultBundle }
+        : { success: false, error: 'SUBAGENT_NOT_FOUND', agentId };
     },
   };
 }
@@ -315,18 +339,18 @@ export function createResumeAgentTool(manager: SubagentManager): ToolDefinition 
 export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): ToolDefinition {
   return {
     name: 'allocate_agent_task',
-    description: 'Assign and coordinate a task to a suitable agent based on capability matching, with anti-duplication and safe file locking.',
+    description: 'PARALLEL SPECIALIST ALLOCATION: Assign and coordinate an independent task to a specialist agent based on capability matching (e.g. ["math"], ["coding"], ["swe-bench"], ["governance"], ["fim"], ["critic"]). You can call this tool multiple times in parallel to dispatch independent workloads to different specialists with automatic anti-duplication and safe file locking.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         objective: {
           type: Type.STRING,
-          description: 'Independent objective to perform.',
+          description: 'Independent objective to perform. To run parallel workflows, invoke allocate_agent_task multiple times concurrently for each independent objective.',
         },
         requiredCapabilities: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'List of required agent capabilities (e.g. ["frontend", "react"], ["database", "sql"]).',
+          description: 'List of required specialist capabilities (e.g. ["math"], ["coding", "synthesis"], ["swe-bench", "architecture"], ["governance"], ["fim"], ["critic"]).',
         },
         maxSteps: {
           type: Type.INTEGER,
@@ -340,7 +364,7 @@ export function createAllocateAgentTaskTool(orchestrator: AgentOrchestrator): To
         fileScope: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Scope of files allowed to change (file locking to avoid concurrent conflicts).',
+          description: 'Scope of files allowed to change. Assign non-overlapping file scopes to run multiple mutating subagents concurrently without file lock conflicts.',
         },
         checkAntiDuplication: {
           type: Type.BOOLEAN,
@@ -452,7 +476,7 @@ export function createVerifySubagentQualityTool(orchestrator: AgentOrchestrator)
 export function createScheduleDagParallelTool(orchestrator: AgentOrchestrator): ToolDefinition {
   return {
     name: 'schedule_dag_parallel',
-    description: 'Schedule and trigger parallel execution via a DAG (DAG Parallel Scheduler) for PlanManager & AgentOrchestrator. Supports running the next batch ("next_batch"), the whole graph ("full_dag"), or status checks ("status").',
+    description: 'PARALLEL DAG BATCH EXECUTION: Schedule and trigger parallel multi-agent execution via a Directed Acyclic Graph (DAG) for PlanManager tasks. Automatically identifies parallelizable tasks without Read/Write set conflicts and dispatches them simultaneously to concurrent subagents. Supports "next_batch" (dispatch current runnable batch in parallel), "full_dag" (run entire plan to completion in parallel batches), or "status" (check DAG readiness and file locks).',
     parameters: {
       type: Type.OBJECT,
       properties: {

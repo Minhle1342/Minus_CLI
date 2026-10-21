@@ -75,6 +75,12 @@ export interface GoalState {
 
 export type DelegationStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
+export interface SubagentArtifactBundle {
+  summary: string;
+  touchedFiles: string[];
+  durationMs: number;
+}
+
 export interface DelegationState {
   id: string;
   sessionId: string;
@@ -84,6 +90,7 @@ export interface DelegationState {
   error?: string;
   startedAt: string;
   finishedAt?: string;
+  resultBundle?: SubagentArtifactBundle;
 }
 
 export type EffectStatus = 'prepared' | 'committed' | 'failed' | 'rolledback';

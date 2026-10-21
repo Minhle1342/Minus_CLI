@@ -20,12 +20,16 @@ export interface SubagentOptions {
   preferCostEfficient?: boolean;
   memoize?: boolean;
   maxBudgetTokens?: number;
+  /** Wall-clock timeout in milliseconds (default: 180_000ms = 3m). Auto-aborts hung subagents. */
+  timeoutMs?: number;
   fileScope?: string[];
   verificationCommand?: string;
   /** Session cha sở hữu delegation (task nền ghi đúng log cha dù đã switch tab). */
   parentSessionId?: string;
   /** OpenCode Scout parity: 'scout' giới hạn subagent vào bộ tool chỉ đọc (deny-mặc định). */
   mode?: 'default' | 'scout';
+  /** ID chuyên gia benchmark trong AgentRegistry để kế thừa mô hình và chỉ dẫn hệ thống. */
+  specialistId?: string;
 }
 
 /**
@@ -103,6 +107,8 @@ export class SubagentManager {
     private readonly persistSession?: (session: Session) => Promise<void>,
     /** OpenCode v1.18.20 parity: surface failed subagent to the parent loop while it can still steer. */
     private readonly onSubagentFailure?: (handle: SubagentHandle, parentSessionId?: string) => void,
+    /** Reactive Wakeup: surface completed subagent to the parent loop inbox for seamless synthesis. */
+    private readonly onSubagentCompletion?: (handle: SubagentHandle, parentSessionId?: string) => void,
   ) {}
 
   bindSession(session: Session): void {
@@ -194,8 +200,20 @@ export class SubagentManager {
 
       if (candidates.length > 0) {
         const selected = candidates[0];
-        const resumed = this.resume(selected.id, { ...options, brief: cleanObjective });
+        const resumed = this.resume(selected.id, {
+          ...options,
+          brief: cleanObjective,
+          modelName: options.modelName || (selected.metadata?.model as string),
+          specialistId: selected.id,
+        });
         if (resumed) return resumed;
+
+        return this.start(cleanObjective, {
+          ...options,
+          capabilities: selected.capabilities || requiredCapabilities,
+          modelName: options.modelName || (selected.metadata?.model as string),
+          specialistId: selected.id,
+        });
       }
     }
 
@@ -475,27 +493,60 @@ export class SubagentManager {
     }
     if (entry) entry.childLoop = loop;
 
+    // Ponytail Priority 2: Wall-clock timeout guard (default 180s) to kill runaway loops & hanging tools.
+    const timeoutMs = options.timeoutMs ?? 180_000;
+    let timedOut = false;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
     // Gắn nhãn stdout của subagent để TUI ghi vào tab con thay vì tab cha.
     void runWithSubagentOutput(session.id, () => loop.submit(session, handle.objective, 'human', {
       maxSteps: options.maxSteps,
       signal: controller.signal,
     })).then((answer) => {
+      clearTimeout(timeoutTimer);
       if (controller.signal.aborted) {
         handle.status = 'stopped';
-        handle.error = 'Subagent stopped by request.';
+        handle.error = timedOut ? `Subagent timed out after ${timeoutMs}ms.` : 'Subagent stopped by request.';
         this.agents.update(handle.id, { status: 'stopped' });
       } else {
         handle.status = 'completed';
         handle.answer = answer;
         this.agents.update(handle.id, { status: 'idle' });
+
+        // Ponytail Priority 3: Extract structured artifact bundle from child session events.
+        const touchedFiles = new Set<string>();
+        for (const event of session.getEvents()) {
+          if (event.type === 'tool/call') {
+            const args = event.data?.args;
+            if (args && typeof args === 'object') {
+              for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path']) {
+                const val = (args as any)[key];
+                if (typeof val === 'string' && val.trim()) touchedFiles.add(val.trim());
+              }
+            }
+          }
+        }
+        handle.resultBundle = {
+          summary: answer ? (answer.length > 300 ? answer.slice(0, 297) + '…' : answer) : '',
+          touchedFiles: Array.from(touchedFiles),
+          durationMs: Date.now() - new Date(handle.startedAt).getTime(),
+        };
       }
       handle.finishedAt = new Date().toISOString();
       this.recordState(handle);
       this.notifyCompletion(handle);
+      // Ponytail Priority 1: Reactive Wakeup push notification to parent session inbox.
+      if (handle.status === 'completed') {
+        this.onSubagentCompletion?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
+      }
     }).catch((error: any) => {
+      clearTimeout(timeoutTimer);
       if (controller.signal.aborted) {
         handle.status = 'stopped';
-        handle.error = 'Subagent stopped by request.';
+        handle.error = timedOut ? `Subagent timed out after ${timeoutMs}ms.` : 'Subagent stopped by request.';
         this.agents.update(handle.id, { status: 'stopped' });
         handle.finishedAt = new Date().toISOString();
         this.recordState(handle);
