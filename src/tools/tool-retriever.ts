@@ -2,6 +2,7 @@ import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
 import { hasNetworkIntent } from '../control/network-intent.js';
+import { hasDelegationIntent } from '../control/request-intent.js';
 import { batchSubwordSimilarity } from '../native/semantic-batch.js';
 import { ToolTransitionGraph } from './tool-transition-graph.js';
 import { LocalCrossEncoderReranker } from './reranker.js';
@@ -211,9 +212,10 @@ export class ToolRetriever {
     const lowerQ = cleanedQuery.toLowerCase();
     const isGameQuery = /\b(game|pixel|sprite|tilemap|physics|unity|engine|scaffold|asset)\b/i.test(lowerQ);
     const isScheduleQuery = /\b(schedule|cron|timer|periodic|recurring)\b/i.test(lowerQ);
-    // Multi-agent intent: thêm bare "agent(s)", "multi-agent" + VI phrasing ("phân rã", "song song",
-    // "ủy thác", "giao việc", "điều phối") — thiếu những từ này model KHÔNG BAO GIỜ thấy delegate/spawn schemas.
-    const isMultiAgentQuery = /\b(sub-?agent|agents?|multi-?agent|delegat|swarm|dag|shared_context|event_bus|orchestrat|blackboard|state|occ|lock)\b|ph[ âa]n r[ãao a]a|uy[ tr]th[áaàc]+|giao vi[ệe]c|đi[ềe]u ph[ốo]i|song song|phan ra|uy thac|giao viec|dieu phoi/i.test(lowerQ);
+    // Multi-agent intent shares one predicate with classification + prompt guidance.
+    const isMultiAgentQuery = hasDelegationIntent(cleanedQuery);
+    // Shared-context tools are not delegation, but the same category: keep their own signal.
+    const isSharedContextQuery = /\b(shared[\s_-]?context|agent[\s_-]?event|blackboard|event_bus|occ|lock|state)\b/i.test(lowerQ);
     const isNetworkQuery = hasNetworkIntent(cleanedQuery);
     const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
@@ -236,7 +238,7 @@ export class ToolRetriever {
       const cat = this.inferCategory(tool);
       if (cat === 'game_development' && !isGameQuery) return false;
       if (tool.name === 'schedule' && !isScheduleQuery) return false;
-      if (cat === 'multi_agent' && !isMultiAgentQuery) return false;
+      if (cat === 'multi_agent' && !isMultiAgentQuery && !isSharedContextQuery) return false;
       if (cat === 'network' && !isNetworkQuery) return false;
       if (cat === 'browser' && !isNetworkQuery && !isBrowserQuery) return false;
       if (cat === 'memory' && !isMemoryQuery) return false;
@@ -268,9 +270,10 @@ export class ToolRetriever {
     }
     // Multi-agent intent khớp → force-include TOÀN BỘ bộ delegation tools (delegate_task bị BM25
     // xếp dưới topK dù intent rõ rang), thay vì tùy hứng rank quyết định tool nào model nhìn thấy.
-    if (isMultiAgentQuery) {
+    if (isMultiAgentQuery || isSharedContextQuery) {
       for (const tool of activePool) {
-        if (this.inferCategory(tool) === 'multi_agent') selectedToolNames.add(tool.name);
+        if (this.inferCategory(tool) !== 'multi_agent') continue;
+        if (isMultiAgentQuery || /shared_context|agent_event/.test(tool.name)) selectedToolNames.add(tool.name);
       }
     }
     // REA exposes ~42 dynamic tools; pin the whole set on reverse-engineering intent
@@ -465,7 +468,7 @@ export class ToolRetriever {
     if (name.startsWith('browser_')) return 'browser';
     if (name.includes('computer') || name.includes('desktop') || name.includes('mouse') || name.includes('screen')) return 'computer_use';
     if (name.includes('lsp') || name.includes('call_graph') || name.includes('route_map') || name.includes('context_360') || name.includes('topology') || name.includes('symbol') || name.includes('reference') || name.includes('diagnostic') || name.includes('codegraph') || name.includes('caller') || name.includes('callee')) return 'code_intelligence';
-    if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn')) return 'multi_agent';
+    if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn') || name.includes('agent') || name.includes('dag')) return 'multi_agent';
     if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
     if (name.includes('web') || name.includes('fetch') || name.includes('url')) return 'network';
     if (name.includes('file') || name.includes('dir') || name.includes('text') || name.includes('patch')) return 'filesystem_mutation';

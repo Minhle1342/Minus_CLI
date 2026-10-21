@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MODEL_HIDDEN_TOOL_NAMES, ToolRegistry } from './registry.js';
-import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool } from './subagent-tools.js';
+import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createScheduleDagParallelTool } from './subagent-tools.js';
 import { SubagentManager } from '../agent/subagent-manager.js';
 
 test('ToolRegistry keeps compatibility tools executable but hides their schemas from the model', () => {
@@ -67,10 +67,12 @@ test('multi-agent schemas nạp theo regex của request (VI phrasing "agent ...
   registry.register(createDelegateTaskTool(dummyManager));
   registry.register(createDelegateAgentTool(dummyManager));
   registry.register(createSpawnAgentTool(dummyManager));
+  registry.register(createScheduleDagParallelTool({} as any));
 
   const delegationNames = new Set(registry.getRelevantTools('cho 3 agent chạy song song đi').map((tool) => tool.name));
   assert.ok(delegationNames.has('delegate_task'), `delegate_task phải nạp cho delegation-intent query; got ${[...delegationNames].join(', ')}`);
   assert.ok(delegationNames.has('spawn_agent'), `spawn_agent phải nạp cho delegation-intent query; got ${[...delegationNames].join(', ')}`);
+  assert.ok(delegationNames.has('schedule_dag_parallel'), `schedule_dag_parallel (batch song song) phải nạp; got ${[...delegationNames].join(', ')}`);
 
   const codingNames = new Set(registry.getRelevantTools('fix the failing parser unit test').map((tool) => tool.name));
   assert.equal(codingNames.has('delegate_task'), false, 'Query coding thường không được nạp multi-agent schemas');

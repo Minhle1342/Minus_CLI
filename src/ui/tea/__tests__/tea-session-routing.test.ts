@@ -42,6 +42,19 @@ test('tool events with background ctx do not leak into viewed viewport', () => {
   assert.equal(m.sessions.tabs.find((t) => t.id === 'a')!.unread, 0);
 });
 
+test('orphan tool:after on a background tab keeps the result row', () => {
+  let m = twoTabs();
+  [m] = update(key('ctrl+t'), m);
+  [m] = update(key('2', '2'), m);
+  assert.equal(m.sessions.activeId, 'b');
+  // No matching tool:before for A — a replayed/partial event stream.
+  [m] = update(kernel('tool:after', ['read_file', { output: 'ORPHAN-A' }, 7, { path: 'x.ts' }, { sessionId: 'a' }]), m);
+  const tabA = m.sessions.tabs.find((t) => t.id === 'a')!;
+  assert.equal(tabA.entries?.length, 2); // work-A + result row
+  assert.ok(tabA.entries?.[1].text.includes('ORPHAN-A'));
+  assert.ok(!plain(m).includes('ORPHAN-A'), 'result must stay out of viewport B');
+});
+
 test('busy tracks per session with parallel tasks', () => {
   let m = twoTabs();
   [m] = update({ type: 'busy', busy: true, sessionId: 'a' }, m);

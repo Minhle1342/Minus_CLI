@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ToolDefinition } from '../tools/types.js';
 import type { ClassificationDecision } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
+import { isOrchestrationTool, ORCHESTRATION_SPAWN_TOOL_NAMES } from './phase-tool-effects.js';
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 import { hasNetworkIntent } from './network-intent.js';
@@ -76,13 +77,18 @@ export class ThisTurnToolGate {
 
     for (const tool of tools) {
       const descriptor = this.descriptors.describe(tool);
+      // Delegation spawns child agents, not workspace mutations — phase masking
+      // must not hide the only way the model can delegate.
+      // Spawning new work needs an explicit delegation intent; steering existing agents does not.
+      const orchestrationAllowed = isOrchestrationTool(tool.name)
+        && (!ORCHESTRATION_SPAWN_TOOL_NAMES.has(tool.name) || required.has('delegate'));
       // Tool đọc an toàn luôn được phép ở mọi phase vì quan sát là quyền năng cốt lõi của Agent
       const isAlwaysAllowedRead = READ_TOOL_NAMES.has(tool.name) && !descriptor.mutates;
       // File effects require an implementation/verification/release phase.
       const isAuthorizedEdit = EDIT_TOOL_NAMES.has(tool.name)
         && ['implement', 'verify', 'release'].includes(classification.phase)
         && required.has('edit');
-      if (descriptor.mutates && (['explore', 'plan'].includes(classification.phase)
+      if (descriptor.mutates && !orchestrationAllowed && (['explore', 'plan'].includes(classification.phase)
         || classification.reversibility === 'read-only')) {
         denied.push(tool.name);
         continue;
@@ -98,15 +104,18 @@ export class ThisTurnToolGate {
         && descriptor.phases.includes(classification.phase);
       const capabilityMatch = descriptor.capabilities.some((capability) => required.has(capability))
         || isAlwaysAllowedRead
+        || orchestrationAllowed
         || isAuthorizedEdit
         || isPhaseTransitionRequest
         || isVerificationRepairTool
         || isCompletionTool;
       const phaseMatch = descriptor.phases.includes(classification.phase)
         || isAlwaysAllowedRead
+        || orchestrationAllowed
         || isAuthorizedEdit;
       const riskMatch = riskRank[classification.risk] >= riskRank[descriptor.minimumRisk]
         || (classification.risk !== 'R0' || !descriptor.mutates)
+        || orchestrationAllowed
         || isAuthorizedEdit;
 
       if ((!isPhaseTransitionTool && capabilityMatch && phaseMatch && riskMatch) || isPhaseTransitionRequest) {

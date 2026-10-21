@@ -171,12 +171,17 @@ function inlineDiffFrame(name: string, result: Record<string, unknown>, args?: R
  * lỗi/fail giữ nguyên 2-entry (call + full block) cho debug; mutation giữ full detail.
  * Trả undefined khi không gộp được (caller fallback sang render 2-entry cũ).
  */
-export function mergedToolEntry(name: string, args: Record<string, unknown> | undefined, result: Record<string, unknown>): string | undefined {
-  if (!isReadOnlyTool(name)) return undefined;
+function toolStatus(result: Record<string, unknown>): { denied: boolean; failed: boolean } {
   const denied = result?.denied === true || result?.status === 'denied';
   const failed = !denied && Boolean(result?.error || result?.errorCode || result?.isError || result?.success === false ||
     (typeof result?.exitCode === 'number' && result.exitCode !== 0) ||
     (typeof result?.exit_code === 'number' && result.exit_code !== 0));
+  return { denied, failed };
+}
+
+export function mergedToolEntry(name: string, args: Record<string, unknown> | undefined, result: Record<string, unknown>): string | undefined {
+  if (!isReadOnlyTool(name)) return undefined;
+  const { denied, failed } = toolStatus(result);
   if (failed || denied) return undefined;
 
   const target = args ? primaryTarget(args) : undefined;
@@ -193,10 +198,7 @@ export function mergedToolEntry(name: string, args: Record<string, unknown> | un
 
 export function toolResultEntry(name: string, result: Record<string, unknown>, _durationMs?: number, args?: Record<string, unknown>): string {
   // P1: text badges ([OK]/[FAIL]/[DENIED]) so status never depends on color alone.
-  const denied = result?.denied === true || result?.status === 'denied';
-  const failed = !denied && Boolean(result?.error || result?.errorCode || result?.isError || result?.success === false ||
-    (typeof result?.exitCode === 'number' && result.exitCode !== 0) ||
-    (typeof result?.exit_code === 'number' && result.exit_code !== 0));
+  const { denied, failed } = toolStatus(result);
   const badge = denied ? '[DENIED]' : failed ? '[FAIL]' : '[OK]';
   // TUI: no duration in the heading — the event log never persists timing, so
   // hydrated tabs rendered "· 0ms" while live tabs showed real timings.

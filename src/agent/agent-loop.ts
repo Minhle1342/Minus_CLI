@@ -66,7 +66,7 @@ import { ClassificationEngine } from '../control/classification-engine.js';
 import type { ClassificationDecision, ToolControlMode } from '../control/classification-types.js';
 import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import { EDIT_TOOL_NAMES, READ_TOOL_NAMES, ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
-import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
+import { checkPhaseToolEffect, isOrchestrationTool } from '../control/phase-tool-effects.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
@@ -1770,6 +1770,7 @@ export class AgentLoop {
         if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
           activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
             ['run_command', 'git_command'].includes(tool.name)
+            || isOrchestrationTool(tool.name)
             || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
         }
 
@@ -1829,6 +1830,7 @@ export class AgentLoop {
         if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
           activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
             ['run_command', 'git_command'].includes(tool.name)
+            || isOrchestrationTool(tool.name)
             || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
         }
 

@@ -55,6 +55,9 @@ test('needsSubagentOrchestratorGuidance gates on subagent tools and delegation q
   assert.equal(needsSubagentOrchestratorGuidance('spawn subagent to audit code', true, 0), true);
   assert.equal(needsSubagentOrchestratorGuidance('phân rã task và ủy thác cho agent con', true, 0), true);
   assert.equal(needsSubagentOrchestratorGuidance('brainstorm with parallel agents', true, 0), true);
+  // Spaced "sub agent" and natural VI phrasings must fire too.
+  assert.equal(needsSubagentOrchestratorGuidance('hãy phân task cho sub agent', true, 0), true);
+  assert.equal(needsSubagentOrchestratorGuidance('chia việc cho nhiều agent song song', true, 0), true);
 
   // Simple single-agent query returns false
   assert.equal(needsSubagentOrchestratorGuidance('read file src/index.ts', true, 0), false);

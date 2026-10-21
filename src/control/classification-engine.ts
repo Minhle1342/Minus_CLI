@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT } from './request-intent.js';
+import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT, hasDelegationIntent } from './request-intent.js';
 import { hasNetworkIntent } from './network-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
@@ -128,6 +128,14 @@ export class ClassificationEngine {
       risk = 'R1';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
       reasons.push('LANGUAGE_AGNOSTIC_ACTION_DEFAULT');
+    }
+
+    // The main LLM may be asked to orchestrate child agents explicitly; surface the
+    // capability so gate/prompt policies treat the turn as delegation, not a plain task.
+    if (hasDelegationIntent(normalizedText)) {
+      if (!capabilities.includes('delegate')) capabilities.push('delegate');
+      if (risk === 'R0') risk = 'R1';
+      reasons.push('EXPLICIT_DELEGATION_INTENT');
     }
 
     const needsNetwork = hasNetworkIntent(normalizedText) || hasNetworkIntent(rawPrompt);

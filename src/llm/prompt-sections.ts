@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolProvider, ToolRegistry } from '../tools/registry.js';
 import type { TaskPhase } from '../control/classification-types.js';
+import { hasDelegationIntent } from '../control/request-intent.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 
 export type MonorepoKind = 'pnpm' | 'npm-yarn' | 'turborepo' | 'nx' | 'cargo' | 'lerna' | 'none';
@@ -589,11 +590,9 @@ export function needsSubagentOrchestratorGuidance(
   if (!hasSubagentTools) return false;
   if (activeSubagents > 0) return true;
   if (!query?.trim()) return false;
-  const text = query
-    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
-    .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
-    .toLowerCase();
-  return /\b(?:subagent|sub-agent|multi-agent|delegate|delegation|orchestrat|parallel agent|brainstorm|phan ra|uy thac|giao viec|dieu phoi)\b/.test(text);
+  // Strip code samples first: a snippet mentioning `delegate` is not a request to delegate.
+  const text = query.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ');
+  return hasDelegationIntent(text);
 }
 
 

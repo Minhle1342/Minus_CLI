@@ -639,15 +639,17 @@ export function ownerReplaceLastEntry(
     }
     return model;
   }
+  let replaced = false;
   const tabs = model.sessions.tabs.map(t => {
     if (t.id !== owner) return t;
     const list = [...(t.entries || [])];
     for (let i = list.length - 1; i >= 0; i--) {
-      if (match(list[i])) { list[i] = next; return { ...t, entries: list, lastActive: Date.now() }; }
+      if (match(list[i])) { list[i] = next; replaced = true; return { ...t, entries: list, lastActive: Date.now() }; }
     }
     return t;
   });
-  return { ...model, sessions: { ...model.sessions, tabs } };
+  // No match -> same object, so callers can detect the miss and append instead.
+  return replaced ? { ...model, sessions: { ...model.sessions, tabs } } : model;
 }
 
 /** Nối stream chunk (thinking/answerStream) vào buffer của owner. */

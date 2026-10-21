@@ -3,6 +3,26 @@ import { ToolDescriptorRegistry } from './tool-descriptor-registry.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 
+/**
+ * Delegation/control tools spawn child agents; they never touch the workspace.
+ * Explore/plan masking exists to protect files before implementation, so these
+ * stay legal in every phase (otherwise the model never even sees a way to delegate).
+ */
+export const ORCHESTRATION_TOOL_NAMES = new Set([
+  'delegate_task', 'delegate_agent', 'spawn_agent', 'wait_agent', 'get_agent_result',
+  'stop_agent', 'resume_agent', 'message_agent', 'allocate_agent_task', 'schedule_dag_parallel',
+  'verify_subagent_quality', 'brainstorm_design',
+]);
+
+export function isOrchestrationTool(name: string): boolean {
+  return ORCHESTRATION_TOOL_NAMES.has(name);
+}
+
+/** Orchestration tools that create new work (vs. just steering existing agents). */
+export const ORCHESTRATION_SPAWN_TOOL_NAMES = new Set([
+  'delegate_task', 'delegate_agent', 'spawn_agent', 'allocate_agent_task', 'schedule_dag_parallel',
+]);
+
 /** Enforce argument-dependent effects on both early and ordinary dispatch paths. */
 export function checkPhaseToolEffect(
   tool: ToolDefinition,
@@ -11,6 +31,7 @@ export function checkPhaseToolEffect(
   workspaceRoot: string,
 ): { allowed: boolean; reason?: string } {
   if (phase !== 'explore' && phase !== 'plan') return { allowed: true };
+  if (isOrchestrationTool(tool.name)) return { allowed: true };
   if (tool.name === 'run_command') {
     const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
     const result = new SandboxPolicyEngine(workspaceRoot, 'strict').evaluateCommand(command, args.cwd);
