@@ -528,6 +528,9 @@ export class ToolDescriptorRegistry {
   }
 
   private cost(tool: ToolDefinition): number {
-    return Math.max(1, Math.ceil((tool.name.length + tool.description.length + JSON.stringify(tool.parameters || {}).length) / 4));
+    // Tool lạ (không có trong provider) được mô tả bằng `{ name }` — thiếu description/parameters.
+    const description = tool.description || '';
+    const params = JSON.stringify(tool.parameters || {}) || '';
+    return Math.max(1, Math.ceil((tool.name.length + description.length + params.length) / 4));
   }
 }

@@ -1312,10 +1312,19 @@ export class AgentLoop {
     const submissionReadiness = new SubmissionReadiness();
     let turnMutationCheckpointId: string | undefined;
     this.rollbackOrchestrator.resetGreenCheckpoint();
+    const isRootAgent = this.agentId === 'root'
+      || this.agentId === 'main'
+      || this.agentId === 'primary'
+      || this.agentId === 'interactive-agent'
+      || this.agentId === 'coding-agent'
+      || this.agentId === 'delegation-parent'
+      || this.agentId === 'delegation-recovery-parent';
+    const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
     const submissionSnapshot = () => ({ session, turn, workspaceRoot: this._workspace.rootDir,
       userRequest: turnUserRequest, plan: this.planManager.getTaskGraph(),
       planBlocker: isPlanOrReadOnlyMode() ? undefined : this.planManager.getCompletionBlocker(),
-      activeAgents: this.agentRegistry.list().filter(agent => agent.id !== this.agentId
+      // Subagent không được chặn vì agent cha đang chạy (parent luôn "running" khi chờ con).
+      activeAgents: isSubagent ? 0 : this.agentRegistry.list().filter(agent => agent.id !== this.agentId
         && ['running', 'waiting'].includes(agent.status)).length });
     const submissionCodeChangeRequired = () => !isPlanOrReadOnlyMode() && ((initialTurnClassification.phase !== 'explore' && initialTurnClassification.phase !== 'plan' && initialTurnClassification.requiredCapabilities.includes('edit'))
       || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
@@ -1386,14 +1395,6 @@ export class AgentLoop {
     try {
       this.setAgentStatus('running', session, turn);
 
-    const isRootAgent = this.agentId === 'root'
-      || this.agentId === 'main'
-      || this.agentId === 'primary'
-      || this.agentId === 'interactive-agent'
-      || this.agentId === 'coding-agent'
-      || this.agentId === 'delegation-parent'
-      || this.agentId === 'delegation-recovery-parent';
-    const isSubagent = !isRootAgent || this.loopOptions?.enableSubagents === false || Boolean(this.agentId?.startsWith('subagent-'));
     this.latencyOrchestrator.resetTurn();
 
     session.append('turn/start', { turn });
@@ -5850,7 +5851,11 @@ export class AgentLoop {
     const requestedNames = options.mode === 'scout'
       ? (options.toolNames || availableNames).filter((name) => SCOUT_TOOL_NAMES.includes(name))
       : (options.toolNames || availableNames);
-    const allowedNames = requestedNames.filter((name) => !forbidden.has(name));
+    // Child luôn cần submit_solution để trả kết quả (không có nó, child không bao giờ kết thúc được).
+    const allowedNames = Array.from(new Set([
+      ...requestedNames.filter((name) => !forbidden.has(name)),
+      'submit_solution',
+    ]));
     const childScope = childRegistry.createScope(`subagent-scope:${agentId}`, allowedNames);
     // Subagent inherits its parent tab's model (parallel tabs stay on their own models).
     const parentLLM = options.parentSessionId
@@ -5902,7 +5907,8 @@ export class AgentLoop {
       id: agentId,
       status: 'running',
       sessionId: session.id,
-      name: this.agentRegistry.get(agentId)?.label ?? `Subagent: ${agentId}`,
+      // Tên tab = objective/brief của việc con (dễ nhận ra) → fallback label trong registry.
+      name: options.brief?.trim() || this.agentRegistry.get(agentId)?.label || agentId,
       isSubagent: true,
     });
     if (signal?.aborted) {

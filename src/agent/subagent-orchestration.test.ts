@@ -86,7 +86,8 @@ test('toolNames tuỳ ý + mode=scout bị intersect về bộ chỉ đọc', ()
     new AbortController().signal,
   );
   const names = childLoop.toolProvider.getAll().map((t: any) => t.name);
-  assert.deepEqual(names, ['read_file'], `intersect phải loại mọiMutation/exec, got: ${names.join(', ')}`);
+  // submit_solution luôn có mặt: đó là kênh trả kết quả của subagent (không phải mutation).
+  assert.deepEqual(names.sort(), ['read_file', 'submit_solution'], `intersect phải loại mọi mutation/exec, got: ${names.join(', ')}`);
 });
 
 test('message_agent hơi (steering) vào inbox của subagent đang chạy, claim được ở step kế tiếp', async () => {

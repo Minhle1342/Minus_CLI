@@ -425,7 +425,8 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
             const busy = record.status === 'running';
             const exists = model.sessions.tabs.some(t => t.id === id);
             const tabs = exists
-              ? model.sessions.tabs.map(t => t.id === id ? { ...t, title, busy } : t)
+              // Giữ tiêu đề đã có (objective lúc spawn) — status sau không ghi đè.
+              ? model.sessions.tabs.map(t => t.id === id ? { ...t, title: t.title || title, busy } : t)
               : [...model.sessions.tabs, { id, title, subagent: true, busy, lastActive: Date.now() }];
             return [{ ...model, sessions: { ...model.sessions, tabs } }, []];
           }

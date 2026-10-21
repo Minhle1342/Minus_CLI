@@ -377,6 +377,7 @@ export class SubagentManager {
         modelName: options.modelName || options.model,
         verificationCommand: options.verificationCommand,
         mode: options.mode,
+        brief: cleanTask,
       }, controller.signal);
     } catch (err: any) {
       clearTimeout(timeoutTimer);
@@ -467,7 +468,7 @@ export class SubagentManager {
     if (entry) entry.executionSession = session;
     let loop: AgentLoop;
     try {
-      loop = this.factory(handle.id, session, options, controller.signal);
+      loop = this.factory(handle.id, session, { ...options, brief: options.brief || handle.objective }, controller.signal);
     } catch (error: any) {
       this.finishFailure(handle, error);
       return;
