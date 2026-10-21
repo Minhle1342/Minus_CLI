@@ -96,7 +96,15 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       ...(model.status.compactionUntil && msg.now >= model.status.compactionUntil ? { compaction: null, compactionUntil: undefined } : {}),
     } }, []];
     case 'action': return action(model, msg.action);
-    case 'log': return msg.text.trim() ? log(msg.text) : [model, []];
+    case 'log': {
+      if (!msg.text.trim()) return [model, []];
+      // Log của subagent → tab của subagent (không lẫn vào viewport đang xem).
+      if (msg.sessionId) {
+        if (!model.sessions.tabs.some(t => t.id === msg.sessionId)) return [model, []];
+        return [ownerAppendEntry(model, { kind: 'log', text: msg.text }, msg.sessionId), []];
+      }
+      return log(msg.text);
+    }
     case 'notice': return [{ ...model, status: { ...model.status, notice: msg.text } }, []];
     case 'busy': {
       // Busy theo từng session (đa task song song): chỉ dot đúng tab, global
@@ -408,6 +416,19 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         case 'agent:abort': case 'abort': return [{ ...model, status: { ...model.status, aborting: model.status.busy } }, []];
         case 'agent:status': case 'agent/status': {
           const record = msg.args[0];
+          // Subagent: transcript đi vào tab riêng (chỉ xem), không lẫn vào tab cha.
+          if (record?.isSubagent && record.sessionId) {
+            const id = record.sessionId;
+            // Bỏ tiền tố "Subagent:" — tab hiện objective để user nhận ra việc con đang làm.
+            const label = String(record.name || record.label || 'Subagent').replace(/^Subagent:\s*/i, '').trim();
+            const title = label.length > 18 ? label.slice(0, 17) + '…' : (label || 'Subagent');
+            const busy = record.status === 'running';
+            const exists = model.sessions.tabs.some(t => t.id === id);
+            const tabs = exists
+              ? model.sessions.tabs.map(t => t.id === id ? { ...t, title, busy } : t)
+              : [...model.sessions.tabs, { id, title, subagent: true, busy, lastActive: Date.now() }];
+            return [{ ...model, sessions: { ...model.sessions, tabs } }, []];
+          }
           if (!['root', 'main', 'primary', 'interactive-agent', 'coding-agent'].includes(record.id)) return [model, []];
           if (['idle', 'stopped', 'error'].includes(record.status)) return [{ ...model, status: { ...model.status, aborting: false, phase: record.status } }, []];
           return [model, []];
@@ -597,6 +618,10 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const session = model.composer.completionDismissed ? undefined : model.composer.completions[model.composer.selected];
         const text = session?.kind === 'session' ? session.value.trim() : model.composer.value.trim();
         if (!text) return [model, []];
+        // Tab subagent chỉ để xem — không gõ được vào con.
+        if (model.sessions.tabs.find(t => t.id === model.sessions.activeId)?.subagent) {
+          return [{ ...model, status: { ...model.status, notice: 'Tab subagent chỉ để xem — quay lại tab khác để gõ.' } }, []];
+        }
         const composer = { ...createComposer(), history: [...model.composer.history.slice(-199), text] };
         if (model.status.busy && (text === '/model' || text === '/modal' || text.startsWith('/model ') || text.startsWith('/modal '))) {
           const targetModel = text.replace(/^\/(?:model|modal)\s*/, '').trim();

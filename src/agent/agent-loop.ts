@@ -19,7 +19,7 @@ import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
 import type { MemoryRecord } from '../memory/types.js';
-import { AgentKernel, KernelContext } from '../kernel/kernel.js';
+import { AgentKernel, KernelContext, type KernelEventBus } from '../kernel/kernel.js';
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
@@ -228,6 +228,27 @@ import {
 } from './task-complexity.js';
 
 /**
+ * Bọc bus để mọi event của subagent mang cờ `isSubagent` — UI biết đâu là transcript
+ * con để tách sang tab riêng, thay vì lẫn vào transcript của agent cha.
+ */
+function subagentEventBus(bus: KernelEventBus): KernelEventBus {
+  const emit = ((event: string, ...args: unknown[]) => {
+    const last = args[args.length - 1];
+    const hasCtx = Boolean(last) && typeof last === 'object' && !Array.isArray(last) && 'sessionId' in (last as object);
+    const tagged = hasCtx ? { ...(last as object), isSubagent: true } : { isSubagent: true };
+    const payload = hasCtx ? args.slice(0, -1) : args;
+    (bus.emit as unknown as (e: string, ...a: unknown[]) => void)(event, ...payload, tagged);
+    return true;
+  });
+  return {
+    emit,
+    on: bus.on.bind(bus),
+    once: bus.once.bind(bus),
+    off: bus.off.bind(bus),
+  } as unknown as KernelEventBus;
+}
+
+/**
  * AgentLoop - Trái tim điều phối vòng đời của Coding Agent (DeepSeek-Harness Ready)
  * 
  * Vòng lặp vận hành theo kiến trúc Plugin & Micro-Kernel:
@@ -291,6 +312,8 @@ export class AgentLoop {
   private editToolCallsInTurn = 0;
   private ephemeralScratchFiles = new Set<string>();
   readonly kernel?: AgentKernel;
+  /** Bus phát event ra UI. Subagent loop dùng bus của parent (đã bọc cờ isSubagent). */
+  private eventBus?: KernelEventBus;
   private sessionPersistence?: SessionPersistence;
   private _isGoalMode: boolean = false;
   private drainingInbox = false;
@@ -442,6 +465,8 @@ export class AgentLoop {
     options?: AgentLoopOptions
   ) {
     this.loopOptions = options;
+    // Bus phát event: kernel có sẵn, subagent loop nhận bus của parent qua options.
+    this.eventBus = options?.eventBus ?? (kernelOrLLM instanceof AgentKernel ? kernelOrLLM.ctx.events : undefined);
     if (kernelOrLLM instanceof AgentKernel) {
       this.kernel = kernelOrLLM;
       this.llm = this.kernel.ctx.llm;
@@ -679,7 +704,7 @@ export class AgentLoop {
     this.modelInstances.set(name, llm);
     session.append('model/change', { modelName: name });
     await this.persistSession(session).catch(() => {});
-    this.kernel?.ctx.events.emit('model:changed', name, { sessionId: session.id });
+    this.eventBus?.emit('model:changed', name, { sessionId: session.id });
   }
 
   /** Explicit per-tab model name, if /model was scoped to this session. */
@@ -1491,7 +1516,7 @@ export class AgentLoop {
         });
         await this.persistSession(session);
         CLI.renderSteeringNotice(steerItem.text);
-        this.kernel?.ctx.events.emit('model:steered', {
+        this.eventBus?.emit('model:steered', {
           sessionId: session.id,
           inputId: steerItem.id,
           text: steerItem.text,
@@ -1701,7 +1726,7 @@ export class AgentLoop {
         });
       }
 
-      this.kernel?.ctx.events.emit('step:before', step, effectiveMaxSteps, classification.phase, { sessionId: session.id });
+      this.eventBus?.emit('step:before', step, effectiveMaxSteps, classification.phase, { sessionId: session.id });
       this.verificationPolicy.setRequiredRisk(classification.risk);
       const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
         workspaceDir: this._workspace.rootDir,
@@ -1885,7 +1910,7 @@ export class AgentLoop {
         evidenceSufficient: this.isEvidenceSufficient(),
       });
       this.reliableToolOrchestrationTelemetry.recordDecision(reliableRouteDecision);
-      this.kernel?.ctx.events.emit('router:decision', reliableRouteDecision);
+      this.eventBus?.emit('router:decision', reliableRouteDecision);
       activeToolDeclarations = applyReliableToolRouteToDeclarations(
         activeToolDeclarations,
         reliableRouteDecision,
@@ -2866,12 +2891,12 @@ export class AgentLoop {
         allowedFunctionNames: visibleToolNames,
         ...(readySubmission ? { functionCallingMode: 'ANY' as const } : {}),
         onRetry: (retryPayload: any) => {
-          this.kernel?.ctx.events.emit('model:retry', retryPayload, { sessionId: session.id });
+          this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
         },
       };
       const requestStartedAt = Date.now();
       let firstTokenAt: number | undefined;
-      this.kernel?.ctx.events.emit('model:thinking:start', {
+      this.eventBus?.emit('model:thinking:start', {
         agentId: this.agentId,
         turn,
         step,
@@ -2921,14 +2946,14 @@ export class AgentLoop {
         if (typeof llm.generateStream === 'function') {
           response = await llm.generateStream(session, activeToolDeclarations, {
             onRetry: (retryPayload: any) => {
-              this.kernel?.ctx.events.emit('model:retry', retryPayload, { sessionId: session.id });
+              this.eventBus?.emit('model:retry', retryPayload, { sessionId: session.id });
             },
             onThoughtToken: (token: string) => {
               if (firstTokenAt === undefined) {
-                this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
+                this.eventBus?.emit('model:retry', null, { sessionId: session.id });
               }
               firstTokenAt ??= Date.now();
-              this.kernel?.ctx.events.emit('model:thought', token, { sessionId: session.id });
+              this.eventBus?.emit('model:thought', token, { sessionId: session.id });
               accumulatedThought += token;
               thoughtTokenCount++;
               if (thoughtTokenCount % 25 === 0 || token.includes('\n')) {
@@ -2954,10 +2979,10 @@ export class AgentLoop {
             },
             onContentToken: (token: string) => {
               if (firstTokenAt === undefined) {
-                this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
+                this.eventBus?.emit('model:retry', null, { sessionId: session.id });
               }
               firstTokenAt ??= Date.now();
-              this.kernel?.ctx.events.emit('model:token', token, { sessionId: session.id });
+              this.eventBus?.emit('model:token', token, { sessionId: session.id });
             },
             onToolCallEarly: (earlyCall: any) => {
               if (!readySubmission && this.loopOptions?.enableStreamingDispatch !== false && !options?.signal?.aborted) {
@@ -2982,8 +3007,8 @@ export class AgentLoop {
           response = await llm.generate(session, activeToolDeclarations, requestOptions);
         }
       } finally {
-        this.kernel?.ctx.events.emit('model:retry', null, { sessionId: session.id });
-        this.kernel?.ctx.events.emit('model:thinking:end', {
+        this.eventBus?.emit('model:retry', null, { sessionId: session.id });
+        this.eventBus?.emit('model:thinking:end', {
           agentId: this.agentId,
           turn,
           step,
@@ -3055,7 +3080,7 @@ export class AgentLoop {
           compactionStrategies: contextPreparation.compactionStats?.strategiesApplied,
         },
       });
-      this.kernel?.ctx.events.emit('model:request_telemetry', {
+      this.eventBus?.emit('model:request_telemetry', {
         turn,
         step,
         requestDurationMs,
@@ -3110,7 +3135,7 @@ export class AgentLoop {
 
       // Giám sát và hiển thị Prompt Cache Hit Rate / Token Telemetry
       if (response.usage) {
-        this.kernel?.ctx.events.emit('model:usage', response.usage);
+        this.eventBus?.emit('model:usage', response.usage);
         if (!this._collapsePreferences.compactSteps) {
           CLI.renderCacheUsage(response.usage);
         }
@@ -3141,7 +3166,7 @@ export class AgentLoop {
         // aggregate only for non-streaming providers to avoid duplicating the
         // reasoning trace in reactive UIs.
         if (typeof llm.generateStream !== 'function') {
-          this.kernel?.ctx.events.emit('model:thought', response.reasoningContent, { sessionId: session.id });
+          this.eventBus?.emit('model:thought', response.reasoningContent, { sessionId: session.id });
         }
 
         // Wink-Style Specification Drift & Goal Substitution Nudge
@@ -3219,7 +3244,7 @@ export class AgentLoop {
             ...hookContext,
             reason: continuationReason,
           });
-          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
           continue;
         }
 
@@ -3376,7 +3401,7 @@ export class AgentLoop {
                   args: scheduled.args,
                   thoughtSignature: partitionItem?.responsePart?.thoughtSignature,
                 });
-                this.kernel?.ctx.events.emit('tool:before', scheduled.name, scheduled.args, { sessionId: session.id });
+                this.eventBus?.emit('tool:before', scheduled.name, scheduled.args, { sessionId: session.id });
                 // Mirror the sequential path below: in compact mode the completion
                 // one-liner (renderCompactOneLiner) already shows each tool, so
                 // emitting the verbose call line here would render every
@@ -3485,7 +3510,7 @@ export class AgentLoop {
                 'aborted-before-dispatch',
               );
               CLI.renderToolResult(pendingToolName, 0, abortedResult);
-              this.kernel?.ctx.events.emit('tool:error', pendingToolName, abortedResult, { sessionId: session.id });
+              this.eventBus?.emit('tool:error', pendingToolName, abortedResult, { sessionId: session.id });
             }
             await this.persistSession(session);
             toolBatchCancelled = true;
@@ -3519,7 +3544,7 @@ export class AgentLoop {
             };
             session.addToolResultWithId(toolName, invalidResult, toolCallId, 'invalid-tool-call');
             if (!deferReadPersistence) await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, invalidResult, { sessionId: session.id });
+            this.eventBus?.emit('tool:error', toolName, invalidResult, { sessionId: session.id });
             continue;
           }
 
@@ -3535,7 +3560,7 @@ export class AgentLoop {
             };
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'phase-transition-requires-fresh-turn');
             await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3555,7 +3580,7 @@ export class AgentLoop {
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
             await this.persistSession(session);
             CLI.renderToolResult(toolName, 0, blockedResult);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3571,7 +3596,7 @@ export class AgentLoop {
               error: domainBlock?.message || phaseEffect.reason, retryable: true };
             session.addToolResultWithId(toolName, blockedResult, toolCallId, 'policy-effect-blocked');
             await this.persistSession(session);
-            this.kernel?.ctx.events.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
+            this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
             continue;
           }
 
@@ -3619,7 +3644,7 @@ export class AgentLoop {
 
           const preexecutedReadResult = preexecutedReadResults.get(callIndex);
           if (!preexecutedReadResult) {
-            this.kernel?.ctx.events.emit('tool:before', toolName, toolArgs, { sessionId: session.id });
+            this.eventBus?.emit('tool:before', toolName, toolArgs, { sessionId: session.id });
             if (!this._collapsePreferences.compactSteps) {
               CLI.renderToolCall(toolName, toolArgs);
             } else {
@@ -3812,7 +3837,7 @@ export class AgentLoop {
                 })
               : { allowed: true, score: 100, reasons: [], inspectedFiles: [] };
 
-            this.kernel?.ctx.events.emit('gate:exploration_sufficiency', explorationSufficiency);
+            this.eventBus?.emit('gate:exploration_sufficiency', explorationSufficiency);
 
             const reproductionCheck: { allowed: boolean; reason?: string; advisory?: string } = isMutationTool(toolName)
               ? this.verificationPolicy.canMutate(classification.taskClass, reproductionMode, {
@@ -3823,7 +3848,7 @@ export class AgentLoop {
                 })
               : { allowed: true };
             if (reproductionCheck.allowed && reproductionCheck.advisory) {
-              this.kernel?.ctx.events.emit('gate:reproduction_advisory', {
+              this.eventBus?.emit('gate:reproduction_advisory', {
                 turn,
                 toolName,
                 targetFilePath,
@@ -4013,7 +4038,7 @@ export class AgentLoop {
           } else {
             CLI.renderToolResult(toolName, executionResult.durationMs, executionResult.result);
           }
-          this.kernel?.ctx.events.emit(
+          this.eventBus?.emit(
             'tool:after',
             toolName,
             executionResult.result,
@@ -4671,7 +4696,7 @@ export class AgentLoop {
                 : {}),
             };
             session.append('control/decision', { turn, step, controlDecision: batchTelemetry });
-            this.kernel?.ctx.events.emit('tools:batch', batchTelemetry);
+            this.eventBus?.emit('tools:batch', batchTelemetry);
             if (readPartition.mode === 'concurrent-read' && readPartition.calls.length > 1) {
               parallelBatchCount++;
               parallelTotalTools += readPartition.calls.length;
@@ -4750,7 +4775,7 @@ export class AgentLoop {
         // The divider is structural navigation, not step detail: keep it visible
         // in compact mode so consecutive steps remain scannable.
         CLI.renderStepFooter();
-        this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+        this.eventBus?.emit('step:after', step, { sessionId: session.id });
 
         // Progress-Leased Step Extension (ponytail: lease extension bounded by maxLeasedSteps)
         if (Number.isFinite(effectiveMaxSteps) && effectiveMaxSteps < maxLeasedSteps) {
@@ -4822,7 +4847,7 @@ export class AgentLoop {
           const finalAnswer = stripSystemPromptEcho(submittedSolutionSummary!) || submittedSolutionSummary!;
           CLI.renderModelAction('final_answer');
           await CLI.renderFinalAnswer(finalAnswer);
-          this.kernel?.ctx.events.emit('model:final_answer', finalAnswer, { sessionId: session.id });
+          this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
           session.addModelMessage({ text: finalAnswer });
           await this.persistSession(session);
           if (isGoal && (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted())) {
@@ -4909,7 +4934,7 @@ export class AgentLoop {
             ...hookContext,
             reason: 'continuation-requested',
           });
-          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
           continue; // TIẾP TỤC VÒNG LẶP, TUYỆT ĐỐI KHÔNG DỪNG VỘI VÃ!
         }
 
@@ -4921,7 +4946,7 @@ export class AgentLoop {
           session.append('step/end', { turn, step, reason: 'missing-final-answer' });
           await this.persistSession(session);
           await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
-          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
           this.goalManager.disarm();
           return message;
@@ -4961,7 +4986,7 @@ export class AgentLoop {
           ...hookContext,
           reason: planReason,
         });
-        this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+        this.eventBus?.emit('step:after', step, { sessionId: session.id });
         if (canRetryPlan) continue;
 
         const planAllowsReconciliation = Boolean(
@@ -5181,7 +5206,7 @@ export class AgentLoop {
             ...hookContext,
             reason: incompleteFinalReason,
           });
-          this.kernel?.ctx.events.emit('step:after', step, { sessionId: session.id });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
           if (canRetryIncompleteFinal) continue;
 
           const incompleteFinalMessage = `Agent stopped: completion remained unresolved after ${consecutiveIncompleteFinals} attempts (${finalAnswerDecision.reason || 'unknown'}).`;
@@ -5217,7 +5242,7 @@ export class AgentLoop {
       CLI.renderModelAction('final_answer');
       CLI.renderStepFooter();
       await CLI.renderFinalAnswer(finalAnswer);
-      this.kernel?.ctx.events.emit('model:final_answer', finalAnswer, { sessionId: session.id });
+      this.eventBus?.emit('model:final_answer', finalAnswer, { sessionId: session.id });
 
       // Ghi nhận câu trả lời cuối cùng vào Session
       session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
@@ -5791,7 +5816,7 @@ export class AgentLoop {
       turn,
       step,
     });
-    this.kernel?.ctx.events.emit('agent/status', record);
+    this.eventBus?.emit('agent/status', record);
   }
 
   /**
@@ -5810,7 +5835,7 @@ export class AgentLoop {
 
   private createSubagentLoop(
     agentId: string,
-    _session: Session,
+    session: Session,
     options: SubagentOptions,
     signal: AbortSignal,
   ): AgentLoop {
@@ -5868,6 +5893,17 @@ export class AgentLoop {
       enableSubagents: false,
       enableStepSummarization: false,
       promptSections: subagentSections,
+      // Child không có kernel riêng → dùng bus của parent (đã bọc cờ isSubagent) để
+      // transcript subagent lên TUI, tách khỏi transcript agent cha.
+      eventBus: this.eventBus ? subagentEventBus(this.eventBus) : undefined,
+    });
+    // Báo trước để TUI kịp tạo tab cho subagent (trước khi child phát event đầu tiên).
+    this.eventBus?.emit('agent/status', {
+      id: agentId,
+      status: 'running',
+      sessionId: session.id,
+      name: this.agentRegistry.get(agentId)?.label ?? `Subagent: ${agentId}`,
+      isSubagent: true,
     });
     if (signal?.aborted) {
       childLoop.subagentManager.stopAll();

@@ -332,17 +332,20 @@ export class TuiStore extends EventEmitter {
     const flushPendingReasoning = () => batcher.flush();
     this.flushPendingReasoning = flushPendingReasoning;
 
-    const onStepBefore = (step: number, maxSteps: number) => {
+    const onStepBefore = (step: number, maxSteps: number, _phase?: unknown, ctx?: { isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return; // Transcript subagent có tab riêng ở TUI, không lẫn vào view Ink.
       batcher.flush();
       this.dispatch({ type: 'STEP_START', step, maxSteps });
     };
 
-    const onStepAfter = (step: number) => {
+    const onStepAfter = (step: number, ctx?: { isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return;
       batcher.flush();
       this.dispatch({ type: 'STEP_END', step });
     };
 
-    const onToolBefore = (toolName: string, args: Record<string, any>) => {
+    const onToolBefore = (toolName: string, args: Record<string, any>, ctx?: { isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return;
       batcher.flush();
       this.dispatch({
         type: 'TOOL_START',
@@ -354,22 +357,26 @@ export class TuiStore extends EventEmitter {
       });
     };
 
-    const onToolAfter = (toolName: string, result: Record<string, any>, durationMs: number) => {
+    const onToolAfter = (toolName: string, result: Record<string, any>, durationMs: number, _args?: unknown, ctx?: { sessionId?: string; agentId?: string; turn?: number; isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return;
       batcher.flush();
       this.dispatch({ type: 'TOOL_END', toolName, result, durationMs });
     };
 
-    const onThinkingStart = (lifecycle: { startedAt: number }) => {
+    const onThinkingStart = (lifecycle: { startedAt: number; isSubagent?: boolean }) => {
+      if (lifecycle?.isSubagent) return;
       batcher.clear();
       this.dispatch({ type: 'THINKING_START', startedAt: lifecycle.startedAt });
     };
 
-    const onThinkingEnd = () => {
+    const onThinkingEnd = (lifecycle?: { isSubagent?: boolean }) => {
+      if (lifecycle?.isSubagent) return;
       batcher.flush();
       this.dispatch({ type: 'THINKING_END' });
     };
 
-    const onModelThought = (thought: string) => {
+    const onModelThought = (thought: string, ctx?: { isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return;
       if (this.state.isAborting || this.state.reasoningInterrupted) return;
       if (this.state.status === 'retrying' || this.state.retryInfo) {
         this.dispatch({ type: 'RETRY_UPDATE', retryInfo: null });
@@ -388,7 +395,8 @@ export class TuiStore extends EventEmitter {
       this.dispatch({ type: 'USAGE_UPDATE', usage });
     };
 
-    const onModelFinalAnswer = (answer: string) => {
+    const onModelFinalAnswer = (answer: string, ctx?: { isSubagent?: boolean }) => {
+      if (ctx?.isSubagent) return;
       batcher.flush();
       this.dispatch({ type: 'FINAL_ANSWER', answer });
     };

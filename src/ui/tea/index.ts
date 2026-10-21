@@ -7,6 +7,7 @@ import { createRootModel } from './models/root-model.js';
 import { KernelTEAAdapter } from './kernel-bridge.js';
 import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
+import { currentSubagentOutputSessionId } from '../../agent/subagent-output-context.js';
 import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard, SwitchWorkspaceOptions } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
 export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
@@ -41,13 +42,10 @@ export class TeaTerminal extends EventEmitter {
     this.program = new Program(model, { input, output, mouse: options.mouse ?? true, onStop: () => this.close(), execute: cmd => this.execute(cmd), subscriptions: [send => new KernelTEAAdapter(kernel.ctx.events, send).bind(), send => compactionStatus.subscribe(status => send({ type: 'compaction', status }))] });
     try {
       this.program.start();
-      if (options.captureOutput !== false) this.restoreOutput = captureTerminalOutput(text => {
-        if (!this.program.model.status.busy) this.program.send({ type: 'log', text });
-      }, text => this.program.send({ type: 'log', text }));
+      if (options.captureOutput !== false) this.restoreOutput = captureTerminalOutput(text => this.sendCaptured(text), text => this.sendCaptured(text));
       this.program.send({ type: 'compaction', status: compactionStatus.get() });
     } catch (error) { this.close(); throw error; }
-  }
-  get model() { return this.program.model; }
+  }  get model() { return this.program.model; }
   get line(): string { return this.model.composer.value; }
   set line(value: string) { this.program.send({ type: 'compose', text: value }); }
   get cursor(): number { return this.model.composer.cursorOffset; }
@@ -141,6 +139,15 @@ export class TeaTerminal extends EventEmitter {
     }
   }
   private answer(value: string | undefined): void { const resolve = this.questionResolver; this.questionResolver = undefined; resolve?.(value); }
+  /**
+   * Dòng stdout bị bắt: nếu phát ra từ subagent thì ghi vào tab của subagent,
+   * nếu không thì giữ luồng cũ (bỏ qua lúc agent cha đang busy).
+   */
+  private sendCaptured(text: string): void {
+    const sessionId = currentSubagentOutputSessionId();
+    if (sessionId) { this.program.send({ type: 'log', text, sessionId }); return; }
+    if (!this.program.model.status.busy) this.program.send({ type: 'log', text });
+  }
   private submit(text: string): void {
     if (this.pending) { const resolve = this.pending; this.pending = undefined; resolve(text); }
     else if (this.model.status.busy) this.emit('line', text);
@@ -228,7 +235,10 @@ export async function runHeadlessCli(kernel: TeaKernel, prompt: string, options:
   const controller = new AbortController();
   const abort = () => { controller.abort(); kernel.cancelCurrentTask?.(); };
   const onSignal = () => abort();
-  const onAnswer = (answer: string) => write(stripTerminalControls(answer) + '\n');
+  const onAnswer = (answer: string, ctx?: { isSubagent?: boolean }) => {
+    if (ctx?.isSubagent) return; // Câu trả lời của subagent không phải câu trả lời cuối của CLI.
+    write(stripTerminalControls(answer) + '\n');
+  };
   kernel.ctx.events.on('model:final_answer', onAnswer);
   options.signal?.addEventListener('abort', onSignal, { once: true });
   process.on('SIGINT', onSignal); process.on('SIGTERM', onSignal);

@@ -713,7 +713,8 @@ async function main() {
 
   // Dream runs outside the interactive agent and is triggered only after a
   // completed answer. It is silent in auto mode; /dream status exposes reports.
-  kernel.ctx.events.on('model:final_answer', () => {
+  kernel.ctx.events.on('model:final_answer', (_answer: string, ctx?: { isSubagent?: boolean }) => {
+    if (ctx?.isSubagent) return; // Subagent có câu trả lời riêng — không kích hoạt dream cho tới khi agent cha xong.
     void kernel.ctx.dream.runIfDue().catch(() => {});
   });
 

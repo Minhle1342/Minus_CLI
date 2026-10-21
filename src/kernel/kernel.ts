@@ -37,7 +37,11 @@ import { disposeLspManager } from '../lsp/lsp-manager.js';
 import { VerificationPolicy } from '../skills/verification-policy.js';
 
 /** Optional trailing context threading the owning session through content events. */
-export interface SessionEventContext { sessionId?: string }
+export interface SessionEventContext {
+  sessionId?: string;
+  /** true khi event phát ra từ subagent — UI tách transcript con khỏi transcript cha. */
+  isSubagent?: boolean;
+}
 
 export interface KernelEvents {
   'kernel:init': () => void;
@@ -54,7 +58,7 @@ export interface KernelEvents {
     result: Record<string, any>,
     durationMs: number,
     args: Record<string, any>,
-    context?: { sessionId?: string; agentId?: string; turn?: number },
+    context?: { sessionId?: string; agentId?: string; turn?: number; isSubagent?: boolean },
   ) => void;
   'tool:error': (toolName: string, error: any, ctx?: SessionEventContext) => void;
   'model:thought': (thought: string, ctx?: SessionEventContext) => void;
@@ -64,6 +68,7 @@ export interface KernelEvents {
     step: number;
     startedAt: number;
     sessionId?: string;
+    isSubagent?: boolean;
   }) => void;
   'model:thinking:end': (lifecycle: {
     agentId: string;
@@ -71,6 +76,7 @@ export interface KernelEvents {
     step: number;
     endedAt: number;
     sessionId?: string;
+    isSubagent?: boolean;
   }) => void;
   'model:retry': (payload: {
     attempt: number;
@@ -112,8 +118,8 @@ export interface KernelEvents {
   'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string, ctx?: SessionEventContext) => void;
-  'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
-  'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number }) => void;
+  'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number; name?: string; label?: string; isSubagent?: boolean }) => void;
+  'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number; name?: string; label?: string; isSubagent?: boolean }) => void;
   'agent:abort': () => void;
   'abort': () => void;
 }

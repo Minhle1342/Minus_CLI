@@ -9,6 +9,7 @@ import type { AgentRegistry } from './agent-registry.js';
 import type { ToolControlMode } from '../control/classification-types.js';
 import type { StepPromptGatingMode } from './step-prompt-policy.js';
 import type { ContextManagementMode } from './context-budget-manager.js';
+import type { KernelEventBus } from '../kernel/kernel.js';
 
 export interface AgentLoopOptions {
   /** Run in non-interactive / headless mode where permission denials gracefully continue instead of killing the turn. */
@@ -70,6 +71,12 @@ export interface AgentLoopOptions {
    * interactive login flows — return undefined/null to fall back to default.
    */
   createSessionLLM?: (modelName: string) => Promise<any>;
+  /**
+   * Event bus dùng chung với parent: child loop không có kernel riêng nên không
+   * phát event ra UI được. Truyền bus của parent để transcript subagent lên TUI
+   * (mọi event của child được gắn cờ isSubagent).
+   */
+  eventBus?: KernelEventBus;
 }
 
 export type AgentState =

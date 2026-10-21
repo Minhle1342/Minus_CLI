@@ -550,6 +550,10 @@ export function syncSessionTabs(model: SessionTabsModel, ids: string[], activeId
   const tabs: SessionTab[] = ids.length
     ? ids.map((id, i) => ({ ...(byId.get(id) || { id, lastActive: 0 }), id, title: titles?.[i] ? shortTabTitle(titles[i]) : byId.get(id)?.title || shortTabTitle(id) }))
     : model.tabs.length ? model.tabs : [{ id: activeId || 'main', title: shortTabTitle(activeId || 'main'), lastActive: 0 }];
+  // Tab subagent không phải session của kernel → metadata refresh không được xoá nó.
+  for (const tab of model.tabs) {
+    if (tab.subagent && !tabs.some(t => t.id === tab.id)) tabs.push(tab);
+  }
   // Giữ tab đang active dù kernel chưa persist kịp (optimistic new-tab).
   // activeId có thể là tên hiển thị (setMetadata {session: name}) → resolve sang id.
   const looksLikeId = activeId && (tabs.some(t => t.id === activeId) || byId.has(activeId));
@@ -712,7 +716,9 @@ function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     composer: chrome.composer,
     diff: chrome.diff,
     sidebar: { ...model.sidebar, session: target.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, target) },
-  }, [{ type: 'session-switch', sessionId: target.id }]];
+    status: target.subagent ? { ...model.status, notice: `Tab subagent (chỉ xem): ${target.title}` } : model.status,
+  // Tab subagent không phải session của kernel → không báo kernel switch session.
+  }, target.subagent ? [] : [{ type: 'session-switch', sessionId: target.id }]];
 }
 
 /**
@@ -837,7 +843,7 @@ function hideTab(model: RootModel, index: number, keepOpen = false): [RootModel,
     diff: hidingActive ? chrome.diff : model.diff,
     sidebar: hidingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, shown) } : model.sidebar,
     status: { ...model.status, notice: `Đã ẩn tab ${target.title} (vẫn chạy nền · Ctrl+T → h để hiện)` },
-  }, hidingActive ? [{ type: 'session-switch', sessionId: fallback.id }] : []];
+  }, hidingActive && !fallback.subagent ? [{ type: 'session-switch', sessionId: fallback.id }] : []];
 }
 
 function toggleHideSelected(model: RootModel): [RootModel, Cmd[]] {
@@ -877,8 +883,9 @@ function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
   const deletingActive = state.activeId === target.id;
   const visible = tabs.filter(t => !t.hidden);
   const fallback = visible[Math.min(state.selected, Math.max(0, visible.length - 1))] || tabs[0];
-  const cmds: Cmd[] = deletingActive && fallback.id !== target.id ? [{ type: 'session-switch', sessionId: fallback.id }] : [];
-  cmds.push({ type: 'session-delete', sessionId: target.id });
+  const cmds: Cmd[] = deletingActive && fallback.id !== target.id && !fallback.subagent ? [{ type: 'session-switch', sessionId: fallback.id }] : [];
+  // Tab subagent không phải session của kernel → chỉ gỡ khỏi TUI, không gọi xoá session.
+  if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });
   const pending = state.pendingActiveId === target.id ? undefined : deletingActive ? fallback.id : state.pendingActiveId;
   const shown = { ...fallback, unread: 0 };
   const shownTabs = tabs.map(t => t.id === fallback.id ? shown : t);

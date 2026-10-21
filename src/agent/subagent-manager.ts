@@ -2,6 +2,7 @@ import type { AgentLoop } from './agent-loop.js';
 import { AgentRegistry } from './agent-registry.js';
 import { Session } from '../session/session.js';
 import type { DelegationState } from '../session/session.js';
+import { runWithSubagentOutput } from './subagent-output-context.js';
 
 export type SubagentStatus = DelegationState['status'];
 export type SubagentHandle = DelegationState;
@@ -392,10 +393,10 @@ export class SubagentManager {
       this.agents.register(id, `IsolatedTask: ${cleanTask.slice(0, 60)}`);
       this.agents.update(id, { status: 'running', sessionId: session.id });
 
-      const rawAnswer = await childLoop.submit(session, cleanTask, 'human', {
+      const rawAnswer = await runWithSubagentOutput(session.id, () => childLoop.submit(session, cleanTask, 'human', {
         maxSteps: options.maxSteps ?? 6,
         signal: controller.signal,
-      });
+      }));
 
       clearTimeout(timeoutTimer);
 
@@ -473,10 +474,11 @@ export class SubagentManager {
     }
     if (entry) entry.childLoop = loop;
 
-    void loop.submit(session, handle.objective, 'human', {
+    // Gắn nhãn stdout của subagent để TUI ghi vào tab con thay vì tab cha.
+    void runWithSubagentOutput(session.id, () => loop.submit(session, handle.objective, 'human', {
       maxSteps: options.maxSteps,
       signal: controller.signal,
-    }).then((answer) => {
+    })).then((answer) => {
       if (controller.signal.aborted) {
         handle.status = 'stopped';
         handle.error = 'Subagent stopped by request.';

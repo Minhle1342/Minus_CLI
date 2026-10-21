@@ -8,7 +8,7 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'resize'; width: number; height: number }
   | { type: 'tick'; now: number }
   | { type: 'action'; action: Action }
-  | { type: 'log'; text: string }
+  | { type: 'log'; text: string; /** session sở hữu dòng log (output của subagent) → ghi vào tab con */ sessionId?: string }
   | { type: 'notice'; text: string }
   | { type: 'busy'; busy: boolean; /** session sở hữu task (đa task song song); thiếu → tab đang xem */ sessionId?: string }
   | { type: 'question'; prompt: string; active: boolean; permission?: PermissionCard; sessionId?: string }
@@ -68,7 +68,7 @@ export interface ComposerModel {
 export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string; diff?: string }
 export interface TranscriptEntry { kind: 'user' | 'answer' | 'thought' | 'tool' | 'step' | 'log' | 'permission'; text: string; permission?: PermissionCard }
 /** Một tab = một session chạy song song trong cùng cửa sổ terminal. Entries cache giữ transcript riêng mỗi tab. */
-export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; awaitingInput?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[] }
+export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; awaitingInput?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[]; /** tab transcript của subagent — chỉ để xem, không gõ vào */ subagent?: boolean }
 export interface SessionTabsModel { open: boolean; selected: number; tabs: SessionTab[]; activeId: string; activeQuestionSessionId?: string; /** model mặc định chung cho tab chưa chọn riêng (đồng bộ từ global /model + metadata) */ defaultModel?: string; /** switch do TEA khởi xướng, kernel chưa confirm — metadata không được revert */ pendingActiveId?: string }
 export interface ViewportModel { entries: TranscriptEntry[]; thinking: string; answerStream: string; offset: number; pinned: boolean; collapsed: boolean }
 export interface SidebarModel { visible: boolean; workspace: string; model: string; session: string; sessions: string[]; tools: string[]; files: string[]; invariants: string[]; tokens: number; maxTokens: number;
