@@ -357,7 +357,7 @@ export function checkGitWorkflowCall(state: GitWorkflowState | undefined, userRe
       const stop = prior >= 2 ? ` This is denial ${prior + 1} for git ${op.name} — STOP retrying it.` : '';
       return `Git ${op.name} belongs to ${stage}, but the current workflow stage is ${state.stage}.${stop} Required evidence: ${state.pending.join(', ') || 'successful result for the current stage'}.${run.length ? ` Run: ${run.join(', ')}.` : ''}`;
     }
-    if (toolName === 'git_command' && !isGitCommandAuthorized(userRequest, op.name, classifyGitCommand(op.name, op.args), op.args)) {
+    if (toolName === 'git_command' && !isGitCommandAuthorized(userRequest, classifyGitCommand(op.name, op.args))) {
       return `Git ${op.name} is not authorized by the current user request.`;
     }
   }

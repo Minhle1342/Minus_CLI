@@ -86,14 +86,14 @@ test('DEFAULT_PROMPT_SECTIONS condition functions support dynamic omission while
     isFrontend: true,
     hasCodebaseTools: true,
     hasSubagentTools: true,
-    includeStaticGitOperations: false,
     includeStaticFrontendUI: false,
     includeStaticCodebaseIntelligence: false,
     includeStaticToolPlaybooks: false,
     includeStaticTaskOrchestrator: false,
   };
   const gatedPrompt = assembler.assembleForContext(gatedCtx);
-  assert.ok(!gatedPrompt.includes('GIT & TESTING RUNTIME OPERATIONS'));
+  // Git operations has no dynamic-tail replacement, so it always stays static.
+  assert.ok(gatedPrompt.includes('GIT & TESTING RUNTIME OPERATIONS'));
   assert.ok(!gatedPrompt.includes('FRONTEND & UI DESIGN STANDARD'));
   assert.ok(!gatedPrompt.includes('CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE'));
   assert.ok(!gatedPrompt.includes('TOOL SYNERGY PLAYBOOKS:'));

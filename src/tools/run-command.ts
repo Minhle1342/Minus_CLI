@@ -623,7 +623,7 @@ export function checkGitPolicyForShell(
         }
       }
     }
-    const scopeDecision = validateGitCommandScope(invocation.subcommand, invocation.args, workspaceRoot, workspaceRoot);
+    const scopeDecision = validateGitCommandScope(invocation.subcommand, invocation.args);
     if (!scopeDecision.allowed) {
       return { error: scopeDecision.error, errorCode: scopeDecision.errorCode };
     }
@@ -637,7 +637,7 @@ export function checkGitPolicyForShell(
         };
       }
     }
-    if (!isGitCommandAuthorized(userRequest, invocation.subcommand, classification, invocation.args)) {
+    if (!isGitCommandAuthorized(userRequest, classification)) {
       return {
         error: `Git ${invocation.subcommand} (${classification.risk}) is not authorized by the current user request.`,
         errorCode: classification.risk === 'destructive'

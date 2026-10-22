@@ -106,9 +106,11 @@ test('commit intent authorizes staging explicit paths but never broad add select
   }
 });
 
-test('destructive git allowed with any explicit request, denied without one', () => {
+test('destructive git needs the command named, not just any message', () => {
   const denied = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', undefined);
   assert.equal(denied?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
+  const unrelated = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy giải thích file này');
+  assert.equal(unrelated?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
   const allowed = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy reset code');
   assert.equal(allowed, undefined);
 });
@@ -118,6 +120,11 @@ test('global/system scope no longer denied; authorization still applies', () => 
   assert.equal(noRequest?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
   const allowed = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
   assert.equal(allowed, undefined);
+  // Config keys that execute programs stay blocked even with a request.
+  const hook = checkGitPolicyForShell(['git config --global diff.external sh -c whoami'], '/repo', 'hãy config git');
+  assert.equal(hook?.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
+  // Reading those keys is still allowed.
+  assert.equal(checkGitPolicyForShell(['git config --get core.pager'], '/repo', undefined), undefined);
 });
 
 test('push to a different branch than requested is denied', () => {
@@ -191,7 +198,7 @@ test('vietnamese intent synonyms authorize amend and continued flows', () => {
   assert.ok(detectExplicitGitCommandNames('tiếp tục rebase').includes('rebase'));
   assert.ok(detectExplicitGitMutationIntent('hãy đẩy code lên main').push);
   assert.equal(
-    isGitCommandAuthorized('tiếp tục rebase', 'rebase', classifyGitCommand('rebase', [])),
+    isGitCommandAuthorized('tiếp tục rebase', classifyGitCommand('rebase', [])),
     true,
   );
 });

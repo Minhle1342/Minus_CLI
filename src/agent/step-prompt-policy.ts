@@ -89,7 +89,6 @@ export interface StepPromptDecision {
   selectedGitPlaybook?: GitWorkflowPromptId;
   gitWorkflow?: GitWorkflowState;
   includeStaticToolPlaybooks: boolean;
-  includeStaticGitOperations: boolean;
   includeStaticFrontendUI: boolean;
   includeStaticCodebaseIntelligence: boolean;
   includeStaticTaskOrchestrator: boolean;
@@ -397,7 +396,6 @@ export class StepPromptPolicy {
       selectedGitPlaybook,
       gitWorkflow,
       includeStaticToolPlaybooks: useLegacyInjection,
-      includeStaticGitOperations: useLegacyInjection,
       includeStaticFrontendUI: useLegacyInjection,
       includeStaticCodebaseIntelligence: useLegacyInjection,
       includeStaticTaskOrchestrator: useLegacyInjection,

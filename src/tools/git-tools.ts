@@ -87,7 +87,7 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
 
   const gitCommandTool: ToolDefinition = {
     name: 'git_command',
-    description: 'Run any installed Git subcommand without a shell. Read-only commands are always available; write, network, and destructive commands require a matching explicit user request. Use git_list_commands to discover all available commands.',
+    description: 'Run any installed Git subcommand without a shell. Read-only commands are always available; write and network commands need a request that asks for Git work; destructive commands must be named in that request. Use git_list_commands to discover all available commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -132,7 +132,7 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           };
         }
         const cwd = args.cwd ? workspace.resolveSafePath(String(args.cwd)) : workspace.rootDir;
-        const scopeDecision = validateGitCommandScope(subcommand, commandArgs, workspace.rootDir, cwd);
+        const scopeDecision = validateGitCommandScope(subcommand, commandArgs);
         if (!scopeDecision.allowed) return scopeDecision;
 
         const classification = classifyGitCommand(subcommand, commandArgs);
@@ -143,7 +143,7 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
             suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
           };
         }
-        if (!isGitCommandAuthorized(context?.userRequest, subcommand, classification, commandArgs)) {
+        if (!isGitCommandAuthorized(context?.userRequest, classification)) {
           return {
             error: `Git ${subcommand} (${classification.risk}) is not authorized by the current user request.`,
             errorCode: classification.risk === 'destructive'

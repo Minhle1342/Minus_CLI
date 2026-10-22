@@ -2146,7 +2146,6 @@ export class AgentLoop {
         const promptAssemblyCtx = {
           ...detectedPromptCtx,
           includeStaticToolPlaybooks: promptDecision.includeStaticToolPlaybooks,
-          includeStaticGitOperations: promptDecision.includeStaticGitOperations,
           includeStaticFrontendUI: promptDecision.includeStaticFrontendUI,
           includeStaticCodebaseIntelligence: promptDecision.includeStaticCodebaseIntelligence,
           includeStaticTaskOrchestrator: promptDecision.includeStaticTaskOrchestrator,

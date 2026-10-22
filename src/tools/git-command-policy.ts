@@ -148,16 +148,14 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
 
 export function isGitCommandAuthorized(
   userRequest: string | undefined,
-  subcommand: string,
   classification: GitCommandClassification,
-  args: string[] = [],
 ): boolean {
-  // Allow all commands when user explicitly requests them (including destructive).
-  // Only block when there is no user request at all (undefined/null empty).
-  if (userRequest && String(userRequest).trim()) return true;
-  // When no user request, only read-only commands are allowed.
   if (classification.risk === 'read') return true;
-  return false;
+  if (!userRequest?.trim()) return false;
+  // Any request authorizes write/network work, but destructive commands must be named so an
+  // unrelated message ("explain this file") can never wipe the worktree.
+  return classification.risk !== 'destructive'
+    || detectExplicitGitCommandNames(userRequest).includes(classification.subcommand);
 }
 
 /**
@@ -193,8 +191,6 @@ export function isExplicitGitAddPathList(args: string[]): boolean {
 export function validateGitCommandScope(
   subcommand: string,
   args: string[],
-  workspaceRoot: string,
-  cwd: string,
 ): { allowed: true } | { allowed: false; errorCode: string; error: string } {
   const command = subcommand.toLowerCase();
   const lowerArgs = args.map((arg) => arg.toLowerCase());
@@ -213,7 +209,8 @@ export function validateGitCommandScope(
     return deny('GIT_EXTERNAL_EXECUTION_BLOCKED', `git ${command} can execute arbitrary programs; use an explicitly authorized execution tool instead.`);
   }
   if (command === 'config') {
-    const sensitiveKey = args.find((arg) => /^(?:alias\.|core\.hookspath$|core\.sshcommand$|credential\.helper$|gpg\.program$|diff\..*\.command$|merge\..*\.driver$|filter\..*\.(?:clean|smudge|process)$)/i.test(arg));
+    const readOnlyConfig = lowerArgs.some((arg) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'].includes(arg));
+    const sensitiveKey = !readOnlyConfig && args.find((arg) => /^(?:alias\.|core\.(?:hookspath|sshcommand|pager|fsmonitor|editor)$|pager\.|sequence\.editor$|credential\.helper$|gpg\.program$|diff\.external$|diff\..*\.command$|merge\..*\.driver$|filter\..*\.(?:clean|smudge|process)$)/i.test(arg));
     if (sensitiveKey) return deny('GIT_UNSAFE_CONFIG_KEY', `Git config key can execute external programs and is blocked: ${sensitiveKey}`);
   }
   return { allowed: true };

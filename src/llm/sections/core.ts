@@ -37,8 +37,6 @@ export interface PromptAssemblyContext {
   hasCodebaseTools?: boolean;
   /** Keep the legacy all-playbooks system section. Step-aware AgentLoop requests disable it. */
   includeStaticToolPlaybooks?: boolean;
-  /** Keep static Git operations section. Gated AgentLoop requests can defer to dynamic tail. */
-  includeStaticGitOperations?: boolean;
   /** Keep static Frontend UI section. Gated AgentLoop requests can defer to dynamic tail. */
   includeStaticFrontendUI?: boolean;
   /** Keep static Codebase Intelligence section. Gated AgentLoop requests can defer to dynamic tail. */
@@ -352,7 +350,7 @@ export function needsFrontendGuidance(
     .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, ' ')
     .normalize('NFD').replace(/\p{M}/gu, '').replace(/[đĐ]/g, 'd')
     .toLowerCase();
-  return /\b(?:ui|ux|component|components|button|modal|dialog|tailwind|css|scss|style|styles|styling|theme|layout|render|html|dom|view|page|screen|giao dien|man hinh|phan tu|nut bam|the|mau sac)\b/.test(text);
+  return /\b(?:ui|ux|component|components|button|modal|dialog|tailwind|css|scss|style|styles|styling|theme|layout|render|html|dom|view|page|screen|giao dien|man hinh|phan tu|nut bam|mau sac)\b/.test(text);
 }
 
 /**
@@ -406,7 +404,7 @@ export const DEFAULT_PROMPT_SECTIONS: DefaultPromptSection[] = [
     content: SECTION_GIT_OPERATIONS,
     priority: 100,
     tier: 'T1',
-    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticGitOperations ?? true) && (ctx.hasGitTools ?? true),
+    condition: (ctx: PromptAssemblyContext) => ctx.hasGitTools ?? true,
   },
   {
     id: 'frontend-ui',
