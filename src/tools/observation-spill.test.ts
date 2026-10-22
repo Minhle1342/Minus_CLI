@@ -114,4 +114,49 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('Scenario 7: read_file giữ nguyên nội dung trong ngân sách của tool (không bị cắt thêm)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-read-'));
+    try {
+      // read_file đã có contract riêng: tối đa 800 dòng, file lớn trả preview+outline.
+      // Runner không được cắt thêm ở 4,000 ký tự — LLM sẽ mất đúng nội dung nó vừa yêu cầu.
+      const content = Array.from({ length: 400 }, (_, i) => `line ${i + 1}: ${'x'.repeat(60)}`).join('\n');
+      assert.ok(content.length > MAX_INLINE_TOOL_CHARS, 'nội dung vượt ngân sách chung');
+      const result = virtualizeToolOutput(content, 'read_file', 'call_read', tmpDir);
+      assert.strictEqual(result, content, 'read_file phải giữ nguyên nội dung');
+      assert.strictEqual(
+        fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs')),
+        false,
+        'không được spill read_file trong ngân sách của tool',
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 8: output vượt hẳn ngân sách của read_file vẫn được spill kèm đường dẫn', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-read-big-'));
+    try {
+      const huge = 'y'.repeat(200_000);
+      const result = virtualizeToolOutput(huge, 'read_file', 'call_read_big', tmpDir);
+      assert.ok(result.includes('[STDOUT TRUNCATED:'));
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_read_big.log')));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 9: run_command vẫn giữ ngưỡng 4,000 ký tự (không nới chung)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-cmd-'));
+    try {
+      const stdout = Array.from({ length: 200 }, (_, i) => `log line ${i + 1} ${'z'.repeat(100)}`).join('\n');
+      assert.ok(stdout.length > MAX_INLINE_TOOL_CHARS);
+      const result = virtualizeToolOutput(stdout, 'run_command', 'call_cmd', tmpDir);
+      assert.ok(result.includes('[STDOUT TRUNCATED:'), 'run_command phải còn bị spill như trước');
+      assert.ok(result.length < stdout.length, 'preview phải ngắn hơn output gốc');
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_cmd.log')));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

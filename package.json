@@ -37,7 +37,10 @@
     "9router": "node scripts/start-9router.js",
     "start": "node --max-old-space-size=4096 dist/index.js",
     "test:tea": "node --import tsx --test src/ui/tea/__tests__/*.test.ts",
-    "test:subagent-orchestration": "node --import tsx --test src/agent/subagent-orchestration.test.ts"
+    "test:subagent-orchestration": "node --import tsx --test src/agent/subagent-orchestration.test.ts",
+    "test:harness2": "node --import tsx --test src/agent/harness2-bridge.test.ts",
+    "harness:export": "tsx scripts/harness2-minus-bridge.ts --export",
+    "harness:cycle": "tsx scripts/run-propose-probe-compose.ts"
   },
   "keywords": [
     "ai-agent",

@@ -83,6 +83,48 @@ describe('AgentLoop Bug Fixes Verification', () => {
     }
   });
 
+  it('Fix 6: Turn bị hủy không giữ user message → gửi lại cùng nội dung không bị nhân đôi', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dup-user-msg-'));
+    try {
+      const workspace = new Workspace(rootDir);
+      const controller = new AbortController();
+      const seen: string[] = [];
+      let calls = 0;
+      const llm = {
+        async generate(session: Session): Promise<any> {
+          calls++;
+          const userText = session.getHistory()
+            .filter((m: any) => m.role === 'user')
+            .map((m: any) => (m.parts || []).map((p: any) => p.text || '').join(''))
+            .join('|');
+          seen.push(userText);
+          if (calls === 1) {
+            controller.abort();
+            return { text: '', toolCalls: [], finishReason: 'aborted' };
+          }
+          return { text: 'ok', toolCalls: [] };
+        },
+      };
+      const loop = new AgentLoop(llm as any, new ToolRegistry(), { workspace });
+      const session = new Session('session-duplicate-user-message');
+
+      await loop.submit(session, 'hi', 'human', { signal: controller.signal });
+      assert.equal(
+        session.getHistory().filter((m: any) => m.role === 'user').length,
+        0,
+        'User message của turn bị hủy phải được gỡ khỏi lịch sử',
+      );
+
+      await loop.submit(session, 'hi', 'human');
+      const userMessages = session.getHistory().filter((m: any) => m.role === 'user');
+      assert.equal(userMessages.length, 1, 'Gửi lại cùng nội dung phải chỉ có 1 user message');
+      const occurrences = (seen[seen.length - 1].match(/\bhi\b/g) || []).length;
+      assert.equal(occurrences, 1, `Prompt gửi LLM không được chứa trùng nội dung, got: ${seen[seen.length - 1]}`);
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
   it('Fix 2: Concurrent-read partition blocks executions after submit_solution', async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'post-sub-test-'));
     try {

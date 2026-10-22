@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer } from './diff-model.js';
@@ -359,9 +359,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         case 'step:after': return [model, []];
         case 'tool:before': {
           const entry = { kind: 'tool' as const, text: toolCallEntry(msg.args[0], msg.args[1]) };
-          if (ownerActive) return [ownerAppendEntry({ ...model, sidebar: { ...model.sidebar, tools: [...model.sidebar.tools, msg.args[0]] } }, entry, explicitOwner), []];
-          const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, tools: [...(t.tools ?? []), msg.args[0]] } : t);
-          return [ownerAppendEntry({ ...model, sessions: { ...model.sessions, tabs } }, entry, explicitOwner), []];
+          // Câu trả lời tạm thời model in ra trước tool phải nằm ngay trên tool này:
+          // flush buffer stream thành entry 'live' (bọc 2 separator) trước khi thêm tool.
+          const flushed = ownerFlushLiveAnswer(model, explicitOwner);
+          if (ownerActive) return [ownerAppendEntry({ ...flushed, sidebar: { ...flushed.sidebar, tools: [...flushed.sidebar.tools, msg.args[0]] } }, entry, explicitOwner), []];
+          const tabs = flushed.sessions.tabs.map(t => t.id === owner ? { ...t, tools: [...(t.tools ?? []), msg.args[0]] } : t);
+          return [ownerAppendEntry({ ...flushed, sessions: { ...flushed.sessions, tabs } }, entry, explicitOwner), []];
         }
         case 'tool:after': {
           const [name, result, duration, args] = msg.args;
@@ -454,6 +457,14 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const hit = sessionStripHit(model.sessions, model.width, msg.mouse.x);
         if (hit) return sessionStripClick(model, hit);
         return [model, []];
+      }
+      // Click chuột lên dấu +/− trước dòng "Thinking ›" → mở/tắt khối Thinking.
+      // Phải xử lý TRƯỚC selection để click nút không bị hiểu là bôi chữ.
+      if (msg.key === 'mouse+press' && msg.mouse && model.height > 4
+        && !model.grill.open && model.focus !== 'grill' && !model.question.active) {
+        const layout = selectionLayout(model);
+        const hit = thoughtToggleHit(model, msg.mouse.x, msg.mouse.y, layout.bodyHeight, layout.mainWidth);
+        if (hit !== undefined) return [toggleThought(model, hit), []];
       }
       const selected = selectionKey(msg, model, selectionLayout(model));
       if (selected) return selected;

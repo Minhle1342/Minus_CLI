@@ -127,8 +127,8 @@ test('Ưu tiên 1 & 3: Subagent hoàn tất thành công tự push notification 
     new AgentRegistry(),
     ((_id: string, childSession: Session) => {
       // Giả lập subagent gọi tool sửa file
-      childSession.append('tool/call', { name: 'replace_text', args: { filePath: 'src/core.ts' } });
-      childSession.append('tool/call', { name: 'write_file', args: { targetFile: 'src/helper.ts' } });
+      childSession.append('tool/call', { toolName: 'replace_text', args: { filePath: 'src/core.ts' } });
+      childSession.append('tool/call', { toolName: 'write_file', args: { targetFile: 'src/helper.ts' } });
       return {
         submit: async () => 'Refactored core logic cleanly.',
       };
@@ -252,17 +252,39 @@ test('Benchmark Specialists được thay thế thành provider InternAI (Discov
   assert.match(specialistPrompt.content, /DeepSeek V4 Pro/);
 });
 
+test('delegate_task chuyển tiếp specialistId xuống child loop (không bị rơi)', async () => {
+  let receivedOptions: any;
+  const manager = new SubagentManager(
+    new AgentRegistry(),
+    ((_id: string, _session: Session, options: any) => {
+      receivedOptions = options;
+      return { submit: async () => 'done' } as any;
+    }) as any,
+  );
+  const parentSession = new Session('parent-sess-specialist-forward');
+  manager.bindSession(parentSession);
+
+  const result = await manager.executeIsolatedTask('viết tài liệu', {
+    specialistId: 'subagent-deepseek-r1-math',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(receivedOptions?.specialistId, 'subagent-deepseek-r1-math', 'specialistId phải tới factory');
+  assert.equal(receivedOptions?.brief, 'viết tài liệu', 'brief phải tới factory');
+});
+
 test('Schema của subagent tools hướng dẫn rõ ràng LLM khả năng chạy subagent song song (Parallel Delegation)', async () => {
   const { createSpawnAgentTool, createDelegateTaskTool, createAllocateAgentTaskTool } = await import('../tools/subagent-tools.js');
   const manager = new SubagentManager(new AgentRegistry(), (() => ({})) as any);
 
   // 1. spawn_agent schema
   const spawnTool = createSpawnAgentTool(manager);
+  const spawnProps = (spawnTool.parameters as any).properties;
   assert.match(spawnTool.description, /PARALLEL/i, 'spawn_agent description phải nêu bật khả năng chạy song song');
   assert.match(spawnTool.description, /MULTIPLE TIMES IN PARALLEL/i, 'spawn_agent description phải chỉ rõ gọi nhiều lần cùng lượt');
-  assert.match(spawnTool.parameters.properties.brief.description, /parallel/i, 'brief description phải hướng dẫn emit song song');
-  assert.match(spawnTool.parameters.properties.fileScope.description, /parallel/i, 'fileScope description phải hướng dẫn non-overlapping scopes');
-  assert.match(spawnTool.parameters.properties.mode.description, /scout/i, 'mode description phải gợi ý scout cho parallel');
+  assert.match(spawnProps.brief.description, /parallel/i, 'brief description phải hướng dẫn emit song song');
+  assert.match(spawnProps.fileScope.description, /parallel/i, 'fileScope description phải hướng dẫn non-overlapping scopes');
+  assert.match(spawnProps.mode.description, /scout/i, 'mode description phải gợi ý scout cho parallel');
 
   // 2. delegate_task schema
   const delegateTaskTool = createDelegateTaskTool(manager);

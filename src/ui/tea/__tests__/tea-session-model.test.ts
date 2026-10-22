@@ -138,18 +138,80 @@ test('tool result heading carries no duration (live and hydrate render alike)', 
   assert.match(m.viewport.entries[0].text, /✔ read_file \[OK\]/);
 });
 
+test('câu trả lời tạm thời nằm ngay TRÊN tool call kế tiếp, bọc 2 separator', () => {
+  let m = createRootModel({ width: 80, height: 30 });
+  [m] = update(kernel('model:token', ['Đây là câu trả lời tạm thời, tôi sẽ kiểm tra thêm file config.']), m);
+  [m] = update(kernel('tool:before', ['read_file', { path: 'a.ts' }]), m);
+  [m] = update(kernel('tool:after', ['read_file', { success: true, output: 'ok' }, 12, { path: 'a.ts' }]), m);
+  [m] = update(kernel('model:token', ['Tiếp tục kiểm tra nữa.']), m);
+  [m] = update(kernel('tool:before', ['run_command', { command: 'npm test' }]), m);
+  [m] = update(kernel('model:final_answer', ['Đã xong.']), m);
+
+  const kinds = m.viewport.entries.map((e) => e.kind);
+  assert.deepEqual(kinds, ['live', 'tool', 'live', 'tool', 'answer'], 'mỗi đoạn text tạm thời nằm ngay trên tool của nó');
+  assert.equal(m.viewport.answerStream, '', 'buffer live phải trống sau khi flush');
+
+  // Thứ tự dòng hiển thị: text tạm thời nằm TRÊN tool, có separator bao quanh.
+  const lines = plain(m).split('\n').map((l) => l.trim());
+  const liveIdx = lines.findIndex((l) => l.includes('Đây là câu trả lời tạm thời'));
+  const toolIdx = lines.findIndex((l) => l.includes('read_file'));
+  assert.ok(liveIdx >= 0 && toolIdx > liveIdx, 'text tạm thời phải nằm trên dòng tool');
+  assert.match(lines[liveIdx - 1], /─{10,}/, 'phải có separator trên đoạn text tạm thời');
+  assert.match(lines[liveIdx + 1], /─{10,}/, 'phải có separator dưới đoạn text tạm thời');
+  // Final answer giữ nguyên dạng, không bọc separator.
+  const answerIdx = lines.findIndex((l) => l.includes('Đã xong'));
+  assert.ok(answerIdx > 0 && !/─{10,}/.test(lines[answerIdx - 1]), 'final answer không bị bọc separator');
+});
+
+test('click dấu + trước dòng Thinking › mở/tắt riêng khối đó', () => {
+  let m = createRootModel({ width: 80, height: 24 });
+  [m] = update(kernel('model:thought', ['Dòng 1 của reasoning.\nDòng 2 của reasoning.\nDòng 3 của reasoning.']), m);
+  [m] = update(kernel('model:thinking:end', []), m);
+  const thought = () => m.viewport.entries.find((e) => e.kind === 'thought')!;
+
+  // Mặc định đóng: có dấu +, nội dung bị ẩn.
+  assert.equal(thought().expanded, undefined, 'khối Thinking mặc định đóng');
+  const collapsedText = plain(m);
+  assert.match(collapsedText, /\+ Thinking › Dòng 1 của reasoning\./);
+  assert.ok(!collapsedText.includes('Dòng 3'), 'nội dung sau dòng đầu phải ẩn');
+
+  // Dưới khối Thinking có separator.
+  const collapsedRows = collapsedText.split('\n');
+  const markerRow = collapsedRows.findIndex((l) => /^\s*\+ Thinking/.test(l));
+  assert.match(collapsedRows[markerRow + 1] ?? '', /─{10,}/, 'khối Thinking phải có separator bên dưới');
+
+  // Tìm dòng chứa marker để bấm đúng chỗ.
+  const rows = plain(m).split('\n');
+  const row = rows.findIndex((l) => /^\s*\+ Thinking/.test(l));
+  assert.ok(row >= 0, 'phải tìm thấy dòng có marker');
+  const y = row + 1;
+
+  [m] = update({ type: 'key', key: 'mouse+press', now: 10, mouse: { x: 1, y } } as Msg, m);
+  assert.equal(thought().expanded, true, 'click vào dấu + phải mở khối Thinking');
+  assert.match(plain(m), /− Thinking › /, 'dấu + đổi thành − khi mở');
+  assert.ok(plain(m).includes('Dòng 3'), 'mở thì hiện toàn bộ nội dung');
+
+  [m] = update({ type: 'key', key: 'mouse+press', now: 11, mouse: { x: 1, y } } as Msg, m);
+  assert.equal(thought().expanded, false, 'click lần hai phải thu gọn lại');
+  assert.ok(!plain(m).includes('Dòng 3'), 'thu gọn thì ẩn nội dung lại');
+});
+
 test('session-transcript on a busy tab preserves live streams and background unread', () => {
   let m = twoTabs();
   // Background task on B: streams cached + unread counted.
   [m] = update(kernel('model:token', ['tok-B', { sessionId: 'b' }]), m);
   [m] = update(kernel('tool:before', ['read_file', { path: 'x.ts' }, { sessionId: 'b' }]), m);
   const tabB = () => m.sessions.tabs.find((t) => t.id === 'b')!;
-  assert.equal(tabB().answerStream, 'tok-B');
-  assert.equal(tabB().unread, 1);
-  // Hydrate for background B: cache history but keep streams, keep unread.
+  // Tool bắt đầu → text đã stream được flush thành entry 'live' (đứng trên tool),
+  // buffer live trống nhưng nội dung vẫn còn trong transcript của tab.
+  assert.equal(tabB().answerStream, '', 'text tạm thời phải rời buffer live khi tool bắt đầu');
+  assert.ok((tabB().entries || []).some((e) => e.kind === 'live' && e.text.includes('tok-B')), 'text tạm thời phải còn trong transcript');
+  assert.equal(tabB().unread, 2, 'live entry + tool entry đều tính unread');
+  // Tab B đang chạy task nền (busy) → hydrate chỉ bổ sung cache, không đè transcript.
+  [m] = update({ type: 'busy', busy: true, sessionId: 'b' }, m);
   [m] = update({ type: 'session-transcript', sessionId: 'b', entries: [{ kind: 'log', text: 'old-history' }] }, m);
-  assert.equal(tabB().answerStream, 'tok-B', 'background stream must survive hydrate');
-  assert.equal(tabB().unread, 1, 'background unread must survive hydrate');
+  assert.ok((tabB().entries || []).some((e) => e.kind === 'live' && e.text.includes('tok-B')), 'background live content must survive hydrate');
+  assert.equal(tabB().unread, 2, 'background unread must survive hydrate');
   // Switch to B (adopt restores cache incl. stream), then hydrate while viewing + busy.
   m = switchTo(m, '2');
   [m] = update({ type: 'busy', busy: true, sessionId: 'b' }, m);

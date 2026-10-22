@@ -573,6 +573,9 @@ export class AgentLoop {
       mode: resolveContextManagementMode(options?.contextManagementMode || process.env.MINUS_CONTEXT_MANAGEMENT_MODE),
       triggerRatio: options?.requestCompactionRatio
         ?? envFiniteNumber('MINUS_REQUEST_COMPACTION_RATIO'),
+      // "Mất context tool": nén sớm khi lịch sử chứa nhiều observation đã bị nén.
+      degradedObservationThreshold: envFiniteNumber('MINUS_DEGRADED_OBSERVATION_THRESHOLD'),
+      degradedContextRatio: envFiniteNumber('MINUS_DEGRADED_CONTEXT_RATIO'),
     });
     const dynamicBudget = options?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : 2000);
     this.dynamicContextArbiter = new DynamicContextArbiter(dynamicBudget);
@@ -5661,6 +5664,21 @@ export class AgentLoop {
     }
   }
 
+  /**
+   * Turn bị hủy (user abort / provider abort) thì user message mở turn đó không được
+   * giữ lại trong lịch sử. Nếu giữ, người dùng gửi lại cùng nội dung sẽ bị chồng thêm
+   * một bản nữa và prompt gửi LLM chứa trùng nội dung (ví dụ "hi" → "hihihi").
+   */
+  private discardCancelledUserMessage(session: Session, inputId: string): void {
+    const turnEnd = session.findLatestEventOfType('turn/end');
+    if (turnEnd?.data.reason !== 'cancelled') return;
+    const lastUser = session.findLatestEventOfType('user/message', (event) => event.data.source !== 'system');
+    if (lastUser?.data.inputId !== inputId) return;
+    // turn/end phải là event của chính turn vừa kết thúc, không phải của turn cũ.
+    if ((turnEnd.seq ?? 0) <= (lastUser.seq ?? 0)) return;
+    session.rollbackLastTurn();
+  }
+
   private async drainInbox(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isRecoveryResume?: boolean }): Promise<void> {
     this.drainScheduled = false;
     this.drainingInbox = true;
@@ -5672,7 +5690,9 @@ export class AgentLoop {
           session.addUserMessage(item.text, item.source, item.id);
           session.append('input/claimed', { inputId: item.id });
           await this.persistSession(session);
-          item.resolve(await this.run(session, options));
+          const answer = await this.run(session, options);
+          this.discardCancelledUserMessage(session, item.id);
+          item.resolve(answer);
         } catch (error) {
           item.reject(error);
         }

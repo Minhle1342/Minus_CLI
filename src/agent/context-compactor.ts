@@ -302,6 +302,36 @@ function isVerificationOrFailure(response: any): boolean {
 }
 
 /**
+ * Payload của một tool observation ĐÃ bị nén (stub) — model không còn đọc được
+ * nội dung gốc, chỉ còn mask + archiveId để gọi lại khi cần.
+ *
+ * Đặt cạnh code mask để hai bên không lệch nhau: mọi hình dạng stub mà
+ * compactor sinh ra đều phải được nhận diện ở đây.
+ */
+export function isDegradedObservationPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const p = payload as Record<string, any>;
+  if (p.status === 'masked' || p.status === 'superseded' || p.status === 'compacted') return true;
+  if (typeof p.observationMask === 'string' && p.observationMask.trim()) return true;
+  if (typeof p.semanticOutline === 'string' && p.semanticOutline) return true;
+  if (typeof p.summary === 'string' && /^\[(?:HARD-BUDGET OBSERVATION STUB|Compressed data)/.test(p.summary)) return true;
+  return false;
+}
+
+/** Đếm số tool observation trong history đã bị nén thành stub. */
+export function countDegradedObservations(messages: SessionMessage[]): number {
+  let count = 0;
+  for (const message of messages || []) {
+    for (const part of (message?.parts || []) as any[]) {
+      const response = part?.functionResponse;
+      if (!response) continue;
+      if (isDegradedObservationPayload(response.response)) count++;
+    }
+  }
+  return count;
+}
+
+/**
  * ContextCompactor - Động cơ Nén Ngữ Cảnh & Quản Lý Ngân Sách Token (Phase 3 - Production)
  * 
  * Áp dụng các kỹ thuật:

@@ -41,6 +41,20 @@ export const SKIP_SPILL_TOOL_NAMES = new Set([
 ]);
 
 /**
+ * Ngân sách inline riêng cho tool ĐÃ có contract giới hạn độ lớn output.
+ *
+ * read_file tự giới hạn: tối đa 800 dòng/lần, dòng > 2.000 ký tự bị cắt, file
+ * lớn (unscoped) trả preview 120 dòng + outline. Runner cắt thêm ở 4.000 ký tự
+ * là ghi đè contract đó: 77% lần read_file bị cắt oan (phân bố thật: p25 =
+ * median = p75 ≈ 4.168 ký tự — chỉ vượt ngưỡng một chút), LLM mất đúng nội dung
+ * nó vừa yêu cầu, và file spill ra disk lại bị cắt lần 2 nên đọc lại cũng
+ * không hồi được.
+ */
+const TOOL_INLINE_BUDGET: Record<string, { chars: number; lines: number }> = {
+  read_file: { chars: 32_000, lines: 800 },
+};
+
+/**
  * Spill large tool outputs to .minus/scratch/tool_outputs/{toolCallId}.log and return
  * a clean Head/Tail preview to protect LLM context and prevent rate-limit exhaustion.
  */
@@ -53,8 +67,9 @@ export function virtualizeToolOutput(
   if (typeof rawText !== 'string') {
     return rawText;
   }
+  const budget = TOOL_INLINE_BUDGET[toolName] ?? { chars: MAX_INLINE_TOOL_CHARS, lines: MAX_INLINE_LINES };
   const lines = rawText.split('\n');
-  if (rawText.length <= MAX_INLINE_TOOL_CHARS && lines.length <= MAX_INLINE_LINES) {
+  if (rawText.length <= budget.chars && lines.length <= budget.lines) {
     return rawText;
   }
   if (SKIP_SPILL_TOOL_NAMES.has(toolName)) {

@@ -138,7 +138,7 @@ export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition
         },
         specialistId: {
           type: Type.STRING,
-          description: 'Optional benchmark specialist ID or alias (e.g. "subagent-deepseek-r1-math", "subagent-internai-coder", "subagent-gemini-swe-architect") to inherit model and system instructions.',
+          description: 'Optional benchmark specialist ID or alias (e.g. "subagent-deepseek-r1-math", "subagent-internai-qwen38-coder", "subagent-gemini-swe-architect") to inherit model and system instructions.',
         },
         allowedTools: {
           type: Type.ARRAY,

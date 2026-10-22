@@ -4,6 +4,7 @@ import type { Content, FunctionDeclaration } from "@google/genai";
 import { ExactTokenizer } from "./exact-tokenizer.js";
 import {
   ContextCompactor,
+  countDegradedObservations,
   type CompactionOptions,
   type CompactionStats,
   type MaskedObservationRecord,
@@ -94,6 +95,17 @@ export interface ContextBudgetManagerOptions {
   mode?: ContextManagementMode;
   triggerRatio?: number;
   counter?: RequestTokenCounter;
+  /**
+   * Số tool observation đã bị nén thành stub mà lịch sử được phép chứa trước
+   * khi coi là "mất context tool" và nén sớm. 0 = tắt.
+   */
+  degradedObservationThreshold?: number;
+  /**
+   * Tỉ lệ ngân sách mà từ đó "mất context tool" mới kích hoạt nén sớm.
+   * Phải THẤP hơn triggerRatio để nén diễn ra sớm hơn, nhưng vẫn cao hơn 0
+   * để không nén liên tục mỗi request (số stub không giảm sau khi nén).
+   */
+  degradedContextRatio?: number;
 }
 
 export interface ContextPrepareOptions extends Omit<
@@ -388,6 +400,10 @@ export class ContextBudgetManager {
   readonly mode: ContextManagementMode;
   readonly triggerRatio: number;
   readonly counter: RequestTokenCounter;
+  /** Ngưỡng số observation đã bị nén để coi là "mất context tool". */
+  readonly degradedObservationThreshold: number;
+  /** Tỉ lệ ngân sách mà điều kiện trên bắt đầu nén sớm. */
+  readonly degradedContextRatio: number;
 
   constructor(
     private readonly compactor: ContextCompactor,
@@ -399,6 +415,14 @@ export class ContextBudgetManager {
       Math.max(0.5, options.triggerRatio ?? 0.75),
     );
     this.counter = options.counter || new CalibratedRequestTokenCounter();
+    this.degradedObservationThreshold = Math.max(
+      0,
+      Math.floor(options.degradedObservationThreshold ?? 8),
+    );
+    this.degradedContextRatio = Math.min(
+      0.9,
+      Math.max(0.1, options.degradedContextRatio ?? 0.5),
+    );
   }
 
   async prepareRequest(
@@ -414,7 +438,18 @@ export class ContextBudgetManager {
       || (this.mode === "auto" && isKnownProvider(envelope.provider)))
       && options.phaseTransition
       && before.historyTokens >= (options.phaseTransition.minHistoryTokens ?? 4_000));
-    const shouldCompact = budgetPressure || phaseTransitionEligible;
+    // "Mất context tool": lịch sử đang chứa nhiều observation đã bị nén thành stub
+    // → model không đọc lại được nội dung tool cũ. Khi đó nén SỚM (ở tỉ lệ
+    // ngân sách thấp hơn triggerRatio) để còn chỗ cho lượt nén tiếp theo thay vì
+    // để context tràn rồi mới vào đường khẩn cấp cắt cụt.
+    // Điều kiện ngân sách giữ cho vòng lặp không lặp vô hạn: sau khi nén, số stub
+    // không giảm (mask là idempotent) nhưng số token giảm → điều kiện tắt.
+    const degradedObservations = this.degradedObservationThreshold > 0
+      ? countDegradedObservations(envelope.history)
+      : 0;
+    const degradedToolContext = degradedObservations >= this.degradedObservationThreshold
+      && before.upperBoundTokens >= Math.floor(targetUsableInputTokens * this.degradedContextRatio);
+    const shouldCompact = budgetPressure || phaseTransitionEligible || degradedToolContext;
     const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(
       envelope.history,
     );

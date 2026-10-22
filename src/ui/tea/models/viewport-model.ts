@@ -259,35 +259,76 @@ function permissionLines(request: PermissionCard, width: number): string[] {
     edge('╰' + '─'.repeat(width - 2) + '╯')];
 }
 
+/**
+ * Entry nào kết thúc bằng separator (divider)?
+ * - tool result (✔/✖/⊘) đóng cặp call+result
+ * - khối Thinking: có separator riêng bên dưới
+ * - band 'live': đã bọc 2 separator
+ * Dùng để không vẽ 2 đường kẻ liền nhau giữa 2 entry.
+ */
+function endsWithDivider(entry: TranscriptEntry): boolean {
+  if (entry.kind === 'thought' || entry.kind === 'live') return true;
+  return entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+}
+
 /** Rendered lines contributed by one transcript entry (cached per width). */
-function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, pairDivider: string): string[] {
+function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, pairDivider: string, prevClosedPair = false): string[] {
     let widths = cachedLines.get(entry);
     if (!widths) { widths = new Map(); cachedLines.set(entry, widths); }
     let rendered = widths.get(width);
     if (!rendered) {
-      const prefix = entry.kind === 'user' ? 'You › ' : entry.kind === 'answer' ? 'Minus › ' : entry.kind === 'thought' ? 'Thinking › ' : '';
-      const prefixColor = entry.kind === 'user' ? tokyoNight.blue : entry.kind === 'answer' ? tokyoNight.purple : tokyoNight.muted;
-      const textColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
-      // Thinking is model prose: same markdown pipeline as the answer, the
-      // muted "Thinking › " prefix keeps it visually subordinate.
-      const body = entry.kind === 'answer' || entry.kind === 'thought' ? formatAnswer(entry.text, width)
-        : entry.kind === 'tool' ? formatTool(entry.text)
-        : color(textColor, stripTerminalControls(entry.text));
-      rendered = entry.kind === 'permission' && entry.permission
-        ? permissionLines(entry.permission, width)
-        : wrap(color(prefixColor, prefix) + body, width);
-      widths.set(width, rendered);
+      // 'live' = câu trả lời tạm thời model in ra giữa lúc làm việc: hiển thị y hệt
+      // final answer nhưng bị bọc 2 separator để không bị đọc như kết quả cuối.
+      const isAnswerLike = entry.kind === 'answer' || entry.kind === 'live';
+      if (entry.kind === 'thought') {
+        // Khối Thinking mặc định ĐÓNG: chỉ hiện dòng đầu + dấu "+" để bấm mở.
+        // Mở thì hiện "−" và toàn bộ nội dung.
+        const expanded = entry.expanded === true;
+        const marker = color(expanded ? tokyoNight.muted : tokyoNight.purple, expanded ? '−' : '+');
+        const label = color(tokyoNight.muted, 'Thinking › ');
+        const raw = stripTerminalControls(entry.text).split('\n')[0] || '';
+        const avail = Math.max(8, width - 12);
+        const preview = raw.length > avail ? raw.slice(0, avail - 1) + '…' : raw;
+        const body = expanded
+          ? formatAnswer(entry.text, width)
+          : formatAnswerInline(preview, tokyoNight.muted);
+        rendered = wrap(marker + ' ' + label + body, width);
+        widths.set(width, rendered);
+      } else {
+        const prefix = entry.kind === 'user' ? 'You › ' : isAnswerLike ? 'Minus › ' : '';
+        const prefixColor = entry.kind === 'user' ? tokyoNight.blue : isAnswerLike ? tokyoNight.purple : tokyoNight.muted;
+        const textColor = entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
+        // Thinking is model prose: same markdown pipeline as the answer, the
+        // muted "Thinking › " prefix keeps it visually subordinate.
+        const body = isAnswerLike ? formatAnswer(entry.text, width)
+          : entry.kind === 'tool' ? formatTool(entry.text)
+          : color(textColor, stripTerminalControls(entry.text));
+        rendered = entry.kind === 'permission' && entry.permission
+          ? permissionLines(entry.permission, width)
+          : wrap(color(prefixColor, prefix) + body, width);
+        widths.set(width, rendered);
+      }
     }
     // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
     const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
-    if (collapsed && ['thought', 'tool', 'step'].includes(entry.kind)) {
+    if (entry.kind === 'live') {
+      // Bọc 2 separator. Nếu entry trước đã đóng cặp bằng divider, không vẽ thêm
+      // (tránh 2 đường kẻ liền nhau).
+      return [...(prevClosedPair ? [] : [pairDivider]), ...rendered, pairDivider];
+    }
+    if (entry.kind === 'thought') {
+      // Thinking tự quản lý trạng thái mở/đóng (dấu +/−) → không bị Ctrl+O ép.
+      // Kết thúc bằng separator để tách khỏi entry kế tiếp.
+      return [...rendered, pairDivider];
+    }
+    if (collapsed && ['tool', 'step'].includes(entry.kind)) {
       if (rendered.length <= 1) return isToolResult ? [...rendered, pairDivider] : rendered;
-      const label = entry.kind === 'thought' ? 'Thinking' : entry.kind === 'tool' ? 'Tool' : 'Step';
-      const labelColor = entry.kind === 'thought' ? tokyoNight.muted : entry.kind === 'tool' ? tokyoNight.cyan : tokyoNight.yellow;
+      const label = entry.kind === 'tool' ? 'Tool' : 'Step';
+      const labelColor = entry.kind === 'tool' ? tokyoNight.cyan : tokyoNight.yellow;
       const badge = color(tokyoNight.purple, '▸ ') + color(labelColor, label)
         + color(tokyoNight.muted, ` · ${rendered.length - 1} lines hidden · `);
       const summary = stripTerminalControls(entry.text).split('\n')[0].trim();
-      const summaryColor = summary.startsWith('✖') ? tokyoNight.red : entry.kind === 'thought' ? tokyoNight.muted : tokyoNight.text;
+      const summaryColor = summary.startsWith('✖') ? tokyoNight.red : tokyoNight.text;
       const badgeLines = wrap(badge + color(summaryColor, summary), width).slice(0, 1);
       return isToolResult ? [...badgeLines, pairDivider] : badgeLines;
     }
@@ -309,8 +350,8 @@ export function lastAnswerOffset(model: ViewportModel, width: number): number | 
   const index = model.entries.findLastIndex((e) => e.kind === 'answer');
   if (index < 0) return undefined;
   const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
-  return model.entries.slice(index + 1)
-    .reduce((sum, entry) => sum + entryLines(entry, width, model.collapsed, pairDivider).length, 0)
+  const after = model.entries.slice(index + 1);
+  return after.reduce((sum, entry, i) => sum + entryLines(entry, width, model.collapsed, pairDivider, i > 0 && endsWithDivider(after[i - 1])).length, 0)
     + (model.thinking ? 1 : 0) + (model.answerStream ? 1 : 0);
 }
 
@@ -318,7 +359,7 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
   // TUI: divider Tokyo Night khép mỗi cặp tool đã xong (call + result).
   // Vẽ ở tầng render nên live + history replay đều có, không tốn entry.
   const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
-  const lines = model.entries.flatMap(entry => entryLines(entry, width, model.collapsed, pairDivider));
+  const lines = model.entries.flatMap((entry, i) => entryLines(entry, width, model.collapsed, pairDivider, i > 0 && endsWithDivider(model.entries[i - 1])));
   // TUI: thinking is ephemeral (archived into a thought entry on flush) — show
   // only the tail as one flattened line so the stream never floods the viewport.
   if (model.thinking) {
@@ -491,7 +532,10 @@ export function sessionHistoryToTranscript(messages: Array<{
         const visible = userVisibleText(text);
         if (visible !== undefined) entries.push({ kind: 'user', text: visible });
       } else {
-        entries.push({ kind: 'answer', text });
+        // Prose đi kèm tool call là câu trả lời TẠM THỜI → kind 'live' (bọc 2 separator),
+        // khớp với cách render live. Prose đứng một mình là final answer.
+        const followedByToolCall = parts.some((part) => part.functionCall);
+        entries.push({ kind: followedByToolCall ? 'live' : 'answer', text });
       }
     }
     // Tool parts hydrate even when the message carries no prose: the model
@@ -616,6 +660,55 @@ export function eventOwnerId(model: RootModel, ownerOverride?: string): string {
   return ownerOverride || model.status.busySessionId || model.sessions.activeId;
 }
 
+/**
+ * Click chuột lên dấu "+/−" trước dòng "Thinking ›" → trả về index của entry
+ * thought tương ứng (undefined nếu không trúng).
+ * Toạ độ chuột 1-based (x=1 là cột đầu tiên), viewport bắt đầu ở dòng y=3
+ * (header + session tab-strip) — cùng quy ước với selection.
+ */
+export function thoughtToggleHit(
+  model: RootModel,
+  x: number,
+  y: number,
+  bodyHeight: number,
+  mainWidth: number,
+): number | undefined {
+  if (x < 1 || x > 2) return undefined;             // marker chỉ nằm ở cột 1-2
+  if (model.diff.visible) return undefined;
+  const lines = viewportLines(model.viewport, mainWidth);
+  const bottom = Math.max(bodyHeight, lines.length - model.viewport.offset);
+  const first = Math.max(0, bottom - bodyHeight);
+  const strip = model.height > 4 ? 1 : 0;
+  const row = y - 2 - strip;
+  if (row < 0 || first + row >= lines.length) return undefined;
+  if (!/^[+−]\s/.test(stripTerminalControls(lines[first + row]))) return undefined;
+
+  // Dòng này thuộc entry nào? Đếm số dòng mỗi entry đóng góp.
+  const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, mainWidth)));
+  const entries = model.viewport.entries;
+  const target = first + row;
+  let acc = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const count = entryLines(entries[i], mainWidth, model.viewport.collapsed, pairDivider, i > 0 && endsWithDivider(entries[i - 1])).length;
+    if (target >= acc && target < acc + count) {
+      return entries[i].kind === 'thought' ? i : undefined;
+    }
+    acc += count;
+  }
+  return undefined;
+}
+
+/** Bật/tắt một khối Thinking (entry index trong viewport.entries). */
+export function toggleThought(model: RootModel, index: number): RootModel {
+  const entries = model.viewport.entries;
+  const entry = entries[index];
+  if (!entry || entry.kind !== 'thought') return model;
+  // Entry mới (object mới) → cache render WeakMap tính lại, không dùng bản cache cũ.
+  const next = [...entries];
+  next[index] = { ...entry, expanded: !entry.expanded };
+  return { ...model, viewport: { ...model.viewport, entries: next } };
+}
+
 /** Append entry vào owner: viewport nếu đang xem tab đó, else cache tab + đếm unread. */
 export function ownerAppendEntry(model: RootModel, entry: TranscriptEntry, ownerOverride?: string): RootModel {
   const owner = eventOwnerId(model, ownerOverride);
@@ -678,6 +771,31 @@ export function ownerArchiveThinking(model: RootModel, ownerOverride?: string): 
   const tabs = model.sessions.tabs.map(t => (t.id === owner && t.thinking)
     ? { ...t, entries: [...(t.entries || []).slice(-999), { kind: 'thought' as const, text: t.thinking }], thinking: '', unread: (t.unread || 0) + 1 }
     : t);
+  return { ...model, sessions: { ...model.sessions, tabs } };
+}
+
+/**
+ * Flush text đang stream của owner thành entry 'live' (bọc 2 separator).
+ * Dùng khi tool call kế tiếp bắt đầu: đoạn text model in ra trước tool phải
+ * nằm ngay TRÊN tool đó, không trôi xuống đáy viewport như buffer live.
+ */
+export function ownerFlushLiveAnswer(model: RootModel, ownerOverride?: string): RootModel {
+  const owner = eventOwnerId(model, ownerOverride);
+  if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
+    const text = model.viewport.answerStream;
+    if (!text.trim()) return model;
+    return { ...model, viewport: { ...appendEntry(model.viewport, { kind: 'live', text }), answerStream: '' } };
+  }
+  const tabs = model.sessions.tabs.map(t => {
+    if (t.id !== owner || !t.answerStream?.trim()) return t;
+    return {
+      ...t,
+      entries: [...(t.entries || []).slice(-999), { kind: 'live' as const, text: t.answerStream }],
+      answerStream: '',
+      unread: (t.unread || 0) + 1,
+      lastActive: Date.now(),
+    };
+  });
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 
@@ -1072,3 +1190,4 @@ export function sessionTabsView(state: SessionTabsModel, width: number, height: 
   const bodyHeight = Math.min(height - 4, lines.length + 2);
   return lipGlossTheme.panel.render(lines.slice(0, Math.max(1, bodyHeight)).join('\n'), panelWidth, bodyHeight).map((row) => fit(row, panelWidth));
 }
+

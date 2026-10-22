@@ -70,6 +70,8 @@ export interface IsolatedTaskOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   mode?: SubagentOptions['mode'];
+  /** ID chuyên gia benchmark trong AgentRegistry để kế thừa mô hình và chỉ dẫn hệ thống. */
+  specialistId?: string;
 }
 
 export interface IsolatedTaskResult {
@@ -395,6 +397,7 @@ export class SubagentManager {
         modelName: options.modelName || options.model,
         verificationCommand: options.verificationCommand,
         mode: options.mode,
+        specialistId: options.specialistId,
         brief: cleanTask,
       }, controller.signal);
     } catch (err: any) {

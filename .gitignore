@@ -86,3 +86,6 @@ desktop.ini
 *.swp
 *~
 *.bak
+
+.eval-sandbox/
+external/

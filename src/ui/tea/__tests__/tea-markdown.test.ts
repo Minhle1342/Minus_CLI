@@ -130,6 +130,7 @@ test('viewportLines: formats thinking markdown like an answer', () => {
     collapsed: false,
     entries: [{
       kind: 'thought',
+      expanded: true,
       text: '# Bước 1\n\n- đọc `canComplete`\n- **kiểm tra** mutation\n\n> lưu ý: chỉ dẫn này',
     }],
   };
@@ -140,6 +141,26 @@ test('viewportLines: formats thinking markdown like an answer', () => {
   assert.doesNotMatch(fullText, /\*\*/, 'bold markers must be consumed by the markdown pipeline');
   assert.doesNotMatch(fullText, /`/, 'inline-code backticks must be consumed');
   assert.match(fullText, /- đọc/, 'list markers stay visible');
+});
+
+test('viewportLines: khối Thinking mặc định đóng — chỉ dòng đầu + dấu +', () => {
+  const model: ViewportModel = {
+    offset: 0,
+    thinking: '',
+    answerStream: '',
+    pinned: false,
+    collapsed: false,
+    entries: [{
+      kind: 'thought',
+      text: 'Đã đọc file config.ts và nhận ra loader đọc sai path.\nTiếp theo cần xem hàm loadConfig() ở dòng 42.',
+    }],
+  };
+  const lines = viewportLines(model, 80).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const first = lines[0];
+  assert.match(first, /^\+ Thinking › /, 'khối Thinking mặc định phải có dấu +');
+  assert.match(first, /Đã đọc file config\.ts/, 'hiện dòng đầu nội dung');
+  assert.doesNotMatch(first, /loadConfig/, 'phần còn lại phải ẩn');
+  assert.ok(!lines.join('\n').includes('dòng 42'), 'nội dung sau dòng đầu phải bị ẩn');
 });
 
 test('formatAnswer: folds setext H1 underline (===) into a heading', () => {
@@ -168,8 +189,10 @@ test('sessionHistoryToTranscript: keeps text-less tool calls and results', () =>
   ]);
   // Explore tool thành công: call + result gộp thành MỘT entry (entry call replaced);
   // list_files chưa có response giữ nguyên entry call.
+  // Prose đi kèm tool call = câu trả lời TẠM THỜI → kind 'live' (bọc 2 separator),
+  // prose đứng một mình mới là final answer.
   const kinds = entries.map((e) => e.kind);
-  assert.deepEqual(kinds, ['user', 'tool', 'answer', 'tool']);
+  assert.deepEqual(kinds, ['user', 'tool', 'live', 'tool']);
   assert.match(entries[1].text, /✔ read_file \[OK\] · a\.ts · const x = 1;/);
   assert.match(entries[1].text, /const x = 1;/);
   assert.match(entries[3].text, /list_files/);

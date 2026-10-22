@@ -1,8 +1,11 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
 import { SECTION_PATCH_FORMAT_SPEC, resolvePatchFormatSpec } from '../llm/prompt-sections.js';
+import { ROOT_CAUSE_STEPS } from '../llm/sections/shared.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
 import { isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
+
+export { ROOT_CAUSE_STEPS };
 
 export interface ToolSynergyContext {
   lastToolName?: string;
@@ -42,8 +45,7 @@ export function detectBugReportIntent(text?: string): boolean {
   return /\b(lỗi|bị lỗi|fix bug|sửa bug|bug|crash|crashed|exception|traceback|failed|failing|error|bị hỏng|không chạy được|fail)\b/.test(stripped);
 }
 
-// Single canonical protocol wording; branches below only add context + tools.
-export const ROOT_CAUSE_STEPS = '1.[Extract Coordinates] -> 2.[Backward Causal Trace] -> 3.[Falsifiable Hypothesis] -> 4.[Smallest Coherent Fix] -> 5.[Verify]';
+// Single canonical protocol wording (defined in sections/shared); branches below only add context + tools.
 
 /**
  * ToolSynergyAdvisor
