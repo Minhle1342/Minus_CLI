@@ -72,23 +72,85 @@ export class Harness2RecursiveEngine {
 
   /**
    * TASK-LEVEL RECURSION (Step 1): Propose candidate harness edits.
-   * Generates invariant (broad discipline) and domain-specific (context-targeted) candidates.
+   * Generates invariant (broad discipline) and domain-specific (context-targeted) candidates
+   * specialized for the active execution phase ('plan' vs 'implement').
    */
-  proposeCandidates(baseScaffold: CognitiveScaffold, taskBrief: string): HarnessCandidate[] {
+  proposeCandidates(
+    baseScaffold: CognitiveScaffold,
+    taskBrief: string,
+    options?: { phase?: 'plan' | 'implement' }
+  ): HarnessCandidate[] {
     const candidates: HarnessCandidate[] = [];
+    const activePhase = options?.phase || baseScaffold.phase || 'implement';
 
     // 1. Base Candidate
     candidates.push({
       id: 'base',
       kind: 'base',
-      description: 'Default baseline scaffold',
-      scaffold: { ...baseScaffold },
+      description: `Default baseline scaffold (${activePhase} mode)`,
+      scaffold: { ...baseScaffold, phase: activePhase },
     });
 
-    // 2. Invariant Candidate (inv1): Enforces strict verification discipline and zero-mock invariant
+    if (activePhase === 'plan') {
+      // 2. Invariant Candidate for Plan mode: Strict mutation lockdown and architectural inspection
+      const planInvGates = [
+        ...baseScaffold.negativeGate,
+        '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text, apply_patch, write_file, write_to_file) during the PLAN phase.',
+        'NEVER call submit_solution or update_plan_task before completing the architectural survey and recording the plan.',
+        'ALWAYS inspect caller references and quantify blast radius before committing to an architectural decomposition.',
+      ];
+      candidates.push({
+        id: 'inv1',
+        kind: 'invariant',
+        description: 'Strict mutation lockdown and architectural decomposition invariant',
+        scaffold: {
+          ...baseScaffold,
+          phase: 'plan',
+          negativeGate: planInvGates,
+          executionTopology: [
+            'Step 1 (Architectural Survey): Inspect files, interfaces, and call graphs via read-only tools.',
+            'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
+            'Step 3 (Plan Formalization): Formulate 2-5 atomic milestones with explicit acceptance criteria.',
+            'Step 4 (Phase Transition Readiness): Request transition to implement phase before mutating.',
+          ],
+        },
+        toolGuidanceDelta: {
+          read_file: 'Inspect exact file contents and line numbers for architectural understanding',
+          create_plan: 'Define ordered milestones with dependsOn boundaries',
+        },
+      });
+
+      // 3. Domain Candidate for Plan mode: Tailored to task domain
+      const isTypeScript = /ts|typescript|types/i.test(taskBrief);
+      const isRefactor = /refactor|restructure|redesign|cache/i.test(taskBrief);
+      const planDomGates = [...baseScaffold.negativeGate];
+      if (isTypeScript) {
+        planDomGates.push('Map exact interface signatures and TypeScript types in the plan before designing changes');
+      }
+      if (isRefactor) {
+        planDomGates.push('Ensure backward compatibility of existing public APIs in the proposed plan milestones');
+      }
+      candidates.push({
+        id: 'dom1',
+        kind: 'domain',
+        description: `Targeted plan specialization (${isTypeScript ? 'TypeScript' : 'General'} + ${isRefactor ? 'Refactor' : 'Feature'})`,
+        scaffold: {
+          ...baseScaffold,
+          phase: 'plan',
+          negativeGate: planDomGates,
+        },
+      });
+
+      return candidates;
+    }
+
+    // Default for 'implement' phase:
+    // 2. Invariant Candidate (inv1): Enforces strict verification discipline, reproduction test, zero-mock
     const invGates = [
       ...baseScaffold.negativeGate,
+      'NEVER attempt bugfix code changes without writing or running a reproduction test (Agentless reproduction protocol).',
       'NEVER modify existing test assertions merely to make a build pass without explicit authorization',
+      'NEVER fabricate mock test data inside production code to force a green test.',
       'ALWAYS inspect caller references before changing function signatures',
     ];
     candidates.push({
@@ -97,16 +159,18 @@ export class Harness2RecursiveEngine {
       description: 'Strict verification and zero-mock invariant',
       scaffold: {
         ...baseScaffold,
+        phase: 'implement',
         negativeGate: invGates,
       },
       toolGuidanceDelta: {
         run_command: 'Run build and test verification commands immediately after each surgical edit',
+        get_diagnostics: 'Inspect compiler feedback immediately after editing a file',
       },
     });
 
     // 3. Domain Candidate (dom1): Injects domain-specific constraints from task keywords
     const isTypeScript = /ts|typescript|types/i.test(taskBrief);
-    const isBug = /fix|bug|error|null|fail/i.test(taskBrief);
+    const isBug = /fix|bug|error|null|fail|deadlock/i.test(taskBrief);
 
     const domGates = [...baseScaffold.negativeGate];
     if (isTypeScript) {
@@ -122,12 +186,14 @@ export class Harness2RecursiveEngine {
       description: `Targeted domain specialization (${isTypeScript ? 'TypeScript' : 'General'} + ${isBug ? 'Defect' : 'Feature'})`,
       scaffold: {
         ...baseScaffold,
+        phase: 'implement',
         negativeGate: domGates,
       },
     });
 
     return candidates;
   }
+
 
   /**
    * TASK-LEVEL RECURSION (Step 2): Empirical probe evaluation.

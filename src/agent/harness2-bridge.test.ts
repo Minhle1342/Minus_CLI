@@ -202,6 +202,49 @@ test('CognitiveHarness - Injects learned negative gates from Harness2 engine', (
   assert.ok(scaffold.negativeGate.some(g => g.includes('NEVER divide by zero')));
 });
 
+test('Harness2RecursiveEngine - Propose specialized candidates for Plan mode', () => {
+  const harness = new CognitiveHarness();
+  const engine = new Harness2RecursiveEngine();
+
+  const planScaffold = harness.createScaffold({
+    request: 'Thiết kế kiến trúc hệ thống cache phân tán',
+    phase: 'plan',
+  });
+
+  const candidates = engine.proposeCandidates(
+    planScaffold,
+    'Thiết kế kiến trúc hệ thống cache phân tán',
+    { phase: 'plan' }
+  );
+
+  assert.strictEqual(candidates.length, 3);
+  const invCandidate = candidates.find(c => c.id === 'inv1');
+  assert.ok(invCandidate);
+  assert.ok(invCandidate.scaffold.negativeGate.some(g => g.includes('PHASE LOCK: PLAN') || g.includes('NEVER attempt code mutations')));
+  assert.ok(invCandidate.scaffold.executionTopology.some(s => s.includes('Architectural') || s.includes('Inspection') || s.includes('Dependency')));
+});
+
+test('Harness2RecursiveEngine - Propose specialized candidates for Implement mode', () => {
+  const harness = new CognitiveHarness();
+  const engine = new Harness2RecursiveEngine();
+
+  const implementScaffold = harness.createScaffold({
+    request: 'Sửa lỗi deadlock trong transaction pool',
+    phase: 'implement',
+  });
+
+  const candidates = engine.proposeCandidates(
+    implementScaffold,
+    'Sửa lỗi deadlock trong transaction pool',
+    { phase: 'implement' }
+  );
+
+  const invCandidate = candidates.find(c => c.id === 'inv1');
+  assert.ok(invCandidate);
+  assert.ok(invCandidate.scaffold.negativeGate.some(g => g.includes('reproduction test') || g.includes('mock test data')));
+});
+
+
 
 
 
