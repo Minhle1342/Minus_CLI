@@ -39,11 +39,7 @@ async function main() {
         'Detect sycophancy and premise deception; reject invalid shortcuts',
       ],
       memory: 'MinusCLI utilizes a Temporal Knowledge Graph and Project Memory architecture.',
-      toolGuidance: {
-        spawn_agent: 'Launch background scout/specialist subagents for parallel exploration without lock conflicts.',
-        run_command: 'Execute terminal verification commands with strict timeout.',
-        replace_file_content: 'Perform surgical, atomic single-block mutations.',
-      },
+      toolGuidance: engine.generateStandardToolGuidanceCatalog(),
       subagents: {
         scout: {
           role: 'Read-only Reconnaissance Agent',
@@ -72,7 +68,7 @@ async function main() {
     console.log('   - systemprompt_implement.md');
     console.log('   - guardrails.md');
     console.log('   - LongTermMEMORY.md');
-    console.log('   - tool_descriptions/');
+    console.log(`   - tool_descriptions/ (${Object.keys(bundle.toolGuidance).length} tools: ${Object.keys(bundle.toolGuidance).join(', ')})`);
     console.log('   - sub_agents/');
     console.log('   - skills/');
     console.log('\n🚀 Bạn có thể chạy harness2 trên thư mục này hoặc dùng trong benchmark.');
@@ -86,7 +82,7 @@ async function main() {
     if (bundle.systemPromptImplement) console.log(`   - System Prompt [IMPLEMENT] (${bundle.systemPromptImplement.length} chars)`);
     console.log(`   - Guardrails (${bundle.guardrails.length} rules)`);
     console.log(`   - Memory (${bundle.memory.length} chars)`);
-    console.log(`   - Tools (${Object.keys(bundle.toolGuidance).length} tools)`);
+    console.log(`   - Tools (${Object.keys(bundle.toolGuidance).length} tools: ${Object.keys(bundle.toolGuidance).join(', ')})`);
     console.log(`   - Subagents (${Object.keys(bundle.subagents).length} agents)`);
     console.log(`   - Skills (${bundle.skills.length} skills: ${bundle.skills.join(', ')})`);
   } else {

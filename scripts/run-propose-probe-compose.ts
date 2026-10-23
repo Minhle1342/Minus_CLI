@@ -118,6 +118,14 @@ async function main() {
         if (cand.scaffold.negativeGate.length > 3) {
           console.log(`       - ${c.gray}... và ${cand.scaffold.negativeGate.length - 3} quy tắc khác${c.reset}`);
         }
+        if (cand.toolGuidance) {
+          const sampleTools = Object.keys(cand.toolGuidance).slice(0, 3);
+          console.log(`     Tool Guidance (${Object.keys(cand.toolGuidance).length} tools):`);
+          for (const t of sampleTools) {
+            const shortDesc = cand.toolGuidance[t].slice(0, 65).replace(/\n/g, ' ');
+            console.log(`       ⚙️  ${c.cyan}${t}${c.reset}: ${c.gray}${shortDesc}...${c.reset}`);
+          }
+        }
       }
 
       // =========================================================================
@@ -157,6 +165,16 @@ async function main() {
       console.log(`  ✨ Composed Negative Gates (${compositionResult.composedScaffold.negativeGate.length} quy tắc):`);
       for (const gate of compositionResult.composedScaffold.negativeGate.slice(-3)) {
         console.log(`     🛡️  ${c.cyan}${gate}${c.reset}`);
+      }
+      if (compositionResult.composedScaffold.toolGuidance) {
+        const tools = Object.keys(compositionResult.composedScaffold.toolGuidance);
+        console.log(`  🛠️  Composed Tool Guidance (${tools.length} tools):`);
+        for (const t of ['read_file', 'replace_text', 'run_command', 'get_diagnostics', 'submit_solution']) {
+          if (compositionResult.composedScaffold.toolGuidance[t]) {
+            const line = compositionResult.composedScaffold.toolGuidance[t].slice(0, 70).replace(/\n/g, ' ');
+            console.log(`     ⚙️  ${c.bold}${t.padEnd(16)}${c.reset} ➔ ${c.gray}${line}...${c.reset}`);
+          }
+        }
       }
       console.log(`  🧭 Composed Topology:`);
       for (const step of compositionResult.composedScaffold.executionTopology) {
