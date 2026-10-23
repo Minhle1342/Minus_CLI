@@ -290,6 +290,32 @@ test('Harness2RecursiveEngine - Generate structured system prompt for Plan and I
   assert.ok(implementPrompt.includes('Surgical') || implementPrompt.includes('surgical') || implementPrompt.includes('atomic') || implementPrompt.includes('MUTATION'));
 });
 
+test('Harness2RecursiveEngine - Generate standard tool guidance catalog for core tools', () => {
+  const engine = new Harness2RecursiveEngine();
+  const catalog = (engine as any).generateStandardToolGuidanceCatalog();
+
+  // Must cover core tools
+  const coreTools = ['read_file', 'replace_text', 'apply_patch', 'run_command', 'get_diagnostics', 'codegraph_explore', 'analyze_impact', 'create_plan', 'submit_solution', 'spawn_agent'];
+  for (const tool of coreTools) {
+    assert.ok(catalog[tool], `Catalog must contain guidance for ${tool}`);
+    assert.ok(catalog[tool].length > 30, `Guidance for ${tool} must be informative`);
+  }
+});
+
+test('Harness2RecursiveEngine - Generate phase-differentiated tool guidance', () => {
+  const engine = new Harness2RecursiveEngine();
+  
+  const planCatalog = (engine as any).generateStandardToolGuidanceCatalog({ phase: 'plan' });
+  assert.ok(planCatalog.replace_text.includes('PHASE LOCK') || planCatalog.replace_text.includes('FORBIDDEN'));
+  assert.ok(planCatalog.apply_patch.includes('PHASE LOCK') || planCatalog.apply_patch.includes('FORBIDDEN'));
+  assert.ok(planCatalog.read_file.includes('primary') || planCatalog.read_file.includes('Survey') || planCatalog.read_file.includes('Inspect') || planCatalog.read_file.includes('read-only'));
+
+  const implCatalog = (engine as any).generateStandardToolGuidanceCatalog({ phase: 'implement' });
+  assert.ok(implCatalog.replace_text.includes('read_file') || implCatalog.replace_text.includes('get_diagnostics') || implCatalog.replace_text.includes('PREREQUISITE'));
+  assert.ok(implCatalog.apply_patch.includes('diff') || implCatalog.apply_patch.includes('patch') || implCatalog.apply_patch.includes('hunk'));
+});
+
+
 
 
 

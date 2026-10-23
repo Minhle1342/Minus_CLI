@@ -418,6 +418,53 @@ export class Harness2RecursiveEngine {
   }
 
   /**
+   * Generates a comprehensive, phase-aware tool guidance catalog for MinusCLI core tools.
+   */
+  generateStandardToolGuidanceCatalog(options?: { phase?: 'plan' | 'implement' }): Record<string, string> {
+    const phase = options?.phase;
+    const isPlan = phase === 'plan';
+    const isImplement = phase === 'implement';
+
+    const catalog: Record<string, string> = {
+      read_file: isPlan
+        ? 'Inspect exact file contents and line ranges. Primary tool for Survey and Architectural Inspection in read-only mode. Never guess line numbers or mutate code.'
+        : 'Inspect exact target lines and context before any modification. Specify StartLine and EndLine to view precise slices. Essential prerequisite before calling replace_text.',
+
+      replace_text: isPlan
+        ? '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Code modifications are strictly prohibited during the Plan phase. Survey, inspect, and plan ONLY.'
+        : isImplement
+        ? '[PREREQUISITES REQUIRED] Perform surgical atomic substring replacement. MUST inspect exact lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via get_diagnostics post-mutation.'
+        : 'Perform surgical atomic substring replacement. Target content must be unique within the specified line range. Always specify leading whitespace exactly.',
+
+      apply_patch: isPlan
+        ? '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Applying code patches is strictly prohibited during the Plan phase. Complete architectural planning first.'
+        : isImplement
+        ? 'Apply unified diff patch hunks (--- a/<path> +++ b/<path> @@ -start,count +start,count @@). Context lines prefix with space, deletions with -, additions with +. Always inspect git diff and compiler diagnostics after applying.'
+        : 'Apply multi-line unified diff patches. Fuzz 0-2 auto-resolved. Inspect file with read_file if fuzz candidate conflict occurs.',
+
+      run_command: isPlan
+        ? 'Execute read-only commands (e.g. git status, git log, directory listings). Mutating commands or running test suites to force premature changes is discouraged.'
+        : 'Execute terminal build, test, and lint commands (e.g. npm test, npx jest, cargo test, pytest). Run fast commands (<5s) synchronously (WaitMsBeforeAsync=5000). Proactively launch servers in background. Avoid polling sleeps.',
+
+      get_diagnostics: 'Query Language Server Protocol (LSP) diagnostics and TypeScript compiler errors for workspace files. Mandatory check immediately following any code edit to verify 0 errors before proceeding.',
+
+      codegraph_explore: 'Explore codebase architecture, symbol hierarchies, call graphs, and dependency routes using pre-indexed knowledge graph. Always survey upstream callers before planning changes.',
+
+      analyze_impact: 'Quantify blast radius and impacted execution flows before modifying function signatures, interfaces, or exported modules. Report callers, processes, and risk level.',
+
+      create_plan: isPlan
+        ? 'Decompose architectural scope into 2-5 verifiable DAG milestones with explicit dependsOn dependencies and concrete acceptance criteria.'
+        : 'Define or refine execution milestones with verifiable acceptance criteria. Mark milestones as completed only after empirical verification.',
+
+      submit_solution: 'Final completion gateway. Validates all milestones, passes reproduction test, and confirms clean test suite exit code 0. FORBIDDEN to call with fake mocks or unverified assertions.',
+
+      spawn_agent: 'Launch background reconnaissance scout or specialist subagents for parallel exploration without lock conflicts or shared state pollution.',
+    };
+
+    return catalog;
+  }
+
+  /**
    * Exports an 8-component bundle to disk matching Harness² directory layout.
    */
   async exportBundleToDirectory(bundle: Harness2Bundle, outDir: string): Promise<void> {
