@@ -1,6 +1,6 @@
 # Harness² Empirical Recursion & Two-Way Bridge Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Chuyển đổi Harness² Bridge từ cơ chế giả lập (mock probe) sang hệ thống đệ quy thực nghiệm (empirical recursion) có lưu trữ kinh nghiệm bền vững (persistent reflection library) và đồng bộ 2 chiều với Google Research Harness².
 
@@ -40,7 +40,7 @@
   - `Harness2RecursiveEngine.loadLibraryFromFile(filePath: string): Promise<number>`
   - `Harness2RecursiveEngine.findRelevantLessons(taskBrief: string): string[]`
 
-- [ ] **Step 1: Write failing tests for library persistence & relevance search**
+- [x] **Step 1: Write failing tests for library persistence & relevance search**
 
 Thêm các test cases vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -72,24 +72,24 @@ test('Harness2RecursiveEngine - Save and load persistent reflection library', as
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL with "engine.saveLibraryToFile is not a function"
 
-- [ ] **Step 3: Implement persistence methods in `src/agent/harness2-bridge.ts`**
+- [x] **Step 3: Implement persistence methods in `src/agent/harness2-bridge.ts`**
 
 Triển khai:
 - `saveLibraryToFile(filePath: string)`: Ghi JSON có format đẹp ra đĩa, tạo thư mục cha nếu chưa có.
 - `loadLibraryFromFile(filePath: string)`: Đọc và parse JSON, nạp vào `persistentLibrary`. Bỏ qua nếu file chưa tồn tại và trả về 0.
 - `findRelevantLessons(taskBrief: string)`: So khớp từ khóa giữa `taskBrief` với `taskBrief` và `lessonsLearned` trong library để trả về các bài học liên quan nhất.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS (all tests pass)
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts
@@ -110,7 +110,7 @@ git commit -m "feat(harness2): add persistent reflection library storage and les
 - Produces:
   - `Harness2RecursiveEngine.evaluateCandidateEmpirically(candidate: HarnessCandidate, context: { testCommand: string; cwd: string; timeoutMs?: number }): Promise<ProbeEvaluation>`
 
-- [ ] **Step 1: Write failing tests for empirical probe evaluation**
+- [x] **Step 1: Write failing tests for empirical probe evaluation**
 
 Thêm test case vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -141,24 +141,24 @@ test('Harness2RecursiveEngine - Evaluate candidate empirically with actual comma
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL with "engine.evaluateCandidateEmpirically is not a function"
 
-- [ ] **Step 3: Implement `evaluateCandidateEmpirically`**
+- [x] **Step 3: Implement `evaluateCandidateEmpirically`**
 
 Triển khai phương thức trong `Harness2RecursiveEngine`:
 - Sử dụng `child_process.exec` kèm timeout.
 - Tính điểm score dựa trên kết quả thực thi thực tế (pass/fail, duration ms, mức độ bao phủ của negative gates).
 - Thay thế các số liệu hardcoded trong `scripts/run-propose-probe-compose.ts` bằng lệnh gọi `engine.evaluateCandidateEmpirically`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts scripts/run-propose-probe-compose.ts
@@ -179,7 +179,7 @@ git commit -m "feat(harness2): implement empirical probe evaluation replacing mo
 - Produces:
   - `Harness2RecursiveEngine.importBundleFromDirectory(inDir: string): Promise<Harness2Bundle>`
 
-- [ ] **Step 1: Write failing test for bundle import**
+- [x] **Step 1: Write failing test for bundle import**
 
 Thêm test case vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -209,12 +209,12 @@ test('Harness2RecursiveEngine - Import 8-component bundle from directory (Two-Wa
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL with "engine.importBundleFromDirectory is not a function"
 
-- [ ] **Step 3: Implement `importBundleFromDirectory`**
+- [x] **Step 3: Implement `importBundleFromDirectory`**
 
 Triển khai trong `src/agent/harness2-bridge.ts`:
 - Đọc `systemprompt.md`, `guardrails.md`, `LongTermMEMORY.md`.
@@ -222,12 +222,12 @@ Triển khai trong `src/agent/harness2-bridge.ts`:
 - Khôi phục thành đối tượng `Harness2Bundle` hoàn chỉnh.
 - Thêm flag `--import` vào `scripts/harness2-minus-bridge.ts`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts scripts/harness2-minus-bridge.ts
@@ -247,7 +247,7 @@ git commit -m "feat(harness2): implement two-way bundle import and export synchr
 - Consumes: `Harness2RecursiveEngine.findRelevantLessons()`
 - Produces: `CognitiveHarness.setHarness2Engine(engine: Harness2RecursiveEngine): void`
 
-- [ ] **Step 1: Write failing test verifying lessons injection into CognitiveScaffold**
+- [x] **Step 1: Write failing test verifying lessons injection into CognitiveScaffold**
 
 Thêm test case kiểm tra scaffold nạp guardrails từ persistent library:
 ```typescript
@@ -271,23 +271,23 @@ test('CognitiveHarness - Injects learned negative gates from Harness2 engine', (
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:completion` hoặc test suite liên quan.
 Expected: FAIL with "harness.setHarness2Engine is not a function"
 
-- [ ] **Step 3: Implement engine injection in `CognitiveHarness`**
+- [x] **Step 3: Implement engine injection in `CognitiveHarness`**
 
 Trong `src/agent/cognitive-harness.ts`:
 - Thêm property `private harness2Engine?: Harness2RecursiveEngine`.
 - Trong `buildScaffold()`, nếu `harness2Engine` được thiết lập, truy vấn `findRelevantLessons(params.request)` và đưa các `suggestedGuardrails` vào `scaffold.negativeGate`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/cognitive-harness.ts src/agent/harness2-bridge.ts
@@ -306,22 +306,22 @@ git commit -m "feat(cognitive-harness): wire harness2 learned lessons into runti
 - Consumes: All components from Tasks 1-4
 - Produces: Fully verified test runs on benchmark tasks with empirical scoring
 
-- [ ] **Step 1: Run complete harness test suite**
+- [x] **Step 1: Run complete harness test suite**
 
 Run: `npm run test:harness2`
 Expected: PASS (tất cả các unit test mới và cũ đều đạt 100%)
 
-- [ ] **Step 2: Run bundle export and verify 8 components**
+- [x] **Step 2: Run bundle export and verify 8 components**
 
 Run: `npm run harness:export`
 Expected: Xuất thành công vào `external/harness2/runs/minus_harness`
 
-- [ ] **Step 3: Run propose-probe-compose cycle with live evaluation**
+- [x] **Step 3: Run propose-probe-compose cycle with live evaluation**
 
 Run: `npm run harness:cycle -- --task=task-bugfix-growth-rate`
 Expected: Chu trình Propose-Probe-Compose chạy thành công với điểm số thực nghiệm thực tế thay vì mock cứng.
 
-- [ ] **Step 4: Final commit**
+- [x] **Step 4: Final commit**
 
 ```bash
 git add scripts/run-propose-probe-compose.ts
