@@ -1,6 +1,6 @@
 # Harness² Plan & Implement System Prompt Optimization Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Nâng cấp Harness² Bridge để tối ưu hóa chuyên sâu System Prompt và Cognitive Scaffolding riêng biệt cho 2 chế độ cốt lõi: **Plan Mode** (phân rã kiến trúc, khóa mutation, đánh giá blast radius) và **Implement Mode** (TDD, reproduction test, sửa đổi nguyên tử, kiểm thử hồi quy thực nghiệm).
 
@@ -38,7 +38,7 @@
 - Produces:
   - `Harness2RecursiveEngine.proposeCandidates(baseScaffold: CognitiveScaffold, taskBrief: string, options?: { phase?: 'plan' | 'implement' }): HarnessCandidate[]`
 
-- [ ] **Step 1: Write failing tests for phase-aware candidate generation**
+- [x] **Step 1: Write failing tests for phase-aware candidate generation**
 
 Thêm test cases vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -87,12 +87,12 @@ test('Harness2RecursiveEngine - Propose specialized candidates for Implement mod
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL (assertion fails because candidate gates lack specialized phase-differentiated rules)
 
-- [ ] **Step 3: Implement phase differentiation in `proposeCandidates`**
+- [x] **Step 3: Implement phase differentiation in `proposeCandidates`**
 
 Cập nhật hàm `proposeCandidates`:
 - Đọc `options?.phase || baseScaffold.phase || 'implement'`.
@@ -103,12 +103,12 @@ Cập nhật hàm `proposeCandidates`:
   - `inv1`: Ép buộc reproduction test trước khi sửa, kiểm tra diagnostics (`get_diagnostics`) sau khi sửa, cấm giả lập kết quả.
   - `dom1`: Tối ưu hóa sửa đổi atomic và kiểm tra biên dữ liệu đặc thù.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts
@@ -131,7 +131,7 @@ git commit -m "feat(harness2): add phase-aware candidate proposal for plan and i
   - `Harness2Bundle.systemPromptImplement?: string`
   - Export/Import hỗ trợ `systemprompt_plan.md` và `systemprompt_implement.md`
 
-- [ ] **Step 1: Write failing test for phase-differentiated bundle export and import**
+- [x] **Step 1: Write failing test for phase-differentiated bundle export and import**
 
 Thêm test case vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -168,12 +168,12 @@ test('Harness2RecursiveEngine - Export and import bundle with phase-specific sys
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL ("systemprompt_plan.md should exist" assertion fails)
 
-- [ ] **Step 3: Implement phase system prompt support in export and import**
+- [x] **Step 3: Implement phase system prompt support in export and import**
 
 Trong `src/agent/harness2-bridge.ts`:
 - Mở rộng interface `Harness2Bundle`:
@@ -190,12 +190,12 @@ Trong `src/agent/harness2-bridge.ts`:
   - Đọc `systemprompt_implement.md` nếu có.
 - Cập nhật `scripts/harness2-minus-bridge.ts` để hiển thị thống kê cả 2 prompt khi export/import.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts scripts/harness2-minus-bridge.ts
@@ -215,7 +215,7 @@ git commit -m "feat(harness2): support phase-differentiated system prompts in bu
 - Produces:
   - `Harness2RecursiveEngine.generatePhaseSystemPrompt(phase: 'plan' | 'implement', customDirectives?: string[]): string`
 
-- [ ] **Step 1: Write failing test for phase system prompt generation**
+- [x] **Step 1: Write failing test for phase system prompt generation**
 
 Thêm test case vào `src/agent/harness2-bridge.test.ts`:
 ```typescript
@@ -234,24 +234,24 @@ test('Harness2RecursiveEngine - Generate structured system prompt for Plan and I
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm run test:harness2`
 Expected: FAIL with "engine.generatePhaseSystemPrompt is not a function"
 
-- [ ] **Step 3: Implement `generatePhaseSystemPrompt` in `Harness2RecursiveEngine`**
+- [x] **Step 3: Implement `generatePhaseSystemPrompt` in `Harness2RecursiveEngine`**
 
 Triển khai phương thức:
 - Kết hợp Core Agent Persona (`You are MinusCLI...`).
 - Nhúng định hướng chuẩn từ `SECTION_PHASE_PLAN_GUIDANCE` (khi phase='plan') hoặc `SECTION_PHASE_IMPLEMENT_GUIDANCE` (khi phase='implement').
 - Tích hợp thêm các directives và guardrails tùy biến đã được tối ưu hóa qua các vòng lặp Harness².
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm run test:harness2`
 Expected: PASS
 
-- [ ] **Step 5: Impact & Graph change review and Commit**
+- [x] **Step 5: Impact & Graph change review and Commit**
 
 ```bash
 git add src/agent/harness2-bridge.ts src/agent/harness2-bridge.test.ts
@@ -269,7 +269,7 @@ git commit -m "feat(harness2): implement generatePhaseSystemPrompt bridging harn
 - Consumes: CLI flag `--phase=plan|implement|both`
 - Produces: Dual-phase probe evaluation reporting contrasts for both planning and implementation
 
-- [ ] **Step 1: Add phase argument parsing to runner script**
+- [x] **Step 1: Add phase argument parsing to runner script**
 
 Trong `scripts/run-propose-probe-compose.ts`:
 - Nhận diện `--phase=plan`, `--phase=implement` hoặc `--phase=both` (mặc định 'both').
@@ -281,17 +281,17 @@ Trong `scripts/run-propose-probe-compose.ts`:
   - Khởi tạo `baseScaffold` với `phase: 'implement'`.
   - Đánh giá khả năng sửa lỗi và vượt qua test suite.
 
-- [ ] **Step 2: Run verification cycle for Plan mode**
+- [x] **Step 2: Run verification cycle for Plan mode**
 
 Run: `npx tsx scripts/run-propose-probe-compose.ts --task=task-bugfix-growth-rate --phase=plan`
 Expected: Hiển thị kết quả Propose-Probe-Compose riêng biệt cho Plan mode với điểm số và tương phản hành vi của Plan scaffolding.
 
-- [ ] **Step 3: Run verification cycle for Implement mode**
+- [x] **Step 3: Run verification cycle for Implement mode**
 
 Run: `npx tsx scripts/run-propose-probe-compose.ts --task=task-bugfix-growth-rate --phase=implement`
 Expected: Hiển thị kết quả Propose-Probe-Compose cho Implement mode.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/run-propose-probe-compose.ts
@@ -310,22 +310,22 @@ git commit -m "feat(harness2): add dual-phase probe evaluation to propose-probe-
 - Consumes: All components from Tasks 1-4
 - Produces: Fully verified test suite and synced bundles on disk
 
-- [ ] **Step 1: Run complete unit test suite**
+- [x] **Step 1: Run complete unit test suite**
 
 Run: `npm run test:harness2`
 Expected: PASS (Tất cả các unit tests từ Task 1 đến Task 4 đều đạt 100%)
 
-- [ ] **Step 2: Export dual-phase bundle to disk**
+- [x] **Step 2: Export dual-phase bundle to disk**
 
 Run: `npm run harness:export`
 Expected: Xuất thành công `systemprompt.md`, `systemprompt_plan.md`, `systemprompt_implement.md` và các thành phần khác vào `external/harness2/runs/minus_harness`.
 
-- [ ] **Step 3: Verify import round-trip**
+- [x] **Step 3: Verify import round-trip**
 
 Run: `npx tsx scripts/harness2-minus-bridge.ts --import`
 Expected: Nạp thành công và hiển thị thống kê cả 2 prompt Plan và Implement.
 
-- [ ] **Step 4: Final commit**
+- [x] **Step 4: Final commit**
 
 ```bash
 git add scripts/harness2-minus-bridge.ts docs/superpowers/plans/2026-10-23-harness2-plan-implement-system-prompt.md

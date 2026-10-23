@@ -24,8 +24,14 @@ async function main() {
 
     const bundle: Harness2Bundle = {
       systemPrompt: 'You are MinusCLI, an advanced autonomous software engineering agent powered by Gemini.',
-      systemPromptPlan: 'You are MinusCLI in PLAN mode. Architectural decomposition, impact assessment, and DAG milestones. Code editing tools are FORBIDDEN.',
-      systemPromptImplement: 'You are MinusCLI in IMPLEMENT mode. Bounded surgical mutations, TDD reproduction tests, immediate diagnostic checks, and empirical verification.',
+      systemPromptPlan: engine.generatePhaseSystemPrompt('plan', [
+        'Survey call graphs with GitNexus before writing plans',
+        'Decompose into 2-5 verifiable DAG milestones',
+      ]),
+      systemPromptImplement: engine.generatePhaseSystemPrompt('implement', [
+        'Require TDD reproduction tests before any code edit',
+        'Verify with empirical test commands before reporting completion',
+      ]),
       guardrails: [
         'MUST run impact before editing (GitNexus call graph intelligence)',
         'NEVER edit a function, class, or method before impact analysis',
