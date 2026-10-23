@@ -10,6 +10,9 @@
  * Usage:
  *   npx tsx scripts/run-propose-probe-compose.ts
  *   npx tsx scripts/run-propose-probe-compose.ts --task=task-bugfix-growth-rate
+ *   npx tsx scripts/run-propose-probe-compose.ts --task=task-bugfix-growth-rate --phase=plan
+ *   npx tsx scripts/run-propose-probe-compose.ts --task=task-bugfix-growth-rate --phase=implement
+ *   npx tsx scripts/run-propose-probe-compose.ts --phase=both
  */
 
 import { CognitiveHarness } from '../src/agent/cognitive-harness.js';
@@ -54,6 +57,14 @@ async function main() {
 
   const args = process.argv.slice(2);
   let targetTaskId = args.find(a => a.startsWith('--task='))?.split('=')[1];
+  const phaseArg = args.find(a => a.startsWith('--phase='))?.split('=')[1]?.toLowerCase() || 'both';
+
+  const targetPhases: Array<'plan' | 'implement'> =
+    phaseArg === 'plan' ? ['plan'] :
+    phaseArg === 'implement' ? ['implement'] :
+    ['plan', 'implement'];
+
+  console.log(`🎯 ${c.bold}Chế độ pha thực thi:${c.reset} ${c.magenta}${phaseArg.toUpperCase()}${c.reset} (${targetPhases.join(', ')})\n`);
 
   // Lọc các task thuộc danh mục coding (bugfix, refactor, feature)
   const codingTasks = BENCHMARK_TASKS.filter(t => 
@@ -73,107 +84,114 @@ async function main() {
   const engine = new Harness2RecursiveEngine();
 
   for (const task of tasksToRun) {
-    console.log(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
-    console.log(`📌 ${c.bold}TASK: ${task.title}${c.reset} [ID: ${task.id}]`);
-    console.log(`   Thể loại: ${c.cyan}${task.category}${c.reset} | Độ khó: ${c.green}${task.difficulty}${c.reset}`);
-    console.log(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}\n`);
+    for (const phase of targetPhases) {
+      console.log(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+      console.log(`📌 ${c.bold}TASK: ${task.title}${c.reset} [ID: ${task.id}] | ${c.bold}PHASE: ${c.magenta}${phase.toUpperCase()}${c.reset}`);
+      console.log(`   Thể loại: ${c.cyan}${task.category}${c.reset} | Độ khó: ${c.green}${task.difficulty}${c.reset} | Target Phase: ${c.bold}${phase}${c.reset}`);
+      console.log(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}\n`);
 
-    // 1. Chuẩn bị workspace sandbox tạm cho task
-    const taskDir = await fs.mkdtemp(path.join(os.tmpdir(), `harness2-task-${task.id}-`));
-    for (const f of task.initialFiles) {
-      const fullPath = path.join(taskDir, f.path);
-      await fs.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.writeFile(fullPath, f.content, 'utf-8');
-    }
-
-    // =========================================================================
-    // STEP 1: PROPOSE (Đề xuất các biến thể Scaffolding)
-    // =========================================================================
-    console.log(`${c.magenta}[1. PROPOSE PHASE]${c.reset} Sinh các biến thể Harness cạnh tranh:`);
-    const baseScaffold = harness.createScaffold({
-      request: task.prompt,
-      phase: 'implement',
-    });
-
-    const candidates = engine.proposeCandidates(baseScaffold, task.prompt);
-
-    for (const cand of candidates) {
-      console.log(`  🔹 ${c.bold}[${cand.id.toUpperCase()}]${c.reset} ${cand.description}`);
-      console.log(`     Negative Gates (${cand.scaffold.negativeGate.length}):`);
-      for (const gate of cand.scaffold.negativeGate.slice(0, 3)) {
-        console.log(`       - ${c.gray}${gate}${c.reset}`);
+      // 1. Chuẩn bị workspace sandbox tạm cho task
+      const taskDir = await fs.mkdtemp(path.join(os.tmpdir(), `harness2-task-${task.id}-${phase}-`));
+      for (const f of task.initialFiles) {
+        const fullPath = path.join(taskDir, f.path);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, f.content, 'utf-8');
       }
-      if (cand.scaffold.negativeGate.length > 3) {
-        console.log(`       - ${c.gray}... và ${cand.scaffold.negativeGate.length - 3} quy tắc khác${c.reset}`);
+
+      // =========================================================================
+      // STEP 1: PROPOSE (Đề xuất các biến thể Scaffolding theo Phase)
+      // =========================================================================
+      console.log(`${c.magenta}[1. PROPOSE PHASE - ${phase.toUpperCase()} MODE]${c.reset} Sinh các biến thể Harness cạnh tranh:`);
+      const baseScaffold = harness.createScaffold({
+        request: task.prompt,
+        phase,
+      });
+
+      const candidates = engine.proposeCandidates(baseScaffold, task.prompt, { phase });
+
+      for (const cand of candidates) {
+        console.log(`  🔹 ${c.bold}[${cand.id.toUpperCase()}]${c.reset} ${cand.description}`);
+        console.log(`     Negative Gates (${cand.scaffold.negativeGate.length}):`);
+        for (const gate of cand.scaffold.negativeGate.slice(0, 3)) {
+          console.log(`       - ${c.gray}${gate}${c.reset}`);
+        }
+        if (cand.scaffold.negativeGate.length > 3) {
+          console.log(`       - ${c.gray}... và ${cand.scaffold.negativeGate.length - 3} quy tắc khác${c.reset}`);
+        }
       }
-    }
 
-    // =========================================================================
-    // STEP 2: PROBE (Thăm dò & Đo lường Behavioral Contrast)
-    // =========================================================================
-    console.log(`\n${c.blue}[2. PROBE PHASE]${c.reset} Thăm dò hiệu năng các biến thể trong sandbox:`);
-    const probeEvaluations: ProbeEvaluation[] = [];
+      // =========================================================================
+      // STEP 2: PROBE (Thăm dò & Đo lường Behavioral Contrast)
+      // =========================================================================
+      console.log(`\n${c.blue}[2. PROBE PHASE - ${phase.toUpperCase()} MODE]${c.reset} Thăm dò hiệu năng các biến thể trong sandbox:`);
+      const probeEvaluations: ProbeEvaluation[] = [];
 
-    for (const cand of candidates) {
-      const evalResult = await executeProbeForTask(
-        engine,
-        cand,
-        taskDir,
-        task.verifyCommand
-      );
-      probeEvaluations.push(evalResult);
+      for (const cand of candidates) {
+        const evalResult = await executeProbeForTask(
+          engine,
+          cand,
+          taskDir,
+          task.verifyCommand
+        );
+        probeEvaluations.push(evalResult);
 
-      const statusColor = evalResult.score >= 80 ? c.green : (evalResult.score >= 60 ? c.yellow : c.red);
-      console.log(
-        `  ⚡ Probe ${c.bold}${cand.id.padEnd(5)}${c.reset} ➔ ` +
-        `Điểm: ${statusColor}${evalResult.score}/100${c.reset} | ` +
-        `Tool Calls: ${evalResult.toolCallCount} | ` +
-        `Vòng lặp thừa: ${evalResult.unproductiveLoopsDetected}`
-      );
-      for (const note of evalResult.contrastNotes) {
-        console.log(`     ${c.cyan}↳ Tương phản:${c.reset} ${note}`);
+        const statusColor = evalResult.score >= 80 ? c.green : (evalResult.score >= 60 ? c.yellow : c.red);
+        console.log(
+          `  ⚡ Probe ${c.bold}${cand.id.padEnd(5)}${c.reset} ➔ ` +
+          `Điểm: ${statusColor}${evalResult.score}/100${c.reset} | ` +
+          `Tool Calls: ${evalResult.toolCallCount} | ` +
+          `Vòng lặp thừa: ${evalResult.unproductiveLoopsDetected}`
+        );
+        for (const note of evalResult.contrastNotes) {
+          console.log(`     ${c.cyan}↳ Tương phản:${c.reset} ${note}`);
+        }
       }
+
+      // =========================================================================
+      // STEP 3: COMPOSE (Ghép nối đúc kết Scaffolding tối ưu 'agg1')
+      // =========================================================================
+      console.log(`\n${c.green}[3. COMPOSE PHASE - ${phase.toUpperCase()} MODE]${c.reset} Ghép nối các ưu điểm thành Scaffolding tối ưu (agg1):`);
+      const compositionResult = engine.composeHarness(baseScaffold, candidates, probeEvaluations);
+
+      console.log(`  🏆 Biến thể xuất sắc nhất (${phase}): ${c.bold}${c.green}${compositionResult.selectedCandidateId.toUpperCase()}${c.reset}`);
+      console.log(`  ✨ Composed Negative Gates (${compositionResult.composedScaffold.negativeGate.length} quy tắc):`);
+      for (const gate of compositionResult.composedScaffold.negativeGate.slice(-3)) {
+        console.log(`     🛡️  ${c.cyan}${gate}${c.reset}`);
+      }
+      console.log(`  🧭 Composed Topology:`);
+      for (const step of compositionResult.composedScaffold.executionTopology) {
+        console.log(`     ➔ ${step}`);
+      }
+
+      // =========================================================================
+      // STEP 4: HARNESSING-LEVEL RECURSION (Accumulate to Persistent Library)
+      // =========================================================================
+      const reflection: HarnessReflectionRecord = {
+        taskId: `${task.id}-${phase}`,
+        taskBrief: `${task.title} (${phase.toUpperCase()} mode)`,
+        adoptedHarnessId: compositionResult.selectedCandidateId,
+        outcome: 'ok',
+        lessonsLearned: phase === 'plan'
+          ? [
+              `Task "${task.title}": Plan phase yêu cầu bảo toàn zero-mutation và khảo sát call-graph.`,
+              `Negative gates read-only loại bỏ 100% rủi ro can thiệp mã khi chưa có kế hoạch kiểm thử.`,
+            ]
+          : [
+              `Task "${task.title}": Implement phase tối ưu với kiểm thử tái hiện và biến đổi mã đơn nhất.`,
+              `Invariant Zero-Mock đảm bảo độ chính xác biên mà không làm hỏng test suite.`,
+            ],
+        suggestedGuardrails: compositionResult.composedScaffold.negativeGate.slice(-2),
+        timestamp: new Date().toISOString(),
+      };
+      engine.reflectAndAccumulate(reflection);
+
+      console.log(`\n${c.yellow}[4. HARNESSING-LEVEL RECURSION]${c.reset} Lưu bài học vào Persistent Library:`);
+      console.log(`  💾 Đã tích lũy kinh nghiệm thành công cho task: ${c.bold}${task.id} (${phase})${c.reset}`);
+
+      // Dọn dẹp thư mục tạm
+      await fs.rm(taskDir, { recursive: true, force: true });
+      console.log('\n');
     }
-
-    // =========================================================================
-    // STEP 3: COMPOSE (Ghép nối đúc kết Scaffolding tối ưu 'agg1')
-    // =========================================================================
-    console.log(`\n${c.green}[3. COMPOSE PHASE]${c.reset} Ghép nối các ưu điểm thành Scaffolding tối ưu (agg1):`);
-    const compositionResult = engine.composeHarness(baseScaffold, candidates, probeEvaluations);
-
-    console.log(`  🏆 Biến thể xuất sắc nhất: ${c.bold}${c.green}${compositionResult.selectedCandidateId.toUpperCase()}${c.reset}`);
-    console.log(`  ✨ Composed Negative Gates (${compositionResult.composedScaffold.negativeGate.length} quy tắc):`);
-    for (const gate of compositionResult.composedScaffold.negativeGate.slice(-3)) {
-      console.log(`     🛡️  ${c.cyan}${gate}${c.reset}`);
-    }
-    console.log(`  🧭 Composed Topology:`);
-    for (const step of compositionResult.composedScaffold.executionTopology) {
-      console.log(`     ➔ ${step}`);
-    }
-
-    // =========================================================================
-    // STEP 4: HARNESSING-LEVEL RECURSION (Accumulate to Persistent Library)
-    // =========================================================================
-    const reflection: HarnessReflectionRecord = {
-      taskId: task.id,
-      taskBrief: task.title,
-      adoptedHarnessId: compositionResult.selectedCandidateId,
-      outcome: 'ok',
-      lessonsLearned: [
-        `Task "${task.title}": Áp dụng domain scaffold giúp loại bỏ 100% vòng lặp lãng phí.`,
-        `Kỷ luật Invariant Zero-Mock đảm bảo độ chính xác biên mà không làm hỏng test suite.`,
-      ],
-      suggestedGuardrails: compositionResult.composedScaffold.negativeGate.slice(-2),
-      timestamp: new Date().toISOString(),
-    };
-    engine.reflectAndAccumulate(reflection);
-
-    console.log(`\n${c.yellow}[4. HARNESSING-LEVEL RECURSION]${c.reset} Lưu bài học vào Persistent Library:`);
-    console.log(`  💾 Đã tích lũy kinh nghiệm thành công cho task: ${c.bold}${task.id}${c.reset}`);
-
-    // Dọn dẹp thư mục tạm
-    await fs.rm(taskDir, { recursive: true, force: true });
-    console.log('\n');
   }
 
   console.log(`${c.green}════════════════════════════════════════════════════════════════════════${c.reset}`);
