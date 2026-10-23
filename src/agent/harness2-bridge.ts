@@ -545,8 +545,12 @@ export class Harness2RecursiveEngine {
     // Tools
     const toolsDir = path.join(outDir, 'tool_descriptions');
     await fs.mkdir(toolsDir, { recursive: true });
-    for (const [name, desc] of Object.entries(bundle.toolGuidance)) {
-      await fs.writeFile(path.join(toolsDir, `${name}.md`), desc, 'utf-8');
+    const guidanceToExport = (bundle.toolGuidance && Object.keys(bundle.toolGuidance).length > 0)
+      ? bundle.toolGuidance
+      : this.generateStandardToolGuidanceCatalog({ phase: bundle.systemPromptPlan ? 'plan' : 'implement' });
+    for (const [name, desc] of Object.entries(guidanceToExport)) {
+      const cleanName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+      await fs.writeFile(path.join(toolsDir, `${cleanName}.md`), desc, 'utf-8');
     }
 
     // Subagents
@@ -600,6 +604,12 @@ export class Harness2RecursiveEngine {
       }
     } catch {
       // directory does not exist or unreadable
+    }
+
+    if (Object.keys(toolGuidance).length === 0) {
+      Object.assign(toolGuidance, this.generateStandardToolGuidanceCatalog({
+        phase: systemPromptPlan ? 'plan' : 'implement',
+      }));
     }
 
     const subagents: Record<string, { role: string; instructions: string; model?: string }> = {};

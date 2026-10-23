@@ -353,6 +353,42 @@ test('Harness2RecursiveEngine - Compose refined tool guidance in composeHarness'
   assert.ok((result.composedScaffold as any).toolGuidance.replace_text);
 });
 
+test('Harness2RecursiveEngine - Export and import comprehensive tool descriptions', async () => {
+  const engine = new Harness2RecursiveEngine();
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'harness2-tools-bundle-test-'));
+  try {
+    const fullCatalog = engine.generateStandardToolGuidanceCatalog({ phase: 'implement' });
+    const bundle: Harness2Bundle = {
+      systemPrompt: 'MinusCLI Agent',
+      guardrails: ['No mock'],
+      memory: 'Project Memory',
+      toolGuidance: fullCatalog,
+      subagents: {},
+      skills: [],
+      scripts: {},
+      plugins: {},
+    };
+
+    await engine.exportBundleToDirectory(bundle, tmpDir);
+
+    const toolsDir = path.join(tmpDir, 'tool_descriptions');
+    const exportedFiles = await fs.readdir(toolsDir);
+    assert.ok(exportedFiles.length >= 10, `Expected at least 10 tool descriptions, found ${exportedFiles.length}`);
+    assert.ok(exportedFiles.includes('read_file.md'));
+    assert.ok(exportedFiles.includes('replace_text.md'));
+    assert.ok(exportedFiles.includes('apply_patch.md'));
+    assert.ok(exportedFiles.includes('get_diagnostics.md'));
+
+    const imported = await engine.importBundleFromDirectory(tmpDir);
+    assert.strictEqual(Object.keys(imported.toolGuidance).length, exportedFiles.length);
+    assert.strictEqual(imported.toolGuidance.read_file, fullCatalog.read_file);
+    assert.strictEqual(imported.toolGuidance.replace_text, fullCatalog.replace_text);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 
 
 
