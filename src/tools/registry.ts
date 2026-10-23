@@ -339,6 +339,7 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'web_fetch') return this.tools.get('read_url_content');
     if (name === 'search_text') return this.tools.get('search_codebase_fast') || searchTextTool;
     if (name === 'tools_search') return this.tools.get('search_codebase_fast');
+    if (name === 'delete-file') return this.tools.get('delete_file');
     return undefined;
   }
 
@@ -471,6 +472,7 @@ export class ToolScope implements ToolProvider {
         : name === 'tools_search' ? 'search_codebase_fast'
         : name === 'write_to_file' ? 'write_file'
         : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
+        : name === 'delete-file' ? 'delete_file'
         : undefined;
       if (!alias || !this.allowed.has(alias)) return undefined;
     }

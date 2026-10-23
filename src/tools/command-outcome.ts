@@ -65,3 +65,61 @@ export function createPreflightBlockedResult(
     ...(suggestion ? { suggestion } : {}),
   });
 }
+
+/**
+ * Global runtime state indicating whether Docker isolation is disabled.
+ * When disabled, run_command permits all non-destructive commands to run freely on host
+ * without being blocked by ISOLATED_SANDBOX_REQUIRED.
+ */
+let _dockerIsolationDisabled = false;
+
+const SYSTEM_DESTRUCTIVE_PATTERNS = [
+  /\brm\s+(?:-[a-z]*r[a-z]*f*|-[a-z]*f[a-z]*r)\s+(?:\/|[a-z]:[\\/])/i,
+  /\brmdir\s+\/s\s+\/q\s+[a-z]:[\\/]/i,
+  /\b(?:remove-item|ri)\b[^\r\n]*(?:-recurse|-r)[^\r\n]*(?:[a-z]:[\\/]|\\\\)/i,
+  /\bformat\s+[a-z]:/i,
+  /\b(?:mkfs\.|dd\s+if=.*\bof=[\\/]dev)/i,
+  /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+];
+
+/** Check if command contains system-destructive operations (e.g. format C:, rm -rf /). */
+export function isSystemDestructiveCommand(command: string): boolean {
+  const normalized = (command || '').trim();
+  return SYSTEM_DESTRUCTIVE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+/** Check if Docker isolation is currently disabled via runtime state or environment variables. */
+export function isDockerIsolationDisabled(): boolean {
+  if (_dockerIsolationDisabled) return true;
+  const envVal = process.env.MINUS_DISABLE_DOCKER_ISOLATION
+    ?? process.env.MINUS_ALLOW_HOST_FALLBACK
+    ?? process.env.DOCKER_ISOLATION_DISABLED;
+  return envVal === 'true' || envVal === '1';
+}
+
+/**
+ * Configure whether Docker isolation is disabled.
+ * Setting to true allows LLM to run all safe commands freely on host.
+ */
+export function setDockerIsolationDisabled(disabled: boolean): void {
+  _dockerIsolationDisabled = disabled;
+  process.env.MINUS_DISABLE_DOCKER_ISOLATION = disabled ? 'true' : 'false';
+  process.env.MINUS_ALLOW_HOST_FALLBACK = disabled ? 'true' : 'false';
+}
+
+/** Toggle Docker isolation state and return new state. */
+export function toggleDockerIsolation(disabled?: boolean): boolean {
+  const next = typeof disabled === 'boolean' ? disabled : !isDockerIsolationDisabled();
+  setDockerIsolationDisabled(next);
+  return next;
+}
+
+/**
+ * Determines whether a command can bypass Docker container isolation.
+ * Returns true if Docker isolation is disabled and command is non-destructive.
+ */
+export function canBypassDockerIsolation(command: string): boolean {
+  if (!isDockerIsolationDisabled()) return false;
+  return !isSystemDestructiveCommand(command);
+}
+

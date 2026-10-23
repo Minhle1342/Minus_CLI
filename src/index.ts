@@ -67,6 +67,7 @@ import { MultiAgentBrainstormingEngine } from './agent/multi-agent-brainstorming
 import { runGrillFlow } from './agent/grill-suggest.js';
 import type { OcrReviewService } from './review/open-code-review.js';
 import { checkWorkspaceChanges, findCliRoot, updateCli } from './tools/cli-updater.js';
+import { isDockerIsolationDisabled, setDockerIsolationDisabled } from './tools/command-outcome.js';
 
 // Load biến môi trường từ file .env bằng Node.js stdlib (native)
 try {
@@ -1277,9 +1278,25 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         const currentSavedSession = loadSession(workspace.rootDir);
         const currentAutoStart = currentSavedSession.autoStartDocker ?? loadSession().autoStartDocker;
 
+        if (sub.startsWith('isolation') || sub === 'no-isolation') {
+          const isoArg = sub.replace(/^isolation\s*/i, '').trim().toLowerCase();
+          if (isoArg === 'off' || isoArg === 'disable' || isoArg === '0' || sub === 'no-isolation') {
+            setDockerIsolationDisabled(true);
+            console.log(`\n  ${c.brightGreen}✔ Docker isolation disabled: LLM can execute all safe commands freely on host.${c.reset}\n`);
+          } else if (isoArg === 'on' || isoArg === 'enable' || isoArg === '1') {
+            setDockerIsolationDisabled(false);
+            console.log(`\n  ${c.brightCyan}✔ Docker isolation enabled: container sandbox requirement restored.${c.reset}\n`);
+          } else {
+            const currentIso = isDockerIsolationDisabled();
+            console.log(`\n  ${c.brightCyan}Docker Isolation:${c.reset} ${currentIso ? c.yellow + 'Disabled (Free safe execution on host)' : c.green + 'Enabled (Sandbox enforced)'}${c.reset}\n`);
+          }
+          continue;
+        }
+
         if (sub === 'on' || sub === 'enable' || sub === '1') {
           saveSession({ autoStartDocker: true }, workspace.rootDir);
           saveSession({ autoStartDocker: true });
+          setDockerIsolationDisabled(false);
           CLI.renderDockerToggleNotice(true);
           if (!currentStatus.isIsolated) {
             console.log(`  ${c.brightCyan}🚀 Starting Docker Desktop...${c.reset}`);
@@ -1294,11 +1311,13 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
         if (sub === 'off' || sub === 'disable' || sub === '0') {
           saveSession({ autoStartDocker: false }, workspace.rootDir);
           saveSession({ autoStartDocker: false });
+          setDockerIsolationDisabled(true);
           CLI.renderDockerToggleNotice(false);
           if (currentStatus.isIsolated) {
             await kernel.ctx.sandbox.switchToLocal();
             console.log(`  ${c.slate}✔ Switched back to Local Sandbox.${c.reset}\n`);
           }
+          console.log(`  ${c.brightGreen}✔ Docker isolation disabled: LLM can execute all safe commands freely on host.${c.reset}\n`);
           continue;
         }
 

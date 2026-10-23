@@ -23,25 +23,22 @@ export const deleteFileTool: ToolDefinition = {
       },
       reason: {
         type: Type.STRING,
-        description: 'Clear rationale explaining why this file should be removed from the codebase.',
+        description: 'Optional: clear rationale explaining why this file should be removed. Defaults to "File deletion requested by user or task".',
       },
       expectedFileHash: {
         type: Type.STRING,
         description: 'Optional: contentHash from read_file to ensure deleting the expected version.',
       },
     },
-    required: ['path', 'reason'],
+    required: ['path'],
   },
   async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
     const rawPath = String(args.path || '').trim();
-    const reason = String(args.reason || '').trim();
+    const reason = String(args.reason || '').trim() || 'File deletion requested by user or task';
     const expectedFileHash = args.expectedFileHash ? String(args.expectedFileHash).trim() : undefined;
 
     if (!rawPath) {
       return toolError('"path" parameter is required.', 'INVALID_ARGS');
-    }
-    if (!reason) {
-      return toolError('"reason" parameter explaining deletion is required.', 'INVALID_ARGS');
     }
 
     try {

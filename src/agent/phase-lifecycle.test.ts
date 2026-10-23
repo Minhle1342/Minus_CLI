@@ -159,3 +159,45 @@ test('transitioning from R0 plan/explore to implement elevates risk floor to R1 
   assert.ok(authoritative.requiredCapabilities.includes('edit'));
 });
 
+
+test('Harness allows implement -> implement (idempotent) and verify -> implement requests', () => {
+  const session = new Session();
+  session.append('turn/start', { turn: 1 });
+  const implementDecision: ClassificationDecision = {
+    ...classification,
+    phase: 'implement',
+    risk: 'R1',
+    reversibility: 'reversible',
+    requiredCapabilities: ['inspect', 'search', 'plan', 'edit', 'execute', 'verify', 'complete'],
+  };
+  session.append('control/decision', { turn: 1, controlDecision: { classification: implementDecision } });
+
+  // 1. implement -> implement
+  const resSame = requestPhaseTransition(session, 1, implementDecision, {
+    targetPhase: 'implement',
+    rationale: 'continue implementation of module',
+    evidenceRefs: ['src/app.ts'],
+  }, { hasPlan: true, evidenceSufficient: true });
+  assert.equal(resSame.accepted, true, 'implement -> implement must be accepted without blocking');
+  assert.equal(resSame.phase, 'implement');
+
+  // 2. verify -> implement
+  const verifyDecision: ClassificationDecision = {
+    ...classification,
+    phase: 'verify',
+    risk: 'R1',
+    reversibility: 'reversible',
+    requiredCapabilities: ['inspect', 'search', 'verify'],
+  };
+  const session2 = new Session();
+  session2.append('turn/start', { turn: 2 });
+  session2.append('control/decision', { turn: 2, controlDecision: { classification: verifyDecision } });
+
+  const resVerifyToImplement = requestPhaseTransition(session2, 2, verifyDecision, {
+    targetPhase: 'implement',
+    rationale: 'need to fix failing test',
+    evidenceRefs: ['test-output.log'],
+  }, { hasPlan: true, evidenceSufficient: true });
+  assert.equal(resVerifyToImplement.accepted, true, 'verify -> implement must be accepted');
+  assert.equal(resVerifyToImplement.phase, 'implement');
+});

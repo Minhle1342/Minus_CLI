@@ -952,6 +952,14 @@ export class ToolUseGuardian {
         coercedKeys.push('WaitMsBeforeAsync');
       }
     }
+    if (actualSchema.properties.reason && !('reason' in coerced)) {
+      const reasonCandidate = coerced.rationale || coerced.explanation || coerced.description || coerced.message;
+      if (typeof reasonCandidate === 'string' && reasonCandidate.trim()) {
+        coerced.reason = reasonCandidate.trim();
+        changed = true;
+        coercedKeys.push('reason');
+      }
+    }
 
     // Top-level semantic aliases cho oldText / TargetContent và newText / ReplacementContent
     if (actualSchema.properties.oldText && (!coerced.oldText || typeof coerced.oldText !== 'string' || coerced.oldText.trim() === '')) {

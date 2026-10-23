@@ -22,7 +22,7 @@ import {
   probeMissingBinary,
   clearBinaryProbeCache,
 } from './command-preflight-guard.js';
-import { annotateCommandResult } from './command-outcome.js';
+import { annotateCommandResult, canBypassDockerIsolation, isDockerIsolationDisabled } from './command-outcome.js';
 import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
 import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
@@ -1379,8 +1379,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       });
 
       // Do not silently downgrade a mutating or otherwise non-read-only command
-      // from Docker to the host. An explicit host target still goes through approval.
-      if (executionTarget === 'auto' && sandboxManager) {
+      // from Docker to the host unless Docker isolation is disabled for free safe execution.
+      // An explicit host target still goes through approval.
+      if (executionTarget === 'auto' && sandboxManager && !canBypassDockerIsolation(effectiveCommand)) {
         const sandboxStatus = sandboxManager.getStatus();
         if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus)) {
           return {

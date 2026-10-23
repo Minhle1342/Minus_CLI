@@ -223,6 +223,11 @@ export function requestPhaseTransition(
     if (getTurnCompletionState(session, turn).hasMutations) {
       return reject('IMPLEMENT_MUTATIONS_PRESENT', 'Mutations were already observed this turn; verify them instead of returning to plan.');
     }
+  } else if (current.phase === targetPhase) {
+    // Idempotent transition / re-affirmation: model requests the phase it is already in (e.g. implement -> implement).
+    // Allow without blocking, maintaining or advancing the phase version so model execution is never halted.
+  } else if (targetPhase === 'implement') {
+    // Implementation transition requested from any phase (e.g. verify -> implement when follow-up edits are needed).
   } else {
     return reject('INVALID_PHASE_TRANSITION', `The Harness does not allow ${current.phase} -> ${String(targetPhase)} from a model request.`);
   }

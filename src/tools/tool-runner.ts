@@ -222,6 +222,7 @@ const TOOL_CANONICAL_ALIASES: Record<string, string> = {
   search_web: 'web_search',
   read_url_content: 'web_fetch',
   search_text: 'search_codebase_fast',
+  'delete-file': 'delete_file',
 };
 
 function isToolAuthorized(toolName: string, allowedNames: string[]): boolean {

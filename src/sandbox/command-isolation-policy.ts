@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { analyzeShellCommand } from '../security/shell-segmenter.js';
 import type { SandboxStatus } from './types.js';
+import { isDockerIsolationDisabled, canBypassDockerIsolation } from '../tools/command-outcome.js';
 
 export interface HostCommandPolicyResult {
   allowed: boolean;
@@ -71,6 +72,9 @@ export function requiresIsolatedExecution(command: string): boolean {
 
 /** Only enforce fail-closed behaviour for an unexpected Docker-to-local downgrade. */
 export function mustBlockUnisolatedAutoExecution(command: string, status: SandboxStatus): boolean {
+  if (isDockerIsolationDisabled() || canBypassDockerIsolation(command)) {
+    return false;
+  }
   if (process.env.MINUS_ALLOW_HOST_FALLBACK === 'true' || process.env.MINUS_ALLOW_HOST_FALLBACK === '1') {
     return false;
   }
