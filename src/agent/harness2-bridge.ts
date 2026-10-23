@@ -45,6 +45,7 @@ export interface HarnessCandidate {
   kind: 'base' | 'invariant' | 'domain' | 'composed';
   description: string;
   scaffold: CognitiveScaffold;
+  toolGuidance?: Record<string, string>;
   toolGuidanceDelta?: Record<string, string>;
   additionalNegativeGates?: string[];
 }
@@ -87,13 +88,15 @@ export class Harness2RecursiveEngine {
   ): HarnessCandidate[] {
     const candidates: HarnessCandidate[] = [];
     const activePhase = options?.phase || baseScaffold.phase || 'implement';
+    const baseCatalog = this.generateStandardToolGuidanceCatalog({ phase: activePhase });
 
     // 1. Base Candidate
     candidates.push({
       id: 'base',
       kind: 'base',
       description: `Default baseline scaffold (${activePhase} mode)`,
-      scaffold: { ...baseScaffold, phase: activePhase },
+      scaffold: { ...baseScaffold, phase: activePhase, toolGuidance: baseCatalog },
+      toolGuidance: baseCatalog,
     });
 
     if (activePhase === 'plan') {
@@ -104,6 +107,14 @@ export class Harness2RecursiveEngine {
         'NEVER call submit_solution or update_plan_task before completing the architectural survey and recording the plan.',
         'ALWAYS inspect caller references and quantify blast radius before committing to an architectural decomposition.',
       ];
+      const planInvToolGuidance: Record<string, string> = {
+        ...baseCatalog,
+        replace_text: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Code modifications are strictly prohibited during the Plan phase. Survey, inspect, and plan ONLY.',
+        apply_patch: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Applying code patches is strictly prohibited during the Plan phase.',
+        read_file: 'Inspect exact file contents and line numbers for architectural understanding. Primary read-only tool.',
+        create_plan: 'Define ordered milestones with dependsOn boundaries and explicit verification criteria.',
+        submit_solution: 'STRICT INVARIANT: Calling submit_solution is blocked until the architectural plan is completed and reviewed.',
+      };
       candidates.push({
         id: 'inv1',
         kind: 'invariant',
@@ -112,6 +123,7 @@ export class Harness2RecursiveEngine {
           ...baseScaffold,
           phase: 'plan',
           negativeGate: planInvGates,
+          toolGuidance: planInvToolGuidance,
           executionTopology: [
             'Step 1 (Architectural Survey): Inspect files, interfaces, and call graphs via read-only tools.',
             'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
@@ -119,6 +131,7 @@ export class Harness2RecursiveEngine {
             'Step 4 (Phase Transition Readiness): Request transition to implement phase before mutating.',
           ],
         },
+        toolGuidance: planInvToolGuidance,
         toolGuidanceDelta: {
           read_file: 'Inspect exact file contents and line numbers for architectural understanding',
           create_plan: 'Define ordered milestones with dependsOn boundaries',
@@ -135,6 +148,15 @@ export class Harness2RecursiveEngine {
       if (isRefactor) {
         planDomGates.push('Ensure backward compatibility of existing public APIs in the proposed plan milestones');
       }
+      const planDomToolGuidance: Record<string, string> = {
+        ...baseCatalog,
+        ...(isTypeScript ? {
+          codegraph_explore: 'Survey TypeScript interfaces, export hierarchies, and caller types across the repo before planning changes.',
+        } : {}),
+        ...(isRefactor ? {
+          analyze_impact: 'Quantify blast radius on existing callers before proposing architectural refactor milestones.',
+        } : {}),
+      };
       candidates.push({
         id: 'dom1',
         kind: 'domain',
@@ -143,7 +165,9 @@ export class Harness2RecursiveEngine {
           ...baseScaffold,
           phase: 'plan',
           negativeGate: planDomGates,
+          toolGuidance: planDomToolGuidance,
         },
+        toolGuidance: planDomToolGuidance,
       });
 
       return candidates;
@@ -158,6 +182,14 @@ export class Harness2RecursiveEngine {
       'NEVER fabricate mock test data inside production code to force a green test.',
       'ALWAYS inspect caller references before changing function signatures',
     ];
+    const implInvToolGuidance: Record<string, string> = {
+      ...baseCatalog,
+      replace_text: 'STRICT INVARIANT: MUST inspect lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via get_diagnostics post-mutation.',
+      apply_patch: 'STRICT INVARIANT: Apply minimal unified diff hunk. MUST inspect git diff and compiler diagnostics after applying.',
+      run_command: 'STRICT INVARIANT: MUST NOT use sleep polling; use schedule. Run build and test verification commands immediately after each surgical edit.',
+      get_diagnostics: 'STRICT INVARIANT: Inspect compiler feedback immediately after editing a file. Never tolerate lingering compilation errors.',
+      submit_solution: 'STRICT INVARIANT: MUST verify exit code 0 on testCommand before submission. Fake mocks or synthetic assertions are strictly rejected.',
+    };
     candidates.push({
       id: 'inv1',
       kind: 'invariant',
@@ -166,7 +198,9 @@ export class Harness2RecursiveEngine {
         ...baseScaffold,
         phase: 'implement',
         negativeGate: invGates,
+        toolGuidance: implInvToolGuidance,
       },
+      toolGuidance: implInvToolGuidance,
       toolGuidanceDelta: {
         run_command: 'Run build and test verification commands immediately after each surgical edit',
         get_diagnostics: 'Inspect compiler feedback immediately after editing a file',
@@ -185,6 +219,16 @@ export class Harness2RecursiveEngine {
       domGates.push('First reproduce the defect with a minimal regression assertion before editing fix targets');
     }
 
+    const implDomToolGuidance: Record<string, string> = {
+      ...baseCatalog,
+      ...(isTypeScript ? {
+        get_diagnostics: 'Query TypeScript Language Server diagnostics (tsc --noEmit). Resolve all type errors and signature mismatches before reporting completion.',
+      } : {}),
+      ...(isBug ? {
+        run_command: 'First execute the reproduction test to confirm defect failure, then re-execute after surgical mutation to confirm pass.',
+      } : {}),
+    };
+
     candidates.push({
       id: 'dom1',
       kind: 'domain',
@@ -193,7 +237,9 @@ export class Harness2RecursiveEngine {
         ...baseScaffold,
         phase: 'implement',
         negativeGate: domGates,
+        toolGuidance: implDomToolGuidance,
       },
+      toolGuidance: implDomToolGuidance,
     });
 
     return candidates;
@@ -301,9 +347,25 @@ export class Harness2RecursiveEngine {
       }
     }
 
+    const activePhase = (winningCandidate.scaffold.phase as any) || 'implement';
+    const consolidatedToolGuidance: Record<string, string> = {
+      ...(this.generateStandardToolGuidanceCatalog({ phase: activePhase })),
+      ...(winningCandidate.toolGuidance || winningCandidate.scaffold.toolGuidance || {}),
+    };
+
+    for (const probe of sorted) {
+      if (probe.score > 0) {
+        const c = candidates.find(cand => cand.id === probe.candidateId);
+        if (c?.toolGuidanceDelta) {
+          Object.assign(consolidatedToolGuidance, c.toolGuidanceDelta);
+        }
+      }
+    }
+
     const composedScaffold: CognitiveScaffold = {
       ...winningCandidate.scaffold,
       negativeGate: Array.from(consolidatedGates),
+      toolGuidance: consolidatedToolGuidance,
       executionTopology: [
         'Harness² Pre-flight: Propose-Probe-Compose validated',
         ...winningCandidate.scaffold.executionTopology,

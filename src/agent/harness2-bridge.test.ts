@@ -315,6 +315,45 @@ test('Harness2RecursiveEngine - Generate phase-differentiated tool guidance', ()
   assert.ok(implCatalog.apply_patch.includes('diff') || implCatalog.apply_patch.includes('patch') || implCatalog.apply_patch.includes('hunk'));
 });
 
+test('Harness2RecursiveEngine - Propose candidates with specialized tool guidance', () => {
+  const harness = new CognitiveHarness();
+  const engine = new Harness2RecursiveEngine();
+  const baseScaffold = harness.createScaffold({ request: 'Refactor auth controller', phase: 'implement' });
+
+  const candidates = engine.proposeCandidates(baseScaffold, 'Refactor auth controller', { phase: 'implement' });
+  const invCandidate = candidates.find(c => c.id === 'inv1');
+  const domCandidate = candidates.find(c => c.id === 'dom1');
+
+  assert.ok(invCandidate?.toolGuidance, 'Invariant candidate must specify specialized tool guidance');
+  assert.ok(
+    invCandidate.toolGuidance.replace_text.includes('STRICT') ||
+    invCandidate.toolGuidance.replace_text.includes('Strict') ||
+    invCandidate.toolGuidance.replace_text.includes('prerequisite') ||
+    invCandidate.toolGuidance.replace_text.includes('read_file')
+  );
+
+  assert.ok(domCandidate?.toolGuidance, 'Domain candidate must specify specialized tool guidance');
+});
+
+test('Harness2RecursiveEngine - Compose refined tool guidance in composeHarness', () => {
+  const harness = new CognitiveHarness();
+  const engine = new Harness2RecursiveEngine();
+  const baseScaffold = harness.createScaffold({ request: 'Fix null pointer in parser', phase: 'implement' });
+  const candidates = engine.proposeCandidates(baseScaffold, 'Fix null pointer in parser', { phase: 'implement' });
+  
+  const evaluations: ProbeEvaluation[] = [
+    { candidateId: 'base', score: 50, toolCallCount: 6, unproductiveLoopsDetected: 1, durationMs: 20, contrastNotes: [] },
+    { candidateId: 'inv1', score: 85, toolCallCount: 4, unproductiveLoopsDetected: 0, durationMs: 15, contrastNotes: [] },
+    { candidateId: 'dom1', score: 70, toolCallCount: 5, unproductiveLoopsDetected: 0, durationMs: 18, contrastNotes: [] },
+  ];
+
+  const result = engine.composeHarness(baseScaffold, candidates, evaluations);
+  assert.strictEqual(result.selectedCandidateId, 'inv1');
+  assert.ok((result.composedScaffold as any).toolGuidance);
+  assert.ok((result.composedScaffold as any).toolGuidance.replace_text);
+});
+
+
 
 
 

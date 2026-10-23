@@ -25,6 +25,7 @@ export interface CognitiveScaffold {
   executionTopology: string[];
   actionBoundary: string;
   premiseInversion?: PremiseInversionDirective;
+  toolGuidance?: Record<string, string>;
 }
 
 export interface CognitiveBrakeDecision {
