@@ -244,6 +244,39 @@ test('Harness2RecursiveEngine - Propose specialized candidates for Implement mod
   assert.ok(invCandidate.scaffold.negativeGate.some(g => g.includes('reproduction test') || g.includes('mock test data')));
 });
 
+test('Harness2RecursiveEngine - Export and import bundle with phase-specific system prompts', async () => {
+  const engine = new Harness2RecursiveEngine();
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'harness2-phase-prompt-test-'));
+  try {
+    const bundle: Harness2Bundle = {
+      systemPrompt: 'Generic system prompt fallback',
+      systemPromptPlan: 'Dedicated Plan Mode Prompt: Architectural survey and DAG decomposition.',
+      systemPromptImplement: 'Dedicated Implement Mode Prompt: Surgical mutation and empirical verification.',
+      guardrails: ['No mocking'],
+      memory: 'Project Memory',
+      toolGuidance: {},
+      subagents: {},
+      skills: [],
+      scripts: {},
+      plugins: {},
+    };
+
+    await engine.exportBundleToDirectory(bundle, tmpDir);
+
+    const planPromptExists = await fs.stat(path.join(tmpDir, 'systemprompt_plan.md')).then(() => true).catch(() => false);
+    const implPromptExists = await fs.stat(path.join(tmpDir, 'systemprompt_implement.md')).then(() => true).catch(() => false);
+    assert.strictEqual(planPromptExists, true, 'systemprompt_plan.md should exist');
+    assert.strictEqual(implPromptExists, true, 'systemprompt_implement.md should exist');
+
+    const imported = await engine.importBundleFromDirectory(tmpDir);
+    assert.strictEqual(imported.systemPromptPlan, bundle.systemPromptPlan);
+    assert.strictEqual(imported.systemPromptImplement, bundle.systemPromptImplement);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 
 
 

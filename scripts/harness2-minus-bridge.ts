@@ -24,6 +24,8 @@ async function main() {
 
     const bundle: Harness2Bundle = {
       systemPrompt: 'You are MinusCLI, an advanced autonomous software engineering agent powered by Gemini.',
+      systemPromptPlan: 'You are MinusCLI in PLAN mode. Architectural decomposition, impact assessment, and DAG milestones. Code editing tools are FORBIDDEN.',
+      systemPromptImplement: 'You are MinusCLI in IMPLEMENT mode. Bounded surgical mutations, TDD reproduction tests, immediate diagnostic checks, and empirical verification.',
       guardrails: [
         'MUST run impact before editing (GitNexus call graph intelligence)',
         'NEVER edit a function, class, or method before impact analysis',
@@ -60,6 +62,8 @@ async function main() {
     await engine.exportBundleToDirectory(bundle, exportPath);
     console.log('✅ Đã xuất thành công 8 thành phần Harness²:');
     console.log('   - systemprompt.md');
+    console.log('   - systemprompt_plan.md');
+    console.log('   - systemprompt_implement.md');
     console.log('   - guardrails.md');
     console.log('   - LongTermMEMORY.md');
     console.log('   - tool_descriptions/');
@@ -71,13 +75,16 @@ async function main() {
     console.log(`📥 Đang nạp 8 thành phần Scaffolding từ Harness²: ${importPath}`);
     const bundle = await engine.importBundleFromDirectory(importPath);
     console.log(`✅ Đã nạp thành công Scaffold từ Harness²:`);
-    console.log(`   - System Prompt (${bundle.systemPrompt.length} chars)`);
+    console.log(`   - System Prompt Generic (${bundle.systemPrompt.length} chars)`);
+    if (bundle.systemPromptPlan) console.log(`   - System Prompt [PLAN] (${bundle.systemPromptPlan.length} chars)`);
+    if (bundle.systemPromptImplement) console.log(`   - System Prompt [IMPLEMENT] (${bundle.systemPromptImplement.length} chars)`);
     console.log(`   - Guardrails (${bundle.guardrails.length} rules)`);
     console.log(`   - Memory (${bundle.memory.length} chars)`);
     console.log(`   - Tools (${Object.keys(bundle.toolGuidance).length} tools)`);
     console.log(`   - Subagents (${Object.keys(bundle.subagents).length} agents)`);
     console.log(`   - Skills (${bundle.skills.length} skills: ${bundle.skills.join(', ')})`);
   } else {
+
     console.log('MinusCLI <-> Harness² Bridge');
     console.log('Tùy chọn:');
     console.log('  --export   Xuất 8 thành phần Scaffold của MinusCLI sang định dạng Harness²');

@@ -26,6 +26,8 @@ const execAsync = promisify(exec);
 /** 8 Editable Components defined in Harness² */
 export interface Harness2Bundle {
   systemPrompt: string;
+  systemPromptPlan?: string;
+  systemPromptImplement?: string;
   guardrails: string[];
   memory: string;
   toolGuidance: Record<string, string>;
@@ -34,6 +36,7 @@ export interface Harness2Bundle {
   scripts: Record<string, string>;
   plugins: Record<string, unknown>;
 }
+
 
 export interface HarnessCandidate {
   id: string;
@@ -397,6 +400,12 @@ export class Harness2RecursiveEngine {
   async exportBundleToDirectory(bundle: Harness2Bundle, outDir: string): Promise<void> {
     await fs.mkdir(outDir, { recursive: true });
     await fs.writeFile(path.join(outDir, 'systemprompt.md'), bundle.systemPrompt, 'utf-8');
+    if (bundle.systemPromptPlan) {
+      await fs.writeFile(path.join(outDir, 'systemprompt_plan.md'), bundle.systemPromptPlan, 'utf-8');
+    }
+    if (bundle.systemPromptImplement) {
+      await fs.writeFile(path.join(outDir, 'systemprompt_implement.md'), bundle.systemPromptImplement, 'utf-8');
+    }
     await fs.writeFile(path.join(outDir, 'guardrails.md'), bundle.guardrails.join('\n- '), 'utf-8');
     await fs.writeFile(path.join(outDir, 'LongTermMEMORY.md'), bundle.memory, 'utf-8');
     
@@ -435,7 +444,10 @@ export class Harness2RecursiveEngine {
     };
 
     const systemPrompt = (await readFileSafe(path.join(inDir, 'systemprompt.md'))).trim();
+    const systemPromptPlan = (await readFileSafe(path.join(inDir, 'systemprompt_plan.md'))).trim() || undefined;
+    const systemPromptImplement = (await readFileSafe(path.join(inDir, 'systemprompt_implement.md'))).trim() || undefined;
     const memory = (await readFileSafe(path.join(inDir, 'LongTermMEMORY.md'))).trim();
+
 
     const rawGuardrails = await readFileSafe(path.join(inDir, 'guardrails.md'));
     const guardrails = rawGuardrails
@@ -489,6 +501,8 @@ export class Harness2RecursiveEngine {
 
     return {
       systemPrompt,
+      systemPromptPlan,
+      systemPromptImplement,
       guardrails,
       memory,
       toolGuidance,
@@ -497,6 +511,7 @@ export class Harness2RecursiveEngine {
       scripts: {},
       plugins: {},
     };
+
   }
 }
 
