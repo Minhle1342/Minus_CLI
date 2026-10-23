@@ -276,6 +276,21 @@ test('Harness2RecursiveEngine - Export and import bundle with phase-specific sys
   }
 });
 
+test('Harness2RecursiveEngine - Generate structured system prompt for Plan and Implement phases', () => {
+  const engine = new Harness2RecursiveEngine();
+
+  const planPrompt = engine.generatePhaseSystemPrompt('plan', ['Focus on call graph exploration']);
+  assert.ok(planPrompt.includes('PHASE: PLAN'));
+  assert.ok(planPrompt.includes('Focus on call graph exploration'));
+  assert.ok(planPrompt.includes('FORBIDDEN') || planPrompt.includes('read-only') || planPrompt.includes('Survey and plan ONLY') || planPrompt.includes('ARCHITECTURAL'));
+
+  const implementPrompt = engine.generatePhaseSystemPrompt('implement', ['Require reproduction test']);
+  assert.ok(implementPrompt.includes('PHASE: IMPLEMENT'));
+  assert.ok(implementPrompt.includes('Require reproduction test'));
+  assert.ok(implementPrompt.includes('Surgical') || implementPrompt.includes('surgical') || implementPrompt.includes('atomic') || implementPrompt.includes('MUTATION'));
+});
+
+
 
 
 

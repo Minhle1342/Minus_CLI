@@ -16,12 +16,14 @@
  */
 
 import { CognitiveScaffold } from './cognitive-harness.js';
+import { SECTION_PHASE_PLAN_GUIDANCE, SECTION_PHASE_IMPLEMENT_GUIDANCE } from '../llm/sections/phases.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
+
 
 /** 8 Editable Components defined in Harness² */
 export interface Harness2Bundle {
@@ -395,9 +397,31 @@ export class Harness2RecursiveEngine {
   }
 
   /**
+   * Generates a complete structured system prompt for the specified phase,
+   * combining MinusCLI persona, standard phase guidance, and custom/Harness² directives.
+   */
+  generatePhaseSystemPrompt(phase: 'plan' | 'implement', customDirectives: string[] = []): string {
+    const basePersona = 'You are MinusCLI, an advanced autonomous software engineering agent powered by Gemini.';
+    const phaseGuidance = phase === 'plan' ? SECTION_PHASE_PLAN_GUIDANCE : SECTION_PHASE_IMPLEMENT_GUIDANCE;
+
+    const sections = [
+      basePersona,
+      `Mode: ${phase.toUpperCase()}`,
+      phaseGuidance,
+    ];
+
+    if (customDirectives && customDirectives.length > 0) {
+      sections.push('Directives & Optimized Guardrails:\n- ' + customDirectives.join('\n- '));
+    }
+
+    return sections.join('\n\n');
+  }
+
+  /**
    * Exports an 8-component bundle to disk matching Harness² directory layout.
    */
   async exportBundleToDirectory(bundle: Harness2Bundle, outDir: string): Promise<void> {
+
     await fs.mkdir(outDir, { recursive: true });
     await fs.writeFile(path.join(outDir, 'systemprompt.md'), bundle.systemPrompt, 'utf-8');
     if (bundle.systemPromptPlan) {
