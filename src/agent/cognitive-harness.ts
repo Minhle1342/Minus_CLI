@@ -231,6 +231,14 @@ export class CognitiveHarness {
   readonly fileFixationTracker = new FileFixationTracker();
   private falsifiedHypothesesCount: number = 0;
   private lastBrakeReason?: string;
+  private harness2Engine?: { findRelevantLessons(taskBrief: string): string[] };
+
+  /**
+   * Links a Harness2RecursiveEngine to inject experience-weighted lessons into runtime scaffolds.
+   */
+  setHarness2Engine(engine: { findRelevantLessons(taskBrief: string): string[] }): void {
+    this.harness2Engine = engine;
+  }
 
   /**
    * Generates a tailored cognitive scaffold based on prompt semantics and execution context
@@ -243,11 +251,24 @@ export class CognitiveHarness {
     hasAttachments?: boolean;
     anchorPaths?: string[];
   }): CognitiveScaffold {
-    const scaffold = this.buildScaffold(params);
+    let scaffold = this.buildScaffold(params);
+
+    // Inject empirical lessons learned from Harness² persistent library
+    if (this.harness2Engine && params.request) {
+      const lessons = this.harness2Engine.findRelevantLessons(params.request);
+      if (lessons.length > 0) {
+        scaffold = {
+          ...scaffold,
+          negativeGate: [...lessons, ...scaffold.negativeGate],
+        };
+      }
+    }
+
     const anchors = (params.anchorPaths || []).map((p) => (p || '').trim()).filter(Boolean);
     if (!params.hasAttachments && anchors.length === 0) return scaffold;
     return this.applyAttachmentScope(scaffold, anchors);
   }
+
 
   private applyAttachmentScope(scaffold: CognitiveScaffold, anchorPaths: string[]): CognitiveScaffold {
     const shown = anchorPaths.slice(0, 5).join(', ') || '(attached file)';

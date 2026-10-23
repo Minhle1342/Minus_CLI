@@ -183,5 +183,25 @@ test('Harness2RecursiveEngine - Import 8-component bundle from directory (Two-Wa
   }
 });
 
+test('CognitiveHarness - Injects learned negative gates from Harness2 engine', () => {
+  const engine = new Harness2RecursiveEngine();
+  engine.reflectAndAccumulate({
+    taskId: 'task-growth',
+    taskBrief: 'Division by zero bug',
+    adoptedHarnessId: 'dom1',
+    outcome: 'ok',
+    lessonsLearned: ['Always guard zero denominator'],
+    suggestedGuardrails: ['NEVER divide by zero without prior check'],
+    timestamp: new Date().toISOString(),
+  });
+
+  const harness = new CognitiveHarness();
+  harness.setHarness2Engine(engine);
+  const scaffold = harness.createScaffold({ request: 'Sửa lỗi division by zero' });
+
+  assert.ok(scaffold.negativeGate.some(g => g.includes('NEVER divide by zero')));
+});
+
+
 
 
