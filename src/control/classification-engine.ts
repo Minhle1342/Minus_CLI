@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT, hasDelegationIntent, INTENT_CONTINUATION_DELIMITER } from './request-intent.js';
+import { SemanticRouter, type SemanticRouteResult } from './semantic-router.js';
 import { hasNetworkIntent } from './network-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
@@ -19,6 +20,7 @@ export interface ClassificationInput {
   evidenceScore?: number;
   evidenceThreshold?: number;
   minimumRisk?: ControlRisk;
+  semanticRoute?: SemanticRouteResult;
 }
 
 const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
@@ -45,16 +47,29 @@ export class ClassificationEngine {
     let risk: ControlRisk = 'R0';
     let capabilities: Capability[] = ['inspect', 'search', 'memory'];
 
-    if (planningIntent.test(normalizedText)) {
+    const router = SemanticRouter.getInstance();
+    const semanticDecision = input.semanticRoute || router.routeSync(intentPrompt);
+    const readOnlyBySemantic = semanticDecision.route === 'read_only' && (semanticDecision.source === 'fast_path' || semanticDecision.score >= 0.7);
+    const mutationBySemantic = semanticDecision.route === 'mutation' && (semanticDecision.source === 'fast_path' || semanticDecision.score >= 0.7);
+
+    const isReadOnly = (readOnlyBySemantic || isReadOnlyRequest(intentPrompt)) && !mutationBySemantic;
+
+    if (planningIntent.test(normalizedText) || semanticDecision.route === 'planning') {
       taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
       complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
       risk = complexity === 'large' ? 'R3' : 'R2';
       phase = 'plan';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
       reasons.push('EXPLICIT_PLANNING_INTENT');
-    } else if (isReadOnlyRequest(intentPrompt) && !input.hasUnverifiedChanges) {
+      if (semanticDecision.route === 'planning') {
+        reasons.push('SEMANTIC_ROUTER_PLANNING');
+      }
+    } else if (isReadOnly && !input.hasUnverifiedChanges) {
       taskClass = 'exploration';
       reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
+      if (readOnlyBySemantic) {
+        reasons.push('SEMANTIC_ROUTER_READ_ONLY');
+      }
     } else if (releaseIntent.test(normalizedText)) {
       taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
@@ -221,5 +236,16 @@ export class ClassificationEngine {
       reasonCodes: reasons,
       createdAt: new Date().toISOString(),
     };
+  }
+
+  async classifyAsync(input: ClassificationInput): Promise<ClassificationDecision> {
+    const rawPrompt = input.request || input.userPrompt || input.prompt || '';
+    if (!input.semanticRoute && rawPrompt) {
+      const intentPrompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
+      const router = SemanticRouter.getInstance();
+      const semanticRoute = await router.routeAsync(intentPrompt);
+      return this.classify({ ...input, semanticRoute });
+    }
+    return this.classify(input);
   }
 }
