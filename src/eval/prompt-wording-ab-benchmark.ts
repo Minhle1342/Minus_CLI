@@ -33,9 +33,12 @@ if (!apiKey) {
 }
 const client = new GoogleGenAI({ apiKey });
 
-/** Read a section verbatim from the committed (pre-refactor) source. */
+/** Commit before the section refactor; holds the original wording. */
+const OLD_REF = arg('old-ref', 'd367199');
+
+/** Read a section verbatim from the pre-refactor source. */
 function oldSection(file: string, name: string): string {
-  const src = execFileSync('git', ['show', `HEAD:${file}`]).toString('utf8');
+  const src = execFileSync('git', ['show', `${OLD_REF}:${file}`]).toString('utf8');
   const marker = `export const ${name} = \``;
   const start = src.indexOf(marker);
   if (start === -1) throw new Error(`Missing ${name} in HEAD:${file}`);
@@ -177,15 +180,17 @@ async function throttle() {
   lastCallAt = Date.now();
 }
 
-async function generateWithRetry(params: any, attempts = 3): Promise<any> {
+async function generateWithRetry(params: any, attempts = 4): Promise<any> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await client.models.generateContent(params);
     } catch (error: any) {
       const message = String(error?.message || error);
-      if (attempt >= attempts || !message.includes('429')) throw error;
-      console.log(`   429 quota, waiting 65s (attempt ${attempt}/${attempts})`);
-      await sleep(65_000);
+      const transient = message.includes('429') || message.includes('503') || message.includes('fetch failed');
+      if (attempt >= attempts || !transient) throw error;
+      const waitMs = message.includes('429') ? 65_000 : 10_000;
+      console.log(`   transient error, waiting ${waitMs / 1000}s (attempt ${attempt}/${attempts})`);
+      await sleep(waitMs);
     }
   }
 }

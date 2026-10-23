@@ -22,6 +22,7 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'compose'; text: string }
   | { type: 'completions'; values: Completion[] }
   | { type: 'diff'; text: string; reveal?: boolean }
+  | { type: 'file'; path: string; text: string; truncated?: boolean }
   | { type: 'metadata'; data: Partial<SidebarModel> }
   | { type: 'compaction'; status: CompactionStatus | null };
 
@@ -49,9 +50,10 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'copy'; text: string }
   | { type: 'abort' | 'quit' | 'compact' | 'editor' }
   | { type: 'complete'; value: string; cursor: number }
+  | { type: 'file-open'; path: string }
   | { type: 'mode'; mode: Mode };
 export type Mode = 'PLAN' | 'IMPLEMENT';
-export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'grill' | 'sessions' | 'model-picker';
+export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker';
 export interface GrillOption { id: string; label: string; detail?: string; source: 'llm' | 'heuristic' | 'user' }
 export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
 /** Một entry trong modal chọn model (/model): mirror AVAILABLE_MODELS của cli-ui. */
@@ -66,12 +68,12 @@ export interface ComposerModel {
   draft: string; completions: Completion[]; selected: number; completionDismissed: boolean;
 }
 export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string; diff?: string }
-export interface TranscriptEntry { kind: 'user' | 'answer' | 'live' | 'thought' | 'tool' | 'step' | 'log' | 'permission'; text: string; permission?: PermissionCard; expanded?: boolean }
+export interface TranscriptEntry { kind: 'user' | 'answer' | 'live' | 'thought' | 'tool' | 'step' | 'log' | 'permission' | 'compaction'; text: string; permission?: PermissionCard; expanded?: boolean }
 /** Một tab = một session chạy song song trong cùng cửa sổ terminal. Entries cache giữ transcript riêng mỗi tab. */
 export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; awaitingInput?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[]; /** tab transcript của subagent — chỉ để xem, không gõ vào */ subagent?: boolean }
 export interface SessionTabsModel { open: boolean; selected: number; tabs: SessionTab[]; activeId: string; activeQuestionSessionId?: string; /** model mặc định chung cho tab chưa chọn riêng (đồng bộ từ global /model + metadata) */ defaultModel?: string; /** switch do TEA khởi xướng, kernel chưa confirm — metadata không được revert */ pendingActiveId?: string }
 export interface ViewportModel { entries: TranscriptEntry[]; thinking: string; answerStream: string; offset: number; pinned: boolean; collapsed: boolean }
-export interface SidebarModel { visible: boolean; workspace: string; model: string; session: string; sessions: string[]; tools: string[]; files: string[]; invariants: string[]; tokens: number; maxTokens: number;
+export interface SidebarModel { visible: boolean; workspace: string; model: string; session: string; sessions: string[]; tools: string[]; files: string[]; invariants: string[]; tokens: number; maxTokens: number; /** dòng đang chọn trong MODIFIED FILES khi sidebar có focus */ selected?: number;
   /** Model mặc định chung (carrier cho metadata, không render trực tiếp — sidebar.model luôn là model của tab đang xem). */
   defaultModel?: string;
   /** IDs song song với `sessions` (vốn là tên hiển thị) + id active — để tab-strip switch đúng session. */
@@ -79,12 +81,13 @@ export interface SidebarModel { visible: boolean; workspace: string; model: stri
 export interface PaletteItem { id: string; label: string; description: string; action?: Action }
 export interface PaletteModel { open: boolean; query: string; selected: number; items: PaletteItem[] }
 export interface DiffViewerModel { visible: boolean; text: string; offset: number; split: boolean; collapsed: number[]; hunk: number }
+export interface FileViewModel { visible: boolean; path: string; text: string; offset: number; truncated?: boolean }
 export interface StatuslineModel { busy: boolean; aborting: boolean; step: number; maxSteps: number; phase: string; retry: string; notice: string; noticeUntil?: number; stoppingUntil?: number; compaction: CompactionStatus | null; compactionUntil?: number; frame: number; /** tab sở hữu task đang chạy — event kernel route về tab này, không lọt sang tab đang xem */ busySessionId?: string }
 export interface RootModel {
   selection?: { target: 'composer' | 'viewport'; anchor: number; head: number; dragging: boolean; lines?: string[]; sourceLines?: string[]; entries?: TranscriptEntry[]; width?: number; viewportOffset?: number; composerCursor?: number };
   width: number; height: number; mode: Mode; focus: Focus; leaderUntil: number;
   composer: ComposerModel; viewport: ViewportModel; sidebar: SidebarModel;
-  palette: PaletteModel; diff: DiffViewerModel; status: StatuslineModel;
+  palette: PaletteModel; diff: DiffViewerModel; file: FileViewModel; status: StatuslineModel;
   grill: GrillModel;
   modelPicker: ModelPickerModel;
   sessions: SessionTabsModel;

@@ -11,6 +11,7 @@ import { nativeCompactHistory, nativeComputeStringHash } from '../native/index.j
 import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
 import { collectCompactionEvidence, renderCompactionTaskState } from './compaction-evidence.js';
 import type { PlanTaskGraph } from './plan-manager.js';
+import { compactHistoryWithLLM } from './llm-compactor.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -122,6 +123,10 @@ export interface CompactionOptions {
   enforceBudget?: boolean;
   /** Per-request context ceiling; overrides the long-lived compactor default. */
   maxInputTokens?: number;
+  /** LLM instance for intelligent summarization. */
+  llm?: any;
+  /** Pre-generated custom summary text from LLM. */
+  customLLMText?: string;
 }
 
 /**
@@ -145,6 +150,10 @@ export interface CompletedTurnWindowOptions {
   /** Authoritative live plan, not inferred from assistant narration. */
   plan?: PlanTaskGraph;
   completionReason?: string;
+  /** LLM instance for intelligent summarization. */
+  llm?: any;
+  /** Pre-generated custom summary text from LLM. */
+  customLLMText?: string;
 }
 
 const ROLLING_SYNOPSIS_MARKER = '[ROLLING DIALOGUE SYNOPSIS';
@@ -344,8 +353,10 @@ export function countDegradedObservations(messages: SessionMessage[]): number {
  */
 export class ContextCompactor {
   private config: Required<CompactionConfig>;
+  private llm?: any;
 
-  constructor(config?: CompactionConfig) {
+  constructor(config?: CompactionConfig, llm?: any) {
+    this.llm = llm;
     this.config = {
       maxCharactersPerToolResult: config?.maxCharactersPerToolResult ?? 1200,
       preserveLastNToolResults: config?.preserveLastNToolResults ?? 3,
@@ -360,6 +371,14 @@ export class ContextCompactor {
       checkpointEveryNToolResults: config?.checkpointEveryNToolResults ?? 12,
       nativePrecompactionThresholdChars: config?.nativePrecompactionThresholdChars ?? 256 * 1024,
     };
+  }
+
+  setLLM(llm: any): void {
+    this.llm = llm;
+  }
+
+  getLLM(): any {
+    return this.llm;
   }
 
   getConfig(): Required<CompactionConfig> {
@@ -652,53 +671,20 @@ export class ContextCompactor {
   private applyRollingTurnCompaction(
     messages: SessionMessage[],
     preserveLastNTurns: number,
-    taskStateInput?: { plan?: PlanTaskGraph; completionReason?: string }
+    taskStateInput?: { plan?: PlanTaskGraph; completionReason?: string; customLLMText?: string }
   ): { messages: SessionMessage[]; archivedTurns: ArchivedTurnDocument[]; prunedTurnsCount: number } {
     const priorSynopsisTexts = messages
       .filter(isRollingSynopsisMessage)
       .flatMap((message) => message.parts || [])
       .map((part) => typeof part.text === 'string' ? part.text : '')
       .filter(Boolean);
-    const priorSynopsisLines = priorSynopsisTexts
-      .flatMap((text) => text.split('\n'))
-      .filter((line) => line.trimStart().startsWith('• Turn #'));
-    // Cumulative facts from previous generations: the chronological index alone
-    // cannot rebuild structured sections, so carry forward prior decisions,
-    // artifact trail entries, high-saliency traces and tool names.
-    const priorDecisions: string[] = [];
-    const priorArtifactLines: string[] = [];
-    const priorHighSaliency: string[] = [];
-    const priorTools: string[] = [];
-    for (const text of priorSynopsisTexts) {
-      const lines = text.split('\n');
-      let section = '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (/^##\s+2\./.test(trimmed)) { section = 'artifacts'; continue; }
-        if (/^##\s+3\./.test(trimmed)) { section = 'saliency'; continue; }
-        if (/^##\s+4\./.test(trimmed)) { section = 'decisions'; continue; }
-        if (/^##\s+5\./.test(trimmed)) { section = 'state'; continue; }
-        if (/^##\s+6\./.test(trimmed) || /^###\s+Chronological/.test(trimmed)) { section = ''; continue; }
-        if (/^##\s+1\./.test(trimmed)) { section = 'intent'; continue; }
-        if (!trimmed.startsWith('- ') && !trimmed.startsWith('• ')) {
-          if (trimmed.startsWith('- Tools executed:')) section = 'state';
-          continue;
-        }
-        const content = trimmed.replace(/^[-•]\s+/, '').trim();
-        if (!content) continue;
-        if (section === 'decisions' && !/follow the codebase technical standards/i.test(content)) {
-          priorDecisions.push(content);
-        } else if (section === 'artifacts' && !/no workspace files modified/i.test(content)) {
-          priorArtifactLines.push(line.trim());
-        } else if (section === 'saliency') {
-          priorHighSaliency.push(content.replace(/^\[FAILED[^\]]*\]:\s*/, '').trim() ? content : content);
-        }
-        const toolsMatch = trimmed.match(/^- Tools executed:\s*(.+)/);
-        if (toolsMatch && toolsMatch[1] && !/none/i.test(toolsMatch[1])) {
-          toolsMatch[1].split(',').map((s) => s.trim()).filter(Boolean).forEach((t) => priorTools.push(t));
-        }
-      }
-    }
+    const {
+      priorSynopsisLines,
+      priorDecisions,
+      priorArtifactLines,
+      priorHighSaliency,
+      priorTools,
+    } = this.parsePriorSynopsis(priorSynopsisTexts);
     const sourceMessages = messages.filter((message) => !isRollingSynopsisMessage(message));
 
     const userTurnIndices: number[] = [];
@@ -828,33 +814,52 @@ export class ContextCompactor {
       ? renderCompactionTaskState(taskStateInput.plan, taskStateInput.completionReason)
       : null;
     const chronologicalIndex = [...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES);
-    const structuredSummary = [
-      `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
-      `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
-      ``,
-      `## 1. Session Intent`,
-      sessionIntent,
-      ``,
-      `## 2. Artifact Trail (Files Modified & Inspected)`,
-      ...boundedArtifactLines,
-      ...highSaliencySection,
-      ``,
-      `## 4. Decisions Made`,
-      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
-      ``,
-      `## 5. Current State & Tools Executed`,
-      `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
-      ...(rollingTaskState ? rollingTaskState.state : ['- Status: older exchange turns safely packaged with an immutable trace.']),
-      `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
-      ``,
-      `## 6. Next Steps`,
-      ...(rollingTaskState ? rollingTaskState.nextSteps : ['- Continue the task on files in the active sliding window.']),
-      ``,
-      `### Chronological Turn Index`,
-      ...chronologicalIndex,
-      `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
-      `\n> (The system will automatically re-inject details if the user refers to the steps above)`
-    ].join('\n');
+    const structuredSummary = taskStateInput?.customLLMText
+      ? [
+          `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
+          `> Older exchange turns compressed under LLM Technical State Snapshot:`,
+          ``,
+          taskStateInput.customLLMText.trim(),
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `> (The system will automatically re-inject details if the user refers to the steps above)`,
+        ].join('\n')
+      : [
+          `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
+          `> Older exchange turns compressed under 7-Section Technical State Standard:`,
+          ``,
+          `Objective`,
+          `- ${sessionIntent}`,
+          ``,
+          `Requirements`,
+          `- Follow codebase technical standards and user directions.`,
+          ``,
+          `Decisions`,
+          ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
+          ``,
+          `Work State`,
+          `Completed`,
+          `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
+          ...(rollingTaskState ? rollingTaskState.state.map((s) => `- ${s}`) : ['- Status: older exchange turns safely packaged with an immutable trace.']),
+          `Active`,
+          `- Status: older exchange turns safely packaged with an immutable trace.`,
+          `Blocked`,
+          `- None`,
+          ``,
+          `Next Move`,
+          ...(rollingTaskState ? rollingTaskState.nextSteps.map((m, i) => `${i + 1}. ${m.replace(/^\d+\.\s*/, '')}`) : ['1. Continue the task on files in the active sliding window.']),
+          ``,
+          `Relevant Files`,
+          ...boundedArtifactLines,
+          ...highSaliencySection,
+          ``,
+          `Important Context`,
+          `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
+          ``,
+          `### Chronological Turn Index`,
+          ...chronologicalIndex,
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `> (The system will automatically re-inject details if the user refers to the steps above)`,
+        ].join('\n');
 
     const rollingSynopsisMessage: SessionMessage = {
       role: 'user',
@@ -905,12 +910,12 @@ export class ContextCompactor {
       let section = '';
       for (const line of lines) {
         const trimmed = line.trim();
-        if (/^##\s+2\./.test(trimmed)) { section = 'artifacts'; continue; }
-        if (/^##\s+3\./.test(trimmed)) { section = 'saliency'; continue; }
-        if (/^##\s+4\./.test(trimmed)) { section = 'decisions'; continue; }
-        if (/^##\s+5\./.test(trimmed)) { section = 'state'; continue; }
-        if (/^##\s+6\./.test(trimmed) || /^###\s+Chronological/.test(trimmed)) { section = ''; continue; }
-        if (/^##\s+1\./.test(trimmed)) { section = 'intent'; continue; }
+        if (/^##\s+2\./.test(trimmed) || /^relevant\s*files?\b/i.test(trimmed) || /^artifact\s*trail\b/i.test(trimmed)) { section = 'artifacts'; continue; }
+        if (/^##\s+3\./.test(trimmed) || /^important\s*context\b/i.test(trimmed) || /^high-saliency\b/i.test(trimmed)) { section = 'saliency'; continue; }
+        if (/^##\s+4\./.test(trimmed) || /^decisions?\b/i.test(trimmed)) { section = 'decisions'; continue; }
+        if (/^##\s+5\./.test(trimmed) || /^work\s*state\b/i.test(trimmed) || /^current\s*state\b/i.test(trimmed)) { section = 'state'; continue; }
+        if (/^##\s+6\./.test(trimmed) || /^next\s*move\b/i.test(trimmed) || /^next\s*steps?\b/i.test(trimmed) || /^###\s+Chronological/.test(trimmed)) { section = ''; continue; }
+        if (/^##\s+1\./.test(trimmed) || /^objective\b/i.test(trimmed) || /^requirements?\b/i.test(trimmed) || /^session\s+intent\b/i.test(trimmed)) { section = 'intent'; continue; }
         if (!trimmed.startsWith('- ') && !trimmed.startsWith('• ')) {
           if (trimmed.startsWith('- Tools executed:')) section = 'state';
           continue;
@@ -1113,34 +1118,55 @@ export class ContextCompactor {
     const firstArchived = archivedNumbers[0];
     const lastArchived = archivedNumbers[archivedNumbers.length - 1];
     const turnRangeLabel = archivedNumbers.length === 1 ? `TURN ${firstArchived}` : `TURNS ${firstArchived} to ${lastArchived}`;
-    const taskState = renderCompactionTaskState(options.plan, options.completionReason);
-    const structuredSummary = [
-      `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
-      `> Older exchange turns compressed under the Anchored Structured Compression standard (/context-compression):`,
-      ``,
-      `## 1. Session Intent`,
-      sessionIntent,
-      ``,
-      `## 2. Artifact Trail (Files Modified & Inspected)`,
-      ...boundedWindowArtifacts,
-      ...highSaliencySection,
-      ``,
-      `## 4. Decisions Made`,
-      ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
-      ``,
-      `## 5. Current State & Tools Executed`,
-      `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
-      ...taskState.state,
-      `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
-      ``,
-      `## 6. Next Steps`,
-      ...taskState.nextSteps,
-      ``,
-      `### Chronological Turn Index`,
-      ...[...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES),
-      `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
-      `> (The system will automatically re-inject details if the user refers to the steps above)`
-    ].join('\n');
+    const taskState = options?.plan
+      ? renderCompactionTaskState(options.plan, options.completionReason)
+      : null;
+    const structuredSummary = (options as any)?.customLLMText
+      ? [
+          `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
+          `> Older exchange turns compressed under LLM Technical State Snapshot:`,
+          ``,
+          String((options as any).customLLMText).trim(),
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `> (The system will automatically re-inject details if the user refers to the steps above)`,
+        ].join('\n')
+      : [
+          `${ROLLING_SYNOPSIS_MARKER} - ${turnRangeLabel} ARCHIVED]:`,
+          `> Older exchange turns compressed under 7-Section Technical State Standard:`,
+          ``,
+          `Objective`,
+          `- ${sessionIntent}`,
+          ``,
+          `Requirements`,
+          `- Follow codebase technical standards and user constraints.`,
+          ``,
+          `Decisions`,
+          ...(allDecisions.length > 0 ? allDecisions.map((d) => `- ${d}`) : ['- Follow the codebase technical standards.']),
+          ``,
+          `Work State`,
+          `Completed`,
+          `- Tools executed: ${allTools.slice(0, 8).join(', ') || 'none'}`,
+          ...(taskState ? taskState.state.map((s) => `- ${s}`) : ['- Status: older exchange turns safely packaged with an immutable trace.']),
+          `Active`,
+          `- Current execution context preserved with immutable trace.`,
+          `Blocked`,
+          `- None`,
+          ``,
+          `Next Move`,
+          ...(taskState ? taskState.nextSteps.map((m, i) => `${i + 1}. ${m.replace(/^\d+\.\s*/, '')}`) : ['1. Continue the task on files in the active sliding window.']),
+          ``,
+          `Relevant Files`,
+          ...boundedWindowArtifacts,
+          ...highSaliencySection,
+          ``,
+          `Important Context`,
+          `- Verification scope: recorded command outcomes only; unrecorded checks are not assumed to pass.`,
+          ``,
+          `### Chronological Turn Index`,
+          ...[...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES),
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `> (The system will automatically re-inject details if the user refers to the steps above)`,
+        ].join('\n');
 
     const prunedSet = new Set(prunableTurns);
     // Pass 1: prune by turn.
@@ -1201,6 +1227,104 @@ export class ContextCompactor {
         strategiesApplied: ['completed-turn-window-compaction'],
       },
     };
+  }
+
+  /**
+   * Asynchronous LLM-powered variant of compactCompletedTurnWindow.
+   * Leverages the provided LLM (or the compactor's configured LLM) to summarize
+   * prunable turns into an exhaustive 7-section Technical State Snapshot.
+   * Gracefully falls back to the deterministic rule-based summary if the LLM
+   * is absent or if summarization fails/times out.
+   */
+  async compactCompletedTurnWindowAsync(
+    entries: TurnWindowEntry[],
+    options: CompletedTurnWindowOptions,
+  ): Promise<{ messages: SessionMessage[]; stats: CompactionStats }> {
+    const activeLLM = options.llm || this.llm;
+    if (!activeLLM) {
+      return this.compactCompletedTurnWindow(entries, options);
+    }
+
+    try {
+      const preserve = Math.max(0, Math.floor(options.preserveCompletedTurns ?? this.config.preserveCompletedTurns ?? 4));
+      const completed = Array.from(new Set(options.completedTurns || [])).filter(
+        (turn) => Number.isInteger(turn) && turn !== options.openTurn,
+      ).sort((a, b) => a - b);
+      if (completed.length <= preserve) {
+        return this.compactCompletedTurnWindow(entries, options);
+      }
+
+      const messagesByTurn = new Map<number, SessionMessage[]>();
+      for (const entry of entries) {
+        if (entry.turn !== undefined) {
+          if (!messagesByTurn.has(entry.turn)) messagesByTurn.set(entry.turn, []);
+          messagesByTurn.get(entry.turn)!.push(entry.message);
+        }
+      }
+
+      const prunableTurns = completed.slice(0, completed.length - preserve);
+      const prunableMessages: SessionMessage[] = [];
+      for (const turn of prunableTurns) {
+        const msgs = messagesByTurn.get(turn);
+        if (msgs) prunableMessages.push(...msgs);
+      }
+
+      let customLLMText: string | undefined;
+      if (prunableMessages.length > 0) {
+        customLLMText = await compactHistoryWithLLM(prunableMessages, activeLLM);
+      }
+
+      return this.compactCompletedTurnWindow(entries, { ...options, customLLMText });
+    } catch (err: any) {
+      try {
+        console.warn(`[compaction] compactCompletedTurnWindowAsync LLM error (${err?.message || err}); falling back to rule-based summary.`);
+      } catch { /* ignore */ }
+      return this.compactCompletedTurnWindow(entries, options);
+    }
+  }
+
+  /**
+   * Asynchronous LLM-powered variant of compact.
+   * If an LLM is available and rolling turns are enabled, uses the LLM to summarize
+   * pruned historical turns into the 7-section technical state snapshot.
+   */
+  async compactAsync(
+    messages: SessionMessage[],
+    options?: CompactionOptions,
+  ): Promise<{ messages: SessionMessage[]; stats: CompactionStats }> {
+    const activeLLM = options?.llm || this.llm;
+    if (!activeLLM) {
+      return this.compact(messages, options);
+    }
+
+    try {
+      const preserve = Math.max(0, Math.floor(options?.preserveLastNTurns ?? this.config.preserveLastNTurns ?? 8));
+      const sourceMessages = messages.filter((m) => !isRollingSynopsisMessage(m));
+      const userTurnIndices: number[] = [];
+      sourceMessages.forEach((msg, idx) => {
+        if (msg.role === 'user' && !msg.parts?.some((p) => p.functionResponse)) {
+          userTurnIndices.push(idx);
+        }
+      });
+
+      if (userTurnIndices.length <= preserve + 1) {
+        return this.compact(messages, options);
+      }
+
+      const cutoffTurnIdx = userTurnIndices[userTurnIndices.length - preserve];
+      const prunableMessages = sourceMessages.slice(userTurnIndices[1], cutoffTurnIdx);
+      let customLLMText: string | undefined;
+      if (prunableMessages.length > 0) {
+        customLLMText = await compactHistoryWithLLM(prunableMessages, activeLLM);
+      }
+
+      return this.compact(messages, { ...options, customLLMText });
+    } catch (err: any) {
+      try {
+        console.warn(`[compaction] compactAsync LLM error (${err?.message || err}); falling back.`);
+      } catch { /* ignore */ }
+      return this.compact(messages, options);
+    }
   }
 
   /**
@@ -1328,7 +1452,7 @@ export class ContextCompactor {
     if (shouldRunRollingTurns && protectedPaths.size === 0 && !options?.protectedMessages?.length
       && (options?.force || originalTokens > effectiveHistoryBudgetTokens)) {
       const rollingResult = this.applyRollingTurnCompaction(workingMessages, preserveTurns,
-        { plan: options?.plan, completionReason: options?.completionReason });
+        { plan: options?.plan, completionReason: options?.completionReason, customLLMText: options?.customLLMText });
       workingMessages = rollingResult.messages;
       archivedTurns = rollingResult.archivedTurns;
       prunedTurnsCount = rollingResult.prunedTurnsCount;

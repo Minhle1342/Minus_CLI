@@ -11,7 +11,10 @@ export function appendEntry(model: ViewportModel, entry: TranscriptEntry): Viewp
 const cachedLines = new WeakMap<TranscriptEntry, Map<number, string[]>>();
 
 /** Lightweight terminal syntax coloring for code in answers and tool output. */
-function highlightCode(line: string): string {
+const MAX_HIGHLIGHT_LINE = 500;
+export function highlightCode(line: string): string {
+  // One huge line (minified/binary) costs O(len) regex tokens for no visible gain.
+  if (line.length > MAX_HIGHLIGHT_LINE) return color(tokyoNight.text, line);
   const tokens = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/.*|#.*|\/\*.*?\*\/|\b(?:const|let|var|function|class|interface|type|import|export|from|return|if|else|for|while|async|await|def|lambda|try|catch|throw|new|public|private|true|false|null|undefined|None|True|False)\b|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\s*\())/g;
   let rendered = '';
   let offset = 0;
@@ -161,6 +164,8 @@ export function formatAnswer(text: string, width = 80): string {
   }
   let codeFence: { marker: string; length: number } | undefined;
   let firstContentLine = true;
+  // Budget per render: giant code blocks degrade to plain color instead of stalling the frame.
+  let codeLinesLeft = 2000;
   return lines.flatMap(line => {
     const fence = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (codeFence) {
@@ -168,7 +173,7 @@ export function formatAnswer(text: string, width = 80): string {
         codeFence = undefined;
         return [];
       }
-      return [highlightCode(line)];
+      return codeLinesLeft-- > 0 ? [highlightCode(line)] : [color(tokyoNight.text, line)];
     }
     if (fence) {
       codeFence = { marker: fence[1][0], length: fence[1].length };
@@ -259,6 +264,240 @@ function permissionLines(request: PermissionCard, width: number): string[] {
     edge('╰' + '─'.repeat(width - 2) + '╯')];
 }
 
+export interface CompactionSnapshotData {
+  rangeLabel: string;
+  objective: string[];
+  requirements: string[];
+  decisions: string[];
+  workState: {
+    completed: string[];
+    active: string[];
+    blocked: string[];
+  };
+  nextMove: string[];
+  relevantFiles: string[];
+  importantContext: string[];
+}
+
+export function parseCompactionText(text: string): CompactionSnapshotData {
+  const result: CompactionSnapshotData = {
+    rangeLabel: '',
+    objective: [],
+    requirements: [],
+    decisions: [],
+    workState: { completed: [], active: [], blocked: [] },
+    nextMove: [],
+    relevantFiles: [],
+    importantContext: [],
+  };
+
+  const lines = text.split('\n');
+  let currentSection: '' | 'objective' | 'requirements' | 'decisions' | 'workState' | 'nextMove' | 'relevantFiles' | 'importantContext' = '';
+  let workStateSub: '' | 'completed' | 'active' | 'blocked' = '';
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+
+    const rangeMatch = trimmed.match(/\[ROLLING DIALOGUE SYNOPSIS\s*-\s*([^\]]+)\]/i);
+    if (rangeMatch) {
+      result.rangeLabel = rangeMatch[1].trim();
+      continue;
+    }
+    if (trimmed.startsWith('> Older exchange turns') || trimmed.startsWith('===') || trimmed.startsWith('---')) {
+      continue;
+    }
+
+    const normalized = trimmed.replace(/^[#*•\d.)\s]+/, '').trim().toLowerCase();
+
+    if (/^objective\b/i.test(normalized) || /^session\s+intent\b/i.test(normalized)) {
+      currentSection = 'objective';
+      continue;
+    }
+    if (/^requirements?\b/i.test(normalized)) {
+      currentSection = 'requirements';
+      continue;
+    }
+    if (/^decisions?\b/i.test(normalized)) {
+      currentSection = 'decisions';
+      continue;
+    }
+    if (/^work\s*state\b/i.test(normalized) || /^current\s*state\b/i.test(normalized)) {
+      currentSection = 'workState';
+      workStateSub = 'completed';
+      continue;
+    }
+    if (/^next\s*(?:move|steps?)\b/i.test(normalized)) {
+      currentSection = 'nextMove';
+      continue;
+    }
+    if (/^relevant\s*files?\b/i.test(normalized) || /^artifact\s*trail\b/i.test(normalized)) {
+      currentSection = 'relevantFiles';
+      continue;
+    }
+    if (/^important\s*context\b/i.test(normalized) || /^high-saliency\b/i.test(normalized)) {
+      currentSection = 'importantContext';
+      continue;
+    }
+
+    if (currentSection === 'workState') {
+      if (/^completed\b/i.test(normalized)) {
+        workStateSub = 'completed';
+        continue;
+      }
+      if (/^active\b/i.test(normalized)) {
+        workStateSub = 'active';
+        continue;
+      }
+      if (/^blocked\b/i.test(normalized)) {
+        workStateSub = 'blocked';
+        continue;
+      }
+    }
+
+    const cleanedLine = trimmed.replace(/^[-*•]\s+/, '').trim();
+    if (!cleanedLine) continue;
+
+    if (currentSection === 'objective') {
+      result.objective.push(cleanedLine);
+    } else if (currentSection === 'requirements') {
+      result.requirements.push(cleanedLine);
+    } else if (currentSection === 'decisions') {
+      result.decisions.push(cleanedLine);
+    } else if (currentSection === 'workState') {
+      if (workStateSub === 'blocked') result.workState.blocked.push(cleanedLine);
+      else if (workStateSub === 'active') result.workState.active.push(cleanedLine);
+      else result.workState.completed.push(cleanedLine);
+    } else if (currentSection === 'nextMove') {
+      result.nextMove.push(cleanedLine);
+    } else if (currentSection === 'relevantFiles') {
+      result.relevantFiles.push(cleanedLine);
+    } else if (currentSection === 'importantContext') {
+      result.importantContext.push(cleanedLine);
+    }
+  }
+
+  return result;
+}
+
+export function formatCompactionCard(text: string, width: number, collapsed: boolean): string[] {
+  const data = parseCompactionText(text);
+  const rangeTitle = data.rangeLabel || 'History Snapshot';
+
+  if (collapsed) {
+    const badge = color(tokyoNight.purple, '▸ ')
+      + color(tokyoNight.cyan, '🧹 Context Compaction (LLM)')
+      + color(tokyoNight.muted, ` · ${rangeTitle} · 7 structured sections · Press Ctrl+O to expand`);
+    return wrap(badge, width);
+  }
+
+  const innerWidth = Math.max(16, width - 4);
+  const edge = (ch: string) => color(tokyoNight.border, ch);
+  const cardLines: string[] = [];
+
+  const addHeader = (icon: string, title: string, titleColor: string) => {
+    cardLines.push(color(titleColor, `${icon} ${title}`));
+  };
+
+  const addItems = (items: string[], itemColor: string, indent = '  • ') => {
+    for (const item of items) {
+      const formatted = formatAnswerInline(item, itemColor);
+      const wrapped = wrap(formatted, innerWidth - indent.length);
+      wrapped.forEach((line, idx) => {
+        cardLines.push((idx === 0 ? color(tokyoNight.muted, indent) : '    ') + line);
+      });
+    }
+  };
+
+  // 1. Objective
+  if (data.objective.length > 0) {
+    addHeader('🎯', 'Objective', tokyoNight.purple);
+    addItems(data.objective, tokyoNight.text);
+    cardLines.push('');
+  }
+
+  // 2. Requirements
+  if (data.requirements.length > 0) {
+    addHeader('📋', 'Requirements', tokyoNight.yellow);
+    addItems(data.requirements, tokyoNight.text);
+    cardLines.push('');
+  }
+
+  // 3. Decisions
+  if (data.decisions.length > 0) {
+    addHeader('💡', 'Decisions', tokyoNight.blue);
+    addItems(data.decisions, tokyoNight.text);
+    cardLines.push('');
+  }
+
+  // 4. Work State
+  const hasWorkState = data.workState.completed.length > 0 || data.workState.active.length > 0 || data.workState.blocked.length > 0;
+  if (hasWorkState) {
+    addHeader('⚡', 'Work State', tokyoNight.green);
+    if (data.workState.completed.length > 0) {
+      cardLines.push('  ' + color(tokyoNight.green, '✔ Completed:'));
+      addItems(data.workState.completed, tokyoNight.text, '    - ');
+    }
+    if (data.workState.active.length > 0) {
+      cardLines.push('  ' + color(tokyoNight.yellow, '● Active:'));
+      addItems(data.workState.active, tokyoNight.text, '    - ');
+    }
+    if (data.workState.blocked.length > 0) {
+      cardLines.push('  ' + color(tokyoNight.red, '✖ Blocked:'));
+      addItems(data.workState.blocked, tokyoNight.text, '    - ');
+    }
+    cardLines.push('');
+  }
+
+  // 5. Next Move
+  if (data.nextMove.length > 0) {
+    addHeader('🚀', 'Next Move', tokyoNight.purple);
+    data.nextMove.forEach((move, idx) => {
+      const numPrefix = `  ${idx + 1}. `;
+      const formatted = formatAnswerInline(move, tokyoNight.text);
+      const wrapped = wrap(formatted, innerWidth - numPrefix.length);
+      wrapped.forEach((line, lIdx) => {
+        cardLines.push((lIdx === 0 ? color(tokyoNight.yellow, numPrefix) : '     ') + line);
+      });
+    });
+    cardLines.push('');
+  }
+
+  // 6. Relevant Files
+  if (data.relevantFiles.length > 0) {
+    addHeader('📁', 'Relevant Files', tokyoNight.cyan);
+    addItems(data.relevantFiles, tokyoNight.cyan);
+    cardLines.push('');
+  }
+
+  // 7. Important Context
+  if (data.importantContext.length > 0) {
+    addHeader('📌', 'Important Context', tokyoNight.yellow);
+    addItems(data.importantContext, tokyoNight.text);
+    cardLines.push('');
+  }
+
+  while (cardLines.length > 0 && cardLines[cardLines.length - 1] === '') {
+    cardLines.pop();
+  }
+
+  if (cardLines.length === 0) {
+    cardLines.push(color(tokyoNight.muted, '  (Empty compaction record)'));
+  }
+
+  const titleTag = ` 🧹 Context Compaction (LLM) · ${rangeTitle} `;
+  const borderTotalWidth = Math.max(30, width - 2);
+  const fillLen = Math.max(2, borderTotalWidth - 3 - displayWidth(titleTag));
+  const topBorder = edge('╭─') + color(tokyoNight.cyan, titleTag) + edge('─'.repeat(fillLen) + '╮');
+  const bottomBorder = edge('╰' + '─'.repeat(borderTotalWidth) + '╯');
+
+  const boxed = cardLines.map((line) => {
+    return edge('│') + ' ' + fit(line, innerWidth) + ' ' + edge('│');
+  });
+
+  return [topBorder, ...boxed, bottomBorder];
+}
+
 /**
  * Entry nào kết thúc bằng separator (divider)?
  * - tool result (✔/✖/⊘) đóng cặp call+result
@@ -267,7 +506,7 @@ function permissionLines(request: PermissionCard, width: number): string[] {
  * Dùng để không vẽ 2 đường kẻ liền nhau giữa 2 entry.
  */
 function endsWithDivider(entry: TranscriptEntry): boolean {
-  if (entry.kind === 'thought' || entry.kind === 'live') return true;
+  if (entry.kind === 'thought' || entry.kind === 'live' || entry.kind === 'compaction') return true;
   return entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
 }
 
@@ -277,40 +516,48 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
     if (!widths) { widths = new Map(); cachedLines.set(entry, widths); }
     let rendered = widths.get(width);
     if (!rendered) {
-      // 'live' = câu trả lời tạm thời model in ra giữa lúc làm việc: hiển thị y hệt
-      // final answer nhưng bị bọc 2 separator để không bị đọc như kết quả cuối.
-      const isAnswerLike = entry.kind === 'answer' || entry.kind === 'live';
-      if (entry.kind === 'thought') {
-        // Khối Thinking mặc định ĐÓNG: chỉ hiện dòng đầu + dấu "+" để bấm mở.
-        // Mở thì hiện "−" và toàn bộ nội dung.
-        const expanded = entry.expanded === true;
-        const marker = color(expanded ? tokyoNight.muted : tokyoNight.purple, expanded ? '−' : '+');
-        const label = color(tokyoNight.muted, 'Thinking › ');
-        const raw = stripTerminalControls(entry.text).split('\n')[0] || '';
-        const avail = Math.max(8, width - 12);
-        const preview = raw.length > avail ? raw.slice(0, avail - 1) + '…' : raw;
-        const body = expanded
-          ? formatAnswer(entry.text, width)
-          : formatAnswerInline(preview, tokyoNight.muted);
-        rendered = wrap(marker + ' ' + label + body, width);
+      if (entry.kind === 'compaction') {
+        rendered = formatCompactionCard(entry.text, width, collapsed);
         widths.set(width, rendered);
       } else {
-        const prefix = entry.kind === 'user' ? 'You › ' : isAnswerLike ? 'Minus › ' : '';
-        const prefixColor = entry.kind === 'user' ? tokyoNight.blue : isAnswerLike ? tokyoNight.purple : tokyoNight.muted;
-        const textColor = entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
-        // Thinking is model prose: same markdown pipeline as the answer, the
-        // muted "Thinking › " prefix keeps it visually subordinate.
-        const body = isAnswerLike ? formatAnswer(entry.text, width)
-          : entry.kind === 'tool' ? formatTool(entry.text)
-          : color(textColor, stripTerminalControls(entry.text));
-        rendered = entry.kind === 'permission' && entry.permission
-          ? permissionLines(entry.permission, width)
-          : wrap(color(prefixColor, prefix) + body, width);
-        widths.set(width, rendered);
+        // 'live' = câu trả lời tạm thời model in ra giữa lúc làm việc: hiển thị y hệt
+        // final answer nhưng bị bọc 2 separator để không bị đọc như kết quả cuối.
+        const isAnswerLike = entry.kind === 'answer' || entry.kind === 'live';
+        if (entry.kind === 'thought') {
+          // Khối Thinking mặc định ĐÓNG: chỉ hiện dòng đầu + dấu "+" để bấm mở.
+          // Mở thì hiện "−" và toàn bộ nội dung.
+          const expanded = entry.expanded === true;
+          const marker = color(expanded ? tokyoNight.muted : tokyoNight.purple, expanded ? '−' : '+');
+          const label = color(tokyoNight.muted, 'Thinking › ');
+          const raw = stripTerminalControls(entry.text).split('\n')[0] || '';
+          const avail = Math.max(8, width - 12);
+          const preview = raw.length > avail ? raw.slice(0, avail - 1) + '…' : raw;
+          const body = expanded
+            ? formatAnswer(entry.text, width)
+            : formatAnswerInline(preview, tokyoNight.muted);
+          rendered = wrap(marker + ' ' + label + body, width);
+          widths.set(width, rendered);
+        } else {
+          const prefix = entry.kind === 'user' ? 'You › ' : isAnswerLike ? 'Minus › ' : '';
+          const prefixColor = entry.kind === 'user' ? tokyoNight.blue : isAnswerLike ? tokyoNight.purple : tokyoNight.muted;
+          const textColor = entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
+          // Thinking is model prose: same markdown pipeline as the answer, the
+          // muted "Thinking › " prefix keeps it visually subordinate.
+          const body = isAnswerLike ? formatAnswer(entry.text, width)
+            : entry.kind === 'tool' ? formatTool(entry.text)
+            : color(textColor, stripTerminalControls(entry.text));
+          rendered = entry.kind === 'permission' && entry.permission
+            ? permissionLines(entry.permission, width)
+            : wrap(color(prefixColor, prefix) + body, width);
+          widths.set(width, rendered);
+        }
       }
     }
     // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
     const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+    if (entry.kind === 'compaction') {
+      return [...rendered, pairDivider];
+    }
     if (entry.kind === 'live') {
       // Bọc 2 separator. Nếu entry trước đã đóng cặp bằng divider, không vẽ thêm
       // (tránh 2 đường kẻ liền nhau).
@@ -529,8 +776,12 @@ export function sessionHistoryToTranscript(messages: Array<{
       : proseParts.map((part) => part.trim()).filter(Boolean).join('\n');
     if (text) {
       if (!isAssistant) {
-        const visible = userVisibleText(text);
-        if (visible !== undefined) entries.push({ kind: 'user', text: visible });
+        if (text.includes('[ROLLING DIALOGUE SYNOPSIS') || text.includes('Technical State Snapshot') || text.includes('Older exchange turns compressed')) {
+          entries.push({ kind: 'compaction', text, expanded: true });
+        } else {
+          const visible = userVisibleText(text);
+          if (visible !== undefined) entries.push({ kind: 'user', text: visible });
+        }
       } else {
         // Prose đi kèm tool call là câu trả lời TẠM THỜI → kind 'live' (bọc 2 separator),
         // khớp với cách render live. Prose đứng một mình là final answer.

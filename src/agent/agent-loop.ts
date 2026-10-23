@@ -9,7 +9,7 @@ import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
 import { evaluateSubmission, SubmissionReadiness } from './submission-readiness.js';
 import { computeRequestValueDigest } from '../session/session-invariants.js';
-import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy } from './completed-turn-compaction-policy.js';
+import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy, shouldTriggerAutoCompaction, hasTurnCountPressure, hasObservationVolumePressure } from './completed-turn-compaction-policy.js';
 import { AgentLoopOptions } from './types.js';
 import { CheckpointManager, type FileDiffItem, type RollbackResult } from '../workspace/checkpoint.js';
 import { CLI, UICollapsePreferences, DEFAULT_COLLAPSE_PREFERENCES } from '../ui/cli-ui.js';
@@ -452,6 +452,10 @@ export class AgentLoop {
     session.addReasoning(thought, { kind: decision.kind, step, turn, trigger: decision.trigger });
   }
 
+  getLLM(): any {
+    return this.llm;
+  }
+
   get collapsePreferences(): UICollapsePreferences {
     return this._collapsePreferences;
   }
@@ -569,6 +573,9 @@ export class AgentLoop {
 
     // Bảo tồn KV-Cache Prefix của OpenAI Codex trong suốt vòng lặp
     this.contextCompactor.setConfig({ preservePrefixCache: true });
+    if (this.llm && typeof (this.contextCompactor as any)?.setLLM === 'function') {
+      (this.contextCompactor as any).setLLM(this.llm);
+    }
     this.contextBudgetManager = new ContextBudgetManager(this.contextCompactor, {
       mode: resolveContextManagementMode(options?.contextManagementMode || process.env.MINUS_CONTEXT_MANAGEMENT_MODE),
       triggerRatio: options?.requestCompactionRatio
@@ -5600,7 +5607,21 @@ export class AgentLoop {
       const budget = resolveRequestBudget(envelope || {
         maxInputTokens, outputReserveTokens: tokenConfig?.maxOutputTokens || 0,
       });
-      if (!hasCompletedTurnPressure(before?.upperBoundTokens ?? historyTokens, budget.targetUsableInputTokens, policy)) return;
+      const historyChars = entries.reduce((acc, entry) => {
+        const content = (entry.message as any).content || (entry.message as any).parts;
+        if (typeof content === 'string') return acc + content.length;
+        if (Array.isArray(content)) return acc + JSON.stringify(content).length;
+        return acc + 100;
+      }, 0);
+      const shouldTrigger = shouldTriggerAutoCompaction({
+        historyTokens: before?.upperBoundTokens ?? historyTokens,
+        maxInputTokens: budget.targetUsableInputTokens,
+        policy,
+        completedTurnCount: completed.length,
+        preserveCount: preserve,
+        historyChars,
+      });
+      if (!shouldTrigger) return;
       const turnKey = computeRequestValueDigest({
         sessionId: session.id, entries, envelope, budget,
         config, policy, plan: this.planManager.getTaskGraph(), count: before,
@@ -5608,16 +5629,23 @@ export class AgentLoop {
       });
       if (this.rejectedTurnCandidateKey === turnKey) return;
       CLI.startCompaction('turn');
-      const result = this.contextCompactor.compactCompletedTurnWindow(entries, {
+      const result = await this.contextCompactor.compactCompletedTurnWindowAsync(entries, {
         completedTurns: completed,
         preserveCompletedTurns: preserve,
         plan: this.planManager.getTaskGraph(),
         completionReason: session.findLatestEventOfType('turn/end')?.data.reason,
+        llm: this.llm,
       });
       const after = envelope ? await this.contextBudgetManager.counter.count({ ...envelope, history: result.messages }) : undefined;
+      const hasTokenSavings = hasMaterialCompletedTurnSavings(
+        before?.upperBoundTokens ?? result.stats.originalTokens,
+        after?.upperBoundTokens ?? result.stats.compactedTokens,
+        policy,
+      );
+      const hasStructuralPressure = hasTurnCountPressure(completed.length, preserve, policy)
+        || hasObservationVolumePressure(historyChars, policy);
       if (!result.stats.prunedTurnsCount || !result.stats.archivedTurns?.length
-        || !hasMaterialCompletedTurnSavings(before?.upperBoundTokens ?? result.stats.originalTokens,
-          after?.upperBoundTokens ?? result.stats.compactedTokens, policy)) {
+        || (!hasTokenSavings && !hasStructuralPressure)) {
         this.rejectedTurnCandidateKey = turnKey;
         return;
       }

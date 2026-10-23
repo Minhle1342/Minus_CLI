@@ -138,6 +138,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/undo', description: 'Undo the most recent checkpoint', category: 'Shadow Git', aliases: ['/rollback'] },
   { command: '/checkpoints', description: 'Show checkpoint history', category: 'Shadow Git' },
   { command: '/diff', description: 'Show the unified diff of the current task', category: 'Shadow Git' },
+  { command: '/file', usage: '/file <path>', description: 'Open a workspace file in a read-only viewer', category: 'UI & Display' },
   { command: '/evidence', description: 'Show current verification evidence', category: 'Telemetry' },
   { command: '/impact', usage: '/impact [path] [symbol]', description: 'Analyze impact scope (Blast Radius)', category: 'Tools' },
   { command: '/image', usage: '/image <path> [prompt]', description: 'Load and analyze images (Vision / Multimodal)', category: 'Vision', aliases: ['/vision', '/img'] },

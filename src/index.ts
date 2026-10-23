@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { startInteractiveTui, runHeadlessCli, readHeadlessPrompt, parseTeaCommandLine, plainTerminalOutput, type TeaTerminal } from './ui/tea/index.js';
 import { sessionHistoryToTranscript } from './ui/tea/models/viewport-model.js';
+import { loadFileView } from './ui/tea/models/file-view-model.js';
 import type { TeaCliOptions } from './ui/tea/cli-options.js';
 import { stdin as input, stdout as output } from 'node:process';
 import { GeminiLLM } from './llm/gemini.js';
@@ -968,6 +969,14 @@ Please focus on executing and verifying this task. Update its status to COMPLETE
     onMode: mode => { applyPlanMode(mode === 'PLAN'); },
     onHotModelSwitch: async (newModelName) => {
       await performHotModelSwitch(newModelName);
+    },
+    onOpenFile: (target) => {
+      try {
+        const view = loadFileView(workspace.rootDir, target);
+        tui?.setFile(view.path, view.text, view.truncated);
+      } catch (err) {
+        tui?.program.send({ type: 'notice', text: `Không mở được ${target}: ${(err as Error).message}` });
+      }
     },
   });
   const rl = tui;
@@ -2253,6 +2262,18 @@ Please focus on executing and verifying this task, and update its status to COMP
         continue;
       }
 
+      if (trimmed === '/file' || trimmed.startsWith('/file ')) {
+        const target = trimmed.slice('/file'.length).trim();
+        if (!target) { tui.program.send({ type: 'notice', text: 'Dùng: /file <path>' }); continue; }
+        try {
+          const view = loadFileView(workspace.rootDir, target);
+          tui.setFile(view.path, view.text, view.truncated);
+        } catch (err) {
+          tui.program.send({ type: 'notice', text: `Không mở được ${target}: ${(err as Error).message}` });
+        }
+        continue;
+      }
+
       if (trimmed === '/diff') {
         const result = await promisify(execFile)('git', ['diff', '--no-ext-diff', 'HEAD'], { cwd: workspace.rootDir, maxBuffer: 8 * 1024 * 1024 });
         tui.setDiff(result.stdout);
@@ -3114,7 +3135,13 @@ Please focus on executing and verifying this task, and update its status to COMP
           try {
             console.log(`\n${c.cyan}🧹 Activating Context Compactor to safely compress context...${c.reset}`);
             await agentLoop.contextGuardian.protectPreCompaction(activeSession);
-            const compactRes = await agentLoop.contextCompactor.compact(activeSession.getHistory(), { force: true, protectActiveTurn: true, enableRollingTurns: false, plan: agentLoop.planManager.getTaskGraph() });
+            const compactRes = await agentLoop.contextCompactor.compactAsync(activeSession.getHistory(), {
+              force: true,
+              protectActiveTurn: true,
+              enableRollingTurns: false,
+              plan: agentLoop.planManager.getTaskGraph(),
+              llm: agentLoop.getLLM?.(),
+            });
             if (compactRes && compactRes.stats.tokensSaved > 0) {
               activeSession.setHistory(compactRes.messages, "manual-compaction", { stats: compactRes.stats });
               await sessionPersistence.save(activeSession);

@@ -19,6 +19,7 @@ export interface InteractiveOptions {
   onAbort?(): void; onQuit?(): void; onCompact?(): Promise<void>;
   onMode?(mode: Mode): void; complete?(value: string, cursor: number): Completion[] | Promise<Completion[]>;
   onHotModelSwitch?(newModelName: string): Promise<void> | void;
+  onOpenFile?(path: string): Promise<void> | void;
 }
 
 /** Async input port for command handlers; terminal ownership stays in Program. */
@@ -53,6 +54,8 @@ export class TeaTerminal extends EventEmitter {
   setBusy(busy: boolean, sessionId?: string): void { this.program.send({ type: 'busy', busy, sessionId }); }
   setMetadata(data: Partial<SidebarModel>): void { this.program.send({ type: 'metadata', data }); }
   setDiff(text: string, reveal = false): void { this.program.send({ type: 'diff', text, reveal }); }
+  /** Mở overlay xem file read-only; nội dung do kernel đọc để TUI không chạm FS. */
+  setFile(path: string, text: string, truncated = false): void { this.program.send({ type: 'file', path, text, truncated }); }
   clear(): void { this.program.send({ type: 'action', action: 'clear' }); }
   readPrompt(): Promise<string> {
     if (this.closed) return Promise.resolve('/exit');
@@ -193,6 +196,7 @@ export class TeaTerminal extends EventEmitter {
         if (this.line === cmd.value && this.cursor === cmd.cursor && !this.model.question.active) this.program.send({ type: 'completions', values: completions }); break;
       }
       case 'mode': await this.options.onMode?.(cmd.mode); break;
+      case 'file-open': await this.options.onOpenFile?.(cmd.path); break;
     }
   }
   close(): void {

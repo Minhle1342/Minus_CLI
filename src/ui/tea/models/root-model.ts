@@ -4,7 +4,8 @@ import { createComposer, updateComposer, composerView, composerDisplay } from '.
 import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
-import { diffView, createDiffViewer } from './diff-model.js';
+import { diffView, createDiffViewer, visibleDiffLines } from './diff-model.js';
+import { fileView, createFileView, fileLineCount } from './file-view-model.js';
 import { headerView, statuslineView } from './statusline-model.js';
 import { toolCallEntry, toolErrorEntry, toolResultEntry, mergedToolEntry } from './tool-entry.js';
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
@@ -36,6 +37,7 @@ export function createRootModel(options: { width?: number; height?: number; comm
     composer: createComposer(), viewport: { entries: [], thinking: '', answerStream: '', offset: 0, pinned: true, collapsed: false },
     sidebar: { visible: false, workspace: '', model: '', session: '', sessions: [], tools: [], files: [], invariants: [], tokens: 0, maxTokens: 128000 },
     palette: { open: false, query: '', selected: 0, items: options.commands || defaultCommands }, diff: { visible: false, text: '', offset: 0, split: false, collapsed: [], hunk: 0 },
+    file: createFileView(),
     grill: createGrillModel(),
     modelPicker: createModelPickerModel(),
     sessions: createSessionTabs('', []),
@@ -44,8 +46,12 @@ export function createRootModel(options: { width?: number; height?: number; comm
 export function init(options?: Parameters<typeof createRootModel>[0]): [RootModel, Cmd[]] { return [createRootModel(options), []]; }
 function action(model: RootModel, actionName: Action): [RootModel, Cmd[]] {
   switch (actionName) {
-    case 'sidebar': return [{ ...model, sidebar: { ...model.sidebar, visible: !model.sidebar.visible } }, []];
-    case 'diff': return [{ ...model, diff: { ...model.diff, visible: !model.diff.visible }, focus: model.diff.visible ? 'composer' : 'diff' }, []];
+    case 'sidebar': {
+      const visible = !model.sidebar.visible;
+      const selected = visible ? Math.min(model.sidebar.selected ?? 0, Math.max(0, model.sidebar.files.length - 1)) : model.sidebar.selected;
+      return [{ ...model, sidebar: { ...model.sidebar, visible, selected }, focus: visible ? 'sidebar' : model.file.visible ? 'file' : 'composer' }, []];
+    }
+    case 'diff': return [{ ...model, diff: { ...model.diff, visible: !model.diff.visible }, file: { ...model.file, visible: false }, focus: model.diff.visible ? 'composer' : 'diff' }, []];
     case 'palette': return [{ ...model, palette: { ...model.palette, open: true, query: '', selected: 0 }, focus: 'palette' }, []];
     case 'mode': { if (model.status.busy) return [{ ...model, status: { ...model.status, notice: 'Switch mode after the current task finishes.' } }, []]; const mode = model.mode === 'IMPLEMENT' ? 'PLAN' : 'IMPLEMENT'; return [{ ...model, mode }, [{ type: 'mode', mode }]]; }
     case 'clear': return [{ ...model, viewport: { ...model.viewport, entries: [], thinking: '', answerStream: '', offset: 0 } }, []];
@@ -86,7 +92,7 @@ function kernelSessionId(msg: KernelMsg): string | undefined {
   }
 }
 function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
-  if (['compose', 'question', 'action', 'diff'].includes(msg.type)) model = { ...model, selection: undefined, composer: { ...model.composer, selection: undefined } };
+  if (['compose', 'question', 'action', 'diff', 'file'].includes(msg.type)) model = { ...model, selection: undefined, composer: { ...model.composer, selection: undefined } };
   const log = (text: string, kind: 'log' | 'tool' | 'step' | 'answer' = 'log'): [RootModel, Cmd[]] => [{ ...model, viewport: appendEntry(model.viewport, { kind, text }) }, []];
   switch (msg.type) {
     case 'resize': return [{ ...model, selection: undefined, composer: { ...model.composer, selection: undefined }, width: Math.max(1, msg.width), height: Math.max(1, msg.height) }, []];
@@ -123,6 +129,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
     case 'compose': return [{ ...model, composer: { ...model.composer, value: msg.text, cursorOffset: msg.text.length } }, []];
     case 'completions': return [{ ...model, composer: { ...model.composer, completions: msg.values, selected: 0 } }, []];
     case 'diff': return [{ ...model, diff: { ...model.diff, text: msg.text, visible: msg.reveal ?? model.diff.visible, offset: 0, collapsed: [], hunk: 0 } }, []];
+    case 'file': return [{ ...model, file: { ...model.file, path: msg.path, text: msg.text, truncated: msg.truncated, visible: true, offset: 0 }, diff: { ...model.diff, visible: false }, focus: 'file' }, []];
     case 'metadata': {
       // `model` là state per-session-tab (outer gửi model của kernel-active session):
       // tách khỏi spread global để không đè nhầm lên tab đang xem.
@@ -481,7 +488,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const mainWidth = model.width - sidebarWidth;
         const delta = msg.key === 'mouse+up' ? 3 : -3;
         if (model.diff.visible) {
-          const maxOffset = Math.max(0, model.diff.text.split('\n').length + 1 - bodyHeight);
+          const maxOffset = Math.max(0, visibleDiffLines(model.diff).length - bodyHeight);
           const offset = Math.max(0, Math.min(maxOffset, model.diff.offset + delta));
           return offset === model.diff.offset ? [model, []] : [{ ...model, diff: { ...model.diff, offset } }, []];
         }
@@ -594,12 +601,37 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       }
       if (msg.key === 'tab') return action(model, 'mode');
       if (msg.key === 'ctrl+o') return [{ ...model, viewport: { ...model.viewport, collapsed: !model.viewport.collapsed } }, []];
+      if (model.focus === 'file') {
+        if (msg.key === 'escape') return [{ ...model, focus: 'composer', file: { ...model.file, visible: false } }, []];
+        if (['up', 'down', 'pageup', 'pagedown'].includes(msg.key)) {
+          const step = msg.key.startsWith('page') ? 10 : 1;
+          const maxOffset = Math.max(0, fileLineCount(model.file) - selectionLayout(model).bodyHeight);
+          const offset = Math.max(0, Math.min(maxOffset, model.file.offset + (msg.key.endsWith('up') ? -step : step)));
+          return offset === model.file.offset ? [model, []] : [{ ...model, file: { ...model.file, offset } }, []];
+        }
+        return [model, []];
+      }
+      if (model.focus === 'sidebar') {
+        if (msg.key === 'escape') return [{ ...model, focus: model.file.visible ? 'file' : 'composer' }, []];
+        const files = model.sidebar.files;
+        if (files.length && (msg.key === 'up' || msg.key === 'down')) {
+          const selected = (Math.min(model.sidebar.selected ?? 0, files.length - 1) + (msg.key === 'up' ? -1 : 1) + files.length) % files.length;
+          return [{ ...model, sidebar: { ...model.sidebar, selected } }, []];
+        }
+        if (msg.key === 'enter' && files.length) return [model, [{ type: 'file-open', path: files[Math.min(model.sidebar.selected ?? 0, files.length - 1)] }]];
+        return [model, []];
+      }
       if (model.focus === 'diff') {
         if (msg.key === 'escape') return [{ ...model, focus: 'composer', diff: { ...model.diff, visible: false } }, []];
         if (msg.key === 's') return [{ ...model, diff: { ...model.diff, split: !model.diff.split } }, []];
         if (msg.key === 'h') return [{ ...model, diff: { ...model.diff, collapsed: model.diff.collapsed.includes(model.diff.hunk) ? model.diff.collapsed.filter(h => h !== model.diff.hunk) : [...model.diff.collapsed, model.diff.hunk] } }, []];
         if (msg.key === 'left' || msg.key === 'right') return [{ ...model, diff: { ...model.diff, hunk: Math.max(0, model.diff.hunk + (msg.key === 'left' ? -1 : 1)) } }, []];
-        if (['up', 'down', 'pageup', 'pagedown'].includes(msg.key)) return [{ ...model, diff: { ...model.diff, offset: Math.max(0, model.diff.offset + (msg.key.endsWith('up') ? -1 : 1) * (msg.key.startsWith('page') ? 10 : 1)) } }, []];
+        if (['up', 'down', 'pageup', 'pagedown'].includes(msg.key)) {
+          const step = msg.key.startsWith('page') ? 10 : 1;
+          const maxOffset = Math.max(0, visibleDiffLines(model.diff).length - selectionLayout(model).bodyHeight);
+          const offset = Math.max(0, Math.min(maxOffset, model.diff.offset + (msg.key.endsWith('up') ? -step : step)));
+          return [{ ...model, diff: { ...model.diff, offset } }, []];
+        }
         return [model, []];
       }
       if (msg.key === 'pageup' || msg.key === 'pagedown') {
@@ -720,8 +752,8 @@ export function view(model: RootModel): string {
   const sidebarWidth = sidebarWidthFor(width, model.sidebar.visible, height);
   const mainWidth = width - sidebarWidth;
   const selectedViewport = model.selection?.target === 'viewport' ? model.selection : undefined;
-  const main = model.focus === 'palette' ? paletteView(model.palette, mainWidth, bodyHeight) : model.diff.visible ? diffView(model.diff, mainWidth, bodyHeight) : viewportView(selectedViewport ? { ...model.viewport, offset: selectedViewport.viewportOffset ?? model.viewport.offset } : model.viewport, mainWidth, bodyHeight, selectedViewport?.sourceLines);
-  const body = sidebarWidth ? joinHorizontal(main, sidebarView(model.sidebar, sidebarWidth, bodyHeight), mainWidth, sidebarWidth) : main;
+  const main = model.focus === 'palette' ? paletteView(model.palette, mainWidth, bodyHeight) : model.file.visible ? fileView(model.file, mainWidth, bodyHeight) : model.diff.visible ? diffView(model.diff, mainWidth, bodyHeight) : viewportView(selectedViewport ? { ...model.viewport, offset: selectedViewport.viewportOffset ?? model.viewport.offset } : model.viewport, mainWidth, bodyHeight, selectedViewport?.sourceLines);
+  const body = sidebarWidth ? joinHorizontal(main, sidebarView(model.sidebar, sidebarWidth, bodyHeight, model.focus === 'sidebar'), mainWidth, sidebarWidth) : main;
   const displayedComposer = model.selection?.target === 'composer' ? { ...model.composer, cursorOffset: model.selection.composerCursor ?? model.composer.cursorOffset } : model.composer;
   let rows = selectionRows(model, joinVertical([headerView(model)], stripRows, body, questionRows, hints, composerView(displayedComposer, width, composerHeight), [statuslineView(model)]), selectionLayout(model));
   // Grill modal overlay: đè lên giữa màn hình (kể cả vùng input) để user thống nhất lựa chọn với LLM.
