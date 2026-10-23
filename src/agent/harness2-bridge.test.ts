@@ -121,3 +121,31 @@ test('Harness2RecursiveEngine - Save and load persistent reflection library', as
   }
 });
 
+test('Harness2RecursiveEngine - Evaluate candidate empirically with actual command execution', async () => {
+  const engine = new Harness2RecursiveEngine();
+  const candidate = {
+    id: 'test-cand',
+    kind: 'invariant' as const,
+    description: 'Test invariant',
+    scaffold: {
+      category: 'code' as const,
+      negativeGate: ['NEVER mock data'],
+      falsificationCriteria: 'test fails',
+      executionTopology: ['Step 1'],
+      actionBoundary: 'Boundary',
+    },
+  };
+
+  const evalResult = await engine.evaluateCandidateEmpirically(candidate, {
+    testCommand: 'node -e "process.exit(0)"',
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  });
+
+  assert.strictEqual(evalResult.candidateId, 'test-cand');
+  assert.strictEqual(evalResult.testsPassed, true);
+  assert.ok(evalResult.score > 70);
+  assert.ok(evalResult.contrastNotes.length > 0);
+});
+
+

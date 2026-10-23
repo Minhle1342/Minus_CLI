@@ -34,49 +34,18 @@ async function runCommandInDir(command: string, cwd: string): Promise<{ stdout: 
 }
 
 async function executeProbeForTask(
-  candidateId: string,
-  negativeGates: string[],
+  engine: Harness2RecursiveEngine,
+  candidate: import('../src/agent/harness2-bridge.js').HarnessCandidate,
   taskDir: string,
   verifyCommand: string
 ): Promise<ProbeEvaluation> {
-  // Thực thi lệnh kiểm thử ban đầu để đo đạc trạng thái hiện tại
-  const initialCheck = await runCommandInDir(verifyCommand, taskDir);
-  const initiallyPassing = initialCheck.exitCode === 0;
-
-  // Đánh giá dựa trên trọng số kỷ luật của từng biến thể Scaffold:
-  let toolCallCount = 4;
-  let loops = 0;
-  let testsPassed = false;
-  let score = 50;
-  const contrastNotes: string[] = [];
-
-  if (candidateId === 'base') {
-    toolCallCount = 6;
-    loops = 1;
-    score = 65;
-    contrastNotes.push('Base scaffold: Gọi nhiều bước dò dẫm, có 1 vòng lặp kiểm tra dư thừa.');
-  } else if (candidateId === 'inv1') {
-    toolCallCount = 4;
-    loops = 0;
-    score = 82;
-    contrastNotes.push('Invariant (inv1): Chặn mock test, buộc bám sát test runner nên số turn giảm 33%.');
-  } else if (candidateId === 'dom1') {
-    toolCallCount = 3;
-    loops = 0;
-    testsPassed = true;
-    score = 94;
-    contrastNotes.push('Domain (dom1): Nhận diện đúng biên chia 0 / quy tắc LRU, trực diện sửa đúng logic lỗi.');
-  }
-
-  return {
-    candidateId,
-    toolCallCount,
-    unproductiveLoopsDetected: loops,
-    testsPassed,
-    score,
-    contrastNotes,
-  };
+  return engine.evaluateCandidateEmpirically(candidate, {
+    testCommand: verifyCommand,
+    cwd: taskDir,
+    timeoutMs: 15000,
+  });
 }
+
 
 async function main() {
   console.log(`\n${c.cyan}╔════════════════════════════════════════════════════════════════════════╗${c.reset}`);
@@ -147,8 +116,8 @@ async function main() {
 
     for (const cand of candidates) {
       const evalResult = await executeProbeForTask(
-        cand.id,
-        cand.scaffold.negativeGate,
+        engine,
+        cand,
         taskDir,
         task.verifyCommand
       );
