@@ -87,7 +87,7 @@ export class Harness2RecursiveEngine {
     options?: { phase?: 'plan' | 'implement' }
   ): HarnessCandidate[] {
     const candidates: HarnessCandidate[] = [];
-    const activePhase = options?.phase || baseScaffold.phase || 'implement';
+    const activePhase: 'plan' | 'implement' = options?.phase || (baseScaffold.phase === 'plan' ? 'plan' : 'implement');
     const baseCatalog = this.generateStandardToolGuidanceCatalog({ phase: activePhase });
 
     // 1. Base Candidate

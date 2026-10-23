@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT, hasDelegationIntent } from './request-intent.js';
+import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT, hasDelegationIntent, INTENT_CONTINUATION_DELIMITER } from './request-intent.js';
 import { hasNetworkIntent } from './network-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
@@ -61,7 +61,7 @@ export class ClassificationEngine {
       reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
     } else if (/^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:(?:run|execute|chay|thuc thi|test|verify|lint|typecheck|bien dich)\b|build\s+(?:the\s+)?(?:project|repo|repository|package)\b)/i.test(normalizeRequestIntentText(intentPrompt))
       && !/\b(?:ke hoach|plan|task|dag)\b/i.test(normalizedText)
-      && !normalizeRequestIntentText(intentPrompt).split(/\b(?:and then|then|and|sau do|roi|va)\b/).slice(1).some(part => MUTATION_INTENT.test(part))) {
+      && !normalizeRequestIntentText(intentPrompt).split(INTENT_CONTINUATION_DELIMITER).slice(1).some(part => MUTATION_INTENT.test(part))) {
       taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
       capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
       reasons.push('EXPLICIT_EXECUTION_INTENT');

@@ -125,6 +125,46 @@ test('mixed review and mutation requests share the classifier mutation vocabular
   assert.equal(isReadOnlyRequest('Review this function, do not edit code'), true);
 });
 
+test('purpose connectives and punctuation recognize mutation intent in mixed Vietnamese and English requests', () => {
+  const engine = new ClassificationEngine();
+  const mixedRequests = [
+    'Kiểm tra để cải tiến Tool guidance',
+    'Khảo sát nhằm cải tiến hàm này',
+    'Kiểm tra, cải tiến code',
+    'Kiểm tra; sửa lỗi deadlock',
+    'Kiểm tra đồng thời tối ưu hóa performance',
+    'Kiểm tra cũng như cập nhật tài liệu',
+    'Inspect in order to fix the bug',
+    'Review so as to improve performance',
+    'Inspect, then fix the bug',
+    'Review and edit this file',
+  ];
+
+  for (const request of mixedRequests) {
+    assert.equal(isReadOnlyRequest(request), false, `Should not be read-only: "${request}"`);
+    const decision = engine.classify({ request });
+    assert.notEqual(decision.reversibility, 'read-only', `Should not be read-only reversibility: "${request}"`);
+    assert.ok(decision.requiredCapabilities.includes('edit'), `Must include edit capability: "${request}"`);
+  }
+
+  const readOnlyRequests = [
+    'Kiểm tra các điểm cần cải tiến',
+    'Đề xuất các điểm cải tiến',
+    'Kiểm tra nguyên nhân để báo cáo kết quả',
+    'Khảo sát để tìm hiểu nguyên nhân',
+    'Khảo sát hiện trạng hệ thống',
+    'Giải thích cách hoạt động của parser',
+  ];
+
+  for (const request of readOnlyRequests) {
+    assert.equal(isReadOnlyRequest(request), true, `Should be read-only: "${request}"`);
+    const decision = engine.classify({ request });
+    assert.equal(decision.phase, 'explore', `Phase should be explore: "${request}"`);
+    assert.equal(decision.requiredCapabilities.includes('edit'), false, `Must not include edit capability: "${request}"`);
+  }
+});
+
+
 test('fresh verification supersedes a failed check and later mutation invalidates verification', () => {
   const session = new Session();
   const classification = new ClassificationEngine().classify({ request: 'Fix this function' });

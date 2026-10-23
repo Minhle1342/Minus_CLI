@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import test from 'node:test';
-import { Harness2RecursiveEngine, Harness2Bundle } from './harness2-bridge.js';
+import { Harness2RecursiveEngine, Harness2Bundle, type ProbeEvaluation } from './harness2-bridge.js';
 import { CognitiveHarness } from './cognitive-harness.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
