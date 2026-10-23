@@ -92,3 +92,32 @@ test('Harness2RecursiveEngine - Export 8-component bundle to directory', async (
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test('Harness2RecursiveEngine - Save and load persistent reflection library', async () => {
+  const engine = new Harness2RecursiveEngine();
+  const tmpFile = path.join(os.tmpdir(), `harness2-lib-test-${Date.now()}.json`);
+  try {
+    engine.reflectAndAccumulate({
+      taskId: 'task-1',
+      taskBrief: 'TypeScript division by zero fix',
+      adoptedHarnessId: 'dom1',
+      outcome: 'ok',
+      lessonsLearned: ['Enforce strict zero-denominator check'],
+      suggestedGuardrails: ['NEVER divide without prior non-zero assertion'],
+      timestamp: new Date().toISOString(),
+    });
+    await engine.saveLibraryToFile(tmpFile);
+
+    const loadedEngine = new Harness2RecursiveEngine();
+    const count = await loadedEngine.loadLibraryFromFile(tmpFile);
+    assert.strictEqual(count, 1);
+    assert.strictEqual(loadedEngine.getLibrary().length, 1);
+
+    const lessons = loadedEngine.findRelevantLessons('division zero');
+    assert.ok(lessons.length > 0);
+    assert(lessons[0].includes('zero-denominator'));
+  } finally {
+    await fs.rm(tmpFile, { force: true });
+  }
+});
+

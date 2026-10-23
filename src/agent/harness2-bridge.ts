@@ -184,6 +184,75 @@ export class Harness2RecursiveEngine {
   }
 
   /**
+   * Saves accumulated reflection library to disk as JSON.
+   */
+  async saveLibraryToFile(filePath: string): Promise<void> {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(this.persistentLibrary, null, 2), 'utf-8');
+  }
+
+  /**
+   * Loads reflection records from disk into memory. Returns number of records loaded.
+   */
+  async loadLibraryFromFile(filePath: string): Promise<number> {
+    try {
+      const raw = await fs.readFile(filePath, 'utf-8');
+      const records = JSON.parse(raw);
+      if (Array.isArray(records)) {
+        this.persistentLibrary = records;
+        return this.persistentLibrary.length;
+      }
+    } catch {
+      // File not found or invalid format; keep current library
+    }
+    return 0;
+  }
+
+  /**
+   * Retrieves relevant lessons from past reflections based on task keywords.
+   */
+  findRelevantLessons(taskBrief: string): string[] {
+    if (!taskBrief) return [];
+    const keywords = taskBrief
+      .toLowerCase()
+      .split(/[^a-zA-Z0-9_\u00C0-\u024F\u1E00-\u1EFF]+/)
+      .filter(w => w.length >= 3);
+
+    const matches: { text: string; score: number }[] = [];
+
+    for (const record of this.persistentLibrary) {
+      const searchTarget = `${record.taskBrief} ${record.lessonsLearned.join(' ')} ${record.suggestedGuardrails.join(' ')}`.toLowerCase();
+      let matchCount = 0;
+      for (const kw of keywords) {
+        if (searchTarget.includes(kw)) {
+          matchCount++;
+        }
+      }
+
+      if (matchCount > 0) {
+        for (const lesson of record.lessonsLearned) {
+          matches.push({ text: lesson, score: matchCount });
+        }
+        for (const guard of record.suggestedGuardrails) {
+          matches.push({ text: guard, score: matchCount });
+        }
+      }
+    }
+
+    // Sort by match score descending and deduplicate
+    matches.sort((a, b) => b.score - a.score);
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const m of matches) {
+      if (!seen.has(m.text)) {
+        seen.add(m.text);
+        result.push(m.text);
+      }
+    }
+    return result;
+  }
+
+  /**
    * Exports an 8-component bundle to disk matching Harness² directory layout.
    */
   async exportBundleToDirectory(bundle: Harness2Bundle, outDir: string): Promise<void> {
