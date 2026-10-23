@@ -148,4 +148,40 @@ test('Harness2RecursiveEngine - Evaluate candidate empirically with actual comma
   assert.ok(evalResult.contrastNotes.length > 0);
 });
 
+test('Harness2RecursiveEngine - Import 8-component bundle from directory (Two-Way Sync)', async () => {
+  const engine = new Harness2RecursiveEngine();
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'harness2-import-test-'));
+  try {
+    const bundle: Harness2Bundle = {
+      systemPrompt: 'Test system prompt for 2-way sync',
+      guardrails: ['Guardrail 1: Strict verification', 'Guardrail 2: No mocking'],
+      memory: 'Temporal Knowledge Graph active',
+      toolGuidance: {
+        read_file: 'Inspect file context accurately',
+        run_command: 'Run build command',
+      },
+      subagents: {
+        scout: { role: 'Reconnaissance Scout', instructions: 'Read only operations' },
+      },
+      skills: ['verification-policy', 'gitnexus-impact'],
+      scripts: { test: 'npm test' },
+      plugins: { gitnexus: { enabled: true } },
+    };
+
+    await engine.exportBundleToDirectory(bundle, tmpDir);
+
+    const imported = await engine.importBundleFromDirectory(tmpDir);
+    assert.strictEqual(imported.systemPrompt, bundle.systemPrompt);
+    assert.strictEqual(imported.guardrails.length, 2);
+    assert.strictEqual(imported.guardrails[0], 'Guardrail 1: Strict verification');
+    assert.strictEqual(imported.memory, bundle.memory);
+    assert.strictEqual(imported.toolGuidance.read_file, 'Inspect file context accurately');
+    assert.strictEqual(imported.subagents.scout.role, 'Reconnaissance Scout');
+    assert.ok(imported.skills.includes('verification-policy'));
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
 

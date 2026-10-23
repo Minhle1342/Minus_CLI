@@ -66,11 +66,24 @@ async function main() {
     console.log('   - sub_agents/');
     console.log('   - skills/');
     console.log('\n🚀 Bạn có thể chạy harness2 trên thư mục này hoặc dùng trong benchmark.');
+  } else if (args.includes('--import')) {
+    const importPath = path.join(rootDir, 'external', 'harness2', 'runs', 'minus_harness');
+    console.log(`📥 Đang nạp 8 thành phần Scaffolding từ Harness²: ${importPath}`);
+    const bundle = await engine.importBundleFromDirectory(importPath);
+    console.log(`✅ Đã nạp thành công Scaffold từ Harness²:`);
+    console.log(`   - System Prompt (${bundle.systemPrompt.length} chars)`);
+    console.log(`   - Guardrails (${bundle.guardrails.length} rules)`);
+    console.log(`   - Memory (${bundle.memory.length} chars)`);
+    console.log(`   - Tools (${Object.keys(bundle.toolGuidance).length} tools)`);
+    console.log(`   - Subagents (${Object.keys(bundle.subagents).length} agents)`);
+    console.log(`   - Skills (${bundle.skills.length} skills: ${bundle.skills.join(', ')})`);
   } else {
     console.log('MinusCLI <-> Harness² Bridge');
     console.log('Tùy chọn:');
     console.log('  --export   Xuất 8 thành phần Scaffold của MinusCLI sang định dạng Harness²');
+    console.log('  --import   Nạp 8 thành phần Scaffold từ thư mục runs/minus_harness về MinusCLI');
   }
+
 }
 
 main().catch(err => {

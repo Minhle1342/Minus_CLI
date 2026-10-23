@@ -355,4 +355,82 @@ export class Harness2RecursiveEngine {
       await fs.writeFile(path.join(skillsDir, `${skill}.md`), `# Skill: ${skill}\n`, 'utf-8');
     }
   }
+
+  /**
+   * Imports an 8-component bundle from disk matching Harness² directory layout.
+   */
+  async importBundleFromDirectory(inDir: string): Promise<Harness2Bundle> {
+    const readFileSafe = async (filePath: string): Promise<string> => {
+      try {
+        return await fs.readFile(filePath, 'utf-8');
+      } catch {
+        return '';
+      }
+    };
+
+    const systemPrompt = (await readFileSafe(path.join(inDir, 'systemprompt.md'))).trim();
+    const memory = (await readFileSafe(path.join(inDir, 'LongTermMEMORY.md'))).trim();
+
+    const rawGuardrails = await readFileSafe(path.join(inDir, 'guardrails.md'));
+    const guardrails = rawGuardrails
+      .split('\n')
+      .map(line => line.replace(/^-\s*/, '').trim())
+      .filter(line => line.length > 0);
+
+    const toolGuidance: Record<string, string> = {};
+    const toolsDir = path.join(inDir, 'tool_descriptions');
+    try {
+      const toolFiles = await fs.readdir(toolsDir);
+      for (const file of toolFiles) {
+        if (file.endsWith('.md')) {
+          const toolName = path.basename(file, '.md');
+          toolGuidance[toolName] = (await readFileSafe(path.join(toolsDir, file))).trim();
+        }
+      }
+    } catch {
+      // directory does not exist or unreadable
+    }
+
+    const subagents: Record<string, { role: string; instructions: string; model?: string }> = {};
+    const subagentsDir = path.join(inDir, 'sub_agents');
+    try {
+      const subagentFiles = await fs.readdir(subagentsDir);
+      for (const file of subagentFiles) {
+        if (file.endsWith('.json')) {
+          const agentName = path.basename(file, '.json');
+          const content = await readFileSafe(path.join(subagentsDir, file));
+          if (content) {
+            subagents[agentName] = JSON.parse(content);
+          }
+        }
+      }
+    } catch {
+      // directory does not exist or unreadable
+    }
+
+    const skills: string[] = [];
+    const skillsDir = path.join(inDir, 'skills');
+    try {
+      const skillFiles = await fs.readdir(skillsDir);
+      for (const file of skillFiles) {
+        if (file.endsWith('.md')) {
+          skills.push(path.basename(file, '.md'));
+        }
+      }
+    } catch {
+      // directory does not exist or unreadable
+    }
+
+    return {
+      systemPrompt,
+      guardrails,
+      memory,
+      toolGuidance,
+      subagents,
+      skills,
+      scripts: {},
+      plugins: {},
+    };
+  }
 }
+
