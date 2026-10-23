@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import {
   serializeMessagesForCompaction,
   compactHistoryWithLLM,
@@ -40,6 +41,47 @@ test('serializeMessagesForCompaction formats transcript cleanly for LLM input', 
   assert.ok(serialized.includes('[TOOL CALL: run_command]: args={"command":"grep ERROR app.log"}'));
   assert.ok(serialized.includes('[TOOL RESULT: run_command]:'));
   assert.ok(serialized.includes('ERROR: connection refused at 10.0.0.1:5432'));
+});
+
+test('serializeMessagesForCompaction caps the total transcript and keeps the newest turns', () => {
+  const messages: any[] = Array.from({ length: 40 }, (_, i) => ({
+    role: i % 2 === 0 ? 'user' : 'model',
+    parts: [{ text: `turn-${i} ${'x'.repeat(5000)}` }],
+  }));
+
+  const serialized = serializeMessagesForCompaction(messages);
+  assert.ok(serialized.length < 130_000, `transcript too long: ${serialized.length}`);
+  assert.ok(serialized.includes('older message(s) omitted'));
+  assert.ok(serialized.includes('turn-39'));
+  assert.ok(!serialized.includes('turn-0 '));
+});
+
+test('compactHistoryWithLLM removes its abort listener on success', async () => {
+  const controller = new AbortController();
+  const mockLLM = { async generate() { return { text: 'Objective\n- ok' }; } };
+
+  await compactHistoryWithLLM(
+    [{ role: 'user', parts: [{ text: 'hi' }] }] as any,
+    mockLLM,
+    { signal: controller.signal },
+  );
+
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('parseCompactionText keeps inline content written after a section heading', () => {
+  const parsed = parseCompactionText(`**Objective**: Fix login flow
+Requirements: Keep it minimal
+
+Work State
+Completed: wired the form
+Active: testing
+`);
+
+  assert.deepEqual(parsed.objective, ['Fix login flow']);
+  assert.deepEqual(parsed.requirements, ['Keep it minimal']);
+  assert.deepEqual(parsed.workState.completed, ['wired the form']);
+  assert.deepEqual(parsed.workState.active, ['testing']);
 });
 
 test('compactHistoryWithLLM calls generate and returns structured text', async () => {

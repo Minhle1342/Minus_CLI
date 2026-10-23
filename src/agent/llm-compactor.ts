@@ -41,13 +41,16 @@ Important Context
 - Tool/session state (e.g., open browser tabs, MCP connections).
 - Key operational constraints and user reminders.`;
 
+const MAX_COMPACTION_TRANSCRIPT_CHARS = 120_000;
+
 /**
  * Serializes turn messages into a readable conversation transcript for the LLM to summarize.
  */
 export function serializeMessagesForCompaction(messages: SessionMessage[]): string {
-  const lines: string[] = [];
+  const blocks: string[] = [];
   for (const msg of messages) {
     const role = msg.role === 'model' || msg.role === 'assistant' ? 'ASSISTANT' : 'USER';
+    const lines: string[] = [];
     for (const part of msg.parts || []) {
       if ((part as any).thought) {
         // Skip thought parts to keep prompt focused on observable actions and decisions
@@ -83,8 +86,25 @@ export function serializeMessagesForCompaction(messages: SessionMessage[]): stri
         lines.push(`[TOOL RESULT: ${name}]:\n${content.trim()}`);
       }
     }
+    if (lines.length > 0) blocks.push(lines.join('\n\n'));
   }
-  return lines.join('\n\n');
+
+  // Cap the whole transcript, not just each result: keep the newest turns (the
+  // ones the preserved tail continues from) and drop the oldest wholesale.
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (used + blocks[i].length > MAX_COMPACTION_TRANSCRIPT_CHARS) break;
+    kept.unshift(blocks[i]);
+    used += blocks[i].length + 2;
+  }
+  if (kept.length === 0 && blocks.length > 0) {
+    kept.push(`[... truncated ...]\n${blocks[blocks.length - 1].slice(-MAX_COMPACTION_TRANSCRIPT_CHARS)}`);
+  }
+  if (kept.length < blocks.length) {
+    kept.unshift(`[... ${blocks.length - kept.length} older message(s) omitted to fit the compaction context ...]`);
+  }
+  return kept.join('\n\n');
 }
 
 export interface LLMCompactionOptions {
@@ -118,18 +138,20 @@ export async function compactHistoryWithLLM(
   const timeoutMs = options?.timeoutMs ?? 45000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const sig = options?.signal ?? controller.signal;
+  let rejectOnAbort: (err: Error) => void = () => {};
+  const abortPromise = new Promise<never>((_, reject) => { rejectOnAbort = reject; });
+  const onAbort = () => rejectOnAbort(new Error('LLM compaction request timed out or was aborted'));
+  sig.addEventListener('abort', onAbort, { once: true });
 
   try {
     const response = await Promise.race([
       llm.generate(tempSession, [], {
         systemPrompt: COMPACTION_SYSTEM_PROMPT,
-        signal: options?.signal ?? controller.signal,
+        signal: sig,
         functionCallingMode: 'NONE',
       }),
-      new Promise<never>((_, reject) => {
-        const sig = options?.signal ?? controller.signal;
-        sig.addEventListener('abort', () => reject(new Error('LLM compaction request timed out or was aborted')), { once: true });
-      }),
+      abortPromise,
     ]);
 
     const text = response?.text || '';
@@ -140,5 +162,6 @@ export async function compactHistoryWithLLM(
     return text.trim();
   } finally {
     clearTimeout(timeoutId);
+    sig.removeEventListener('abort', onAbort);
   }
 }

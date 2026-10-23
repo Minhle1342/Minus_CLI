@@ -291,7 +291,13 @@ export function parseCompactionText(text: string): CompactionSnapshotData {
     importantContext: [],
   };
 
-  const lines = text.split('\n');
+  // Split "**Objective**: text" into a heading line plus a content line; the
+  // parser ignores anything after a heading on the same line.
+  const inlineHeading = /^[#*•\d.)\s-]*(objective|requirements?|decisions?|work\s*state|current\s*state|next\s*(?:move|steps?)|relevant\s*files?|artifact\s*trail|important\s*context|high-saliency|session\s+intent|completed|active|blocked)\b\s*(?:\*\*)?\s*:\s*(.+)$/i;
+  const lines = text.split('\n').flatMap((line) => {
+    const match = line.match(inlineHeading);
+    return match ? [match[1], match[2]] : [line];
+  });
   let currentSection: '' | 'objective' | 'requirements' | 'decisions' | 'workState' | 'nextMove' | 'relevantFiles' | 'importantContext' = '';
   let workStateSub: '' | 'completed' | 'active' | 'blocked' = '';
 

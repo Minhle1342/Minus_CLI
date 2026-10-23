@@ -1312,6 +1312,8 @@ export class ContextCompactor {
       }
 
       const cutoffTurnIdx = userTurnIndices[userTurnIndices.length - preserve];
+      // Summary input only: this raw slice can strand half of a cross-turn tool pair.
+      // The returned history is rebuilt by compact(), which makes pair-aware cuts.
       const prunableMessages = sourceMessages.slice(userTurnIndices[1], cutoffTurnIdx);
       let customLLMText: string | undefined;
       if (prunableMessages.length > 0) {
