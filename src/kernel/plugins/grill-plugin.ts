@@ -1,5 +1,4 @@
 import type { AgentPlugin, KernelContext } from '../kernel.js';
-import { createGrillTools } from '../../tools/grill-tools.js';
 
 export const SPEC_CLARIFICATION_SECTION_ID = 'spec-clarification';
 
@@ -11,14 +10,13 @@ export const SPEC_CLARIFICATION_POLICY = `17. SPEC CLARIFICATION VIA ask_user / 
 
 /**
  * GrillPlugin - Model-initiated spec clarification (MCP Elicitation & V2 Form).
- * Registers ask_user and ask_question tools plus the policy section together.
+ * Registers the policy section together.
  */
 export const GrillPlugin: AgentPlugin = {
   name: 'grill-plugin',
   version: '1.1.0',
   description: 'MCP Elicitation & V2 Form: interactive ask_user / ask_question Grill modal with structured options or LLM-suggested options',
   apply(ctx: KernelContext) {
-    for (const tool of createGrillTools(ctx.grill)) ctx.registerTool(tool);
     ctx.systemPrompt.unregister(SPEC_CLARIFICATION_SECTION_ID);
     ctx.systemPrompt.register({
       id: SPEC_CLARIFICATION_SECTION_ID,

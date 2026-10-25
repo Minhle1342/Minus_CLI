@@ -175,8 +175,8 @@ export class LatencyOrchestrator {
         break;
       case 'verify':
         phaseDirective = input.verificationReady
-          ? 'Verification is sufficient: call submit_solution now with the evidence; do not add another model round trip.'
-          : 'Verify: run only the decisive missing check, then call submit_solution when the evidence gate is satisfied.';
+          ? 'Verification is sufficient: report that evidence and answer directly; do not add another model round trip.'
+          : 'Verify: run only the decisive missing check, then report the evidence and answer.';
         break;
       case 'release':
         phaseDirective = 'Release: preserve all safety gates, reuse completed evidence, and avoid repeating successful checks.';

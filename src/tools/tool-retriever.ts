@@ -97,6 +97,7 @@ export class ToolRetriever {
       alwaysInclude: config?.alwaysInclude ?? [
         'read_file',
         'list_files',
+        'search_text',
         'replace_text',
         'write_file',
         'run_command',

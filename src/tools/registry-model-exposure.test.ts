@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MODEL_HIDDEN_TOOL_NAMES, ToolRegistry } from './registry.js';
-import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createScheduleDagParallelTool } from './subagent-tools.js';
-import { SubagentManager } from '../agent/subagent-manager.js';
 
 test('ToolRegistry keeps compatibility tools executable but hides their schemas from the model', () => {
   const registry = new ToolRegistry();
@@ -26,11 +24,12 @@ test('ToolScope preserves the model exposure policy', () => {
   }
 });
 
-test('ToolRetriever keeps a workflow-complete core with 7 essential tools', () => {
+test('ToolRetriever keeps a workflow-complete core with 8 essential tools', () => {
   const registry = new ToolRegistry();
   assert.deepEqual(registry.getRetriever().getConfig().alwaysInclude, [
     'read_file',
     'list_files',
+    'search_text',
     'replace_text',
     'write_file',
     'run_command',
@@ -42,10 +41,11 @@ test('ToolRetriever keeps a workflow-complete core with 7 essential tools', () =
   const codingNames = new Set(codingTools.map((tool) => tool.name));
   assert.equal(codingNames.has('replace_text'), true);
   assert.equal(codingNames.has('read_file'), true);
+  assert.equal(codingNames.has('search_text'), true);
   assert.equal(codingNames.has('write_file'), true);
   assert.equal(codingNames.has('run_command'), true);
   assert.equal(codingNames.has('list_files'), true);
-  assert.ok(codingTools.length <= 7, `expected at most 7 schemas, received ${codingTools.length}`);
+  assert.ok(codingTools.length <= 8, `expected at most 8 schemas, received ${codingTools.length}`);
 
   const webNames = new Set(registry.getRelevantTools('research the latest Node.js documentation online').map((tool) => tool.name));
   assert.equal(webNames.has('web_search'), true);
@@ -56,11 +56,9 @@ test('ToolRetriever keeps a workflow-complete core with 7 essential tools', () =
 
 test('multi-agent tools are strictly omitted from model-facing schema exposure', () => {
   const registry = new ToolRegistry();
-  const dummyManager = new SubagentManager({ register: () => {}, update: () => {} } as any, (() => { throw new Error('not launched in test'); }) as any);
-  registry.register(createDelegateTaskTool(dummyManager));
-  registry.register(createDelegateAgentTool(dummyManager));
-  registry.register(createSpawnAgentTool(dummyManager));
-  registry.register(createScheduleDagParallelTool({} as any));
+  registry.register({ name: 'delegate_task', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
+  registry.register({ name: 'spawn_agent', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
+  registry.register({ name: 'schedule_dag_parallel', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
 
   const names = new Set(registry.getRelevantTools('cho 3 agent chạy song song đi').map((tool) => tool.name));
   assert.equal(names.has('delegate_task'), false, 'delegate_task must be omitted from model exposure');

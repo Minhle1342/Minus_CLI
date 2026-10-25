@@ -1,22 +1,14 @@
 import { AgentPlugin, KernelContext } from '../kernel.js';
-import { unityGameplayStudioTool } from '../../tools/unity-tools.js';
 import { GamePlugin } from './game-plugin.js';
 
 /**
  * UnityPlugin - Công cụ chuyên biệt Unity Engine
- * 
- * Cung cấp:
- * - unity_gameplay_studio: Scene Composition, Prefab Instantiation, Reference Wiring,
- *   Build Settings Configuration, và sinh Editor Script C# tự động.
- * 
- * Plugin tùy chọn (Optional): Chỉ được nạp khi phát hiện dự án Unity hoặc người dùng yêu cầu.
  */
 export const UnityPlugin: AgentPlugin = {
   name: 'unity-plugin',
   version: '1.0.0',
   description: 'Specialized Unity Engine toolkit: Scene Composition, Prefab, Build Settings',
-  apply(ctx: KernelContext) {
-    if (!ctx.tools.get(unityGameplayStudioTool.name)) ctx.registerTool(unityGameplayStudioTool);
+  apply(_ctx: KernelContext) {
   },
 };
 

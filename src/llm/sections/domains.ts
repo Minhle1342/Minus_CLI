@@ -19,7 +19,7 @@ export const SECTION_ARCHITECTURE_ANALYSIS = `15. DEEP ARCHITECTURE, WORKFLOW & 
    - Step 3 [Synthesis]: Choose prose, examples, tables, or diagrams to answer the actual question. No fixed outline or heading quota.
    - Step 4 [Depth]: Follow the user's requested detail and language. Answer directly with clarity.`;
 
-export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. TASK ORCHESTRATION & BOUNDARIES:
+export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & NOT-BLOCK BOUNDARIES:
    - Role: Decompose tasks, implement minimal surgical mutations, and enforce quality via testing.
    - Use read_file to inspect, replace_text / write_file to edit, and run_command to verify.`;
 

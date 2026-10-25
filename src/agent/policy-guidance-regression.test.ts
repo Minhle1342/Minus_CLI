@@ -50,7 +50,7 @@ test('advisor never declares incomplete, blocked or unrelated commands verified'
 test('risk adjusted verification does not demand tests for R1', () => {
   const guidance = resolvePhaseDynamicGuidance('verify', { risk: 'R1' });
   assert.doesNotMatch(guidance, /passing test exit code|Targeted test suite/);
-  assert.match(guidance, /diagnostics/);
+  assert.match(guidance, /verify state/);
   assert.doesNotMatch(CORE_SYSTEM_PROMPT, /pushing to main -> L1 & L2 override/);
 });
 

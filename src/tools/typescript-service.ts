@@ -509,3 +509,24 @@ export class TypeScriptService {
     }
   }
 }
+
+let sharedTsService: TypeScriptService | undefined;
+
+export function getOrCreateTypeScriptService(workspace: Workspace): TypeScriptService {
+  if (!sharedTsService || sharedTsService['workspace'] !== workspace) {
+    if (sharedTsService) {
+      try { sharedTsService.dispose(); } catch {}
+    }
+    sharedTsService = new TypeScriptService(workspace);
+  }
+  return sharedTsService;
+}
+
+export function disposeSharedTypeScriptService(): void {
+  if (sharedTsService) {
+    try {
+      sharedTsService.dispose();
+    } catch {}
+    sharedTsService = undefined;
+  }
+}

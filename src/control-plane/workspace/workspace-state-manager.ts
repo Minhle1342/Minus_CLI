@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Workspace } from '../../workspace/workspace.js';
-import { getOrCreateTypeScriptService } from '../../tools/inspect-symbol.js';
+import { getOrCreateTypeScriptService } from '../../tools/typescript-service.js';
 import { CodeSyntaxValidator } from '../../workspace/syntax-diagnostics.js';
 import type {
   WorkspaceState,

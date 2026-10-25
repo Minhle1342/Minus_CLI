@@ -6,12 +6,8 @@ import { CapabilityCatalog } from '../../capabilities/capability-catalog.js';
 import { CapabilityPolicy } from '../../capabilities/capability-policy.js';
 import { createDefaultCapabilityCatalog } from '../../capabilities/default-capabilities.js';
 import { WorktreeManager } from '../../workspace/worktree-manager.js';
-import { createWorktreeTools } from '../../tools/worktree-tools.js';
-import { createSkillTools } from '../../tools/skill-tools.js';
 import { ApprovalManager } from '../../agent/approval-manager.js';
-import { createApprovalTools } from '../../tools/approval-tools.js';
 import { ReviewManager } from '../../agent/review-manager.js';
-import { createReviewTools } from '../../tools/review-tools.js';
 import { VerificationPolicy } from '../../skills/verification-policy.js';
 import { SuperpowersWorkflowMap } from '../../skills/workflow-map.js';
 import { OcrReviewService } from '../../review/open-code-review.js';
@@ -64,40 +60,12 @@ export class SuperpowersPlugin implements AgentPlugin {
     // 1. Nạp Superpowers Skills
     SuperpowersSource.registerSuperpowers(this.skillRegistry);
 
-    // 2. Đăng ký các Tools bổ sung vào ToolRegistry
-    const worktreeTools = createWorktreeTools(this.worktreeManager);
-    for (const tool of worktreeTools) {
-      ctx.tools.register(tool);
-    }
-    for (const tool of createSkillTools(this.skillRegistry)) ctx.tools.register(tool);
-    ctx.systemPrompt.unregister('dynamic-skill-loading');
-    ctx.systemPrompt.register({
-      id: 'dynamic-skill-loading',
-      priority: 95,
-      content: 'When a task needs a skill/plugin not listed by list_skills (e.g. user points to a linked repo path), call load_workspace_skills with that directory first, then list_skills to confirm. Only SKILL.md markdown is loaded, never executed code.',
-    });
-
-    // Dedicated git_* tools stay unregistered by design: all Git flows through
-    // run_command, which enforces the same scope/intent policy (see
-    // checkGitPolicyForShell in tools/run-command.ts). This keeps a single
-    // policy path and avoids fragmenting the model-visible tool surface.
     this.onWorkspaceChanged = () => {
       this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
       this.ocrReview?.setWorkspace(ctx.workspace.rootDir);
       (ctx as any).worktrees = this.worktreeManager;
-      for (const tool of createWorktreeTools(this.worktreeManager)) ctx.tools.register(tool);
     };
     ctx.events.on('workspace:changed', this.onWorkspaceChanged);
-
-    const approvalTools = createApprovalTools(this.approvalManager);
-    for (const tool of approvalTools) {
-      ctx.tools.register(tool);
-    }
-
-    const reviewTools = createReviewTools(this.reviewManager, this.ocrReview);
-    for (const tool of reviewTools) {
-      ctx.tools.register(tool);
-    }
 
     // 3. Gắn Hook Turn-Start để tự động kích hoạt Skills và nạp Prompt Sections
     ctx.agentHooks.register('superpowers-activator', {

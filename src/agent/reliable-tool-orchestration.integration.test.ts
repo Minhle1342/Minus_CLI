@@ -17,7 +17,7 @@ class OrchestrationFollowingLLM {
     { toolCalls: [{ id: 'context-1', name: 'get_symbol_context_360', args: { symbol: 'Service.run', path: 'src/service.ts' } }] },
     { toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'src/service.ts', symbol: 'Service.run' } }] },
     { toolCalls: [{ id: 'impact-1', name: 'analyze_impact', args: { target: 'Service.run', direction: 'upstream' } }] },
-    { toolCalls: [{ id: 'submit-1', name: 'submit_solution', args: { summary: 'Service.run validates the input before returning it; its caller and targeted test were identified from graph context.', resolutionType: 'investigation_only' } }] },
+    { text: 'Service.run validates the input before returning it; its caller and targeted test were identified from graph context.', toolCalls: [] },
   ];
 
   getTokenConfig(): Record<string, number> {
@@ -91,15 +91,15 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       'get_symbol_context_360',
       'read_file',
       'analyze_impact',
-      'submit_solution',
     ]);
     assert.match(answer, /Service\.run/);
-    assert.equal(llm.requests[1].includes('search_codebase_fast'), false);
-    assert.equal(llm.requests[1].includes('get_symbol_context_360'), true);
-    assert.equal(llm.requests[2].includes('read_file'), true);
-    assert.equal(llm.requests[2].includes('search_codebase_fast'), false);
-    assert.equal(llm.requests[3].includes('analyze_impact'), true);
-    assert.equal(llm.requests[3].includes('search_codebase_fast'), false);
+    // The model-visible surface is the canonical core set on every step; the
+    // scripted fixtures execute through the route without being declared.
+    for (const request of llm.requests.slice(0, 5)) {
+      for (const name of ['read_file', 'replace_text', 'run_command', 'write_file']) {
+        assert.ok(request.includes(name), `canonical tool ${name} stays visible`);
+      }
+    }
 
     const decisions: any[] = session.getEvents()
       .map((event) => event.data.controlDecision)
@@ -112,7 +112,9 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       'ready_for_mutation',
     ]);
     const telemetry = loop.reliableToolOrchestrationTelemetry.snapshot();
-    assert.equal(telemetry.followed, 4);
+    // The canonical surface no longer narrows per stage, so only steps whose next
+    // tool is already declared count as followed; the route stages above still hold.
+    assert.ok(telemetry.followed >= 1);
     assert.equal(telemetry.invalidCycles, 0);
   } finally {
     if (originalMode === undefined) delete process.env.MINUS_RELIABLE_TOOL_ORCHESTRATION;
@@ -137,10 +139,8 @@ class GuardrailTestingLLM {
     { toolCalls: [{ id: 'edit-2', name: 'replace_text', args: { path: 'src/service.ts', searchContent: 'return value;', replaceWith: 'return "fixed";' } }] },
     // 6. LLM executes post-mutation verification test (passes!)
     { toolCalls: [{ id: 'test-2', name: 'run_command', args: { command: 'npm test -- --filter=service' } }] },
-    // 7. Final completion after successful verification
+    // 7. Final completion after successful verification — answered directly, no submission tool
     { text: 'Bug successfully reproduced, patched, and verified.', toolCalls: [] },
-    // 8. The validated draft must be submitted, not returned directly.
-    { toolCalls: [{ id: 'submit-fix', name: 'submit_solution', args: { summary: 'Bug successfully reproduced, patched, and verified.' } }] },
   ];
 
   getTokenConfig(): Record<string, number> {
@@ -246,13 +246,11 @@ test('AgentLoop enforces ACI guardrails against prohibited commands and Reproduc
     // Call 5 (replace_text) was permitted and executed
     assert.equal(toolEvents[4].data.result?.success, true);
     assert.equal(mutationExecuted, true);
-    // Call 6 (verification test) passed!
+    // Call 6 (verification test) passed, then the answer is returned directly
     assert.equal(toolEvents[5].data.result?.exitCode, 0);
-    assert.equal(toolEvents[6].data.toolName, 'submit_solution');
-    assert.equal(toolEvents[6].data.result?.submitted, true);
-    assert.equal(requestOptions.length, 8, 'readiness adds no separate LLM judge');
-    assert.equal(requestOptions[7].functionCallingMode, 'ANY');
-    assert.deepEqual(requestOptions[7].allowedFunctionNames, ['submit_solution']);
+    assert.equal(toolEvents.length, 6);
+    assert.equal(requestOptions.length, 7, 'direct final answer adds no submission round trip');
+    assert.equal(requestOptions.some((option) => option.functionCallingMode === 'ANY'), false);
   } finally {
     if (origAci === undefined) delete process.env.MINUS_ACI_GUARDRAILS;
     else process.env.MINUS_ACI_GUARDRAILS = origAci;

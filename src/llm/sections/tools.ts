@@ -89,12 +89,12 @@ export const SECTION_ANTIGRAVITY_TOOLS = `10. COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; ${PROACTIVE_SERVER_LAUNCH_RULE}
    - Web retrieval: Use web_search and web_fetch for third-party docs, APIs, and web inspection.`;
 
-export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & EXPLORATION:
-   - Use list_files to inspect directory layouts and read_file to inspect exact implementation lines.
-   - Use run_command for search, git inspection, build, and test verification.`;
+export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
+   - Use list_files to inspect directory layouts, search_text for regex/keyword code searches, and read_file to inspect exact implementation lines.
+   - Use run_command for build, git, and test verification.`;
 
 export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
-   - Dynamic per-step tool chain: inspect with list_files and read_file, edit with replace_text or write_file, verify with run_command.`;
+   - Dynamic per-step tool chain: explore with list_files and search_text, inspect with read_file, edit with replace_text or write_file, verify with run_command.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {

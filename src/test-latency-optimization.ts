@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   assert(orchestrator.buildGuidance({ step: 1, footprint, phase: 'explore' }).includes('no hard timeout'));
   assert(orchestrator.buildGuidance({ step: 1, footprint, phase: 'explore' }).includes('batch independent read-only tools'));
   assert(orchestrator.buildGuidance({ step: 1, footprint, phase: 'implement' }).includes('omit preamble'));
-  assert(orchestrator.buildGuidance({ step: 1, footprint, phase: 'verify', verificationReady: true }).includes('submit_solution now'));
+  assert(orchestrator.buildGuidance({ step: 1, footprint, phase: 'verify', verificationReady: true }).includes('answer directly'));
   orchestrator.record({ durationMs: 1_500 });
   assert(orchestrator.buildGuidance({ step: 2, footprint: { ...footprint, pressureRatio: 0.1 } }).includes('previous round trip'));
 

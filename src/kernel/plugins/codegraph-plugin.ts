@@ -1,5 +1,4 @@
 import type { AgentPlugin, KernelContext } from '../kernel.js';
-import { createCodeGraphTools } from '../../tools/codegraph-tools.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -29,9 +28,6 @@ export const CodeGraphPlugin: AgentPlugin = {
   description: 'Semantic code intelligence qua CodeGraph CLI (explore/node/search/callers/callees/impact/status)',
   apply(ctx: KernelContext) {
     if (String(process.env.MINUS_CODEGRAPH || '1') === '0') return;
-    for (const tool of createCodeGraphTools()) {
-      if (!ctx.tools.get(tool.name)) ctx.registerTool(tool);
-    }
     const codegraphDir = path.join(ctx.workspace.rootDir, '.codegraph');
     if (fs.existsSync(codegraphDir)) {
       ctx.systemPrompt.unregister(CODEGRAPH_PROMPT_SECTION_ID);

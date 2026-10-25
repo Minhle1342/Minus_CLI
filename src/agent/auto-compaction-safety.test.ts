@@ -19,7 +19,7 @@ test('active turn remains verbatim through native, phase masking and emergency c
   const manager = new ContextBudgetManager(compactor, { mode: 'enforce' });
   const result = await manager.prepareRequest({ provider: 'test', model: 'gemini-test', systemPrompt: '', tools: [],
     history: original, maxInputTokens: 1000, outputReserveTokens: 100 },
-  { protectActiveTurn: true, cognitivePhase: 'implement', enableObservationMasking: true });
+  { protectActiveTurn: true, protectedMessages: original, cognitivePhase: 'implement', enableObservationMasking: true });
   assert.deepEqual(result.history, original);
   assert.equal(result.changed, false);
   assert.equal(result.failureReason, 'CONTEXT_BUDGET_UNSATISFIABLE');

@@ -5,7 +5,6 @@ import path from 'node:path';
 import test from 'node:test';
 import { ClassificationEngine } from '../control/classification-engine.js';
 import { Session } from '../session/session.js';
-import { createHypothesisTool } from '../tools/hypothesis-tool.js';
 import { ToolUseGuardian } from '../tools/tool-use-guardian.js';
 import { Workspace } from '../workspace/workspace.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
@@ -335,64 +334,24 @@ test('a plan alone still emits an advisory for R3 bugfixes with thin evidence', 
   assert.ok(res.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
 });
 
-test('hypothesis tool distinguishes static support from empirical validation', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pareto-hypothesis-'));
-  try {
-    const workspace = new Workspace(root);
-    const tracker = new HypothesisTracker();
-    const tool = createHypothesisTool(tracker, workspace);
-    const common = {
-      statement: 'The parser rejects a documented delimiter.',
-      falsificationTest: 'A focused input containing that delimiter is accepted.',
-      targetFiles: ['src/parser.ts'],
-      evidence: 'The branch returns false before normalization.',
-      blastRadius: 'MEDIUM',
-    };
+test('hypothesis tracker distinguishes static support from empirical validation', async () => {
+  const tracker = new HypothesisTracker();
+  const h1 = tracker.formulate({
+    statement: 'The parser rejects a documented delimiter.',
+    falsificationTest: 'A focused input containing that delimiter is accepted.',
+    targetFiles: ['src/parser.ts'],
+    blastRadius: 'MEDIUM',
+  });
+  tracker.markSupported(h1.id);
+  assert.equal(tracker.getValidatedHypotheses().length, 0);
+  assert.equal(tracker.getSupportedHypotheses().length, 1);
 
-    const staticResult = await tool.execute(common, workspace) as any;
-    assert.equal(staticResult.success, true);
-    assert.equal(staticResult.status, 'supported');
-    assert.equal(tracker.getValidatedHypotheses().length, 0);
-    assert.equal(tracker.getSupportedHypotheses().length, 1);
-
-    const reproduced = await tool.execute({
-      ...common,
-      reproductionCommand: 'node -e "process.exit(1)"',
-      expectedOutcome: 'fail',
-    }, workspace) as any;
-    assert.equal(reproduced.success, true);
-    assert.equal(reproduced.status, 'validated');
-    assert.equal(reproduced.reproductionResult.exitCode, 1);
-
-    const passingCheck = await tool.execute({
-      ...common,
-      reproductionCommand: 'node -e "process.exit(0)"',
-      expectedOutcome: 'pass',
-    }, workspace) as any;
-    assert.equal(passingCheck.success, true);
-    assert.equal(passingCheck.status, 'validated');
-
-    const mismatch = await tool.execute({
-      ...common,
-      reproductionCommand: 'node -e "process.exit(0)"',
-      expectedOutcome: 'fail',
-    }, workspace) as any;
-    assert.equal(mismatch.success, false);
-    assert.equal(mismatch.status, 'testing');
-    assert.equal(mismatch.errorCode, 'REPRODUCTION_OUTCOME_MISMATCH');
-    assert.equal(tracker.getFalsifiedHypotheses().length, 0, 'a bad reproduction command does not falsify causality');
-
-    const commandFailure = await tool.execute({
-      ...common,
-      reproductionCommand: 'definitely_missing_minus_command_42',
-      expectedOutcome: 'fail',
-    }, workspace) as any;
-    assert.equal(commandFailure.success, false);
-    assert.equal(commandFailure.status, 'testing');
-    assert.equal(commandFailure.errorCode, 'REPRODUCTION_EXECUTION_FAILED');
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
+  const h2 = tracker.formulate({
+    statement: 'The parser rejects another delimiter.',
+    falsificationTest: 'A focused input containing that delimiter is accepted.',
+  });
+  tracker.markValidated(h2.id);
+  assert.equal(tracker.getValidatedHypotheses().length, 1);
 });
 
 test('cognitive brake reacts to current repeated feedback, not old falsified hypotheses alone', () => {

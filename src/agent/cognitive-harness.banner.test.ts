@@ -11,7 +11,7 @@ for (const request of ['fix error in token validation', 'Explain the module arch
       assert.ok(banner, 'explore governance banner must remain visible');
       assert.ok(banner.includes('EXPLORE MODE (advisory)'));
       assert.doesNotMatch(banner, /locked|disabled|forbidden/i, 'a phase banner must not invent runtime tool permissions');
-      assert.ok(banner.includes('request_phase_transition'), 'keep implementation hand-off guidance');
+      assert.doesNotMatch(banner, /request_phase_transition|create_plan/, 'a phase banner must not advertise removed tools');
       assert.match(banner, /inspect/i, 'keep evidence-first guidance');
     }
   });

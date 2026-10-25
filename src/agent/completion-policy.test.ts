@@ -8,7 +8,6 @@ import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
 import { CompletionEvidenceGate, isUserExplicitlyExemptingTests, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
-import { createReportFindingsTool } from '../tools/report-findings.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CriticGate } from './critic-gate.js';
@@ -128,18 +127,6 @@ test('read-only explanation passes evidence gate; execution claims still require
   assert.equal(gate.evaluate('Updated next.ts.', session, { turn: 1 }).allow, false);
 });
 
-test('reports accept concise findings and uncertainty without inventing root causes or verification', async () => {
-  const tool = createReportFindingsTool();
-  assert.deepEqual((tool.parameters as any).required, ['userFacingReport']);
-  const report = await tool.execute({ userFacingReport: 'The entry point is main().', uncertainties: ['Caller not inspected.'] }, new Workspace(process.cwd()));
-  assert.equal(report.success, true);
-  assert.equal(report.rootCause, undefined);
-  assert.equal((await tool.execute({ userFacingReport: 'Done.' }, new Workspace(process.cwd()))).success, false);
-  const session = new Session();
-  record(session, 1, 'write_file', { path: 'main.ts' }, { success: true });
-  record(session, 1, tool.name, {}, report);
-  assert.equal(new CompletionEvidenceGate().evaluate('Updated main.ts.', session, { turn: 1 }).allow, false);
-});
 
 test('latest substantive answer wins; recovery instructions depend on what is missing', () => {
   const report = 'The earlier detailed report. '.repeat(20);
@@ -205,6 +192,8 @@ test('mutation tasks without submission are redirected to submit_solution', asyn
     const registry = new ToolRegistry();
     registry.register({ name: 'replace_text', description: 'edit', parameters: { type: 'OBJECT', properties: {} } as any,
       execute: async () => ({ success: true, filesModified: ['a.ts'] }) });
+    registry.register({ name: 'submit_solution', description: 'submit', parameters: { type: 'OBJECT', properties: {} } as any,
+      execute: async () => ({ success: true, userFacingSummary: summary }) });
     const summary = 'Replaced the null guard in a.ts.';
     const llm = new ScriptedCompletionLLM([
       { toolCalls: [{ name: 'replace_text', args: { path: 'a.ts' } }] },
@@ -262,6 +251,8 @@ test('a recorded report is a fallback, not a replacement for a newer answer', as
   try {
     const workspace = new Workspace(rootDir);
     const report = 'The entry point is main(). The remaining callers have not been inspected. '.repeat(5);
+    const registry = new ToolRegistry();
+    registry.register({ name: 'report_investigation_findings', description: 'report', parameters: { type: 'OBJECT', properties: {} } as any, execute: async (args: any) => ({ success: true, userFacingReport: args.userFacingReport }) });
     // A newer substantive answer returns directly without a submit round trip.
     {
       const llm = new ScriptedCompletionLLM([
@@ -270,7 +261,7 @@ test('a recorded report is a fallback, not a replacement for a newer answer', as
       ]);
       const session = new Session();
       session.addUserMessage('Explain the entry point briefly.');
-      const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
+      const loop = new AgentLoop(llm, registry, { maxSteps: 4, workspace });
       assert.equal(await loop.run(session), 'The entry point is main().');
       assert.equal(llm.calls, 2);
       assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings']);
@@ -283,7 +274,7 @@ test('a recorded report is a fallback, not a replacement for a newer answer', as
       ]);
       const session = new Session();
       session.addUserMessage('Explain the entry point briefly.');
-      const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 4, workspace });
+      const loop = new AgentLoop(llm, registry, { maxSteps: 4, workspace });
       assert.equal(await loop.run(session), report.trim());
       assert.equal(llm.calls, 2);
       assert.deepEqual(session.getEvents().filter((event) => event.type === 'tool/call').map(event => event.data.toolName), ['report_investigation_findings']);
@@ -295,6 +286,9 @@ test('a recorded report cannot bypass evidence checks on an empty model response
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-report-evidence-'));
   try {
     const workspace = new Workspace(rootDir);
+    const registry = new ToolRegistry();
+    registry.register({ name: 'report_investigation_findings', description: 'report', parameters: { type: 'OBJECT', properties: {} } as any, execute: async (args: any) => ({ success: true, userFacingReport: args.userFacingReport }) });
+    registry.register({ name: 'submit_solution', description: 'submit', parameters: { type: 'OBJECT', properties: {} } as any, execute: async (args: any) => ({ success: true, userFacingSummary: args.summary }) });
     const llm = new ScriptedCompletionLLM([
       { toolCalls: [{ name: 'report_investigation_findings', args: { userFacingReport: 'I ran tests and they passed.' } }] },
       { text: '', toolCalls: [] },
@@ -302,7 +296,7 @@ test('a recorded report cannot bypass evidence checks on an empty model response
     ]);
     const session = new Session();
     session.addUserMessage('Explain the entry point briefly.');
-    const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 5, workspace });
+    const loop = new AgentLoop(llm, registry, { maxSteps: 5, workspace });
     assert.match(await loop.run(session), /^Tests have not been run/);
     assert.equal(llm.calls, 3);
     assert.match(llm.prompts[2], /call submit_solution/);
@@ -322,7 +316,7 @@ test('a new read-only turn is independent of past mutations and verification ski
     session.append('turn/end', { turn: 1 });
     session.recordSkillDecision({ skillId: 'verification-before-completion', version: '1.0.0', reason: 'Previous editing turn', timestamp: new Date().toISOString(), decision: 'activated' });
     session.addUserMessage('Explain why a string cannot be assigned to a number; read only.');
-    const llm = new ScriptedCompletionLLM([{ toolCalls: [{ name: 'submit_solution', args: { summary: 'The string conflicts with the declared number type.', resolutionType: 'investigation_only' } }] }]);
+    const llm = new ScriptedCompletionLLM([{ text: 'The string conflicts with the declared number type.', toolCalls: [] }]);
     const loop = new AgentLoop(llm, new ToolRegistry(), { maxSteps: 3, workspace });
     assert.equal(await loop.run(session), 'The string conflicts with the declared number type.');
     assert.equal(llm.calls, 1);
@@ -362,7 +356,7 @@ test('exploration tasks with cause investigation and expository introductions co
     ].join('\n\n');
 
     const llm = new ScriptedCompletionLLM([
-      { toolCalls: [{ name: 'submit_solution', args: { summary: substantiveAnswer, resolutionType: 'investigation_only' } }] },
+      { text: substantiveAnswer, toolCalls: [] },
     ]);
     const session = new Session();
     session.addUserMessage('Nguyên nhân khiến TUI hiển thị cảnh báo này và cơ chế vận hành?');

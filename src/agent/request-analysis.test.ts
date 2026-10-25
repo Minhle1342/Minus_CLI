@@ -41,7 +41,7 @@ test('CORE_SYSTEM_PROMPT stays within the lean token budget after the new line',
   assert.ok(!CORE_SYSTEM_PROMPT.includes('5-STAGE ERROR DETECTIVE'));
   assert.ok(CORE_SYSTEM_PROMPT.includes('VERIFICATION LADDER'));
   assert.ok(CORE_SYSTEM_PROMPT.includes('FINAL ANSWER LANGUAGE MATCHING'));
-  assert.ok(CORE_SYSTEM_PROMPT.includes('custom build command'));
+  assert.ok(CORE_SYSTEM_PROMPT.includes('builds or tests'));
 });
 
 test('extractRequestAnalysis pulls the block with or without a close tag', () => {
@@ -141,17 +141,16 @@ test('resolvePhaseDynamicGuidance tailors explore guidance for R1 and R2 without
 
 test('resolveVerifyPlaybookPrompt provides risk-tiered verification playbooks', () => {
   const r1Playbook = resolveVerifyPlaybookPrompt('R1');
-  assert.match(r1Playbook, /R1 DIAGNOSTICS/);
+  assert.match(r1Playbook, /R1 INSPECTION/);
   assert.ok(!r1Playbook.includes('run_command(npm run build'));
 
   const r2Playbook = resolveVerifyPlaybookPrompt('R2');
-  assert.match(r2Playbook, /R2 TYPECHECK & DIFF/);
+  assert.match(r2Playbook, /R2 TEST & DIFF/);
   assert.ok(!r2Playbook.includes('run_command(targeted test)'));
 
   const r3Playbook = resolveVerifyPlaybookPrompt('R3');
   assert.match(r3Playbook, /DIFF AUDIT/);
-  assert.match(r3Playbook, /active verification contract/);
-  assert.ok(r3Playbook.includes('required diagnostics/build/targeted evidence within user scope'));
-  assert.match(r3Playbook, /Do not infer permission to execute tests excluded by the user/);
+  assert.match(r3Playbook, /git diff/);
+  assert.ok(r3Playbook.includes('execute verification test command'));
 });
 

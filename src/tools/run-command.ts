@@ -27,9 +27,8 @@ import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
 import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
-import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
+import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope, pushArgsTargetBranch } from './git-command-policy.js';
 import { extractRequestedGitBranch, hasForceOrDeletePushArg, isForcePushAuthorized } from './git-intent.js';
-import { pushArgsTargetBranch } from './git-tools.js';
 import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
 import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
 import {

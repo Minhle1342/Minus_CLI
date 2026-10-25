@@ -475,8 +475,8 @@ Phase 0 (mandatory) — survey the current state first:
 Follow the Writing Plans & Planning with Files protocols:
 1. Decompose ONLY the missing/changed delta into bite-sized atomic steps (2-5 min each) with exact target file paths, line ranges, concrete code logic, and verification commands.
 2. Never include steps that rebuild or re-implement functionality already present. Reference the existing code instead of re-planning it.
-3. Record the dependency-aware task plan with the harness create_plan tool.
-4. Stop condition: call create_plan exactly once, then present the plan and stop. Do not call update_plan_task or submit_solution in Plan mode.
+3. Present the dependency-aware task plan in your response.
+4. Stop condition: present the plan and stop. Do not edit files or claim the work is done in Plan mode.
 5. Keep the task plan in PlanManager; use planning notes only when the current permission mode allows them.
 6. Present the structured plan directly to the user in their language for alignment and review, including a short "Already exists - reused as-is" section with file:line evidence.
 Do not execute implementation tasks or modify project code in Plan mode.
@@ -511,12 +511,12 @@ ${planOverview}
 
 Implementation Protocols:
 1. Research blast radius with analyze_impact or codegraph_explore before modifying code.
-2. Update task state to IN_PROGRESS using update_plan_task before applying edits or inspections.
-3. For inspection tasks, execute inspection tools (e.g. read_file) on ALL declared read anchor files before calling update_plan_task(status='COMPLETED').
-4. Apply surgical minimal changes with edit tools (replace_text, apply_patch, etc.).
+2. Read the active task's declared anchors before applying edits or inspections.
+3. For inspection tasks, execute inspection tools (e.g. read_file) on ALL declared read anchor files before reporting the task done.
+4. Apply surgical minimal changes with the edit tools (replace_text, write_file).
 5. Empirically verify changes with tests/build/diagnostics via run_command.
-6. Update task state to COMPLETED using update_plan_task with evidence ONLY after tool evidence is observed. Never mark COMPLETED at Step 1 before tool execution.
-7. Do NOT claim the plan is finished without calling edit tools, update_plan_task, and verifying.
+6. Report task completion with evidence ONLY after tool evidence is observed. Never claim completion before tool execution.
+7. Do NOT claim the plan is finished without editing and verifying.
 
 User Request:
 ${request}`;
@@ -781,10 +781,10 @@ async function main() {
 Goal Objective: ${objective}
 
 Follow the OpenAI Codex CLI Goal-driven Execution Protocol:
-1. If no execution plan exists yet in PlanManager, create a structured plan using create_plan before modifying code.
+1. Survey the codebase and produce a structured plan before modifying code.
 2. Execute each task sequentially, gathering observable verification evidence.
-3. Update task status via update_plan_task as milestones complete.
-4. Submit final verified solution via submit_solution once all tasks are complete and verified.`;
+3. Report progress against the plan as milestones complete.
+4. Finish with a direct final answer once all tasks are complete and verified.`;
 
         await agentLoop.submit(
           activeSession,
@@ -801,7 +801,7 @@ Goal: ${state.objective}
 Target Task #${nextTask.id}: ${nextTask.title}
 Acceptance Criteria: ${nextTask.acceptanceCriteria}
 
-Please focus on executing and verifying this task. Update its status to COMPLETED using update_plan_task upon verification.`;
+Please focus on executing and verifying this task. Report it complete only after verification.`;
           await agentLoop.submit(activeSession, roundPrompt, 'system', { isGoalMode: true, signal });
         } else {
           await agentLoop.run(activeSession, { isGoalMode: true, signal });
@@ -1858,7 +1858,7 @@ Continue executing the in-flight plan.
 Next Target Task #${nextTask.id}: ${nextTask.title}
 Acceptance Criteria: ${nextTask.acceptanceCriteria}
 
-Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
+Please focus on executing and verifying this task, and report it complete only after verification.`;
           sessionCount++;
           try {
             await runWithCancellation(async (signal) => {
@@ -1935,7 +1935,7 @@ Continue executing the in-flight plan.
 Next Target Task #${nextTask.id}: ${nextTask.title}
 Acceptance Criteria: ${nextTask.acceptanceCriteria}
 
-Please focus on executing and verifying this task, and update its status to COMPLETED using update_plan_task.`;
+Please focus on executing and verifying this task, and report it complete only after verification.`;
           sessionCount++;
           try {
             await runWithCancellation(async (signal) => {

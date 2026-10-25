@@ -13,7 +13,6 @@ import {
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 import { TypeScriptService } from '../tools/typescript-service.js';
 import { CodebaseIntelligenceService } from '../tools/codebase-intelligence.js';
-import { createGetSymbolContext360Tool } from '../tools/symbol-context-360.js';
 import { Workspace } from '../workspace/workspace.js';
 
 
@@ -209,13 +208,11 @@ test('context 360 resolves qualified class methods and isolates workspace servic
     assert.match(context.docComment || '', /Runs alpha/);
     assert.ok(context.referencingFiles.includes('src/service.ts'));
 
-    const tool = createGetSymbolContext360Tool();
-    const firstResult = await tool.execute({ symbol: 'Alpha.run', path: 'src/service.ts' }, firstWorkspace);
-    const secondResult = await tool.execute({ symbol: 'Beta.run', path: 'src/service.ts' }, secondWorkspace);
-    assert.equal(firstResult.context360?.file, 'src/service.ts');
-    assert.equal(firstResult.context360?.kind, 'method');
-    assert.equal(secondResult.context360?.file, 'src/service.ts');
-    assert.equal(secondResult.context360?.kind, 'method');
+    const secondContext = new CodebaseIntelligenceService(secondWorkspace).getSymbolContext360('Beta.run', 'src/service.ts');
+    assert.equal(context.file, 'src/service.ts');
+    assert.equal(context.kind, 'method');
+    assert.equal(secondContext.file, 'src/service.ts');
+    assert.equal(secondContext.kind, 'method');
   } finally {
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }

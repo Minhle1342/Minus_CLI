@@ -1,6 +1,5 @@
 import type { Workspace } from '../workspace/workspace.js';
-import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
-import type { DiagnosticItem } from '../tools/typescript-service.js';
+import { getOrCreateTypeScriptService, type DiagnosticItem } from '../tools/typescript-service.js';
 import { ErrorDetective, type ErrorDetectiveReport } from './error-detective.js';
 import { isCommandOutcomeBlocked, isNonFailingCommandOutcome } from '../tools/command-outcome.js';
 

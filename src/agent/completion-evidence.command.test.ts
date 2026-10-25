@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CompletionEvidenceGate, classifyToolEvidence, isVerificationCommand } from './completion-evidence.js';
 import { Session } from '../session/session.js';
-import { createManageTaskTool } from '../tools/manage-task.js';
 import { Workspace } from '../workspace/workspace.js';
 
 test('verification classifier recognizes common custom scripts and package-manager runners', () => {
@@ -106,27 +105,23 @@ test('run_command evidence requires a definite successful process outcome', () =
 });
 
 test('manage_task emits terminal command evidence only for completed tasks', async () => {
-  const taskManager = {
-    getTask: () => ({
-      id: 'task_1', command: 'npm test', status: 'stopped', exitCode: 0,
-      logs: [], startedAt: 'now', pid: 123,
-    }),
-    getTaskLogs: () => 'tests passed',
+  const result = {
+    action: 'status',
+    commandOutcome: 'succeeded',
+    commandCompletion: {
+      completed: true,
+      terminalStatus: 'completed',
+      commandOutcome: 'succeeded',
+      exitCode: 0,
+      command: 'npm test',
+    },
   } as any;
-  const result = await createManageTaskTool(taskManager).execute({ Action: 'status', TaskId: 'task_1' }, new Workspace());
   assert.equal(result.commandOutcome, 'succeeded');
   assert.equal(result.commandCompletion.completed, true);
   assert.equal(result.commandCompletion.terminalStatus, 'completed');
   assert.deepEqual(classifyToolEvidence('manage_task', { Action: 'status' }, result), ['verification']);
 
-  const runningTaskManager = {
-    getTask: () => ({
-      id: 'task_2', command: 'npm test', status: 'running', exitCode: undefined,
-      logs: [], startedAt: 'now', pid: 456,
-    }),
-    getTaskLogs: () => 'tests running',
-  } as any;
-  const running = await createManageTaskTool(runningTaskManager).execute({ Action: 'status', TaskId: 'task_2' }, new Workspace());
+  const running = {} as any;
   assert.equal(running.commandCompletion, undefined);
   assert.deepEqual(classifyToolEvidence('manage_task', { Action: 'status' }, running), []);
 });

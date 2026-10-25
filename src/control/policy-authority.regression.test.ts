@@ -100,7 +100,7 @@ test('enforced binding cannot dispatch a registered root tool or edit outside it
   for (const phase of ['plan', 'implement']) for (const name of ['outside_authority', 'replace_text']) {
     const outcome = await runner.run(name, {}, { controlMode: 'enforce', decisionId: 'bound', allowedToolNames: [], allowedToolSetHash: hashAllowedToolSet([]), classificationPhase: phase });
     assert.equal(outcome.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
-    if (phase === 'plan') assert.match(outcome.result.recoverySuggestion, /request_phase_transition/);
+    if (phase === 'plan') assert.match(outcome.result.recoverySuggestion, /authorized tools/);
   }
   assert.equal(executions, 0);
 });

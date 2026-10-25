@@ -11,7 +11,8 @@ class NamedMockLLM {
   async generate(session: Session): Promise<any> {
     this.calls.push(session.id);
     return {
-      toolCalls: [{ name: 'submit_solution', args: { summary: 'The string conflicts with the declared number type.' } }],
+      text: 'The string conflicts with the declared number type.',
+      toolCalls: [],
     };
   }
 }

@@ -291,3 +291,16 @@ function isDestructiveInvocation(command: string, args: string[], firstArg?: str
 function deny(errorCode: string, error: string): { allowed: false; errorCode: string; error: string } {
   return { allowed: false, errorCode, error };
 }
+
+export function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
+  // A dry run pushes nothing: branch targeting is moot, not a violation.
+  if (args.some((arg) => arg === '--dry-run' || arg === '-n')) return true;
+  const positional = args.filter((arg) => !arg.startsWith('-'));
+  // `git push [<remote>]` with no refspec relies on the upstream default.
+  if (positional.length < 2) return true;
+  return positional.slice(1).some((refspec) => refspec === requestedBranch
+    || refspec === 'HEAD'
+    || refspec === `HEAD:${requestedBranch}`
+    || refspec.endsWith(`:${requestedBranch}`));
+}
+

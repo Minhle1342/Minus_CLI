@@ -38,7 +38,6 @@ import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, col
 import { resolveGitWorkflow, checkGitWorkflowCall } from './git-workflow.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
-import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createMessageAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool, createModelsTool } from '../tools/subagent-tools.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
@@ -50,9 +49,7 @@ import { HypothesisTracker, type BlastRadiusRisk } from './hypothesis-tracker.js
 import { SpeculativeBranchManager } from './speculative-branch-manager.js';
 import { EpistemicInvestigationEngine } from './epistemic-investigation-engine.js';
 import { CriticGate, type ExplorationSufficiencyDecision } from './critic-gate.js';
-import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
-import { registerReportFindingsTool } from '../tools/report-findings.js';
-import { registerWorktreeTools } from '../tools/worktree-tools.js';
+
 import { WorkspaceStateVerifier } from '../workspace/workspace-state-verifier.js';
 import { HypothesisRollbackOrchestrator } from './hypothesis-rollback-orchestrator.js';
 import { AdaptiveReasoningController } from './adaptive-reasoning-controller.js';
@@ -70,7 +67,7 @@ import { EDIT_TOOL_NAMES, READ_TOOL_NAMES, ToolDescriptorRegistry } from '../con
 import { checkPhaseToolEffect, isOrchestrationTool } from '../control/phase-tool-effects.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
-import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/inspect-symbol.js';
+import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/typescript-service.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 import { LatencyOrchestrator } from './latency-orchestrator.js';
 import { DynamicContextCache } from './dynamic-context-cache.js';
@@ -509,12 +506,6 @@ export class AgentLoop {
       this.turnMemoryRetriever.init().catch(() => { });
       this.maxSteps = options?.maxSteps ?? Infinity;
       this.sessionPersistence = options?.sessionPersistence;
-      registerSubmitSolutionTool(this.toolRegistry, this._workspace);
-      registerReportFindingsTool(this.toolRegistry, this._workspace);
-      registerWorktreeTools(this.toolRegistry, this._workspace);
-      this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
-      this.toolRegistry.attachGitTools(this._workspace);
-      this.toolRegistry.attachSessionDiff(() => this.checkpointManager);
       this.kernel.init().catch(() => { });
     } else {
       this.llm = kernelOrLLM;
@@ -559,13 +550,6 @@ export class AgentLoop {
       this.toolRegistry.attachPlanManager(this.planManager);
       this.toolRegistry.attachMemoryManager(this.memoryManager);
       this.toolRegistry.attachRepositoryMemory(this.repositoryMemory);
-      registerSubmitSolutionTool(this.toolRegistry, this._workspace);
-      registerReportFindingsTool(this.toolRegistry, this._workspace);
-      registerWorktreeTools(this.toolRegistry, this._workspace);
-      this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
-      this.toolRegistry.attachGitTools(this._workspace);
-      this.toolRegistry.attachSessionDiff(() => this.checkpointManager);
-
       this.checkpointManager.init().catch(() => { });
       this.memoryManager.init(this._workspace).catch(() => { });
       this.repositoryMemory.init().catch(() => { });
@@ -606,33 +590,6 @@ export class AgentLoop {
     );
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     this.orchestrator.bindPlanManager(this.planManager);
-    if (options?.enableSubagents !== false) {
-      this.toolRegistry.register(createDelegateTaskTool(this.subagentManager));
-      this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
-      this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
-      this.toolRegistry.register(createWaitAgentTool(this.subagentManager));
-      this.toolRegistry.register(createGetAgentResultTool(this.subagentManager));
-      this.toolRegistry.register(createStopAgentTool(this.subagentManager));
-      this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
-      this.toolRegistry.register(createMessageAgentTool(this.subagentManager));
-      this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
-      this.toolRegistry.register(createBrainstormDesignTool());
-      this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
-      this.toolRegistry.register(createScheduleDagParallelTool(this.orchestrator));
-      this.toolRegistry.register(createModelsTool());
-    }
-
-    this.registerGameToolsIfApplicable(this._workspace);
-  }
-
-  private registerGameToolsIfApplicable(workspace: Workspace): void {
-    if (typeof (this.toolRegistry as any).registerGameTools === 'function') {
-      try {
-        if (detectPromptContext(workspace).isUnity) {
-          (this.toolRegistry as any).registerGameTools().catch(() => { });
-        }
-      } catch { }
-    }
   }
 
   get workspace(): Workspace {
@@ -656,7 +613,6 @@ export class AgentLoop {
     this.dynamicContextCache.invalidate();
     this.repositoryMap.setWorkspace(workspace);
     this.repositoryMemory.setWorkspace(workspace);
-    this.registerGameToolsIfApplicable(workspace);
     if (this.kernel) {
       this.kernel.ctx.setWorkspace(workspace);
       (this as any).checkpointManager = this.kernel.ctx.checkpoints;
@@ -685,10 +641,6 @@ export class AgentLoop {
     (this as any).contextAgent = new ContextAgent(this._workspace.rootDir);
     (this as any).turnMemoryRetriever = new TurnMemoryRetriever(this._workspace.rootDir);
     this.turnMemoryRetriever.init().catch(() => { });
-    this.toolRegistry.attachHypothesisTracker(this.hypothesisTracker, this._workspace);
-    registerSubmitSolutionTool(this.toolRegistry, this._workspace);
-    registerReportFindingsTool(this.toolRegistry, this._workspace);
-    registerWorktreeTools(this.toolRegistry, this._workspace);
   }
 
   setLLM(llm: any, modelName?: string) {
@@ -823,88 +775,26 @@ export class AgentLoop {
    * Hoàn tác hành động sửa đổi gần nhất (/undo)
    * Phục hồi file về checkpoint trước đó và tua ngược lịch sử hội thoại về tin nhắn gần nhất.
    */
-  async rollback(session?: Session): Promise<{
-    success: boolean;
-    message: string;
-    restoredFiles?: string[];
-    diffs?: FileDiffItem[];
-    undonePrompt?: string;
-  }> {
+  async rollback(session?: Session): Promise<{ success: boolean; message: string; restoredFiles?: string[]; diffs?: any[]; undonePrompt?: string }> {
     const targetSession = session || this.activeSession;
     if (targetSession) this.effectLedger.bindSession(targetSession);
-
-    // 1. Rollback file workspace
-    // Ưu tiên rollback về task checkpoint của turn gần nhất nếu có (turn-${lastTurn})
+    let result: any;
     const lastTurn = targetSession ? (targetSession.getOpenTurn() ?? targetSession.getCompletedTurnNumbers().at(-1)) : undefined;
-    let fileResult: RollbackResult | undefined;
-    if (lastTurn !== undefined) {
-      fileResult = await this.checkpointManager.rollbackToTaskCheckpoint(`turn-${lastTurn}`).catch(() => undefined);
+    if (lastTurn !== undefined && typeof this.checkpointManager?.rollbackToTaskCheckpoint === 'function') {
+      result = await this.checkpointManager.rollbackToTaskCheckpoint(`turn-${lastTurn}`).catch(() => undefined);
     }
-    if (!fileResult || !fileResult.success) {
-      fileResult = await this.checkpointManager.rollbackLast().catch(() => undefined);
+    if (!result || !result.success) {
+      result = await this.checkpointManager.rollbackLast();
     }
-
-    // 2. Rollback session conversation history về message gần nhất
-    let sessionRollback: { success: boolean; undonePrompt?: string; remainingMessages: number } | undefined;
-    if (targetSession) {
-      sessionRollback = targetSession.rollbackLastTurn();
+    // The conversation must rewind with the workspace, before the restoration
+    // events below are appended.
+    const sessionRollback = targetSession?.rollbackLastTurn();
+    if (sessionRollback?.undonePrompt) result = { ...result, success: true, undonePrompt: sessionRollback.undonePrompt };
+    else if (sessionRollback?.success) result = { ...result, success: true };
+    if (result.restoredFiles?.length && targetSession) {
+      await this.recordWorkspaceRestoration(targetSession, result.restoredFiles, result.success ? result.checkpoint?.id : undefined);
     }
-
-    const filesRestoredCount = fileResult?.restoredFiles?.length || 0;
-    const hadFileSuccess = Boolean(fileResult?.success && filesRestoredCount > 0);
-    const hadSessionSuccess = Boolean(sessionRollback?.success);
-
-    if (!hadFileSuccess && !hadSessionSuccess) {
-      return {
-        success: false,
-        message: fileResult?.message || 'Không có checkpoint hoặc tin nhắn nào trong phiên để hoàn tác.',
-      };
-    }
-
-    // 3. Cập nhật cache, ledger và invalidation
-    if (fileResult?.checkpoint?.id && targetSession) {
-      this.effectLedger.rollbackByCheckpoint(fileResult.checkpoint.id);
-    }
-    if (fileResult?.restoredFiles?.length) {
-      for (const file of fileResult.restoredFiles) {
-        this.verificationPolicy.recordModification(file);
-        this.targetFilesModifiedInTurn.add(file);
-        this.repositoryMap.invalidate(file);
-      }
-    }
-    this.dynamicContextCache.invalidate();
-    disposeSharedTypeScriptService();
-    this.lastCommandExecutionState = undefined;
-    this.lastMutationForInvestigation = undefined;
-    this.rollbackOrchestrator.resetGreenCheckpoint();
-    if (targetSession) {
-      await this.persistSession(targetSession);
-    }
-
-    // 4. Soạn message báo cáo kết quả chi tiết
-    let msg = '';
-    if (sessionRollback?.undonePrompt) {
-      const promptSnippet = sessionRollback.undonePrompt.length > 50
-        ? sessionRollback.undonePrompt.slice(0, 50) + '...'
-        : sessionRollback.undonePrompt;
-      msg = `Đã hoàn tác tin nhắn "${promptSnippet}".`;
-    } else {
-      msg = `Đã hoàn tác lượt gần nhất.`;
-    }
-
-    if (filesRestoredCount > 0) {
-      msg += ` Đã khôi phục ${filesRestoredCount} file(s) về trạng thái trước đó.`;
-    } else {
-      msg += ` (Không có thay đổi file nào cần hoàn tác trong lượt này).`;
-    }
-
-    return {
-      success: true,
-      message: msg,
-      restoredFiles: fileResult?.restoredFiles,
-      diffs: fileResult?.diffs,
-      undonePrompt: sessionRollback?.undonePrompt,
-    };
+    return result;
   }
 
   private async recordWorkspaceRestoration(session: Session, restoredFiles: string[], checkpointId?: string, turn = session.getOpenTurn()): Promise<void> {
@@ -1321,8 +1211,7 @@ export class AgentLoop {
     let consecutiveIncompleteFinishes = 0;
     let consecutiveNoProgressStrategyChanges = 0;
     let hasSubmittedSolution = false;
-    const submissionReadiness = new SubmissionReadiness();
-    let turnMutationCheckpointId: string | undefined;
+        let turnMutationCheckpointId: string | undefined;
     this.rollbackOrchestrator.resetGreenCheckpoint();
     const isRootAgent = this.agentId === 'root'
       || this.agentId === 'main'
@@ -1348,6 +1237,7 @@ export class AgentLoop {
       || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0));
     let submittedSolutionSummary: string | undefined;
     let submittedValidatedDraft = false;
+    const submissionReadiness = new SubmissionReadiness();
     let hasReportedFindings = false;
     let reportedFindingsMarkdown: string | undefined;
     let previousClassification: ClassificationDecision | undefined;
@@ -1773,9 +1663,6 @@ export class AgentLoop {
         const activeStepQuery = retrievalState.query;
         const stepCompletionState = getTurnCompletionState(session, turn);
 
-        const canRequestPhaseTransition = ['explore', 'plan', 'implement'].includes(classification.phase)
-          && ['bugfix', 'feature', 'refactor', 'question', 'exploration'].includes(classification.taskClass);
-
         let activeToolDeclarations: any[];
         if (hasSubmittedSolution) {
           // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
@@ -1804,6 +1691,16 @@ export class AgentLoop {
             })
             : candidateProvider.getFunctionDeclarations();
 
+          // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
+          // In explore and plan phases, mutation tools are withheld from model-visible schemas so the LLM physically cannot mutate
+          // before the harness advances the phase.
+          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+              ['run_command', 'git_command'].includes(tool.name)
+              || isOrchestrationTool(tool.name)
+              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
+          }
+
           // Phase-appropriate exploration anchors if present in gate surface
           if (gateToolSurface.visibleToolNames.length > 0) {
             const declarationsByName = new Map(
@@ -1815,6 +1712,14 @@ export class AgentLoop {
                 activeToolDeclarations.push(declaration);
               }
             }
+          }
+
+          // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
+          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
+              ['run_command', 'git_command'].includes(tool.name)
+              || isOrchestrationTool(tool.name)
+              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
           }
 
           // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
@@ -1878,15 +1783,7 @@ export class AgentLoop {
         );
 
         // Completion is a control primitive, not an optional relevance match.
-        // Pin the same declaration on every pre-submission step (cache-stable),
-        // including read-only investigation and plan phases.
-        if (!hasSubmittedSolution && candidateProvider.get('submit_solution')
-          && !activeToolDeclarations.some((tool: any) => tool.name === 'submit_solution')) {
-          const declaration = candidateProvider.getFunctionDeclarations()
-            .find((tool: any) => tool.name === 'submit_solution');
-          if (declaration) activeToolDeclarations.push(declaration);
-          activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
-        }
+        // The final answer is produced as plain text; no completion tool is pinned.
 
         const readySubmission = !hasSubmittedSolution && candidateProvider.get('submit_solution')
           ? submissionReadiness.current(submissionSnapshot()) : undefined;
@@ -2287,7 +2184,6 @@ export class AgentLoop {
           evidenceSufficient: paretoEvidence.hasSufficientEvidence,
           evidenceScore: paretoEvidence.score,
           evidenceThreshold: paretoEvidence.threshold,
-          targetFile: activeTargetFile,
         });
 
         // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)
@@ -2327,9 +2223,9 @@ export class AgentLoop {
           const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
           completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
         } else if (completionVerificationSatisfied) {
-          completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then call submit_solution with only established findings and the actual verification performed.';
+          completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then answer directly with only established findings and the actual verification performed.';
         } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
-          completionDirective = '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: When the answer is ready, return it directly as the final answer — do not call submit_solution for read-only answers. No code edit or test is required. A concise answer is valid; do not invent edits or verification. Return the answer in the user\'s language.';
+          completionDirective = '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: When the answer is ready, return it directly as the final answer. No code edit or test is required. A concise answer is valid; do not invent edits or verification. Return the answer in the user\'s language.';
         }
 
         // Epistemic Investigation Engine: Dual Thesis vs Antithesis + Lightweight Speculative Rollout
@@ -2453,7 +2349,6 @@ export class AgentLoop {
         // P0: phase/tool authority directive rides inside the non-truncatable P1.5
         // phaseGuidance slot so the model always sees the exact authorized list.
         const phaseToolDirective = buildPhaseToolAuthorityDirective(classification.phase, visibleToolNames, {
-          canRequestPhaseTransition,
           hasSubmittedSolution,
           isReadOnly: classification.risk === 'R0' || classification.reversibility === 'read-only',
         });
@@ -2978,6 +2873,7 @@ export class AgentLoop {
         this.setCircuitBreakerRetries(session.id, 0);
         const requestDurationMs = Date.now() - requestStartedAt;
         const timeToFirstTokenMs = firstTokenAt === undefined ? undefined : firstTokenAt - requestStartedAt;
+        response = response || { text: '', toolCalls: [] };
         response.usage = {
           ...(response.usage || {}),
           requestDurationMs,
@@ -5079,9 +4975,10 @@ export class AgentLoop {
         // submit_solution, since no other gate checks subagent output.
         const isDirectAnswerCompletion = !hasCodeMutations && !codeChangeRequired;
         const requiresReadOnlySubmission = isDirectAnswerCompletion && !hasSubmittedSolution;
-        const requiresSubmission = isDirectAnswerCompletion
+        const hasSubmitSolutionTool = Boolean(this.toolRegistry.get('submit_solution'));
+        const requiresSubmission = hasSubmitSolutionTool && (isDirectAnswerCompletion
           ? (isSubagent && !hasSubmittedSolution && !isMockLLM)
-          : (!hasSubmittedSolution && !isSubagent && !isMockLLM);
+          : (!hasSubmittedSolution && !isSubagent && !isMockLLM));
         if (finalAnswerDecision.allow && requiresSubmission) {
           const candidate = evaluateSubmission({ summary: finalAnswer }, {
             session, turn, userRequest: turnUserRequest, workspaceRoot: this._workspace.rootDir,

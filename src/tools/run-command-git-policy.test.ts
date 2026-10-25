@@ -4,7 +4,7 @@ import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
 import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand, validateGitCommandScope } from './git-command-policy.js';
 import { detectExplicitGitMutationIntent, extractRequestedGitBranch } from './git-intent.js';
-import { pushArgsTargetBranch } from './git-tools.js';
+import { pushArgsTargetBranch } from './git-command-policy.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
 
 test('parseGitInvocation keeps global flags in argv for scope checks', () => {

@@ -3,20 +3,15 @@ import assert from 'node:assert/strict';
 import { ToolRetriever } from '../tools/tool-retriever.js';
 import { ToolRegistry } from '../tools/registry.js';
 
-test('ToolRetriever - Adaptive Tool Schema Pruning removes heavy game tools on regular code queries', async () => {
-  const registry = new ToolRegistry(undefined, undefined, undefined, { enableGameTools: true });
-  await registry.registerGameTools();
+test('ToolRetriever - Adaptive Tool Schema Pruning preserves core anchors on regular code queries', async () => {
+  const registry = new ToolRegistry();
   const allTools = registry.getAll();
-
-  // Đảm bảo trong registry có cả tool thông thường và tool game
-  assert.ok(allTools.some((t) => t.name.startsWith('game_') || t.name.startsWith('unity_')), 'Registry must contain game tools');
 
   const retriever = new ToolRetriever({ enabled: true, activationThreshold: 5, topK: 4 });
   retriever.indexTools(allTools);
 
-  // 1. Khi truy vấn code thông thường: KHÔNG được chứa tool game chuyên biệt
-  const regularDeclarations = retriever.retrieve('fix authentication bug and inspect src/auth.ts', allTools);
-  const regularToolNames = regularDeclarations.map((d) => d.name || '');
+  const regularToolNames = retriever.retrieve('fix authentication bug and inspect src/auth.ts', allTools)
+    .map((d) => d.name || '');
 
   // Core Anchor Tools phải luôn hiện diện (bảo toàn 100% accuracy)
   assert.ok(regularToolNames.includes('read_file'), 'Must include read_file');
@@ -24,41 +19,13 @@ test('ToolRetriever - Adaptive Tool Schema Pruning removes heavy game tools on r
   assert.ok(regularToolNames.includes('replace_text'), 'Must include replace_text');
   assert.ok(regularToolNames.includes('run_command'), 'Must include run_command');
 
-  // Tool game nặng KHÔNG được xuất hiện
-  const hasGameToolInRegular = regularToolNames.some((name) => name.startsWith('game_') || name.startsWith('unity_'));
-  assert.equal(hasGameToolInRegular, false, 'Heavy game tools must be pruned from regular coding queries');
-
-  // 2. Khi truy vấn thực sự liên quan tới Game / Unity: Tự động bung tool Game
-  const gameDeclarations = retriever.retrieve('create 2d pixel character sprite for unity game', allTools);
-  const gameToolNames = gameDeclarations.map((d) => d.name || '');
-
-  const hasGameToolInGameQuery = gameToolNames.some((name) => name.startsWith('game_') || name.startsWith('unity_'));
-  assert.equal(hasGameToolInGameQuery, true, 'Game tools must be dynamically included when query explicitly asks for game/unity');
-});
-
-test('ToolRetriever - exposes inspect_image for Vietnamese vision queries and image filenames', () => {
-  const registry = new ToolRegistry();
-  const allTools = registry.getAll();
-  const retriever = new ToolRetriever({ enabled: true, activationThreshold: 5, topK: 3 });
-  retriever.indexTools(allTools);
-
-  for (const query of [
-    'phân tích ảnh này giúp tôi',
-    'xem nội dung hình ảnh đính kèm',
-    'what is in images.jpg',
-    'describe screenshot.png',
-  ]) {
-    const names = retriever.retrieve(query, allTools).map((d) => d.name);
-    assert.ok(names.includes('inspect_image'), `inspect_image must be visible for query: ${query}`);
-  }
-
-  const codeQuery = retriever.retrieve('fix authentication bug in src/auth.ts', allTools).map((d) => d.name);
-  assert.equal(codeQuery.includes('inspect_image'), false, 'inspect_image stays pruned for unrelated code queries');
+  // Tool nặng ngoài canonical surface không còn được đăng ký
+  const hasGameTool = regularToolNames.some((name) => name.startsWith('game_') || name.startsWith('unity_'));
+  assert.equal(hasGameTool, false, 'Game tools are not part of the model-visible surface');
 });
 
 test('ToolRetriever - Schema token reduction preserves anchor tools and stays within budget', async () => {
-  const registry = new ToolRegistry(undefined, undefined, undefined, { enableGameTools: true });
-  await registry.registerGameTools();
+  const registry = new ToolRegistry();
   const allTools = registry.getAll();
   const retriever = new ToolRetriever({ enabled: true, activationThreshold: 5, topK: 3 });
   retriever.indexTools(allTools);

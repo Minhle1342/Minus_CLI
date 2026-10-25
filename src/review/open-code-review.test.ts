@@ -237,6 +237,4 @@ test('SuperpowersPlugin registers the OCR service and review tools in the kernel
   t.after(() => kernel.unuse('superpowers'));
 
   assert.ok((kernel.ctx as any).ocrReview instanceof OcrReviewService);
-  assert.ok(kernel.ctx.tools.get('run_code_review'));
-  assert.ok(kernel.ctx.tools.get('get_code_review_status'));
 });

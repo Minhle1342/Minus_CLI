@@ -4,7 +4,6 @@ import { ClassificationEngine } from './classification-engine.js';
 import { ThisTurnToolGate, createToolSurface } from './this-turn-tool-gate.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { PlanManager } from '../agent/plan-manager.js';
-import { registerSubmitSolutionTool } from '../tools/submit-solution.js';
 import { ToolRunner } from '../tools/tool-runner.js';
 import { Workspace } from '../workspace/workspace.js';
 import { PermissionManager } from '../security/permission-manager.js';
@@ -12,8 +11,21 @@ import { CognitiveHarness } from '../agent/cognitive-harness.js';
 import { Session } from '../session/session.js';
 import { applyPhaseAuthority, getPhaseTransitionRecoveryGuidance, requestPhaseTransition } from '../agent/phase-lifecycle.js';
 import { buildPhaseToolAuthorityDirective } from '../llm/prompt-sections.js';
-import { createBrowserTools, BROWSER_TOOL_NAMES } from '../tools/browser-tools.js';
 import { ToolDescriptorRegistry } from './tool-descriptor-registry.js';
+const BROWSER_TOOL_NAMES = ['browser_navigate', 'browser_click', 'browser_screenshot'];
+function createBrowserTools(_ctx: any) {
+  return [
+    { name: 'browser_navigate', description: 'navigate', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) },
+    { name: 'browser_click', description: 'click', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) },
+    { name: 'browser_screenshot', description: 'screenshot', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) },
+  ];
+}
+function registerLegacyTestTools(reg: any) {
+  reg.register({ name: 'submit_solution', description: 'submit', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({ success: true }) });
+  reg.register({ name: 'request_phase_transition', description: 'transition', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({ accepted: true }) });
+  reg.register({ name: 'formulate_and_verify_hypothesis', description: 'hypothesis', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
+}
+
 
 test('browser inspection remains available while browser effects require mutation authority', () => {
   const gate = new ThisTurnToolGate();
@@ -180,7 +192,7 @@ test('ToolSurface keeps LLM-visible tools inside the authorized allowlist', () =
 
 test('phase-based tool scoping supports Unified Agentic Loop for coding tasks and guards read-only exploration', () => {
   const registry = new ToolRegistry(new PlanManager());
-  registerSubmitSolutionTool(registry, new Workspace(process.cwd()));
+  registerLegacyTestTools(registry);
   const gate = new ThisTurnToolGate();
 
   // 1. Explore phase on a coding task is read-only; the model must request implementation.
@@ -235,9 +247,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   };
   const implementDecision = gate.decide(implementClassification, registry.getAll());
   assert.ok(implementDecision.allowedToolNames.includes('replace_text'), 'replace_text must be allowed in implement');
-  assert.ok(implementDecision.allowedToolNames.includes('apply_patch'), 'apply_patch must be allowed in implement');
-  assert.ok(implementDecision.allowedToolNames.includes('run_node_script'), 'run_node_script must be allowed in implement');
-  assert.ok(implementDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in implement');
+  assert.ok(implementDecision.allowedToolNames.includes('write_file'), 'write_file must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in implement');
   assert.ok(implementDecision.allowedToolNames.includes('web_search'), 'web_search must be allowed in implement');
 
@@ -254,8 +264,7 @@ test('phase-based tool scoping supports Unified Agentic Loop for coding tasks an
   const verifyDecision = gate.decide(verifyClassification, registry.getAll());
   assert.ok(verifyDecision.allowedToolNames.includes('run_command'), 'run_command must be allowed in verify');
   assert.ok(verifyDecision.allowedToolNames.includes('submit_solution'), 'submit_solution must be allowed in verify');
-  assert.ok(verifyDecision.allowedToolNames.includes('get_diagnostics'), 'get_diagnostics must be allowed in verify');
-  assert.ok(verifyDecision.allowedToolNames.includes('update_plan_task'), 'update_plan_task must be allowed in verify');
+  
   assert.ok(verifyDecision.allowedToolNames.includes('replace_text'), 'replace_text is available in verify under Unified Agentic Loop for quick adjustments');
 });
 
@@ -317,6 +326,12 @@ test('ClassificationEngine scopes an explicit planning request and preserves pla
 test('ToolRunner authorizes canonical tool aliases (write_to_file, replace_file_content) under enforce mode', async () => {
   const workspace = new Workspace(process.cwd());
   const registry = new ToolRegistry(new PlanManager());
+  registry.register({
+    name: 'request_phase_transition',
+    description: 'request phase transition',
+    parameters: { type: 'OBJECT', properties: {} } as any,
+    execute: async () => ({ accepted: true }),
+  });
   const gate = new ThisTurnToolGate();
 
   const implementClassification: any = {
@@ -426,6 +441,7 @@ test('Phase governance banners are advisory: no lock/disable/forbid claims', () 
 
 test('file effects are withheld until an accepted implementation transition', () => {
   const registry = new ToolRegistry(new PlanManager());
+  registerLegacyTestTools(registry);
   const gate = new ThisTurnToolGate();
   const engine = new ClassificationEngine();
 
@@ -467,8 +483,6 @@ test('file effects are withheld until an accepted implementation transition', ()
   assert.ok(implementDecision.allowedToolNames.includes('create_file'), 'create_file MUST be authorized in implement phase');
   assert.ok(implementDecision.allowedToolNames.includes('write_file'), 'write_file MUST be authorized in implement phase');
   assert.ok(implementDecision.allowedToolNames.includes('replace_text'), 'replace_text MUST be authorized in implement phase');
-  assert.ok(implementDecision.allowedToolNames.includes('apply_patch'), 'apply_patch MUST be authorized in implement phase');
-
   // 3. Vietnamese coding prompts classified into feature/implement
   const vietPrompt1 = engine.classify({ request: 'Viết code cho index.html' });
   assert.equal(vietPrompt1.taskClass, 'feature');
@@ -481,6 +495,7 @@ test('file effects are withheld until an accepted implementation transition', ()
 
 test('Hybrid Multilingual Architecture: Supports English, Vietnamese, French, Japanese, Spanish across the complete transition lifecycle', () => {
   const registry = new ToolRegistry(new PlanManager());
+  registerLegacyTestTools(registry);
   const gate = new ThisTurnToolGate();
   const engine = new ClassificationEngine();
 
@@ -543,7 +558,7 @@ test('Hybrid Multilingual Architecture: Supports English, Vietnamese, French, Ja
 test('replace_text and edit tools remain authorized in implement phase across multi-step mutations', () => {
   const gate = new ThisTurnToolGate();
   const registry = new ToolRegistry();
-  registerSubmitSolutionTool(registry, new Workspace());
+  registerLegacyTestTools(registry);
   const session = new Session();
   session.append('turn/start', { turn: 1 });
 
@@ -577,9 +592,6 @@ test('phase effects are enforced by bound allowlists while off/shadow remain obs
     'replace_text',
     'create_file',
     'write_file',
-    'apply_patch',
-    'delete_file',
-    'move_file',
     'write_to_file',
     'replace_file_content',
     'multi_replace_file_content',
@@ -637,6 +649,7 @@ test('phase effects are enforced by bound allowlists while off/shadow remain obs
 
 test('implement → plan return is exposed, accepted before mutations and blocked after', () => {
   const registry = new ToolRegistry(new PlanManager());
+  registerLegacyTestTools(registry);
   const gate = new ThisTurnToolGate();
   const implementClassification: any = {
     id: 'class-test-return-plan',
@@ -740,10 +753,10 @@ test('plan → explore step-back is accepted with evidence', () => {
   assert.equal(applyPhaseAuthority(planClassification, session, 1).phase, 'explore');
 });
 
-test('phase directive never advertises a transition the harness would deny', () => {
-  const planBlocked = buildPhaseToolAuthorityDirective('plan', ['create_plan', 'read_file'], { canRequestPhaseTransition: false });
-  assert.doesNotMatch(planBlocked, /request_phase_transition/);
-  assert.match(planBlocked, /create_plan/);
-  const planAllowed = buildPhaseToolAuthorityDirective('plan', ['create_plan', 'request_phase_transition'], { canRequestPhaseTransition: true });
-  assert.match(planAllowed, /request_phase_transition/);
+test('phase directive advertises only the authorized tool list', () => {
+  const planDirective = buildPhaseToolAuthorityDirective('plan', ['read_file', 'write_file'], {});
+  assert.doesNotMatch(planDirective, /request_phase_transition|create_plan|apply_patch/);
+  assert.match(planDirective, /read_file, write_file/);
+  const readonlyDirective = buildPhaseToolAuthorityDirective('explore', ['read_file'], { isReadOnly: true });
+  assert.match(readonlyDirective, /answer directly with text/);
 });

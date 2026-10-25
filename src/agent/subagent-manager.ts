@@ -251,6 +251,7 @@ export class SubagentManager {
         cleanup();
         reject(new Error(`Timeout waiting for subagent '${id}' after ${timeoutMs}ms.`));
       }, timeoutMs);
+      timer.unref?.();
 
       const listener = (h: SubagentHandle) => {
         cleanup();
@@ -388,6 +389,7 @@ export class SubagentManager {
     const timeoutTimer = setTimeout(() => {
       controller.abort();
     }, timeoutMs);
+    timeoutTimer.unref?.();
 
     let childLoop: AgentLoop;
     try {
@@ -503,6 +505,7 @@ export class SubagentManager {
       timedOut = true;
       controller.abort();
     }, timeoutMs);
+    timeoutTimer.unref?.();
 
     // Gắn nhãn stdout của subagent để TUI ghi vào tab con thay vì tab cha.
     void runWithSubagentOutput(session.id, () => loop.submit(session, handle.objective, 'human', {

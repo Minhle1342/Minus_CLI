@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
-import { resolvePatchFormatSpec, resolvePhaseDynamicGuidance } from '../llm/prompt-sections.js';
+import { resolvePatchFormatSpec, resolvePhaseDynamicGuidance, SECTION_PHASE_IMPLEMENT_GUIDANCE } from '../llm/prompt-sections.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 
 test('Prompt Engineering Mũi nhọn 1: getProjectDigest với Task-Conditioned Relevance Scoring', () => {
@@ -84,12 +84,9 @@ test('Prompt Engineering Mũi nhọn 2: resolvePatchFormatSpec Dynamic Few-Shot 
   const tsSpec = resolvePatchFormatSpec('src/index.ts');
   assert.match(tsSpec, /const a = 1;/);
 
-  // Test 2f: Tích hợp trong resolvePhaseDynamicGuidance
-  const phaseGuidancePy = resolvePhaseDynamicGuidance('implement', {
-    targetFile: 'src/analytics.py',
-    includePatchSpec: true,
-  });
-  assert.match(phaseGuidancePy, /def compute\(a: int, b: int\) -> int:/);
+  // Test 2f: Implement phase guidance is the static section; no patch spec is appended
+  const phaseGuidancePy = resolvePhaseDynamicGuidance('implement', { risk: 'R1' });
+  assert.equal(phaseGuidancePy, SECTION_PHASE_IMPLEMENT_GUIDANCE);
 });
 
 test('Prompt Engineering Mũi nhọn 3: ToolSynergyAdvisor Call-Graph Aware Guidance', () => {

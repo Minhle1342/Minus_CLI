@@ -125,14 +125,8 @@ test('Agent loop gracefully continues and adapts when permission is denied in no
         toolCalls: [{ id: 'call-deny-headless', name: 'run_command', args: { command: 'rm -rf /tmp/denied-probe-xyz' } }],
       },
       {
-        text: 'Alternative safe inspection completed without running terminal commands.',
-        toolCalls: [
-          {
-            id: 'call-submit',
-            name: 'submit_solution',
-            args: { summary: 'Task finished: destructive command was skipped due to permission denial.' },
-          },
-        ],
+        text: 'Alternative safe inspection completed without running terminal commands. Task finished: destructive command was skipped due to permission denial.',
+        toolCalls: [],
       },
     ]);
     const registry = new ToolRegistry();

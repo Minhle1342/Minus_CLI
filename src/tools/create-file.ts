@@ -1,94 +1,20 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { createPatch } from 'diff';
-import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
+import { writeFileTool } from './write-file.js';
+import type { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
-import { computeFileHash, computeStringHash } from '../workspace/workspace-digest.js';
-import { toolError, toolSuccess } from './tool-result.js';
 
 /**
- * Tool create_file (Surgical Create-Only Tool)
- * 
- * Tạo một file mới trong workspace với semantic create-only.
- * Mặc định từ chối ghi đè file đã tồn tại (expectedAbsent: true).
+ * create_file compatibility alias — forwards directly to write_file.
  */
 export const createFileTool: ToolDefinition = {
+  ...writeFileTool,
   name: 'create_file',
-  description: 'Create a new file in the workspace. By default overwriting existing files is disallowed. To modify existing files, use replace_text or apply_patch.',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      path: {
-        type: Type.STRING,
-        description: 'Relative path to the new file to create (e.g. "src/utils/helper.ts")',
-      },
-      content: {
-        type: Type.STRING,
-        description: 'Complete text content for the new file',
-      },
-      expectedAbsent: {
-        type: Type.BOOLEAN,
-        description: 'Require that the file does not already exist on disk (default: true).',
-      },
-    },
-    required: ['path', 'content'],
-  },
-  async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.path || '').trim();
-    const content = String(args.content ?? '');
-    const expectedAbsent = args.expectedAbsent !== false;
-
-    if (!rawPath) {
-      return toolError('"path" parameter is required.', 'INVALID_ARGS');
-    }
-
-    try {
-      const safePath = workspace.resolveSafePath(rawPath);
-
-      if (workspace.isProtectedFile(safePath)) {
-        return toolError(
-          `Security violation: Cannot create or overwrite protected configuration file "${rawPath}".`,
-          'SECURITY_VIOLATION',
-        );
-      }
-
-      const currentHash = await computeFileHash(safePath);
-      if (currentHash !== 'sha256:absent' && expectedAbsent) {
-        return toolError(
-          `File "${rawPath}" already exists on disk. create_file does not allow overwrite. Use replace_text or apply_patch to update.`,
-          'FILE_ALREADY_EXISTS',
-          { path: rawPath, currentHash },
-          'Use read_file to inspect the current file content and use replace_text or apply_patch to modify.',
-        );
-      }
-
-      const parentDir = path.dirname(safePath);
-      await fs.mkdir(parentDir, { recursive: true });
-      await fs.writeFile(safePath, content, 'utf-8');
-
-      const contentHash = computeStringHash(content);
-      const bytes = Buffer.byteLength(content, 'utf-8');
-
-      // Diff từ rỗng cho TEA diff viewer + khung inline (capped như write_file).
-      let unifiedDiff: string | undefined;
-      try {
-        if (content) {
-          const patch = createPatch(rawPath, '', content, 'before', 'after');
-          unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
-        }
-      } catch {}
-
-      return toolSuccess({
-        path: workspace.toRelativePath(safePath),
-        created: true,
-        bytes,
-        contentHash,
-        message: `Successfully created file "${rawPath}" (${bytes} bytes).`,
-        ...(unifiedDiff ? { diff: unifiedDiff, unifiedDiff } : {}),
-      });
-    } catch (err: any) {
-      return toolError(`Failed to create file: ${err.message}`, 'EXECUTION_ERROR', { path: rawPath });
-    }
+  execute: async (args: Record<string, any>, workspace: Workspace = new Workspace()) => {
+    return writeFileTool.execute({
+      path: args.path,
+      content: args.content,
+      allowOverwrite: args.expectedAbsent === false,
+    }, workspace);
   },
 };
+
+export default createFileTool;

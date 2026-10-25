@@ -3,6 +3,7 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { readFileTool } from './read-file.js';
 import { listFilesTool } from './list-files.js';
+import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
 import { writeFileTool } from './write-file.js';
 import { writeToFileTool } from './write-to-file.js';
@@ -11,6 +12,8 @@ import { multiReplaceFileContentTool } from './multi-replace-file-content.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
 import { searchWebTool, webSearchTool } from './web-search.js';
 import { readUrlContentTool, webFetchTool } from './web-fetch.js';
+import { createFileTool } from './create-file.js';
+import { searchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
 
 export interface ToolProvider {
@@ -23,14 +26,15 @@ export interface ToolProvider {
 }
 
 /**
- * 7 canonical core tools exposed to LLM:
- * read, write, edit, command, list file, web search, web fetch.
+ * 8 canonical core tools exposed to LLM:
+ * read_file, write_file, replace_text, list_files, search_text, run_command, web_search, web_fetch.
  */
 export const CANONICAL_MODEL_TOOL_NAMES = new Set([
   'read_file',
   'write_file',
   'replace_text',
   'list_files',
+  'search_text',
   'run_command',
   'web_search',
   'web_fetch',
@@ -46,6 +50,8 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
+  'create_file',
+  'search_codebase_fast',
 ]);
 
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
@@ -56,7 +62,7 @@ function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
- * Chỉ đăng ký và phơi bày 7 tool cốt lõi cho LLM.
+ * Chỉ đăng ký và phơi bày 8 tool cốt lõi cho LLM.
  */
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
@@ -74,9 +80,10 @@ export class ToolRegistry implements ToolProvider {
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
 
-    // Register ONLY the 7 canonical core tools
+    // Register ONLY the 8 canonical core tools
     this.register(readFileTool);
     this.register(listFilesTool);
+    this.register(searchTextTool);
     this.register(replaceTextTool);
     this.register(writeFileTool);
     this.register(runCommandTool);
@@ -89,6 +96,8 @@ export class ToolRegistry implements ToolProvider {
     this.register(writeToFileTool);
     this.register(replaceFileContentTool);
     this.register(multiReplaceFileContentTool);
+    this.register(createFileTool);
+    this.register(searchCodebaseFastTool);
   }
 
   attachSession(_session: any): void {
@@ -192,8 +201,9 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'web_search') return this.tools.has('search_web');
     if (name === 'read_url_content') return this.tools.has('web_fetch');
     if (name === 'web_fetch') return this.tools.has('read_url_content');
-    if (name === 'write_to_file') return this.tools.has('write_file');
+    if (name === 'write_to_file' || name === 'create_file') return this.tools.has('write_file');
     if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.has('replace_text');
+    if (name === 'search_codebase_fast' || name === 'tools_search') return this.tools.has('search_text');
     return false;
   }
 
@@ -207,8 +217,9 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'web_search') return this.tools.get('search_web');
     if (name === 'read_url_content') return this.tools.get('web_fetch');
     if (name === 'web_fetch') return this.tools.get('read_url_content');
-    if (name === 'write_to_file') return this.tools.get('write_file');
+    if (name === 'write_to_file' || name === 'create_file') return this.tools.get('write_file');
     if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.get('replace_text');
+    if (name === 'search_codebase_fast' || name === 'tools_search') return this.tools.get('search_text');
     return undefined;
   }
 
@@ -221,7 +232,7 @@ export class ToolRegistry implements ToolProvider {
 
   /**
    * Xuất danh sách schema FunctionDeclaration đầy đủ cho LLM.
-   * Luôn chỉ chứa 7 tool cốt lõi đã qua modelVisibleTools.
+   * Luôn chỉ chứa 8 tool cốt lõi đã qua modelVisibleTools.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
     return modelVisibleTools(this.getAll())
@@ -274,17 +285,20 @@ export class ToolRegistry implements ToolProvider {
         if (!resolvedArgs.Url && resolvedArgs.url) {
           resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
         }
-      } else if (name === 'write_to_file' && this.tools.has('write_file')) {
+      } else if ((name === 'write_to_file' || name === 'create_file') && this.tools.has('write_file')) {
         resolvedName = 'write_file';
       } else if ((name === 'replace_file_content' || name === 'multi_replace_file_content') && this.tools.has('replace_text')) {
         resolvedName = 'replace_text';
+      } else if ((name === 'search_codebase_fast' || name === 'tools_search') && this.tools.has('search_text')) {
+        resolvedName = 'search_text';
       }
     }
 
     const tool = this.get(resolvedName);
     if (!tool) {
+      const available = this.getFunctionDeclarations().map((t) => t.name).join(', ');
       return {
-        error: `Tool "${name}" does not exist in ToolRegistry. Available tools: ${Array.from(this.tools.keys()).join(', ')}`,
+        error: `Tool "${name}" does not exist in ToolRegistry. Available tools: ${available}`,
         errorCode: 'UNKNOWN_TOOL',
       };
     }
@@ -337,8 +351,9 @@ export class ToolScope implements ToolProvider {
         : name === 'web_search' ? 'search_web'
         : name === 'read_url_content' ? 'web_fetch'
         : name === 'web_fetch' ? 'read_url_content'
-        : name === 'write_to_file' ? 'write_file'
+        : name === 'write_to_file' || name === 'create_file' ? 'write_file'
         : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
+        : name === 'search_codebase_fast' || name === 'tools_search' ? 'search_text'
         : undefined;
       if (!alias || !this.allowed.has(alias)) return undefined;
     }

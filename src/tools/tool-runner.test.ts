@@ -145,9 +145,9 @@ describe('ToolRunner Suite', () => {
     const res = await runner.run('deploy_production', { target: 'prod' }, ctx);
     assert.equal(res.result.errorCode, 'TOOL_NOT_ALLOWED_THIS_TURN');
     assert.match(res.result.error, /phase "plan"/);
-    assert.match(res.result.error, /request_phase_transition/);
+    assert.match(res.result.error, /authorized tools/);
     assert.equal(res.guardianDiagnosis?.category, 'AUTHORIZATION_DENIED');
-    assert.match(String(res.guardianDiagnosis?.recoveryAction), /request_phase_transition/);
+    assert.match(String(res.guardianDiagnosis?.recoveryAction), /authorized tools/);
   });
 
   it('4. Stage 3 rà soát an ninh cho mọi alias đường dẫn (filePath, file, path)', async () => {

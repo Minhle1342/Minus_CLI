@@ -1,5 +1,4 @@
 import { AgentPlugin, KernelContext } from '../kernel.js';
-import { createComposeTools } from '../../tools/compose-tools.js';
 
 export class ComposePlugin implements AgentPlugin {
   readonly name = 'compose';
@@ -10,16 +9,12 @@ export class ComposePlugin implements AgentPlugin {
   private onWorkspaceChanged?: (oldPath: string, newPath: string) => void;
 
   async apply(ctx: KernelContext): Promise<void> {
-    for (const tool of createComposeTools(ctx.compose)) ctx.tools.register(tool);
-
     this.onToolAfter = (toolName: string, result: Record<string, any>, _durationMs: number, args: Record<string, any>) => {
       void ctx.compose.observeToolResult(toolName, args || {}, result || {}).catch(() => {});
     };
     ctx.events.on('tool:after', this.onToolAfter);
 
-    this.onWorkspaceChanged = () => {
-      for (const tool of createComposeTools(ctx.compose)) ctx.tools.register(tool);
-    };
+    this.onWorkspaceChanged = () => {};
     ctx.events.on('workspace:changed', this.onWorkspaceChanged);
 
     ctx.systemPrompt.unregister('compose-static-contract');

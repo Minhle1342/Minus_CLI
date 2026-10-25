@@ -4,8 +4,7 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import ts from 'typescript';
 import type { Workspace } from './workspace.js';
-import { getOrCreateTypeScriptService } from '../tools/inspect-symbol.js';
-import type { DiagnosticItem } from '../tools/typescript-service.js';
+import { getOrCreateTypeScriptService, type DiagnosticItem } from '../tools/typescript-service.js';
 
 const execAsync = promisify(exec);
 

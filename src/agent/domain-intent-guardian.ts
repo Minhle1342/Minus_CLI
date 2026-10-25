@@ -344,6 +344,18 @@ export class DomainIntentGuardian {
       };
     }
 
+    if (toolName === 'apply_patch') {
+      const patchText = String(args.patch || args.Patch || args.patchText || '');
+      if ((patchText.includes('Update File:') || patchText.includes('Delete File:')) && newStats.active <= oldStats.active) {
+        return {
+          isTampering: true,
+          reason: 'Test file modification in patch',
+          oldAsserts: oldStats.active,
+          newAsserts: newStats.active,
+        };
+      }
+    }
+
     return {
       isTampering: false,
       reason: 'Assertions preserved or strengthened',
@@ -419,7 +431,7 @@ export class DomainIntentGuardian {
           // "keep existing test assertions unchanged" chỉ cấm SỬA/ẨN/bớt assertions của test hiện có
           // (tampering thật), không cấm việc BỔ SUNG assert — thêm bảo vệ không phải là phá rào.
           const check = this.checkAssertionStrength(toolName, args, forbidden, options?.workspaceRoot);
-          if (!check.isTampering) {
+          if (!check.isTampering && toolName !== 'create_file') {
             return null;
           }
           this.blockedTamperAttempts++;

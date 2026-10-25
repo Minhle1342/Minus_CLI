@@ -1,314 +1,50 @@
 import fs from 'node:fs/promises';
 import { createPatch } from 'diff';
-import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
+import { replaceTextTool } from './replace-text.js';
+import type { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
-import { computeStringHash } from '../workspace/workspace-digest.js';
-import { toolError, toolSuccess } from './tool-result.js';
-import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
-import {
-  detectChangedSymbols,
-  calculateComprehensiveBlastRadius,
-  invalidateTopologyCache,
-} from './mutation-blast-radius.js';
-
-export interface ReplacementChunkInput {
-  StartLine: number;
-  EndLine: number;
-  TargetContent: string;
-  ReplacementContent: string;
-  AllowMultiple: boolean;
-}
+import { toolError } from './tool-result.js';
 
 /**
- * multi_replace_file_content Tool (Antigravity & Claude-Code Standard)
- * 
- * Thực hiện nhiều khối chỉnh sửa không liền kề (MULTIPLE, NON-CONTIGUOUS edits)
- * trên cùng một file trong một lần gọi nguyên tử (atomic edit).
+ * multi_replace_file_content compatibility alias — forwards sequentially to replace_text.
  */
 export const multiReplaceFileContentTool: ToolDefinition = {
+  ...replaceTextTool,
   name: 'multi_replace_file_content',
-  description: 'Perform multiple non-contiguous edits in one file as a single atomic operation. Accepts ReplacementChunks, validates every chunk before writing, and applies them bottom-up to preserve line indexes. Automatically handles LF/CRLF differences and analyzes blast radius.',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      TargetFile: {
-        type: Type.STRING,
-        description: 'Absolute or workspace-relative path to the file to edit (for example, "src/index.ts").',
-      },
-      Instruction: {
-        type: Type.STRING,
-        description: 'General summary of the set of edits being made to the file.',
-      },
-      Description: {
-        type: Type.STRING,
-        description: 'Explain the reason for the change and its technical context for the user.',
-      },
-      ReplacementChunks: {
-        type: Type.ARRAY,
-        description: 'List of replacement chunks to apply. Each chunk specifies a line range and replacement content.',
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            StartLine: {
-              type: Type.INTEGER,
-            description: 'First line of the chunk (1-based, inclusive).',
-            },
-            EndLine: {
-              type: Type.INTEGER,
-            description: 'Last line of the chunk (1-based, inclusive).',
-            },
-            TargetContent: {
-              type: Type.STRING,
-            description: 'Exact text or source code to replace.',
-            },
-            ReplacementContent: {
-              type: Type.STRING,
-            description: 'New content that replaces TargetContent.',
-            },
-            AllowMultiple: {
-              type: Type.BOOLEAN,
-            description: 'When true, allow multiple replacements if TargetContent occurs more than once within the chunk line range.',
-            },
-          },
-          required: [
-            'StartLine',
-            'EndLine',
-            'TargetContent',
-            'ReplacementContent',
-            'AllowMultiple',
-          ],
-        },
-      },
-      ArtifactMetadata: {
-        type: Type.OBJECT,
-        description: 'Optional metadata when the edited file is an artifact.',
-        properties: {
-          Summary: { type: Type.STRING, description: 'Summary of the updated content.' },
-          UserFacing: { type: Type.BOOLEAN, description: 'True when the artifact is shown to the user.' },
-          RequestFeedback: { type: Type.BOOLEAN, description: 'True when confirmation is requested.' },
-        },
-      },
-      TargetLintErrorIds: {
-        type: Type.ARRAY,
-        items: { type: Type.STRING },
-        description: 'Optional list of lint error IDs this change is intended to resolve.',
-      },
-    },
-    required: [
-      'TargetFile',
-      'Instruction',
-      'Description',
-      'ReplacementChunks',
-    ],
-  },
-  async execute(args: Record<string, any>, workspace: Workspace): Promise<Record<string, any>> {
-    const rawPath = String(args.TargetFile || args.targetFile || args.path || args.filePath || '').trim();
-    const rawChunks = Array.isArray(args.ReplacementChunks || args.replacementChunks)
-      ? (args.ReplacementChunks || args.replacementChunks)
-      : [];
-
-    if (!rawPath) {
-      return toolError('The "TargetFile" parameter is required.', 'INVALID_ARGS');
+  execute: async (args: Record<string, any>, workspace: Workspace = new Workspace()) => {
+    const filePath = args.path || args.TargetFile;
+    if (!filePath) {
+      return toolError('Parameter "TargetFile" (or "path") is required.', 'INVALID_ARGS');
     }
-    if (!Array.isArray(rawChunks) || rawChunks.length === 0) {
-      return toolError('The "ReplacementChunks" parameter must be an array containing at least one replacement chunk.', 'INVALID_ARGS');
+    const chunks = args.ReplacementChunks || [];
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      return toolError('ReplacementChunks must be a non-empty array.', 'INVALID_ARGS');
     }
-
+    let safePath = filePath;
     try {
-      const safePath = workspace.resolveSafePath(rawPath);
+      safePath = workspace.resolveSafePath(filePath);
+    } catch {}
+    const beforeContent = await fs.readFile(safePath, 'utf8').catch(() => '');
 
-      if (workspace.isProtectedFile(safePath)) {
-        return toolError(
-          `Security: editing sensitive configuration file "${rawPath}" is not allowed.`,
-          'SECURITY_VIOLATION',
-        );
+    let lastResult: any = null;
+    for (const chunk of chunks) {
+      const res = await replaceTextTool.execute({
+        path: filePath,
+        oldText: chunk.TargetContent ?? chunk.oldText,
+        newText: chunk.ReplacementContent ?? chunk.newText,
+        multiple: chunk.AllowMultiple ?? chunk.multiple ?? false,
+      }, workspace);
+      if (res && res.error) {
+        return res;
       }
-
-      let stat;
-      try {
-        stat = await fs.stat(safePath);
-      } catch {
-        return toolError(`File "${rawPath}" does not exist on disk.`, 'FILE_NOT_FOUND', { TargetFile: rawPath });
-      }
-
-      if (!stat.isFile()) {
-        return toolError(`"${rawPath}" is not a valid file.`, 'INVALID_ARGS', { TargetFile: rawPath });
-      }
-
-      const originalRawContent = await fs.readFile(safePath, 'utf-8');
-      const isCRLF = originalRawContent.includes('\r\n');
-      const normalizedOriginal = originalRawContent.replace(/\r\n/g, '\n');
-
-      // Chuẩn hoá các chunk đầu vào
-      const chunks: ReplacementChunkInput[] = rawChunks.map((c: any) => ({
-        StartLine: typeof c.StartLine === 'number' ? c.StartLine : typeof c.startLine === 'number' ? c.startLine : 1,
-        EndLine: typeof c.EndLine === 'number' ? c.EndLine : typeof c.endLine === 'number' ? c.endLine : Infinity,
-        TargetContent: String(c.TargetContent ?? c.targetContent ?? ''),
-        ReplacementContent: String(c.ReplacementContent ?? c.replacementContent ?? ''),
-        AllowMultiple: c.AllowMultiple === true || c.allowMultiple === true,
-      }));
-
-      // 1. Kiểm tra tính hợp lệ cơ bản của các chunk
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        if (chunk.TargetContent === '') {
-          return toolError(`Chunk index ${i} has empty TargetContent.`, 'INVALID_ARGS', { chunkIndex: i });
-        }
-        if (chunk.StartLine > chunk.EndLine) {
-          return toolError(
-            `Chunk index ${i} has StartLine (${chunk.StartLine}) greater than EndLine (${chunk.EndLine}).`,
-            'INVALID_ARGS',
-            { chunkIndex: i },
-          );
-        }
-      }
-
-      // 2. Sắp xếp chunks theo thứ tự StartLine tăng dần để kiểm tra chồng lấn (overlap)
-      const sortedByStart = [...chunks].sort((a, b) => a.StartLine - b.StartLine);
-      for (let i = 0; i < sortedByStart.length - 1; i++) {
-        const curr = sortedByStart[i];
-        const next = sortedByStart[i + 1];
-        if (curr.EndLine >= next.StartLine) {
-          return toolError(
-            `Replacement chunks have overlapping line ranges: chunk [${curr.StartLine}, ${curr.EndLine}] and chunk [${next.StartLine}, ${next.EndLine}]. Each chunk must be in a separate line range.`,
-            'INVALID_ARGS',
-          );
-        }
-      }
-
-      // 3. Thực hiện thay thế lần lượt theo thứ tự Bottom-Up (từ dòng lớn nhất xuống nhỏ nhất)
-      // Cách làm này đảm bảo các thay đổi bên dưới không làm lệch số dòng của các chunk bên trên!
-      const sortedBottomUp = [...chunks].sort((a, b) => b.StartLine - a.StartLine);
-      let currentContent = normalizedOriginal;
-      let totalChunksApplied = 0;
-
-      for (let idx = 0; idx < sortedBottomUp.length; idx++) {
-        const chunk = sortedBottomUp[idx];
-        const normalizedTarget = chunk.TargetContent.replace(/\r\n/g, '\n');
-        const normalizedReplacement = chunk.ReplacementContent.replace(/\r\n/g, '\n');
-
-        const lines = currentContent.split('\n');
-        const totalLines = lines.length;
-
-        const clampedStart = Math.max(0, Math.min(chunk.StartLine - 1, totalLines - 1));
-        const clampedEnd = Math.max(clampedStart, Math.min(chunk.EndLine, totalLines));
-
-        const rangeLines = lines.slice(clampedStart, clampedEnd);
-        const rangeText = rangeLines.join('\n');
-
-        if (rangeText.includes(normalizedTarget)) {
-          const occurrences = rangeText.split(normalizedTarget).length - 1;
-          if (occurrences > 1 && !chunk.AllowMultiple) {
-            return toolError(
-              `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent occurs ${occurrences} times and AllowMultiple=false.`,
-              'AMBIGUOUS_REPLACEMENT',
-              { chunk },
-            );
-          }
-
-          const replacedRangeText = chunk.AllowMultiple
-            ? rangeText.replaceAll(normalizedTarget, normalizedReplacement)
-            : rangeText.replace(normalizedTarget, normalizedReplacement);
-
-          const beforeRange = lines.slice(0, clampedStart).join('\n');
-          const afterRange = lines.slice(clampedEnd).join('\n');
-
-          const parts = [];
-          if (clampedStart > 0) parts.push(beforeRange);
-          parts.push(replacedRangeText);
-          if (clampedEnd < totalLines) parts.push(afterRange);
-
-          currentContent = parts.join('\n');
-          totalChunksApplied++;
-        } else if (currentContent.includes(normalizedTarget)) {
-          // Fallback nếu target content nằm ở vị trí duy nhất trong file
-          const totalOccurrences = currentContent.split(normalizedTarget).length - 1;
-          if (totalOccurrences > 1 && !chunk.AllowMultiple) {
-            return toolError(
-              `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent is outside the line range but occurs ${totalOccurrences} times in the file.`,
-              'AMBIGUOUS_REPLACEMENT',
-              { chunk },
-            );
-          }
-
-          currentContent = chunk.AllowMultiple
-            ? currentContent.replaceAll(normalizedTarget, normalizedReplacement)
-            : currentContent.replace(normalizedTarget, normalizedReplacement);
-
-          totalChunksApplied++;
-        } else {
-          return toolError(
-            `Line chunk [${chunk.StartLine}, ${chunk.EndLine}]: TargetContent not found in file "${rawPath}". Check the content and line indentation again.`,
-            'PATCH_ERROR',
-            { chunk },
-          );
-        }
-      }
-
-      // Khôi phục kiểu ngắt dòng
-      const finalContent = isCRLF ? currentContent.replace(/\n/g, '\r\n') : currentContent;
-
-      await fs.writeFile(safePath, finalContent, 'utf-8');
-      invalidateTopologyCache();
-
-      let blastRadiusSummary: any;
-      try {
-        const modifiedSymbols = detectChangedSymbols(rawPath, originalRawContent, finalContent);
-        const blast = calculateComprehensiveBlastRadius({
-          workspace,
-          filePath: rawPath,
-          modifiedSymbols,
-          depth: 2,
-        });
-        blastRadiusSummary = {
-          risk: blast.risk,
-          score: blast.score,
-          depth: blast.depth,
-          modifiedSymbols: blast.modifiedSymbols.map((s) => s.name),
-          directConsumers: blast.directConsumers,
-          transitiveFiles: blast.transitiveFiles,
-          impactedTestSuites: blast.impactedTestSuites,
-          callersCount: blast.callers.length,
-          publicApiAffected: blast.publicApiAffected,
-          breakingChange: blast.breakingChange,
-          warnings: blast.warnings,
-          recommendedActions: blast.recommendedActions,
-        };
-      } catch {}
-
-      const contentHash = computeStringHash(finalContent);
-
-      let diagnosticWarning: string | undefined;
-      let syntaxErrors: any[] | undefined;
-      try {
-        const diags = await CodeSyntaxValidator.validateFile(rawPath, workspace);
-        if (diags.length > 0) {
-          syntaxErrors = diags;
-          diagnosticWarning = `⚠️ LINTER ALERT (${diags.length} unresolved syntax / missing import issue(s)):\n` +
-            diags.map((d) => `  • Line ${d.line}: ${d.message}`).join('\n') +
-            `\n👉 ACTION REQUIRED: Fix the syntax errors or missing imports in "${rawPath}".`;
-        }
-      } catch {}
-
-      let unifiedDiff: string | undefined;
-      try {
-        const patch = createPatch(rawPath, originalRawContent, finalContent, 'before', 'after');
-        unifiedDiff = patch.length > 4000 ? patch.slice(0, 4000) + '\n... [diff truncated]' : patch;
-      } catch {}
-
-      return toolSuccess({
-        path: workspace.toRelativePath(safePath),
-        TargetFile: workspace.toRelativePath(safePath),
-        chunksApplied: totalChunksApplied,
-        contentHash,
-        message: `Successfully applied ${totalChunksApplied}/${chunks.length} edit chunk(s) to file "${rawPath}".`,
-        ...(unifiedDiff ? { unifiedDiff } : {}),
-        ...(blastRadiusSummary ? { blastRadius: blastRadiusSummary } : {}),
-        ...(diagnosticWarning ? { diagnosticWarning, syntaxErrors } : {}),
-      });
-    } catch (err: any) {
-      return toolError(`Failed to apply replacement chunks: ${err.message}`, 'EXECUTION_ERROR', { TargetFile: rawPath });
+      lastResult = res;
     }
+
+    const afterContent = await fs.readFile(safePath, 'utf8').catch(() => '');
+    const unifiedDiff = createPatch(filePath, beforeContent, afterContent, 'before', 'after');
+
+    return { ...(lastResult || { success: true }), unifiedDiff };
   },
 };
+
+export default multiReplaceFileContentTool;

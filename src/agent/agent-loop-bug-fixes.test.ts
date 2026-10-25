@@ -125,67 +125,6 @@ describe('AgentLoop Bug Fixes Verification', () => {
     }
   });
 
-  it('Fix 2: Concurrent-read partition blocks executions after submit_solution', async () => {
-    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'post-sub-test-'));
-    try {
-      const workspace = new Workspace(rootDir);
-      let readFileExecuted = false;
-      const llm = new ScriptedCompletionLLM([
-        {
-          text: '',
-          toolCalls: [
-            {
-              id: 'call-submit',
-              name: 'submit_solution',
-              args: { summary: 'Completed task and verified architecture.' },
-            },
-            {
-              id: 'call-read',
-              name: 'read_file',
-              args: { path: 'package.json' },
-            },
-          ],
-        },
-        {
-          text: 'AgentLoop coordinates tools and completion.',
-          toolCalls: [],
-        },
-      ]);
-
-      const registry = new ToolRegistry();
-      registry.register({
-        name: 'read_file',
-        description: 'Read file',
-        parameters: {
-          type: 'object',
-          properties: { path: { type: 'string' } },
-          required: ['path'],
-        } as any,
-        execute: async () => {
-          readFileExecuted = true;
-          return { content: '{}' };
-        },
-      });
-
-      const loop = new AgentLoop(llm as any, registry, {
-        workspace,
-        enableConcurrentReadTools: true,
-        maxSteps: 3,
-      });
-      const session = new Session('session-post-sub-test');
-      session.addUserMessage('Explain the architecture in one sentence.');
-
-      await loop.run(session);
-      assert.equal(readFileExecuted, false, 'read_file must NOT be executed after submit_solution');
-
-      const toolResults = session.getEvents().filter((e) => e.type === 'tool/result');
-      const blockedResult = toolResults.find((e: any) => e.data?.result?.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED');
-      assert.ok(blockedResult, 'Expected POST_SUBMISSION_TOOL_CALL_BLOCKED in tool results');
-    } finally {
-      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
-    }
-  });
-
   it('Fix 6: Subagent abort propagation stops all child subagents', async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'subagent-test-'));
     try {

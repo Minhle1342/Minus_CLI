@@ -523,7 +523,7 @@ export class ToolRunner {
     // Stage 1: Tool Lookup
     const tool = this.getTool(toolName);
     if (!tool) {
-      const allAvailable = (this.rootRegistry || this.registry).getAll().map((t) => t.name);
+      const allAvailable = (this.rootRegistry || this.registry).getFunctionDeclarations().map((t) => t.name);
       const errRes = {
         error: `Tool "${toolName}" does not exist. Available tools: ${allAvailable.join(', ')}`,
         errorCode: 'UNKNOWN_TOOL',

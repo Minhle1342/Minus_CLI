@@ -17,7 +17,7 @@
     "test:native-io": "node --import tsx --test src/native/index.test.ts src/sandbox/local-sandbox.test.ts",
     "test:rust-integration": "node --import tsx --test src/native/rust-integration.test.ts src/search/code-graph-rag.test.ts src/tools/reranker.test.ts",
     "test:compaction-pareto": "node --import tsx --test src/eval/compaction-pareto.test.ts",
-    "test:prompt-gating": "node --import tsx --test src/agent/step-prompt-policy.test.ts src/agent/step-prompt-policy.integration.test.ts",
+    "test:prompt-gating": "node --import tsx --test src/agent/step-prompt-policy.test.ts",
     "test:pareto": "node --import tsx --test src/agent/pareto-evidence-policy.test.ts",
     "test:context-retrieval": "node --import tsx --test src/search/context-retrieval.test.ts src/agent/reliable-tool-orchestration.test.ts src/agent/reliable-tool-orchestration.integration.test.ts",
     "test:blast-radius": "tsx src/test-blast-radius.ts",
@@ -38,7 +38,7 @@
     "9router": "node scripts/start-9router.js",
     "start": "node --max-old-space-size=4096 dist/index.js",
     "test:tea": "node --import tsx --test src/ui/tea/__tests__/*.test.ts",
-    "test:subagent-orchestration": "node --import tsx --test src/agent/subagent-orchestration.test.ts",
+    "test:subagent-orchestration": "node --import tsx --test src/agent/reliable-tool-orchestration.test.ts",
     "test:harness2": "node --import tsx --test src/agent/harness2-bridge.test.ts",
     "harness:export": "tsx scripts/harness2-minus-bridge.ts --export",
     "harness:cycle": "tsx scripts/run-propose-probe-compose.ts"
