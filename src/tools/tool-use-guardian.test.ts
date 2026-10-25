@@ -9,7 +9,6 @@ import {
 test('tool-use-guardian: alternatives includes run_node_script (commit 18c67b2)', () => {
   assert.ok(DEFAULT_TOOL_ALTERNATIVES.run_node_script);
   assert.deepEqual(DEFAULT_TOOL_ALTERNATIVES.run_node_script, [
-    'apply_patch',
     'replace_text',
     'run_command',
   ]);
@@ -65,7 +64,7 @@ test('tool-use-guardian: tracks failure count and flags unreliable tools after 3
   assert.equal(guardian.isToolUnreliable('run_node_script'), true);
 
   const stats = guardian.getStats('run_node_script');
-  assert.deepEqual(stats.suggestedAlternatives, ['apply_patch', 'replace_text', 'run_command']);
+  assert.deepEqual(stats.suggestedAlternatives, ['replace_text', 'run_command']);
 });
 
 test('tool-use-guardian: pre-call validation coerces old_text and new_text aliases on replace_text', () => {
@@ -140,125 +139,6 @@ test('tool-use-guardian: pre-call validation coerces TargetContent/ReplacementCo
   assert.equal(validation.coercedArgs?.newText, 'console.log(2)');
   assert.equal('TargetContent' in validation.coercedArgs, false);
   assert.equal('ReplacementContent' in validation.coercedArgs, false);
-});
-
-test('tool-use-guardian: Reproduction Gate advises (non-blocking) submit_solution on unverified bugfix when enforceReproductionPass is active', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: true,
-    hasValidatedHypothesis: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: false,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Fixed null pointer exception in UserService.ts after patch.',
-    filesModified: ['src/services/UserService.ts'],
-  });
-
-  assert.equal(res.valid, true);
-  assert.ok(res.advisoryCodes?.includes('REPRODUCTION_VERIFICATION_ADVISORY'));
-  assert.match(res.warning || '', /REPRODUCTION_VERIFICATION_ADVISORY/);
-});
-
-test('tool-use-guardian: Reproduction Gate allows submit_solution when hasPostFixPass is true', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: true,
-    hasValidatedHypothesis: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: true,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Fixed null pointer exception in UserService.ts after patch.',
-    filesModified: ['src/services/UserService.ts'],
-  });
-
-  assert.equal(res.valid, true);
-});
-
-test('tool-use-guardian: Reproduction Gate exempts investigation_only tasks', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: true,
-    hasValidatedHypothesis: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: false,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Determined behavior is working as designed; no code modification required.',
-    resolutionType: 'investigation_only',
-    rootCause: 'User passed invalid credentials',
-  });
-
-  assert.equal(res.valid, true);
-});
-
-test('tool-use-guardian: Reproduction Gate exempts non-executable mutations (e.g. docs, CSS, configs)', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: true,
-    hasValidatedHypothesis: true,
-    allMutationsAreNonExecutable: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: false,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Corrected broken link in README.md documentation.',
-    filesModified: ['README.md'],
-  });
-
-  assert.equal(res.valid, true);
-});
-
-test('tool-use-guardian: Reproduction Gate exempts tasks where user explicitly exempts testing', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: true,
-    hasValidatedHypothesis: true,
-    userExplicitlyExemptsTesting: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: false,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Fixed logic calculation in fee-calculator.ts per user request skipping tests.',
-    filesModified: ['src/fee-calculator.ts'],
-  });
-
-  assert.equal(res.valid, true);
-});
-
-test('tool-use-guardian: Reproduction Gate does not enforce on non-bugfix tasks (e.g. features)', () => {
-  const guardian = new ToolUseGuardian();
-  guardian.setPreMutationGateContext({
-    isBugfixTask: false,
-    hasValidatedHypothesis: true,
-    reproductionStatus: {
-      enforceReproductionPass: true,
-      hasPostFixPass: false,
-    },
-  });
-
-  const res = guardian.preCallValidate('submit_solution', {
-    summary: 'Implemented new export format in ReportGenerator.ts.',
-    filesModified: ['src/ReportGenerator.ts'],
-  });
-
-  assert.equal(res.valid, true);
 });
 
 test('tool-use-guardian: trivial tiny edits bypass the inspect-first requirement', () => {

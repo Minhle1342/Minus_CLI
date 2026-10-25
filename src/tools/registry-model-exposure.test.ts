@@ -54,14 +54,19 @@ test('ToolRetriever keeps a workflow-complete core with 8 essential tools', () =
   assert.equal(webNames.has('read_url_content'), false);
 });
 
-test('multi-agent tools are strictly omitted from model-facing schema exposure', () => {
+test('orchestration tools are exposed to the model and retrieved on delegation intent', () => {
   const registry = new ToolRegistry();
   registry.register({ name: 'delegate_task', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
   registry.register({ name: 'spawn_agent', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
   registry.register({ name: 'schedule_dag_parallel', description: 'test', parameters: { type: 'OBJECT', properties: {} } as any, execute: async () => ({}) });
 
+  const declared = new Set(registry.getFunctionDeclarations().map((tool) => tool.name));
+  assert.equal(declared.has('delegate_task'), true);
+  assert.equal(declared.has('spawn_agent'), true);
+  assert.equal(declared.has('schedule_dag_parallel'), true);
+
   const names = new Set(registry.getRelevantTools('cho 3 agent chạy song song đi').map((tool) => tool.name));
-  assert.equal(names.has('delegate_task'), false, 'delegate_task must be omitted from model exposure');
-  assert.equal(names.has('spawn_agent'), false, 'spawn_agent must be omitted from model exposure');
-  assert.equal(names.has('schedule_dag_parallel'), false, 'schedule_dag_parallel must be omitted from model exposure');
+  assert.equal(names.has('delegate_task'), true, 'delegation intent must surface delegate_task');
+  assert.equal(names.has('spawn_agent'), true, 'delegation intent must surface spawn_agent');
+  assert.equal(names.has('schedule_dag_parallel'), true, 'delegation intent must surface schedule_dag_parallel');
 });

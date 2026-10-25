@@ -30,6 +30,7 @@ import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions, SCOUT_TOOL_NAMES } from './subagent-manager.js';
 import type { SubagentHandle } from './subagent-manager.js';
 import { AgentOrchestrator } from './agent-orchestrator.js';
+import { createDelegateTaskTool, createDelegateAgentTool, createSpawnAgentTool, createWaitAgentTool, createGetAgentResultTool, createResumeAgentTool, createStopAgentTool, createMessageAgentTool, createAllocateAgentTaskTool, createBrainstormDesignTool, createVerifySubagentQualityTool, createScheduleDagParallelTool, createModelsTool } from '../tools/subagent-tools.js';
 import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { ProcessFailureDetector } from './process-failure-detector.js';
@@ -590,6 +591,21 @@ export class AgentLoop {
     );
     this.orchestrator = new AgentOrchestrator(this.agentRegistry, this.subagentManager);
     this.orchestrator.bindPlanManager(this.planManager);
+    if (options?.enableSubagents !== false) {
+      this.toolRegistry.register(createDelegateTaskTool(this.subagentManager));
+      this.toolRegistry.register(createDelegateAgentTool(this.subagentManager));
+      this.toolRegistry.register(createSpawnAgentTool(this.subagentManager));
+      this.toolRegistry.register(createWaitAgentTool(this.subagentManager));
+      this.toolRegistry.register(createGetAgentResultTool(this.subagentManager));
+      this.toolRegistry.register(createStopAgentTool(this.subagentManager));
+      this.toolRegistry.register(createResumeAgentTool(this.subagentManager));
+      this.toolRegistry.register(createMessageAgentTool(this.subagentManager));
+      this.toolRegistry.register(createAllocateAgentTaskTool(this.orchestrator));
+      this.toolRegistry.register(createBrainstormDesignTool());
+      this.toolRegistry.register(createVerifySubagentQualityTool(this.orchestrator));
+      this.toolRegistry.register(createScheduleDagParallelTool(this.orchestrator));
+      this.toolRegistry.register(createModelsTool());
+    }
   }
 
   get workspace(): Workspace {

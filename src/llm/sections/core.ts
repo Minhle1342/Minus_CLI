@@ -236,10 +236,10 @@ export function detectPromptContext(
   }
 
   const hasComputerTool = toolNames.includes('computer');
-  const hasGitTools = toolNames.some((name) => name.startsWith('git_'));
-  const hasSubagentTools = toolNames.some((name) => name.includes('agent') || name.includes('subagent') || name === 'allocate_agent_task' || name === 'delegate_agent' || name === 'brainstorm_design');
-  const hasAntigravityTools = toolNames.length === 0 || toolNames.some((name) => ['run_command', 'manage_task', 'schedule', 'search_web', 'read_url_content'].includes(name));
-  const hasCodebaseTools = toolNames.length === 0 || toolNames.some((name) => ['query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology'].includes(name));
+  const hasGitTools = toolNames.length === 0 || toolNames.includes('run_command');
+  const hasSubagentTools = toolNames.some((name) => name.includes('subagent') || name === 'allocate_agent_task');
+  const hasAntigravityTools = toolNames.length === 0 || toolNames.some((name) => ['run_command', 'web_search', 'web_fetch'].includes(name));
+  const hasCodebaseTools = toolNames.length === 0 || toolNames.some((name) => ['list_files', 'read_file', 'search_text'].includes(name));
   const isArchitectureAnalysis = Boolean(request && detectArchitectureAnalysisIntent(request).isArchitectureQuery);
 
   return {

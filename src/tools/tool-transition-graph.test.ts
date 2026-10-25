@@ -26,39 +26,29 @@ const mockTools: ToolDefinition[] = [
 test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior boosts', () => {
   const graph = new ToolTransitionGraph();
 
-  // 1. Sau khi mutation thành công -> get_diagnostics và run_command phải được ưu tiên cao nhất
-  const boostDiagnostics = graph.getTransitionBoost('apply_patch', { success: true, diff: '...' }, 'get_diagnostics');
-  const boostRunCommand = graph.getTransitionBoost('apply_patch', { success: true }, 'run_command');
-  const boostReadFile = graph.getTransitionBoost('apply_patch', { success: true }, 'read_file');
-  assert.ok(boostDiagnostics > 0.2, 'get_diagnostics phải có boost > 0.2 sau mutation thành công');
+  // 1. Sau khi mutation thành công -> run_command phải được ưu tiên cao nhất
+  const boostRunCommand = graph.getTransitionBoost('write_file', { success: true }, 'run_command');
+  const boostReadFile = graph.getTransitionBoost('write_file', { success: true }, 'read_file');
   assert.ok(boostRunCommand > 0.2, 'run_command phải có boost > 0.2 sau mutation thành công');
   assert.strictEqual(boostReadFile, 0, 'read_file không phải primary successor của mutation thành công');
 
   // 2. Sau khi mutation thất bại -> read_file và replace_text phải được ưu tiên
-  const boostRetryRead = graph.getTransitionBoost('apply_patch', { error: 'Hunk #1 failed' }, 'read_file');
-  const boostRetryReplace = graph.getTransitionBoost('apply_patch', { status: 'FUZZY_CANDIDATE_FOUND' }, 'replace_text');
-  assert.ok(boostRetryRead > 0.2, 'read_file phải được boost sau patch failure');
-  assert.ok(boostRetryReplace > 0.2, 'replace_text phải được boost sau patch failure');
+  const boostRetryRead = graph.getTransitionBoost('write_file', { error: 'Hunk #1 failed' }, 'read_file');
+  const boostRetryReplace = graph.getTransitionBoost('write_file', { status: 'FUZZY_CANDIDATE_FOUND' }, 'replace_text');
+  assert.ok(boostRetryRead > 0.2, 'read_file phải được boosted sau mutation failure');
+  assert.ok(boostRetryReplace > 0.2, 'replace_text phải được boosted sau mutation failure');
 
-  // 3. Sau khi get_diagnostics clean (0 lỗi) -> submit_solution được boost mạnh
-  const boostSubmit = graph.getTransitionBoost('get_diagnostics', { clean: true, totalErrors: 0 }, 'submit_solution');
-  assert.ok(boostSubmit >= 0.3, 'submit_solution phải có prior boost >= 0.3 khi diagnostics clean');
-
-  // 4. Sau khi run_command test pass -> submit_solution được boost
-  const boostTestPass = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 0 }, 'submit_solution');
-  assert.ok(boostTestPass >= 0.3, 'submit_solution phải có prior boost khi test pass');
-
-  // 5. Sau khi web_search -> web_fetch được boost mạnh
+  // 3. Sau khi web_search -> web_fetch được boost mạnh
   const boostWebFetch = graph.getTransitionBoost('web_search', { success: true }, 'web_fetch');
   assert.ok(boostWebFetch >= 0.35, 'web_fetch phải có prior boost >= 0.35 sau web_search');
 
-  // 6. Sau khi formulate_and_verify_hypothesis validated -> request_phase_transition được boost
-  const boostPhaseTrans = graph.getTransitionBoost('formulate_and_verify_hypothesis', { status: 'validated' }, 'request_phase_transition');
-  assert.ok(boostPhaseTrans >= 0.35, 'request_phase_transition phải có boost >= 0.35 khi hypothesis validated');
+  // 4. Sau khi formulate_and_verify_hypothesis validated -> create_file được boost
+  const boostPhaseTrans = graph.getTransitionBoost('formulate_and_verify_hypothesis', { status: 'validated' }, 'create_file');
+  assert.ok(boostPhaseTrans >= 0.35, 'create_file phải có boost >= 0.35 khi hypothesis validated');
 
-  // 7. Sau khi create_plan -> update_plan_task được boost
-  const boostPlanTask = graph.getTransitionBoost('create_plan', { success: true }, 'update_plan_task');
-  assert.ok(boostPlanTask >= 0.25, 'update_plan_task phải có boost >= 0.25 sau create_plan');
+  // 5. Sau khi verify_subagent_quality -> write_shared_context được boost
+  const boostPlanTask = graph.getTransitionBoost('verify_subagent_quality', { success: true }, 'write_shared_context');
+  assert.ok(boostPlanTask >= 0.32, 'write_shared_context phải có boost >= 0.32 sau verify_subagent_quality');
 
   // 8. Sau khi run_command test fail -> formulate_and_verify_hypothesis được boost
   const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'formulate_and_verify_hypothesis');
@@ -70,11 +60,9 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   assert.ok(boostFixationSymbol >= 0.35, 'get_symbol_context_360 phải có boost >= 0.35 khi file bị circuit breaker freeze');
   assert.strictEqual(boostFixationMutation, 0, 'replace_text tuyệt đối không được boost khi file đang bị freeze');
 
-  // 10. Sau khi Completion Evidence Gate chặn submit_solution -> run_command và get_diagnostics được boost
-  const boostEvidenceRunCmd = graph.getTransitionBoost('submit_solution', { errorCode: 'COMPLETION_EVIDENCE_REQUIRED' }, 'run_command');
-  const boostEvidenceDiag = graph.getTransitionBoost('submit_solution', { errorCode: 'COMPLETION_EVIDENCE_REQUIRED' }, 'get_diagnostics');
+  // 10. Sau khi Completion Evidence Gate chặn kết thúc lượt -> run_command được boost
+  const boostEvidenceRunCmd = graph.getTransitionBoost('write_file', { errorCode: 'COMPLETION_EVIDENCE_REQUIRED' }, 'run_command');
   assert.ok(boostEvidenceRunCmd >= 0.35, 'run_command phải được boost để chạy kiểm thử xác thực');
-  assert.ok(boostEvidenceDiag >= 0.35, 'get_diagnostics phải được boost để kiểm tra lỗi code');
 
   // 11. Sau khi ACI Guardrail hoặc replace_text báo TARGET_CONTENT_NOT_FOUND -> read_file được boost
   const boostTargetRead = graph.getTransitionBoost('replace_text', { reasonCode: 'TARGET_CONTENT_NOT_FOUND' }, 'read_file');
@@ -95,7 +83,7 @@ test('ToolRetriever - Supports structured StepRetrievalQueryResult and Graph-Aug
     },
     phase: 'implement',
     taskClass: 'bugfix',
-    lastToolName: 'apply_patch',
+    lastToolName: 'write_file',
     lastToolResult: { success: true, mutatedFile: 'src/auth/token.ts' },
     allowedToolNames: mockTools.map((t) => t.name),
   });
@@ -104,10 +92,10 @@ test('ToolRetriever - Supports structured StepRetrievalQueryResult and Graph-Aug
   const declarations = retriever.retrieve(stepResult, mockTools);
   const names = declarations.map((d) => d.name);
 
-  // Phải giữ vững Anchor Tools và chọn get_diagnostics / run_command / get_symbol_context_360
+  // Phải giữ vững Anchor Tools và chọn run_command do Graph boost sau mutation
   assert.ok(names.includes('read_file'), 'Anchor read_file phải có mặt');
-  assert.ok(names.includes('apply_patch'), 'Anchor apply_patch phải có mặt');
-  assert.ok(names.includes('get_diagnostics'), 'get_diagnostics phải được chọn do Graph boost sau mutation');
+  assert.ok(names.includes('replace_text'), 'Anchor replace_text phải có mặt');
+  assert.ok(names.includes('run_command'), 'run_command phải được chọn do Graph boost sau mutation');
 });
 
 test('ToolRetriever - Generates Two-Tier compact catalog stubs', () => {
@@ -116,6 +104,5 @@ test('ToolRetriever - Generates Two-Tier compact catalog stubs', () => {
 
   const stubs = retriever.getToolCatalogStubs(mockTools);
   assert.strictEqual(stubs.length, mockTools.length, 'Số lượng stubs phải khớp số lượng tools');
-  assert.ok(stubs.some((s) => s.name === 'get_diagnostics' && s.category === 'code_intelligence'));
   assert.ok(stubs.some((s) => s.name === 'run_command' && s.category === 'process_task'));
 });

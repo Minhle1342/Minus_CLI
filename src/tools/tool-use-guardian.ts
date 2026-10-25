@@ -11,10 +11,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeForMatching } from '../agent/final-answer-guard.js';
-import { extractTechnicalEntities, CONCRETE_ACTION_VERBS_REGEX, isPurelyEvasiveText } from '../agent/solution-grounding-auditor.js';
 import { detectLazyOmission, resolveFullRewriteWarnLines } from '../agent/aci-guardrails.js';
-import { PatchEngine } from '../patch/patch-engine.js';
 
 export type ToolFailureCategory =
   | 'TRUNCATED_JSON'
@@ -111,17 +108,16 @@ export interface GuardianPreCallResult {
 
 /**
  * Strong Advisory (non-blocking) — strong action guideline.
- * 4 process/cognition gates have been downgraded from hard block to advisory in prompt + tool warning:
- * UNVERIFIED_MUTATION / CASCADE_REPAIR / REPRODUCTION_VERIFICATION / WEAK_SUBMISSION_SUMMARY.
- * Safety gates (PAYLOAD_TOO_LARGE, POST_SUBMISSION, catastrophic deletion, push to main, sandbox) stay hard block.
+ * 3 process/cognition gates have been downgraded from hard block to advisory in prompt + tool warning:
+ * UNVERIFIED_MUTATION / CASCADE_REPAIR / REPRODUCTION_VERIFICATION.
+ * Safety gates (PAYLOAD_TOO_LARGE, post-submission lockout, catastrophic deletion, push to main, sandbox) stay hard block.
  */
 export const STRONG_ADVISORY_HEADER = '[STRONG ADVISORY — ACTION GUIDELINE (non-blocking, tool still executes)]';
 
 export type StrongAdvisoryCode =
   | 'UNVERIFIED_MUTATION_ADVISORY'
   | 'CASCADE_REPAIR_ADVISORY'
-  | 'REPRODUCTION_VERIFICATION_ADVISORY'
-  | 'WEAK_SUBMISSION_SUMMARY_ADVISORY';
+  | 'REPRODUCTION_VERIFICATION_ADVISORY';
 
 export function formatStrongAdvisory(code: StrongAdvisoryCode, body: string, remediation?: string): string {
   const rem = remediation ? ` Recommended: ${remediation}.` : '';
@@ -139,15 +135,15 @@ export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[]
     const detail = gate.cascadeReason ? ` ${gate.cascadeReason}.` : '';
     items.push(formatStrongAdvisory(
       'CASCADE_REPAIR_ADVISORY',
-      `Repeated fixes keep failing on the same error signature.${detail} Stop editing blindly — revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to get a genuinely new signal`,
-      'run "update_plan_task" first, mutate after',
+      `Repeated fixes keep failing on the same error signature.${detail} Stop editing blindly — revise the root-cause hypothesis, or run diagnostics/tests to get a genuinely new signal`,
+      'read the failing target and re-state the hypothesis first',
     ));
   }
   const reproEnforced = Boolean(gate.reproductionStatus?.enforceReproductionPass);
   if (reproEnforced && !gate.reproductionStatus?.hasPostFixPass) {
     items.push(formatStrongAdvisory(
       'REPRODUCTION_VERIFICATION_ADVISORY',
-      'Bugfix has no post-fix PASS yet. Run the reproduction test and prove PASS before submit_solution; if the infra is broken, state the reason explicitly in the summary',
+      'Bugfix has no post-fix PASS yet. Run the reproduction test and prove PASS before concluding; if the infra is broken, state the reason explicitly in the final answer',
       'run_command (reproduction test)',
     ));
   }
@@ -178,22 +174,20 @@ export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
   read_file: ['read_compressed_code', 'run_command (cat/head)', 'inspect_symbol'],
   read_compressed_code: ['read_file', 'inspect_symbol'],
   pack_codebase: ['list_files', 'read_compressed_code'],
-  replace_text: ['apply_patch', 'write_file'],
-  apply_patch: ['replace_text', 'write_file'],
+  replace_text: ['write_file'],
   query_call_graph: ['get_symbol_context_360', 'inspect_symbol', 'read_file', 'find_references'],
   get_symbol_context_360: ['inspect_symbol', 'query_call_graph', 'find_references'],
   get_route_map: ['grep_search', 'read_file'],
   git_status: ['git_command', 'run_command (git status)'],
   git_diff: ['git_command', 'run_command (git diff)'],
-  submit_solution: ['report_investigation_findings'],
-  report_investigation_findings: ['submit_solution'],
+  report_investigation_findings: ['read_file', 'search_codebase_fast'],
   formulate_and_verify_hypothesis: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact'],
   replace_file_content: ['formulate_and_verify_hypothesis', 'get_symbol_context_360'],
   write_to_file: ['formulate_and_verify_hypothesis', 'replace_file_content'],
   web_search: ['search_web', 'read_url_content'],
   search_web: ['read_url_content', 'run_command (curl)'],
   read_url_content: ['search_web', 'run_command (curl)'],
-  run_node_script: ['apply_patch', 'replace_text', 'run_command'],
+  run_node_script: ['replace_text', 'run_command'],
 };
 
 /**
@@ -236,7 +230,7 @@ export function classifyToolFailure(
       };
     }
 
-    // Nếu bị chặn sau khi đã submit_solution thành công
+    // Nếu bị chặn vì lượt đã kết thúc (turn đã chốt câu trả lời)
     if (result.errorCode === 'POST_SUBMISSION_TOOL_CALL_BLOCKED') {
       return {
         category: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
@@ -542,87 +536,18 @@ export class ToolUseGuardian {
       ? stats.suggestedAlternatives[0] || DEFAULT_TOOL_ALTERNATIVES[toolName]?.[0]
       : undefined;
 
-    // 2a. Tool-Use Guardian: Post-Submission Terminal Gate Check
+    // 2a. Pre-mutation gate context (Adaptive Pareto evidence + reproduction status)
     const gateContext = options?.preMutationGate || this.preMutationGateContext;
-    if (gateContext?.hasSubmittedSolution === true) {
-      const errorMsg = 'Tool call rejected by Tool-Use Guardian: the solution has been accepted via submit_solution. All tools are now locked. Immediately conclude the turn (conclude turn) and return the final summary analysis to the user.';
-      return {
-        valid: false,
-        allowed: false,
-        coercedArgs: args,
-        wasCoerced: false,
-        coercedKeys: [],
-        error: errorMsg,
-        errorCode: 'POST_SUBMISSION_TOOL_CALL_BLOCKED',
-        reason: errorMsg,
-      };
-    }
 
-    // 2b. Tool-Use Guardian: Semantic check for submit_solution summary (downgraded: Strong Advisory, non-blocking)
-    // Collect advisories instead of hard blocking — the tool still runs, advisories flow into warnings + contextual prompt.
+    // 2b. Session-visible Strong Advisories (downgraded from hard blocks): collected, never blocking.
     const strongAdvisories: string[] = [];
     const advisoryCodes: StrongAdvisoryCode[] = [];
-    if (toolName === 'submit_solution' && typeof args.summary === 'string') {
-      const summary = args.summary.trim();
-      const normalizedSummary = normalizeForMatching(summary);
-      const isEvasivePhrase = isPurelyEvasiveText(normalizedSummary);
-      const hasActionVerb = CONCRETE_ACTION_VERBS_REGEX.test(normalizedSummary);
-      const entities = extractTechnicalEntities(summary);
-      const declaredFiles = Array.isArray(args.filesModified)
-        ? args.filesModified.filter((f: any) => typeof f === 'string' && f.trim().length > 0)
-        : [];
-      const hasSubstance =
-        entities.length > 0 ||
-        declaredFiles.length > 0 ||
-        Boolean(args.rootCause && String(args.rootCause).trim().length > 0);
-
-      const isPseudoClaim = !hasSubstance && (isEvasivePhrase || (!hasActionVerb && summary.length < 140));
-      if (isPseudoClaim && summary.length < 250 && !/[-*•\d]\.\s|```|\*\*|###/.test(summary)) {
-        strongAdvisories.push(formatStrongAdvisory(
-          'WEAK_SUBMISSION_SUMMARY_ADVISORY',
-          'The submit_solution summary is still hollow ("Answer provided...") — missing root cause, code location, and concrete fix. Add the technical findings to the summary',
-          'add root-cause + filesModified + evidence',
-        ));
-        advisoryCodes.push('WEAK_SUBMISSION_SUMMARY_ADVISORY');
-      }
-
-      // SWE-Reasoner Execution-Verified Gating (Phase 1):
-      const declaredAllNonExecutable = declaredFiles.length > 0
-        && declaredFiles.every((f: string) => {
-          const lower = f.trim().toLowerCase();
-          return /\.(?:md|markdown|txt|rst|csv|tsv|svg|png|jpe?g|gif|webp|ico|json|ya?ml|toml|ini|xml|css|scss|sass|less|lock)$/i.test(lower);
-        });
-
-      const isNonCodeTask = args.resolutionType === 'investigation_only'
-        || args.resolutionType === 'text_or_asset_edit'
-        || (args.resolutionType === 'configuration_change' && declaredAllNonExecutable)
-        || gateContext?.allMutationsAreNonExecutable === true
-        || declaredAllNonExecutable;
-      const userExempted = gateContext?.userExplicitlyExemptsTesting === true;
-      const isBugfix = gateContext?.isBugfixTask !== false;
-
-      if (
-        isBugfix &&
-        gateContext?.reproductionStatus?.enforceReproductionPass &&
-        !gateContext.reproductionStatus.hasPostFixPass &&
-        !isNonCodeTask &&
-        !userExempted
-      ) {
-        strongAdvisories.push(formatStrongAdvisory(
-          'REPRODUCTION_VERIFICATION_ADVISORY',
-          'Bugfix has no post-fix PASS evidence yet. Run the reproduction test before submit_solution; if the infra is broken, state the reason explicitly in the summary',
-          'run_command (reproduction test)',
-        ));
-        advisoryCodes.push('REPRODUCTION_VERIFICATION_ADVISORY');
-      }
-    }
 
     // 2c. Tool-Use Guardian: Explore-to-Implement Pre-Mutation Gate (Adaptive Pareto 80/20 Rule)
     const isMutationTool = [
       'write_to_file',
       'replace_file_content',
       'multi_replace_file_content',
-      'apply_patch',
       'write_file',
       'replace_text',
       'create_file',
@@ -633,7 +558,7 @@ export class ToolUseGuardian {
 
     // 2c(i). Lazy-omission sensor: block LLM placeholders that would silently
     // delete code ("# ... rest of code unchanged"). Content-bearing writes only;
-    // apply_patch hunks and deletions carry no free-form content to scan.
+    // deletions carry no free-form content to scan.
     let hugeRewriteWarning: string | undefined;
     if (['write_file', 'write_to_file', 'replace_text', 'replace_file_content', 'create_file'].includes(toolName)) {
       const fullContent = String(
@@ -687,12 +612,7 @@ export class ToolUseGuardian {
       args?.file ||
       ''
     ).trim();
-    const patchFiles = toolName === 'apply_patch'
-      ? PatchEngine.parsePatch(String(args?.patch || ''), targetPath || undefined).files
-      : [];
-    const targetPaths = patchFiles.length
-      ? patchFiles.map((file) => file.newPath || file.oldPath || '')
-      : [targetPath];
+    const targetPaths = [targetPath];
 
     // 2c(iii). Cascade-repair freeze (downgraded: Strong Advisory, non-blocking).
     // ≥3 consecutive failures on ONE error signature means flailing, not exploration.
@@ -701,8 +621,8 @@ export class ToolUseGuardian {
       const detail = gateContext.cascadeReason ? ` ${gateContext.cascadeReason}.` : '';
       strongAdvisories.push(formatStrongAdvisory(
         'CASCADE_REPAIR_ADVISORY',
-        `Repeated fixes keep failing on the same error.${detail} Stop editing blindly: revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to obtain a genuinely different signal before mutating again`,
-        'update_plan_task',
+        `Repeated fixes keep failing on the same error.${detail} Stop editing blindly: revise the root-cause hypothesis, or run diagnostics/tests to obtain a genuinely different signal before mutating again`,
+        'read the failing target and re-state the hypothesis first',
       ));
       advisoryCodes.push('CASCADE_REPAIR_ADVISORY');
     }
@@ -739,7 +659,7 @@ export class ToolUseGuardian {
       // changed lines, small payload, non-sensitive target, never high-risk.
       // A typo fix should not cost a full evidence round-trip. Only applies
       // when the edit size is genuinely measurable from old/new text
-      // (apply_patch/write_file carry content elsewhere and keep full gating).
+      // (write_file carries content elsewhere and keeps full gating).
       const hasSizedEdit = `${oldText}${newText}`.length > 0;
       const isTrivialEdit = !isHighRisk && hasSizedEdit && changedLineCount <= 3
         && Math.max(oldText.length, newText.length) <= 240
@@ -1176,8 +1096,8 @@ export class ToolUseGuardian {
               let itemChanged = false;
               const coercedItem = { ...item };
 
-              // Quy tắc đặc thù cho create_plan hoặc mảng tasks:
-              if (toolName === 'create_plan' || key === 'tasks') {
+              // Quy tắc đặc thù cho mảng tasks:
+              if (key === 'tasks') {
                 // Ánh xạ description -> title nếu thiếu title
                 if (!coercedItem.title && typeof coercedItem.description === 'string' && coercedItem.description.trim()) {
                   coercedItem.title = coercedItem.description.trim();

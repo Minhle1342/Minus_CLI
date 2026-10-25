@@ -59,7 +59,7 @@ export type ToolRetrievalQueryInput =
  * trên query structural/flow (đã có index): cùng trả callers/callees/flow/
  * impact nhưng qua grep/AST loop nhiều call hơn. Giữ lại search_codebase_fast
  * (lexical fallback), read_file (staleness banner + file ngoài index) và
- * get_diagnostics (verify, codegraph không làm).
+ * run_command (verify, codegraph không làm).
  */
 export const CODEGRAPH_PRUNED_OVERLAP = new Set([
   'inspect_symbol',
@@ -216,10 +216,6 @@ export class ToolRetriever {
     // Reverse-engineering intent: REA tools are dynamic and numerous, so force them
     // into the visible set only when the request actually asks for binary analysis.
     const isReverseQuery = /\b(rea|reverse[\s-]?engineer\w*|decompil\w*|disassembl\w*|binary|executable|apk|ipa|dylib|mach-?o|hopper|xrefs?|pseudocode|malware|firmware)\b|dịch\s?ngược|dich\s?nguoc|mã\s?máy|ma\s?may|soi\s?app|phân\s?tích\s?(app|binary|ứng\s?dụng)|phan\s?tich\s?(app|binary)/i.test(lowerQ);
-    // Vision intent must fire for non-English phrasing (VI "ảnh", "hình ảnh") and
-    // for bare image filenames ("images.jpg"), not only English keywords — otherwise
-    // inspect_image is pruned and the model never sees the one tool that can attach pixels.
-    const isVisionQuery = /(image|images|screenshot|photo|picture|vision|diagram|pixel|ảnh|hình\s?ảnh|hình vẽ|biểu đồ|\.(?:png|jpe?g|gif|webp|bmp|svg)\b)/i.test(lowerQ);
     // Structural/flow query (EN + VI): câu hỏi về cấu trúc, luồng gọi, callers/callees, impact.
     const isStructuralQuery = /(how does|how do|call graph|call path|callers|callees|blast radius|impact\b|architect|trace|tracing|reach(es)?\b|dependenc|flow\b|where\b.*(called|used|defined)|luồng|luong|đồ thị gọi|do thi goi|ai gọi|ai goi|ảnh hưởng|anh huong|phụ thuộc|phu thuoc|kiến trúc|kien truc|truy vết|truy vet|khảo sát|khao sat|cấu trúc|cau truc)/i.test(lowerQ);
     // Chỉ prune khi graph thật sự sẵn sàng: pool có codegraph_explore VÀ workspace đã init
@@ -237,7 +233,6 @@ export class ToolRetriever {
       if (cat === 'network' && !isNetworkQuery) return false;
       if (cat === 'browser' && !isNetworkQuery && !isBrowserQuery) return false;
       if (cat === 'memory' && !isMemoryQuery) return false;
-      if (tool.name === 'inspect_image' && !isVisionQuery) return false;
       // Single-strong-tool steering: query structural/flow + graph sẵn sàng →
       // codegraph_explore làm primary, prune tool code-intel trùng lắp.
       if (isStructuralQuery && codegraphReady && CODEGRAPH_PRUNED_OVERLAP.has(tool.name)) return false;
@@ -252,16 +247,6 @@ export class ToolRetriever {
       if (activePoolMap.has(anchor)) {
         selectedToolNames.add(anchor);
       }
-    }
-    // Bảo lưu công cụ cập nhật tiến độ công việc nếu đã được cấp quyền trong activePool
-    if (activePoolMap.has('update_plan_task')) {
-      selectedToolNames.add('update_plan_task');
-    }
-    // Being in activePool is not enough: relevance scoring can rank inspect_image
-    // below topK for non-English queries or a bare filename. Force-include it so the
-    // model actually receives the only tool that can attach an image to its context.
-    if (isVisionQuery && activePoolMap.has('inspect_image')) {
-      selectedToolNames.add('inspect_image');
     }
     // Multi-agent intent khớp → force-include TOÀN BỘ bộ delegation tools (delegate_task bị BM25
     // xếp dưới topK dù intent rõ rang), thay vì tùy hứng rank quyết định tool nào model nhìn thấy.

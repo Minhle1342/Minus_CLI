@@ -12,15 +12,11 @@ export type ToolOutcomeState =
   | 'IDLE'
   | 'SUCCESS_MUTATION'
   | 'FAILED_MUTATION'
-  | 'CLEAN_DIAGNOSTICS'
-  | 'DIRTY_DIAGNOSTICS'
   | 'PASSED_TEST'
   | 'FAILED_TEST'
   | 'HYPOTHESIS_VALIDATED'
   | 'HYPOTHESIS_FORMULATED'
   | 'HYPOTHESIS_FALSIFIED'
-  | 'PLAN_CREATED'
-  | 'PLAN_TASK_UPDATED'
   | 'WEB_SEARCH_HIT'
   | 'WEB_CONTENT_ACQUIRED'
   | 'MEMORY_RECALLED'
@@ -28,7 +24,6 @@ export type ToolOutcomeState =
   | 'DESIGN_REVIEW_COMPLETED'
   | 'AGENT_TASK_ALLOCATED'
   | 'SUBAGENT_QUALITY_VERIFIED'
-  | 'IMAGE_INSPECTED'
   | 'DISCOVERY_HIT'
   | 'SYMBOL_INSPECTED'
   | 'BACKGROUND_RUNNING'
@@ -58,50 +53,38 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.08,
   },
   PHASE_TRANSITION_ACCEPTED: {
-    primarySuccessors: ['create_file', 'write_file', 'replace_text', 'apply_patch'],
+    primarySuccessors: ['create_file', 'write_file', 'replace_text'],
     secondarySuccessors: ['read_file', 'run_command', 'run_node_script'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
   SUCCESS_MUTATION: {
-    primarySuccessors: ['verify_edit', 'get_diagnostics', 'run_command', 'get_symbol_context_360'],
+    primarySuccessors: ['run_command', 'get_symbol_context_360'],
     secondarySuccessors: ['analyze_impact', 'replace_text'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
   FAILED_MUTATION: {
     primarySuccessors: ['read_file', 'replace_text'],
-    secondarySuccessors: ['apply_patch', 'inspect_symbol'],
+    secondarySuccessors: ['inspect_symbol'],
     primaryBoost: 0.26,
     secondaryBoost: 0.10,
   },
-  CLEAN_DIAGNOSTICS: {
-    primarySuccessors: ['submit_solution', 'run_command'],
-    secondarySuccessors: ['get_symbol_context_360'],
-    primaryBoost: 0.32,
-    secondaryBoost: 0.14,
-  },
-  DIRTY_DIAGNOSTICS: {
-    primarySuccessors: ['replace_text', 'apply_patch', 'inspect_symbol'],
-    secondarySuccessors: ['get_symbol_context_360', 'query_call_graph', 'get_diagnostics'],
-    primaryBoost: 0.28,
-    secondaryBoost: 0.12,
-  },
   PASSED_TEST: {
-    primarySuccessors: ['submit_solution'],
-    secondarySuccessors: ['get_diagnostics'],
+    primarySuccessors: [],
+    secondarySuccessors: ['read_file'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
   FAILED_TEST: {
-    primarySuccessors: ['formulate_and_verify_hypothesis', 'get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
+    primarySuccessors: ['formulate_and_verify_hypothesis', 'get_symbol_context_360', 'search_codebase_fast'],
     secondarySuccessors: ['query_call_graph', 'inspect_symbol', 'replace_text'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
   HYPOTHESIS_VALIDATED: {
-    primarySuccessors: ['request_phase_transition', 'create_file', 'replace_text', 'apply_patch'],
-    secondarySuccessors: ['run_command', 'get_diagnostics'],
+    primarySuccessors: ['create_file', 'replace_text', 'write_file'],
+    secondarySuccessors: ['run_command'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
@@ -117,18 +100,6 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     primaryBoost: 0.30,
     secondaryBoost: 0.12,
   },
-  PLAN_CREATED: {
-    primarySuccessors: ['update_plan_task', 'read_file', 'search_codebase_fast'],
-    secondarySuccessors: ['formulate_and_verify_hypothesis', 'allocate_agent_task'],
-    primaryBoost: 0.28,
-    secondaryBoost: 0.12,
-  },
-  PLAN_TASK_UPDATED: {
-    primarySuccessors: ['read_file', 'replace_text', 'run_command'],
-    secondarySuccessors: ['submit_solution', 'update_plan_task', 'get_diagnostics'],
-    primaryBoost: 0.25,
-    secondaryBoost: 0.12,
-  },
   WEB_SEARCH_HIT: {
     primarySuccessors: ['web_fetch'],
     secondarySuccessors: ['read_file', 'replace_text'],
@@ -137,7 +108,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   WEB_CONTENT_ACQUIRED: {
     primarySuccessors: ['read_file', 'replace_text', 'create_file'],
-    secondarySuccessors: ['apply_patch', 'run_command'],
+    secondarySuccessors: ['run_command'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
@@ -148,13 +119,13 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.12,
   },
   MEMORY_SAVED: {
-    primarySuccessors: ['read_file', 'create_plan', 'search_codebase_fast'],
+    primarySuccessors: ['read_file', 'search_codebase_fast'],
     secondarySuccessors: ['get_symbol_context_360'],
     primaryBoost: 0.20,
     secondaryBoost: 0.10,
   },
   DESIGN_REVIEW_COMPLETED: {
-    primarySuccessors: ['allocate_agent_task', 'create_plan', 'write_shared_context'],
+    primarySuccessors: ['allocate_agent_task', 'write_shared_context'],
     secondarySuccessors: ['schedule_dag_parallel', 'read_file'],
     primaryBoost: 0.30,
     secondaryBoost: 0.12,
@@ -166,16 +137,10 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   SUBAGENT_QUALITY_VERIFIED: {
-    primarySuccessors: ['write_shared_context', 'update_plan_task', 'submit_solution'],
-    secondarySuccessors: ['get_diagnostics', 'run_command'],
+    primarySuccessors: ['write_shared_context', 'run_command'],
+    secondarySuccessors: ['read_file'],
     primaryBoost: 0.32,
     secondaryBoost: 0.15,
-  },
-  IMAGE_INSPECTED: {
-    primarySuccessors: ['generate_image', 'replace_text', 'read_file'],
-    secondarySuccessors: ['create_file', 'write_file'],
-    primaryBoost: 0.28,
-    secondaryBoost: 0.12,
   },
   DISCOVERY_HIT: {
     primarySuccessors: ['read_file', 'get_symbol_context_360', 'inspect_symbol'],
@@ -191,7 +156,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   GRAPH_CONTEXT_ACQUIRED: {
     primarySuccessors: ['read_file', 'replace_text', 'write_file'],
-    secondarySuccessors: ['get_diagnostics', 'run_command', 'inspect_symbol'],
+    secondarySuccessors: ['run_command', 'inspect_symbol'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
@@ -214,8 +179,8 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   COMPLETION_EVIDENCE_REQUIRED: {
-    primarySuccessors: ['run_command', 'get_diagnostics'],
-    secondarySuccessors: ['verify_edit', 'read_file'],
+    primarySuccessors: ['run_command'],
+    secondarySuccessors: ['read_file'],
     primaryBoost: 0.38,
     secondaryBoost: 0.16,
   },
@@ -244,7 +209,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.06,
   },
   GENERAL_ERROR: {
-    primarySuccessors: ['get_diagnostics', 'search_codebase_fast', 'read_file'],
+    primarySuccessors: ['run_command', 'search_codebase_fast', 'read_file'],
     secondarySuccessors: ['inspect_symbol', 'query_call_graph'],
     primaryBoost: 0.20,
     secondaryBoost: 0.10,
@@ -252,9 +217,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
 };
 
 const MUTATION_TOOLS = new Set([
-  'apply_patch',
   'replace_text',
-  'verify_edit',
   'write_file',
   'create_file',
   'delete_file',
@@ -348,13 +311,7 @@ export class ToolTransitionGraph {
       return 'SUCCESS_MUTATION';
     }
 
-    // 4. Kiểm tra get_diagnostics
-    if (lastToolName === 'get_diagnostics') {
-      const isClean = !hasError && (res?.clean === true || res?.totalErrors === 0 || (Array.isArray(res?.diagnostics) && res.diagnostics.length === 0));
-      return isClean ? 'CLEAN_DIAGNOSTICS' : 'DIRTY_DIAGNOSTICS';
-    }
-
-    // 5. Kiểm tra run_command
+    // 4. Kiểm tra run_command
     if (lastToolName === 'run_command') {
       const isTestCmd = typeof res?.command === 'string' && /\b(?:test|spec|check|verify|jest|vitest|pytest|cargo test)\b/i.test(res.command);
       if (isTestCmd) {
@@ -373,27 +330,14 @@ export class ToolTransitionGraph {
       return hasError ? 'GENERAL_ERROR' : 'DISCOVERY_HIT';
     }
 
-    // 8. Kiểm tra Phase Transition Tools
-    if (lastToolName === 'request_phase_transition') {
-      return (res?.accepted || res?.success) ? 'PHASE_TRANSITION_ACCEPTED' : 'GENERAL_ERROR';
-    }
-
-    // 9. Kiểm tra Hypothesis Verification Tools
+    // 8. Kiểm tra Hypothesis Verification Tools
     if (lastToolName === 'formulate_and_verify_hypothesis') {
       if (res?.status === 'validated' || res?.canProceedToImplement) return 'HYPOTHESIS_VALIDATED';
       if (hasError || res?.status === 'falsified') return 'HYPOTHESIS_FALSIFIED';
       return 'HYPOTHESIS_FORMULATED';
     }
 
-    // 10. Kiểm tra Planning Tools
-    if (lastToolName === 'create_plan') {
-      return hasError ? 'GENERAL_ERROR' : 'PLAN_CREATED';
-    }
-    if (lastToolName === 'update_plan_task') {
-      return hasError ? 'GENERAL_ERROR' : 'PLAN_TASK_UPDATED';
-    }
-
-    // 11. Kiểm tra Web Research Tools
+    // 9. Kiểm tra Web Research Tools
     if (lastToolName === 'web_search') {
       return hasError ? 'GENERAL_ERROR' : 'WEB_SEARCH_HIT';
     }
@@ -418,11 +362,6 @@ export class ToolTransitionGraph {
     }
     if (lastToolName === 'verify_subagent_quality') {
       return hasError ? 'GENERAL_ERROR' : 'SUBAGENT_QUALITY_VERIFIED';
-    }
-
-    // 14. Kiểm tra Multimodal Vision Tools
-    if (lastToolName === 'inspect_image') {
-      return hasError ? 'GENERAL_ERROR' : 'IMAGE_INSPECTED';
     }
 
     return hasError ? 'GENERAL_ERROR' : 'GENERAL_SUCCESS';

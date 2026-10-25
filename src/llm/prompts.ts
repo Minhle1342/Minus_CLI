@@ -134,13 +134,13 @@ export function resolveSubagentPromptSections(options: SubagentPromptResolutionO
   const brief = (options.brief || '').toLowerCase();
 
   // 1. Phân giải công cụ Git
-  if (tools.some((t) => t.startsWith('git_'))) {
+  if (tools.some((t) => t.startsWith('git_') || t === 'run_command')) {
     sections.push({ id: 'git-operations', content: SECTION_GIT_OPERATIONS, priority: 100 });
   }
 
   // 2. Chuyên gia Lập trình / Refactor / Sửa mã (Code Writer / Refactoring Specialist)
   const isCoder = caps.some((c) => c.includes('code') || c.includes('refactor') || c.includes('humaneval') || c.includes('fim'))
-    || tools.some((t) => ['apply_patch', 'replace_text', 'create_file'].includes(t));
+    || tools.some((t) => ['replace_text', 'write_file'].includes(t));
   if (isCoder) {
     sections.push({ id: 'patch-format-spec', content: SECTION_PATCH_FORMAT_SPEC, priority: 150 });
     sections.push({ id: 'semantic-blast-radius', content: SECTION_SEMANTIC_BLAST_RADIUS_FULL, priority: 200 });
@@ -155,13 +155,13 @@ export function resolveSubagentPromptSections(options: SubagentPromptResolutionO
 
   // 4. Chuyên gia Nghiên cứu / Kiến trúc / Toán học (Deep Researcher / Reasoning Specialist)
   const isArchitectOrResearcher = caps.some((c) => c.includes('math') || c.includes('reasoning') || c.includes('research') || c.includes('architecture'))
-    || tools.some((t) => ['query_call_graph', 'get_route_map', 'get_symbol_context_360', 'get_architecture_topology'].includes(t));
+    || tools.some((t) => ['search_text', 'read_file', 'list_files'].includes(t));
   if (isArchitectOrResearcher) {
     sections.push({ id: 'codebase-intelligence', content: SECTION_CODEBASE_INTELLIGENCE_FULL, priority: 300 });
   }
 
   // 5. Chuyên gia Terminal / Lệnh nền / DevOps
-  const isTerminalOrDevOps = tools.some((t) => ['run_command', 'manage_task', 'schedule'].includes(t));
+  const isTerminalOrDevOps = tools.some((t) => t === 'run_command');
   if (isTerminalOrDevOps) {
     sections.push({ id: 'terminal-sandbox', content: SECTION_TERMINAL_SANDBOX_FULL, priority: 350 });
     sections.push({ id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLCHAIN_FULL, priority: 400 });

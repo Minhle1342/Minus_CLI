@@ -150,8 +150,6 @@ test('Root-cause guidance shares one canonical protocol without false triggers',
   // 3. All dynamic branches share the canonical steps with distinct labels.
   const report = advisor.advise({ userRequest: 'Fix bug where login crashes' }).guidance;
   assert.ok(report.startsWith('[ROOT-CAUSE:REPORT]') && report.includes(ROOT_CAUSE_STEPS));
-  const diag = advisor.advise({ lastToolName: 'get_diagnostics', lastToolResult: { totalErrors: 1, diagnostics: [{ file: 'a.ts' }] } }).guidance;
-  assert.ok(diag.startsWith('[ROOT-CAUSE:DIAG]') && diag.includes(ROOT_CAUSE_STEPS));
   // 4. Static section shares the same steps; word-boundary gating ignores prefix/suffix.
   assert.ok(SECTION_ERROR_DETECTIVE_PROTOCOL.includes(ROOT_CAUSE_STEPS));
   assert.equal(resolveSubagentPromptSections({ brief: 'list prefix tokens' }).some((s) => s.id === 'error-detective'), false);

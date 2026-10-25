@@ -1,6 +1,6 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
-import { SECTION_PATCH_FORMAT_SPEC, resolvePatchFormatSpec } from '../llm/prompt-sections.js';
 import { ROOT_CAUSE_STEPS } from '../llm/sections/shared.js';
+import { resolvePatchFormatSpec } from '../llm/sections/tools.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
 import { isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -31,7 +31,7 @@ export interface ToolSynergyContext {
 }
 
 export interface ToolAdvice {
-  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'H_BROWSER' | 'POST_SUBMISSION' | 'GENERAL';
+  playbook: 'A_DISCOVERY' | 'B_DEBUGGING' | 'C_MUTATION' | 'D_ASYNC_CLI' | 'E_MULTI_AGENT' | 'F_PLAN_LIFECYCLE' | 'G_BLAST_RADIUS' | 'H_BROWSER' | 'GENERAL';
   guidance: string;
   suggestedTools: string[];
 }
@@ -68,24 +68,14 @@ export class ToolSynergyAdvisor {
       hasRunningBackgroundTasks,
       hasSharedContextConflicts,
       userRequest,
-      hasSubmittedSolution,
     } = context;
 
-    // 0a. Vừa gọi submit_solution (thành công) hoặc đã submit giải pháp thành công (Playbook POST_SUBMISSION)
-    if ((lastToolName === 'submit_solution' && lastToolResult?.submitted === true && !isToolResultFailure(lastToolResult)) || hasSubmittedSolution) {
-      return {
-        playbook: 'POST_SUBMISSION',
-        guidance: 'Solution has been submitted successfully. The task is now COMPLETE. Do not call further tools. Return the submitted answer at the requested length.',
-        suggestedTools: [],
-      };
-    }
-
-    // 0b. Phát hiện người dùng báo lỗi trong prompt (User Bug Report Intent) ngay turn đầu
+    // 0. Phát hiện người dùng báo lỗi trong prompt (User Bug Report Intent) ngay turn đầu
     if (!lastToolName && detectBugReportIntent(userRequest)) {
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[ROOT-CAUSE:REPORT] User reported a bug or error. Do not guess or monkey-patch. Protocol: ${ROOT_CAUSE_STEPS} via search/read_file/query_call_graph. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.`,
-        suggestedTools: ['search_codebase_fast', 'read_file', 'get_diagnostics', 'query_call_graph'],
+        suggestedTools: ['search_codebase_fast', 'read_file', 'run_command', 'query_call_graph'],
       };
     }
 
@@ -129,25 +119,7 @@ export class ToolSynergyAdvisor {
       }
     }
 
-    // 2.5. Sự cố apply_patch (Lỗi format patch hoặc FUZZY_CANDIDATE_FOUND)
-    if (
-      lastToolName === 'apply_patch' &&
-      lastToolResult &&
-      (lastToolResult.error || lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND')
-    ) {
-      const isFuzzy = Boolean(lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND');
-      const reason = isFuzzy
-        ? 'FUZZY_CANDIDATE_FOUND (Fuzz Level 3 match). Disk was NOT mutated to avoid accidental corruption.'
-        : `Patch application failed: ${lastToolResult.error || 'Invalid patch structure'}`;
-      const patchSpec = resolvePatchFormatSpec(context.lastTargetFile);
-      return {
-        playbook: 'C_MUTATION',
-        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${patchSpec}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide an exact patch hunk with matching context lines.`,
-        suggestedTools: ['read_file', 'apply_patch', 'replace_text'],
-      };
-    }
-
-    // 2.7. Fast-path: run_command vừa chạy test thành công → gợi ý submit_solution ngay (Step Efficiency Boost)
+    // 2.5. Fast-path: run_command vừa chạy test thành công → tái sử dụng bằng chứng, kết luận (Step Efficiency Boost)
     if (
       lastToolName === 'run_command' &&
       lastToolResult &&
@@ -161,8 +133,26 @@ export class ToolSynergyAdvisor {
     ) {
       return {
         playbook: 'C_MUTATION',
-        guidance: 'The observed verification command completed with exit 0. Reuse this evidence; check the active task acceptance criteria, evidence freshness and remaining authorized workflow before submit_solution. Do not infer that unrelated checks passed.',
-        suggestedTools: ['submit_solution'],
+        guidance: 'The observed verification command completed with exit 0. Reuse this evidence; check the active task acceptance criteria, evidence freshness and remaining authorized workflow before concluding the turn. Do not infer that unrelated checks passed.',
+        suggestedTools: [],
+      };
+    }
+
+    // 2.5. Sự cố apply_patch (Lỗi format patch hoặc FUZZY_CANDIDATE_FOUND) -> gợi ý chuyển sang replace_text
+    if (
+      lastToolName === 'apply_patch' &&
+      lastToolResult &&
+      (lastToolResult.error || lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND')
+    ) {
+      const isFuzzy = Boolean(lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND');
+      const reason = isFuzzy
+        ? 'FUZZY_CANDIDATE_FOUND (Fuzz Level 3 match). Disk was NOT mutated to avoid accidental corruption.'
+        : `Patch application failed: ${lastToolResult.error || 'Invalid patch structure'}`;
+      const patchSpec = resolvePatchFormatSpec(context.lastTargetFile);
+      return {
+        playbook: 'C_MUTATION',
+        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${patchSpec}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide exact replacement with "replace_text".`,
+        suggestedTools: ['read_file', 'replace_text'],
       };
     }
 
@@ -177,7 +167,7 @@ export class ToolSynergyAdvisor {
         if (blast) {
           const testAdvice = blast.impactedTestSuites?.length > 0
             ? ` Impacted test suite(s): ${blast.impactedTestSuites.slice(0, 2).join(', ')}. Run targeted test via "run_command".`
-            : ' Next, call "get_diagnostics" or targeted tests to verify.';
+            : ' Next, call "run_command" for targeted tests/typecheck to verify.';
           const consumerAdvice = blast.directConsumers?.length > 0
             ? ` ${blast.directConsumers.length} direct consumer file(s) affected.`
             : '';
@@ -189,46 +179,16 @@ export class ToolSynergyAdvisor {
           return {
             playbook: 'C_MUTATION',
             guidance: `${riskPrefix}Code mutation applied.${symbolAdvice}${consumerAdvice}${graphAdvice}${testAdvice}`,
-            suggestedTools: blast.impactedTestSuites?.length > 0
-              ? ['run_command', 'get_diagnostics', 'get_symbol_context_360']
-              : ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
+            suggestedTools: ['run_command'],
           };
         }
 
         return {
           playbook: 'C_MUTATION',
-          guidance: `Code was modified.${graphAdvice} Next, call "get_diagnostics" to check for compiler/type errors, then run relevant test suites via "run_command".`,
-          suggestedTools: ['get_diagnostics', 'run_command', 'get_symbol_context_360'],
+          guidance: `Code was modified.${graphAdvice} Next, run targeted tests/typecheck via "run_command" to verify the change.`,
+          suggestedTools: ['run_command'],
         };
       }
-    }
-
-    // 3.4. Vừa chạy get_diagnostics (Playbook C: Verification Transition)
-    if (lastToolName === 'get_diagnostics') {
-      const isClean = lastToolResult && !lastToolResult.error && lastToolResult.clean === true && (!lastToolResult.totalErrors || lastToolResult.totalErrors === 0);
-      if (isClean) {
-        return {
-          playbook: 'C_MUTATION',
-          guidance: 'Diagnostics reported 0 syntax and type errors. This proves diagnostics cleanliness only; follow the risk-adjusted completion contract and active acceptance criteria before submit_solution.',
-          suggestedTools: ['submit_solution', 'run_command'],
-        };
-      }
-      const errCount = lastToolResult?.totalErrors || (Array.isArray(lastToolResult?.diagnostics) ? lastToolResult.diagnostics.length : 1);
-      const errFiles = Array.isArray(lastToolResult?.diagnostics)
-        ? [...new Set(lastToolResult.diagnostics.map((d: any) => d?.file).filter(Boolean))]
-        : [];
-      if (errFiles.length >= 2) {
-        return {
-          playbook: 'B_DEBUGGING',
-          guidance: `[BATCH CLEANUP] Diagnostics detected ${errCount} compiler/type error(s) across ${errFiles.length} files (${errFiles.slice(0, 5).join(', ')}). Fixing file-by-file wastes turns: call "run_node_script" once with targetFiles set to the error files, fixing root causes only (never weaken assertions or edit test expectations to match buggy behavior). Then re-run "get_diagnostics" to confirm zero errors before committing.`,
-          suggestedTools: ['run_node_script', 'get_diagnostics', 'read_file'],
-        };
-      }
-      return {
-        playbook: 'B_DEBUGGING',
-        guidance: `[ROOT-CAUSE:DIAG] Diagnostics detected ${errCount} compiler/type error(s). Never monkey-patch crash sites or weaken assertions! Protocol: ${ROOT_CAUSE_STEPS}. Verify the anchor with "verify_edit" first, then use "replace_text" or "apply_patch".`,
-        suggestedTools: ['verify_edit', 'replace_text', 'apply_patch', 'inspect_symbol', 'get_diagnostics'],
-      };
     }
 
     // 3.5. Cảnh báo lỗi và gợi ý công cụ thay thế từ Tool Use Guardian (Playbook B: Root Cause Debugging)
@@ -242,7 +202,7 @@ export class ToolSynergyAdvisor {
         guidance: `[TOOL GUARDIAN ADVISORY]: Tool "${lastToolName || 'unknown'}" failed with ${guardianDiag.category}. ${guardianDiag.recoveryAction}`,
         suggestedTools: alternatives.length > 0
           ? alternatives
-          : ['get_diagnostics', 'inspect_symbol', 'query_call_graph'],
+          : ['run_command', 'read_file', 'search_text'],
       };
     }
 
@@ -252,7 +212,7 @@ export class ToolSynergyAdvisor {
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[LATS BACKTRACKING] Repeated repair attempts failed. Stop speculative edits and re-evaluate the causal hypothesis. Failures do not authorize Git restore, reset, stash or discarding workspace changes. Only use a rollback explicitly authorized for the affected scope.${memoText}`,
-        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'search_codebase_fast'],
+        suggestedTools: ['run_command', 'read_file', 'search_text'],
       };
     }
 
@@ -266,8 +226,8 @@ export class ToolSynergyAdvisor {
         : '';
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `[ROOT-CAUSE:FAIL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: ${ROOT_CAUSE_STEPS} via get_symbol_context_360 or query_call_graph(direction='callers').${graphTrace} Use the newest feedback to pivot after repeated equivalent failure.`,
-        suggestedTools: ['get_diagnostics', 'get_symbol_context_360', 'query_call_graph', 'inspect_symbol', 'verify_edit', 'replace_text'],
+        guidance: `[ROOT-CAUSE:FAIL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: ${ROOT_CAUSE_STEPS}.${graphTrace} Use the newest feedback to pivot after repeated equivalent failure.`,
+        suggestedTools: ['run_command', 'read_file', 'search_text', 'replace_text'],
       };
     }
 
@@ -302,16 +262,16 @@ export class ToolSynergyAdvisor {
         : '';
       return {
         playbook: 'G_BLAST_RADIUS',
-        guidance: `Symbol definition inspected.${callerHint} For full cross-codebase 360-degree context (all callers, outgoing callees, dependencies, and test coverage in 1 payload), use "get_symbol_context_360".`,
-        suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact', 'replace_text'],
+        guidance: `Symbol definition inspected.${callerHint} Inspect exact implementation lines with read_file or search occurrences with search_text.`,
+        suggestedTools: ['read_file', 'search_text', 'replace_text'],
       };
     }
 
     // 7. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
-      guidance: 'Choose the most precise high-level tool: "get_symbol_context_360" for complete 360-degree symbol analysis, "get_route_map" for APIs, or "get_architecture_topology" for system structure.',
-      suggestedTools: ['get_symbol_context_360', 'query_call_graph', 'replace_text', 'get_diagnostics'],
+      guidance: 'Explore with list_files and search_text, inspect implementation details with read_file, edit with replace_text or write_file, and verify with run_command.',
+      suggestedTools: ['list_files', 'search_text', 'read_file', 'replace_text', 'run_command'],
     };
   }
 

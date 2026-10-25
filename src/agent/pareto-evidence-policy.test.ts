@@ -299,28 +299,6 @@ test('Adaptive Pareto gate can be disabled without disabling other mutation guar
   assert.equal(result.valid, true);
 });
 
-test('patch evidence is checked for every parsed target, not the optional path', () => {
-  const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
-  guardian.setPreMutationGateContext({
-    taskClass: 'bugfix', hasValidatedHypothesis: false, risk: 'R2',
-    evidenceScore: 1, evidenceThreshold: 3, inspectedFiles: ['src/parser.ts'],
-  });
-  const filePatch = (file: string) => `--- a/${file}\n+++ b/${file}\n@@ -1,1 +1,1 @@\n-old\n+new`;
-  assert.equal(guardian.preCallValidate('apply_patch', { patch: filePatch('src/parser.ts') }).valid, true);
-  const mixed = guardian.preCallValidate('apply_patch', {
-    path: 'src/parser.ts', patch: `${filePatch('src/parser.ts')}\n${filePatch('src/other.ts')}`,
-  });
-  assert.equal(mixed.valid, true);
-  assert.ok(mixed.advisoryCodes?.includes('UNVERIFIED_MUTATION_ADVISORY'));
-  assert.match(mixed.warning || '', /src\/other\.ts/);
-  assert.equal(guardian.preCallValidate('apply_patch', {
-    patch: `${filePatch('tests/parser.test.ts')}\n${filePatch('src/parser.ts')}`,
-  }).valid, true);
-  assert.equal(guardian.preCallValidate('apply_patch', {
-    path: 'src/parser.ts', patch: '@@ -1,1 +1,1 @@\n-old\n+new',
-  }).valid, true);
-});
-
 test('a plan alone still emits an advisory for R3 bugfixes with thin evidence', () => {
   const guardian = new ToolUseGuardian({ workspaceDir: process.cwd() });
   guardian.setPreMutationGateContext({

@@ -132,12 +132,12 @@ function resolvePhaseDynamicGuidanceUncached(
 export function buildPhaseToolAuthorityDirective(
   phase: string,
   visibleToolNames: readonly string[],
-  options?: { hasSubmittedSolution?: boolean; isReadOnly?: boolean },
+  options?: { hasSubmittedSolution?: boolean; hasCompletedWork?: boolean; isReadOnly?: boolean },
 ): string {
   // visibleToolNames is already sorted at the call site path; sort a copy for a
   // stable cache key without mutating the caller's array.
   const names = [...new Set(visibleToolNames)].sort();
-  const cacheKey = `${phase}|${names.join(',')}|${options?.hasSubmittedSolution ? 1 : 0}|${options?.isReadOnly ? 1 : 0}`;
+  const cacheKey = `${phase}|${names.join(',')}|${(options?.hasSubmittedSolution || options?.hasCompletedWork) ? 1 : 0}|${options?.isReadOnly ? 1 : 0}`;
   const cached = phaseAuthorityCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const resolved = buildPhaseToolAuthorityDirectiveUncached(phase, names, options);
@@ -151,9 +151,9 @@ const phaseAuthorityCache = new Map<string, string>();
 function buildPhaseToolAuthorityDirectiveUncached(
   phase: string,
   names: string[],
-  options?: { hasSubmittedSolution?: boolean; isReadOnly?: boolean },
+  options?: { hasSubmittedSolution?: boolean; hasCompletedWork?: boolean; isReadOnly?: boolean },
 ): string {
-  if (options?.hasSubmittedSolution || names.length === 0) {
+  if (options?.hasSubmittedSolution || options?.hasCompletedWork || names.length === 0) {
     return `🔧 [PHASE TOOL AUTHORITY: ${phase}] No tools are authorized this step. Answer directly with text; do not call any tool.`;
   }
   const list = names.join(', ');

@@ -10,8 +10,8 @@ export const BACKGROUND_LAUNCH_RULE = 'dispatch run_command with WaitMsBeforeAsy
 /** Proactive server-launch directive: launch in background, never print passive snippets. */
 export const PROACTIVE_SERVER_LAUNCH_RULE = 'for servers/watchers/background daemons, NEVER output passive shell snippets; proactively call run_command with WaitMsBeforeAsync=5000 in background and verify startup when asked to run, start, or test a server.';
 
-/** Deletion/rename safety rule: file tools only, never shell rm/del/mv. */
-export const FILE_MUTATION_SAFETY_RULE = 'MUST use `delete_file` (with reason and expectedFileHash) for deletions and `move_file` for renames (never shell `mv`, never delete+recreate a file to rename it); MUST NEVER run `rm`, `del`, `rmdir`, `Remove-Item`, or `mv` via `run_command` - `rm` is unavailable on Windows cmd.exe and triggers CRITICAL permission gates.';
+/** Deletion/rename safety rule: file tools only, never destructive shell rm/del/mv. */
+export const FILE_MUTATION_SAFETY_RULE = 'MUST use `write_file` to create or overwrite files and `replace_text` to edit existing files; MUST NEVER run `rm`, `del`, `rmdir`, `Remove-Item`, or `mv` via `run_command` - destructive shell deletes are forbidden and trigger CRITICAL permission gates.';
 
 /**
  * Canonical root-cause protocol. Kept in this leaf module so both the error

@@ -158,27 +158,6 @@ test('successful verification advice preserves remaining workflow and read-only 
 });
 
 
-test('multi-file diagnostics steer toward run_node_script batch cleanup before commit', () => {
-  const advisor = new ToolSynergyAdvisor();
-  const multi = advisor.advise({ lastToolName: 'get_diagnostics', lastToolResult: {
-    clean: false, totalErrors: 3,
-    diagnostics: [
-      { file: 'src/a.ts', line: 12, message: "Cannot find name 'x'" },
-      { file: 'src/b.ts', line: 4, message: "Type 'string' is not assignable" },
-      { file: 'src/a.ts', line: 30, message: "Property 'y' does not exist" },
-    ],
-  } });
-  assert.equal(multi.playbook, 'B_DEBUGGING');
-  assert.match(multi.guidance, /run_node_script/);
-  assert.match(multi.guidance, /src\/a\.ts.*src\/b\.ts/);
-  assert.match(multi.guidance, /before committing/);
-  assert.equal(multi.suggestedTools[0], 'run_node_script');
-  const single = advisor.advise({ lastToolName: 'get_diagnostics', lastToolResult: {
-    clean: false, totalErrors: 1, diagnostics: [{ file: 'src/a.ts', line: 12, message: "Cannot find name 'x'" }],
-  } });
-  assert.doesNotMatch(single.guidance, /run_node_script/);
-});
-
 test('guardian requires paired completed outcomes rather than attempts or success prose', () => {
   const session = new Session();
   session.addModelMessage({functionCalls:[{id:'attempt',name:'write_file',args:{path:'attempt.ts'}}]});

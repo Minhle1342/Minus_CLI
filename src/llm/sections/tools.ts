@@ -2,7 +2,7 @@ import path from 'node:path';
 import { PROACTIVE_SERVER_LAUNCH_RULE } from './shared.js';
 
 /**
- * ON-DEMAND MODULE: PATCH FORMAT AND MATCHING MECHANISM (apply_patch 1-shot unified diff)
+ * ON-DEMAND MODULE: UNIFIED DIFF FORMAT AND MATCHING SPECIFICATION
  * Split out from the core invariant to avoid bloating the startup prompt (~60 tokens).
  * Supports dynamic few-shot example selection by targetFile language (Python, Go, Rust, JSON, YAML, TypeScript).
  */
@@ -58,15 +58,14 @@ export function resolvePatchFormatSpec(targetFile?: string): string {
      timeout: 30`;
   }
 
-  return `UNIFIED DIFF & PATCH FORMAT SPECIFICATION (apply_patch):
+  return `UNIFIED DIFF & CODE MODIFICATION SPECIFICATION:
 - Header: --- a/<path> followed by +++ b/<path>
 - Hunk format: @@ -start,count +start,count @@
 - Context lines prefix with ' ', deletions prefix with '-', additions prefix with '+'
 - 1-Shot Example:
 ${oneShotExample}
-- Fuzz Matching: Fuzz 0-2 auto-resolved (line shifts, indentation tolerance, context reduction).
-- Fuzz 3 (FUZZY_CANDIDATE_FOUND): Returns advisory signal and does NOT mutate disk; call read_file for exact line matching.
-- Optimistic Concurrency: If providing expectedFileHashes, pass a JSON object mapping relative file paths to contentHash strings, e.g. {"src/index.ts": "hash123"}. Never wrap hashes in an array.`;
+- Line Matching: Match lines precisely with the target file. Call read_file for exact line matching and contentHash before modifying.
+- Optimistic Concurrency: If providing expectedFileHash, pass the exact contentHash string from read_file.`;
 }
 
 export const SECTION_PATCH_FORMAT_SPEC = resolvePatchFormatSpec();

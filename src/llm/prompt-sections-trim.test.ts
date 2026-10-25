@@ -75,10 +75,10 @@ test('repeated run_command and file-mutation rules are single-sourced macros', (
   assert.ok(SECTION_ANTIGRAVITY_TOOLS.includes(PROACTIVE_SERVER_LAUNCH_RULE), 'tools section must reuse the launch macro');
   assert.ok(SECTION_TERMINAL_SANDBOX_FULL.includes(FILE_MUTATION_SAFETY_RULE), 'sandbox module must reuse the file-mutation macro');
   assert.ok(SECTION_PHASE_IMPLEMENT_GUIDANCE.includes(FILE_MUTATION_SAFETY_RULE), 'implement guidance must reuse the file-mutation macro');
-  // Regression: renaming must not degrade into delete_file (observed with gemini-3.5-flash-lite).
-  assert.match(FILE_MUTATION_SAFETY_RULE, /`move_file` for renames/, 'must bind renames to move_file');
-  assert.match(FILE_MUTATION_SAFETY_RULE, /never shell `mv`/, 'must forbid shell mv');
-  assert.match(FILE_MUTATION_SAFETY_RULE, /never delete\+recreate/, 'must forbid delete+recreate as a rename');
+  // Canonical tools: creation with write_file, modification with replace_text.
+  assert.match(FILE_MUTATION_SAFETY_RULE, /`write_file` to create/, 'must bind file creation to write_file');
+  assert.match(FILE_MUTATION_SAFETY_RULE, /`replace_text` to edit/, 'must bind edits to replace_text');
+  assert.match(FILE_MUTATION_SAFETY_RULE, /never run `rm`/i, 'must forbid shell deletes');
 });
 
 test('project fingerprint is cached per workspace root', () => {

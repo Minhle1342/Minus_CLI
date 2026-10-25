@@ -15,6 +15,7 @@ import { readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { createFileTool } from './create-file.js';
 import { searchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
+import { isOrchestrationTool } from '../control/phase-tool-effects.js';
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -56,7 +57,8 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
 
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
   return tools.filter(
-    (tool) => CANONICAL_MODEL_TOOL_NAMES.has(tool.name) && !MODEL_HIDDEN_TOOL_NAMES.has(tool.name)
+    (tool) => (CANONICAL_MODEL_TOOL_NAMES.has(tool.name) || isOrchestrationTool(tool.name))
+      && !MODEL_HIDDEN_TOOL_NAMES.has(tool.name)
   );
 }
 

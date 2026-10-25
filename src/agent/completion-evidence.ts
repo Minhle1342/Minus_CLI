@@ -24,14 +24,12 @@ const INSPECTION_TOOLS = new Set([
   'get_task_output',
   'inspect_symbol',
   'find_references',
-  'get_diagnostics',
   'analyze_impact',
   'query_call_graph',
   'get_route_map',
   'get_symbol_context_360',
   'get_architecture_topology',
   'lsp_query',
-  'inspect_image',
   'read_shared_context',
   'recall_repository_memory',
   'verify_repository_memory',
@@ -128,7 +126,6 @@ export function classifyToolEvidence(
   if (isCommandOutcomeBlocked(result)) return [];
   if (isToolResultFailure(result)) return [];
   if (hasObservedMutation(toolName, result)) return ['mutation'];
-  if (toolName === 'submit_solution') return ['other'];
   if (toolName === 'run_test_suite') return result.exitCode === 0 && result.isPassed === true && !args.useScratchWorkspace
     ? ['verification'] : [];
   if (toolName === 'run_command') {
@@ -151,12 +148,6 @@ export function classifyToolEvidence(
     if (result.action !== 'status' || !completion?.completed || completion.terminalStatus !== 'completed'
       || completion.commandOutcome !== 'succeeded' || completion.exitCode !== 0) return [];
     return isVerificationCommand(completion.command) ? ['verification'] : ['other'];
-  }
-  if (toolName === 'get_diagnostics') {
-    if (result.clean === true && (!result.totalErrors || result.totalErrors === 0)) {
-      return ['inspection', 'verification'];
-    }
-    return ['inspection'];
   }
   if (toolName === 'git_status' || toolName === 'git_diff') {
     return ['inspection', 'git'];
@@ -186,7 +177,7 @@ export interface CompletionEvidenceDecision {
 /**
  * Kill-switch for the CompletionEvidenceGate (the [SYSTEM EVIDENCE GATE] block).
  * `MINUS_COMPLETION_EVIDENCE_GATE=off|0|false|disabled` bypasses both the
- * final-answer check and the submit_solution check. Any other value (or unset)
+ * final-answer check. Any other value (or unset)
  * keeps the gate active. Other safeguards (VerificationPolicy, CriticGate,
  * FinalAnswerGuard) are unaffected.
  */
@@ -288,7 +279,7 @@ export class CompletionEvidenceGate {
     if ((effectiveCodeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
-    // Nới lỏng: verification pass sau mutation cuối (test pass / get_diagnostics sạch)
+    // Nới lỏng: verification pass sau mutation cuối (test/build/lint pass)
     // được tính là reproduction đủ — không bắt buộc fail-to-pass proof riêng.
     const hasReproProof = options.hasReproduction === true || executions.some((e) => e.kinds.includes('reproduction')) || verifications.length > 0;
     if ((options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
@@ -478,7 +469,7 @@ export class CompletionEvidenceGate {
       // được + nguyên nhân ngoài tầm kiểm soát) được chấp nhận ngay lần đầu nếu agent
       // đã có khảo sát hoặc quan sát lỗi — không ép chạy thêm tool cho có.
       const namesConcreteCheck =
-        /\b(?:npm\s+(?:test|run\s+\S+|exec\b)|npx\s+\S+|pytest|jest|vitest|mocha|ava|playwright|cypress|tsc\b|typecheck|lint|build|get_diagnostics|diagnostics|test\s+suite|unit\s+tests?|integration\s+tests?|e2e)\b/.test(normalized);
+        /\b(?:npm\s+(?:test|run\s+\S+|exec\b)|npx\s+\S+|pytest|jest|vitest|mocha|ava|playwright|cypress|tsc\b|typecheck|lint|build|diagnostics|test\s+suite|unit\s+tests?|integration\s+tests?|e2e)\b/.test(normalized);
       const namesConcreteCause =
         /\b(?:missing|misses|unavailable|not\s+(?:available|installed|configured|supported|found)|no\s+(?:access|network|database|db|registry|credentials?|permission|test\s+script|tests?\s+configured)|offline|without\s+(?:access|network|database|db|credentials?|permission)|denied|forbidden|requires?\s+(?:network|database|db|docker|credentials?|access|license|paid)|timed?\s*out|out\s+of\s+memory|unsupported|incompatible|blocked\s+by|due\s+to|because|caused\s+by|thieu|khong\s+co|chua\s+co|khong\s+(?:duoc\s+)?cau\s+hinh|chua\s+(?:duoc\s+)?cau\s+hinh|chua\s+cai\s+dat|khong\s+ho\s+tro|mat\s+ket\s+noi|het\s+bo\s+nho|khong\s+co\s+quyen|yeu\s+cau\s+quyen)\b/.test(normalized);
       const isSpecificBlockerReport = namesConcreteCheck && namesConcreteCause
