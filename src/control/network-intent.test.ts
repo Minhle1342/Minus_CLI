@@ -8,10 +8,11 @@ test('detects pasted URL as network intent', () => {
   assert.equal(hasNetworkIntent('mở www.google.com giúp'), true);
 });
 
-test('detects explicit VN/EN web search request', () => {
-  assert.equal(hasNetworkIntent('tìm trên mạng giúp tôi'), true);
-  assert.equal(hasNetworkIntent('search web về SearXNG'), true);
-  assert.equal(hasNetworkIntent('tra cứu tài liệu mới nhất'), true);
+test('prose alone is not a network signal', () => {
+  // Guessing "this sounds like a web search" was removed; only a URL is a fact.
+  assert.equal(hasNetworkIntent('tìm trên mạng giúp tôi'), false);
+  assert.equal(hasNetworkIntent('search web về SearXNG'), false);
+  assert.equal(hasNetworkIntent('tra cứu tài liệu mới nhất'), false);
 });
 
 test('keeps pure code tasks local', () => {

@@ -148,7 +148,7 @@ test('blocked or unstarted tests are not empirical evidence; both executed test 
   assert.equal(snapshot('run_test_suite', { errorCode: 'TEST_HARNESS_FAILURE' }).hasEmpiricalEvidence, false);
 });
 
-test('classification explores under uncertainty and acts when evidence reaches the threshold', () => {
+test('risk floors still apply while the phase stays model-directed', () => {
   const engine = new ClassificationEngine();
   const base = {
     request: 'Fix the parser bug',
@@ -161,25 +161,6 @@ test('classification explores under uncertainty and acts when evidence reaches t
   assert.equal(uncertain.requiredCapabilities.includes('edit'), true);
   assert.equal(uncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), false);
 
-  const largeUncertain = engine.classify({
-    ...base,
-    request: 'Fix the parser bug across the entire system architecture',
-    hasPlan: false,
-  });
-  assert.equal(largeUncertain.risk, 'R3');
-  assert.equal(largeUncertain.phase, 'plan');
-  assert.equal(largeUncertain.requiredCapabilities.includes('edit'), false);
-  assert.equal(largeUncertain.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'), false);
-
-  const supported = engine.classify({
-    ...base,
-    hasDirectEvidence: true,
-    evidenceScore: 3,
-  });
-  assert.equal(supported.phase, 'implement');
-  assert.equal(supported.requiredCapabilities.includes('edit'), true);
-  assert.equal(supported.reasonCodes.includes('PARETO_EVIDENCE_FAST_PATH'), true);
-
   const raisedRisk = engine.classify({
     ...base,
     hasDirectEvidence: true,
@@ -188,6 +169,7 @@ test('classification explores under uncertainty and acts when evidence reaches t
     minimumRisk: 'R3',
   });
   assert.equal(raisedRisk.risk, 'R3');
+  assert.equal(raisedRisk.phase, 'implement');
   assert.equal(raisedRisk.reasonCodes.includes('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR'), true);
 });
 

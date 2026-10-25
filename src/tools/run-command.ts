@@ -27,8 +27,7 @@ import { ToolchainProvisioner } from '../toolchains/toolchain-provisioner.js';
 import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
-import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope, pushArgsTargetBranch } from './git-command-policy.js';
-import { extractRequestedGitBranch, hasForceOrDeletePushArg, isForcePushAuthorized } from './git-intent.js';
+import { classifyGitCommand, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
 import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
 import {
@@ -614,16 +613,16 @@ export function shouldReturnPermissionDenial(
 }
 
 /**
- * Chốt policy Git duy nhất cho `run_command` (thay thế các tool `git_*` chuyên dụng
- * đã gỡ đăng ký): mọi phân đoạn chứa `git ...` đều phải qua cùng kiểm tra
- * `validateGitCommandScope` + `isGitCommandAuthorized` + ràng buộc nhánh push.
- * Từ chối cứng, không thể bypass bằng approval chung.
+ * Single Git policy for `run_command`: every `git ...` segment must pass
+ * `validateGitCommandScope`, and any non-read operation must carry the observed
+ * approval for that exact command. No prompt text is parsed to decide whether
+ * the user "meant" a commit; the approval prompt is the authorization.
  */
 export function checkGitPolicyForShell(
   segments: string[],
   workspaceRoot: string,
-  userRequest?: string,
   approvalAvailable = true,
+  approved = false,
 ): GitShellPolicyViolation | undefined {
   for (const segment of segments) {
     const invocation = parseGitInvocation(segment);
@@ -647,43 +646,16 @@ export function checkGitPolicyForShell(
       return { error: scopeDecision.error, errorCode: scopeDecision.errorCode };
     }
     const classification = classifyGitCommand(invocation.subcommand, invocation.args);
-    if (invocation.subcommand === 'add' && !isExplicitGitAddPathList(invocation.args)) {
-      if (!isBroadAddWithCommitIntent(invocation.args, userRequest)) {
-        return {
-          error: 'Broad Git staging is blocked. Use `git add -- <explicit workspace-relative file paths>`; -A/--all, ., wildcard, and pathspec staging are never authorized by a commit request.',
-          errorCode: 'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-          suggestion: 'Inspect git status/diff, then stage only the changed file paths that belong in the requested commit.',
-        };
-      }
-    }
-    if (!isGitCommandAuthorized(userRequest, classification)) {
+    if (classification.risk !== 'read' && !approved) {
       return {
-        error: `Git ${invocation.subcommand} (${classification.risk}) is not authorized by the current user request.`,
+        error: `Git ${invocation.subcommand} (${classification.risk}) requires explicit approval for this command.`,
         errorCode: classification.risk === 'destructive'
           ? 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED'
           : 'GIT_OPERATION_NOT_AUTHORIZED',
         suggestion: approvalAvailable
-          ? `Ask the user to explicitly request git ${invocation.subcommand}${classification.risk === 'destructive' ? ' and its destructive behavior (e.g. "git clean -fdx")' : ''}; verify first with status/diff or ls-files --others.`
-          : `No approval channel is available in this session: re-run with arguments matching the current task intent, or use an allowlisted read-only git command (status/diff/log).`,
+          ? `Ask the user to approve \`git ${invocation.subcommand}\`${classification.risk === 'destructive' ? ' and its destructive behavior' : ''}; verify first with status/diff or ls-files --others.`
+          : 'No approval channel is available in this session: use an allowlisted read-only git command (status/diff/log).',
       };
-    }
-    if (invocation.subcommand === 'push') {
-      if (hasForceOrDeletePushArg(invocation.args) && !isForcePushAuthorized(userRequest)) {
-        return {
-          error: 'Force push or remote branch delete is not authorized by the current user request.',
-          errorCode: 'GIT_FORCE_PUSH_NOT_AUTHORIZED',
-          suggestion: 'Verify the remote state with status/diff/ls-remote, then ask the user to explicitly request a force push (e.g. "force push lên nhánh dev") or a branch delete.',
-        };
-      }
-      const requestedBranch = extractRequestedGitBranch(userRequest);
-      if (requestedBranch && !pushArgsTargetBranch(invocation.args, requestedBranch)) {
-        return {
-          error: `Push arguments do not target the user-requested branch "${requestedBranch}".`,
-          errorCode: 'GIT_BRANCH_NOT_AUTHORIZED',
-          requestedBranch,
-          suggestion: `Push to "${requestedBranch}" instead (e.g. git push origin ${requestedBranch}), or restate the request with the intended branch.`,
-        };
-      }
     }
   }
   return undefined;
@@ -1487,11 +1459,19 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         ? false
         : shellAnalysis.operators.some((operator) => !SAFE_CHAIN_OPERATORS.has(operator));
 
+      // Git writes/network require the user's approval for this exact command;
+      // only read subcommands stay allowlisted without a prompt.
+      const gitNeedsApproval = shellAnalysis.segments.some((segment) => {
+        const invocation = parseGitInvocation(segment);
+        return Boolean(invocation && classifyGitCommand(invocation.subcommand, invocation.args).risk !== 'read');
+      });
+
       // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, chứa toán tử không an toàn, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
         || isComplex
         || hasDisallowedOperators
         || blockedPushToMain
+        || gitNeedsApproval
         || !shellAnalysis.segments.every(isAllowedCommand);
 
       const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
@@ -1625,7 +1605,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // đoạn `git ...` vượt qua được các chốt trên đều phải qua thêm kiểm tra
       // scope/intent/branch. Đặt sau PUSH_TO_MAIN_PROHIBITED và allowlist để giữ
       // nguyên mã lỗi cũ; từ chối cứng, không bypass bằng approval chung.
-      const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, context?.userRequest, hasApprovalChannel(effectivePermissionManager));
+      const gitPolicyViolation = checkGitPolicyForShell(shellAnalysis.segments, workspace.rootDir, hasApprovalChannel(effectivePermissionManager), hasExplicitPermission);
       if (gitPolicyViolation) {
         return {
           ...(gitPolicyViolation.errorCode === 'GIT_CREDENTIAL_IN_URL' ? {} : { command: rawCommand }),

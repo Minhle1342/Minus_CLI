@@ -232,15 +232,17 @@ test('AgentLoop repairs unsupported execution claims with a direct revised answe
 });
 
 
-test('classification distinguishes proposed edits from authorized edits', () => {
+test('classification defers prose to the model and narrows only on explicit directives', () => {
   const classifier = new ClassificationEngine();
-  for (const request of ['Suggest how to refactor the agent.', 'Explain why update() fails.', 'Đề xuất cách sửa guard.', 'Compare options to deploy the agent.', 'Review the code; do not edit files.']) {
+  for (const request of ['Suggest how to refactor the agent.', 'Explain why update() fails.', 'Đề xuất cách sửa guard.', 'Compare options to deploy the agent.']) {
     const decision = classifier.classify({ request });
-    assert.equal(decision.taskClass, 'exploration', request);
-    assert.equal(decision.requiredCapabilities.includes('edit'), false, request);
+    assert.equal(decision.phase, 'implement', request);
+    assert.ok(decision.requiredCapabilities.includes('edit'), request);
   }
-  for (const request of ['Explain the bug and then fix it.', 'Analyze the guard and implement the change.', 'Phân tích rồi sửa guard.']) {
-    assert.notEqual(classifier.classify({ request }).taskClass, 'exploration', request);
+  for (const request of ['read-only: suggest how to refactor', 'Review the code; do not edit files.']) {
+    const decision = classifier.classify({ request });
+    assert.equal(decision.phase, 'explore', request);
+    assert.equal(decision.requiredCapabilities.includes('edit'), false, request);
   }
   const mutated = classifier.classify({ request: 'Explain the code.', hasUnverifiedChanges: true });
   assert.equal(mutated.phase, 'verify');

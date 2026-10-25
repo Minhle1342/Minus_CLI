@@ -3,8 +3,7 @@ import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
 import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand, validateGitCommandScope } from './git-command-policy.js';
-import { detectExplicitGitMutationIntent, extractRequestedGitBranch } from './git-intent.js';
-import { pushArgsTargetBranch } from './git-command-policy.js';
+import { detectExplicitGitMutationIntent } from './git-intent.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
 
 test('parseGitInvocation keeps global flags in argv for scope checks', () => {
@@ -52,7 +51,8 @@ test('Git policy blocks query-bearing GitHub clone URLs without returning their 
   const result = checkGitPolicyForShell(
     ['git clone https://github.com/acme/private.git?token=secret-test-token private'],
     '/repo',
-    'Please git clone the private repository',
+    true,
+    true,
   );
   assert.equal(result?.errorCode, 'GIT_CREDENTIAL_IN_URL');
   assert.doesNotMatch(JSON.stringify(result), /secret-test-token/);
@@ -70,72 +70,63 @@ test('network Git cannot use the background path that bypasses execution_target'
   assert.equal(started, false);
 });
 
-test('read-only git passes without an explicit user request', () => {
-  assert.equal(checkGitPolicyForShell(['git status'], '/repo', undefined), undefined);
-  assert.equal(checkGitPolicyForShell(['git log --oneline'], '/repo', undefined), undefined);
+test('read-only git passes without approval', () => {
+  assert.equal(checkGitPolicyForShell(['git status'], '/repo'), undefined);
+  assert.equal(checkGitPolicyForShell(['git log --oneline'], '/repo'), undefined);
 });
 
-test('write git without an explicit user request is denied', () => {
-  const violation = checkGitPolicyForShell(['git commit -m "x"'], '/repo', undefined);
-  assert.equal(violation?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
-  const requested = checkGitPolicyForShell(['git commit -m "x"'], '/repo', 'hãy commit code mới');
-  assert.equal(requested, undefined);
+test('git write is denied until the exact command is approved', () => {
+  assert.equal(
+    checkGitPolicyForShell(['git commit -m "x"'], '/repo')?.errorCode,
+    'GIT_OPERATION_NOT_AUTHORIZED',
+  );
+  assert.equal(checkGitPolicyForShell(['git commit -m "x"'], '/repo', true, true), undefined);
 });
 
-test('commit intent authorizes staging explicit paths but never broad add selectors', () => {
-  const request = 'commit và push code mới lên nhánh develop';
-  assert.equal(checkGitPolicyForShell(['git add -- src/index.ts'], '/repo', request), undefined);
-  assert.equal(checkGitPolicyForShell(['git add src/index.ts src/tools/run-command.ts'], '/repo', request), undefined);
-
-  // Whole-tree selectors stay blocked without commit intent...
-  for (const command of ['git add -A', 'git add --all', 'git add .']) {
+test('git add needs the same approval for every selector', () => {
+  for (const command of ['git add src/index.ts', 'git add -A', 'git add --all', 'git add .', 'git add src/*.ts', 'git add :(top)src/index.ts']) {
     assert.equal(
-      checkGitPolicyForShell([command], '/repo', 'xem thay đổi giúp tôi')?.errorCode,
-      'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-      `${command} must remain blocked without an explicit commit request`,
+      checkGitPolicyForShell([command], '/repo')?.errorCode,
+      'GIT_OPERATION_NOT_AUTHORIZED',
+      `${command} must wait for approval`,
     );
-  }
-
-  // ...and wildcards/pathspecs stay blocked even with commit intent.
-  for (const command of ['git add src/*.ts', 'git add :(top)src/index.ts']) {
     assert.equal(
-      checkGitPolicyForShell([command], '/repo', request)?.errorCode,
-      'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-      `${command} must remain blocked even when the request includes commit/push`,
+      checkGitPolicyForShell([command], '/repo', true, true),
+      undefined,
+      `${command} runs once the user approved this exact command`,
     );
   }
 });
 
-test('destructive git needs the command named, not just any message', () => {
-  const denied = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', undefined);
+test('destructive git is reported as destructive until approved', () => {
+  const denied = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo');
   assert.equal(denied?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-  const unrelated = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy giải thích file này');
-  assert.equal(unrelated?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-  const allowed = checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', 'hãy reset code');
-  assert.equal(allowed, undefined);
+  assert.equal(checkGitPolicyForShell(['git reset --hard HEAD'], '/repo', true, true), undefined);
 });
 
-test('global/system scope no longer denied; authorization still applies', () => {
-  const noRequest = checkGitPolicyForShell(['git --global config user.name x'], '/repo', undefined);
-  assert.equal(noRequest?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
-  const allowed = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
-  assert.equal(allowed, undefined);
-  // Config keys that execute programs stay blocked even with a request.
-  const hook = checkGitPolicyForShell(['git config --global diff.external sh -c whoami'], '/repo', 'hãy config git');
+test('global/system scope is allowed; unsafe config keys stay blocked after approval', () => {
+  const noApproval = checkGitPolicyForShell(['git --global config user.name x'], '/repo');
+  assert.equal(noApproval?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
+  assert.equal(checkGitPolicyForShell(['git --global config user.name x'], '/repo', true, true), undefined);
+  // Config keys that execute programs stay blocked even when approved.
+  const hook = checkGitPolicyForShell(['git config --global diff.external sh -c whoami'], '/repo', true, true);
   assert.equal(hook?.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
   // Reading those keys is still allowed.
-  assert.equal(checkGitPolicyForShell(['git config --get core.pager'], '/repo', undefined), undefined);
+  assert.equal(checkGitPolicyForShell(['git config --get core.pager'], '/repo'), undefined);
 });
 
-test('push to a different branch than requested is denied', () => {
-  const violation = checkGitPolicyForShell(
-    ['git push origin main'], '/repo', 'hãy push code lên nhánh develop',
+test('push is authorized by approval, not by re-reading the request text', () => {
+  assert.equal(
+    checkGitPolicyForShell(['git push origin main'], '/repo')?.errorCode,
+    'GIT_OPERATION_NOT_AUTHORIZED',
   );
-  assert.equal(violation?.errorCode, 'GIT_BRANCH_NOT_AUTHORIZED');
-  const allowed = checkGitPolicyForShell(
-    ['git push origin develop'], '/repo', 'hãy push code lên nhánh develop',
+  assert.equal(checkGitPolicyForShell(['git push origin main'], '/repo', true, true), undefined);
+  // Force push is destructive, so it carries the destructive code until approved.
+  assert.equal(
+    checkGitPolicyForShell(['git push --force origin dev'], '/repo')?.errorCode,
+    'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED',
   );
-  assert.equal(allowed, undefined);
+  assert.equal(checkGitPolicyForShell(['git push --force origin dev'], '/repo', true, true), undefined);
 });
 
 test('run_command denies unauthorized git before spawning any process', async () => {
@@ -148,12 +139,12 @@ test('run_command denies unauthorized git before spawning any process', async ()
     workspace,
     { userRequest: 'commit và push code mới lên nhánh develop' },
   );
-  assert.equal(broadStage.errorCode, 'GIT_BROAD_STAGING_NOT_AUTHORIZED');
+  assert.equal(broadStage.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
   const reset = await tool.execute({ command: 'git reset --hard HEAD' }, workspace);
   assert.equal(reset.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
   // Scope gate is policy-only: verify via checkGitPolicyForShell (no process spawn).
-  const scoped = checkGitPolicyForShell(['git --global config user.name x'], '/repo', 'hãy config git');
-  assert.equal(scoped, undefined, 'global config now allowed with an explicit request');
+  const scoped = checkGitPolicyForShell(['git --global config user.name x'], '/repo');
+  assert.equal(scoped?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
 });
 
 test('parseGitInvocation ignores git keywords in non-git commands via AST', () => {
@@ -162,38 +153,7 @@ test('parseGitInvocation ignores git keywords in non-git commands via AST', () =
   assert.equal(parseGitInvocation('cat git.log'), undefined);
 });
 
-test('push args accept HEAD, upstream defaults, and dry runs', () => {
-  assert.equal(pushArgsTargetBranch(['origin', 'HEAD'], 'main'), true);
-  assert.equal(pushArgsTargetBranch(['origin', 'HEAD:main'], 'main'), true);
-  assert.equal(pushArgsTargetBranch(['origin'], 'main'), true);
-  assert.equal(pushArgsTargetBranch([], 'main'), true);
-  assert.equal(pushArgsTargetBranch(['--dry-run', 'origin', 'other'], 'main'), true);
-  assert.equal(pushArgsTargetBranch(['origin', 'main'], 'main'), true);
-  assert.equal(pushArgsTargetBranch(['origin', 'other'], 'main'), false);
-});
-
-test('branch extraction understands len-branch phrasing without false pinning', () => {
-  assert.equal(extractRequestedGitBranch('hãy đẩy code lên nhánh main'), 'main');
-  assert.equal(extractRequestedGitBranch('hãy đẩy lên main'), 'main');
-  assert.equal(extractRequestedGitBranch('hãy đẩy code lên repo'), undefined);
-  assert.equal(extractRequestedGitBranch('fix bug login'), undefined);
-});
-
-test('whole-tree git add passes with explicit commit intent only', () => {
-  const request = 'hãy commit code mới';
-  assert.equal(checkGitPolicyForShell(['git add -A'], '/repo', request), undefined);
-  assert.equal(checkGitPolicyForShell(['git add .'], '/repo', request), undefined);
-  assert.equal(
-    checkGitPolicyForShell(['git add -A'], '/repo', undefined)?.errorCode,
-    'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-  );
-  assert.equal(
-    checkGitPolicyForShell(['git add src/*.ts'], '/repo', request)?.errorCode,
-    'GIT_BROAD_STAGING_NOT_AUTHORIZED',
-  );
-});
-
-test('vietnamese intent synonyms authorize amend and continued flows', () => {
+test('vietnamese intent synonyms still drive git guidance', () => {
   assert.ok(detectExplicitGitMutationIntent('hãy sửa commit vừa rồi').commit);
   assert.ok(detectExplicitGitCommandNames('tiếp tục rebase').includes('rebase'));
   assert.ok(detectExplicitGitMutationIntent('hãy đẩy code lên main').push);
@@ -242,16 +202,16 @@ test('approval suggestions branch on session interactivity, errorCodes unchanged
   assert.match(interactive.suggestion, /Ask the user to approve permission/);
 
   // Same branching inside the git policy gate (direct calls, no git binary needed).
-  const gitDenied = checkGitPolicyForShell(['git stash push'], '/repo', undefined, false);
+  const gitDenied = checkGitPolicyForShell(['git stash push'], '/repo', false);
   assert.equal(gitDenied?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
   assert.match(gitDenied?.suggestion || '', /No approval channel is available/);
-  const gitInteractive = checkGitPolicyForShell(['git stash push'], '/repo', undefined, true);
+  const gitInteractive = checkGitPolicyForShell(['git stash push'], '/repo', true);
   assert.equal(gitInteractive?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
-  assert.match(gitInteractive?.suggestion || '', /Ask the user to explicitly request/);
+  assert.match(gitInteractive?.suggestion || '', /Ask the user to approve/);
 });
 
 test('git scope blocks config writes disguised as reads plus exec-path and -c injections', () => {
-  // `--list --add` is a WRITE: no user request may plant a hook path.
+  // `--list --add` is a WRITE: no approval may plant a hook path.
   const listAdd = validateGitCommandScope('config', ['--list', '--add', 'core.hookspath', '/tmp/evil']);
   assert.equal(listAdd.allowed, false);
   if (!listAdd.allowed) assert.equal(listAdd.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
@@ -273,17 +233,17 @@ test('git scope blocks config writes disguised as reads plus exec-path and -c in
   assert.equal(injected.allowed, false);
   if (!injected.allowed) assert.equal(injected.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
 
-  // Same holes through the run_command shell gate, with no user request at all.
+  // Same holes through the run_command shell gate, even with approval.
   assert.equal(
-    checkGitPolicyForShell(['git config --list --add core.hookspath /tmp/evil'], '/repo')?.errorCode,
+    checkGitPolicyForShell(['git config --list --add core.hookspath /tmp/evil'], '/repo', true, true)?.errorCode,
     'GIT_UNSAFE_CONFIG_KEY',
   );
   assert.equal(
-    checkGitPolicyForShell(['git --exec-path=/tmp/evil commit -m x'], '/repo', 'hãy commit')?.errorCode,
+    checkGitPolicyForShell(['git --exec-path=/tmp/evil commit -m x'], '/repo', true, true)?.errorCode,
     'GIT_UNSAFE_ARGUMENT',
   );
   assert.equal(
-    checkGitPolicyForShell(['git -c core.hooksPath=/tmp/evil commit -m x'], '/repo', 'hãy commit')?.errorCode,
+    checkGitPolicyForShell(['git -c core.hooksPath=/tmp/evil commit -m x'], '/repo', true, true)?.errorCode,
     'GIT_UNSAFE_CONFIG_KEY',
   );
 });
@@ -292,40 +252,15 @@ test('a pasted error log never authorizes a destructive git command', () => {
   const explainReset = checkGitPolicyForShell(
     ['git reset --hard HEAD'],
     '/repo',
-    'giải thích cái lỗi này: fatal: git reset --hard failed',
+    true,
+    false,
   );
   assert.equal(explainReset?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
   const explainClean = checkGitPolicyForShell(
     ['git clean -fd'],
     '/repo',
-    'giải thích cái lệnh này: git clean -fd đã chạy rồi',
+    true,
+    false,
   );
   assert.equal(explainClean?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-  // Quoting the command inside an error report is not an order either.
-  const quotedClean = checkGitPolicyForShell(
-    ['git clean -fd'],
-    '/repo',
-    'lỗi này nói: git clean -fd đã chạy rồi',
-  );
-  assert.equal(quotedClean?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
-});
-
-test('force push and remote branch delete require an explicit force-push request', () => {
-  assert.equal(
-    checkGitPolicyForShell(['git push --force origin dev'], '/repo', 'push code lên')?.errorCode,
-    'GIT_FORCE_PUSH_NOT_AUTHORIZED',
-  );
-  assert.equal(
-    checkGitPolicyForShell(['git push --delete origin dev'], '/repo', 'push code lên')?.errorCode,
-    'GIT_FORCE_PUSH_NOT_AUTHORIZED',
-  );
-  // An explicit force-push request and a plain push still pass.
-  assert.equal(
-    checkGitPolicyForShell(['git push --force origin dev'], '/repo', 'force push code lên dev'),
-    undefined,
-  );
-  assert.equal(
-    checkGitPolicyForShell(['git push origin dev'], '/repo', 'push code lên'),
-    undefined,
-  );
 });

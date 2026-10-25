@@ -1245,10 +1245,9 @@ export class AgentLoop {
       activeAgents: isSubagent ? 0 : this.agentRegistry.list().filter(agent => agent.id !== this.agentId
         && ['running', 'waiting'].includes(agent.status)).length
     });
-    const submissionCodeChangeRequired = () => !isPlanOrReadOnlyMode() && ((initialTurnClassification.phase !== 'explore' && initialTurnClassification.phase !== 'plan' && initialTurnClassification.requiredCapabilities.includes('edit'))
-      || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT')
-      || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
-      || getTurnCompletionState(session, turn).hasMutations
+    // Observed state only: prose no longer declares that an edit was requested.
+    const submissionCodeChangeRequired = () => !isPlanOrReadOnlyMode() && (
+      getTurnCompletionState(session, turn).hasMutations
       || this.verificationPolicy.hasPendingModifications()
       || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0));
     let submittedSolutionSummary: string | undefined;
@@ -1707,16 +1706,6 @@ export class AgentLoop {
             })
             : candidateProvider.getFunctionDeclarations();
 
-          // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
-          // In explore and plan phases, mutation tools are withheld from model-visible schemas so the LLM physically cannot mutate
-          // before the harness advances the phase.
-          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-              ['run_command', 'git_command'].includes(tool.name)
-              || isOrchestrationTool(tool.name)
-              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
-          }
-
           // Phase-appropriate exploration anchors if present in gate surface
           if (gateToolSurface.visibleToolNames.length > 0) {
             const declarationsByName = new Map(
@@ -1730,12 +1719,15 @@ export class AgentLoop {
             }
           }
 
-          // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
+          // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
+          // In explore and plan phases, mutation tools are withheld from model-visible schemas so the LLM physically cannot mutate
+          // before the harness advances the phase.
           if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+            const descriptorRegistry = new ToolDescriptorRegistry();
             activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
               ['run_command', 'git_command'].includes(tool.name)
               || isOrchestrationTool(tool.name)
-              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
+              || !descriptorRegistry.describe(candidateProvider.get(tool.name) || tool).mutates);
           }
 
           // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn
@@ -4892,15 +4884,8 @@ export class AgentLoop {
 
         const completionState = getTurnCompletionState(session, turn);
         const hasCodeMutations = completionState.hasMutations;
-        const isExplorationOrReadOnly = !hasCodeMutations && (
-          initialTurnClassification.taskClass === 'exploration'
-          || initialTurnClassification.phase === 'explore'
-          || isReadOnlyRequest(turnUserRequest)
-        );
-        const codeChangeRequired = !isExplorationOrReadOnly && (
-          initialTurnClassification.requiredCapabilities.includes('edit')
-          || initialTurnClassification.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE')
-        );
+        // Observed state only: no regex verdict decides whether code was required.
+        const codeChangeRequired = hasCodeMutations;
         const policyDecision = isSubagent
           ? { allow: true }
           : this.finalAnswerGuard.evaluate(finalAnswer, {

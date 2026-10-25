@@ -57,7 +57,7 @@ test('read-only exploration can inspect Git history through guarded run_command'
   const workspace = new Workspace(process.cwd());
   const registry = new ToolRegistry();
   const classification = new ClassificationEngine().classify({
-    request: 'Explain how the current implementation relates to recent commits',
+    request: 'read-only: explain how the current implementation relates to recent commits',
   });
   const decision = new ThisTurnToolGate().decide(classification, registry.getAll());
 
@@ -70,7 +70,7 @@ test('read-only exploration can inspect Git history through guarded run_command'
     decisionId: decision.id,
     allowedToolNames: decision.allowedToolNames,
     allowedToolSetHash: decision.allowedToolSetHash,
-    userRequest: 'Explain how the current implementation relates to recent commits',
+    userRequest: 'read-only: explain how the current implementation relates to recent commits',
   };
   const gitLog = await runner.run('run_command', { command: 'git log -n 5 --stat' }, context);
   assert.equal(gitLog.result.exitCode, 0);
@@ -307,14 +307,13 @@ test('ClassificationEngine scopes an explicit planning request and preserves pla
   assert.equal(secondFileMutation.phase, 'implement', 'subsequent file edit in implement must remain in implement phase');
   assert.ok(secondFileMutation.requiredCapabilities.includes('edit'), 'must retain edit capability for multi-file changes');
 
-  // Bug 4: replace and thay the regex recognition
-  const replaceEn = engine.classify({ request: 'Replace the JWT token verification in auth.ts' });
-  assert.equal(replaceEn.taskClass, 'feature');
-  assert.ok(replaceEn.requiredCapabilities.includes('edit'));
-
-  const replaceVi = engine.classify({ request: 'Thay thế cấu hình cổng kết nối database' });
-  assert.equal(replaceVi.taskClass, 'feature');
-  assert.ok(replaceVi.requiredCapabilities.includes('edit'));
+  // Bug 4: prose no longer implies edit authority; the model-directed default does.
+  for (const request of ['Replace the JWT token verification in auth.ts', 'Thay thế cấu hình cổng kết nối database']) {
+    const classification = engine.classify({ request });
+    assert.equal(classification.taskClass, 'feature', request);
+    assert.equal(classification.phase, 'implement', request);
+    assert.ok(classification.requiredCapabilities.includes('edit'), request);
+  }
 
   // Bug 5: Slash command prefix in read-only analysis
   const slashCommandExploration = engine.classify({ request: '/open-code-review Đánh giá kiến trúc hệ thống' });

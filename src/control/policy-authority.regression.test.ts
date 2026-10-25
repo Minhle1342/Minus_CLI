@@ -24,26 +24,27 @@ test('Git inspection is exposed but readonly permission and phase still deny Git
   assert.equal((await permission.checkPermission('git_command', { subcommand: 'commit', args: ['-m', 'change'] })).allowed, false);
 });
 
-test('explicit execution has execution phase while planning and explanation retain readonly scope', () => {
+test('prose execution verbs are not parsed; the model-directed default carries execution', () => {
   const engine = new ClassificationEngine();
-  for (const request of ['Run once', 'Execute the batch', 'Run npm test', 'Build the project', 'Chạy script này', 'Run test that prints "do not edit code"']) {
+  for (const request of ['Run once', 'Execute the batch', 'Run npm test', 'Build the project', 'Chạy script này']) {
     const classification = engine.classify({ request });
-    assert.equal(classification.phase, 'verify', request);
-    assert.ok(classification.requiredCapabilities.includes('execute'));
-    assert.equal(classification.requiredCapabilities.includes('edit'), false);
-  }
-  for (const request of ['Explain how to run npm test', 'Review this README: "Run npm test"', "Don't edit code, don't run npm test", 'Read-only: run npm test', 'Make a plan to run tests']) {
-    assert.ok(['explore', 'plan'].includes(engine.classify({ request }).phase), request);
+    assert.equal(classification.phase, 'implement', request);
+    assert.ok(classification.requiredCapabilities.includes('execute'), request);
   }
 });
 
-test('readonly or planning deliverables cannot authorize implementation by phase request', async () => {
-  for (const request of ['Review this function', 'Make a plan to fix this function']) {
+test('only explicit read-only/planning directives block implementation transitions', async () => {
+  for (const request of ['read-only: review this function', '/plan fix this function']) {
     const session = new Session();
     const classification = new ClassificationEngine().classify({ request });
     const decision = requestPhaseTransition(session, 1, classification, { targetPhase: 'implement', rationale: 'ready', evidenceRefs: ['src/a.ts'] }, { hasPlan: true, evidenceSufficient: true });
     assert.equal(decision.accepted, false, request);
   }
+  // Prose no longer encodes a hidden "review" contract: the model declares intent.
+  const proseSession = new Session();
+  const prose = new ClassificationEngine().classify({ request: 'Review this function' });
+  assert.equal(requestPhaseTransition(proseSession, 1, prose, { targetPhase: 'implement', rationale: 'ready', evidenceRefs: ['src/a.ts'] }, { hasPlan: true, evidenceSufficient: true }).accepted, true);
+
   let executions = 0;
   const registry = new ToolRegistry();
   registry.register({ name: 'replace_text', description: 'fixture', parameters: { type: 'OBJECT' } as any, execute: async () => { executions++; return {}; } });
@@ -105,7 +106,7 @@ test('enforced binding cannot dispatch a registered root tool or edit outside it
   assert.equal(executions, 0);
 });
 
-test('phase gate excludes effects from exploration/planning and retains authorized edits in implementation', () => {
+test('phase gate excludes file effects in exploration/planning and allows them in implement', () => {
   const registry = new ToolRegistry();
   const gate = new ThisTurnToolGate();
   for (const phase of ['explore', 'plan'] as const) {
@@ -114,53 +115,40 @@ test('phase gate excludes effects from exploration/planning and retains authoriz
     for (const name of ['replace_text', 'apply_patch', 'run_node_script']) assert.equal(decision.allowedToolNames.includes(name), false, `${phase}:${name}`);
     assert.ok(decision.allowedToolNames.includes('run_command'));
   }
-  assert.ok(gate.decide(new ClassificationEngine().classify({ request: 'Fix this function' }), registry.getAll()).allowedToolNames.includes('replace_text'));
+  const neutral = new ClassificationEngine().classify({ request: 'Fix this function' });
+  const implemented = {
+    ...neutral,
+    phase: 'implement' as const,
+    requiredCapabilities: [...neutral.requiredCapabilities, 'edit' as const],
+  };
+  assert.ok(gate.decide(implemented, registry.getAll()).allowedToolNames.includes('replace_text'));
 });
 
-test('mixed review and mutation requests share the classifier mutation vocabulary', () => {
+test('only explicit directives are read-only; prose is model-directed', () => {
+  assert.equal(isReadOnlyRequest('read-only: inspect this'), true);
+  assert.equal(isReadOnlyRequest('/plan fix it'), false);
+  assert.equal(isReadOnlyRequest('Review this function, do not edit code'), true);
   for (const request of ['Review and add tests', 'Inspect and update this function', 'Review then remove the unused method', 'Phân tích rồi thêm kiểm tra', 'Kiểm tra và cập nhật hàm này', 'Review and refactor this method']) {
     assert.equal(isReadOnlyRequest(request), false, request);
-    assert.notEqual(new ClassificationEngine().classify({ request }).reversibility, 'read-only', request);
+    const decision = new ClassificationEngine().classify({ request });
+    assert.equal(decision.phase, 'implement', request);
+    assert.ok(decision.requiredCapabilities.includes('edit'), request);
   }
-  assert.equal(isReadOnlyRequest('Review this function, do not edit code'), true);
 });
 
-test('purpose connectives and punctuation recognize mutation intent in mixed Vietnamese and English requests', () => {
+test('explicit planning directives are the only plan signal', () => {
   const engine = new ClassificationEngine();
-  const mixedRequests = [
+  for (const request of [
     'Kiểm tra để cải tiến Tool guidance',
     'Khảo sát nhằm cải tiến hàm này',
     'Kiểm tra, cải tiến code',
-    'Kiểm tra; sửa lỗi deadlock',
-    'Kiểm tra đồng thời tối ưu hóa performance',
-    'Kiểm tra cũng như cập nhật tài liệu',
     'Inspect in order to fix the bug',
-    'Review so as to improve performance',
-    'Inspect, then fix the bug',
     'Review and edit this file',
-  ];
-
-  for (const request of mixedRequests) {
-    assert.equal(isReadOnlyRequest(request), false, `Should not be read-only: "${request}"`);
-    const decision = engine.classify({ request });
-    assert.notEqual(decision.reversibility, 'read-only', `Should not be read-only reversibility: "${request}"`);
-    assert.ok(decision.requiredCapabilities.includes('edit'), `Must include edit capability: "${request}"`);
+  ]) {
+    assert.equal(engine.classify({ request }).phase, 'implement', request);
   }
-
-  const readOnlyRequests = [
-    'Kiểm tra các điểm cần cải tiến',
-    'Đề xuất các điểm cải tiến',
-    'Kiểm tra nguyên nhân để báo cáo kết quả',
-    'Khảo sát để tìm hiểu nguyên nhân',
-    'Khảo sát hiện trạng hệ thống',
-    'Giải thích cách hoạt động của parser',
-  ];
-
-  for (const request of readOnlyRequests) {
-    assert.equal(isReadOnlyRequest(request), true, `Should be read-only: "${request}"`);
-    const decision = engine.classify({ request });
-    assert.equal(decision.phase, 'explore', `Phase should be explore: "${request}"`);
-    assert.equal(decision.requiredCapabilities.includes('edit'), false, `Must not include edit capability: "${request}"`);
+  for (const request of ['/plan migrate the auth module', '[PLANNING MODE REQUEST]: write a plan']) {
+    assert.equal(engine.classify({ request }).phase, 'plan', request);
   }
 });
 

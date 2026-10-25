@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isReadOnlyRequest, normalizeRequestIntentText, MUTATION_INTENT, hasDelegationIntent, INTENT_CONTINUATION_DELIMITER } from './request-intent.js';
-import { SemanticRouter, type SemanticRouteResult } from './semantic-router.js';
+import { hasDelegationIntent, hasExplicitPlanningDirective, isReadOnlyRequest } from './request-intent.js';
 import { hasNetworkIntent } from './network-intent.js';
 import type { ClassificationDecision, Capability, ControlRisk, TaskClass, TaskComplexity, TaskPhase } from './classification-types.js';
 
@@ -20,232 +19,120 @@ export interface ClassificationInput {
   evidenceScore?: number;
   evidenceThreshold?: number;
   minimumRisk?: ControlRisk;
-  semanticRoute?: SemanticRouteResult;
 }
 
 const riskRank: Record<ControlRisk, number> = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
 
-const mutationIntent = MUTATION_INTENT;
-const bugIntent = /\b(?:bug|error|fail|broken|debug|diagnos|root cause|loi|hong|khong hoat dong|nguyen nhan)\b/i;
-const refactorIntent = /\b(?:refactor|rename|extract|split|move|restructure|tai cau truc)\b/i;
-const releaseIntent = /\b(?:deploy|publish|release|push|production|phat hanh|trien khai production)\b/i;
-const verifyIntent = /\b(?:test|verify|verification|build|lint|typecheck|kiem thu|xac minh|doi chieu)\b/i;
-const exploreIntent = /\b(?:explain|inspect|investigate|review|analy[sz]e|how|why|what|kiem tra|phan tich|danh gia|giai thich|tim hieu)\b/i;
-const planningIntent = /(?:^|\s)\/plan(?:\s|$)|\[planning mode request\]|\b(?:write|create|make|generate)\s+(?:an?\s+)?(?:implementation\s+)?plan\b|lap\s+ke\s*hoach|phan\s+ra\s+(?:task|tac\s+vu|cong\s+viec)/i;
-
+/**
+ * The classifier no longer infers a task from prose. It starts every fresh turn
+ * model-directed (`implement`, edit authority) and only narrows when the harness
+ * observes state (pending mutations, a failed tool, a prior granted phase) or the
+ * user wrote a literal directive (`/plan`, read-only).
+ */
 export class ClassificationEngine {
   classify(input: ClassificationInput): ClassificationDecision {
     const rawPrompt = input.request || input.userPrompt || input.prompt || '';
     // Quoted documents/commands are data, not authorization for execution or edits.
-    const intentPrompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
-    const text = [intentPrompt, input.activeTask, input.activeAcceptance].filter(Boolean).join(' ').trim();
-    const normalizedText = normalizeRequestIntentText(text);
+    const prompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
     const reasons: string[] = [];
-    let taskClass: TaskClass = 'question';
+    const previous = input.previous;
+
+    let taskClass: TaskClass = 'feature';
     let phase: TaskPhase = 'explore';
     let complexity: TaskComplexity = 'small';
-    let risk: ControlRisk = 'R0';
+    let risk: ControlRisk = 'R1';
     let capabilities: Capability[] = ['inspect', 'search', 'memory'];
 
-    const router = SemanticRouter.getInstance();
-    const semanticDecision = input.semanticRoute || router.routeSync(intentPrompt);
-    const readOnlyBySemantic = semanticDecision.route === 'read_only' && (semanticDecision.source === 'fast_path' || semanticDecision.score >= 0.7);
-    const mutationBySemantic = semanticDecision.route === 'mutation' && (semanticDecision.source === 'fast_path' || semanticDecision.score >= 0.7);
-
-    const isReadOnly = (readOnlyBySemantic || isReadOnlyRequest(intentPrompt)) && !mutationBySemantic;
-
-    if (planningIntent.test(normalizedText) || semanticDecision.route === 'planning') {
-      taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
-      complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
-      risk = complexity === 'large' ? 'R3' : 'R2';
+    if (previous && ['plan', 'implement', 'verify', 'release'].includes(previous.phase)) {
+      // Observed state: the harness already granted this phase this turn.
+      taskClass = previous.taskClass;
+      phase = previous.phase;
+      complexity = previous.complexity;
+      risk = previous.risk;
+      capabilities = [...previous.requiredCapabilities];
+      reasons.push('OBSERVED_PHASE_CONTINUATION');
+      if (input.lastToolFailed && phase === 'implement') {
+        reasons.push('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY');
+      }
+      if (input.lastToolFailed && phase === 'plan' && !input.hasPlan) {
+        reasons.push('FAILED_ACTION_PRESERVE_PLAN_CAPABILITY');
+      }
+    } else if (hasExplicitPlanningDirective(prompt)) {
+      taskClass = 'feature';
       phase = 'plan';
+      complexity = 'medium';
+      risk = 'R2';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
       reasons.push('EXPLICIT_PLANNING_INTENT');
-      if (semanticDecision.route === 'planning') {
-        reasons.push('SEMANTIC_ROUTER_PLANNING');
-      }
-    } else if (isReadOnly && !input.hasUnverifiedChanges) {
+    } else if (isReadOnlyRequest(prompt)) {
       taskClass = 'exploration';
-      reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
-      if (readOnlyBySemantic) {
-        reasons.push('SEMANTIC_ROUTER_READ_ONLY');
-      }
-    } else if (releaseIntent.test(normalizedText)) {
-      taskClass = 'release'; phase = 'release'; complexity = 'large'; risk = 'R4';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'git-write', 'network', 'complete'];
-      reasons.push('RELEASE_OR_EXTERNAL_MUTATION');
-    } else if (/^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:(?:run|execute|chay|thuc thi|test|verify|lint|typecheck|bien dich)\b|build\s+(?:the\s+)?(?:project|repo|repository|package)\b)/i.test(normalizeRequestIntentText(intentPrompt))
-      && !/\b(?:ke hoach|plan|task|dag)\b/i.test(normalizedText)
-      && !normalizeRequestIntentText(intentPrompt).split(INTENT_CONTINUATION_DELIMITER).slice(1).some(part => MUTATION_INTENT.test(part))) {
-      taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete'];
-      reasons.push('EXPLICIT_EXECUTION_INTENT');
-    } else if (
-      (input.previous?.phase === 'implement' && verifyIntent.test(normalizedText))
-      || (input.previous?.phase === 'verify' && ['run_command', 'run_test_suite', 'run_node_script', 'get_diagnostics'].includes(input.lastToolName || '') && !input.lastToolFailed)
-      || (input.hasUnverifiedChanges && !mutationIntent.test(normalizedText) && input.previous?.phase !== 'implement')
-    ) {
-      taskClass = input.previous?.taskClass || 'feature'; phase = 'verify'; risk = input.previous?.risk || 'R2';
-      complexity = input.previous?.complexity || 'medium';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete', 'plan', 'edit'];
-      reasons.push(input.hasUnverifiedChanges ? 'UNVERIFIED_MUTATION_EXISTS' : 'VERIFICATION_PHASE_STICKY_UNTIL_COMPLETION');
-    } else if (mutationIntent.test(normalizedText)) {
-      taskClass = refactorIntent.test(normalizedText) ? 'refactor' : bugIntent.test(normalizedText) ? 'bugfix' : 'feature';
-      complexity = /\b(?:architecture|system|migration|multiple|all|kien truc|he thong|lo trinh|toan bo)\b/i.test(normalizedText) ? 'large' : 'medium';
-      risk = complexity === 'large' ? 'R3' : 'R2';
-      if (input.minimumRisk && riskRank[input.minimumRisk] > riskRank[risk]) {
-        risk = input.minimumRisk;
-        reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');
-      }
-
-      const evidenceThreshold = Math.max(1, input.evidenceThreshold || 1);
-      const hasEnoughEvidence = Boolean(
-        input.hasValidatedHypothesis
-        || input.hasDirectEvidence
-        || (input.evidenceScore || 0) >= evidenceThreshold
-      );
-      const requiresEvidenceFirst = (taskClass === 'bugfix' || taskClass === 'refactor')
-        && ['R4', 'R5'].includes(risk)
-        && !hasEnoughEvidence;
-      if (requiresEvidenceFirst) {
-        phase = 'explore';
-        capabilities = ['inspect', 'search', 'plan', 'memory', 'verify', 'edit', 'execute', 'git-read'];
-        reasons.push('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE');
-      } else {
-        phase = input.hasPlan || (risk === 'R3' && input.hasValidatedHypothesis) || complexity !== 'large' ? 'implement' : 'plan';
-        if (phase === 'plan') {
-          capabilities = ['inspect', 'search', 'plan', 'memory'];
-        } else {
-          capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
-        }
-        if ((taskClass === 'bugfix' || taskClass === 'refactor') && hasEnoughEvidence) {
-          reasons.push('PARETO_EVIDENCE_FAST_PATH');
-        }
-        reasons.push(refactorIntent.test(normalizedText) ? 'REFACTOR_INTENT' : 'WORKSPACE_MUTATION_INTENT');
-      }
-    } else if (bugIntent.test(normalizedText)) {
-      taskClass = 'bugfix'; phase = 'explore'; complexity = 'medium'; risk = 'R1';
-      capabilities = ['inspect', 'search', 'execute', 'verify', 'memory', 'edit', 'plan', 'git-read'];
-      reasons.push('BUG_REQUIRES_DIAGNOSIS');
-    } else if (verifyIntent.test(normalizedText)) {
-      taskClass = 'exploration'; phase = 'verify'; complexity = 'small'; risk = 'R1';
-      capabilities = ['inspect', 'execute', 'verify', 'git-read'];
-      if (input.hasPlan) {
-        capabilities.push('plan');
-      }
-      reasons.push('VERIFICATION_INTENT');
-    } else if (exploreIntent.test(normalizedText)) {
-      taskClass = 'exploration';
-      reasons.push('READ_ONLY_EXPLORATION');
-    } else {
-      taskClass = 'feature';
       phase = 'explore';
-      risk = 'R1';
+      complexity = 'small';
+      risk = 'R0';
+      capabilities = ['inspect', 'search', 'memory'];
+      reasons.push('READ_ONLY_EXPLANATION_OR_PROPOSAL');
+    } else if (input.hasUnverifiedChanges) {
+      taskClass = previous?.taskClass ?? 'feature';
+      phase = 'verify';
+      complexity = previous?.complexity ?? 'medium';
+      risk = previous?.risk ?? 'R2';
+      capabilities = ['inspect', 'execute', 'verify', 'git-read', 'complete', 'plan', 'edit'];
+      reasons.push('UNVERIFIED_MUTATION_EXISTS');
+    } else if (input.lastToolFailed) {
+      phase = 'explore';
       capabilities = ['inspect', 'search', 'plan', 'memory'];
-      reasons.push('LANGUAGE_AGNOSTIC_ACTION_DEFAULT');
+      reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
+    } else {
+      // No prose inference: the model decides what to do. Hard safety policy,
+      // approvals, and explicit directives still narrow this authority.
+      phase = 'implement';
+      complexity = 'medium';
+      risk = 'R2';
+      capabilities = ['inspect', 'search', 'plan', 'memory', 'edit', 'execute', 'verify', 'git-read', 'complete'];
+      reasons.push('MODEL_DIRECTED_DEFAULT');
+    }
+
+    if (input.minimumRisk && riskRank[input.minimumRisk] > riskRank[risk]) {
+      risk = input.minimumRisk;
+      reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');
     }
 
     // The main LLM may be asked to orchestrate child agents explicitly; surface the
     // capability so gate/prompt policies treat the turn as delegation, not a plain task.
-    if (hasDelegationIntent(normalizedText)) {
+    if (hasDelegationIntent(prompt)) {
       if (!capabilities.includes('delegate')) capabilities.push('delegate');
       if (risk === 'R0') risk = 'R1';
       reasons.push('EXPLICIT_DELEGATION_INTENT');
     }
 
-    const needsNetwork = hasNetworkIntent(normalizedText) || hasNetworkIntent(rawPrompt);
+    // A pasted URL is a fact, not an inferred intent; it is the only network signal.
+    const needsNetwork = hasNetworkIntent(rawPrompt);
     if (needsNetwork && !capabilities.includes('network')) {
       capabilities.push('network');
       if (risk === 'R0') risk = 'R1';
-      reasons.push('NETWORK_INFORMATION_REQUIRED');
+      reasons.push('NETWORK_URL_PRESENT');
     }
     if (complexity === 'large' && !capabilities.includes('delegate')) {
       capabilities.push('delegate');
       reasons.push('PARALLEL_DELEGATION_ELIGIBLE');
     }
 
-    const mentionsSymbol = /\b(?:ham|function|class|method|interface|type|symbol|call graph|caller|callee|blast radius)\b/i.test(normalizedText)
-      || /\b[a-zA-Z0-9_]{3,}\.[a-zA-Z0-9_]{2,}\b/.test(normalizedText);
-    if (mentionsSymbol && (taskClass === 'exploration' || phase === 'explore')) {
-      reasons.push('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED');
-    }
-
-    if (input.lastToolFailed && input.previous && input.previous.phase !== 'release') {
-      const preserveMutationCapability = mutationIntent.test(normalizedText)
-        && input.previous.requiredCapabilities.includes('edit')
-        && (input.previous.phase === 'implement' || input.previous.phase === 'verify');
-      const preservePlanCapability = input.previous.phase === 'plan'
-        || input.previous.requiredCapabilities.includes('plan');
-
-      if (preserveMutationCapability) {
-        phase = 'implement';
-        capabilities = Array.from(new Set<Capability>([
-          ...input.previous.requiredCapabilities,
-          'inspect',
-          'search',
-          'edit',
-          'execute',
-          'verify',
-        ]));
-        reasons.push('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY');
-      } else if (preservePlanCapability && !input.hasPlan) {
-        phase = 'plan';
-        capabilities = Array.from(new Set<Capability>([
-          'inspect',
-          'search',
-          'plan',
-          'memory',
-        ]));
-        reasons.push('FAILED_ACTION_PRESERVE_PLAN_CAPABILITY');
-      } else {
-        phase = 'explore';
-        capabilities = Array.from(new Set<Capability>([
-          'inspect',
-          'search',
-          'memory',
-          'plan',
-          ...(risk === 'R0' ? [] : ['execute' as Capability]),
-        ]));
-        reasons.push('FAILED_ACTION_RECLASSIFY_TO_EXPLORE');
-      }
-    }
-
-    if (input.minimumRisk) {
-      if (riskRank[input.minimumRisk] > riskRank[risk]) {
-        risk = input.minimumRisk;
-        reasons.push('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR');
-      }
-    }
-
-    const confidence = text.length < 8 ? 0.55 : reasons.includes('CONSERVATIVE_READ_ONLY_DEFAULT') ? 0.65 : 0.9;
-    const stable = JSON.stringify({ taskClass, phase, complexity, risk, capabilities, text: normalizedText });
+    const confidence = prompt.trim().length < 8 ? 0.55 : 0.9;
+    const stable = JSON.stringify({ taskClass, phase, complexity, risk, capabilities, text: prompt.trim() });
     return {
       id: `class-${createHash('sha256').update(stable).digest('hex').slice(0, 16)}`,
       version: 1,
       taskClass,
       phase,
       complexity,
-      externality: taskClass === 'release' ? 'external-state' : needsNetwork ? 'network' : 'local',
+      externality: needsNetwork ? 'network' : 'local',
       reversibility: (risk === 'R0' || phase === 'plan') ? 'read-only' : risk >= 'R4' ? 'hard-to-reverse' : 'reversible',
       risk,
       requiredCapabilities: capabilities,
       confidence,
-      fastPath: complexity === 'trivial'
-        || (risk === 'R0' && !input.hasPlan)
-        || Boolean(input.hasDirectEvidence && (risk === 'R1' || risk === 'R2')),
+      fastPath: complexity === 'trivial' || (risk === 'R0' && !input.hasPlan),
       reasonCodes: reasons,
       createdAt: new Date().toISOString(),
     };
-  }
-
-  async classifyAsync(input: ClassificationInput): Promise<ClassificationDecision> {
-    const rawPrompt = input.request || input.userPrompt || input.prompt || '';
-    if (!input.semanticRoute && rawPrompt) {
-      const intentPrompt = rawPrompt.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ');
-      const router = SemanticRouter.getInstance();
-      const semanticRoute = await router.routeAsync(intentPrompt);
-      return this.classify({ ...input, semanticRoute });
-    }
-    return this.classify(input);
   }
 }

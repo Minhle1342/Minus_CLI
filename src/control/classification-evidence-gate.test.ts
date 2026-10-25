@@ -2,24 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ClassificationEngine } from './classification-engine.js';
 
-test('R2 bugfix skips the evidence gate and goes straight to implement', () => {
+test('prose alone defers to the model instead of inspecting words', () => {
   const engine = new ClassificationEngine();
   const decision = engine.classify({ request: 'Fix null pointer bug in auth.ts' });
-  assert.equal(decision.taskClass, 'bugfix');
   assert.equal(decision.phase, 'implement');
-  assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
+  assert.ok(decision.requiredCapabilities.includes('edit'));
+  assert.ok(decision.reasonCodes.includes('MODEL_DIRECTED_DEFAULT'));
 });
 
-test('R3 large work requires a plan before implementation', () => {
-  const engine = new ClassificationEngine();
-  const decision = engine.classify({ request: 'Refactor the authentication system architecture across all modules' });
-  assert.equal(decision.taskClass, 'refactor');
+test('a risk floor raises risk without inferring a task class', () => {
+  const decision = new ClassificationEngine().classify({
+    request: 'Refactor the authentication system architecture across all modules',
+    minimumRisk: 'R3',
+  });
   assert.equal(decision.risk, 'R3');
-  assert.equal(decision.phase, 'plan');
-  assert.ok(!decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
+  assert.equal(decision.phase, 'implement');
+  assert.ok(decision.reasonCodes.includes('HYPOTHESIS_BLAST_RADIUS_RISK_FLOOR'));
 });
 
-test('an explicit planning request enters plan phase', () => {
+test('an explicit planning directive enters plan phase', () => {
   const decision = new ClassificationEngine().classify({
     request: '[PLANNING MODE REQUEST]: Create a plan to refactor the authentication system architecture.',
   });
@@ -28,44 +29,32 @@ test('an explicit planning request enters plan phase', () => {
   assert.ok(decision.reasonCodes.includes('EXPLICIT_PLANNING_INTENT'));
 });
 
-test('a planning-only request enters plan phase without mutation language', () => {
-  const decision = new ClassificationEngine().classify({ request: 'Make a plan for investigating the authentication flow.' });
+test('/plan enters plan phase', () => {
+  const decision = new ClassificationEngine().classify({ request: '/plan migrate the auth module' });
   assert.equal(decision.phase, 'plan');
-  assert.equal(decision.taskClass, 'feature');
+  assert.equal(decision.requiredCapabilities.includes('edit'), false);
 });
 
-test('R3 large refactor fast-paths to implement with an accepted plan', () => {
-  const decision = new ClassificationEngine().classify({
-    request: 'Refactor the authentication system architecture across all modules',
-    hasPlan: true,
-  });
-  assert.equal(decision.risk, 'R3');
-  assert.equal(decision.phase, 'implement');
-});
-
-test('R4 bugfix still requires evidence before implementation', () => {
-  const decision = new ClassificationEngine().classify({
-    request: 'Refactor the authentication system architecture across all modules',
-    minimumRisk: 'R4',
-  });
-  assert.equal(decision.risk, 'R4');
+test('an explicit read-only directive keeps the turn read-only', () => {
+  const decision = new ClassificationEngine().classify({ request: 'read-only: explain the auth flow' });
   assert.equal(decision.phase, 'explore');
-  assert.ok(decision.reasonCodes.includes('PARETO_UNCERTAINTY_REQUIRES_EVIDENCE'));
+  assert.equal(decision.risk, 'R0');
+  assert.equal(decision.requiredCapabilities.includes('edit'), false);
+  assert.ok(decision.reasonCodes.includes('READ_ONLY_EXPLANATION_OR_PROPOSAL'));
 });
 
-test('R3 bugfix with validated hypothesis takes the fast path', () => {
+test('an observed implement phase is sticky across steps', () => {
   const engine = new ClassificationEngine();
-  const decision = engine.classify({
-    request: 'Refactor the authentication system architecture across all modules',
-    hasValidatedHypothesis: true,
-  });
+  const neutral = engine.classify({ request: 'Fix null pointer bug in auth.ts' });
+  const decision = engine.classify({ request: 'Fix null pointer bug in auth.ts', previous: neutral });
   assert.equal(decision.phase, 'implement');
-  assert.ok(decision.reasonCodes.includes('PARETO_EVIDENCE_FAST_PATH'));
+  assert.ok(decision.requiredCapabilities.includes('edit'));
+  assert.ok(decision.reasonCodes.includes('OBSERVED_PHASE_CONTINUATION'));
 });
 
-test('ordinary R2 feature work is unaffected', () => {
-  const engine = new ClassificationEngine();
-  const decision = engine.classify({ request: 'Add a login button to the header' });
-  assert.equal(decision.taskClass, 'feature');
-  assert.equal(decision.phase, 'implement');
+test('pending mutations force the verify phase', () => {
+  const decision = new ClassificationEngine().classify({ request: 'Continue', hasUnverifiedChanges: true });
+  assert.equal(decision.phase, 'verify');
+  assert.ok(decision.requiredCapabilities.includes('edit'));
+  assert.ok(decision.reasonCodes.includes('UNVERIFIED_MUTATION_EXISTS'));
 });

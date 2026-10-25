@@ -1,4 +1,4 @@
-/** Scope the user's deliverable separately from verbs mentioned inside the code being discussed. */
+/** Lowercase + strip diacritics so literal directives match regardless of casing. */
 export function normalizeRequestIntentText(request: string): string {
   return request
     .normalize('NFD')
@@ -8,27 +8,30 @@ export function normalizeRequestIntentText(request: string): string {
     .trim();
 }
 
-/** Shared action vocabulary for classification and mixed read/action requests. */
-export const MUTATION_INTENT = /\b(?:implement|fix|change|modify|edit|update|replace|create|delete|rename|refactor|migrate|upgrade|add|remove|write|patch|build|develop|scaffold|improve|optimize|resolve|remedy|sua|chinh sua|khac phuc|toi uu|nang cap|giai quyet|trien khai|thuc hien|thuc thi|tien hanh|bat dau thuc hien|cap nhat|thay the|tao|xoa|doi ten|tich hop|bo sung|them|cai tien|ap dung|viet code|viet|lap trinh|xay dung|thiet ke|dung trang|lam web|tao file|viet script)\b/i;
-
-/** Delimiters separating sequential, purpose, or co-occurrence clauses in mixed requests. */
-export const INTENT_CONTINUATION_DELIMITER = /\b(?:and then|then|and|sau do|roi|va|de(?!\s+(?:xuat|nghi|cap|tai|muc))|nham|dong thoi|cung nhu|in order to|so as to)\b|[,;]/i;
+/**
+ * Explicit read-only directives only. A turn is read-only when the user wrote a
+ * literal constraint ("read-only", "chỉ đọc", "do not edit"), never because the
+ * prose looked like a question. Semantics are the model's job; the harness only
+ * parses directives the user actually wrote.
+ */
+export function isReadOnlyRequest(request?: string | null): boolean {
+  if (!request) return false;
+  const text = normalizeRequestIntentText(request);
+  // Literal commands whose contract is read-only.
+  if (/(?:^|[\s,;])(?:\/read-?only|\/open-code-review|\/code-reviewer|\/bug-hunter|--read-only)(?=$|[\s,;])/i.test(text)) return true;
+  return /\b(?:read[ -]only|chi doc|do not (?:edit|modify|change)|don['’]t (?:edit|modify|change))\b/.test(text);
+}
 
 /** Explicit ask to hand work to child agents (main LLM stays the orchestrator). */
-export function hasDelegationIntent(request: string): boolean {
+export function hasDelegationIntent(request?: string | null): boolean {
+  if (!request) return false;
   const text = normalizeRequestIntentText(request);
-  return /\b(?:sub[\s-]?agents?|multi[\s-]?agents?|delegat\w*|orchestrat\w*|brainstorm|swarm|parallel\s+agents?|(?:spawn|cho|dung|use|run|chay)\s+(?:\d+\s+)?agents?|agents?\s+(?:team|pool|swarm))\b|phan\s+(?:ra|task|cong|chia)|chia\s+(?:viec|task)|giao\s+(?:viec|task|cho\s+(?:\d+\s+)?agent)|uy\s+thac|dieu\s+phoi/.test(text);
+  return /\b(?:sub[\s-]?agents?|multi[\s-]?agents?|delegat\w*|orchestrat\w*|swarm|parallel\s+agents?|agents?\s+(?:team|pool|swarm)|(?:spawn|cho|dung|use|run|chay)\s+(?:\d+\s+)?agents?|agents?\s+(?:song song|parallel))\b|uy\s+thac|giao\s+(?:viec|task)|dieu\s+phoi|chia\s+(?:viec|task)|phan\s+(?:ra|chia)\s+(?:task|cong\s+viec)/.test(text);
 }
 
-export function isReadOnlyRequest(request: string): boolean {
-  const text = normalizeRequestIntentText(request);
-  if (/\b(?:read[ -]only|chi doc|khong (?:sua|chinh sua|thay doi) (?:code|ma|file)|do not (?:edit|modify|change)|don['’]t (?:edit|modify|change))\b/.test(text)) return true;
-  // Bỏ qua các tiền tố slash commands như /bug-hunter, /open-code-review, /code-reviewer
-  const stripped = text.replace(/^\s*(?:\/[a-z0-9_-]+\s*)+/i, '');
-  const asksExplanation = /^(?:(?:please|can you|could you|hay|ban hay)\s+)?(?:explain|describe|review|compare|analy[sz]e|inspect|investigate|suggest|propose|recommend|how|why|what|where|explore|chan doan|giai thich|mo ta|kiem tra|bao cao|phan tich|danh gia|so sanh|de xuat|goi y|tai sao|vi sao|co che|cach|tim hieu|khao sat|nguyen nhan|ly do|xem xet|xem|cho biet|nghien cuu)\b/.test(stripped);
-  if (!asksExplanation) return false;
-  // Mixed requests that explicitly ask us to implement the proposal still need mutation evidence.
-  const continuations = stripped.split(INTENT_CONTINUATION_DELIMITER).slice(1);
-  return !continuations.some((part) => MUTATION_INTENT.test(part.replace(/^\s*(?:please|hay)\s+/, '')));
+/** Literal `/plan` command or the planning-mode marker; not a prose heuristic. */
+export function hasExplicitPlanningDirective(request?: string | null): boolean {
+  if (!request) return false;
+  return /(?:^|\s)\/plan(?:\s|$)/i.test(request)
+    || /\[planning mode request\]/i.test(request);
 }
-

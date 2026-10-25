@@ -9,20 +9,19 @@ import { Workspace } from '../workspace/workspace.js';
 import { ClassificationEngine } from './classification-engine.js';
 import { isReadOnlyRequest, normalizeRequestIntentText } from './request-intent.js';
 
-test('Vietnamese mutation requests retain edit capability after an operational failure', () => {
+test('observed implement phase retains edit capability after an operational failure', () => {
   const engine = new ClassificationEngine();
   const request = 'Bổ sung thêm những điểm còn thiếu và thực thi cải tiến';
-  const initial = engine.classify({ request });
+  const neutral = engine.classify({ request });
 
   assert.equal(normalizeRequestIntentText('Thực thi cải tiến'), 'thuc thi cai tien');
   assert.equal(isReadOnlyRequest(request), false);
-  assert.equal(initial.taskClass, 'feature');
-  assert.equal(initial.phase, 'implement');
-  assert.ok(initial.requiredCapabilities.includes('edit'));
+  assert.equal(neutral.phase, 'implement');
+  assert.ok(neutral.requiredCapabilities.includes('edit'));
 
   const recovered = engine.classify({
     request,
-    previous: initial,
+    previous: neutral,
     lastToolName: 'run_command',
     lastToolFailed: true,
   });
@@ -32,12 +31,11 @@ test('Vietnamese mutation requests retain edit capability after an operational f
   assert.ok(recovered.reasonCodes.includes('FAILED_ACTION_PRESERVE_MUTATION_CAPABILITY'));
 });
 
-test('read-only Vietnamese investigations remain read-only', () => {
+test('an explicit read-only directive keeps Vietnamese investigations non-mutating', () => {
   const classification = new ClassificationEngine().classify({
-    request: 'Kiểm tra nguyên nhân gây ngắt runtime và báo cáo kết quả',
+    request: 'chỉ đọc: kiểm tra nguyên nhân gây ngắt runtime và báo cáo kết quả',
   });
 
-  assert.equal(classification.taskClass, 'exploration');
   assert.equal(classification.phase, 'explore');
   assert.equal(classification.requiredCapabilities.includes('edit'), false);
 });

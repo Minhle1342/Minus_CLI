@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { detectExplicitGitMutationIntent, normalizeIntentText } from './git-intent.js';
 import { parseShellAst } from '../security/shell-ast-parser.js';
 
@@ -147,6 +146,10 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   return [...names];
 }
 
+/**
+ * `git add` used to be restricted to literal paths; authorization is now the
+ * approval result, so only read commands bypass it.
+ */
 export function isGitCommandAuthorized(
   userRequest: string | undefined,
   classification: GitCommandClassification,
@@ -157,36 +160,6 @@ export function isGitCommandAuthorized(
   // unrelated message ("explain this file") can never wipe the worktree.
   return classification.risk !== 'destructive'
     || detectExplicitGitCommandNames(userRequest).includes(classification.subcommand);
-}
-
-/**
- * `git add` is only allowed to stage literal, workspace-relative paths.
- * Broad selectors/options (`-A`, `--all`, `.`, globs, pathspec magic) remain
- * blocked even when the user authorized a commit — except the plain
- * whole-tree selectors below when a commit was explicitly requested.
- */
-const BROAD_ADD_WHOLE_TREE = new Set(['-A', '--all', '.', './']);
-
-/** Whole-tree `git add -A/.` with an explicit commit request (no wildcards/pathspec). */
-export function isBroadAddWithCommitIntent(args: string[], userRequest?: string): boolean {
-  if (!detectExplicitGitMutationIntent(userRequest).commit) return false;
-  const relevant = args[0] === '--' ? args.slice(1) : args;
-  if (!relevant.some((arg) => BROAD_ADD_WHOLE_TREE.has(arg.trim()))) return false;
-  return !relevant.some((arg) => {
-    const value = arg.trim();
-    return /[*?[\]!]/.test(value) || value.startsWith(':') || value.startsWith('!');
-  });
-}
-export function isExplicitGitAddPathList(args: string[]): boolean {
-  const paths = args[0] === '--' ? args.slice(1) : args;
-  if (paths.length === 0) return false;
-  return paths.every((candidate) => {
-    const value = candidate.trim();
-    if (!value || value !== candidate || value.startsWith('-') || value.startsWith(':')) return false;
-    if (path.isAbsolute(value) || /[*?!\[\]]/.test(value)) return false;
-    const segments = value.split(/[\\/]+/);
-    return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
-  });
 }
 
 /** Read flags that make a git config invocation non-mutating by themselves. */
@@ -290,17 +263,5 @@ function isDestructiveInvocation(command: string, args: string[], firstArg?: str
 
 function deny(errorCode: string, error: string): { allowed: false; errorCode: string; error: string } {
   return { allowed: false, errorCode, error };
-}
-
-export function pushArgsTargetBranch(args: string[], requestedBranch: string): boolean {
-  // A dry run pushes nothing: branch targeting is moot, not a violation.
-  if (args.some((arg) => arg === '--dry-run' || arg === '-n')) return true;
-  const positional = args.filter((arg) => !arg.startsWith('-'));
-  // `git push [<remote>]` with no refspec relies on the upstream default.
-  if (positional.length < 2) return true;
-  return positional.slice(1).some((refspec) => refspec === requestedBranch
-    || refspec === 'HEAD'
-    || refspec === `HEAD:${requestedBranch}`
-    || refspec.endsWith(`:${requestedBranch}`));
 }
 

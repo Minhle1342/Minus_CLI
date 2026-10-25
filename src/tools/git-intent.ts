@@ -55,34 +55,6 @@ export function isGitMutationAuthorized(
   return detectExplicitGitMutationIntent(userRequest)[operation];
 }
 
-export function isForcePushAuthorized(userRequest?: string): boolean {
-  const normalized = normalizeIntentText(userRequest || '');
-  // Direct push mention rather than the stricter isDirectRequest gate, so
-  // "force push lên nhánh dev" is authorizable; discussion requests still die
-  // at the capability filter in git-command-policy.
-  const mentionsPush = /\bpush(?:ing|ed)?\b|\bday(?:\s+code)?\s+len\b|\bdua(?:\s+code)?\s+len\b/.test(normalized);
-  const negated = /\b(?:do not|dont|without|khong|dung)\s+(?:git\s+)?push\b/.test(normalized);
-  return mentionsPush && !negated
-    && /\b(?:force(?:-with-lease)?\s+push|push\s+(?:voi\s+)?force|ep\s+push)\b/.test(normalized);
-}
-
-/** Push args that rewrite or delete remote history, needing isForcePushAuthorized. */
-export function hasForceOrDeletePushArg(args: string[]): boolean {
-  return args.some((arg) =>
-    arg === '--force' || arg === '-f' || arg.startsWith('--force-with-lease') || arg === '--delete' || arg === '-d');
-}
-
-export function extractRequestedGitBranch(userRequest?: string): string | undefined {
-  const normalized = normalizeIntentText(userRequest || '');
-  if (!detectExplicitGitMutationIntent(userRequest).push) return undefined;
-  const match = normalized.match(/\b(?:branch|nhanh)\s+["']?([a-z0-9._/-]+)/i)
-    || normalized.match(/\blen\s+(?:nhanh\s+|branch\s+)?["']?([a-z0-9._/-]+)/i);
-  const branch = match?.[1]?.toLowerCase();
-  // Generic words after "lên" name no branch ("đẩy code lên repo" must not pin branch "repo").
-  if (!branch || /^(repo|repository|remote|github|gitlab|code|ma|nguon|len|lenh)$/.test(branch)) return undefined;
-  return branch;
-}
-
 export function normalizeIntentText(value: string): string {
   return value
     .normalize('NFD')

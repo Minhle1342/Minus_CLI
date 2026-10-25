@@ -6,7 +6,7 @@ import { ClassificationEngine } from './classification-engine.js';
 
 const tool = (name: string) => ({ name, description: name, parameters: { type: 'object', properties: {} } }) as any;
 const cwd = process.cwd();
-const exploreDecision = new ClassificationEngine().classify({ request: 'hãy phân task cho sub agent', hasPlan: false });
+const exploreDecision = new ClassificationEngine().classify({ request: 'read-only: hãy phân task cho sub agent', hasPlan: false });
 
 test('orchestration tools stay usable before implementation, file mutators do not', () => {
   for (const name of ['delegate_task', 'delegate_agent', 'spawn_agent', 'message_agent', 'schedule_dag_parallel']) {

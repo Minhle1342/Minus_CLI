@@ -1,7 +1,6 @@
 import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
-import { hasNetworkIntent } from '../control/network-intent.js';
 import { hasDelegationIntent } from '../control/request-intent.js';
 import { batchSubwordSimilarity } from '../native/semantic-batch.js';
 import { ToolTransitionGraph } from './tool-transition-graph.js';
@@ -210,8 +209,6 @@ export class ToolRetriever {
     const isMultiAgentQuery = hasDelegationIntent(cleanedQuery);
     // Shared-context tools are not delegation, but the same category: keep their own signal.
     const isSharedContextQuery = /\b(shared[\s_-]?context|agent[\s_-]?event|blackboard|event_bus|occ|lock|state)\b/i.test(lowerQ);
-    const isNetworkQuery = hasNetworkIntent(cleanedQuery);
-    const isBrowserQuery = /\b(browser|playwright|spa|login|form|click|navigate|snapshot|screenshot|e2e|dynamic|javascript-render)\b/i.test(lowerQ);
     const isMemoryQuery = /\b(memory|remember|recall|knowledge|lesson|insight|episodic)\b/i.test(lowerQ);
     // Reverse-engineering intent: REA tools are dynamic and numerous, so force them
     // into the visible set only when the request actually asks for binary analysis.
@@ -230,8 +227,6 @@ export class ToolRetriever {
       if (cat === 'game_development' && !isGameQuery) return false;
       if (tool.name === 'schedule' && !isScheduleQuery) return false;
       if (cat === 'multi_agent' && !isMultiAgentQuery && !isSharedContextQuery) return false;
-      if (cat === 'network' && !isNetworkQuery) return false;
-      if (cat === 'browser' && !isNetworkQuery && !isBrowserQuery) return false;
       if (cat === 'memory' && !isMemoryQuery) return false;
       // Single-strong-tool steering: query structural/flow + graph sẵn sàng →
       // codegraph_explore làm primary, prune tool code-intel trùng lắp.
