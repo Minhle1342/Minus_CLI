@@ -10,61 +10,40 @@ import { resolvePatchFormatSpec, resolveVerifyPlaybookPrompt } from './tools.js'
 export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-ADAPTIVE INVESTIGATION)]:
 - Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
 - Tool Strategy by Use Case:
-  * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
-  * Fast Lexical Search: Use \`search_text\` for ripgrep search (file names & content regex) with scoped path; use \`search_codebase_fast\` (global only, no path param, filter via filePattern) when repo is unindexed or searching literal tokens/configs.
-  * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
-  * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout; use \`get_diagnostics\` to capture baseline compiler errors.
-  * Parallel Inspection: Emit multiple read-only tool calls (read_file, search_text, inspect_symbol, get_diagnostics) in a single turn to run them concurrently in parallel.
-- Pareto Rule: Investigate more when uncertainty or blast radius is high. Once evidence is sufficient, call \`request_phase_transition\` to plan or implement; wait for the next turn before editing.
-- Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
+  * Structure & Layout: Use \`list_files\` to explore directory layout.
+  * Search: Use \`run_command\` (with ripgrep/grep or git log) to find symbols, occurrences, or commit history.
+  * Source Inspection: Use \`read_file\` to examine exact lines and obtain contentHash.
+  * Parallel Inspection: Emit multiple read-only tool calls (read_file, list_files) in a single turn to run them concurrently in parallel.
+- Evidence Rule: Inspect the exact target lines with \`read_file\` before editing.`;
 
 export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (READ-ONLY INVESTIGATION - R0 FAST PATH)]:
 - Goal: Gather relevant context and directly answer or explain with zero mutation risk.
-- Tool Strategy by Use Case:
-  * Semantic Code Graph: Call \`codegraph_explore\` FIRST for structural questions ("how does X work", flow X→Y, architecture survey). Use \`codegraph_search\` for fast FTS5 symbol lookup.
-  * Fast Lexical Search: Use \`search_text\` for ripgrep search (file names & content regex) with scoped path; use \`search_codebase_fast\` (global only, no path param, filter via filePattern) when repo is unindexed or searching literal tokens/configs.
-  * Deep Symbol Context: Use \`get_symbol_context_360\` for complete symbol panorama (AST definitions, signatures, callers, callees, referencing files, related tests); use \`inspect_symbol\` and \`query_call_graph\` for targeted hops.
-  * Source Inspection & Baseline: Use \`read_file\` to examine exact lines and obtain contentHash; use \`list_files\` to explore directory layout.
-  * Parallel Inspection: Emit multiple read-only tool calls in a single turn to execute them concurrently in parallel.
-- Read-Only Rule: Answer directly once context is understood. No phase transition, plan, edit, or test execution required.`;
+- Tool Strategy:
+  * Structure: Use \`list_files\` to explore directory layout.
+  * Source Inspection: Use \`read_file\` to examine exact lines.
+  * Search: Use \`run_command\` to search codebase.
+- Read-Only Rule: Answer directly once context is understood. No mutation or test execution required.`;
 
-export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION & IMPACT ASSESSMENT)]:
-- Goal: Analyze blast radius and module boundaries, then break down complex changes into 2-5 atomic milestones with \`create_plan\`.
-- Read-Only Scope: In Plan / read-only mode, survey and plan ONLY — no edits, no test execution. Write verification steps as commands to run later; do not run them now. Never call \`update_plan_task\` or \`submit_solution\` in Plan mode.
-- Pre-Plan Impact & Architecture Exploration:
-  * Call \`codegraph_impact\` or \`analyze_impact\` to quantify caller blast radius and risk (LOW/MEDIUM/HIGH/CRITICAL) before planning modifications.
-  * Call \`get_architecture_topology\` to inspect module layer boundaries and prevent circular dependencies.
-  * Call \`codegraph_explore\` or \`get_symbol_context_360\` to clarify dependencies and interface contracts.
-  * Use \`search_text\`, \`search_codebase_fast\`, \`list_files\`, \`inspect_symbol\`, or \`read_file\` to confirm config or reference lines.
-  * Only call tools present in your available tool list. If no codegraph index exists (codegraph_* tools absent), fall back to \`search_text\` / \`search_codebase_fast\` / \`read_file\` — never invent or hallucinate tool calls.
-- Milestone Structuring:
-  * Sequence: [Inspect / Isolate -> Surgical Mutation -> Verification Ladder & Diff Audit].
-  * Dependency: Specify explicit \`dependsOn\` to identify parallelizable sub-tasks.
-  * Stop Condition: After recording the plan with a single \`create_plan\` call, present it to the user and stop. Then call \`request_phase_transition\` to implement before editing.`;
+export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
+- Goal: Survey codebase and plan surgical changes.
+- Read-Only Scope: Survey and plan ONLY — no edits or premature mutations.
+- Tools: Use \`list_files\` and \`read_file\` to confirm configurations, types, and logic before modifying.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
 - Primary Mutation Tools:
-  * Use \`apply_patch\` (Unified Diff --- a/... +++ b/...) for multi-file or multi-hunk edits (always inspect targets first).
-  * Use \`replace_text\` or \`replace_file_content\` with \`expectedFileHash\` and \`expectedOccurrences: 1\` for single-block edits.
-  * File Management: Use \`create_file\` for new files; ${FILE_MUTATION_SAFETY_RULE}
-- In-Flight Safety & Coherence Anchors:
+  * Use \`replace_text\` with \`expectedFileHash\` and unique anchor lines for modifying existing files.
+  * Use \`write_file\` for creating new files or full file rewrites; ${FILE_MUTATION_SAFETY_RULE}
+- In-Flight Safety:
   * Inspect target lines with \`read_file\` for contentHash and line offsets before modifying.
-  * Use \`get_symbol_context_360\` if you need to double-check a dependency's signature, callers, or related tests during implementation.
-  * Use \`get_diagnostics\` immediately after modifying each file to catch in-memory type/syntax errors before moving forward.
-  * Use \`read_file\` to refresh line numbers and verify clean state after a patch.
-- Pareto Rule: Use the smallest coherent write-set that fully restores the invariant. Avoid unrelated or speculative rewrites.
-- Return to Plan: If the scope outgrows current understanding and nothing has been edited yet, call \`request_phase_transition\` to plan with rationale+evidenceRefs instead of guessing; wait for the next turn before using plan tools.`;
+  * Avoid unrelated or speculative rewrites.`;
 
-export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION LADDER & DIFF AUDIT)]:
-- Goal: Verify the active acceptance criteria with risk-proportional checks after the latest mutation. Reuse current evidence; do not claim unexecuted checks passed.
-- Follow the selected verification contract: localized R1 may use clean diagnostics; R2 may require typecheck/build and scoped diff; higher-risk changes require the targeted evidence specified by the task contract. Respect the user's verification scope and test limits.
- - Inspect defined scripts (package.json scripts or cargo/go equivalent) plus the detected build/test command first and run exactly that command. Do not guess script names or monorepo flags.
-- Review the expected workspace diff without requiring a clean working tree or discarding existing user work. Git inspection does not authorize stage, commit, push or rollback.
-- Tier discipline: run the tier named in DYNAMIC VERIFICATION (diagnostics/typecheck/targeted/full) — a lighter check never satisfies a heavier requirement.
-- Impacted suites: when DYNAMIC VERIFICATION names pending suites, run each of them (or the full suite) — one suite passing does not discharge the others.
-- Flaky test handling: You are NOT required to run full test suites or test commands if they are known to be flaky, unstable, or prone to environmental failure; static diagnostics, typecheck, or targeted verification are sufficient when test execution is unreliable.
-- Completion Gate: Call submit_solution with the observed evidence and disclose any verification limitation. A successful isolated check does not prove every acceptance criterion or workflow stage is complete.`;
+export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION)]:
+- Goal: Verify the changes with empirical tests and diff review.
+- Verification Tools:
+  * Use \`run_command\` to run builds (e.g. \`npm run build\`, \`tsc\`) and test suites (\`npm test\`, \`cargo test\`, \`pytest\`).
+  * Use \`run_command "git diff"\` to inspect working tree changes.
+- Completion: Report clear evidence of test passes and observed diff.`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
 - Goal: Provide a clear, natural final summary matching the user's language.

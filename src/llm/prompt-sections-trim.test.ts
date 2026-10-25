@@ -36,7 +36,6 @@ test('antigravity sections name the canonical web tools', () => {
 test('codebase-intelligence short section stays lean', () => {
   const bullets = SECTION_CODEBASE_INTELLIGENCE.split('\n').filter((line) => line.trim().startsWith('-'));
   assert.ok(bullets.length <= 3, `expected at most 3 bullets, got ${bullets.length}`);
-  assert.ok(SECTION_CODEBASE_INTELLIGENCE.includes('codegraph'), 'must point at the CodeGraph policy');
 });
 
 test('tool-playbooks short section defers to dynamic playbooks', () => {

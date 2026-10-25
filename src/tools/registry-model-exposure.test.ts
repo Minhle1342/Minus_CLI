@@ -26,33 +26,26 @@ test('ToolScope preserves the model exposure policy', () => {
   }
 });
 
-test('ToolRetriever keeps a workflow-complete core and prunes unrelated network and memory schemas', () => {
+test('ToolRetriever keeps a workflow-complete core with 7 essential tools', () => {
   const registry = new ToolRegistry();
   assert.deepEqual(registry.getRetriever().getConfig().alwaysInclude, [
     'read_file',
     'list_files',
-    'search_codebase_fast',
-    'search_text',
-    'codegraph_explore',
-    'apply_patch',
     'replace_text',
-    'create_file',
     'write_file',
     'run_command',
-    'run_node_script',
-    'submit_solution',
-    'get_symbol_context_360',
-    'get_diagnostics',
+    'web_search',
+    'web_fetch',
   ]);
 
   const codingTools = registry.getRelevantTools('fix the failing parser unit test');
   const codingNames = new Set(codingTools.map((tool) => tool.name));
-  assert.equal(codingNames.has('web_search'), false);
-  assert.equal(codingNames.has('web_fetch'), false);
-  assert.equal(codingNames.has('read_memory'), false);
-  assert.equal(codingNames.has('apply_patch'), true);
   assert.equal(codingNames.has('replace_text'), true);
-  assert.ok(codingTools.length <= 18, `expected at most 18 schemas, received ${codingTools.length}`);
+  assert.equal(codingNames.has('read_file'), true);
+  assert.equal(codingNames.has('write_file'), true);
+  assert.equal(codingNames.has('run_command'), true);
+  assert.equal(codingNames.has('list_files'), true);
+  assert.ok(codingTools.length <= 7, `expected at most 7 schemas, received ${codingTools.length}`);
 
   const webNames = new Set(registry.getRelevantTools('research the latest Node.js documentation online').map((tool) => tool.name));
   assert.equal(webNames.has('web_search'), true);
@@ -61,7 +54,7 @@ test('ToolRetriever keeps a workflow-complete core and prunes unrelated network 
   assert.equal(webNames.has('read_url_content'), false);
 });
 
-test('multi-agent schemas nạp theo regex của request (VI phrasing "agent ... song song" cũng khớp)', () => {
+test('multi-agent tools are strictly omitted from model-facing schema exposure', () => {
   const registry = new ToolRegistry();
   const dummyManager = new SubagentManager({ register: () => {}, update: () => {} } as any, (() => { throw new Error('not launched in test'); }) as any);
   registry.register(createDelegateTaskTool(dummyManager));
@@ -69,12 +62,8 @@ test('multi-agent schemas nạp theo regex của request (VI phrasing "agent ...
   registry.register(createSpawnAgentTool(dummyManager));
   registry.register(createScheduleDagParallelTool({} as any));
 
-  const delegationNames = new Set(registry.getRelevantTools('cho 3 agent chạy song song đi').map((tool) => tool.name));
-  assert.ok(delegationNames.has('delegate_task'), `delegate_task phải nạp cho delegation-intent query; got ${[...delegationNames].join(', ')}`);
-  assert.ok(delegationNames.has('spawn_agent'), `spawn_agent phải nạp cho delegation-intent query; got ${[...delegationNames].join(', ')}`);
-  assert.ok(delegationNames.has('schedule_dag_parallel'), `schedule_dag_parallel (batch song song) phải nạp; got ${[...delegationNames].join(', ')}`);
-
-  const codingNames = new Set(registry.getRelevantTools('fix the failing parser unit test').map((tool) => tool.name));
-  assert.equal(codingNames.has('delegate_task'), false, 'Query coding thường không được nạp multi-agent schemas');
-  assert.equal(codingNames.has('spawn_agent'), false, 'Query coding thường không được nạp multi-agent schemas');
+  const names = new Set(registry.getRelevantTools('cho 3 agent chạy song song đi').map((tool) => tool.name));
+  assert.equal(names.has('delegate_task'), false, 'delegate_task must be omitted from model exposure');
+  assert.equal(names.has('spawn_agent'), false, 'spawn_agent must be omitted from model exposure');
+  assert.equal(names.has('schedule_dag_parallel'), false, 'schedule_dag_parallel must be omitted from model exposure');
 });

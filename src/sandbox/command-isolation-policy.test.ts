@@ -68,6 +68,8 @@ test('workspace-confined recursive deletes fall through to approval instead of a
   assert.equal(evaluateHostCommandPolicy(`rm -rf ${inside}`, path.resolve(root)).allowed, true);
   // ...but nothing leaves the workspace, and the workspace root itself stays protected.
   assert.equal(evaluateHostCommandPolicy('rm -rf /', path.resolve(root)).allowed, false);
+  assert.equal(evaluateHostCommandPolicy('rm -rf .', path.resolve(root)).allowed, false);
+  assert.equal(evaluateHostCommandPolicy('rm -rf src/..', path.resolve(root)).allowed, false);
   assert.equal(evaluateHostCommandPolicy(`rm -rf ${absoluteInside} ${path.resolve('elsewhere')}`, path.resolve(root)).allowed, false);
   assert.equal(evaluateHostCommandPolicy(`rm -rf ${path.resolve(root)}`, path.resolve(root)).allowed, false);
   assert.equal(evaluateHostCommandPolicy('format C:', path.resolve(root)).allowed, false);

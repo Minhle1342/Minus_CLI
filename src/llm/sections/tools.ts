@@ -85,37 +85,34 @@ export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Inspect existing design tokens, CSS variables, and spacing before adding components.
    - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Always verify with tsc --noEmit.`;
 
-export const SECTION_ANTIGRAVITY_TOOLS = `10. GOOGLE ANTIGRAVITY TOOLCHAIN:
+export const SECTION_ANTIGRAVITY_TOOLS = `10. COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; ${PROACTIVE_SERVER_LAUNCH_RULE}
-   - manage_task: Manage background tasks (list, status, kill, send_input).
-   - schedule: Event-driven delays via schedule(DurationSeconds=N, Prompt="...", TimerCondition="..."). Avoid polling.
-   - Web retrieval: Use web_search and web_fetch for third-party docs and APIs (per the web-search decision policy).`;
+   - Web retrieval: Use web_search and web_fetch for third-party docs, APIs, and web inspection.`;
 
-export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
-   - Follow the codegraph usage policy: codegraph_explore first for structural questions, then targeted hops.
-   - get_symbol_context_360 for a symbol panorama; codegraph_impact / analyze_impact before modifying code.
-   - Tool schemas carry exact parameters; phase guidance carries the per-step chain.`;
+export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & EXPLORATION:
+   - Use list_files to inspect directory layouts and read_file to inspect exact implementation lines.
+   - Use run_command for search, git inspection, build, and test verification.`;
 
 export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
-   - Per-step tool chains are injected dynamically below (architecture, root cause, mutation, long tasks, subagents, plans, verification). Follow the injected chain; tool schemas carry exact parameters.`;
+   - Dynamic per-step tool chain: inspect with list_files and read_file, edit with replace_text or write_file, verify with run_command.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {
-  architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\ncodegraph_explore / get_architecture_topology -> get_route_map -> get_symbol_context_360 -> read_file.`,
-  rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nget_diagnostics / inspect_symbol -> query_call_graph(callers) / codegraph_explore -> read_file.`,
-  mutation: `[TOOL PLAYBOOK C - MUTATION]\nget_symbol_context_360 -> replace_text / apply_patch -> get_diagnostics -> targeted test.`,
-  longTask: `[TOOL PLAYBOOK D - LONG TASK / SERVER]\nrun_command(WaitMsBeforeAsync=5000) -> inspect startup logs -> manage_task if needed -> schedule; proactively launch servers in background instead of printing passive instructions.`,
-  subagent: `[TOOL PLAYBOOK E - SUBAGENT]\nbrainstorm_design -> allocate_agent_task -> shared context/event -> wait_agent -> verify_subagent_quality.`,
-  dagPlan: `[TOOL PLAYBOOK F - DAG PLAN]\ncodegraph_impact / analyze_impact -> create_plan(dependsOn) -> execute READY nodes -> verify -> update_plan_task -> submit_solution.`,
-  verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nInspect the active verification contract -> gather the required diagnostics/build/targeted evidence within user scope -> review scoped git diff -> submit_solution only when acceptance and authorized workflow are complete. Do not infer permission to execute tests excluded by the user.`,
+  architecture: `[TOOL PLAYBOOK A - ARCHITECTURE]\nlist_files -> read_file.`,
+  rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nlist_files -> read_file -> run_command.`,
+  mutation: `[TOOL PLAYBOOK C - MUTATION]\nread_file -> replace_text / write_file -> run_command.`,
+  longTask: `[TOOL PLAYBOOK D - LONG TASK / SERVER]\nrun_command(WaitMsBeforeAsync=5000) -> inspect startup logs.`,
+  subagent: `[TOOL PLAYBOOK E - EXECUTION]\nread_file -> replace_text -> run_command.`,
+  dagPlan: `[TOOL PLAYBOOK F - PLAN & VERIFY]\nread_file -> replace_text -> run_command.`,
+  verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nInspect working tree with run_command("git diff") -> execute verification test command.`,
 } as const;
 
 export function resolveVerifyPlaybookPrompt(risk?: string): string {
   if (risk === 'R0' || risk === 'R1') {
-    return `[TOOL PLAYBOOK V - VERIFY (R1 DIAGNOSTICS)]\nget_diagnostics -> inspect clean state -> submit_solution.`;
+    return `[TOOL PLAYBOOK V - VERIFY (R1 INSPECTION)]\nread_file -> verify state.`;
   }
   if (risk === 'R2') {
-    return `[TOOL PLAYBOOK V - VERIFY (R2 TYPECHECK & DIFF)]\nget_diagnostics -> run_command(npm run build / tsc) -> run_command("git diff -U3") -> submit_solution.`;
+    return `[TOOL PLAYBOOK V - VERIFY (R2 TEST & DIFF)]\nrun_command(npm test) -> run_command("git diff").`;
   }
   return TOOL_PLAYBOOK_PROMPTS.verifyDiff;
 }

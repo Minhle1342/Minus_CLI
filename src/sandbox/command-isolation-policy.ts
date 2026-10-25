@@ -83,6 +83,15 @@ export function mustBlockUnisolatedAutoExecution(command: string, status: Sandbo
 
 /** Approval is necessary for host execution, but never sufficient for system-destructive commands. */
 export function evaluateHostCommandPolicy(command: string, workspaceRoot?: string): HostCommandPolicyResult {
+  // Recursive delete of the workspace root itself: non-approvable data loss
+  // (repo + .git gone after one approval click).
+  if (workspaceRoot && deletesWorkspaceRoot(command, workspaceRoot)) {
+    return {
+      allowed: false,
+      errorCode: 'HOST_SYSTEM_RISK',
+      reason: 'Host execution blocked: recursively deleting the workspace root cannot be approved.',
+    };
+  }
   // Item 10: recursive deletes confined to the workspace are not system
   // destruction — exempt them here so they fall through to the allowlist and
   // the approval gate instead of a non-bypassable block.
@@ -101,19 +110,17 @@ export function evaluateHostCommandPolicy(command: string, workspaceRoot?: strin
 const RM_VERBS = new Set(['rm', 'rmdir', 'rd', 'remove-item', 'ri']);
 
 /**
- * True when the command holds recursive-delete segments and EVERY delete
- * target resolves inside the workspace. Anything else (format, dd, fork
- * bombs, outside targets, unparseable input) returns false to stay fail-closed.
+ * Recursive-delete targets of a command, or undefined when the input is
+ * unparseable or holds no recursive delete segment (fail-closed for callers).
  */
-export function allRecursiveDeleteTargetsInWorkspace(command: string, workspaceRoot: string): boolean {
+function recursiveDeleteTargets(command: string): string[] | undefined {
   let analysis: { error?: string; segments: string[] };
   try {
     analysis = analyzeShellCommand(command);
   } catch {
-    return false;
+    return undefined;
   }
-  if (analysis.error || (analysis.segments || []).length === 0) return false;
-  const root = path.resolve(workspaceRoot);
+  if (analysis.error || (analysis.segments || []).length === 0) return undefined;
   const targets: string[] = [];
   for (const segment of analysis.segments || []) {
     const tokens = segment.trim().match(/"[^"]*"|'[^']*'|\S+/g) || [];
@@ -128,14 +135,35 @@ export function allRecursiveDeleteTargetsInWorkspace(command: string, workspaceR
     });
     if (!recursive) continue;
     const paths = args.filter((arg) => !arg.startsWith('-') && !arg.startsWith('/'));
-    if (paths.length === 0) return false;
+    if (paths.length === 0) return undefined;
     targets.push(...paths);
   }
-  if (targets.length === 0) return false;
+  if (targets.length === 0) return undefined;
+  return targets;
+}
+
+/**
+ * True when the command holds recursive-delete segments and EVERY delete
+ * target resolves strictly inside the workspace. Anything else (format, dd,
+ * fork bombs, outside targets, unparseable input) returns false to stay
+ * fail-closed.
+ */
+export function allRecursiveDeleteTargetsInWorkspace(command: string, workspaceRoot: string): boolean {
+  const targets = recursiveDeleteTargets(command);
+  if (!targets) return false;
+  const root = path.resolve(workspaceRoot);
   return targets.every((target) => {
     const resolved = path.resolve(root, target);
     const relative = path.relative(root, resolved);
     const normalized = process.platform === 'win32' ? relative.toLowerCase() : relative;
     return normalized !== '' && !normalized.startsWith('..') && !path.isAbsolute(normalized);
   });
+}
+
+/** A recursive delete of the workspace root itself is never approvable. */
+export function deletesWorkspaceRoot(command: string, workspaceRoot: string): boolean {
+  const targets = recursiveDeleteTargets(command);
+  if (!targets) return false;
+  const root = path.resolve(workspaceRoot);
+  return targets.some((target) => path.relative(root, path.resolve(root, target)) === '');
 }

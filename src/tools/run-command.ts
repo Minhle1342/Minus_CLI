@@ -28,7 +28,7 @@ import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand, isBroadAddWithCommitIntent, isExplicitGitAddPathList, isGitCommandAuthorized, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
-import { extractRequestedGitBranch } from './git-intent.js';
+import { extractRequestedGitBranch, hasForceOrDeletePushArg, isForcePushAuthorized } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
 import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
 import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
@@ -58,6 +58,26 @@ export function resolveAutoBackgroundWait(
   const soft = Number(process.env.MINUS_SOFT_TIMEOUT_MS);
   const softMs = Number.isFinite(soft) && soft > 0 ? Math.min(10000, soft) : 10000;
   return waitMsBeforeAsync !== undefined ? waitMsBeforeAsync : softMs;
+}
+
+/**
+ * Bọc lệnh cho `shell: "powershell"` bằng -EncodedCommand (base64 UTF-16LE)
+ * để khỏi phải escape ngoặc kép/phép thay thế trong chuỗi lệnh. Tiền tố
+ * tắt progress stream (không thì mọi lệnh cmdlet đều xả CLIXML vào stderr);
+ * đuôi propagates exit code của lệnh native về process exit code của PowerShell.
+ * shortcut: chỉ PowerShell 5.1 (`powershell`/`pwsh`), không có `&&` giữa các
+ * lệnh riêng lẻ — upgrade: nhận thêm giá trị shell "pwsh" và bỏ kiểm tra
+ * platform, hoặc tách chuỗi lệnh thành mảng trước khi bọc.
+ */
+export function wrapPowerShellCommand(command: string): string {
+  const shell = process.platform === 'win32' ? 'powershell' : 'pwsh';
+  const script = [
+    "$ProgressPreference='SilentlyContinue'",
+    command,
+    'if ($LASTEXITCODE) { exit $LASTEXITCODE }',
+  ].join('\n');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return `${shell} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
 }
 
 // Danh sách các tiền tố lệnh an toàn khi chạy ở chế độ Host / Unsandboxed (Terminal-First Exploration & Build)
@@ -649,6 +669,13 @@ export function checkGitPolicyForShell(
       };
     }
     if (invocation.subcommand === 'push') {
+      if (hasForceOrDeletePushArg(invocation.args) && !isForcePushAuthorized(userRequest)) {
+        return {
+          error: 'Force push or remote branch delete is not authorized by the current user request.',
+          errorCode: 'GIT_FORCE_PUSH_NOT_AUTHORIZED',
+          suggestion: 'Verify the remote state with status/diff/ls-remote, then ask the user to explicitly request a force push (e.g. "force push lên nhánh dev") or a branch delete.',
+        };
+      }
       const requestedBranch = extractRequestedGitBranch(userRequest);
       if (requestedBranch && !pushArgsTargetBranch(invocation.args, requestedBranch)) {
         return {
@@ -1150,6 +1177,19 @@ export async function executeRmEmulation(
   try {
     for (const targetPath of parsed.targetPaths) {
       const safePath = workspace.resolveSafePath(targetPath);
+      // Deleting the workspace root (rm -rf . / src/..) wipes repo + .git:
+      // never emulatable, approval or not.
+      if (path.resolve(safePath) === path.resolve(workspace.rootDir)
+        || path.resolve(safePath) === path.resolve(workspace.realRootDir)) {
+        return {
+          stdout: deletedPaths.length > 0 ? `Deleted: ${deletedPaths.join(', ')}` : '',
+          stderr: `Security violation: deleting the workspace root "${targetPath}" is not allowed.`,
+          success: false,
+          durationMs: Date.now() - startTime,
+          exitCode: 1,
+          suggestion: 'Delete specific paths inside the workspace instead of the workspace root.',
+        };
+      }
       if (workspace.isProtectedFile(safePath)) {
         return {
           stdout: deletedPaths.length > 0 ? `Deleted: ${deletedPaths.join(', ')}` : '',
@@ -1225,7 +1265,7 @@ export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefault
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg/rm calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task` (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Never include secrets or tokens in commands.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg/rm calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with `manage_task` (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `search_codebase_fast`, `read_file`, `write_file`, `delete_file`, `move_file`). Use move_file with sourcePath and targetPath for moves. Set `shell: "powershell"` to run a single command under PowerShell instead of the default host shell (quoted strings, `$` and `&` are then safe as written; PowerShell 5.1 has no `&&`, and it is unavailable under Docker isolation). Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -1249,6 +1289,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           type: Type.STRING,
           description: 'Execution target: "auto" (default; prefers the isolated Internal/sandbox environment when available, but does not guarantee the sandbox is available; guardrails may reject commands requiring isolation instead of silently running them on the Host) or "host" (External; the host operating system). Choose "host" only when a host-native toolchain/dependency is needed or the sandbox is incompatible. Host policy always applies: allowlisted commands may run without approval, commands outside the allowlist may require approval, and approval does not override policy prohibitions.',
         },
+        shell: {
+          type: Type.STRING,
+          description: 'Opt-in shell override: set to "powershell" to run this command under PowerShell instead of the default host shell (cmd.exe on Windows). The command is passed as -EncodedCommand so quotes, `$` and the call operator `&` are safe as written, and cmd.exe-only normalization (`&` stripping, which->where, ls->dir) is skipped. PowerShell 5.1 has no `&&` between separate commands, so split chains into separate run_command calls. Unavailable under Docker isolation (POWERSHELL_ISOLATION_UNSUPPORTED); omit it to keep the default shell.',
+        },
       },
       required: [],
     },
@@ -1269,6 +1313,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           errorCode: 'INVALID_EXECUTION_TARGET',
         };
       }
+      const shellOpt = String(args.shell || '').trim().toLowerCase();
+      if (shellOpt && shellOpt !== 'powershell') {
+        return {
+          command: rawCommand,
+          error: 'shell only accepts "powershell"; omit it to keep the default host shell.',
+          errorCode: 'INVALID_SHELL',
+        };
+      }
+      const shellMode = shellOpt === 'powershell';
 
       // Reject credential-bearing GitHub URLs before any guard can echo the command to logs/results.
       for (const match of rawCommand.matchAll(/https?:\/\/[^\s"'<>]+/gi)) {
@@ -1290,6 +1343,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         waitMsBeforeAsync,
         lastExecution: (context as any)?.lastCommandExecution,
         workspaceRoot: workspace.rootDir,
+        ...(shellMode ? { shell: 'powershell' as const } : {}),
       });
 
       if (!preflight.allowed) {
@@ -1343,13 +1397,29 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // emulation, background dispatch or spawn. Approval never bypasses it;
       // Docker isolation is the stronger boundary, so container paths are left
       // alone when it is active.
-      const sessionCwd = resolveSessionCwd(workspace);
+      const sessionCwd = resolveSessionCwd(workspace, context?.sessionId);
       const isolatedTarget = executionTarget !== 'host' && Boolean(sandboxManager?.getStatus?.()?.isIsolated);
 
+      // shell: "powershell" không có trong image Linux của Docker sandbox —
+      // chặn sớm, trước cả allowlist/approval, để lỗi trả về đúng nguyên nhân.
+      if (shellMode && isolatedTarget) {
+        return {
+          command: rawCommand,
+          error: 'shell: "powershell" is unavailable under Docker isolation because the container image has no PowerShell.',
+          errorCode: 'POWERSHELL_ISOLATION_UNSUPPORTED',
+          preflightCode: 'POWERSHELL_ISOLATION_UNSUPPORTED',
+          suggestion: 'Drop shell: "powershell" and write the command for the container shell (sh), or retry with execution_target: "host" and shell: "powershell".',
+          commandOutcome: 'blocked_preflight',
+          processStarted: false,
+          success: false,
+          durationMs: 1,
+        };
+      }
+
       // Persistent shell: bare `cd <dir>` sticks for later calls (no spawn).
-      const cdTarget = tryHandleCdCommand(effectiveCommand, workspace);
+      const cdTarget = tryHandleCdCommand(effectiveCommand, workspace, context?.sessionId);
       if (cdTarget) {
-        trackSessionEnv(workspace.rootDir, preflight.extractedEnv);
+        trackSessionEnv(workspace.rootDir, context?.sessionId, preflight.extractedEnv);
         return {
           command: effectiveCommand,
           stdout: cdTarget,
@@ -1366,13 +1436,19 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Persistent shell env: export/$env prefixes accumulate across calls.
-      const sessionEnv = trackSessionEnv(workspace.rootDir, preflight.extractedEnv);
+      const sessionEnv = trackSessionEnv(workspace.rootDir, context?.sessionId, preflight.extractedEnv);
       const hookAdvisory = hookVerdict.advisory;
       const preflightAdvisories: string[] = [];
       if (hookAdvisory) preflightAdvisories.push(hookAdvisory);
 
       // Parse and authorize the entire command before any synchronous or background dispatch.
-      const shellAnalysis = analyzeShellCommand(effectiveCommand);
+      // shortcut: shell: "powershell" có '&' là call operator, còn AST parser POSIX
+      // đọc nó thành toán tử background nên báo "Empty shell command segment".
+      // Phân tích trên bản đã bỏ '&' đầu dòng, lệnh dispatch vẫn giữ nguyên.
+      // Ceiling: '&' ở giữa chuỗi (`a ; & b`) chưa được xử lý — upgrade: mode
+      // PowerShell cho shell-ast-parser.
+      const analysisCommand = shellMode ? effectiveCommand.replace(/^&\s+/, '') : effectiveCommand;
+      const shellAnalysis = analyzeShellCommand(analysisCommand);
       const networkGitCommand = shellAnalysis.segments.some((segment) => {
         const invocation = parseGitInvocation(segment);
         return Boolean(invocation && classifyGitCommand(invocation.subcommand, invocation.args).risk === 'network');
@@ -1486,7 +1562,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // known fallback) only warn and let execution proceed (observe) instead
       // of hard-blocking. Binaries with no recovery path still fail fast below.
       const binaryAdvisories: string[] = [];
-      if (!probeDisabled && !probeIsolated) {
+      // shortcut: bỏ qua probe khi shell là PowerShell — cmdlet (Get-Command,
+      // Test-Path...) không nằm trên PATH nên probe sẽ báo DEV_BINARY_NOT_FOUND
+      // sai; PowerShell tự trả "is not recognized" rõ ràng. Upgrade: dạy probe
+      // phân biệt cmdlet PowerShell khi cần fail-fast trước khi spawn.
+      if (!probeDisabled && !probeIsolated && !shellMode) {
         for (const segment of shellAnalysis.segments) {
           const missing = probeMissingBinary(segment, { workspaceRoot: workspace.rootDir });
           if (missing) {
@@ -1554,6 +1634,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         };
       }
 
+      // shell: "powershell" — bọc đúng một lần tại đây. Mọi payload kết quả vẫn
+      // nhận effectiveCommand (lệnh gốc) để classification/allowlist/hiển thị
+      // không đổi; chỉ đầu vào spawn là lệnh đã bọc.
+      const dispatchCommand = shellMode ? wrapPowerShellCommand(effectiveCommand) : effectiveCommand;
+
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch)
       // + soft-timeout→background: explicit long jobs (timeout_ms=0|>120s)
       // auto-promote after ~10s instead of blocking the turn.
@@ -1581,7 +1666,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             errorCode: 'BACKGROUND_GIT_NETWORK_UNSUPPORTED',
           };
         }
-        const bgTask = taskManager.startTask(effectiveCommand, sessionCwd, dispatchEnv);
+        const bgTask = taskManager.startTask(dispatchCommand, sessionCwd, dispatchEnv);
         const startTime = Date.now();
         const deadline = startTime + effectiveWaitMs;
 
@@ -1725,7 +1810,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
         const hostSandbox = new LocalProcessSandbox(workspace.rootDir);
         await hostSandbox.init();
-        let hostResult = await hostSandbox.exec(effectiveCommand, {
+        let hostResult = await hostSandbox.exec(dispatchCommand, {
           cwd: sessionCwd,
           timeoutMs,
           signal: context?.signal,
@@ -1745,7 +1830,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             if (provisionRes?.success) {
               clearBinaryProbeCache();
               // Thử lại lệnh sau khi nạp PATH
-              const retryResult = await hostSandbox.exec(effectiveCommand, {
+              const retryResult = await hostSandbox.exec(dispatchCommand, {
                 cwd: sessionCwd,
                 timeoutMs,
                 signal: context?.signal,
@@ -1866,7 +1951,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           };
         }
 
-        const res = await sandboxManager.exec(effectiveCommand, {
+        const res = await sandboxManager.exec(dispatchCommand, {
           cwd: sessionCwd,
           timeoutMs,
           signal: context?.signal,
@@ -1951,7 +2036,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         finalizeCommandResult({ command: effectiveCommand, ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
       return new Promise((resolve) => {
         exec(
-          effectiveCommand,
+          dispatchCommand,
           {
             cwd: sessionCwd,
             timeout: timeoutMs,
@@ -1984,7 +2069,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                   if (provRes?.success) {
                     clearBinaryProbeCache();
                     exec(
-                      effectiveCommand,
+                      dispatchCommand,
                       {
                         cwd: sessionCwd,
                         timeout: timeoutMs,

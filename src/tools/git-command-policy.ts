@@ -129,7 +129,8 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   if (!normalized) return [];
   const directPrefix = /^(?:please|hay|vui long|giup toi|thuc hien|chay|goi|git)\b/.test(normalized)
     || /\b(?:please|hay|vui long|giup toi|thuc hien|chay lenh|tiep tuc)\b/.test(normalized);
-  const capabilityDiscussion = /\b(?:co quyen|co the|kha nang|ho tro|enable|allow|permission|permissions|them tool|nang cap|tai sao|why|whether)\b/.test(normalized);
+  // "explain/giải thích ..." and pasted error logs are never an order to run a destructive command.
+  const capabilityDiscussion = /\b(?:co quyen|co the|kha nang|ho tro|enable|allow|permission|permissions|them tool|nang cap|tai sao|why|whether|explain|giai thich|mo ta|describe|error|says?|said)\b|noi:/.test(normalized);
   if (capabilityDiscussion && !directPrefix) return [];
 
   const names = new Set<string>();
@@ -188,6 +189,25 @@ export function isExplicitGitAddPathList(args: string[]): boolean {
   });
 }
 
+/** Read flags that make a git config invocation non-mutating by themselves. */
+const CONFIG_READ_FLAGS = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'];
+/** Write flags that mutate config, so a read flag on the same argv no longer counts. */
+const CONFIG_WRITE_FLAGS = ['--add', '--replace-all', '--unset', '--unset-all', '--remove-section', '--rename-section'];
+/** Config keys whose value is executed as a program (hooks, pager, helpers, drivers). */
+const SENSITIVE_CONFIG_KEY = /^(?:alias\.|core\.(?:hookspath|sshcommand|pager|fsmonitor|editor)$|pager\.|sequence\.editor$|credential\.helper$|gpg\.program$|diff\.external$|diff\..*\.command$|merge\..*\.driver$|filter\..*\.(?:clean|smudge|process)$)/i;
+
+/** Keys installed outside git config via git -c key=value in any subcommand. */
+function findInjectedUnsafeConfigKey(args: string[]): string | undefined {
+  const keys: string[] = [];
+  for (let index = 0; index + 1 < args.length; index++) {
+    if (args[index] === "-c") keys.push(args[index + 1]);
+  }
+  for (const arg of args) {
+    if (arg.startsWith("--config-env=")) keys.push(arg.slice("--config-env=".length));
+  }
+  return keys.map((key) => key.split("=")[0]).find((key) => SENSITIVE_CONFIG_KEY.test(key));
+}
+
 export function validateGitCommandScope(
   subcommand: string,
   args: string[],
@@ -199,7 +219,7 @@ export function validateGitCommandScope(
   // execute external programs, external-executing subcommands and sensitive
   // config keys stay blocked.
   const executableArgument = lowerArgs.find((arg) =>
-    /^(?:--(?:exec|upload-pack|receive-pack|ext-diff|textconv|tool|helper|strategy)=|--no-prompt$)/.test(arg),
+    /^(?:--(?:exec(?:-path)?|upload-pack|receive-pack|ext-diff|textconv|tool|helper|strategy)=|--no-prompt$)/.test(arg),
   );
   if (executableArgument) return deny('GIT_UNSAFE_ARGUMENT', `Argument can execute an external program: ${executableArgument}`);
   if ((command === 'submodule' && lowerArgs[0] === 'foreach')
@@ -209,10 +229,14 @@ export function validateGitCommandScope(
     return deny('GIT_EXTERNAL_EXECUTION_BLOCKED', `git ${command} can execute arbitrary programs; use an explicitly authorized execution tool instead.`);
   }
   if (command === 'config') {
-    const readOnlyConfig = lowerArgs.some((arg) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'].includes(arg));
-    const sensitiveKey = !readOnlyConfig && args.find((arg) => /^(?:alias\.|core\.(?:hookspath|sshcommand|pager|fsmonitor|editor)$|pager\.|sequence\.editor$|credential\.helper$|gpg\.program$|diff\.external$|diff\..*\.command$|merge\..*\.driver$|filter\..*\.(?:clean|smudge|process)$)/i.test(arg));
+    // A read flag plus a write flag is a WRITE: `--list --add` mutates config.
+    const readOnlyConfig = lowerArgs.some((arg) => CONFIG_READ_FLAGS.includes(arg))
+      && !lowerArgs.some((arg) => CONFIG_WRITE_FLAGS.includes(arg));
+    const sensitiveKey = !readOnlyConfig && args.find((arg) => SENSITIVE_CONFIG_KEY.test(arg.split('=')[0]));
     if (sensitiveKey) return deny('GIT_UNSAFE_CONFIG_KEY', `Git config key can execute external programs and is blocked: ${sensitiveKey}`);
   }
+  const injectedKey = findInjectedUnsafeConfigKey(args);
+  if (injectedKey) return deny('GIT_UNSAFE_CONFIG_KEY', `Git config key can execute external programs and is blocked: ${injectedKey}`);
   return { allowed: true };
 }
 
@@ -221,7 +245,7 @@ function isReadOnlyInvocation(command: string, args: string[], firstArg?: string
   if (command === 'hash-object') return !args.includes('-w') && !args.includes('--write');
   if (command === 'branch') return args.length === 0 || args.some((arg) => ['--list', '--show-current', '-a', '--all', '-r', '--remotes'].includes(arg));
   if (command === 'tag') return args.length === 0 || args.some((arg) => ['--list', '-l', '--verify', '-v'].includes(arg));
-  if (command === 'config') return args.some((arg) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'].includes(arg));
+  if (command === 'config') return args.some((arg) => CONFIG_READ_FLAGS.includes(arg)) && !args.some((arg) => CONFIG_WRITE_FLAGS.includes(arg));
   if (command === 'remote') return args.length === 0 || args.includes('-v') || firstArg === 'get-url';
   if (command === 'stash') return firstArg === 'list' || firstArg === 'show';
   if (command === 'reflog') return !firstArg || firstArg === 'show' || firstArg === 'exists';

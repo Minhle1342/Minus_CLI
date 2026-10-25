@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
-import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand } from './git-command-policy.js';
+import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand, validateGitCommandScope } from './git-command-policy.js';
 import { detectExplicitGitMutationIntent, extractRequestedGitBranch } from './git-intent.js';
 import { pushArgsTargetBranch } from './git-tools.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
@@ -248,4 +248,84 @@ test('approval suggestions branch on session interactivity, errorCodes unchanged
   const gitInteractive = checkGitPolicyForShell(['git stash push'], '/repo', undefined, true);
   assert.equal(gitInteractive?.errorCode, 'GIT_OPERATION_NOT_AUTHORIZED');
   assert.match(gitInteractive?.suggestion || '', /Ask the user to explicitly request/);
+});
+
+test('git scope blocks config writes disguised as reads plus exec-path and -c injections', () => {
+  // `--list --add` is a WRITE: no user request may plant a hook path.
+  const listAdd = validateGitCommandScope('config', ['--list', '--add', 'core.hookspath', '/tmp/evil']);
+  assert.equal(listAdd.allowed, false);
+  if (!listAdd.allowed) assert.equal(listAdd.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
+  // Pure reads stay allowed.
+  assert.equal(validateGitCommandScope('config', ['--list']).allowed, true);
+  assert.equal(validateGitCommandScope('config', ['--get', 'core.user']).allowed, true);
+  // Sensitive key via a plain write.
+  const unset = validateGitCommandScope('config', ['--unset', 'core.pager']);
+  assert.equal(unset.allowed, false);
+  if (!unset.allowed) assert.equal(unset.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
+
+  // Program-running global flags.
+  const execPath = validateGitCommandScope('commit', ['--exec-path=/tmp/evil']);
+  assert.equal(execPath.allowed, false);
+  if (!execPath.allowed) assert.equal(execPath.errorCode, 'GIT_UNSAFE_ARGUMENT');
+
+  // Config injected via -c on a non-config subcommand.
+  const injected = validateGitCommandScope('commit', ['-c', 'core.hooksPath=/tmp/evil']);
+  assert.equal(injected.allowed, false);
+  if (!injected.allowed) assert.equal(injected.errorCode, 'GIT_UNSAFE_CONFIG_KEY');
+
+  // Same holes through the run_command shell gate, with no user request at all.
+  assert.equal(
+    checkGitPolicyForShell(['git config --list --add core.hookspath /tmp/evil'], '/repo')?.errorCode,
+    'GIT_UNSAFE_CONFIG_KEY',
+  );
+  assert.equal(
+    checkGitPolicyForShell(['git --exec-path=/tmp/evil commit -m x'], '/repo', 'hãy commit')?.errorCode,
+    'GIT_UNSAFE_ARGUMENT',
+  );
+  assert.equal(
+    checkGitPolicyForShell(['git -c core.hooksPath=/tmp/evil commit -m x'], '/repo', 'hãy commit')?.errorCode,
+    'GIT_UNSAFE_CONFIG_KEY',
+  );
+});
+
+test('a pasted error log never authorizes a destructive git command', () => {
+  const explainReset = checkGitPolicyForShell(
+    ['git reset --hard HEAD'],
+    '/repo',
+    'giải thích cái lỗi này: fatal: git reset --hard failed',
+  );
+  assert.equal(explainReset?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
+  const explainClean = checkGitPolicyForShell(
+    ['git clean -fd'],
+    '/repo',
+    'giải thích cái lệnh này: git clean -fd đã chạy rồi',
+  );
+  assert.equal(explainClean?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
+  // Quoting the command inside an error report is not an order either.
+  const quotedClean = checkGitPolicyForShell(
+    ['git clean -fd'],
+    '/repo',
+    'lỗi này nói: git clean -fd đã chạy rồi',
+  );
+  assert.equal(quotedClean?.errorCode, 'GIT_DESTRUCTIVE_OPERATION_NOT_AUTHORIZED');
+});
+
+test('force push and remote branch delete require an explicit force-push request', () => {
+  assert.equal(
+    checkGitPolicyForShell(['git push --force origin dev'], '/repo', 'push code lên')?.errorCode,
+    'GIT_FORCE_PUSH_NOT_AUTHORIZED',
+  );
+  assert.equal(
+    checkGitPolicyForShell(['git push --delete origin dev'], '/repo', 'push code lên')?.errorCode,
+    'GIT_FORCE_PUSH_NOT_AUTHORIZED',
+  );
+  // An explicit force-push request and a plain push still pass.
+  assert.equal(
+    checkGitPolicyForShell(['git push --force origin dev'], '/repo', 'force push code lên dev'),
+    undefined,
+  );
+  assert.equal(
+    checkGitPolicyForShell(['git push origin dev'], '/repo', 'push code lên'),
+    undefined,
+  );
 });

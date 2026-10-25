@@ -89,8 +89,12 @@ export function isTestCommand(command: string): boolean {
  * Chuẩn hóa lệnh trên môi trường Windows native:
  * - Chuyển 'which <cmd>' thành 'where <cmd>'
  * - Bóc tách biến môi trường dạng POSIX 'export FOO=bar && <cmd>' hoặc 'FOO=bar <cmd>'
+ *
+ * options.shell === 'powershell' bỏ qua mục 1 vì ba phép đó sinh ra cho cmd.exe:
+ * '&' là call operator phải giữ, 'where' là alias của Where-Object, 'dir /a'
+ * không hợp lệ trong PowerShell.
  */
-export function normalizeWindowsCommand(command: string): {
+export function normalizeWindowsCommand(command: string, options?: { shell?: 'powershell' }): {
   normalizedCommand: string;
   extractedEnv?: Record<string, string>;
   modified: boolean;
@@ -103,7 +107,7 @@ export function normalizeWindowsCommand(command: string): {
   // - Bóc tách toán tử gọi của PowerShell '& <cmd>' (ví dụ: & .\bin\Release\GitKeyTests.exe)
   // - Chuyển 'which <tool>' thành 'where <tool>'
   // - Chuẩn hóa 'ls' thành 'dir'
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && options?.shell !== 'powershell') {
     // 1.0. Chuẩn hóa toán tử gọi của PowerShell "& <cmd>" trên Windows cmd.exe
     // Ví dụ: & .\bin\Release\GitKeyTests.exe -> .\bin\Release\GitKeyTests.exe
     const psCallMatch = normalized.match(/^&\s+((?:["'][^"']+["'])|(?:\S+.*))$/);
@@ -214,6 +218,8 @@ export interface EvaluateCommandPreflightOptions {
   lastExecution?: LastCommandExecutionState;
   mode?: 'enforce' | 'observe' | 'off';
   workspaceRoot?: string;
+  /** Opt-in shell (run_command `shell: "powershell"`); skips cmd.exe-only normalization. */
+  shell?: 'powershell';
 }
 
 /**
@@ -229,7 +235,7 @@ export function evaluateCommandPreflight(
   }
 
   const raw = command.trim();
-  const { normalizedCommand, extractedEnv } = normalizeWindowsCommand(raw);
+  const { normalizedCommand, extractedEnv } = normalizeWindowsCommand(raw, { shell: options?.shell });
   const nonInteractiveRemote = /^(?:ssh\b.*(?:-o\s*batchmode=yes|-obatchmode=yes)|sftp\b.*\s-b\b|ftp\b.*\s-n\b)/i.test(normalizedCommand);
   const versionOrHelpProbe = /^(?:vim|vi|nano|pico|emacs|less|more|man)\b.*(?:--version|--help|\s-h)\b/i.test(normalizedCommand);
 

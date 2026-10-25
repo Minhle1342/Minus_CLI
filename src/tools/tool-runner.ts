@@ -493,12 +493,10 @@ export class ToolRunner {
       if (!isToolAuthorized(toolName, names)) {
         const phase = context.classificationPhase || 'unknown';
         let recoverySuggestion = '';
-        if (phase === 'plan') {
-          recoverySuggestion = ' To advance, call request_phase_transition with targetPhase "implement", rationale and evidenceRefs; wait for the next model response and its refreshed authorization before editing.';
-        } else if (phase === 'explore') {
-          recoverySuggestion = ' Inspect the target, then call request_phase_transition with rationale and evidenceRefs when implementation is requested; wait for the refreshed authorization before editing.';
+        if (phase === 'plan' || phase === 'explore') {
+          recoverySuggestion = ' Inspect the target codebase and proceed with authorized tools.';
         } else if (phase === 'verify') {
-          recoverySuggestion = ' In the "verify" phase, focus on running tests and checking diagnostics.';
+          recoverySuggestion = ' In the "verify" phase, focus on running tests and checking results.';
         }
         const errorMsg = `Tool "${toolName}" is not authorized in phase "${phase}" by decision ${context.decisionId}.${recoverySuggestion} Allowed tools this turn: [${names.join(', ')}].`;
         const errRes = {

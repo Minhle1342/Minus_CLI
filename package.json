@@ -7,7 +7,8 @@
   "scripts": {
     "predev": "npm run search:up",
     "dev": "node --max-old-space-size=4096 --import tsx src/index.ts",
-    "test": "node --max-old-space-size=4096 --import tsx src/test-suite.ts",
+    "test": "node --max-old-space-size=4096 --import tsx --test \"src/**/*.test.ts\"",
+    "test:legacy": "node --max-old-space-size=4096 --import tsx src/test-suite.ts",
     "test:completion": "node --import tsx --test src/agent/completion-policy.test.ts",
     "test:ocr": "node --import tsx --test src/review/open-code-review.test.ts",
     "test:scenarios": "tsx src/test-scenarios.ts",

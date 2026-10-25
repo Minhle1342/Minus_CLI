@@ -97,18 +97,11 @@ export class ToolRetriever {
       alwaysInclude: config?.alwaysInclude ?? [
         'read_file',
         'list_files',
-        'search_codebase_fast',
-        'search_text',
-        'codegraph_explore',
-        'apply_patch',
         'replace_text',
-        'create_file',
         'write_file',
         'run_command',
-        'run_node_script',
-        'submit_solution',
-        'get_symbol_context_360',
-        'get_diagnostics',
+        'web_search',
+        'web_fetch',
       ],
       minScore: config?.minScore ?? 0.05,
     };
@@ -235,6 +228,7 @@ export class ToolRetriever {
 
     // Adaptive Schema Pruning: Loại trừ các tool chuyên biệt nặng nếu query không chứa tín hiệu liên quan
     const activePool = pool.filter((tool) => {
+      if (this.config.alwaysInclude?.includes(tool.name)) return true;
       const cat = this.inferCategory(tool);
       if (cat === 'game_development' && !isGameQuery) return false;
       if (tool.name === 'schedule' && !isScheduleQuery) return false;

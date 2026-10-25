@@ -3,65 +3,15 @@ import { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
 import { readFileTool } from './read-file.js';
 import { listFilesTool } from './list-files.js';
-import { searchTextTool } from './search-text.js';
 import { replaceTextTool } from './replace-text.js';
-import { applyPatchTool } from './apply-patch.js';
 import { writeFileTool } from './write-file.js';
 import { writeToFileTool } from './write-to-file.js';
 import { replaceFileContentTool } from './replace-file-content.js';
 import { multiReplaceFileContentTool } from './multi-replace-file-content.js';
-import { createFileTool } from './create-file.js';
-import { deleteFileTool } from './delete-file.js';
-import { moveFileTool } from './move-file.js';
-import { inspectSymbolTool } from './inspect-symbol.js';
-import { findReferencesTool } from './find-references.js';
-import { getDiagnosticsTool } from './get-diagnostics.js';
-import { lspQueryTool } from './lsp-query.js';
-import { analyzeImpactTool } from './blast-radius.js';
-import { inspectImageTool, createInspectImageTool } from './inspect-image.js';
-import { createGenerateImageTool } from './generate-image.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
-import { runNodeScriptTool } from './run-node-script.js';
-import { createManageTaskTool } from './manage-task.js';
-import { createScheduleTool } from './schedule-tool.js';
-import { createWebSearchTool, searchWebTool, webSearchTool } from './web-search.js';
-import { createWebFetchTool, readUrlContentTool, webFetchTool } from './web-fetch.js';
-import { createReadSharedContextTool, createWriteSharedContextTool } from './shared-context-tools.js';
-import { createPublishAgentEventTool } from './agent-event-tools.js';
-import { createSessionDiffTool } from './session-diff.js';
-import type { CheckpointManager } from '../workspace/checkpoint.js';
-import { queryCallGraphTool } from './query-call-graph.js';
-import { getRouteMapTool } from './get-route-map.js';
-import { getSymbolContext360Tool } from './symbol-context-360.js';
-import { getArchitectureTopologyTool } from './architecture-topology.js';
-import { TaskManager } from '../tasks/task-manager.js';
-import { ScheduleManager } from '../tasks/schedule-manager.js';
-import { SharedContextService } from '../agent/shared-context-service.js';
-import { AgentEventBus } from '../agent/agent-event-bus.js';
-import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
-import { createAllocateAgentTaskTool, createVerifySubagentQualityTool, createBrainstormDesignTool, createScheduleDagParallelTool } from './subagent-tools.js';
-import { PlanManager } from '../agent/plan-manager.js';
-import { createPlanTool, createUpdatePlanTaskTool } from './plan-tools.js';
-import { ProjectMemoryManager } from '../memory/project-memory.js';
-import { createSaveMemoryTool, createReadMemoryTool } from './memory-tools.js';
-import { CitationValidatedRepositoryMemory } from '../memory/repository-memory.js';
-import { createRecallRepositoryMemoryTool, createSaveRepositoryMemoryTool, createVerifyRepositoryMemoryTool } from './repository-memory-tools.js';
-import { createReadCompressedCodeTool, createPackCodebaseTool } from './repomix-tool.js';
-import { createSearchCodebaseFastTool } from './search-code-tool.js';
-import { createReportFindingsTool } from './report-findings.js';
-import { createHypothesisTool } from './hypothesis-tool.js';
-import { HypothesisTracker } from '../agent/hypothesis-tracker.js';
-import { createGitTools } from './git-tools.js';
-import { verifyEditTool } from './verify-edit.js';
+import { searchWebTool, webSearchTool } from './web-search.js';
+import { readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
-import { createDiscoverToolsTool } from './tool-discovery.js';
-import { requestPhaseTransitionTool } from './request-phase-transition.js';
-import { ComputerController, createComputerTool } from '../computer/index.js';
-import type { McpManager } from '../mcp/mcp-manager.js';
-import { createBrowserTools } from './browser-tools.js';
-import type { ReaMcpManager } from '../mcp/rea-mcp-manager.js';
-import { createReaTools } from './rea-tools.js';
-
 
 export interface ToolProvider {
   get(name: string): ToolDefinition | undefined;
@@ -73,9 +23,22 @@ export interface ToolProvider {
 }
 
 /**
- * Compatibility/workflow tools remain executable through `get`/`execute`, but
- * are omitted from model-facing declarations because a canonical tool or an
- * AgentLoop harness gate already provides the same capability.
+ * 7 canonical core tools exposed to LLM:
+ * read, write, edit, command, list file, web search, web fetch.
+ */
+export const CANONICAL_MODEL_TOOL_NAMES = new Set([
+  'read_file',
+  'write_file',
+  'replace_text',
+  'list_files',
+  'run_command',
+  'web_search',
+  'web_fetch',
+]);
+
+/**
+ * Compatibility/workflow tool aliases that remain executable via get/has/execute,
+ * but are strictly hidden from LLM schema declarations.
  */
 export const MODEL_HIDDEN_TOOL_NAMES = new Set([
   'search_web',
@@ -83,181 +46,94 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
-  'discover_tools',
-  'report_investigation_findings',
-  'pack_codebase',
 ]);
 
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
-  return tools.filter((tool) => !MODEL_HIDDEN_TOOL_NAMES.has(tool.name));
+  return tools.filter(
+    (tool) => CANONICAL_MODEL_TOOL_NAMES.has(tool.name) && !MODEL_HIDDEN_TOOL_NAMES.has(tool.name)
+  );
 }
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
- * 
- * Giúp tách biệt hoàn toàn giữa:
- * - Agent Loop (điều phối vòng lặp)
- * - LLM (chọn tool)
- * - Tool Runner (kiểm tra an toàn và thực thi)
- * - Dynamic Tool Retriever (RATS - lọc động tool phù hợp ngữ cảnh, chống loãng description)
+ * Chỉ đăng ký và phơi bày 7 tool cốt lõi cho LLM.
  */
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
   private retriever: ToolRetriever;
-  private computerController: ComputerController;
+  private computerController?: any;
   private sandboxManager?: any;
-  private taskManager?: TaskManager;
+  private taskManager?: any;
   private permissionManager?: any;
 
   constructor(
-    planManager?: PlanManager,
-    memoryManager?: ProjectMemoryManager,
+    _planManager?: any,
+    _memoryManager?: any,
     retrieverConfig?: ToolRetrieverConfig,
-    options?: { enableGameTools?: boolean }
+    _options?: { enableGameTools?: boolean }
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
-    this.computerController = new ComputerController();
 
-    // Đăng ký mặc định các tool cốt lõi của Coding Agent
+    // Register ONLY the 7 canonical core tools
     this.register(readFileTool);
     this.register(listFilesTool);
-    this.register(searchTextTool);
-    this.register(applyPatchTool);
     this.register(replaceTextTool);
-    this.register(verifyEditTool);
     this.register(writeFileTool);
+    this.register(runCommandTool);
+    this.register(webSearchTool);
+    this.register(webFetchTool);
+
+    // Register compatibility aliases (hidden from model declarations)
+    this.register(searchWebTool);
+    this.register(readUrlContentTool);
     this.register(writeToFileTool);
     this.register(replaceFileContentTool);
     this.register(multiReplaceFileContentTool);
-    this.register(createFileTool);
-    this.register(deleteFileTool);
-    this.register(moveFileTool);
-    this.register(inspectSymbolTool);
-    this.register(findReferencesTool);
-    this.register(getDiagnosticsTool);
-    this.register(lspQueryTool);
-    this.register(analyzeImpactTool);
-    this.register(inspectImageTool);
-    this.register(createGenerateImageTool());
-    this.register(runCommandTool);
-    this.register(runNodeScriptTool);
-    this.register(webSearchTool);
-    this.register(searchWebTool);
-    this.register(webFetchTool);
-    this.register(readUrlContentTool);
-    this.register(queryCallGraphTool);
-    this.register(getRouteMapTool);
-    this.register(getSymbolContext360Tool);
-    this.register(getArchitectureTopologyTool);
-    this.register(createSearchCodebaseFastTool());
-    this.register(createReadCompressedCodeTool());
-    this.register(createPackCodebaseTool());
-    this.register(createReportFindingsTool());
-    this.register(createHypothesisTool());
-    this.register(requestPhaseTransitionTool);
-
-    // Đăng ký Meta-Tool khám phá công cụ theo nhu cầu (Progressive Disclosure)
-    this.register(createDiscoverToolsTool(this));
-
-    if (options?.enableGameTools) {
-      this.registerGameTools();
-    }
-
-    // Đăng ký các planning tools nếu có PlanManager
-    if (planManager) {
-      this.attachPlanManager(planManager);
-    }
-
-    // Đăng ký các memory tools nếu có ProjectMemoryManager
-    if (memoryManager) {
-      this.attachMemoryManager(memoryManager);
-    }
   }
 
-  attachSession(session: any): void {
-    this.register(createInspectImageTool(() => session));
-    this.register(createGenerateImageTool(() => session));
-    this.computerController.setSessionAccessor(() => session);
+  attachSession(_session: any): void {
+    // No-op: legacy image inspection tools removed
   }
 
-  /**
-   * Đăng ký các công cụ chuyên biệt phát triển Game 2D, Pixel Art & Unity Engine theo nguyên lý Progressive Disclosure.
-   * Sử dụng dynamic import() để tránh tải game-tools.js và unity-tools.js vào bộ nhớ khi không cần thiết.
-   */
   async registerGameTools(): Promise<void> {
-    try {
-      const [{ gameTilemapStudioTool, gamePixelSpriteStudioTool, game2DPhysicsConfigTool, gameScaffoldEngineTool }, { unityGameplayStudioTool }] = await Promise.all([
-        import('./game-tools.js'),
-        import('./unity-tools.js'),
-      ]);
-      if (!this.tools.has(gameTilemapStudioTool.name)) this.register(gameTilemapStudioTool);
-      if (!this.tools.has(gamePixelSpriteStudioTool.name)) this.register(gamePixelSpriteStudioTool);
-      if (!this.tools.has(game2DPhysicsConfigTool.name)) this.register(game2DPhysicsConfigTool);
-      if (!this.tools.has(gameScaffoldEngineTool.name)) this.register(gameScaffoldEngineTool);
-      if (!this.tools.has(unityGameplayStudioTool.name)) this.register(unityGameplayStudioTool);
-    } catch { /* Game tools unavailable – not critical */ }
+    // No-op: game tools removed
   }
 
-  attachComputerController(controller: ComputerController): void {
+  attachComputerController(controller: any): void {
     this.computerController = controller;
-    this.register(createComputerTool(this.computerController));
   }
 
-  attachBrowserManager(manager: McpManager): void {
-    for (const tool of createBrowserTools(manager)) {
-      if (!this.tools.has(tool.name)) this.register(tool);
-    }
+  attachBrowserManager(_manager: any): void {
+    // No-op: browser MCP tools removed
   }
 
-  /** Discovers REA's tool surface at runtime; safe to retry, existing names are kept. */
-  async attachReaManager(manager: ReaMcpManager): Promise<number> {
-    const tools = createReaTools(manager, await manager.listTools());
-    let added = 0;
-    for (const tool of tools) {
-      if (!this.tools.has(tool.name)) {
-        this.register(tool);
-        added++;
-      }
-    }
-    return added;
+  async attachReaManager(_manager: any): Promise<number> {
+    // No-op: REA tools removed
+    return 0;
   }
 
-  getComputerController(): ComputerController {
+  getComputerController(): any {
     return this.computerController;
   }
 
-  attachPlanManager(planManager: PlanManager): void {
-    this.register(createPlanTool(planManager));
-    this.register(createUpdatePlanTaskTool(planManager));
+  attachPlanManager(_planManager: any): void {
+    // No-op: plan tools removed from LLM
   }
 
-  attachMemoryManager(memoryManager: ProjectMemoryManager): void {
-    this.register(createSaveMemoryTool(memoryManager));
-    this.register(createReadMemoryTool(memoryManager));
+  attachMemoryManager(_memoryManager: any): void {
+    // No-op: memory tools removed from LLM
   }
 
-  attachRepositoryMemory(memory: CitationValidatedRepositoryMemory): void {
-    this.register(createSaveRepositoryMemoryTool(memory));
-    this.register(createRecallRepositoryMemoryTool(memory));
-    this.register(createVerifyRepositoryMemoryTool(memory));
+  attachRepositoryMemory(_memory: any): void {
+    // No-op: repository memory tools removed
   }
 
-  attachHypothesisTracker(tracker: HypothesisTracker, workspace?: Workspace): void {
-    this.register(createHypothesisTool(tracker, workspace));
+  attachHypothesisTracker(_tracker: any, _workspace?: Workspace): void {
+    // No-op: hypothesis tools removed
   }
 
-  /**
-   * Đăng ký bộ công cụ Git context & audit an toàn (git_status, git_diff, git_log, git_command...)
-   * @deprecated Chuẩn công nghiệp: Toàn bộ thao tác Git & Testing đã được dồn trọn vẹn vào `run_command`.
-   * Mặc định không nạp các tool git_* dư thừa vào schema LLM để tiết kiệm token và chống phân mảnh tool.
-   * Để nạp riêng cho mục đích test tương thích ngược, truyền `forceEnable = true`.
-   */
-  attachGitTools(workspace: Workspace, forceEnable = false): void {
-    if (!forceEnable) return;
-    const gitTools = createGitTools(workspace);
-    for (const tool of gitTools) {
-      this.register(tool);
-    }
+  attachGitTools(_workspace: Workspace, _forceEnable = false): void {
+    // No-op: git operations unified into run_command
   }
 
   attachSandboxManager(sandboxManager: any): void {
@@ -265,9 +141,8 @@ export class ToolRegistry implements ToolProvider {
     this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
-  attachTaskManager(taskManager: TaskManager): void {
+  attachTaskManager(taskManager: any): void {
     this.taskManager = taskManager;
-    this.register(createManageTaskTool(taskManager));
     this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
@@ -276,28 +151,24 @@ export class ToolRegistry implements ToolProvider {
     this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
   }
 
-  attachScheduleManager(scheduleManager: ScheduleManager): void {
-    this.register(createScheduleTool(scheduleManager));
+  attachScheduleManager(_scheduleManager: any): void {
+    // No-op: schedule tool removed
   }
 
-  attachSharedContextService(sharedContext: SharedContextService): void {
-    this.register(createReadSharedContextTool(sharedContext));
-    this.register(createWriteSharedContextTool(sharedContext));
+  attachSharedContextService(_sharedContext: any): void {
+    // No-op: shared context tools removed
   }
 
-  attachAgentEventBus(eventBus: AgentEventBus): void {
-    this.register(createPublishAgentEventTool(eventBus));
+  attachAgentEventBus(_eventBus: any): void {
+    // No-op: agent event tools removed
   }
 
-  attachSessionDiff(getManager: () => CheckpointManager | undefined): void {
-    if (!this.tools.has('session_diff')) this.register(createSessionDiffTool(getManager));
+  attachSessionDiff(_getManager: () => any): void {
+    // No-op: session diff tool removed
   }
 
-  attachAgentOrchestrator(orchestrator: AgentOrchestrator): void {
-    this.register(createAllocateAgentTaskTool(orchestrator));
-    this.register(createVerifySubagentQualityTool(orchestrator));
-    this.register(createBrainstormDesignTool());
-    this.register(createScheduleDagParallelTool(orchestrator));
+  attachAgentOrchestrator(_orchestrator: any): void {
+    // No-op: subagent tools removed
   }
 
   createScope(scopeId: string, allowedToolNames?: string[]): ToolScope {
@@ -313,10 +184,7 @@ export class ToolRegistry implements ToolProvider {
   }
 
   /**
-   * Lấy tool theo tên
-   */
-  /**
-   * Lấy tool theo tên (ưu tiên exact match, sau đó hỗ trợ alias tương thích 2 chiều: search_web <-> web_search, read_url_content <-> web_fetch)
+   * Kiểm tra tool tồn tại theo tên hoặc alias tương thích
    */
   has(name: string): boolean {
     if (this.tools.has(name)) return true;
@@ -324,12 +192,14 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'web_search') return this.tools.has('search_web');
     if (name === 'read_url_content') return this.tools.has('web_fetch');
     if (name === 'web_fetch') return this.tools.has('read_url_content');
-    if (name === 'search_text') return this.tools.has('search_codebase_fast') || this.tools.has('search_text');
-    // shortcut: Code Mode built-in name; resolves to the fast search implementation.
-    if (name === 'tools_search') return this.tools.has('search_codebase_fast');
+    if (name === 'write_to_file') return this.tools.has('write_file');
+    if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.has('replace_text');
     return false;
   }
 
+  /**
+   * Lấy tool theo tên (ưu tiên exact match, sau đó hỗ trợ alias tương thích)
+   */
   get(name: string): ToolDefinition | undefined {
     const exact = this.tools.get(name);
     if (exact) return exact;
@@ -337,9 +207,8 @@ export class ToolRegistry implements ToolProvider {
     if (name === 'web_search') return this.tools.get('search_web');
     if (name === 'read_url_content') return this.tools.get('web_fetch');
     if (name === 'web_fetch') return this.tools.get('read_url_content');
-    if (name === 'search_text') return this.tools.get('search_codebase_fast') || searchTextTool;
-    if (name === 'tools_search') return this.tools.get('search_codebase_fast');
-    if (name === 'delete-file') return this.tools.get('delete_file');
+    if (name === 'write_to_file') return this.tools.get('write_file');
+    if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.get('replace_text');
     return undefined;
   }
 
@@ -351,8 +220,8 @@ export class ToolRegistry implements ToolProvider {
   }
 
   /**
-   * Xuất danh sách schema FunctionDeclaration đầy đủ.
-   * Áp dụng KV-Cache Prefix Alignment: Sắp xếp cố định theo tên để chuỗi token schema luôn đồng nhất 100%.
+   * Xuất danh sách schema FunctionDeclaration đầy đủ cho LLM.
+   * Luôn chỉ chứa 7 tool cốt lõi đã qua modelVisibleTools.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
     return modelVisibleTools(this.getAll())
@@ -365,7 +234,7 @@ export class ToolRegistry implements ToolProvider {
   }
 
   /**
-   * Dynamic Tool Retrieval (RATS): Lấy tập hợp FunctionDeclaration phù hợp nhất với ngữ cảnh hiện tại
+   * Dynamic Tool Retrieval (RATS): Lấy tập hợp FunctionDeclaration phù hợp
    */
   getRelevantTools(query: ToolRetrievalQueryInput): FunctionDeclaration[] {
     return this.retriever.retrieve(query, modelVisibleTools(this.getAll()));
@@ -405,10 +274,10 @@ export class ToolRegistry implements ToolProvider {
         if (!resolvedArgs.Url && resolvedArgs.url) {
           resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
         }
-      } else if (name === 'search_text') {
-        resolvedName = 'search_text';
-      } else if (name === 'tools_search') {
-        resolvedName = 'search_codebase_fast';
+      } else if (name === 'write_to_file' && this.tools.has('write_file')) {
+        resolvedName = 'write_file';
+      } else if ((name === 'replace_file_content' || name === 'multi_replace_file_content') && this.tools.has('replace_text')) {
+        resolvedName = 'replace_text';
       }
     }
 
@@ -468,11 +337,8 @@ export class ToolScope implements ToolProvider {
         : name === 'web_search' ? 'search_web'
         : name === 'read_url_content' ? 'web_fetch'
         : name === 'web_fetch' ? 'read_url_content'
-        : name === 'search_text' ? 'search_codebase_fast'
-        : name === 'tools_search' ? 'search_codebase_fast'
         : name === 'write_to_file' ? 'write_file'
         : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
-        : name === 'delete-file' ? 'delete_file'
         : undefined;
       if (!alias || !this.allowed.has(alias)) return undefined;
     }
@@ -481,9 +347,7 @@ export class ToolScope implements ToolProvider {
 
   getAll(): ToolDefinition[] {
     const visible = this.allowed
-      ? this.base.getAll().filter((tool) => this.allowed!.has(tool.name)
-        // shortcut: alias allowlist (tools_search) exposes the built-in target, matching get().
-        || (tool.name === 'search_codebase_fast' && this.allowed!.has('tools_search')))
+      ? this.base.getAll().filter((tool) => this.allowed!.has(tool.name))
       : this.base.getAll();
     const byName = new Map(visible.map((tool) => [tool.name, tool]));
     for (const [name, tool] of this.localTools) byName.set(name, tool);
@@ -513,4 +377,4 @@ export class ToolScope implements ToolProvider {
   }
 }
 
-export { writeToFileTool, replaceFileContentTool, multiReplaceFileContentTool };
+export { writeToFileTool, replaceFileContentTool, multiReplaceFileContentTool, searchWebTool, readUrlContentTool };

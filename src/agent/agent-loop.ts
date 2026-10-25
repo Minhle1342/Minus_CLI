@@ -1804,56 +1804,7 @@ export class AgentLoop {
             })
             : candidateProvider.getFunctionDeclarations();
 
-          // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
-          // In explore and plan phases, mutation tools are withheld from model-visible schemas so LLM physically cannot mutate
-          // before requesting a phase transition to implement.
-          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-              ['run_command', 'git_command'].includes(tool.name)
-              || isOrchestrationTool(tool.name)
-              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
-          }
-
-          // A transition request is a control primitive, not a retrieved task tool.
-          // Keep it visible whenever the current coding phase can accept one so the
-          // model never has to guess an unauthorized edit to advance its workflow.
-          if (!canRequestPhaseTransition) {
-            activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'request_phase_transition');
-          } else if (
-            candidateProvider.get('request_phase_transition')
-            && !activeToolDeclarations.some((tool: any) => tool.name === 'request_phase_transition')
-          ) {
-            const transitionDeclaration = candidateProvider.getFunctionDeclarations()
-              .find((tool: any) => tool.name === 'request_phase_transition');
-            if (transitionDeclaration) activeToolDeclarations.push(transitionDeclaration);
-          }
-
-          if (this.planManager.hasPlan() && candidateProvider.get('update_plan_task')) {
-            const hasUpdatePlan = activeToolDeclarations.some((tool: any) => tool.name === 'update_plan_task');
-            if (!hasUpdatePlan) {
-              const updatePlanDecl = candidateProvider.getFunctionDeclarations().find((d) => d.name === 'update_plan_task');
-              if (updatePlanDecl) {
-                activeToolDeclarations.push(updatePlanDecl);
-              }
-            }
-            // One-way state transition: Once a plan exists, hide create_plan so the model
-            // updates existing tasks with update_plan_task instead of overwriting the whole plan.
-            activeToolDeclarations = activeToolDeclarations.filter((tool: any) => tool.name !== 'create_plan');
-          }
-
-          // Planning is opt-in, but once the user explicitly enters the plan
-          // phase without an existing plan, create_plan must be model-visible and runtime-authorized. Pin
-          // it after route filtering so declaration visibility and ToolScope stay
-          // aligned instead of producing an authorization loop.
-          if (classification.phase === 'plan' && !this.planManager.hasPlan() && candidateProvider.get('create_plan')
-            && !activeToolDeclarations.some((tool: any) => tool.name === 'create_plan')) {
-            const createPlanDeclaration = candidateProvider.getFunctionDeclarations()
-              .find((tool: any) => tool.name === 'create_plan');
-            if (createPlanDeclaration) activeToolDeclarations.push(createPlanDeclaration);
-          }
-
-          // Keep a small, phase-appropriate exploration set visible even when
-          // relevance retrieval ranks it below task-specific tools.
+          // Phase-appropriate exploration anchors if present in gate surface
           if (gateToolSurface.visibleToolNames.length > 0) {
             const declarationsByName = new Map(
               candidateProvider.getFunctionDeclarations().map((tool: any) => [tool.name, tool]),
@@ -1864,14 +1815,6 @@ export class AgentLoop {
                 activeToolDeclarations.push(declaration);
               }
             }
-          }
-
-          // Ensure no mutation tools leak through gateToolSurface during explore/plan phase
-          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
-            activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
-              ['run_command', 'git_command'].includes(tool.name)
-              || isOrchestrationTool(tool.name)
-              || !new ToolDescriptorRegistry().describe(candidateProvider.get(tool.name) || tool).mutates);
           }
 
           // Tool-Level Circuit Breaker: Hide external tools that tripped rate limits or quota exhaustion in this turn

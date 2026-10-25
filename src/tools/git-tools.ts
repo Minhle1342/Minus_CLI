@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import {
   extractRequestedGitBranch,
+  hasForceOrDeletePushArg,
   isForcePushAuthorized,
   isGitMutationAuthorized,
   GitMutationOperation,
@@ -154,6 +155,14 @@ export function createGitTools(workspace: Workspace): ToolDefinition[] {
           };
         }
         if (subcommand === 'push') {
+          if (hasForceOrDeletePushArg(commandArgs) && !isForcePushAuthorized(context?.userRequest)) {
+            return {
+              error: 'Force push or remote branch delete is not authorized by the current user request.',
+              errorCode: 'GIT_FORCE_PUSH_NOT_AUTHORIZED',
+              risk: 'destructive',
+              suggestion: 'Verify the remote state with status/diff/ls-remote, then ask the user to explicitly request a force push or a branch delete.',
+            };
+          }
           const requestedBranch = extractRequestedGitBranch(context?.userRequest);
           if (requestedBranch && !pushArgsTargetBranch(commandArgs, requestedBranch)) {
             return {

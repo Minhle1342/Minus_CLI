@@ -53,15 +53,42 @@ export function collapseCarriageReturns(text: string): string {
 }
 
 /**
+ * PowerShell 5.1 ghi error stream của chính nó ra CLIXML khi stderr là pipe
+ * (ký hiệu "#< CLIXML" + <Objs ...>). Bóc các payload <S S="Error"> ra text
+ * thuần để LLM đọc được thông báo lỗi thay vì XML.
+ * shortcut: unwrap theo regex cho các chuỗi flat, không decode CLIXML thật;
+ * upgrade: parse XML nếu một ngày nào đó xuất hiện record lồng nhau/typed.
+ */
+export function unwrapPowerShellCliXml(text: string): string {
+  if (!text || !text.includes('#< CLIXML')) return text || '';
+  const payloads = [...text.matchAll(/<S S="(?:Error|Warning)">(.*?)<\/S>/gs)].map((m) => m[1]);
+  if (payloads.length === 0) {
+    // Chỉ có progress record (đã bị $ProgressPreference tắt) → bỏ hẳn khối.
+    return text.replace(/#< CLIXML\r?\n?<Objs[\s\S]*?<\/Objs>\r?\n?/g, '').trim();
+  }
+  return payloads
+    .join('\n')
+    .replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+/**
  * Làm sạch toàn diện output terminal:
  * 1. Strip ANSI escape sequences
- * 2. Collapse carriage return progress bars
- * 3. Chuẩn hóa khoảng trắng đầu/cuối dòng
+ * 2. Bóc CLIXML của PowerShell (shell: "powershell")
+ * 3. Collapse carriage return progress bars
+ * 4. Chuẩn hóa khoảng trắng đầu/cuối dòng
  */
 export function sanitizeTerminalOutput(raw: string): string {
   if (!raw) return '';
   const noAnsi = stripAnsi(raw);
-  const collapsed = collapseCarriageReturns(noAnsi);
+  const unwrapped = unwrapPowerShellCliXml(noAnsi);
+  const collapsed = collapseCarriageReturns(unwrapped);
   return collapsed.trim();
 }
 

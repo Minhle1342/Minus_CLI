@@ -342,9 +342,9 @@ test('Harness2RecursiveEngine - Compose refined tool guidance in composeHarness'
   const candidates = engine.proposeCandidates(baseScaffold, 'Fix null pointer in parser', { phase: 'implement' });
   
   const evaluations: ProbeEvaluation[] = [
-    { candidateId: 'base', score: 50, toolCallCount: 6, unproductiveLoopsDetected: 1, durationMs: 20, contrastNotes: [] },
-    { candidateId: 'inv1', score: 85, toolCallCount: 4, unproductiveLoopsDetected: 0, durationMs: 15, contrastNotes: [] },
-    { candidateId: 'dom1', score: 70, toolCallCount: 5, unproductiveLoopsDetected: 0, durationMs: 18, contrastNotes: [] },
+    { candidateId: 'base', score: 50, testsPassed: true, toolCallCount: 6, unproductiveLoopsDetected: 1, contrastNotes: [] },
+    { candidateId: 'inv1', score: 85, testsPassed: true, toolCallCount: 4, unproductiveLoopsDetected: 0, contrastNotes: [] },
+    { candidateId: 'dom1', score: 70, testsPassed: true, toolCallCount: 5, unproductiveLoopsDetected: 0, contrastNotes: [] },
   ];
 
   const result = engine.composeHarness(baseScaffold, candidates, evaluations);
