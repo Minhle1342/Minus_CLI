@@ -76,13 +76,13 @@ export const SECTION_PATCH_FORMAT_SPEC = resolvePatchFormatSpec();
 
 export const SECTION_GIT_OPERATIONS = `8. GIT & TESTING RUNTIME OPERATIONS (INDUSTRY STANDARD):
    - Use run_command for read-only Git inspection (git status, git diff, git log, git show) when relevant. Before editing code, inspect existing changes and preserve user work, including staged and untracked files.
-   - Change Git state (stage, commit, create/switch branches, push, restore, revert, stash, reset) only when the user's request authorizes that operation and scope. Editing code, passing tests, generated plan steps, or tool failures alone do not authorize it. Never overwrite or discard unrelated user changes.
+   - Change Git state (stage, commit, create/switch branches, push, restore, revert, stash, reset) only when the user requests or approves that exact operation and scope; the run-time approval check must still accept the command. Editing code, passing tests, generated plan steps, or tool failures alone do not authorize it. Never overwrite or discard unrelated user changes.
    - Execute test suites (npm test, npx jest, pytest, cargo test, etc.) directly via run_command.
    - NEVER push to main/master unless explicitly requested by the user.`;
 
 export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
    - Inspect existing design tokens, CSS variables, and spacing before adding components.
-   - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Always verify with tsc --noEmit.`;
+   - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Verify UI changes with the project's type/build check when one exists (e.g. \`tsc --noEmit\`).`;
 
 export const SECTION_ANTIGRAVITY_TOOLS = `10. COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; ${PROACTIVE_SERVER_LAUNCH_RULE}
@@ -140,7 +140,7 @@ export const GIT_WORKFLOW_PROMPTS = {
   gitCommit: `[GIT WORKFLOW - ATOMIC STAGING & COMMIT]
 - Execute only the staging/commit operation requested by the user. A staging-only request does not authorize committing; passing tests does not authorize either operation. Preserve pre-existing staged changes and include only authorized changes in a commit.
 - 1. Review exact changes: \`run_command "git diff"\` and \`git diff --cached\`. Inspect existing staged changes before adding anything; a normal commit includes the whole index, not just newly staged files.
-- 2. Stage specific modified files ONLY: \`run_command "git add <file1> <file2>"\` (NEVER use \`git add .\` to avoid staging secrets or ephemeral artifacts).
+- 2. Stage specific modified files: \`run_command "git add <file1> <file2>"\`. Use \`git add .\`/\`-A\` only when the user explicitly requested that broad selector; the run-time approval check still applies.
 - 3. Review \`git diff --cached --stat\` and the staged diff before committing. If the index contains unrelated user work, preserve it and isolate only authorized changes; do not silently commit or unstage their work. Mixed changes within a file require selective staging, not staging the entire file.
 - 4. Conventional Commit: \`run_command "git commit -m \\"<type>(<scope>): <concise summary>\\""\` (always include -m to prevent interactive vim/nano hang). Respect repository hooks; do not bypass them or retry by amending unless requested.
 - 5. Confirm the resulting hash and changed paths with \`git log -1 --oneline\` and \`git show --stat HEAD\`, then inspect status. Report hooks/tests actually executed and remaining changes. Never infer push permission from commit permission.`,
@@ -152,7 +152,7 @@ export const GIT_WORKFLOW_PROMPTS = {
    * Review Checklist: Specific files and critical functions reviewers should scrutinize.
    * Verification Evidence: Exact commands executed (e.g. tests, build) and exit codes.
    * Risk Assessment: Potential regression blast radius and mitigations.
-- 3. Safety Gate: NEVER run git push --force. Push only when the user explicitly requests it; preparing or reviewing a PR does not authorize pushing. Existing explicit authorization needs no repeated confirmation.
+- 3. Safety Gate: NEVER run git push --force. Push only when the user explicitly requests it; preparing or reviewing a PR does not authorize pushing. The run-time approval prompt is the only confirmation; do not ask again in prose.
 - Creating or updating a PR requires a matching user request and an available PR tool/CLI. Review title, base/head branches, and description before submission; report the actual PR URL only after creation succeeds. A review-only request authorizes inspection and findings.`,
 
   gitSync: `[GIT WORKFLOW - REMOTE SYNCHRONIZATION]
@@ -165,7 +165,7 @@ export const GIT_WORKFLOW_PROMPTS = {
   gitImplement: `[GIT WORKFLOW - IMPLEMENTATION]
 - Complete the requested code changes on the inspected working tree and authorized branch. Preserve unrelated and pre-existing edits. Branch/commit/push permission does not grant permission for unrelated code changes.
 - Follow the implementation plan. Record actual successful edit results, then obtain successful relevant verification after the most recent edit; a test result from before that edit cannot complete this stage. If no changes are needed, report the evidence and the scope adjustment needed rather than making an artificial edit to advance the workflow.
-- Do not stage, commit, sync, or publish a PR while the current implementation is incomplete. Report failed verification or missing evidence and remain in this stage. The Harness determines when implementation evidence permits the next Git stage.`,
+- Do not stage, commit, sync, or publish a PR while the current implementation is incomplete. Report failed verification or missing evidence and remain in this stage. This guidance is advisory; the run-time Git policy still decides whether a command runs.`,
 
   gitIntegrate: `[GIT WORKFLOW - INTEGRATION & CONFLICTS]
 - Merge, rebase, and cherry-pick only when requested, using the specified refs and strategy. Inspect status, starting HEAD, target history, and existing merge/rebase state first. Preserve user changes; do not start another integration while one is active.

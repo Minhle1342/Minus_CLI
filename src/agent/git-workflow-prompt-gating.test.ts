@@ -122,7 +122,7 @@ test('Git gating: Atomic staging & commit requires explicit scope and observed s
   assert.ok(decision.gitPlaybookPrompt.endsWith(GIT_WORKFLOW_PROMPTS.gitCommit));
   assert.match(decision.gitPlaybookPrompt, /Current stage: Commit/);
   assert.ok(decision.gitPlaybookPrompt.includes('git add <file1> <file2>'));
-  assert.ok(decision.gitPlaybookPrompt.includes('NEVER use `git add .`'));
+  assert.ok(decision.gitPlaybookPrompt.includes('only when the user explicitly requested that broad selector'));
   assert.ok(decision.reasonCodes.includes('GIT_PLAYBOOK_GITCOMMIT'));
 });
 

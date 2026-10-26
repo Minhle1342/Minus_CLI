@@ -39,11 +39,11 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
   * Avoid unrelated or speculative rewrites.`;
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION)]:
-- Goal: Verify the changes with empirical tests and diff review.
+- Goal: Verify the changes with the check appropriate to their risk, plus diff review.
 - Verification Tools:
-  * Use \`run_command\` to run builds (e.g. \`npm run build\`, \`tsc\`) and test suites (\`npm test\`, \`cargo test\`, \`pytest\`).
+  * Use \`run_command\` to run the applicable build or test check (e.g. \`npm run build\`, \`tsc\`, \`npm test\`, \`cargo test\`, \`pytest\`).
   * Use \`run_command "git diff"\` to inspect working tree changes.
-- Completion: Report clear evidence of test passes and observed diff.`;
+- Completion: Report clear evidence of the check actually run and the observed diff.`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
 - Goal: Provide a clear, natural final summary matching the user's language.
