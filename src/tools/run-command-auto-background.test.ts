@@ -1,0 +1,78 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createRunCommandTool, resolveAutoBackgroundWait } from './run-command.js';
+import { isLongRunningServerCommand } from './command-preflight-guard.js';
+import { Workspace } from '../workspace/workspace.js';
+
+function fakeTaskManager() {
+  const started: any[] = [];
+  return {
+    started,
+    startTask: (command: string, cwd: string, env: object, options: any) => {
+      const task = { id: `task_${started.length + 1}`, command, cwd, status: 'running', logs: [], pid: 1, lastOutputAt: Date.now() };
+      started.push({ command, options, task });
+      return task;
+    },
+    hasAutoPromotedRunning: () => false,
+    waitForAutoPromoted: async () => 'completed' as const,
+    listTasks: () => [],
+  } as any;
+}
+
+test('a finite command without WaitMsBeforeAsync auto-promotes as awaited', async () => {
+  process.env.MINUS_SOFT_TIMEOUT_MS = '1000';
+  const tm = fakeTaskManager();
+  const result = await createRunCommandTool(undefined, tm).execute(
+    { command: 'node -e "setTimeout(() => process.exit(0), 3000)"' }, new Workspace(),
+  );
+  delete process.env.MINUS_SOFT_TIMEOUT_MS;
+  assert.equal(result.isBackgroundTask, true);
+  assert.equal(result.autoPromoted, true);
+  assert.equal(tm.started[0].options.autoPromoted, true);
+});
+
+test('a command that finishes before the threshold stays synchronous', async () => {
+  process.env.MINUS_SOFT_TIMEOUT_MS = '5000';
+  const tm = fakeTaskManager();
+  const result = await createRunCommandTool(undefined, tm).execute(
+    { command: 'node -e "console.log(1)"' }, new Workspace(),
+  );
+  delete process.env.MINUS_SOFT_TIMEOUT_MS;
+  assert.equal(result.isBackgroundTask, undefined);
+  assert.equal(result.success, true);
+  assert.equal(tm.started.length, 0);
+});
+
+test('an explicit WaitMsBeforeAsync command is long-lived', async () => {
+  const tm = fakeTaskManager();
+  await createRunCommandTool(undefined, tm).execute(
+    { command: 'node -e "setTimeout(() => process.exit(0), 3000)"', WaitMsBeforeAsync: 50 }, new Workspace(),
+  );
+  assert.equal(tm.started[0].options.autoPromoted, false);
+});
+
+test('dev-server patterns are promoted but never awaited', async () => {
+  process.env.MINUS_SOFT_TIMEOUT_MS = '10';
+  const tm = fakeTaskManager();
+  const result = await createRunCommandTool(undefined, tm).execute({ command: 'npm run dev' }, new Workspace());
+  delete process.env.MINUS_SOFT_TIMEOUT_MS;
+  assert.equal(isLongRunningServerCommand('npm run dev'), true);
+  assert.equal(result.longLived, true);
+  assert.equal(tm.started[0].options.autoPromoted, false);
+});
+
+test('auto-promotion does not cross an isolated sandbox boundary', async () => {
+  const tm = fakeTaskManager();
+  const sandbox = {
+    getStatus: () => ({ isIsolated: true, fallbackToLocal: false }),
+    exec: async () => ({ stdout: 'ok', stderr: '', exitCode: 0, durationMs: 1, sandboxType: 'docker', success: true }),
+  } as any;
+  const result = await createRunCommandTool(sandbox, tm).execute({ command: 'npm test' }, new Workspace());
+  assert.equal(tm.started.length, 0);
+  assert.equal(result.preflightCode, undefined);
+});
+
+test('subagent contexts never auto-promote', () => {
+  const tm = fakeTaskManager();
+  assert.equal(resolveAutoBackgroundWait(undefined, 120000, tm, { isSubagent: true }), undefined);
+});

@@ -77,6 +77,11 @@ const DEV_SERVER_PATTERNS = [
   /\b(?:vite|next\s+dev|webpack\s+serve|nodemon|uvicorn|flask\s+run)\b/i,
 ];
 
+/** True khi lệnh là dev server/watcher chạy vô hạn — được promote nhưng không bao giờ chờ. */
+export function isLongRunningServerCommand(command: string): boolean {
+  return DEV_SERVER_PATTERNS.some((p) => p.test(command));
+}
+
 /**
  * Kiểm tra xem lệnh có phải là lệnh kiểm thử hay không.
  */
