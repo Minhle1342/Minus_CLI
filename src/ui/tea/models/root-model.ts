@@ -6,7 +6,7 @@ import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer, visibleDiffLines } from './diff-model.js';
 import { fileView, createFileView, fileLineCount } from './file-view-model.js';
-import { headerView, statuslineView } from './statusline-model.js';
+import { headerView, statuslineView, statuslineSubagentHit } from './statusline-model.js';
 import { toolCallEntry, toolErrorEntry, toolResultEntry, mergedToolEntry } from './tool-entry.js';
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
@@ -456,7 +456,14 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         if (handled) return handled;
         return [model, []];
       }
-      // Click chuột trên session tab-strip (dòng y=2, ngay trên viewport):
+      // Click chuột lên nhãn Subagent ở statusline (dòng cuối y=model.height) → mở Subagents Modal
+      if (msg.key === 'mouse+press' && msg.mouse && model.height > 4 && msg.mouse.y === model.height
+        && !model.grill.open && model.focus !== 'grill' && !model.question.active) {
+        if (statuslineSubagentHit(model, msg.mouse.x)) {
+          return action(model, 'subagents');
+        }
+      }
+            // Click chuột trên session tab-strip (dòng y=2, ngay trên viewport):
       // tab → switch, × → ẩn tạm, + new → tạo tab. Nuốt click để không lọt
       // xuống text-selection của viewport. Grill/question giữ quyền ưu tiên.
       if (msg.key === 'mouse+press' && msg.mouse && model.height > 4 && msg.mouse.y === 2
