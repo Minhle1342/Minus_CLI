@@ -2,6 +2,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Workspace } from '../workspace/workspace.js';
 import type { ToolControlMode } from '../control/classification-types.js';
 import type { PreMutationGateContext } from './tool-use-guardian.js';
+import type { AgentInbox } from '../agent/agent-inbox.js';
 
 export interface ToolExecutionContext {
   sessionId?: string;
@@ -30,6 +31,8 @@ export interface ToolExecutionContext {
   completionEvidenceReason?: string;
   /** Indicates if execution is originating from an isolated background subagent */
   isSubagent?: boolean;
+  /** Inbox để tool (run_command) enqueue thông báo nền khi task exit/stall. */
+  inbox?: Pick<AgentInbox, 'enqueue'>;
   /** Optional cancellation signal to abort long-running tools and child processes. */
   signal?: AbortSignal;
 }

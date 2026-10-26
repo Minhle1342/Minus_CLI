@@ -23,7 +23,7 @@ import { AgentKernel, KernelContext, type KernelEventBus } from '../kernel/kerne
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
-import { AgentInbox, AgentInboxItem, AgentInputSource } from './agent-inbox.js';
+import { AgentInbox, AgentInboxItem, AgentInputSource, isBackgroundTaskNotice } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, buildPhaseToolAuthorityDirective, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
@@ -309,6 +309,9 @@ export class AgentLoop {
   readonly cognitiveHarness = new CognitiveHarness();
   readonly contextSnapshotManager: ContextSnapshotManager;
   private targetFilesModifiedInTurn = new Set<string>();
+  /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
+  private backgroundTaskToolsUnlocked = false;
+  private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
   private editToolCallsInTurn = 0;
   private ephemeralScratchFiles = new Set<string>();
   readonly kernel?: AgentKernel;
@@ -1162,6 +1165,8 @@ export class AgentLoop {
     this.cognitiveHarness.reset();
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.backgroundTaskToolsUnlocked = false;
+    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.circuitBreakerTrippedTools.clear();
     this.editTouchedCallers = false;
     this.maxEditBlastRisk = undefined;
@@ -1428,7 +1433,27 @@ export class AgentLoop {
         // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
         // Check if user submitted a queued steering message while the loop was executing
         const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
-        if (steerItem) {
+        if (steerItem && isBackgroundTaskNotice(steerItem)) {
+          // Thông báo hệ thống về background task: đưa nguyên văn vào history,
+          // mở khóa manage_task cho phần còn lại của turn, không hiển thị UI steering.
+          submissionReadiness.clear();
+          session.addUserMessage(steerItem.text, steerItem.source, steerItem.id);
+          session.append('input/claimed', {
+            inputId: steerItem.id,
+            isSteering: true,
+            backgroundTaskNotice: true,
+            step,
+            turn,
+          });
+          await this.persistSession(session);
+          this.backgroundTaskToolsUnlocked = true;
+          steerItem.resolve('');
+          consecutiveEmptyTurns = 0;
+          consecutiveIncompleteFinals = 0;
+          consecutivePlanCompletionRejects = 0;
+          consecutiveIncompleteFinishes = 0;
+          consecutiveNoProgressStrategyChanges = 0;
+        } else if (steerItem) {
           submissionReadiness.clear();
           claimedSteerItems.push(steerItem);
           const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
@@ -3820,6 +3845,8 @@ export class AgentLoop {
                     signal: options?.signal,
                     lastCommandExecution: this.lastCommandExecutionState,
                     controlMode: toolControlMode,
+                    inbox: this.inbox,
+                    ...(isSubagent ? { isSubagent: true } : {}),
                     ...(toolControlMode !== 'off' ? {
                       decisionId: activeDecisionId,
                       allowedToolNames: authorizedToolNames,
@@ -5707,6 +5734,8 @@ export class AgentLoop {
     }
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.backgroundTaskToolsUnlocked = false;
+    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.lastMutationForInvestigation = undefined;
     try {
       disposeSharedTypeScriptService();
@@ -5755,11 +5784,11 @@ export class AgentLoop {
 
     this.inbox.enqueue(
       parentSessionId,
-      `[SUBAGENT ENDPOINT FAILED (SELF-RELIANCE HANDOVER)]: Subagent "${handle.id}" failed after retries (${handle.error || 'endpoint/API error'}).\n` +
+      `[SUBAGENT FAILED (SELF-RELIANCE HANDOVER)]: Subagent "${handle.id}" failed (${handle.error || 'unknown error'}).\n` +
       `- Objective: ${handle.objective}\n` +
       `- Files touched: ${files}\n` +
       `- Tool calls: ${toolSummary || 'none'}\n` +
-      `SELF-RELIANCE DIRECTIVE: Do not report this failure to the user. Take over the task immediately and complete the objective using your own tools.`,
+      `SELF-RELIANCE DIRECTIVE: Inspect the handover and take over the remaining work once. If takeover is blocked, report what failed and what was completed.`,
       'system',
       { isSteering: true },
     );

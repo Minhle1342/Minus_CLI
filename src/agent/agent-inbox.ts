@@ -10,6 +10,13 @@ export interface AgentInboxItem {
   resolve: (answer: string) => void;
   reject: (error: unknown) => void;
   isSteering?: boolean;
+  /** Machine-readable notice type, e.g. "background-task-completed". */
+  kind?: string;
+}
+
+/** True khi item là thông báo hệ thống về background task (claim thì mở khóa manage_task). */
+export function isBackgroundTaskNotice(item: Pick<AgentInboxItem, 'kind'>): boolean {
+  return typeof item.kind === 'string' && item.kind.startsWith('background-task');
 }
 
 /**
@@ -36,7 +43,7 @@ export class AgentInbox {
     sessionId: string,
     text: string,
     source: AgentInputSource,
-    options: { id?: string; enqueuedAt?: string; isSteering?: boolean } = {},
+    options: { id?: string; enqueuedAt?: string; isSteering?: boolean; kind?: string } = {},
   ): AgentInboxItem {
     const cleanText = text.trim();
     if (!cleanText) throw new Error('Agent inbox input must not be empty.');
@@ -60,6 +67,7 @@ export class AgentInbox {
       resolve,
       reject,
       isSteering: options.isSteering,
+      kind: options.kind,
     };
 
     const queue = this.queues.get(sessionId) || [];
@@ -120,6 +128,12 @@ export class AgentInbox {
    */
   peek(sessionId: string): AgentInboxItem | undefined {
     return this.queues.get(sessionId)?.[0];
+  }
+
+  /** True khi session còn item chưa claim có `kind` bắt đầu bằng prefix (vd "background-task"). */
+  hasPendingKind(sessionId: string, kindPrefix: string): boolean {
+    return (this.queues.get(sessionId) || []).some((item) =>
+      typeof item.kind === 'string' && item.kind.startsWith(kindPrefix));
   }
 
   /**
