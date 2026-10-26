@@ -129,7 +129,13 @@ test('lịch sử đã mất tool context → nén sớm hơn triggerRatio thư�
   assert.ok(degraded.after.historyTokens < degraded.before.historyTokens, 'nén phải tiết kiệm token thật');
 
   // Cùng kích thước, nhưng lịch sử KHÔNG mất tool context → không nén.
-  const clean = await manager.prepareRequest({ ...envelope, history: mixedHistory(0, 6) });
+  // Dùng manager mới để hysteresis/growth của lần nén trước không chi phối.
+  const cleanManager = new ContextBudgetManager(new ContextCompactor({ preserveLastNToolResults: 2 }), {
+    mode: 'enforce',
+    triggerRatio: 0.75,
+    counter: sizeCounter(),
+  });
+  const clean = await cleanManager.prepareRequest({ ...envelope, history: mixedHistory(0, 6) });
   assert.equal(clean.changed, false, 'không nén khi tool context còn nguyên');
 });
 

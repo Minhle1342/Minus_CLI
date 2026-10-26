@@ -66,3 +66,16 @@ test('shell-ast-parser: correctly extracts simple command executables and args',
   assert.equal(res.commands[1].executable, 'git');
   assert.deepEqual(res.commands[1].args, ['push', 'origin', 'main']);
 });
+
+test('shell-ast-parser: tokenizes file descriptor redirections correctly without polluting args', () => {
+  const res = parseShellAst('ls -la .codingagent/sessions/ 2>/dev/null || echo "Not found in cwd"');
+  assert.equal(res.commands.length, 2);
+  assert.equal(res.commands[0].executable, 'ls');
+  assert.deepEqual(res.commands[0].args, ['-la', '.codingagent/sessions/']);
+  assert.equal(res.commands[0].redirects.length, 1);
+  assert.equal(res.commands[0].redirects[0].fd, 2);
+  assert.equal(res.commands[0].redirects[0].type, '>');
+  assert.equal(res.commands[0].redirects[0].target, '/dev/null');
+  assert.equal(res.commands[1].executable, 'echo');
+  assert.deepEqual(res.commands[1].args, ['Not found in cwd']);
+});

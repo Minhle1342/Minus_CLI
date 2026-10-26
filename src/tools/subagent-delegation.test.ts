@@ -4,7 +4,7 @@ import { SubagentManager } from '../agent/subagent-manager.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
-import { createDelegateTaskTool } from './subagent-tools.js';
+import { createSpawnAgentTool } from './subagent-tools.js';
 
 describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
   it('Scenario 1: Subagent chạy độc lập tiêu tốn nhiều thao tác nội bộ -> kết quả tóm tắt ≤ 1600 chars, context cha không bị ô nhiễm', async () => {
@@ -82,27 +82,97 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
     assert.equal(result.summary, 'Files created and updated successfully.');
   });
 
-  it('Scenario 3: delegate_task ToolDefinition thực thi đúng cấu trúc schema và trả về kết quả cho ToolRunner', async () => {
+  it('Scenario 3: spawn_agent trả về handover packet tự thân vận động khi subagent gặp lỗi kết nối', async () => {
     const parentSession = new Session('parent-session-3');
     const registry = new AgentRegistry();
     const manager = new SubagentManager(
       registry,
       ((agentId: string, childSession: Session) => ({
-        submit: async () => 'Subagent subtask complete.',
+        submit: async () => {
+          childSession.append('tool/call', {
+            toolCallId: 'call_1',
+            toolName: 'read_file',
+            args: { path: 'src/config.ts' },
+          });
+          childSession.append('tool/result', {
+            toolCallId: 'call_1',
+            toolName: 'read_file',
+            result: { success: true },
+          });
+          childSession.append('tool/call', {
+            toolCallId: 'call_2',
+            toolName: 'write_file',
+            args: { path: 'src/partial.ts', content: 'test' },
+          });
+          childSession.append('tool/result', {
+            toolCallId: 'call_2',
+            toolName: 'write_file',
+            result: { success: true, filesModified: ['src/partial.ts'] },
+          });
+          throw new Error('LLM provider error: 503 Service Unavailable after 3 retries');
+        },
       })) as any,
     );
     manager.bindSession(parentSession);
 
-    const tool = createDelegateTaskTool(manager);
-    assert.equal(tool.name, 'delegate_task');
-
+    const tool = createSpawnAgentTool(manager);
     const executionResult = await tool.execute({
-      task: 'Verify dependencies',
-      maxSteps: 4,
+      brief: 'Update partial configuration',
+      wait: true,
+      timeoutMs: 5000,
     }, new Workspace('.'));
 
-    assert.equal(executionResult.success, true);
-    assert.equal(executionResult.summary, 'Subagent subtask complete.');
-    assert.ok(typeof executionResult.durationMs === 'number');
+    assert.equal(executionResult.success, false);
+    assert.equal(executionResult.status, 'failed');
+    assert.ok(executionResult.instruction.includes('SUBAGENT ENDPOINT FAILED'));
+    assert.ok(executionResult.handover);
+    assert.equal(executionResult.handover.objective, 'Update partial configuration');
+    assert.deepEqual(executionResult.handover.filesModified, ['src/partial.ts']);
+    assert.equal(executionResult.handover.toolCalls.length, 2);
+    assert.equal(executionResult.handover.toolCalls[0].toolName, 'read_file');
+    assert.equal(executionResult.handover.toolCalls[0].status, 'PASS');
+    assert.equal(executionResult.handover.toolCalls[1].toolName, 'write_file');
+    assert.equal(executionResult.handover.toolCalls[1].status, 'PASS');
+  });
+
+  it('Scenario 4: spawn_agent hỗ trợ cờ wait (async khi false, sync block khi true)', async () => {
+    const parentSession = new Session('parent-session-4');
+    const registry = new AgentRegistry();
+    let ranTask = false;
+    const manager = new SubagentManager(
+      registry,
+      ((agentId: string, childSession: Session) => ({
+        submit: async () => {
+          ranTask = true;
+          return 'Subagent completed successfully.';
+        },
+      })) as any,
+    );
+    manager.bindSession(parentSession);
+
+    const spawnTool = createSpawnAgentTool(manager);
+    assert.equal(spawnTool.name, 'spawn_agent');
+
+    // 1. Asynchronous (wait: false / omitted)
+    const asyncResult = await spawnTool.execute({
+      brief: 'Async background reconnaissance',
+      wait: false,
+    }, new Workspace('.'));
+
+    assert.equal(asyncResult.success, true);
+    assert.ok(asyncResult.agentId);
+    assert.equal(asyncResult.agent.status, 'running');
+
+    // 2. Synchronous (wait: true)
+    const syncResult = await spawnTool.execute({
+      brief: 'Synchronous blocking task',
+      wait: true,
+      timeoutMs: 5000,
+    }, new Workspace('.'));
+
+    assert.equal(syncResult.success, true);
+    assert.ok(syncResult.agentId);
+    assert.equal(syncResult.completed, true);
+    assert.equal(syncResult.answer, 'Subagent completed successfully.');
   });
 });

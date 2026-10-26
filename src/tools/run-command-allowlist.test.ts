@@ -71,6 +71,7 @@ test('dangerous and destructive commands still require approval', () => {
 test('bounded two-segment pipelines of allowlisted commands skip approval', () => {
   assert.equal(isAllowedShellCommand('npm test | head -n 20'), true);
   assert.equal(isAllowedShellCommand('git log --oneline | head -n 5'), true);
+  assert.equal(isAllowedShellCommand('ls -la .codingagent/sessions/ 2>/dev/null || echo "Not found in cwd"'), true);
   assert.equal(isAllowedShellCommand('npm test | tee out.txt'), false);
   assert.equal(isAllowedShellCommand('npm test | head -n 5 | tail -n 2'), false);
   assert.equal(isAllowedShellCommand('echo hi > out.txt'), false);

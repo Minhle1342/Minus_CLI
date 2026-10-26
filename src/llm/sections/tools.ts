@@ -101,7 +101,7 @@ export const TOOL_PLAYBOOK_PROMPTS = {
   rootCause: `[TOOL PLAYBOOK B - ROOT CAUSE]\nlist_files -> read_file -> run_command.`,
   mutation: `[TOOL PLAYBOOK C - MUTATION]\nread_file -> replace_text / write_file -> run_command.`,
   longTask: `[TOOL PLAYBOOK D - LONG TASK / SERVER]\nrun_command(WaitMsBeforeAsync=5000) -> inspect startup logs.`,
-  subagent: `[TOOL PLAYBOOK E - EXECUTION]\nread_file -> replace_text -> run_command.`,
+  subagent: `[TOOL PLAYBOOK E - ORCHESTRATION & SELF-RELIANCE]\nspawn_agent(wait=false/true) -> inspect handover if subagent fails -> take over with read_file -> replace_text -> run_command.`,
   dagPlan: `[TOOL PLAYBOOK F - PLAN & VERIFY]\nread_file -> replace_text -> run_command.`,
   verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nInspect working tree with run_command("git diff") -> execute verification test command.`,
 } as const;

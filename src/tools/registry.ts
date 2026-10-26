@@ -287,11 +287,7 @@ export class ToolRegistry implements ToolProvider {
         if (!resolvedArgs.Url && resolvedArgs.url) {
           resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
         }
-      } else if ((name === 'write_to_file' || name === 'create_file') && this.tools.has('write_file')) {
-        resolvedName = 'write_file';
-      } else if ((name === 'replace_file_content' || name === 'multi_replace_file_content') && this.tools.has('replace_text')) {
-        resolvedName = 'replace_text';
-      } else if ((name === 'search_codebase_fast' || name === 'tools_search') && this.tools.has('search_text')) {
+      } else if (name === 'tools_search' && this.tools.has('search_text')) {
         resolvedName = 'search_text';
       }
     }

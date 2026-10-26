@@ -12,6 +12,7 @@ import {
 import type { ArchivedTurnDocument } from "../context/turn-memory-retriever.js";
 import { compactActiveTurnText, type ActiveTextReplacement } from './active-turn-compaction.js';
 import { getHistoryTotalChars } from '../session/message-metrics.js';
+import { isLargeHistoryPrefix } from './completed-turn-compaction-policy.js';
 
 export type ContextManagementMode = "legacy" | "shadow" | "enforce" | "auto";
 export type TokenCountSource =
@@ -89,11 +90,27 @@ export interface ContextPreparationResult {
   withinBudget: boolean;
   phaseTransitionCompacted?: boolean;
   failureReason?: "CONTEXT_BUDGET_UNSATISFIABLE";
+  /** Why this request was evaluated for compaction; telemetry only, not a policy input. */
+  triggerReasons?: string[];
+  /** History growth reserved out of the proactive ceiling for the next step. */
+  projectedGrowthTokens?: number;
+  /** System prompt + tools + dynamic context alone exceed their share of the window. */
+  nonHistoryPressure?: boolean;
 }
 
 export interface ContextBudgetManagerOptions {
   mode?: ContextManagementMode;
   triggerRatio?: number;
+  /**
+   * Do not rewrite history again until the request grows past the post-compaction
+   * upper bound by this fraction. Prevents a zombie trigger that keeps matching
+   * because masking is idempotent. A hard-ceiling overflow always bypasses it.
+   */
+  hysteresisRatio?: number;
+  /** Cap for the projected next-step growth reserved out of the proactive ceiling. */
+  growthReserveCapRatio?: number;
+  /** Share of the usable input budget above which system/tool surface is reported as pressure. */
+  nonHistoryShareThreshold?: number;
   counter?: RequestTokenCounter;
   /**
    * Số tool observation đã bị nén thành stub mà lịch sử được phép chứa trước
@@ -399,11 +416,17 @@ export class ContextBudgetManager {
   }
   readonly mode: ContextManagementMode;
   readonly triggerRatio: number;
+  readonly hysteresisRatio: number;
+  readonly growthReserveCapRatio: number;
+  readonly nonHistoryShareThreshold: number;
   readonly counter: RequestTokenCounter;
   /** Ngưỡng số observation đã bị nén để coi là "mất context tool". */
   readonly degradedObservationThreshold: number;
   /** Tỉ lệ ngân sách mà điều kiện trên bắt đầu nén sớm. */
   readonly degradedContextRatio: number;
+  private lastCompactionAfterUpperBound?: number;
+  private lastHistoryTokens?: number;
+  private historyGrowthEwma = 0;
 
   constructor(
     private readonly compactor: ContextCompactor,
@@ -412,7 +435,19 @@ export class ContextBudgetManager {
     this.mode = options.mode || "auto";
     this.triggerRatio = Math.min(
       0.95,
-      Math.max(0.5, options.triggerRatio ?? 0.75),
+      Math.max(0.5, options.triggerRatio ?? 0.8),
+    );
+    this.hysteresisRatio = Math.min(
+      0.5,
+      Math.max(0, options.hysteresisRatio ?? 0.1),
+    );
+    this.growthReserveCapRatio = Math.min(
+      0.5,
+      Math.max(0, options.growthReserveCapRatio ?? 0.25),
+    );
+    this.nonHistoryShareThreshold = Math.min(
+      0.95,
+      Math.max(0.1, options.nonHistoryShareThreshold ?? 0.4),
     );
     this.counter = options.counter || new CalibratedRequestTokenCounter();
     this.degradedObservationThreshold = Math.max(
@@ -425,15 +460,50 @@ export class ContextBudgetManager {
     );
   }
 
+  /** Forget per-session hysteresis/growth when the loop binds a different session. */
+  resetSessionState(): void {
+    this.rejectedCandidateKeys.clear();
+    this.lastCompactionAfterUpperBound = undefined;
+    this.lastHistoryTokens = undefined;
+    this.historyGrowthEwma = 0;
+  }
+
   async prepareRequest(
     envelope: ModelRequestEnvelope,
     options: ContextPrepareOptions = {},
   ): Promise<ContextPreparationResult> {
     const before = await this.counter.count(envelope);
     const { usableInputTokens, targetUsableInputTokens } = resolveRequestBudget(envelope);
-    const budgetPressure =
-      before.upperBoundTokens >
-      Math.floor(targetUsableInputTokens * this.triggerRatio);
+    // One normalized trigger ratio against the real window. The earlier design
+    // multiplied a 75% cost target by triggerRatio, so compaction fired near half
+    // the provider window and kept breaking the cache prefix while headroom remained.
+    const observedHistoryGrowth = this.lastHistoryTokens === undefined
+      ? 0
+      : Math.max(0, before.historyTokens - this.lastHistoryTokens);
+    this.lastHistoryTokens = before.historyTokens;
+    // Decay on every step, including flat ones: growth is a decreasing signal, so
+    // a stale one-off spike must not reserve headroom forever.
+    this.historyGrowthEwma = this.historyGrowthEwma * 0.7 + observedHistoryGrowth * 0.3;
+    // Reserve the projected next-step growth so a large tool observation does not
+    // land one step past the trigger and force an emergency pass.
+    const projectedGrowthTokens = Math.min(
+      Math.floor(usableInputTokens * this.growthReserveCapRatio),
+      Math.ceil(this.historyGrowthEwma * 1.5),
+    );
+    const triggerCeiling = Math.max(
+      1,
+      Math.floor(usableInputTokens * this.triggerRatio) - projectedGrowthTokens,
+    );
+    const budgetPressure = before.upperBoundTokens > triggerCeiling;
+    const hardOverflow = before.upperBoundTokens > usableInputTokens;
+    const hysteresisFloor = this.lastCompactionAfterUpperBound === undefined
+      ? undefined
+      : Math.ceil(this.lastCompactionAfterUpperBound * (1 + this.hysteresisRatio));
+    const hysteresisBlocked = hysteresisFloor !== undefined
+      && before.upperBoundTokens <= hysteresisFloor
+      && !hardOverflow;
+    const nonHistoryPressure = before.nonHistoryTokens / Math.max(1, usableInputTokens)
+      >= this.nonHistoryShareThreshold;
     const phaseTransitionEligible = Boolean((this.mode === "enforce"
       || (this.mode === "auto" && isKnownProvider(envelope.provider)))
       && options.phaseTransition
@@ -448,8 +518,17 @@ export class ContextBudgetManager {
       ? countDegradedObservations(envelope.history)
       : 0;
     const degradedToolContext = degradedObservations >= this.degradedObservationThreshold
-      && before.upperBoundTokens >= Math.floor(targetUsableInputTokens * this.degradedContextRatio);
-    const shouldCompact = budgetPressure || phaseTransitionEligible || degradedToolContext;
+      && before.upperBoundTokens >= Math.floor(usableInputTokens * this.degradedContextRatio);
+    const shouldCompact = !hysteresisBlocked
+      && (budgetPressure || phaseTransitionEligible || degradedToolContext);
+    const triggerReasons = [
+      budgetPressure && !hysteresisBlocked ? "budget-pressure" : undefined,
+      phaseTransitionEligible && !hysteresisBlocked ? "phase-transition" : undefined,
+      degradedToolContext && !hysteresisBlocked ? "degraded-tool-context" : undefined,
+      projectedGrowthTokens > 0 ? "growth-reserve" : undefined,
+      nonHistoryPressure ? "non-history-surface" : undefined,
+      hysteresisBlocked ? "hysteresis-cooldown" : undefined,
+    ].filter((reason): reason is string => Boolean(reason));
     const checkpointObservations = this.compactor.collectWithinTurnCheckpoint(
       envelope.history,
     );
@@ -463,6 +542,9 @@ export class ContextBudgetManager {
         after: before,
         checkpointObservations,
         withinBudget: before.upperBoundTokens <= usableInputTokens,
+        triggerReasons,
+        projectedGrowthTokens,
+        nonHistoryPressure,
       };
     }
 
@@ -473,11 +555,13 @@ export class ContextBudgetManager {
       config: this.compactor.getConfig(), count: before, mode: this.mode,
     })).digest('hex');
     if (this.rejectedCandidateKeys.has(candidateKey)) {
-      const enforce = this.mode === 'enforce' || (this.mode === 'auto' && isKnownProvider(envelope.provider));
       return { mode: this.mode, history: envelope.history, changed: false,
         before, after: before, checkpointObservations,
         withinBudget: before.upperBoundTokens <= usableInputTokens,
-        ...(enforce && before.upperBoundTokens > usableInputTokens
+        triggerReasons,
+        projectedGrowthTokens,
+        nonHistoryPressure,
+        ...(hardOverflow
           ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}) };
     }
     options.onCompactionStart?.();
@@ -541,7 +625,7 @@ export class ContextBudgetManager {
 
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
-    if (!withinBudget && ((!options.protectActiveTurn && envelope.history.length > 2) || (useEnforce && options.protectActiveTurn && recoveryWindow))) {
+    if (!withinBudget && (recoveryWindow || envelope.history.length > 2)) {
       const emergencyBudgetTokens = Math.max(
         1,
         usableInputTokens - before.nonHistoryTokens,
@@ -652,7 +736,13 @@ export class ContextBudgetManager {
       }
     }
     const tokensSaved = before.upperBoundTokens - finalAfter.upperBoundTokens;
-    const materialSavings = tokensSaved >= 512 && tokensSaved / Math.max(1, before.upperBoundTokens) >= 0.1;
+    // Breaking a prefix cache is only worth it when the rewrite is material. A
+    // large prefix loses more cached input than a marginal saving returns, so
+    // demand a larger share of the request once history dominates the window.
+    const largePrefix = isLargeHistoryPrefix(before.historyTokens, usableInputTokens);
+    const requiredSavingsRatio = largePrefix ? 0.2 : 0.1;
+    const materialSavings = tokensSaved >= 512
+      && tokensSaved / Math.max(1, before.upperBoundTokens) >= requiredSavingsRatio;
     if (tokensSaved <= 0 || (before.upperBoundTokens <= usableInputTokens && !materialSavings)) {
       this.markRejectedCandidate(candidateKey);
       return {
@@ -660,11 +750,17 @@ export class ContextBudgetManager {
         before, after: before, checkpointObservations,
         compactionStats: finalSelected.stats,
         withinBudget: before.upperBoundTokens <= usableInputTokens,
-        ...(effectiveMode === 'enforce' && before.upperBoundTokens > usableInputTokens
+        triggerReasons,
+        projectedGrowthTokens,
+        nonHistoryPressure,
+        ...(hardOverflow
           ? { failureReason: 'CONTEXT_BUDGET_UNSATISFIABLE' as const } : {}),
       };
     }
     this.clearRejectedCandidates();
+    this.lastCompactionAfterUpperBound = finalAfter.upperBoundTokens;
+    this.lastHistoryTokens = finalAfter.historyTokens;
+    this.historyGrowthEwma = 0;
     return {
       mode: this.mode,
       history: finalSelected.messages,
@@ -681,7 +777,10 @@ export class ContextBudgetManager {
       ), ...(activeTextReplacements.length ? { activeTextReplacements } : {}) },
       withinBudget,
       phaseTransitionCompacted: phaseTransitionEligible && !budgetPressure,
-      ...(effectiveMode === "enforce" && !withinBudget
+      triggerReasons,
+      projectedGrowthTokens,
+      nonHistoryPressure,
+      ...(!withinBudget
         ? { failureReason: "CONTEXT_BUDGET_UNSATISFIABLE" as const }
         : {}),
     };

@@ -38,6 +38,24 @@ const SENSITIVE_FILE_PATTERNS: RegExp[] = [
   /\.npmrc/i,
 ];
 
+const SAFE_NULL_OR_STREAM_TARGETS = new Set([
+  '/dev/null',
+  'nul',
+  'con',
+  '/dev/stdout',
+  '/dev/stderr',
+  '&1',
+  '&2',
+  '1',
+  '2',
+]);
+
+function isSafeReadOnlyRedirect(redirect: { type: string; target: string; fd?: number }): boolean {
+  const target = (redirect.target || '').trim().toLowerCase();
+  if (SAFE_NULL_OR_STREAM_TARGETS.has(target)) return true;
+  if (['>&', '<&'].includes(redirect.type) && /^&?[0-2]$/.test(target)) return true;
+  return false;
+}
 // Các lệnh đọc an toàn
 const SAFE_READ_ONLY_PREFIXES = [
   'cat', 'head', 'tail', 'less', 'more', 'type', 'Get-Content', 'gc',
@@ -141,15 +159,17 @@ export class SandboxPolicyEngine {
     }
 
     const analysis = parseShellAst(trimmed);
-    const hasOnlyPipes = analysis.operators.length === 0 || analysis.operators.every(op => op === '|');
+    const SAFE_READ_ONLY_OPERATORS = new Set(['|', '&&', '||', ';', 'newline']);
+    const hasSafeOperators = analysis.operators.length === 0 || analysis.operators.every(op => SAFE_READ_ONLY_OPERATORS.has(op));
     const isObfuscationSafe = !analysis.hasObfuscation || (
       analysis.obfuscationReasons.length === 1 &&
       analysis.obfuscationReasons[0] === 'Dynamic shell eval/exec detected.' &&
       analysis.commands.some(c => c.executable.toLowerCase() === 'find')
     );
-    const isReadOnly = !analysis.error && !analysis.hasSubshell && hasOnlyPipes && isObfuscationSafe && analysis.commands.length > 0
+    const isReadOnly = !analysis.error && !analysis.hasSubshell && hasSafeOperators && isObfuscationSafe && analysis.commands.length > 0
       && analysis.commands.every((command) => {
-        if (command.redirects.length || command.assignments.length) return false;
+        if (command.assignments.length) return false;
+        if (command.redirects.length && !command.redirects.every(isSafeReadOnlyRedirect)) return false;
         const executable = command.executable.toLowerCase();
         const args = command.args;
         if (executable === 'git' || executable === 'git.exe') {

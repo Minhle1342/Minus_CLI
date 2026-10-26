@@ -193,9 +193,272 @@ test('a missed proactive target does not become a false provider-budget failure'
     outputReserveTokens: 50,
   });
 
-  assert.equal(result.compactionStats?.withinBudget, false);
+  // The proactive target is not a trigger; the request still fits the hard window.
+  assert.equal(result.changed, false);
+  assert.equal(result.compactionStats, undefined);
   assert.equal(result.withinBudget, true);
   assert.equal(result.failureReason, undefined);
+});
+
+test('the proactive trigger is normalized against the hard window, not a discounted target', async () => {
+  const counter = {
+    async count() {
+      return {
+        inputTokens: 6_500,
+        upperBoundTokens: 6_500,
+        historyTokens: 6_500,
+        nonHistoryTokens: 0,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(new ContextCompactor(), { mode: 'enforce', counter });
+  const result = await manager.prepareRequest({
+    provider: 'test',
+    model: 'test',
+    systemPrompt: 'system',
+    tools: [],
+    history: [{ role: 'user', parts: [{ text: 'small history '.repeat(20) }] }],
+    maxInputTokens: 10_000,
+    targetInputTokens: 7_500,
+    outputReserveTokens: 0,
+  });
+
+  // 6,500 < 80% of 10,000. The old target-based gate (75% x 75%) would rewrite here.
+  assert.equal(result.changed, false);
+  assert.equal(result.compactionStats, undefined);
+  assert.equal(result.withinBudget, true);
+});
+
+test('post-compaction hysteresis blocks a repeat rewrite until the request grows again', async () => {
+  let countCall = 0;
+  const counter = {
+    async count() {
+      countCall++;
+      const tokens = countCall === 1 ? 6_000
+        : countCall === 2 ? 5_000
+        : countCall === 3 ? 5_200
+        : countCall === 4 ? 5_800
+        : 5_000;
+      return {
+        inputTokens: tokens,
+        upperBoundTokens: tokens,
+        historyTokens: tokens,
+        nonHistoryTokens: 0,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(
+    new ContextCompactor({ preserveLastNToolResults: 1 }),
+    { mode: 'enforce', triggerRatio: 0.5, hysteresisRatio: 0.1, counter },
+  );
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Inspect the change.' }] }];
+  for (let index = 0; index < 6; index++) {
+    history.push({ role: 'model', parts: [{ functionCall: { id: `read-${index}`, name: 'read_file', args: { path: `${index}.ts` } } }] });
+    history.push({ role: 'user', parts: [{ functionResponse: { id: `read-${index}`, name: 'read_file', response: { path: `${index}.ts`, content: 'evidence '.repeat(300) } } }] });
+  }
+  const envelope = {
+    provider: 'test', model: 'test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 10_000, outputReserveTokens: 0,
+  };
+
+  const first = await manager.prepareRequest(envelope);
+  assert.equal(first.changed, true);
+  assert.equal(first.after.upperBoundTokens, 5_000);
+
+  // 5,200 is still inside the 10% floor above 5,000: no second rewrite.
+  const smallGrowth = await manager.prepareRequest({
+    ...envelope,
+    history: [...first.history, { role: 'model', parts: [{ text: 'small growth' }] }],
+  });
+  assert.equal(smallGrowth.changed, false);
+  assert.ok(smallGrowth.triggerReasons?.includes('hysteresis-cooldown'));
+
+  // Growing past the floor re-enables compaction.
+  const grown: any[] = [...first.history, { role: 'model', parts: [{ text: 'more growth' }] }];
+  for (let index = 0; index < 2; index++) {
+    grown.push({ role: 'model', parts: [{ functionCall: { id: `new-${index}`, name: 'read_file', args: { path: `new-${index}.ts` } } }] });
+    grown.push({ role: 'user', parts: [{ functionResponse: { id: `new-${index}`, name: 'read_file', response: { path: `new-${index}.ts`, content: 'fresh evidence '.repeat(300) } } }] });
+  }
+  const regrown = await manager.prepareRequest({ ...envelope, history: grown });
+  assert.equal(regrown.changed, true);
+});
+
+test('projected next-step growth tightens the proactive ceiling', async () => {
+  let countCall = 0;
+  const counter = {
+    async count() {
+      countCall++;
+      const tokens = countCall === 1 ? 3_000 : countCall === 2 ? 6_500 : 4_000;
+      return {
+        inputTokens: tokens,
+        upperBoundTokens: tokens,
+        historyTokens: tokens,
+        nonHistoryTokens: 0,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(new ContextCompactor({ preserveLastNToolResults: 1 }), {
+    mode: 'enforce', triggerRatio: 0.8, counter,
+  });
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Inspect the change.' }] }];
+  for (let index = 0; index < 6; index++) {
+    history.push({ role: 'model', parts: [{ functionCall: { id: `read-${index}`, name: 'read_file', args: { path: `${index}.ts` } } }] });
+    history.push({ role: 'user', parts: [{ functionResponse: { id: `read-${index}`, name: 'read_file', response: { path: `${index}.ts`, content: 'evidence '.repeat(300) } } }] });
+  }
+  const envelope = {
+    provider: 'test', model: 'test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 10_000, outputReserveTokens: 0,
+  };
+
+  const first = await manager.prepareRequest(envelope);
+  assert.equal(first.changed, false);
+  assert.equal(first.projectedGrowthTokens, 0);
+
+  const second = await manager.prepareRequest({
+    ...envelope,
+    history: [...history, { role: 'user', parts: [{ text: 'extra evidence added this step' }] }],
+  });
+  assert.ok((second.projectedGrowthTokens ?? 0) > 0);
+  assert.ok(second.triggerReasons?.includes('growth-reserve'));
+  // 6,500 fits 80% of the window, but not once projected growth is reserved.
+  assert.equal(second.changed, true);
+});
+
+test('projected growth decays after a one-off spike instead of reserving headroom forever', async () => {
+  let countCall = 0;
+  const counter = {
+    async count() {
+      countCall++;
+      const tokens = countCall === 1 ? 10_000
+        : countCall === 2 ? 50_000
+        : countCall === 3 ? 50_000
+        : countCall === 4 ? 50_000
+        : 10_000;
+      return {
+        inputTokens: tokens,
+        upperBoundTokens: tokens,
+        historyTokens: tokens,
+        nonHistoryTokens: 0,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(new ContextCompactor(), {
+    mode: 'enforce', triggerRatio: 0.8, counter,
+  });
+  const envelope = {
+    provider: 'test', model: 'test', systemPrompt: 'system', tools: [],
+    history: [{ role: 'user', parts: [{ text: 'steady history' }] }],
+    maxInputTokens: 100_000, outputReserveTokens: 0,
+  };
+
+  await manager.prepareRequest(envelope);
+  const spike = await manager.prepareRequest(envelope);
+  const flatOne = await manager.prepareRequest(envelope);
+  const flatTwo = await manager.prepareRequest(envelope);
+  const afterDrop = await manager.prepareRequest(envelope);
+
+  assert.ok(spike.projectedGrowthTokens! > flatOne.projectedGrowthTokens!);
+  assert.ok(flatOne.projectedGrowthTokens! > flatTwo.projectedGrowthTokens!);
+  assert.ok(flatTwo.projectedGrowthTokens! > afterDrop.projectedGrowthTokens!);
+  // The spike's reserve must decay, not stay pinned at 25% of the window.
+  assert.ok(afterDrop.projectedGrowthTokens! < 7_000,
+    `expected decayed reserve, got ${afterDrop.projectedGrowthTokens}`);
+  assert.equal(afterDrop.changed, false);
+});
+
+test('hard overflow bypasses post-compaction hysteresis', async () => {
+  let countCall = 0;
+  const counter = {
+    async count() {
+      countCall++;
+      const tokens = countCall === 1 ? 12_000
+        : countCall === 2 ? 9_500
+        : countCall === 3 ? 10_200
+        : 5_000;
+      return {
+        inputTokens: tokens,
+        upperBoundTokens: tokens,
+        historyTokens: tokens,
+        nonHistoryTokens: 0,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(
+    new ContextCompactor({ preserveLastNToolResults: 1 }),
+    { mode: 'enforce', triggerRatio: 0.5, hysteresisRatio: 0.1, counter },
+  );
+  const history: any[] = [{ role: 'user', parts: [{ text: 'Inspect the change.' }] }];
+  for (let index = 0; index < 6; index++) {
+    history.push({ role: 'model', parts: [{ functionCall: { id: `read-${index}`, name: 'read_file', args: { path: `${index}.ts` } } }] });
+    history.push({ role: 'user', parts: [{ functionResponse: { id: `read-${index}`, name: 'read_file', response: { path: `${index}.ts`, content: 'evidence '.repeat(300) } } }] });
+  }
+  const envelope = {
+    provider: 'test', model: 'test', systemPrompt: 'system', tools: [], history,
+    maxInputTokens: 10_000, outputReserveTokens: 0,
+  };
+
+  const first = await manager.prepareRequest(envelope);
+  assert.equal(first.after.upperBoundTokens, 9_500);
+  assert.equal(first.withinBudget, true);
+
+  // 10,200 > 10,000 usable but still inside the 10% hysteresis floor (10,450):
+  // the hard ceiling must win over the cooldown or the request overflows.
+  const overflow = await manager.prepareRequest(envelope);
+  assert.equal(overflow.changed, true);
+  assert.ok(!overflow.triggerReasons?.includes('hysteresis-cooldown'));
+});
+
+test('non-history surface pressure is reported without rewriting history', async () => {
+  const counter = {
+    async count() {
+      return {
+        inputTokens: 7_000,
+        upperBoundTokens: 7_000,
+        historyTokens: 1_000,
+        nonHistoryTokens: 6_000,
+        source: 'tokenizer' as const,
+        hardBound: false,
+        errorMarginRatio: 0,
+      };
+    },
+  };
+  const manager = new ContextBudgetManager(new ContextCompactor(), { mode: 'enforce', counter });
+  const result = await manager.prepareRequest({
+    provider: 'test', model: 'test', systemPrompt: 'large tools', tools: [],
+    history: [{ role: 'user', parts: [{ text: 'small' }] }],
+    maxInputTokens: 10_000, outputReserveTokens: 0,
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.nonHistoryPressure, true);
+  assert.ok(result.triggerReasons?.includes('non-history-surface'));
+});
+
+test('legacy mode still refuses a request above the hard ceiling', async () => {
+  const manager = new ContextBudgetManager(new ContextCompactor(), { mode: 'legacy' });
+  const result = await manager.prepareRequest({
+    provider: 'unknown-provider', model: 'custom', systemPrompt: 'system', tools: [],
+    history: [{ role: 'user', parts: [{ text: `Pinned request: ${'x'.repeat(8_000)}` }] }],
+    maxInputTokens: 500, outputReserveTokens: 50,
+  });
+
+  assert.equal(result.withinBudget, false);
+  assert.equal(result.failureReason, 'CONTEXT_BUDGET_UNSATISFIABLE');
 });
 
 test('guardian never invents successful verification evidence', async () => {

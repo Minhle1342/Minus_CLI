@@ -69,6 +69,7 @@ export interface ShellToken {
   quoted?: boolean;
   quoteChar?: "'" | '"' | '`';
   raw: string;
+  fd?: number;
 }
 
 /**
@@ -272,6 +273,21 @@ export function tokenizeShell(command: string): { tokens: ShellToken[]; error?: 
       continue;
     }
 
+    // File descriptor redirections (e.g. 2>, 1>, 2>>, 2>&1, 1>&2)
+    if (/[0-9]/.test(char)) {
+      const fdMatch = /^(\d+)(>>|>|<|>&|<&)/.exec(command.slice(i));
+      if (fdMatch) {
+        tokens.push({
+          type: 'REDIRECT',
+          value: fdMatch[2],
+          raw: fdMatch[0],
+          fd: parseInt(fdMatch[1], 10),
+        });
+        i += fdMatch[0].length;
+        continue;
+      }
+    }
+    
     // Two-character operators
     const twoChars = command.slice(i, i + 2);
     if (['&&', '||', '>>', '<<', '>&', '<&', '&>', '>|'].includes(twoChars)) {
@@ -343,21 +359,11 @@ export function tokenizeShell(command: string): { tokens: ShellToken[]; error?: 
     }
 
     if (word.length > 0) {
-      // Check for file descriptor redirect prefix e.g. 2>&1 or 2>
-      const fdRedirectMatch = /^(\d+)(>>|>|<)$/.exec(word);
-      if (fdRedirectMatch) {
-        tokens.push({
-          type: 'REDIRECT',
-          value: fdRedirectMatch[2],
-          raw: word,
-        });
-      } else {
-        tokens.push({
-          type: 'WORD',
-          value: word,
-          raw: command.slice(start, i),
-        });
-      }
+      tokens.push({
+        type: 'WORD',
+        value: word,
+        raw: command.slice(start, i),
+      });
     }
   }
 
@@ -452,6 +458,7 @@ function parseSimpleCommandsFromTokens(tokens: ShellToken[]): ShellSimpleCommand
       currentRedirects.push({
         type: token.value,
         target,
+        ...(typeof token.fd === 'number' ? { fd: token.fd } : {}),
       });
       if (next && next.type === 'WORD') {
         currentRaw.push(next.raw);

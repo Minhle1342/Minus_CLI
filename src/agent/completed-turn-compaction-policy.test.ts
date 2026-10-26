@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveCompletedTurnCompactionPolicy, hasCompletedTurnPressure, hasMaterialCompletedTurnSavings } from './completed-turn-compaction-policy.js';
+import { resolveCompletedTurnCompactionPolicy, hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveEffectiveMinSavingsRatio, isLargeHistoryPrefix } from './completed-turn-compaction-policy.js';
 import { AgentLoop } from './agent-loop.js';
 import { ContextCompactor } from './context-compactor.js';
 import { Session } from '../session/session.js';
@@ -32,6 +32,62 @@ test('environment thresholds are configurable and invalid values use defaults', 
       MINUS_COMPLETED_TURN_MIN_SAVINGS_RATIO: value,
     }), defaults);
   }
+});
+
+test('large prefixes require a bigger savings share', () => {
+  const policy = { triggerRatio: 0.6, minTokensSaved: 512, minSavingsRatio: 0.1 };
+  assert.equal(resolveEffectiveMinSavingsRatio(policy, 7_000, 10_000), 0.1);
+  assert.equal(resolveEffectiveMinSavingsRatio(policy, 7_500, 10_000), 0.2);
+  assert.equal(resolveEffectiveMinSavingsRatio({ ...policy, minSavingsRatio: 0.3 }, 8_000, 10_000), 0.3);
+  assert.equal(resolveEffectiveMinSavingsRatio(policy, NaN, 10_000), 0.1);
+});
+
+test('large-prefix boundary is shared by every caller', () => {
+  // Fractional windows must not floor the threshold into a different answer.
+  assert.equal(isLargeHistoryPrefix(11_249, 14_999), false);
+  assert.equal(isLargeHistoryPrefix(11_250, 14_999), true);
+  assert.equal(resolveEffectiveMinSavingsRatio(
+    { triggerRatio: 0.6, minTokensSaved: 512, minSavingsRatio: 0.1 }, 11_249, 14_999), 0.1);
+  assert.equal(resolveEffectiveMinSavingsRatio(
+    { triggerRatio: 0.6, minTokensSaved: 512, minSavingsRatio: 0.1 }, 11_250, 14_999), 0.2);
+  assert.equal(isLargeHistoryPrefix(7_499, 10_000), false);
+  assert.equal(isLargeHistoryPrefix(7_500, 10_000), true);
+  assert.equal(isLargeHistoryPrefix(NaN, 10_000), false);
+  assert.equal(isLargeHistoryPrefix(7_500, 0), false);
+});
+
+test('turn backlog and observation volume alone never rewrite history', async () => {
+  const manyTurns = closedSession(12);
+  const manyHarness = boundaryHarness(1_000_000);
+  await manyHarness.run(manyTurns);
+  assert.deepEqual(manyHarness.calls, { candidates: 0, archives: 0, persisted: 0 });
+
+  const largeOldTurn = closedSession(5, true);
+  const largeHarness = boundaryHarness(1_000_000);
+  await largeHarness.run(largeOldTurn);
+  assert.deepEqual(largeHarness.calls, { candidates: 0, archives: 0, persisted: 0 });
+});
+
+test('structural pressure archives recall records without rewriting model history', async () => {
+  const session = new Session('checkpoint-session');
+  for (let turn = 1; turn <= 14; turn++) {
+    session.append('turn/start', { turn });
+    session.addUserMessage(`read ${turn}`);
+    session.addModelMessage({ functionCalls: [{ id: `r-${turn}`, name: 'read_file', args: { path: 'a.ts' } }] });
+    session.addToolResultWithId('read_file', { path: 'a.ts', content: `observation ${turn}` }, `r-${turn}`);
+    session.append('turn/end', { turn, reason: 'completed' });
+  }
+  const before = session.getHistory();
+  const harness = boundaryHarness(1_000_000);
+  let archivedRecords = 0;
+  harness.loop.turnMemoryRetriever.archiveMaskedObservations = async (records: any[]) => {
+    archivedRecords = records.length;
+    return { inserted: records.length, updated: 0, skipped: 0, evicted: [] };
+  };
+  await harness.run(session);
+  assert.ok(archivedRecords > 0);
+  assert.deepEqual(harness.calls, { candidates: 0, archives: 0, persisted: 0 });
+  assert.deepEqual(session.getHistory(), before);
 });
 
 function closedSession(count: number, largeOldTurn = false): Session {

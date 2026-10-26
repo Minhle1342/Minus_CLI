@@ -499,9 +499,22 @@ export function isAllowedCommand(command: string): boolean {
   return false;
 }
 
+export const SAFE_CHAIN_OPERATORS = new Set(['&&', '||', ';']);
+
 export function isAllowedShellCommand(command: string): boolean {
   const analysis = analyzeShellCommand(command);
   if (analysis.error) return false;
+  if (
+    !analysis.hasSubshell &&
+    !analysis.hasObfuscation &&
+    !analysis.operators.some((op) => !SAFE_CHAIN_OPERATORS.has(op)) &&
+    analysis.segments.every(isAllowedCommand)
+  ) {
+    const allRedirectsSafe =
+      !analysis.commands ||
+      analysis.commands.every((cmd) => cmd.redirects.every(isSafeDiscardRedirect));
+    if (allRedirectsSafe) return true;
+  }
   if (!analysis.complex && analysis.segments.every(isAllowedCommand)) return true;
   // Item 12: bounded two-segment pipelines of allowlisted commands skip approval.
   return isBoundedAllowlistedPipeline(analysis);
@@ -518,6 +531,13 @@ export function isBoundedAllowlistedPipeline(analysis: ReturnType<typeof analyze
   return analysis.segments.every((segment) => !/[><]|`|\$\(/.test(segment));
 }
 
+export function isSafeDiscardRedirect(redirect: { type: string; target: string; fd?: number }): boolean {
+  const target = (redirect.target || '').trim().toLowerCase();
+  if (SAFE_DEVICE_TARGETS.has(target)) return true;
+  if (['&1', '&2', '1', '2'].includes(target)) return true;
+  if (['>&', '<&'].includes(redirect.type) && /^&?[0-2]$/.test(target)) return true;
+  return false;
+}
 const SAFE_DEVICE_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty', 'nul', 'con']);
 const HOME_EXPANSION = /^(?:~(?=$|[\\/])|\$HOME(?=$|[\\/])|\$\{HOME\}|\$env:USERPROFILE|%USERPROFILE%|%HOMEPATH%|%APPDATA%)/i;
 
@@ -1452,9 +1472,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Bounded allowlisted pipelines (e.g. `npm test | head -n 20`, `git log --oneline | head -n 5`)
       // skip interactive approval and are not rejected as complex grouping.
       const isBoundedPipeline = isBoundedAllowlistedPipeline(shellAnalysis);
-      const isComplex = Boolean(shellAnalysis.complex && !isBoundedPipeline);
+      const isSafeChainWithDiscardRedirects = !shellAnalysis.hasSubshell
+        && !shellAnalysis.hasObfuscation
+        && !shellAnalysis.operators.some((op) => !SAFE_CHAIN_OPERATORS.has(op))
+        && Boolean(shellAnalysis.commands && shellAnalysis.commands.length > 0)
+        && shellAnalysis.commands!.every(cmd => cmd.redirects.every(isSafeDiscardRedirect))
+        && shellAnalysis.segments.every(isAllowedCommand);
 
-      const SAFE_CHAIN_OPERATORS = new Set(['&&', '||', ';']);
+      const isComplex = Boolean(shellAnalysis.complex && !isBoundedPipeline && !isSafeChainWithDiscardRedirects);
+
       const hasDisallowedOperators = isBoundedPipeline
         ? false
         : shellAnalysis.operators.some((operator) => !SAFE_CHAIN_OPERATORS.has(operator));

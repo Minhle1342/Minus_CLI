@@ -177,6 +177,7 @@ test('strict sandbox checks effects and containment before allowing read command
   assert.equal(policy.evaluateCommand('git status -s').allowed, true);
   assert.equal(policy.evaluateCommand('git branch -a').allowed, true);
   assert.equal(policy.evaluateCommand('find src -type f -exec wc -l {} + | sort -n').allowed, true);
+  assert.equal(policy.evaluateCommand('ls -la .codingagent/sessions/ 2>/dev/null || echo "Not found in cwd"').allowed, true);
   assert.equal(policy.evaluateCommand('git status -s', '..').allowed, false);
 });
 
@@ -200,6 +201,7 @@ test('argument-dependent phase effects permit inspection but deny shell and Git 
   const fixture = (name: string) => ({ name, description: 'fixture', parameters: {}, execute: async () => ({}) });
   for (const phase of ['explore', 'plan']) {
     assert.equal(checkPhaseToolEffect(fixture('run_command'), { command: 'git status -s' }, phase, process.cwd()).allowed, true);
+    assert.equal(checkPhaseToolEffect(fixture('run_command'), { command: 'ls -la .codingagent/sessions/ 2>/dev/null || echo "Not found in cwd"' }, phase, process.cwd()).allowed, true);
     assert.equal(checkPhaseToolEffect(fixture('run_command'), { command: 'node write-script.js' }, phase, process.cwd()).allowed, false);
     assert.equal(checkPhaseToolEffect(fixture('git_command'), { subcommand: 'branch', args: ['-a'] }, phase, process.cwd()).allowed, true);
     assert.equal(checkPhaseToolEffect(fixture('git_command'), { subcommand: 'branch', args: ['new-name'] }, phase, process.cwd()).allowed, false);

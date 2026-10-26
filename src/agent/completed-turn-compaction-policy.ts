@@ -41,7 +41,7 @@ export function hasCompletedTurnPressure(
     && historyTokens >= maxInputTokens * policy.triggerRatio;
 }
 
-/** Triggers compaction if uncompacted completed turns have accumulated significantly. */
+/** Turn count and observation volume identify backlog; they only drive archive-only checkpoints. */
 export function hasTurnCountPressure(
   completedTurnCount: number,
   preserveCount: number,
@@ -51,7 +51,7 @@ export function hasTurnCountPressure(
   return Number.isFinite(completedTurnCount) && completedTurnCount >= maxAllowed;
 }
 
-/** Triggers compaction if older observation character volume is heavy. */
+/** Triggers archive-only checkpoints if older observation character volume is heavy. */
 export function hasObservationVolumePressure(
   historyChars: number,
   policy: CompletedTurnCompactionPolicy,
@@ -60,29 +60,27 @@ export function hasObservationVolumePressure(
   return Number.isFinite(historyChars) && historyChars >= limit;
 }
 
+/** Shared predicate so every path applies the same 75% cache-materiality rule. */
+export function isLargeHistoryPrefix(
+  historyTokens: number,
+  usableInputTokens: number,
+): boolean {
+  return Number.isFinite(historyTokens) && usableInputTokens > 0
+    && historyTokens >= usableInputTokens * 0.75;
+}
+
 /**
- * Composite auto-compaction decision evaluator.
- * Triggers if token budget ratio exceeded OR turn backlog accumulated OR observation volume high.
+ * A large prefix loses more cached input than a marginal rewrite returns, so
+ * require a bigger share of tokens saved once history dominates the window.
  */
-export function shouldTriggerAutoCompaction(params: {
-  historyTokens: number;
-  maxInputTokens: number;
-  policy: CompletedTurnCompactionPolicy;
-  completedTurnCount?: number;
-  preserveCount?: number;
-  historyChars?: number;
-}): boolean {
-  const { historyTokens, maxInputTokens, policy, completedTurnCount, preserveCount, historyChars } = params;
-  if (hasCompletedTurnPressure(historyTokens, maxInputTokens, policy)) {
-    return true;
-  }
-  if (completedTurnCount !== undefined && preserveCount !== undefined && hasTurnCountPressure(completedTurnCount, preserveCount, policy)) {
-    return true;
-  }
-  if (historyChars !== undefined && hasObservationVolumePressure(historyChars, policy)) {
-    return true;
-  }
-  return false;
+export function resolveEffectiveMinSavingsRatio(
+  policy: CompletedTurnCompactionPolicy,
+  historyTokens: number,
+  usableInputTokens: number,
+): number {
+  return isLargeHistoryPrefix(historyTokens, usableInputTokens)
+    ? Math.max(policy.minSavingsRatio, 0.2)
+    : policy.minSavingsRatio;
 }
 
 /** Never rewrite the KV prefix for a growing or marginally smaller synopsis. */

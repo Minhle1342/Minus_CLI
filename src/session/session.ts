@@ -81,6 +81,20 @@ export interface SubagentArtifactBundle {
   durationMs: number;
 }
 
+export interface SubagentToolCallRecord {
+  toolName: string;
+  args?: Record<string, any>;
+  status: 'PASS' | 'FAIL';
+  error?: string;
+}
+
+export interface SubagentHandover {
+  objective: string;
+  toolCalls: SubagentToolCallRecord[];
+  filesModified: string[];
+  error?: string;
+}
+
 export interface DelegationState {
   id: string;
   sessionId: string;
@@ -91,6 +105,7 @@ export interface DelegationState {
   startedAt: string;
   finishedAt?: string;
   resultBundle?: SubagentArtifactBundle;
+  handover?: SubagentHandover;
 }
 
 export type EffectStatus = 'prepared' | 'committed' | 'failed' | 'rolledback';

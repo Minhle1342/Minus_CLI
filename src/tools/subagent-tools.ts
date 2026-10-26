@@ -8,12 +8,9 @@ import { Workspace } from '../workspace/workspace.js';
 import { AVAILABLE_MODELS } from '../ui/cli-ui.js';
 
 export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn_agent'): ToolDefinition {
-  const isDelegate = toolName === 'delegate_agent';
   return {
     name: toolName,
-    description: isDelegate
-      ? 'PARALLEL SUBAGENT DELEGATION: Launch an asynchronous background subagent for an independent task. YOU CAN CALL THIS TOOL MULTIPLE TIMES IN PARALLEL within the same turn to run independent subtasks concurrently (e.g. parallel file exploration, concurrent test runs, multi-module analysis, or dividing work across benchmark specialists). Non-blocking; returns an agentId immediately without waiting, and the subagent proactively notifies you with its results upon completion.'
-      : 'PARALLEL CLEAN-CONTEXT CHILD AGENT: Spawn an asynchronous background subagent with an explicit task brief and isolated context. YOU CAN CALL THIS TOOL MULTIPLE TIMES IN PARALLEL within a single turn to run independent subtasks concurrently (parallel code search, multi-file inspection, speculative exploration, or concurrent benchmark specialists). Non-blocking; returns an agentId immediately and sends a completion notification upon finish.',
+    description: 'PARALLEL & ASYNC/SYNC SUBAGENT: Spawn an isolated background child agent for an independent task. By default (wait=false), runs asynchronously in the background and returns an agentId immediately (YOU CAN CALL THIS TOOL MULTIPLE TIMES IN PARALLEL within the same turn). Set wait=true to synchronously wait for the subagent to finish and receive its final result directly in this turn.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -24,6 +21,14 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
         objective: {
           type: Type.STRING,
           description: 'Alias for brief.',
+        },
+        wait: {
+          type: Type.BOOLEAN,
+          description: 'If true, synchronously block and wait for this subagent to finish, returning its final result directly. If false or omitted (default), runs asynchronously in the background and returns an agentId immediately.',
+        },
+        timeoutMs: {
+          type: Type.INTEGER,
+          description: 'Optional timeout in milliseconds when wait is true (default: 60000ms = 60s).',
         },
         model: {
           type: Type.STRING,
@@ -76,14 +81,45 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
         worktreePath: args.worktreePath ? String(args.worktreePath) : undefined,
         verificationCommand: typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined,
       });
+
+      if (args.wait === true) {
+        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
+        try {
+          const completedHandle = await manager.waitFor(handle.id, timeoutMs);
+          if (completedHandle.status === 'failed') {
+            return {
+              success: false,
+              agentId: handle.id,
+              status: 'failed',
+              error: completedHandle.error,
+              handover: completedHandle.handover,
+              instruction: `[SUBAGENT ENDPOINT FAILED (3 retries)]: The subagent encountered a fatal connection or API failure after 3 retries. Take over the task immediately and complete the objective directly using your own tools. Objective: "${completedHandle.objective}". Modified files: ${JSON.stringify(completedHandle.handover?.filesModified || [])}.`,
+            };
+          }
+          return {
+            success: true,
+            agentId: handle.id,
+            completed: completedHandle.status === 'completed',
+            answer: completedHandle.answer,
+            result: completedHandle.resultBundle,
+            handover: completedHandle.handover,
+            agent: completedHandle,
+          };
+        } catch (err: any) {
+          const entry = manager.get(handle.id);
+          return {
+            success: false,
+            agentId: handle.id,
+            error: err instanceof Error ? err.message : String(err),
+            handover: entry?.handover,
+            instruction: `[SUBAGENT FAILED/TIMED OUT]: Take over the task immediately and complete the objective directly using your own tools. Objective: "${handle.objective}".`,
+          };
+        }
+      }
+
       return { success: true, agentId: handle.id, agent: handle };
     },
   };
-}
-
-/** @deprecated Use spawn_agent. Kept as a 1-line alias for backwards compatibility. */
-export function createDelegateAgentTool(manager: SubagentManager): ToolDefinition {
-  return createSpawnAgentTool(manager, 'delegate_agent');
 }
 
 export function createMessageAgentTool(manager: SubagentManager): ToolDefinition {
@@ -95,7 +131,7 @@ export function createMessageAgentTool(manager: SubagentManager): ToolDefinition
       properties: {
         agentId: {
           type: Type.STRING,
-          description: 'Subagent id returned by delegate_agent / spawn_agent / allocate_agent_task.',
+          description: 'Subagent id returned by spawn_agent / allocate_agent_task.',
         },
         message: {
           type: Type.STRING,
@@ -121,68 +157,7 @@ export function createMessageAgentTool(manager: SubagentManager): ToolDefinition
   };
 }
 
-export function createDelegateTaskTool(manager: SubagentManager): ToolDefinition {
-  return {
-    name: 'delegate_task',
-    description: 'SYNCHRONOUS SUBTASK DELEGATION (BLOCKING): Delegate a single bounded subtask to an isolated subagent and wait synchronously for its summary. IMPORTANT: If you have 2 or more independent subtasks, PREFER USING "spawn_agent" MULTIPLE TIMES IN PARALLEL instead of sequentially blocking on delegate_task!',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        task: {
-          type: Type.STRING,
-          description: 'Clear description of the single subtask to perform synchronously.',
-        },
-        model: {
-          type: Type.STRING,
-          description: 'Optional model override for the subagent (e.g. "internai/deepseek-v4-flash-0731", "internai/deepseek-v4-pro-0813", "internai/qwen3.8-27b", "gemini-2.5-flash"). If omitted, inherits parent model or specialist default.',
-        },
-        specialistId: {
-          type: Type.STRING,
-          description: 'Optional benchmark specialist ID or alias (e.g. "subagent-deepseek-r1-math", "subagent-internai-qwen38-coder", "subagent-gemini-swe-architect") to inherit model and system instructions.',
-        },
-        allowedTools: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
-          description: 'Optional list of allowed tool names (e.g. ["read_file", "search_files", "run_command"]).',
-        },
-        maxSteps: {
-          type: Type.INTEGER,
-          description: 'Maximum step budget for this subtask (default: 6).',
-        },
-        mode: {
-          type: Type.STRING,
-          description: 'Optional capability preset. Use "scout" for a read-only exploration agent (no file mutations, no commands).',
-        },
-        verificationCommand: {
-          type: Type.STRING,
-          description: 'Optional verification command to execute before finishing.',
-        },
-      },
-      required: ['task'],
-    },
-    async execute(args: Record<string, any>, _workspace: Workspace, context?: any): Promise<Record<string, any>> {
-      const task = String(args.task || '').trim();
-      if (!task) return { error: 'The "task" parameter is required.' };
-      const maxSteps = typeof args.maxSteps === 'number' ? args.maxSteps : 6;
-      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
-      const specialistId = typeof args.specialistId === 'string' && args.specialistId.trim() ? args.specialistId.trim() : undefined;
-      const allowedTools = Array.isArray(args.allowedTools) ? args.allowedTools.map(String) : undefined;
-      const verificationCommand = typeof args.verificationCommand === 'string' ? args.verificationCommand : undefined;
 
-      const result = await manager.executeIsolatedTask(task, {
-        maxSteps,
-        modelName: model,
-        specialistId,
-        allowedTools,
-        mode: args.mode === 'scout' ? 'scout' : undefined,
-        verificationCommand,
-        signal: context?.signal,
-      });
-
-      return result;
-    },
-  };
-}
 
 
 export function createModelsTool(): ToolDefinition {
@@ -240,7 +215,7 @@ export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
       properties: {
         agentId: {
           type: Type.STRING,
-          description: 'ID of the subagent to wait for (returned by spawn_agent / delegate_agent / allocate_agent_task).',
+          description: 'ID of the subagent to wait for (returned by spawn_agent / allocate_agent_task).',
         },
         timeoutMs: {
           type: Type.INTEGER,

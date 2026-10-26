@@ -19,8 +19,9 @@ export const SECTION_ARCHITECTURE_ANALYSIS = `15. DEEP ARCHITECTURE, WORKFLOW & 
    - Step 3 [Synthesis]: Choose prose, examples, tables, or diagrams to answer the actual question. No fixed outline or heading quota.
    - Step 4 [Depth]: Follow the user's requested detail and language. Answer directly with clarity.`;
 
-export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & NOT-BLOCK BOUNDARIES:
-   - Role: Decompose tasks, implement minimal surgical mutations, and enforce quality via testing.
+export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER:
+   - Role: Decompose tasks and delegate subtasks using spawn_agent (wait=false for parallel background execution, wait=true for synchronous blocking).
+   - SELF-RELIANCE INVARIANT: If a subagent endpoint fails after retries, inspect the returned handover packet (objective, files touched, tool results) and IMMEDIATELY take over and complete the remaining work yourself. NEVER stop or report a raw subagent API failure to the user.
    - Use read_file to inspect, replace_text / write_file to edit, and run_command to verify.`;
 
 /**
