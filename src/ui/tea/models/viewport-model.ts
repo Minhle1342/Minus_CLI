@@ -1321,13 +1321,15 @@ export function sortAwaitingFirst<T extends { tab: SessionTab }>(state: SessionT
 /** Index gốc của các tab hiển thị (bỏ hidden), theo đúng thứ tự strip (awaiting lên trước, tối đa 6). */
 export function visibleTabOrder(state: SessionTabsModel): number[] {
   return sortAwaitingFirst(state, state.tabs.map((tab, index) => ({ tab, index })))
-    .filter(({ tab }) => !tab.hidden)
+    .filter(({ tab }) => !tab.hidden && !tab.subagent)
     .map(({ index }) => index);
 }
 
 /** Index gốc theo đúng thứ tự modal (awaiting lên trước, gồm cả tab hidden) — dùng cho phím số. */
 export function modalTabOrder(state: SessionTabsModel): number[] {
-  return sortAwaitingFirst(state, state.tabs.map((tab, index) => ({ tab, index }))).map(({ index }) => index);
+  return sortAwaitingFirst(state, state.tabs.map((tab, index) => ({ tab, index })))
+    .filter(({ tab }) => !tab.subagent)
+    .map(({ index }) => index);
 }
 
 /** Segment plain (chưa tô màu) của tab-strip — nguồn duy nhất cho cả render lẫn hit-test click chuột. */
@@ -1338,8 +1340,9 @@ export function sessionStripSegments(state: SessionTabsModel, width: number): St
   // Ưu tiên: tab đang chờ user input (awaitingInput) được ghim lên đầu strip (OpenCode v2 UX)
   const visible = visibleTabOrder(state).slice(0, 6).map((index) => ({ tab: state.tabs[index], index }));
   const suffix: StripSegment[] = [{ text: '+ new', tab: -1, zone: 'new' }, { text: ' · Ctrl+T', tab: -1, zone: 'none' }];
-  const hiddenCount = state.tabs.length - state.tabs.filter(t => !t.hidden).length;
-  const overflow = state.tabs.filter(t => !t.hidden).length - visible.length;
+  const userTabs = state.tabs.filter(t => !t.subagent);
+  const hiddenCount = userTabs.length - userTabs.filter(t => !t.hidden).length;
+  const overflow = userTabs.filter(t => !t.hidden).length - visible.length;
   const segs: StripSegment[] = [];
   visible.forEach(({ tab, index }, i) => {
     const isAwaiting = Boolean(tab.awaitingInput || (state.activeQuestionSessionId && tab.id === state.activeQuestionSessionId));
@@ -1420,15 +1423,17 @@ export function sessionStripClick(model: RootModel, hit: { tab: number; zone: 't
 export function sessionTabsView(state: SessionTabsModel, width: number, height: number): string[] {
   const panelWidth = Math.max(24, Math.min(width - 4, 72));
   const lines: string[] = [];
-  const parallel = state.tabs.filter(t => t.busy).length;
-  const awaitingCount = state.tabs.filter(t => t.awaitingInput || (state.activeQuestionSessionId && t.id === state.activeQuestionSessionId)).length;
-  lines.push(color(tokyoNight.purple, `SESSIONS · ${state.tabs.length} tab${state.tabs.length === 1 ? '' : 's'}${parallel ? ` · ${parallel} đang chạy` : ''}${awaitingCount ? ` · ${awaitingCount} chờ input` : ''}`) + color(tokyoNight.muted, ' · Esc đóng'));
+  const userTabs = state.tabs.filter(t => !t.subagent);
+  const parallel = userTabs.filter(t => t.busy).length;
+  const awaitingCount = userTabs.filter(t => t.awaitingInput || (state.activeQuestionSessionId && t.id === state.activeQuestionSessionId)).length;
+  lines.push(color(tokyoNight.purple, `SESSIONS · ${userTabs.length} tab${userTabs.length === 1 ? '' : 's'}${parallel ? ` · ${parallel} đang chạy` : ''}${awaitingCount ? ` · ${awaitingCount} chờ input` : ''}`) + color(tokyoNight.muted, ' · Esc đóng'));
   lines.push('');
-  if (!state.tabs.length) {
+  if (!userTabs.length) {
     lines.push(...wrap(color(tokyoNight.muted, 'Chưa có session. Nhấn n để tạo tab mới.'), panelWidth));
   } else {
     // Sắp xếp hiển thị modal: ưu tiên tab awaitingInput lên đầu (OpenCode v2 UX)
-    const indexedTabs = sortAwaitingFirst(state, state.tabs.map((tab, originalIndex) => ({ tab, originalIndex })));
+    const indexedTabs = sortAwaitingFirst(state, state.tabs.map((tab, originalIndex) => ({ tab, originalIndex })))
+      .filter(({ tab }) => !tab.subagent);
 
     indexedTabs.forEach(({ tab, originalIndex }, displayIndex) => {
       const isSelected = originalIndex === state.selected;
