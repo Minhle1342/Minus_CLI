@@ -20,7 +20,7 @@ import {
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Create a new file or overwrite an entire file in the workspace. Set overwrite to false to prevent accidentally replacing an existing file.',
+  description: 'Create a new file or overwrite an entire file in the workspace. Creates missing parent directories; for partial edits use replace_text instead of overwriting the whole file.',
   parameters: {
     type: Type.OBJECT,
     properties: {

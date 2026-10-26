@@ -61,7 +61,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       expectedOccurrences: {
         type: Type.INTEGER,
-        description: 'Expected number of oldText occurrences (default: 1).',
+        description: 'Expected number of oldText occurrences; tool gates that only 1 occurrence matches and replaces the first location, so typically use 1 unless you need to target multiple identical anchors per file edit.',
       },
     },
     required: ['path', 'oldText', 'newText'],
