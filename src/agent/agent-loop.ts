@@ -36,7 +36,6 @@ import { LoopProgressGuard } from './loop-progress-guard.js';
 import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, collectCompletionObservations } from './completion-observations.js';
-import { resolveGitWorkflow, checkGitWorkflowCall } from './git-workflow.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
@@ -3430,27 +3429,6 @@ export class AgentLoop {
               continue;
             }
 
-
-            // Reconstruct again for each call: earlier calls in this same batch may have completed a stage.
-            const gitWorkflowNow = resolveGitWorkflow({
-              userRequest: turnUserRequest,
-              observations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
-              mayEdit: !isReadOnlyRequest(turnUserRequest),
-              implementationRequested: gitCodeChangeRequested(),
-              implementationReady: gitImplementationReady(),
-            });
-            const gitWorkflowError = checkGitWorkflowCall(gitWorkflowNow, turnUserRequest, toolName, toolArgs);
-            if (gitWorkflowError) {
-              const blockedResult = {
-                success: false, errorCode: 'GIT_WORKFLOW_STAGE_BLOCKED', error: gitWorkflowError,
-                processStarted: false, gitWorkflow: gitWorkflowNow, retryable: true
-              };
-              session.addToolResultWithId(toolName, blockedResult, toolCallId, 'git-workflow-stage-blocked');
-              await this.persistSession(session);
-              CLI.renderToolResult(toolName, 0, blockedResult);
-              this.eventBus?.emit('tool:error', toolName, blockedResult, { sessionId: session.id });
-              continue;
-            }
 
             const phaseEffect = checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
               toolArgs, classification.phase, this._workspace.rootDir);

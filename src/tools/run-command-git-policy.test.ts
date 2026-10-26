@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
-import { detectExplicitGitCommandNames, isGitCommandAuthorized, classifyGitCommand, validateGitCommandScope } from './git-command-policy.js';
+import { detectExplicitGitCommandNames, validateGitCommandScope } from './git-command-policy.js';
 import { detectExplicitGitMutationIntent } from './git-intent.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
 
@@ -157,10 +157,6 @@ test('vietnamese intent synonyms still drive git guidance', () => {
   assert.ok(detectExplicitGitMutationIntent('hãy sửa commit vừa rồi').commit);
   assert.ok(detectExplicitGitCommandNames('tiếp tục rebase').includes('rebase'));
   assert.ok(detectExplicitGitMutationIntent('hãy đẩy code lên main').push);
-  assert.equal(
-    isGitCommandAuthorized('tiếp tục rebase', classifyGitCommand('rebase', [])),
-    true,
-  );
 });
 
 test('no-channel permission denial merges into a single COMMAND_NOT_ALLOWED', async () => {

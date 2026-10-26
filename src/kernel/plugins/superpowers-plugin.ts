@@ -1,6 +1,5 @@
 import { AgentPlugin, KernelContext } from '../kernel.js';
 import { SkillRegistry } from '../../skills/skill-registry.js';
-import { SkillActivator } from '../../skills/skill-activator.js';
 import { SuperpowersSource } from '../../skills/superpowers-source.js';
 import { CapabilityCatalog } from '../../capabilities/capability-catalog.js';
 import { CapabilityPolicy } from '../../capabilities/capability-policy.js';
@@ -32,14 +31,12 @@ export class SuperpowersPlugin implements AgentPlugin {
   private skillRegistry = new SkillRegistry();
   private capabilityCatalog: CapabilityCatalog = createDefaultCapabilityCatalog();
   private capabilityPolicy = new CapabilityPolicy();
-  private activator: SkillActivator;
   private worktreeManager?: WorktreeManager;
   private approvalManager = new ApprovalManager();
   private reviewManager = new ReviewManager();
   private ocrReview?: OcrReviewService;
   private verificationPolicy = new VerificationPolicy();
   private workflowMap = new SuperpowersWorkflowMap();
-  private registeredSkillSections = new Set<string>();
   private onWorkspaceChanged?: (oldPath: string, newPath: string) => void;
   private onToolAfter?: (
     toolName: string,
@@ -48,10 +45,6 @@ export class SuperpowersPlugin implements AgentPlugin {
     args: Record<string, any>,
     context?: { sessionId?: string; agentId?: string; turn?: number },
   ) => void;
-
-  constructor() {
-    this.activator = new SkillActivator(this.skillRegistry, this.capabilityCatalog);
-  }
 
   async apply(ctx: KernelContext): Promise<void> {
     this.worktreeManager = new WorktreeManager(ctx.workspace.rootDir);
@@ -66,48 +59,6 @@ export class SuperpowersPlugin implements AgentPlugin {
       (ctx as any).worktrees = this.worktreeManager;
     };
     ctx.events.on('workspace:changed', this.onWorkspaceChanged);
-
-    // 3. Gắn Hook Turn-Start để tự động kích hoạt Skills và nạp Prompt Sections
-    ctx.agentHooks.register('superpowers-activator', {
-      'agent/turn-start': async (hookCtx) => {
-        const history = hookCtx.session.getHistory();
-        const lastUserMessage = history.filter((m: any) => m.role === 'user').pop();
-        const userText = lastUserMessage?.parts?.[0]?.text || '';
-
-        const activation = this.activator.evaluate({
-          session: hookCtx.session,
-          userRequest: userText,
-          availableCapabilities: this.capabilityCatalog.list().map((c) => c.name),
-        });
-
-        // Ghi nhận quyết định kích hoạt vào Session
-        for (const decision of activation.decisions) {
-          hookCtx.session.recordSkillDecision(decision);
-        }
-
-        // Replace this plugin's turn-scoped skill set; inactive skills must not
-        // continue directing later requests through the persistent assembler.
-        for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
-        this.registeredSkillSections.clear();
-        const activeIds = new Set(activation.activeSkills.map(skill => skill.id));
-        for (const previous of hookCtx.session.getActiveSkillDecisions()) {
-          if (!activeIds.has(previous.skillId)) hookCtx.session.recordSkillDecision({
-            ...previous, decision: 'disabled', reason: 'Not applicable to the current turn', timestamp: new Date().toISOString(),
-          });
-        }
-        for (const section of activation.promptSections) {
-          ctx.systemPrompt.unregister(section.name);
-          ctx.systemPrompt.register({
-            id: section.name,
-            content: section.content,
-            priority: section.priority,
-          });
-          this.registeredSkillSections.add(section.name);
-        }
-
-        return { allow: true };
-      },
-    });
 
     // 4. Theo dõi thay đổi code & xác thực qua VerificationPolicy
     this.onToolAfter = (toolName, result, _durationMs, args) => {
@@ -128,7 +79,6 @@ export class SuperpowersPlugin implements AgentPlugin {
 
     // 5. Gắn các services vào KernelContext mở rộng
     (ctx as any).skills = this.skillRegistry;
-    (ctx as any).activator = this.activator;
     (ctx as any).capabilities = this.capabilityCatalog;
     (ctx as any).capabilityPolicy = this.capabilityPolicy;
     (ctx as any).worktrees = this.worktreeManager;
@@ -149,10 +99,7 @@ export class SuperpowersPlugin implements AgentPlugin {
       ctx.events.off('tool:after', this.onToolAfter);
       this.onToolAfter = undefined;
     }
-    ctx.agentHooks.unregister('superpowers-activator');
     ctx.systemPrompt.unregister('dynamic-skill-loading');
-    for (const id of this.registeredSkillSections) ctx.systemPrompt.unregister(id);
-    this.registeredSkillSections.clear();
   }
 
   getSkillRegistry(): SkillRegistry {
@@ -161,10 +108,6 @@ export class SuperpowersPlugin implements AgentPlugin {
 
   getCapabilityCatalog(): CapabilityCatalog {
     return this.capabilityCatalog;
-  }
-
-  getActivator(): SkillActivator {
-    return this.activator;
   }
 
   getApprovalManager(): ApprovalManager {

@@ -1,9 +1,6 @@
 import { AdaptiveComputeController } from '../control-plane/reasoning/adaptive-compute-controller.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SkillRegistry } from '../skills/skill-registry.js';
-import { SkillActivator } from '../skills/skill-activator.js';
-import { SuperpowersSource } from '../skills/superpowers-source.js';
 import { Session } from '../session/session.js';
 import { ToolSynergyAdvisor } from './tool-synergy-advisor.js';
 import { DynamicContextArbiter } from './dynamic-context-arbiter.js';
@@ -14,28 +11,6 @@ import { PromptAssembler } from '../llm/prompt-assembler.js';
 import { StepPromptPolicy } from './step-prompt-policy.js';
 import { FinalAnswerGuard } from './final-answer-guard.js';
 import { ContextGuardian } from '../context/context-guardian.js';
-
-test('inspection Git intent never activates finishing or worktree skills', () => {
-  const registry = new SkillRegistry();
-  SuperpowersSource.registerSuperpowers(registry);
-  const result = new SkillActivator(registry).evaluate({ session: new Session(), userRequest: 'Review git diff' });
-  assert.ok(!result.activeSkills.some(s => ['finishing-a-development-branch', 'using-git-worktrees'].includes(s.id)));
-});
-
-test('implicit planning selects one planning owner', () => {
-  const registry = new SkillRegistry();
-  SuperpowersSource.registerSuperpowers(registry);
-  const result = new SkillActivator(registry).evaluate({ session: new Session(), userRequest: 'Create a plan for this feature' });
-  assert.deepEqual(result.activeSkills.filter(s => ['brainstorming', 'writing-plans', 'planning-with-files', 'concise-planning'].includes(s.id)).map(s => s.id), ['writing-plans']);
-});
-
-test('a disabled skill cannot be reactivated as a dependency', () => {
-  const registry = new SkillRegistry();
-  registry.register({ id: 'child', name: 'child', description: 'child', version: '1', source: 'builtin', path: '', requires: ['parent'], autoActivate: true });
-  registry.register({ id: 'parent', name: 'parent', description: 'parent', version: '1', source: 'builtin', path: '' });
-  const result = new SkillActivator(registry).evaluate({ session: new Session(), manualOverrides: { disabled: ['parent'] } });
-  assert.equal(result.activeSkills.length, 0);
-});
 
 test('advisor never declares incomplete, blocked or unrelated commands verified', () => {
   const advisor = new ToolSynergyAdvisor();
@@ -83,35 +58,6 @@ test('submission-only reasoning recovery avoids debugging mandates', () => {
   assert.match(controller.getGuidancePrompt({submissionOnly: true}), /existing evidence/);
 });
 
-test('plugin replaces skills between a planning and an unrelated read-only turn', async () => {
-  const plugin = new SuperpowersPlugin();
-  const assembler = new PromptAssembler();
-  let hook: any;
-  const ctx = {
-    workspace: {rootDir: process.cwd()},
-    tools: {register() {}}, events: {on() {}, off() {}},
-    agentHooks: {register(_name: string, hooks: any) { hook = hooks['agent/turn-start']; }},
-    systemPrompt: assembler,
-  };
-  await plugin.apply(ctx as any);
-  const session = new Session();
-  session.addUserMessage('Create a plan for this feature');
-  await hook({session});
-  assert.ok(assembler.list().some(id => id.includes('writing-plans')));
-  session.addUserMessage('What is the package name?');
-  await hook({session});
-  assert.ok(!assembler.list().some(id => id.includes('writing-plans')));
-  assert.ok(!session.getActiveSkillDecisions().some(d => d.skillId === 'writing-plans'));
-});
-
-test('dependency cycles and conflicts fail atomically', () => {
-  const registry = new SkillRegistry();
-  const base = {version:'1',source:'builtin' as const,path:'',description:'scope'};
-  registry.register({...base,id:'a',name:'a',requires:['b'],autoActivate:true});
-  registry.register({...base,id:'b',name:'b',requires:['a']});
-  assert.equal(new SkillActivator(registry).evaluate({session:new Session()}).activeSkills.length, 0);
-});
-
 test('shadow does not inject selected Git prompts and sufficient evidence suppresses hypothesis advisory', () => {
   const context: any = {
     activeStepQuery:'commit changes',userRequest:'commit changes',fingerprint:'x',
@@ -125,18 +71,6 @@ test('shadow does not inject selected Git prompts and sufficient evidence suppre
   const result = new StepPromptPolicy().decide(context, 'shadow');
   assert.equal(result.gitPlaybookPrompt, '');
   assert.doesNotMatch(result.strongAdvisoryPrompt, /UNVERIFIED_MUTATION_ADVISORY/);
-});
-
-test('dependencies obey capabilities and symmetric conflicts without partial activation', () => {
-  const base = {version:'1',source:'builtin' as const,path:'',description:'scope'};
-  const registry = new SkillRegistry();
-  registry.register({...base,id:'owner',name:'owner',requires:['missing-cap'],autoActivate:true});
-  registry.register({...base,id:'missing-cap',name:'missing-cap',requiredCapabilities:['filesystem.edit']});
-  assert.equal(new SkillActivator(registry).evaluate({session:new Session(),availableCapabilities:['filesystem.read']}).activeSkills.length, 0);
-  const conflicting = new SkillRegistry();
-  conflicting.register({...base,id:'first',name:'first',priority:1,conflicts:['second'],autoActivate:true});
-  conflicting.register({...base,id:'second',name:'second',priority:2,autoActivate:true});
-  assert.deepEqual(new SkillActivator(conflicting).evaluate({session:new Session()}).activeSkills.map(s=>s.id), ['first']);
 });
 
 test('recovery briefing stays historical and does not fabricate verification or permissions', () => {
@@ -193,18 +127,13 @@ test('guardian rejects mismatched and cross-turn observations', () => {
   assert.deepEqual(data.p0.workingCommands,[]);
 });
 
-test('plugin dispose removes owned skills while preserving unrelated prompt sections', async () => {
+test('plugin dispose preserves unrelated prompt sections', async () => {
   const plugin = new SuperpowersPlugin();
   const assembler = new PromptAssembler();
   assembler.register({id:'unrelated',content:'Preserve this section',priority:1});
-  let hook: any;
   const ctx = {workspace:{rootDir:process.cwd()},tools:{register(){}},events:{on(){},off(){}},
-    agentHooks:{register(_name:string,hooks:any){hook=hooks['agent/turn-start'];},unregister(){}},systemPrompt:assembler};
+    agentHooks:{register(){},unregister(){}},systemPrompt:assembler};
   await plugin.apply(ctx as any);
-  const session = new Session();
-  session.addUserMessage('Create a plan for this feature');
-  await hook({session});
-  assert.ok(assembler.list().some(id=>id.includes('writing-plans')));
   plugin.dispose(ctx as any);
   assert.deepEqual(assembler.list(),['unrelated']);
 });

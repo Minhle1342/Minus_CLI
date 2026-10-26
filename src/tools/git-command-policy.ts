@@ -146,22 +146,6 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   return [...names];
 }
 
-/**
- * `git add` used to be restricted to literal paths; authorization is now the
- * approval result, so only read commands bypass it.
- */
-export function isGitCommandAuthorized(
-  userRequest: string | undefined,
-  classification: GitCommandClassification,
-): boolean {
-  if (classification.risk === 'read') return true;
-  if (!userRequest?.trim()) return false;
-  // Any request authorizes write/network work, but destructive commands must be named so an
-  // unrelated message ("explain this file") can never wipe the worktree.
-  return classification.risk !== 'destructive'
-    || detectExplicitGitCommandNames(userRequest).includes(classification.subcommand);
-}
-
 /** Read flags that make a git config invocation non-mutating by themselves. */
 const CONFIG_READ_FLAGS = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'];
 /** Write flags that mutate config, so a read flag on the same argv no longer counts. */
