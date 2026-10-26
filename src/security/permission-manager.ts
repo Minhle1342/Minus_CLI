@@ -1,6 +1,6 @@
 import type { ToolExecutionContext } from '../tools/types.js';
 import path from 'node:path';
-import { detectFileCommandMisuse, type FileMisuseDetection } from '../tools/run-command.js';
+import { detectFileCommandMisuse, type FileMisuseDetection, isBlockedGitPushToMain } from '../tools/run-command.js';
 import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
 import { CLI } from '../ui/cli-ui.js';
@@ -50,6 +50,15 @@ export interface PermissionCheckResult {
  * 4. Thao tác Git ảnh hưởng mã nguồn (git push, git reset --hard)
  */
 export class PermissionManager {
+  private autoApprovedSessions = new Set<string>();
+
+  autoApproveSession(sessionId: string): void {
+    if (sessionId) this.autoApprovedSessions.add(sessionId);
+  }
+
+  isSessionAutoApproved(sessionId?: string): boolean {
+    return Boolean(sessionId && this.autoApprovedSessions.has(sessionId));
+  }
   private mode: PermissionMode;
   private promptHandler?: PermissionPromptHandler;
   private sessionApprovedCategories = new Set<string>();
@@ -220,6 +229,37 @@ export class PermissionManager {
         };
       }
       return { allowed: true };
+    }
+
+    const isSubagentSession = Boolean(
+      context?.isSubagent ||
+      (context?.sessionId && this.autoApprovedSessions.has(context.sessionId))
+    );
+
+    if (isSubagentSession) {
+      if (toolName === 'run_command') {
+        const cmd = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
+        if (isBlockedGitPushToMain(cmd)) {
+          return {
+            allowed: false,
+            errorCode: 'PUSH_TO_MAIN_PROHIBITED',
+            reason: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master.',
+          };
+        }
+        const pe = new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'workspace-write').evaluateCommand(cmd);
+        if (!pe.allowed && pe.riskLevel === 'SYSTEM_RISK') {
+          return {
+            allowed: false,
+            errorCode: 'SECURITY_VIOLATION',
+            reason: pe.reason || 'System-destructive command blocked by security policy.',
+          };
+        }
+      }
+      return {
+        allowed: true,
+        permissionGranted: toolName === 'run_command',
+        permissionRequestId: `subagent-perm-${Date.now()}`,
+      };
     }
 
     // Phân loại rủi ro của Tool Call
