@@ -77,9 +77,15 @@ const DEV_SERVER_PATTERNS = [
   /\b(?:vite|next\s+dev|webpack\s+serve|nodemon|uvicorn|flask\s+run)\b/i,
 ];
 
+/** Watcher/follow có output liên tục, không bao giờ thoát — coi như long-lived. */
+const WATCH_PATTERNS = [
+  /\s--watch(?:All)?\b/i,
+  /\b(?:tail|docker\s+logs)\b[^\n]*\s(?:-f|--follow)\b/i,
+];
+
 /** True khi lệnh là dev server/watcher chạy vô hạn — được promote nhưng không bao giờ chờ. */
 export function isLongRunningServerCommand(command: string): boolean {
-  return DEV_SERVER_PATTERNS.some((p) => p.test(command));
+  return DEV_SERVER_PATTERNS.some((p) => p.test(command)) || WATCH_PATTERNS.some((p) => p.test(command));
 }
 
 /**

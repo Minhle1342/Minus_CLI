@@ -61,6 +61,13 @@ test('dev-server patterns are promoted but never awaited', async () => {
   assert.equal(tm.started[0].options.autoPromoted, false);
 });
 
+test('watcher/follow commands are long-lived so they never hang the turn', () => {
+  for (const cmd of ['tsc --watch', 'npx jest --watchAll', 'tail -f app.log', 'docker logs -f web']) {
+    assert.equal(isLongRunningServerCommand(cmd), true, cmd);
+  }
+  assert.equal(isLongRunningServerCommand('git add -f src/index.ts'), false, '-f for force must not read as follow');
+});
+
 test('auto-promotion does not cross an isolated sandbox boundary', async () => {
   const tm = fakeTaskManager();
   const sandbox = {
