@@ -148,7 +148,11 @@ export class TeaTerminal extends EventEmitter {
    */
   private sendCaptured(text: string): void {
     const sessionId = currentSubagentOutputSessionId();
-    if (sessionId) { this.program.send({ type: 'log', text, sessionId }); return; }
+    if (sessionId) {
+      // Subagent execution events are ingested structured via kernel event bus.
+      // Dropping raw ANSI/Ink stdout escape strings prevents terminal corruption.
+      return;
+    }
     if (!this.program.model.status.busy) this.program.send({ type: 'log', text });
   }
   private submit(text: string): void {
