@@ -73,8 +73,14 @@ export class PermissionManager {
   /** Plan mode forces read_only regardless of global/project modes. */
   private planLock = false;
 
-  constructor(mode: PermissionMode = 'ask_sensitive') {
-    this.mode = mode;
+  constructor(modeOrOptions: PermissionMode | { mode?: PermissionMode; workspaceRoot?: string; promptHandler?: PermissionPromptHandler } = 'ask_sensitive') {
+    if (typeof modeOrOptions === 'object') {
+      this.mode = modeOrOptions.mode || 'ask_sensitive';
+      if (modeOrOptions.workspaceRoot) this.workspaceRoot = modeOrOptions.workspaceRoot;
+      if (modeOrOptions.promptHandler) this.promptHandler = modeOrOptions.promptHandler;
+      return;
+    }
+    this.mode = modeOrOptions;
   }
 
   setWorkspaceRoot(root: string): void {
@@ -87,6 +93,7 @@ export class PermissionManager {
 
   setMode(mode: PermissionMode): void {
     this.mode = mode;
+
   }
 
   getMode(): PermissionMode {

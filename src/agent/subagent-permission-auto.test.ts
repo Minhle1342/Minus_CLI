@@ -9,7 +9,7 @@ test('subagent session auto-approval allows workspace mutations without interact
     workspaceRoot: process.cwd(),
     promptHandler: async () => {
       promptCalled = true;
-      return 'deny';
+      return 'reject';
     },
   });
 

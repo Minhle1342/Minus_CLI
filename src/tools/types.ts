@@ -28,6 +28,8 @@ export interface ToolExecutionContext {
   /** Set only by the orchestrator after checking session-backed evidence. */
   completionEvidenceVerified?: boolean;
   completionEvidenceReason?: string;
+  /** Indicates if execution is originating from an isolated background subagent */
+  isSubagent?: boolean;
   /** Optional cancellation signal to abort long-running tools and child processes. */
   signal?: AbortSignal;
 }

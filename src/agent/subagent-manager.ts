@@ -1,7 +1,8 @@
 import type { AgentLoop } from './agent-loop.js';
 import { AgentRegistry } from './agent-registry.js';
 import { Session } from '../session/session.js';
-import type { DelegationState } from '../session/session.js';
+import type { DelegationState, SubagentHandover, SubagentToolCallRecord } from '../session/session.js';
+export type { SubagentHandover, SubagentToolCallRecord };
 import { runWithSubagentOutput } from './subagent-output-context.js';
 
 export type SubagentStatus = DelegationState['status'];
@@ -469,11 +470,66 @@ export class SubagentManager {
     handle.status = 'failed';
     handle.error = error instanceof Error ? error.message : String(error);
     handle.finishedAt = new Date().toISOString();
+    const session = this.handles.get(handle.id)?.executionSession;
+    if (session) {
+      handle.handover = this.extractHandover(handle.objective, session, handle.error);
+    }
     this.agents.update(handle.id, { status: 'error' });
     this.recordState(handle);
     this.notifyCompletion(handle);
     // Surface resumable failure thay vì để parent chờ kết quả rỗng.
     this.onSubagentFailure?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
+  }
+
+  extractHandover(objective: string, session: Session, error?: string): SubagentHandover {
+    const filesModified = new Set<string>();
+    const toolCallsMap = new Map<string, SubagentToolCallRecord>();
+    const toolCallsOrder: string[] = [];
+    const mutatingTools = new Set(['write_file', 'replace_text', 'replace_file_content', 'apply_patch', 'delete_file', 'move_file', 'edit_file', 'write_patch']);
+
+    for (const event of session.getEvents()) {
+      if (event.type === 'tool/call') {
+        const toolCallId = String(event.data?.toolCallId || ('call_' + toolCallsOrder.length));
+        const toolName = String(event.data?.toolName || 'unknown');
+        const args = event.data?.args;
+        if (mutatingTools.has(toolName) && args && typeof args === 'object') {
+          for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path']) {
+            const val = args[key];
+            if (typeof val === 'string' && val.trim()) filesModified.add(val.trim());
+          }
+        }
+        toolCallsMap.set(toolCallId, {
+          toolName,
+          args: args && typeof args === 'object' ? args : undefined,
+          status: 'PASS',
+        });
+        toolCallsOrder.push(toolCallId);
+      } else if (event.type === 'tool/result') {
+        const toolCallId = String(event.data?.toolCallId || '');
+        const record = toolCallsMap.get(toolCallId);
+        if (record) {
+          const res = event.data?.result;
+          if (res) {
+            if (res.error !== undefined || res.success === false || (typeof res.exitCode === 'number' && res.exitCode !== 0)) {
+              record.status = 'FAIL';
+              record.error = typeof res.error === 'string' ? res.error : JSON.stringify(res.error || res.stderr || 'Tool execution failed');
+            }
+            if (Array.isArray(res.filesModified)) {
+              for (const f of res.filesModified) {
+                if (typeof f === 'string' && f.trim()) filesModified.add(f.trim());
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      objective,
+      toolCalls: toolCallsOrder.map((id) => toolCallsMap.get(id)).filter((t): t is SubagentToolCallRecord => Boolean(t)),
+      filesModified: Array.from(filesModified),
+      error,
+    };
   }
 
   private notifyCompletion(handle: SubagentHandle): void {
@@ -540,6 +596,7 @@ export class SubagentManager {
           touchedFiles: Array.from(touchedFiles),
           durationMs: Date.now() - new Date(handle.startedAt).getTime(),
         };
+        handle.handover = this.extractHandover(handle.objective, session);
       }
       handle.finishedAt = new Date().toISOString();
       this.recordState(handle);
