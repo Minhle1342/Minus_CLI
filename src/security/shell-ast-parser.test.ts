@@ -79,3 +79,13 @@ test('shell-ast-parser: tokenizes file descriptor redirections correctly without
   assert.equal(res.commands[1].executable, 'echo');
   assert.deepEqual(res.commands[1].args, ['Not found in cwd']);
 });
+
+test('shell-ast-parser: tokenizes `2>&1` as one fd redirect', () => {
+  const res = parseShellAst('ls -la 2>&1');
+  assert.equal(res.commands.length, 1);
+  assert.deepEqual(res.commands[0].args, ['-la']);
+  assert.equal(res.commands[0].redirects.length, 1);
+  assert.equal(res.commands[0].redirects[0].fd, 2);
+  assert.equal(res.commands[0].redirects[0].type, '>&');
+  assert.equal(res.commands[0].redirects[0].target, '1');
+});

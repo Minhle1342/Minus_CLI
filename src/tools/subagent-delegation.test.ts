@@ -4,7 +4,7 @@ import { SubagentManager } from '../agent/subagent-manager.js';
 import { AgentRegistry } from '../agent/agent-registry.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
-import { createSpawnAgentTool } from './subagent-tools.js';
+import { createGetAgentResultTool, createSpawnAgentTool } from './subagent-tools.js';
 
 describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
   it('Scenario 1: Subagent chạy độc lập tiêu tốn nhiều thao tác nội bộ -> kết quả tóm tắt ≤ 1600 chars, context cha không bị ô nhiễm', async () => {
@@ -124,7 +124,9 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
 
     assert.equal(executionResult.success, false);
     assert.equal(executionResult.status, 'failed');
-    assert.ok(executionResult.instruction.includes('SUBAGENT ENDPOINT FAILED'));
+    assert.ok(executionResult.instruction.includes('SUBAGENT FAILED'));
+    // The parent must take over automatically instead of asking the user to re-run.
+    assert.match(executionResult.instruction, /take over now/i);
     assert.ok(executionResult.handover);
     assert.equal(executionResult.handover.objective, 'Update partial configuration');
     assert.deepEqual(executionResult.handover.filesModified, ['src/partial.ts']);
@@ -133,6 +135,8 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
     assert.equal(executionResult.handover.toolCalls[0].status, 'PASS');
     assert.equal(executionResult.handover.toolCalls[1].toolName, 'write_file');
     assert.equal(executionResult.handover.toolCalls[1].status, 'PASS');
+    // File bodies are dropped from the handover; only the path survives.
+    assert.deepEqual(executionResult.handover.toolCalls[1].args, { path: 'src/partial.ts' });
   });
 
   it('Scenario 4: spawn_agent hỗ trợ cờ wait (async khi false, sync block khi true)', async () => {
@@ -174,5 +178,69 @@ describe('Satellite 5: Synchronous Subagent Task Delegation', () => {
     assert.ok(syncResult.agentId);
     assert.equal(syncResult.completed, true);
     assert.equal(syncResult.answer, 'Subagent completed successfully.');
+    assert.equal(syncResult.agent, undefined, 'the full handle duplicates answer/handover');
+  });
+
+  it('Scenario 5: wait timeout stops the subagent instead of leaving it mutating files', async () => {
+    const manager = new SubagentManager(
+      new AgentRegistry(),
+      (() => ({ submit: () => new Promise(() => {}) })) as any,
+    );
+    manager.bindSession(new Session('parent-session-5'));
+
+    const tool = createSpawnAgentTool(manager);
+    const result = await tool.execute({ brief: 'Long task', wait: true, timeoutMs: 20 }, new Workspace('.'));
+
+    assert.equal(result.success, false);
+    assert.match(result.instruction, /TIMED OUT/);
+    assert.equal(manager.get(result.agentId)?.status, 'stopped');
+  });
+
+  it('Scenario 6: aborting the turn stops a synchronous wait', async () => {
+    const manager = new SubagentManager(
+      new AgentRegistry(),
+      (() => ({ submit: () => new Promise(() => {}) })) as any,
+    );
+    manager.bindSession(new Session('parent-session-6'));
+    const controller = new AbortController();
+    controller.abort();
+
+    const tool = createSpawnAgentTool(manager);
+    const result = await tool.execute(
+      { brief: 'Aborted task', wait: true },
+      new Workspace('.'),
+      { signal: controller.signal },
+    );
+
+    assert.equal(result.aborted, true);
+    assert.equal(manager.get(result.agentId)?.status, 'stopped');
+  });
+
+  it('Scenario 7: an awaited result does not also enqueue a completion notice', async () => {
+    let completions = 0;
+    const manager = new SubagentManager(
+      new AgentRegistry(),
+      (() => ({ submit: async () => 'done' })) as any,
+      undefined,
+      undefined,
+      () => { completions++; },
+    );
+    manager.bindSession(new Session('parent-session-7'));
+
+    const tool = createSpawnAgentTool(manager);
+    const result = await tool.execute({ brief: 'Sync task', wait: true, timeoutMs: 5000 }, new Workspace('.'));
+
+    assert.equal(result.success, true);
+    assert.equal(completions, 0);
+  });
+
+  it('Scenario 8: get_agent_result flags takeover for a failed agent', async () => {
+    const tool = createGetAgentResultTool({
+      get: () => ({ status: 'failed', handover: { filesModified: ['src/a.ts'] } }),
+    } as any);
+    const result = await tool.execute({ agentId: 'a1' }, new Workspace('.'));
+
+    assert.equal(result.takeoverRequired, true);
+    assert.deepEqual(result.handover.filesModified, ['src/a.ts']);
   });
 });

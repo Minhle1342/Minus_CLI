@@ -90,6 +90,36 @@ export type SubagentFactory = (
   signal: AbortSignal,
 ) => AgentLoop;
 
+const MUTATING_TOOL_NAMES = new Set([
+  'write_file', 'replace_text', 'replace_file_content', 'apply_patch',
+  'delete_file', 'move_file', 'edit_file', 'write_patch',
+]);
+const TOOL_PATH_ARG_KEYS = ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path'];
+const HANDOVER_ARG_CLIP = 200;
+
+/**
+ * Keep handover args small: mutating tools contribute paths only (never file
+ * bodies), other tools clip long values. The packet is re-sent to the parent LLM.
+ */
+function summarizeToolArgs(toolName: string, args: Record<string, unknown>): Record<string, any> | undefined {
+  const entries = Object.entries(args);
+  const kept = MUTATING_TOOL_NAMES.has(toolName)
+    ? entries.filter(([key, value]) => TOOL_PATH_ARG_KEYS.includes(key) && typeof value === 'string')
+    : entries;
+  if (!kept.length) return undefined;
+  return Object.fromEntries(kept.map(([key, value]) => {
+    if (typeof value !== 'string') {
+      try {
+        const text = JSON.stringify(value) ?? '';
+        return [key, text.length > HANDOVER_ARG_CLIP ? text.slice(0, HANDOVER_ARG_CLIP) + '…' : value];
+      } catch {
+        return [key, '[unserializable]'];
+      }
+    }
+    return [key, value.length > HANDOVER_ARG_CLIP ? value.slice(0, HANDOVER_ARG_CLIP) + '…' : value];
+  }));
+}
+
 /**
  * Provider seam for delegated/background agents.
  * The parent receives a handle immediately and the handle is also written to
@@ -98,6 +128,8 @@ export type SubagentFactory = (
 export class SubagentManager {
   private handles = new Map<string, { handle: SubagentHandle; controller: AbortController; executionSession?: Session; parentSessionId?: string; childLoop?: AgentLoop }>();
   private completionListeners = new Map<string, Array<(handle: SubagentHandle) => void>>();
+  /** Handles whose result was already delivered synchronously; skip the inbox notification. */
+  private awaitedIds = new Set<string>();
   private counter = 0;
   private boundSession?: Session;
   private boundSessionId?: string;
@@ -237,7 +269,7 @@ export class SubagentManager {
   /**
    * Đợi subagent hoàn thành một cách đồng bộ không cần vòng lặp polling
    */
-  async waitFor(id: string, timeoutMs = 60000): Promise<SubagentHandle> {
+  async waitFor(id: string, timeoutMs = 60000, signal?: AbortSignal): Promise<SubagentHandle> {
     const entry = this.handles.get(id);
     if (!entry) {
       throw new Error(`Subagent '${id}' not found.`);
@@ -247,8 +279,13 @@ export class SubagentManager {
       return { ...entry.handle };
     }
 
+    // The caller receives the result in-turn, so suppress the duplicate inbox notification.
+    this.awaitedIds.add(id);
+
     return new Promise<SubagentHandle>((resolve, reject) => {
       const timer = setTimeout(() => {
+        // The wait timed out, so the caller still needs the later completion notice.
+        this.awaitedIds.delete(id);
         cleanup();
         reject(new Error(`Timeout waiting for subagent '${id}' after ${timeoutMs}ms.`));
       }, timeoutMs);
@@ -259,14 +296,27 @@ export class SubagentManager {
         resolve(h);
       };
 
+      const onAbort = () => {
+        this.awaitedIds.delete(id);
+        cleanup();
+        reject(new Error(`Wait for subagent '${id}' aborted.`));
+      };
+
       const cleanup = () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         const listeners = this.completionListeners.get(id) || [];
         this.completionListeners.set(
           id,
           listeners.filter((l) => l !== listener)
         );
       };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
 
       const existingListeners = this.completionListeners.get(id) || [];
       existingListeners.push(listener);
@@ -478,29 +528,31 @@ export class SubagentManager {
     this.recordState(handle);
     this.notifyCompletion(handle);
     // Surface resumable failure thay vì để parent chờ kết quả rỗng.
-    this.onSubagentFailure?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
+    if (!this.awaitedIds.has(handle.id)) {
+      this.onSubagentFailure?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
+    }
+    this.awaitedIds.delete(handle.id);
   }
 
   extractHandover(objective: string, session: Session, error?: string): SubagentHandover {
     const filesModified = new Set<string>();
     const toolCallsMap = new Map<string, SubagentToolCallRecord>();
     const toolCallsOrder: string[] = [];
-    const mutatingTools = new Set(['write_file', 'replace_text', 'replace_file_content', 'apply_patch', 'delete_file', 'move_file', 'edit_file', 'write_patch']);
 
     for (const event of session.getEvents()) {
       if (event.type === 'tool/call') {
         const toolCallId = String(event.data?.toolCallId || ('call_' + toolCallsOrder.length));
         const toolName = String(event.data?.toolName || 'unknown');
         const args = event.data?.args;
-        if (mutatingTools.has(toolName) && args && typeof args === 'object') {
-          for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path']) {
+        if (MUTATING_TOOL_NAMES.has(toolName) && args && typeof args === 'object') {
+          for (const key of TOOL_PATH_ARG_KEYS) {
             const val = args[key];
             if (typeof val === 'string' && val.trim()) filesModified.add(val.trim());
           }
         }
         toolCallsMap.set(toolCallId, {
           toolName,
-          args: args && typeof args === 'object' ? args : undefined,
+          args: args && typeof args === 'object' ? summarizeToolArgs(toolName, args) : undefined,
           status: 'PASS',
         });
         toolCallsOrder.push(toolCallId);
@@ -602,9 +654,10 @@ export class SubagentManager {
       this.recordState(handle);
       this.notifyCompletion(handle);
       // Ponytail Priority 1: Reactive Wakeup push notification to parent session inbox.
-      if (handle.status === 'completed') {
+      if (handle.status === 'completed' && !this.awaitedIds.has(handle.id)) {
         this.onSubagentCompletion?.({ ...handle }, this.handles.get(handle.id)?.parentSessionId);
       }
+      this.awaitedIds.delete(handle.id);
     }).catch((error: any) => {
       clearTimeout(timeoutTimer);
       if (controller.signal.aborted) {

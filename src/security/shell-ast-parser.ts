@@ -275,7 +275,8 @@ export function tokenizeShell(command: string): { tokens: ShellToken[]; error?: 
 
     // File descriptor redirections (e.g. 2>, 1>, 2>>, 2>&1, 1>&2)
     if (/[0-9]/.test(char)) {
-      const fdMatch = /^(\d+)(>>|>|<|>&|<&)/.exec(command.slice(i));
+      // Longest operators first: "2>&1" must not tokenize as "2>" + "&" + "1".
+      const fdMatch = /^(\d+)(>>|>&|<&|>|<)/.exec(command.slice(i));
       if (fdMatch) {
         tokens.push({
           type: 'REDIRECT',

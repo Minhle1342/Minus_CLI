@@ -35,7 +35,7 @@ import { EffectLedger } from './effect-ledger.js';
 import { LoopProgressGuard } from './loop-progress-guard.js';
 import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
-import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, collectCompletionObservations } from './completion-observations.js';
+import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, collectCompletionObservations, toolResultFailed } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
@@ -136,6 +136,28 @@ export function scopedMutationTargets(toolName: string, args: Record<string, any
     for (const match of String(args.patch || '').matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+)$/gm)) add(match[1]);
   }
   return [...targets];
+}
+
+/** True khi tool call chạm một file mà subagent fail đã đụng tới (đọc hay ghi). */
+function touchesTakeoverFiles(
+  toolName: string,
+  args: Record<string, any>,
+  result: Record<string, any>,
+  files: string[],
+): boolean {
+  if (!files.length || toolResultFailed(result)) return false;
+  const normalize = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase().replace(/\/+$/, '');
+  const touched = new Set(scopedMutationTargets(toolName, args));
+  for (const key of ['path', 'filePath', 'file', 'target_path', 'file_path']) {
+    if (typeof args[key] === 'string') touched.add(args[key]);
+  }
+  return [...touched].some((target) => {
+    const n = normalize(target);
+    return files.some((file) => {
+      const h = normalize(file);
+      return n === h || n.endsWith('/' + h) || h.endsWith('/' + n);
+    });
+  });
 }
 
 function configuredEvidenceGateMode(): 'off' | 'observe' | 'enforce' | undefined {
@@ -312,6 +334,8 @@ export class AgentLoop {
   /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
   private backgroundTaskToolsUnlocked = false;
   private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
+  /** Set khi subagent fail — loop ép thêm một bước takeover cho tới khi tool chạm file của handover. */
+  private subagentTakeoverPending: { files: string[] } | null = null;
   /** TaskManager của loop (kernel ctx.tasks hoặc options) — gate cuối turn và auto-promotion. */
   private taskManager?: import('../tasks/task-manager.js').TaskManager;
   private editToolCallsInTurn = 0;
@@ -1172,6 +1196,7 @@ export class AgentLoop {
     this.targetFilesModifiedInTurn.clear();
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
+    this.subagentTakeoverPending = null;
     this.circuitBreakerTrippedTools.clear();
     this.editTouchedCallers = false;
     this.maxEditBlastRisk = undefined;
@@ -1437,9 +1462,35 @@ export class AgentLoop {
 
         // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
         // Check if user submitted a queued steering message while the loop was executing
-        // Background-task notices are NOT claimed here — the turn-end gate owns them.
         const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
-        if (steerItem) {
+        // System notices (background task, subagent failure) go into history verbatim;
+        // they are not user steering and must not render a steering banner.
+        const steerNoticeKind = steerItem?.kind && (isBackgroundTaskNotice(steerItem) || steerItem.kind === 'subagent-failed')
+          ? (isBackgroundTaskNotice(steerItem) ? 'background-task' : 'subagent-failed')
+          : undefined;
+        if (steerItem && steerNoticeKind) {
+          submissionReadiness.clear();
+          session.addUserMessage(steerItem.text, steerItem.source, steerItem.id);
+          session.append('input/claimed', {
+            inputId: steerItem.id,
+            isSteering: true,
+            backgroundTaskNotice: steerNoticeKind === 'background-task',
+            step,
+            turn,
+          });
+          await this.persistSession(session);
+          if (steerNoticeKind === 'background-task') {
+            this.backgroundTaskToolsUnlocked = true;
+          } else {
+            this.subagentTakeoverPending = { files: steerItem.takeoverFiles ?? [] };
+          }
+          steerItem.resolve('');
+          consecutiveEmptyTurns = 0;
+          consecutiveIncompleteFinals = 0;
+          consecutivePlanCompletionRejects = 0;
+          consecutiveIncompleteFinishes = 0;
+          consecutiveNoProgressStrategyChanges = 0;
+        } else if (steerItem) {
           submissionReadiness.clear();
           claimedSteerItems.push(steerItem);
           const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
@@ -4434,7 +4485,24 @@ export class AgentLoop {
               }
             }
 
-            // Ghi Tool Result vào Session (kèm Reflection Prompt hướng dẫn nếu có lỗi)
+            // Only touching a handover file proves the takeover; an empty handover has no
+            // baseline, so any successful mutation counts. Read-only calls prove nothing.
+            // shortcut: a legitimate fix on a file outside a non-empty handover still spends
+            // one forced step; add a planned-files field to the handover if that matters.
+            if (this.subagentTakeoverPending) {
+              const takeoverFiles = this.subagentTakeoverPending.files;
+              const proven = takeoverFiles.length === 0
+                ? hasObservedMutation(toolName, executionResult.result)
+                : touchesTakeoverFiles(toolName, toolArgs, executionResult.result, takeoverFiles);
+              if (proven) this.subagentTakeoverPending = null;
+            }
+            if (executionResult.result?.takeoverRequired === true) {
+              this.subagentTakeoverPending = {
+                files: Array.isArray(executionResult.result.handover?.filesModified)
+                  ? executionResult.result.handover.filesModified.filter((f: unknown) => typeof f === 'string')
+                  : [],
+              };
+            }
             if (executionResult.result?._untrusted_context?.quarantined && executionResult.result?._untrusted_context?.warning) {
               CLI.renderReflectionAlert(1, executionResult.result._untrusted_context.warning);
             }
@@ -4863,6 +4931,31 @@ export class AgentLoop {
           hasReportedFindings ? reportedFindingsMarkdown : undefined,
           hasSubmittedSolution ? submittedSolutionSummary : undefined);
         consecutiveEmptyTurns = 0;
+
+        // A failed subagent leaves unfinished work. The prompt asks for takeover, but
+        // enforce it deterministically: spend one extra step before any final answer lands.
+        if (this.subagentTakeoverPending) {
+          this.subagentTakeoverPending = null;
+          if (effectiveMaxSteps < maxLeasedSteps) effectiveMaxSteps += 1;
+          session.append('control/decision', {
+            turn,
+            step,
+            controlDecision: { mode: 'subagent-takeover' },
+          });
+          session.addUserMessage(
+            '[TAKEOVER REQUIRED — SUBAGENT FAILED]: A subagent stopped before finishing. '
+            + 'Inspect the handover in its tool result, finish the remaining work with your own tools now, and verify it. '
+            + 'Do not ask the user to re-run the subagent. If the takeover cannot proceed, report what is completed and what remains.',
+            'system',
+          );
+          await this.persistSession(session);
+          CLI.renderStepFooter();
+          session.append('step/end', { turn, step, reason: 'subagent-takeover' });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'subagent-takeover' });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
+          continue;
+        }
 
         const isPlanModeThisStep = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
         const planBlocker = isPlanModeThisStep ? undefined : this.planManager.getCompletionBlocker();
@@ -5801,6 +5894,7 @@ export class AgentLoop {
     this.targetFilesModifiedInTurn.clear();
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
+    this.subagentTakeoverPending = null;
     this.lastMutationForInvestigation = undefined;
     try {
       disposeSharedTypeScriptService();
@@ -5853,9 +5947,9 @@ export class AgentLoop {
       `- Objective: ${handle.objective}\n` +
       `- Files touched: ${files}\n` +
       `- Tool calls: ${toolSummary || 'none'}\n` +
-      `SELF-RELIANCE DIRECTIVE: Inspect the handover and take over the remaining work once. If takeover is blocked, report what failed and what was completed.`,
+      `SELF-RELIANCE DIRECTIVE: Take over the remaining work yourself with your own tools NOW. Do not ask the user to re-run the subagent and do not stop at the raw error. After the takeover attempt, report what you completed and what still remains.`,
       'system',
-      { isSteering: true },
+      { isSteering: true, kind: 'subagent-failed', takeoverFiles: handover?.filesModified || [] },
     );
   }
 

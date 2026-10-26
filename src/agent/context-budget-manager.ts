@@ -625,7 +625,8 @@ export class ContextBudgetManager {
 
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
-    if (!withinBudget && (recoveryWindow || envelope.history.length > 2)) {
+    if (!withinBudget && ((!options.protectActiveTurn && envelope.history.length > 2)
+      || (useEnforce && options.protectActiveTurn && recoveryWindow))) {
       const emergencyBudgetTokens = Math.max(
         1,
         usableInputTokens - before.nonHistoryTokens,
@@ -780,6 +781,7 @@ export class ContextBudgetManager {
       triggerReasons,
       projectedGrowthTokens,
       nonHistoryPressure,
+      // Every mode (including shadow/legacy) refuses a request above the hard ceiling.
       ...(!withinBudget
         ? { failureReason: "CONTEXT_BUDGET_UNSATISFIABLE" as const }
         : {}),

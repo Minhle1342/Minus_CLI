@@ -12,6 +12,8 @@ export interface AgentInboxItem {
   isSteering?: boolean;
   /** Machine-readable notice type, e.g. "background-task-completed". */
   kind?: string;
+  /** Files the failed subagent touched — parent takeover is only proven by touching one. */
+  takeoverFiles?: string[];
 }
 
 /** True khi item là thông báo hệ thống về background task (claim thì mở khóa manage_task). */
@@ -43,7 +45,7 @@ export class AgentInbox {
     sessionId: string,
     text: string,
     source: AgentInputSource,
-    options: { id?: string; enqueuedAt?: string; isSteering?: boolean; kind?: string } = {},
+    options: { id?: string; enqueuedAt?: string; isSteering?: boolean; kind?: string; takeoverFiles?: string[] } = {},
   ): AgentInboxItem {
     const cleanText = text.trim();
     if (!cleanText) throw new Error('Agent inbox input must not be empty.');
@@ -68,6 +70,7 @@ export class AgentInbox {
       reject,
       isSteering: options.isSteering,
       kind: options.kind,
+      takeoverFiles: options.takeoverFiles,
     };
 
     const queue = this.queues.get(sessionId) || [];

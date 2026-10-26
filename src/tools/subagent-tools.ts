@@ -1,5 +1,5 @@
 import { Type } from '@google/genai';
-import { ToolDefinition } from './types.js';
+import { ToolDefinition, ToolExecutionContext } from './types.js';
 import { SubagentManager } from '../agent/subagent-manager.js';
 import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { MultiAgentBrainstormingEngine } from '../agent/multi-agent-brainstorming.js';
@@ -28,7 +28,7 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
         },
         timeoutMs: {
           type: Type.INTEGER,
-          description: 'Optional timeout in milliseconds when wait is true (default: 60000ms = 60s).',
+          description: 'Optional timeout in milliseconds when wait is true (default: 180000ms = 180s, matching the subagent wall-clock limit). On timeout the subagent is stopped.',
         },
         model: {
           type: Type.STRING,
@@ -66,7 +66,7 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
         },
       },
     },
-    async execute(args: Record<string, any>, _workspace: Workspace): Promise<Record<string, any>> {
+    async execute(args: Record<string, any>, _workspace: Workspace, context?: ToolExecutionContext): Promise<Record<string, any>> {
       const task = String(args.brief || args.objective || '').trim();
       if (!task) return { error: 'Param "brief" or "objective" is required.' };
       const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
@@ -83,17 +83,18 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
       });
 
       if (args.wait === true) {
-        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
+        const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 180000;
         try {
-          const completedHandle = await manager.waitFor(handle.id, timeoutMs);
+          const completedHandle = await manager.waitFor(handle.id, timeoutMs, context?.signal);
           if (completedHandle.status === 'failed') {
             return {
               success: false,
               agentId: handle.id,
               status: 'failed',
+              takeoverRequired: true,
               error: completedHandle.error,
               handover: completedHandle.handover,
-              instruction: `[SUBAGENT ENDPOINT FAILED (3 retries)]: The subagent encountered a fatal connection or API failure after 3 retries. Take over the task immediately and complete the objective directly using your own tools. Objective: "${completedHandle.objective}". Modified files: ${JSON.stringify(completedHandle.handover?.filesModified || [])}.`,
+              instruction: `[SUBAGENT FAILED (SELF-RELIANCE HANDOVER)]: The subagent stopped before finishing. Take over NOW and complete the remaining work yourself with your own tools; do not ask the user to re-run it. Objective: "${completedHandle.objective}". Modified files: ${JSON.stringify(completedHandle.handover?.filesModified || [])}.`,
             };
           }
           return {
@@ -103,16 +104,21 @@ export function createSpawnAgentTool(manager: SubagentManager, toolName = 'spawn
             answer: completedHandle.answer,
             result: completedHandle.resultBundle,
             handover: completedHandle.handover,
-            agent: completedHandle,
           };
         } catch (err: any) {
+          const aborted = context?.signal?.aborted === true;
+          // Never leave the child mutating files while the parent takes over.
+          if (manager.get(handle.id)?.status === 'running') manager.stop(handle.id);
           const entry = manager.get(handle.id);
           return {
             success: false,
             agentId: handle.id,
+            ...(aborted ? { aborted: true } : { takeoverRequired: true }),
             error: err instanceof Error ? err.message : String(err),
             handover: entry?.handover,
-            instruction: `[SUBAGENT FAILED/TIMED OUT]: Take over the task immediately and complete the objective directly using your own tools. Objective: "${handle.objective}".`,
+            instruction: aborted
+              ? `[SPAWN WAIT ABORTED]: The subagent was stopped. Objective: "${handle.objective}".`
+              : `[SUBAGENT FAILED/TIMED OUT]: The subagent was stopped. Take over the remaining work NOW with your own tools; do not ask the user to re-run it. Objective: "${handle.objective}".`,
           };
         }
       }
@@ -230,6 +236,17 @@ export function createWaitAgentTool(manager: SubagentManager): ToolDefinition {
       const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 60000;
       try {
         const handle = await manager.waitFor(agentId, timeoutMs);
+        if (handle.status === 'failed') {
+          return {
+            success: false,
+            agentId,
+            status: 'failed',
+            takeoverRequired: true,
+            error: handle.error,
+            handover: handle.handover,
+            instruction: `[SUBAGENT FAILED (SELF-RELIANCE HANDOVER)]: Take over NOW and complete the remaining work yourself with your own tools; do not ask the user to re-run it. Objective: "${handle.objective}". Modified files: ${JSON.stringify(handle.handover?.filesModified || [])}.`,
+          };
+        }
         return {
           success: true,
           agent: handle,
@@ -259,9 +276,18 @@ export function createGetAgentResultTool(manager: SubagentManager): ToolDefiniti
       const agentId = String(args.agentId || '').trim();
       if (!agentId) return { error: 'The "agentId" parameter is required.' };
       const agent = manager.get(agentId);
-      return agent
-        ? { success: true, agent, answer: agent.answer, result: agent.resultBundle }
-        : { success: false, error: 'SUBAGENT_NOT_FOUND', agentId };
+      if (!agent) return { success: false, error: 'SUBAGENT_NOT_FOUND', agentId };
+      return agent.status === 'failed'
+        ? {
+          success: true,
+          agent,
+          answer: agent.answer,
+          takeoverRequired: true,
+          handover: agent.handover,
+          instruction: `[SUBAGENT FAILED (SELF-RELIANCE HANDOVER)]: Take over NOW and complete the remaining work yourself with your own tools; do not ask the user to re-run it. Objective: "${agent.objective}". Modified files: ${JSON.stringify(agent.handover?.filesModified || [])}.`,
+          result: agent.resultBundle,
+        }
+        : { success: true, agent, answer: agent.answer, result: agent.resultBundle };
     },
   };
 }

@@ -449,16 +449,18 @@ test('non-history surface pressure is reported without rewriting history', async
   assert.ok(result.triggerReasons?.includes('non-history-surface'));
 });
 
-test('legacy mode still refuses a request above the hard ceiling', async () => {
-  const manager = new ContextBudgetManager(new ContextCompactor(), { mode: 'legacy' });
-  const result = await manager.prepareRequest({
-    provider: 'unknown-provider', model: 'custom', systemPrompt: 'system', tools: [],
-    history: [{ role: 'user', parts: [{ text: `Pinned request: ${'x'.repeat(8_000)}` }] }],
-    maxInputTokens: 500, outputReserveTokens: 50,
-  });
+test('legacy and shadow modes still refuse a request above the hard ceiling', async () => {
+  for (const mode of ['legacy', 'shadow'] as const) {
+    const manager = new ContextBudgetManager(new ContextCompactor(), { mode });
+    const result = await manager.prepareRequest({
+      provider: 'unknown-provider', model: 'custom', systemPrompt: 'system', tools: [],
+      history: [{ role: 'user', parts: [{ text: `Pinned request: ${'x'.repeat(8_000)}` }] }],
+      maxInputTokens: 500, outputReserveTokens: 50,
+    });
 
-  assert.equal(result.withinBudget, false);
-  assert.equal(result.failureReason, 'CONTEXT_BUDGET_UNSATISFIABLE');
+    assert.equal(result.withinBudget, false, mode);
+    assert.equal(result.failureReason, 'CONTEXT_BUDGET_UNSATISFIABLE', mode);
+  }
 });
 
 test('guardian never invents successful verification evidence', async () => {

@@ -44,15 +44,12 @@ const SAFE_NULL_OR_STREAM_TARGETS = new Set([
   'con',
   '/dev/stdout',
   '/dev/stderr',
-  '&1',
-  '&2',
-  '1',
-  '2',
 ]);
 
 function isSafeReadOnlyRedirect(redirect: { type: string; target: string; fd?: number }): boolean {
   const target = (redirect.target || '').trim().toLowerCase();
   if (SAFE_NULL_OR_STREAM_TARGETS.has(target)) return true;
+  // Bare digits are fds only for `2>&1`-style redirects. `cmd > 1` creates a file named "1".
   if (['>&', '<&'].includes(redirect.type) && /^&?[0-2]$/.test(target)) return true;
   return false;
 }
@@ -176,6 +173,10 @@ export class SandboxPolicyEngine {
           // Global config, external diff drivers and output files can change effects.
           if (!args.length || args[0].startsWith('-') || args.some(arg => /^--(?:output|ext-diff|textconv|exec-path)(?:=|$)/i.test(arg))) return false;
           return classifyGitCommand(args[0], args.slice(1)).risk === 'read';
+        }
+        if (executable === 'codegraph' || executable === 'codegraph.exe') {
+          return args.length > 0
+            && ['explore', 'node', 'search', 'callers', 'callees', 'impact', 'status'].includes(args[0].toLowerCase());
         }
         if (executable === 'env' || executable === 'printenv') return args.length === 0;
         if (executable === 'find') {

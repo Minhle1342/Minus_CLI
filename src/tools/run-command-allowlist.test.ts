@@ -77,3 +77,19 @@ test('bounded two-segment pipelines of allowlisted commands skip approval', () =
   assert.equal(isAllowedShellCommand('echo hi > out.txt'), false);
   assert.equal(isAllowedShellCommand('rm -rf /tmp/x | cat'), false);
 });
+
+test('fd redirects are allowlisted without widening file writes', () => {
+  assert.equal(isAllowedShellCommand('ls -la 2>&1'), true);
+  assert.equal(isAllowedShellCommand('git status 2>/dev/null'), true);
+  assert.equal(isAllowedShellCommand('git status > 1'), false);
+  assert.equal(isAllowedShellCommand('git status >> 2'), false);
+});
+
+test('only read-only codegraph subcommands skip approval', () => {
+  for (const cmd of ['codegraph explore AgentLoop', 'codegraph impact AgentLoop', 'codegraph status']) {
+    assert.equal(isAllowedCommand(cmd), true, cmd);
+  }
+  for (const cmd of ['codegraph init', 'codegraph sync', 'codegraph explore x && codegraph init']) {
+    assert.equal(isAllowedShellCommand(cmd), false, cmd);
+  }
+});

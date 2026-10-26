@@ -131,7 +131,6 @@ export interface SessionEventData {
   inputId?: string;
   inputText?: string;
   isSteering?: boolean;
-  /** True khi input là thông báo hệ thống về background task (manage_task unlock). */
   backgroundTaskNotice?: boolean;
   /** Per-tab model chosen via scoped /model (model/change events). */
   modelName?: string;

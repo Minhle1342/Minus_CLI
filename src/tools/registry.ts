@@ -62,6 +62,20 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
  */
 export const LAZY_TOOL_NAMES = new Set(['manage_task']);
 
+/** Single source of truth for compatibility aliases (has/get/execute/scope). */
+export const TOOL_ALIASES: Record<string, string> = {
+  search_web: 'web_search',
+  web_search: 'search_web',
+  read_url_content: 'web_fetch',
+  web_fetch: 'read_url_content',
+  write_to_file: 'write_file',
+  create_file: 'write_file',
+  replace_file_content: 'replace_text',
+  multi_replace_file_content: 'replace_text',
+  search_codebase_fast: 'search_text',
+  tools_search: 'search_text',
+};
+
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
   return tools.filter(
     (tool) => (CANONICAL_MODEL_TOOL_NAMES.has(tool.name) || isOrchestrationTool(tool.name))
@@ -210,14 +224,8 @@ export class ToolRegistry implements ToolProvider {
    */
   has(name: string): boolean {
     if (this.tools.has(name)) return true;
-    if (name === 'search_web') return this.tools.has('web_search');
-    if (name === 'web_search') return this.tools.has('search_web');
-    if (name === 'read_url_content') return this.tools.has('web_fetch');
-    if (name === 'web_fetch') return this.tools.has('read_url_content');
-    if (name === 'write_to_file' || name === 'create_file') return this.tools.has('write_file');
-    if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.has('replace_text');
-    if (name === 'search_codebase_fast' || name === 'tools_search') return this.tools.has('search_text');
-    return false;
+    const alias = TOOL_ALIASES[name];
+    return alias ? this.tools.has(alias) : false;
   }
 
   /**
@@ -226,14 +234,8 @@ export class ToolRegistry implements ToolProvider {
   get(name: string): ToolDefinition | undefined {
     const exact = this.tools.get(name);
     if (exact) return exact;
-    if (name === 'search_web') return this.tools.get('web_search');
-    if (name === 'web_search') return this.tools.get('search_web');
-    if (name === 'read_url_content') return this.tools.get('web_fetch');
-    if (name === 'web_fetch') return this.tools.get('read_url_content');
-    if (name === 'write_to_file' || name === 'create_file') return this.tools.get('write_file');
-    if (name === 'replace_file_content' || name === 'multi_replace_file_content') return this.tools.get('replace_text');
-    if (name === 'search_codebase_fast' || name === 'tools_search') return this.tools.get('search_text');
-    return undefined;
+    const alias = TOOL_ALIASES[name];
+    return alias ? this.tools.get(alias) : undefined;
   }
 
   /**
@@ -284,22 +286,14 @@ export class ToolRegistry implements ToolProvider {
     let resolvedArgs = args;
 
     if (!this.tools.has(name)) {
-      if (name === 'search_web' && this.tools.has('web_search')) {
-        resolvedName = 'web_search';
-      } else if (name === 'web_search' && this.tools.has('search_web')) {
-        resolvedName = 'search_web';
-      } else if (name === 'read_url_content' && this.tools.has('web_fetch')) {
-        resolvedName = 'web_fetch';
-        if (!resolvedArgs.url && resolvedArgs.Url) {
+      const alias = TOOL_ALIASES[name];
+      if (alias && this.tools.has(alias)) {
+        resolvedName = alias;
+        if (alias === 'web_fetch' && !resolvedArgs.url && resolvedArgs.Url) {
           resolvedArgs = { ...resolvedArgs, url: resolvedArgs.Url };
-        }
-      } else if (name === 'web_fetch' && this.tools.has('read_url_content')) {
-        resolvedName = 'read_url_content';
-        if (!resolvedArgs.Url && resolvedArgs.url) {
+        } else if (alias === 'read_url_content' && !resolvedArgs.Url && resolvedArgs.url) {
           resolvedArgs = { ...resolvedArgs, Url: resolvedArgs.url };
         }
-      } else if (name === 'tools_search' && this.tools.has('search_text')) {
-        resolvedName = 'search_text';
       }
     }
 
@@ -356,14 +350,7 @@ export class ToolScope implements ToolProvider {
     if (local) return local;
     if (this.allowed && !this.allowed.has(name)) {
       // Check alias permission
-      const alias = name === 'search_web' ? 'web_search'
-        : name === 'web_search' ? 'search_web'
-        : name === 'read_url_content' ? 'web_fetch'
-        : name === 'web_fetch' ? 'read_url_content'
-        : name === 'write_to_file' || name === 'create_file' ? 'write_file'
-        : name === 'replace_file_content' || name === 'multi_replace_file_content' ? 'replace_text'
-        : name === 'search_codebase_fast' || name === 'tools_search' ? 'search_text'
-        : undefined;
+      const alias = TOOL_ALIASES[name];
       if (!alias || !this.allowed.has(alias)) return undefined;
     }
     return this.base.get(name);

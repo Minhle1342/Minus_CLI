@@ -12,7 +12,8 @@ that replaces manual grep loops — use \`run_command\` with the CodeGraph CLI:
 1. Run \`codegraph explore <symbol>\` via \`run_command\` FIRST for structural questions ("how does X work",
    flow X→Y, surveying an area, bug tracing) and BEFORE EDITING. One call returns source + call paths + blast radius.
 2. Go deeper with \`codegraph node <symbol>\` (caller/callee trail) or \`codegraph impact <symbol>\` before modifying code.
-3. Read files directly with \`read_file\` only when outside the index or freshly modified.`;
+3. Read files directly with \`read_file\` when the file is outside the index or was edited after the last index sync.
+4. Never run \`codegraph init\` or \`codegraph sync\` without user approval.`;
 
 export const CodeGraphPlugin: AgentPlugin = {
   name: 'codegraph-plugin',

@@ -78,7 +78,7 @@ test('DEFAULT_PROMPT_SECTIONS condition functions support dynamic omission while
   assert.ok(defaultPrompt.includes('GIT & TESTING RUNTIME OPERATIONS'));
   assert.ok(defaultPrompt.includes('FRONTEND & UI DESIGN STANDARD'));
   assert.ok(defaultPrompt.includes('CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE'));
-  assert.ok(defaultPrompt.includes('MULTI-AGENT ORCHESTRATION & NOT-BLOCK BOUNDARIES'));
+  assert.ok(defaultPrompt.includes('MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER'));
 
   // Gated context with static inclusion disabled strips redundant static sections
   const gatedCtx: PromptAssemblyContext = {
@@ -97,7 +97,7 @@ test('DEFAULT_PROMPT_SECTIONS condition functions support dynamic omission while
   assert.ok(!gatedPrompt.includes('FRONTEND & UI DESIGN STANDARD'));
   assert.ok(!gatedPrompt.includes('CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE'));
   assert.ok(!gatedPrompt.includes('TOOL SYNERGY PLAYBOOKS:'));
-  assert.ok(!gatedPrompt.includes('MULTI-AGENT ORCHESTRATION & NOT-BLOCK BOUNDARIES'));
+  assert.ok(!gatedPrompt.includes('MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER'));
   // Invariant Core prompt is always present
   assert.ok(gatedPrompt.includes('You are a fast, precise, safe coding agent in the terminal.'));
 });

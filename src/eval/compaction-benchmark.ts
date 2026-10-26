@@ -74,14 +74,16 @@ async function runPolicy(policy: PolicySpec, repeats: number): Promise<PairedCom
         let previousState: CompactionStateV1 | undefined;
         let totalLatencyMs = 0;
         let result;
+        // One manager per task, reused across generations: production keeps the
+        // same instance, so hysteresis/last-compaction state must persist here too.
+        const compactor = new ContextCompactor({
+          maxTotalHistoryTokens: 8_000,
+          enableRollingTurnCompaction: true,
+          enableObservationMasking: true,
+          ...policy.config,
+        });
+        const manager = new ContextBudgetManager(compactor, { mode: policy.mode, triggerRatio: 0.55 });
         for (let generation = 0; generation < 4; generation++) {
-          const compactor = new ContextCompactor({
-            maxTotalHistoryTokens: 8_000,
-            enableRollingTurnCompaction: true,
-            enableObservationMasking: true,
-            ...policy.config,
-          });
-          const manager = new ContextBudgetManager(compactor, { mode: policy.mode, triggerRatio: 0.55 });
           const started = performance.now();
           result = await manager.prepareRequest({
             provider: 'benchmark',

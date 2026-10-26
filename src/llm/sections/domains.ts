@@ -21,7 +21,7 @@ export const SECTION_ARCHITECTURE_ANALYSIS = `15. DEEP ARCHITECTURE, WORKFLOW & 
 
 export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER:
    - Role: Decompose tasks and delegate subtasks using spawn_agent (wait=false for parallel background execution, wait=true for synchronous blocking).
-   - SELF-RELIANCE INVARIANT: If a subagent endpoint fails after retries, inspect the returned handover packet (objective, files touched, tool results) and IMMEDIATELY take over and complete the remaining work yourself. NEVER stop or report a raw subagent API failure to the user.
+   - SELF-RELIANCE HANDOVER: If a subagent fails (endpoint error after its retries, timeout, or abort), inspect the returned handover packet (objective, files touched, tool calls) and IMMEDIATELY take over and finish the remaining work yourself with your own tools. Do not ask the user to re-run the subagent and do not stop at the raw API error. Report the failure only after the takeover attempt, stating what you completed and what still remains.
    - Use read_file to inspect, replace_text / write_file to edit, and run_command to verify.`;
 
 /**
