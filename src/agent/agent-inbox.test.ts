@@ -26,3 +26,14 @@ test('hasPendingKind finds unclaimed background notices only', () => {
   assert.equal(inbox.hasPendingKind('session', 'user'), false);
   assert.equal(inbox.hasPendingKind('other-session', 'background-task'), false);
 });
+
+test('claimSteerMessage skips background notices; the gate dequeues them', () => {
+  const inbox = new AgentInbox();
+  const notice = inbox.enqueue('session', 'notice', 'system', { isSteering: true, kind: 'background-task-completed' });
+  const steer = inbox.enqueue('session', 'steer', 'human', { isSteering: true });
+  // Step-top claim never takes a background notice — the turn-end gate owns them.
+  assert.equal(inbox.claimSteerMessage('session', false)?.id, steer.id);
+  assert.equal(inbox.claimSteerMessage('session', true), undefined);
+  assert.equal(inbox.claimBackgroundNotice('session')?.id, notice.id);
+  assert.equal(inbox.claimBackgroundNotice('session'), undefined);
+});

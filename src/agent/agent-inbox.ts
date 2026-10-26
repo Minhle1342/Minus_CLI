@@ -112,15 +112,35 @@ export class AgentInbox {
     const queue = this.queues.get(sessionId);
     if (!queue || queue.length === 0) return undefined;
 
+    // Background-task notices never steer a step: the turn-end gate claims them.
+    const isClaimable = (item: AgentInboxItem) => item.isSteering === true && !isBackgroundTaskNotice(item);
+
     if (onlyExplicitSteering) {
-      const idx = queue.findIndex((item) => item.isSteering === true);
+      const idx = queue.findIndex(isClaimable);
       if (idx === -1) return undefined;
       const [item] = queue.splice(idx, 1);
       if (queue.length === 0) this.queues.delete(sessionId);
       return item;
     }
 
-    return this.claim(sessionId);
+    const claimableIdx = queue.findIndex(isClaimable);
+    if (claimableIdx === 0) return this.claim(sessionId);
+    if (claimableIdx === -1) return undefined;
+    // Đầu hàng đợi là notice nền → claim item claimable phía sau, giữ notice tại chỗ.
+    const [item] = queue.splice(claimableIdx, 1);
+    if (queue.length === 0) this.queues.delete(sessionId);
+    return item;
+  }
+
+  /** Dequeue notice nền đầu tiên — chỉ gate cuối turn được gọi. */
+  claimBackgroundNotice(sessionId: string): AgentInboxItem | undefined {
+    const queue = this.queues.get(sessionId);
+    if (!queue) return undefined;
+    const idx = queue.findIndex(isBackgroundTaskNotice);
+    if (idx === -1) return undefined;
+    const [item] = queue.splice(idx, 1);
+    if (queue.length === 0) this.queues.delete(sessionId);
+    return item;
   }
 
   /**

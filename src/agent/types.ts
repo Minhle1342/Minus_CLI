@@ -10,8 +10,11 @@ import type { ToolControlMode } from '../control/classification-types.js';
 import type { StepPromptGatingMode } from './step-prompt-policy.js';
 import type { ContextManagementMode } from './context-budget-manager.js';
 import type { KernelEventBus } from '../kernel/kernel.js';
+import type { TaskManager } from '../tasks/task-manager.js';
 
 export interface AgentLoopOptions {
+  /** TaskManager for background-command gating and the turn-end background wait. */
+  taskManager?: TaskManager;
   /** Run in non-interactive / headless mode where permission denials gracefully continue instead of killing the turn. */
   headless?: boolean;
   nonInteractive?: boolean;

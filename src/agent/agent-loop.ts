@@ -312,6 +312,11 @@ export class AgentLoop {
   /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
   private backgroundTaskToolsUnlocked = false;
   private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
+  /** TaskManager của loop (kernel ctx.tasks hoặc options) — gate cuối turn và auto-promotion. */
+  private taskManager?: import('../tasks/task-manager.js').TaskManager;
+  /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
+  private backgroundTaskToolsUnlocked = false;
+  private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
   private editToolCallsInTurn = 0;
   private ephemeralScratchFiles = new Set<string>();
   readonly kernel?: AgentKernel;
@@ -489,6 +494,7 @@ export class AgentLoop {
       this.goalManager = this.kernel.ctx.goal;
       this.agentHooks = this.kernel.ctx.agentHooks;
       this.inbox = this.kernel.ctx.inbox;
+      this.taskManager = options?.taskManager ?? this.kernel.ctx.tasks;
       this.promptAssembler = this.kernel.ctx.systemPrompt;
       this.agentRegistry = options?.agentRegistry || this.kernel.ctx.agents;
       this.agentId = options?.agentId || 'coding-agent';
@@ -529,6 +535,8 @@ export class AgentLoop {
       this.goalManager = new GoalManager();
       this.agentHooks = new AgentHookRegistry();
       this.inbox = new AgentInbox();
+      this.taskManager = options?.taskManager;
+      if (options?.taskManager) this.toolRegistry.attachTaskManager(options.taskManager);
       this.promptAssembler = new PromptAssembler();
       const sectionsToRegister = options?.promptSections || DEFAULT_PROMPT_SECTIONS;
       for (const section of sectionsToRegister) {
@@ -1167,6 +1175,8 @@ export class AgentLoop {
     this.targetFilesModifiedInTurn.clear();
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
+    this.backgroundTaskToolsUnlocked = false;
+    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.circuitBreakerTrippedTools.clear();
     this.editTouchedCallers = false;
     this.maxEditBlastRisk = undefined;
@@ -1682,7 +1692,14 @@ export class AgentLoop {
           workspaceDir: this._workspace.rootDir,
           userRequest: turnUserRequest,
         });
-        const gateToolSurface = recommendedToolDecision.toolSurface;
+        // Lazy unlock: sau khi một background-task notice được claim, manage_task
+        // vào surface (authorized + visible) cho phần còn lại của turn.
+        const gateToolSurface = this.backgroundTaskToolsUnlocked
+          ? createToolSurface(
+            [...recommendedToolDecision.toolSurface.authorizedToolNames, 'manage_task'],
+            [...recommendedToolDecision.toolSurface.visibleToolNames, 'manage_task'],
+          )
+          : recommendedToolDecision.toolSurface;
         this.toolControlTelemetry.recordDecision(classification, recommendedToolDecision);
         const candidateProvider = toolControlMode === 'enforce'
           ? new ToolScope(`turn-${turn}-step-${step}-candidates`, this.toolProvider, gateToolSurface.authorizedToolNames)
@@ -1719,6 +1736,7 @@ export class AgentLoop {
           && this.cachedTurnToolPhase === classification.phase
           && this.cachedTurnToolPhaseVersion === classification.phaseVersion
           && this.cachedHasPlan === this.planManager.hasPlan()
+          && this.cachedBackgroundTaskToolsUnlocked === this.backgroundTaskToolsUnlocked
         ) {
           // KV Cache Preservation: Tái sử dụng 100% Tool Declarations cố định của phase trong turn này,
           // ngăn chặn việc re-retrieval sau mỗi tool call làm thay đổi thứ tự/danh sách tool prefix token.
@@ -1767,6 +1785,19 @@ export class AgentLoop {
             );
           }
 
+          // Lazy unlock: manage_task xuất hiện trong declarations sau khi notice nền được claim.
+          if (this.backgroundTaskToolsUnlocked) {
+            const manageTaskTool = candidateProvider.get('manage_task');
+            if (manageTaskTool && !activeToolDeclarations.some((tool: any) => tool.name === 'manage_task')) {
+              // Chỉ push declaration thuần (không kèm hàm execute) — session clone JSON.
+              activeToolDeclarations.push({
+                name: manageTaskTool.name,
+                description: manageTaskTool.description,
+                parameters: manageTaskTool.parameters,
+              });
+            }
+          }
+
           // Canonical alphabetical sort: Đảm bảo thứ tự tool schemas luôn nhất quán tuyệt đối,
           // bảo tồn nguyên vẹn KV Cache prefix qua từng step.
           activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
@@ -1777,6 +1808,7 @@ export class AgentLoop {
           this.cachedTurnToolPhase = classification.phase;
           this.cachedTurnToolPhaseVersion = classification.phaseVersion;
           this.cachedHasPlan = this.planManager.hasPlan();
+          this.cachedBackgroundTaskToolsUnlocked = this.backgroundTaskToolsUnlocked;
         }
 
         // Verification State tracking:
@@ -3740,8 +3772,13 @@ export class AgentLoop {
 
               const readinessInvalidated = toolName === 'submit_solution' && Boolean(readySubmission)
                 && !submissionReadiness.current(submissionSnapshot(), true);
+              // Còn background task finite đang chạy của turn này → chưa được submit;
+              // notice hoàn thành sẽ tự đến (không retry submit).
+              const backgroundPending = toolName === 'submit_solution' && !isSubagent
+                && Boolean(this.taskManager?.hasAutoPromotedRunning(session.id, turn));
               const submitGateBlocked = toolName === 'submit_solution' && (
-                readinessInvalidated
+                backgroundPending
+                || readinessInvalidated
                 || submissionCheck?.allowed !== true
                 || submissionCheck?.audit.allowed === false
                 || policyCompletion?.allowed !== true
@@ -3749,7 +3786,9 @@ export class AgentLoop {
                 || !ocrCompletion.allow
               );
               if (submitGateBlocked) {
-                const error = readinessInvalidated
+                const error = backgroundPending
+                  ? 'Background tasks from this turn are still running; their completion notice will arrive automatically. Do not retry submit_solution until then.'
+                  : readinessInvalidated
                   ? 'Completion evidence, task scope or tracked artifacts changed while generating submission. Re-check the current task before submitting.'
                   : !ocrCompletion.allow
                     ? ocrCompletion.continuationPrompt || 'OpenCodeReview must pass before submitting the solution.'
@@ -3766,7 +3805,8 @@ export class AgentLoop {
                   result: {
                     success: false,
                     error,
-                    errorCode: readinessInvalidated ? 'SUBMISSION_READINESS_INVALIDATED'
+                    errorCode: backgroundPending ? 'BACKGROUND_TASKS_PENDING'
+                      : readinessInvalidated ? 'SUBMISSION_READINESS_INVALIDATED'
                       : !ocrCompletion.allow ? 'OCR_REVIEW_REQUIRED'
                         : submissionCheck?.audit.allowed === false ? submissionCheck.audit.errorCode : 'COMPLETION_EVIDENCE_REQUIRED',
                     submitted: false,
@@ -5096,6 +5136,49 @@ export class AgentLoop {
             return incompleteFinalMessage;
           }
         }
+        // Turn-end gate: chờ background task auto-promoted của turn này hoặc
+        // claim notice nền đã nằm trong inbox trước khi commit câu trả lời cuối.
+        // Gate không tốn step (gia hạn qua step-lease); stall notice là đường thoát.
+        const backgroundTaskRunning = !isSubagent && Boolean(this.taskManager?.hasAutoPromotedRunning(session.id, turn));
+        const backgroundNoticePending = !isSubagent && this.inbox.hasPendingKind(session.id, 'background-task');
+        if (backgroundTaskRunning || backgroundNoticePending) {
+          const leaseExtension = Math.min(1, maxLeasedSteps - effectiveMaxSteps);
+          if (leaseExtension > 0) effectiveMaxSteps += leaseExtension;
+          session.append('control/decision', {
+            turn,
+            step,
+            controlDecision: { mode: 'background-wait', backgroundTaskRunning, backgroundNoticePending },
+          });
+          if (backgroundTaskRunning) {
+            await this.taskManager!.waitForAutoPromoted(session.id, turn, options?.signal);
+          }
+          const bgNotice = this.inbox.claimBackgroundNotice(session.id);
+          if (bgNotice) {
+            submissionReadiness.clear();
+            session.addUserMessage(bgNotice.text, bgNotice.source, bgNotice.id);
+            session.append('input/claimed', {
+              inputId: bgNotice.id,
+              isSteering: true,
+              backgroundTaskNotice: true,
+              step,
+              turn,
+            });
+            this.backgroundTaskToolsUnlocked = true;
+            bgNotice.resolve('');
+            consecutiveEmptyTurns = 0;
+            consecutiveIncompleteFinals = 0;
+            consecutivePlanCompletionRejects = 0;
+            consecutiveIncompleteFinishes = 0;
+            consecutiveNoProgressStrategyChanges = 0;
+          }
+          // Giống các đường continue khác: đóng step hiện tại để invariant session không vỡ.
+          CLI.renderStepFooter();
+          session.append('step/end', { turn, step, reason: 'background-wait' });
+          await this.persistSession(session);
+          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'background-wait' });
+          this.eventBus?.emit('step:after', step, { sessionId: session.id });
+          continue;
+        }
         consecutiveIncompleteFinals = 0;
         this.adaptiveReasoning.reset();
 
@@ -5734,6 +5817,8 @@ export class AgentLoop {
     }
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
+    this.backgroundTaskToolsUnlocked = false;
+    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.lastMutationForInvestigation = undefined;
