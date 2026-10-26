@@ -2,6 +2,7 @@ import { spawn, ChildProcess, execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { buildSafeChildEnv } from '../security/env-scrub.js';
+import type { AgentInbox } from '../agent/agent-inbox.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -10,6 +11,13 @@ export const STALL_IDLE_MS = Number(process.env.MINUS_STALL_IDLE_MS) > 0
   ? Number(process.env.MINUS_STALL_IDLE_MS)
   : 45_000;
 const STALL_RENOTIFY_MS = 60_000;
+
+export interface BackgroundTaskOptions {
+  sessionId?: string;
+  turn?: number;
+  autoPromoted?: boolean;
+  inbox?: Pick<AgentInbox, 'enqueue'>;
+}
 
 export interface BackgroundTask {
   id: string;
@@ -26,7 +34,32 @@ export interface BackgroundTask {
   lastOutputAt: number;
   /** Last timestamp (ms) a stall notice was emitted. Limits noise to 1/min. */
   lastStallNoticeAt?: number;
+  /** Session that started the task; notices route to its inbox. */
+  sessionId?: string;
+  /** Turn that started the task; waiters scope to it. */
+  turn?: number;
+  /** True when run_command promoted this task automatically (finite command over threshold). */
+  autoPromoted?: boolean;
+  /** Set once a stall notice has released the turn-end gate for this task. */
+  stallReleased?: boolean;
 }
+
+/**
+ * Pure stall predicate: running task idle beyond `stallIdleMs`, respecting the
+ * `renotifyMs` cooldown. Exported for tests.
+ */
+export function shouldEmitStallNotice(
+  task: Pick<BackgroundTask, 'status' | 'lastOutputAt' | 'lastStallNoticeAt'>,
+  now: number,
+  stallIdleMs: number,
+  renotifyMs: number,
+): boolean {
+  if (task.status !== 'running') return false;
+  if (now - task.lastOutputAt < stallIdleMs) return false;
+  return now - (task.lastStallNoticeAt || 0) >= renotifyMs;
+}
+
+type WaitOutcome = 'completed' | 'stalled' | 'aborted';
 
 /**
  * TaskManager - Quản lý các tiến trình bất đồng bộ chạy nền (Asynchronous Subprocesses)
@@ -39,6 +72,8 @@ export interface BackgroundTask {
  */
 export class TaskManager {
   private tasks = new Map<string, BackgroundTask>();
+  private watchdogs = new Map<string, NodeJS.Timeout>();
+  private inboxes = new Map<string, Pick<AgentInbox, 'enqueue'>>();
   private defaultCwd: string;
   private taskCounter = 0;
 
@@ -49,7 +84,7 @@ export class TaskManager {
   /**
    * Khởi chạy một tiến trình nền mới
    */
-  startTask(command: string, cwd?: string, env?: Record<string, string>): BackgroundTask {
+  startTask(command: string, cwd?: string, env?: Record<string, string>, options?: BackgroundTaskOptions): BackgroundTask {
     this.taskCounter++;
     const id = `task_${this.taskCounter}`;
     const effectiveCwd = cwd ? path.resolve(cwd) : this.defaultCwd;
@@ -63,6 +98,9 @@ export class TaskManager {
       startedAt,
       logs: [],
       lastOutputAt: Date.now(),
+      sessionId: options?.sessionId,
+      turn: options?.turn,
+      autoPromoted: options?.autoPromoted,
     };
 
     // Khởi chạy child process với shell và env đã scrub (không leak host secrets)
@@ -96,11 +134,40 @@ export class TaskManager {
     child.stdout?.on('data', appendLog);
     child.stderr?.on('data', appendLog);
 
+    if (options?.inbox && task.sessionId) this.inboxes.set(id, options.inbox);
+
+    const watchdog = setInterval(() => {
+      if (shouldEmitStallNotice(task, Date.now(), STALL_IDLE_MS, STALL_RENOTIFY_MS)) {
+        this.emitStallFor(task);
+      }
+    }, 5_000);
+    watchdog.unref();
+    this.watchdogs.set(id, watchdog);
+
     child.on('exit', (code) => {
       task.status = task.stopRequested || code === 0 ? 'stopped' : 'failed';
       task.exitCode = code;
       task.lastOutputAt = Date.now();
       task.logs.push(`[SYSTEM] Process exited with code: ${code}`);
+      const watchdog = this.watchdogs.get(id);
+      if (watchdog) {
+        clearInterval(watchdog);
+        this.watchdogs.delete(id);
+      }
+      if (task.sessionId && options?.inbox) {
+        const outcome = task.stopRequested
+          ? 'cancelled'
+          : task.status === 'stopped' && code === 0
+            ? 'succeeded'
+            : 'failed_unexpected';
+        const logTail = task.logs.slice(-20).join('\n');
+        options.inbox.enqueue(
+          task.sessionId,
+          `[BACKGROUND TASK COMPLETED] ${command} (${id}) finished with exit code ${code} (${outcome}).\n${logTail}\nCall manage_task (status / logs / kill) to inspect or manage this task if needed.`,
+          'system',
+          { isSteering: true, kind: 'background-task-completed' },
+        );
+      }
     });
 
     child.on('error', (err) => {
@@ -111,6 +178,60 @@ export class TaskManager {
 
     this.tasks.set(id, task);
     return task;
+  }
+
+  /** True when an auto-promoted task for this session/turn is still running and its stall notice has not released the gate. */
+  hasAutoPromotedRunning(sessionId: string, turn?: number): boolean {
+    for (const task of this.tasks.values()) {
+      if (!task.autoPromoted) continue;
+      if (task.sessionId !== sessionId) continue;
+      if (turn !== undefined && task.turn !== undefined && task.turn !== turn) continue;
+      if (task.status === 'running' && !task.stallReleased) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Chờ các auto-promoted task của session/turn kết thúc hoặc gặp stall.
+   * Poll 100ms; trả 'stalled' ngay khi một task thoả điều kiện stall (kèm notice), 'completed' khi hết task chạy.
+   */
+  async waitForAutoPromoted(
+    sessionId: string,
+    turn: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<WaitOutcome> {
+    for (;;) {
+      if (signal?.aborted) return 'aborted';
+      const running: BackgroundTask[] = [];
+      for (const task of this.tasks.values()) {
+        if (!task.autoPromoted) continue;
+        if (task.sessionId !== sessionId) continue;
+        if (turn !== undefined && task.turn !== undefined && task.turn !== turn) continue;
+        if (task.status === 'running' && !task.stallReleased) running.push(task);
+      }
+      if (running.length === 0) return 'completed';
+      for (const task of running) {
+        if (shouldEmitStallNotice(task, Date.now(), STALL_IDLE_MS, STALL_RENOTIFY_MS)) {
+          this.emitStallFor(task);
+          return 'stalled';
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  /** Phát stall notice đúng một lần mỗi cửa sổ idle — dùng chung cho watchdog và waiter. */
+  private emitStallFor(task: BackgroundTask): void {
+    const inbox = this.inboxes.get(task.id);
+    if (!inbox || !task.sessionId) return;
+    task.lastStallNoticeAt = Date.now();
+    task.stallReleased = true;
+    inbox.enqueue(
+      task.sessionId,
+      `[BACKGROUND TASK STALLED] ${task.command} (${task.id}) produced no output for ${Math.round(STALL_IDLE_MS / 1000)}s and may be waiting on input. Use manage_task (send_input / kill, or logs to inspect).`,
+      'system',
+      { isSteering: true, kind: 'background-task-stalled' },
+    );
   }
 
   /**
@@ -228,6 +349,9 @@ export class TaskManager {
       throw new Error(`Failed to terminate background process tree(s): ${failedTaskIds.join(', ')}.`);
     }
     this.tasks.clear();
+    for (const watchdog of this.watchdogs.values()) clearInterval(watchdog);
+    this.watchdogs.clear();
+    this.inboxes.clear();
   }
 
   private async terminateProcessTree(task: BackgroundTask): Promise<boolean> {
