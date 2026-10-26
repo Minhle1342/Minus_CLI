@@ -3,7 +3,7 @@ import type { CompactionStatus } from '../compaction-status.js';
 
 export type KernelMsg = { [K in keyof KernelEvents]: { type: 'kernel'; event: K; args: Parameters<KernelEvents[K]> } }[keyof KernelEvents];
 export interface KeyMsg { type: 'key'; key: string; text?: string; mouse?: { x: number; y: number }; now: number }
-export type Action = 'compact' | 'editor' | 'quit' | 'sidebar' | 'diff' | 'palette' | 'mode' | 'clear';
+export type Action = 'compact' | 'editor' | 'quit' | 'sidebar' | 'diff' | 'palette' | 'mode' | 'clear' | 'subagents';
 export type Msg = KeyMsg | KernelMsg
   | { type: 'resize'; width: number; height: number }
   | { type: 'tick'; now: number }
@@ -53,13 +53,14 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'file-open'; path: string }
   | { type: 'mode'; mode: Mode };
 export type Mode = 'PLAN' | 'IMPLEMENT';
-export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker';
+export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker' | 'subagents';
 export interface GrillOption { id: string; label: string; detail?: string; source: 'llm' | 'heuristic' | 'user' }
 export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
 /** Một entry trong modal chọn model (/model): mirror AVAILABLE_MODELS của cli-ui. */
 export interface ModelPickerOption { id: string; name: string; desc?: string; provider?: string; recommended?: boolean; /** true = model đang active của tab */ current?: boolean }
 /** Modal chọn model đè lên viewport — cùng ngôn ngữ visual/key với grill. */
 export interface ModelPickerModel { open: boolean; options: ModelPickerOption[]; selected: number; /** chuỗi lọc fuzzy (mirror palette query) */ query: string; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
+export interface SubagentsModalModel { open: boolean; selected: number }
 export interface Completion { label: string; value: string; cursor?: number; kind?: 'file' | 'session' }
 export interface ComposerModel {
   selection?: { anchor: number; head: number };
@@ -91,6 +92,8 @@ export interface RootModel {
   grill: GrillModel;
   modelPicker: ModelPickerModel;
   sessions: SessionTabsModel;
+  subagents: SubagentsModalModel;
+  previousActiveSessionId?: string;
   question: { active: boolean; prompt: string; draft?: ComposerModel; permission?: PermissionCard; selected: number; sessionId?: string };
 }
 export interface Model<M> { init(): [M, Cmd[]]; update(msg: Msg, model: M): [M, Cmd[]]; view(model: M): string }

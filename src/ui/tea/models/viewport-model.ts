@@ -1066,7 +1066,7 @@ export function ownerClearStream(model: RootModel, field: 'thinking' | 'answerSt
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 
-function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
+export function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
   const snap = snapshotActive(model);
   const target = snap[Math.min(Math.max(0, index), snap.length - 1)];
   if (!target || target.id === model.sessions.activeId) {
@@ -1075,9 +1075,13 @@ function switchToTab(model: RootModel, index: number): [RootModel, Cmd[]] {
   // Mở tab ra xem: restore cả stream buffer + chrome (composer/diff/tools/tokens) + xóa unread (đã đọc).
   const tabs = snap.map(t => t.id === target.id ? { ...t, unread: 0 } : t);
   const chrome = restoreTabChrome(target);
+  const prevActive = !snap.find(t => t.id === model.sessions.activeId)?.subagent
+    ? model.sessions.activeId
+    : model.previousActiveSessionId;
   return [{
     ...model,
     focus: 'composer' as const,
+    previousActiveSessionId: target.subagent ? prevActive : model.previousActiveSessionId,
     selection: undefined, // Bôi đen text là của tab cũ — bỏ khi chuyển tab, kẻo viewport vẫn vẽ ảnh chụp cũ.
     sessions: { ...model.sessions, open: false, tabs, activeId: target.id, pendingActiveId: target.id, selected: tabs.findIndex(t => t.id === target.id) },
     viewport: {

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer, visibleDiffLines } from './diff-model.js';
@@ -11,6 +11,7 @@ import { toolCallEntry, toolErrorEntry, toolResultEntry, mergedToolEntry } from 
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
 import { createModelPickerModel, modelPickerKey, modelPickerLayout } from './model-picker-model.js';
+import { createSubagentsModal, subagentsModalKey, subagentsModalView } from './subagent-modal.js';
 import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight } from '../styles/theme.js';
 
 const defaultCommands: PaletteItem[] = [
@@ -41,6 +42,7 @@ export function createRootModel(options: { width?: number; height?: number; comm
     grill: createGrillModel(),
     modelPicker: createModelPickerModel(),
     sessions: createSessionTabs('', []),
+    subagents: createSubagentsModal(),
     status: { busy: false, aborting: false, step: 0, maxSteps: Infinity, phase: '', retry: '', notice: '', compaction: null, frame: 0 }, question: { active: false, prompt: '', selected: 0 } };
 }
 export function init(options?: Parameters<typeof createRootModel>[0]): [RootModel, Cmd[]] { return [createRootModel(options), []]; }
@@ -55,6 +57,17 @@ function action(model: RootModel, actionName: Action): [RootModel, Cmd[]] {
     case 'palette': return [{ ...model, palette: { ...model.palette, open: true, query: '', selected: 0 }, focus: 'palette' }, []];
     case 'mode': { if (model.status.busy) return [{ ...model, status: { ...model.status, notice: 'Switch mode after the current task finishes.' } }, []]; const mode = model.mode === 'IMPLEMENT' ? 'PLAN' : 'IMPLEMENT'; return [{ ...model, mode }, [{ type: 'mode', mode }]]; }
     case 'clear': return [{ ...model, viewport: { ...model.viewport, entries: [], thinking: '', answerStream: '', offset: 0 } }, []];
+    case 'subagents': {
+      const open = !model.subagents.open;
+      const subagentTabs = model.sessions.tabs.filter(t => t.subagent);
+      const selected = Math.min(model.subagents.selected, Math.max(0, subagentTabs.length - 1));
+      return [{
+        ...model,
+        focus: open ? 'subagents' as const : 'composer' as const,
+        palette: { ...model.palette, open: false },
+        subagents: { ...model.subagents, open, selected: Math.max(0, selected) },
+      }, []];
+    }
     case 'compact': case 'editor': return model.status.busy ? [{ ...model, status: { ...model.status, notice: 'Wait for the current task to finish.' } }, []] : [model, [{ type: actionName }]];
     case 'quit': return [model, [{ type: 'quit' }]];
   }
@@ -456,6 +469,11 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         if (handled) return handled;
         return [model, []];
       }
+      if ((model.subagents?.open || model.focus === 'subagents') && msg.mouse) {
+        const handled = subagentsModalKey(msg, { ...model, focus: 'subagents' as const });
+        if (handled) return handled;
+        return [model, []];
+      }
       // Click chuột lên nhãn Subagent ở statusline (dòng cuối y=model.height) → mở Subagents Modal
       if (msg.key === 'mouse+press' && msg.mouse && model.height > 4 && msg.mouse.y === model.height
         && !model.grill.open && model.focus !== 'grill' && !model.question.active) {
@@ -555,6 +573,34 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const handled = modelPickerKey(msg, { ...model, focus: 'model-picker' as const });
         if (handled) return handled;
         return [model, []];
+      }
+      // Subagents modal đè lên viewport: ↑↓ + Enter để chọn xem transcript subagent.
+      if (model.subagents?.open || model.focus === 'subagents') {
+        const handled = subagentsModalKey(msg, { ...model, focus: 'subagents' as const });
+        if (handled) return handled;
+        return [model, []];
+      }
+      const activeTab = model.sessions.tabs.find(t => t.id === model.sessions.activeId);
+      if (activeTab?.subagent) {
+        if (msg.key === 'escape') {
+          const fallbackId = model.previousActiveSessionId && model.sessions.tabs.some(t => t.id === model.previousActiveSessionId && !t.subagent)
+            ? model.previousActiveSessionId
+            : model.sessions.tabs.find(t => !t.subagent)?.id;
+          if (fallbackId) {
+            const fallbackIdx = model.sessions.tabs.findIndex(t => t.id === fallbackId);
+            return switchToTab({ ...model, focus: 'composer' as const }, fallbackIdx);
+          }
+        }
+        if (['up', 'down', 'pageup', 'pagedown', 'home', 'end'].includes(msg.key)) {
+          const mainWidth = Math.max(1, model.width - sidebarWidthFor(model.width, model.sidebar.visible, model.height));
+          const maxOffset = Math.max(0, viewportLines(model.viewport, mainWidth).length - Math.max(1, model.height - 4));
+          const step = msg.key === 'up' ? -1 : msg.key === 'down' ? 1 : msg.key === 'pageup' ? -10 : msg.key === 'pagedown' ? 10 : 0;
+          let offset = model.viewport.offset;
+          if (msg.key === 'home') offset = 0;
+          else if (msg.key === 'end') offset = maxOffset;
+          else offset = Math.max(0, Math.min(maxOffset, offset + step));
+          return [{ ...model, viewport: { ...model.viewport, offset, pinned: offset === 0 } }, []];
+        }
       }
       if (msg.key === 'ctrl+c' || (msg.key === 'escape' && model.status.busy && model.focus === 'composer')) {
         if (model.status.aborting) return [model, []];
@@ -762,7 +808,11 @@ export function view(model: RootModel): string {
   const main = model.focus === 'palette' ? paletteView(model.palette, mainWidth, bodyHeight) : model.file.visible ? fileView(model.file, mainWidth, bodyHeight) : model.diff.visible ? diffView(model.diff, mainWidth, bodyHeight) : viewportView(selectedViewport ? { ...model.viewport, offset: selectedViewport.viewportOffset ?? model.viewport.offset } : model.viewport, mainWidth, bodyHeight, selectedViewport?.sourceLines);
   const body = sidebarWidth ? joinHorizontal(main, sidebarView(model.sidebar, sidebarWidth, bodyHeight, model.focus === 'sidebar'), mainWidth, sidebarWidth) : main;
   const displayedComposer = model.selection?.target === 'composer' ? { ...model.composer, cursorOffset: model.selection.composerCursor ?? model.composer.cursorOffset } : model.composer;
-  let rows = selectionRows(model, joinVertical([headerView(model)], stripRows, body, questionRows, hints, composerView(displayedComposer, width, composerHeight), [statuslineView(model)]), selectionLayout(model));
+  const activeTab = model.sessions.tabs.find(t => t.id === model.sessions.activeId);
+  const isViewingSubagent = Boolean(activeTab?.subagent);
+  const subagentBanner = [fit(color(tokyoNight.muted, 'Viewing subagent transcript (read-only) · Press Esc to return to main session'), width)];
+  const inputRows = isViewingSubagent ? subagentBanner : composerView(displayedComposer, width, composerHeight);
+  let rows = selectionRows(model, joinVertical([headerView(model)], stripRows, body, questionRows, hints, inputRows, [statuslineView(model)]), selectionLayout(model));
   // Grill modal overlay: đè lên giữa màn hình (kể cả vùng input) để user thống nhất lựa chọn với LLM.
   if (model.grill.open) {
     const panel = grillView(model.grill, width, height);
@@ -786,6 +836,16 @@ export function view(model: RootModel): string {
   // Model-picker modal: đè lên giữa màn hình, ngay trên viewport để chọn model.
   if (model.modelPicker.open) {
     const { panel, startRow } = modelPickerLayout(model.modelPicker, width, height);
+    rows = rows.map((row, i) => {
+      const p = i - startRow;
+      if (p < 0 || p >= panel.length) return row;
+      return panel[p];
+    });
+  }
+  // Subagents modal: đè lên giữa màn hình để chọn subagent.
+  if (model.subagents?.open) {
+    const panel = subagentsModalView(model, width, height);
+    const startRow = Math.max(1, Math.floor((height - panel.length) / 2));
     rows = rows.map((row, i) => {
       const p = i - startRow;
       if (p < 0 || p >= panel.length) return row;
