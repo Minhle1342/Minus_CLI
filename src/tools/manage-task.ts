@@ -1,3 +1,5 @@
+import { Type } from '@google/genai';
+import type { FunctionDeclaration } from '@google/genai';
 import type { ToolDefinition } from './types.js';
 import type { TaskManager } from '../tasks/task-manager.js';
 
@@ -18,15 +20,15 @@ export function createManageTaskTool(taskManager: TaskManager): ToolDefinition {
     name: 'manage_task',
     description: 'List, inspect, feed stdin to, or stop background tasks started by run_command. Actions: list, status, logs, send_input, kill.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
-        Action: { type: 'string', description: 'One of: list, status, logs, send_input, kill.' },
-        TaskId: { type: 'string', description: 'Background task id (e.g. task_1); required for every action except list.' },
-        Input: { type: 'string', description: 'Text to write to the task stdin (send_input), e.g. an answer to a prompt.' },
-        Lines: { type: 'integer', description: 'Log tail length for status/logs (default 40).' },
+        Action: { type: Type.STRING, description: 'One of: list, status, logs, send_input, kill.' },
+        TaskId: { type: Type.STRING, description: 'Background task id (e.g. task_1); required for every action except list.' },
+        Input: { type: Type.STRING, description: 'Text to write to the task stdin (send_input), e.g. an answer to a prompt.' },
+        Lines: { type: Type.INTEGER, description: 'Log tail length for status/logs (default 40).' },
       },
       required: ['Action'],
-    },
+    } as FunctionDeclaration['parameters'],
     async execute(args: Record<string, any>): Promise<Record<string, any>> {
       const action = norm(args.Action || args.action).toLowerCase();
       const taskId = norm(args.TaskId || args.taskId);
