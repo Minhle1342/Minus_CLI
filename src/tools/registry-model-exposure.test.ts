@@ -1,6 +1,17 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import { MODEL_HIDDEN_TOOL_NAMES, ToolRegistry } from './registry.js';
+
+test('manage_task is executable but hidden until unlocked', () => {
+  const registry = new ToolRegistry();
+  registry.attachTaskManager({
+    listTasks: () => [], getTask: () => undefined, getTaskLogs: () => '', getStallInfo: () => undefined,
+    sendInput: () => false, stopTask: async () => false,
+  } as any);
+  assert.equal(registry.get('manage_task') !== undefined, true);
+  assert.equal(registry.getFunctionDeclarations().some((t) => t.name === 'manage_task'), false);
+});
+
 
 test('ToolRegistry keeps compatibility tools executable but hides their schemas from the model', () => {
   const registry = new ToolRegistry();

@@ -10,6 +10,7 @@ import { writeToFileTool } from './write-to-file.js';
 import { replaceFileContentTool } from './replace-file-content.js';
 import { multiReplaceFileContentTool } from './multi-replace-file-content.js';
 import { runCommandTool, createRunCommandTool } from './run-command.js';
+import { createManageTaskTool } from './manage-task.js';
 import { searchWebTool, webSearchTool } from './web-search.js';
 import { readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { createFileTool } from './create-file.js';
@@ -55,10 +56,17 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
   'search_codebase_fast',
 ]);
 
+/**
+ * Tools that stay executable once attached but only appear in model
+ * declarations after their unlock event (background task notice claimed).
+ */
+export const LAZY_TOOL_NAMES = new Set(['manage_task']);
+
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
   return tools.filter(
     (tool) => (CANONICAL_MODEL_TOOL_NAMES.has(tool.name) || isOrchestrationTool(tool.name))
       && !MODEL_HIDDEN_TOOL_NAMES.has(tool.name)
+      && !LAZY_TOOL_NAMES.has(tool.name)
   );
 }
 
@@ -155,6 +163,9 @@ export class ToolRegistry implements ToolProvider {
   attachTaskManager(taskManager: any): void {
     this.taskManager = taskManager;
     this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+    // Registered but hidden from default declarations (LAZY_TOOL_NAMES) —
+    // it unlocks after a background-task notice is claimed.
+    this.register(createManageTaskTool(taskManager));
   }
 
   attachPermissionManager(permissionManager: any): void {
