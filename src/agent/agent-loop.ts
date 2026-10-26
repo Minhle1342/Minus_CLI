@@ -1198,10 +1198,13 @@ export class AgentLoop {
       : Infinity;
     const leaseBonus = parseInt(process.env.MINUS_STEP_LEASE_BONUS || '5', 10);
     const turn = session.getEvents().filter((event) => event.type === 'turn/start').length + 1;
-    const gitCodeChangeRequested = !isReadOnlyRequest(turnUserRequest)
-      && ['bugfix', 'feature', 'refactor'].includes(initialTurnClassification.taskClass)
-      && (initialTurnClassification.requiredCapabilities.includes('edit')
-        || initialTurnClassification.reasonCodes.includes('WORKSPACE_MUTATION_INTENT'));
+    // Git implementation guidance follows observed work, not a classifier verdict:
+    // the model-directed default always carries `edit`, which would otherwise make
+    // every turn look like an implementation turn.
+    const gitCodeChangeRequested = () => !isReadOnlyRequest(turnUserRequest)
+      && (getTurnCompletionState(session, turn).hasMutations
+        || this.verificationPolicy.hasPendingModifications()
+        || this.planManager.getTasks().some(task => (task.writeSet || []).length > 0));
     const gitImplementationReady = () => {
       if (!this.planManager.hasPlan() || this.planManager.isAllTasksCompleted()) return true;
       const implementationTasks = this.planManager.getTasks().filter((task) => task.writeSet.length > 0);
@@ -1922,7 +1925,7 @@ export class AgentLoop {
           hasSubagentTools: detectedPromptCtx.hasSubagentTools,
           gitWorkflowObservations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
           gitWorkflowMayEdit: !isReadOnlyRequest(turnUserRequest),
-          gitWorkflowImplementationRequested: gitCodeChangeRequested,
+          gitWorkflowImplementationRequested: gitCodeChangeRequested(),
           gitWorkflowImplementationReady: gitImplementationReady(),
           failureSignature: this.lastToolExecution && isToolResultFailure(this.lastToolExecution.result || {})
             ? `${this.lastToolExecution.toolName}:failed`
@@ -3433,7 +3436,7 @@ export class AgentLoop {
               userRequest: turnUserRequest,
               observations: collectCompletionObservations(session).filter((item) => item.call.seq > (turnUserEvent?.seq ?? session.seq)),
               mayEdit: !isReadOnlyRequest(turnUserRequest),
-              implementationRequested: gitCodeChangeRequested,
+              implementationRequested: gitCodeChangeRequested(),
               implementationReady: gitImplementationReady(),
             });
             const gitWorkflowError = checkGitWorkflowCall(gitWorkflowNow, turnUserRequest, toolName, toolArgs);
