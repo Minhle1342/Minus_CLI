@@ -1,7 +1,7 @@
 import { spawn, ChildProcess, execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { buildSafeChildEnv } from '../security/env-scrub.js';
+import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
 import type { AgentInbox } from '../agent/agent-inbox.js';
 
 const execFileAsync = promisify(execFile);
@@ -160,10 +160,11 @@ export class TaskManager {
           : task.status === 'stopped' && code === 0
             ? 'succeeded'
             : 'failed_unexpected';
-        const logTail = task.logs.slice(-20).join('\n');
+        const secrets = collectSecretsFromEnv(process.env as Record<string, string>);
+        const logTail = redactSecretsFromText(task.logs.slice(-20).join('\n'), secrets);
         options.inbox.enqueue(
           task.sessionId,
-          `[BACKGROUND TASK COMPLETED] ${command} (${id}) finished with exit code ${code} (${outcome}).\n${logTail}\nCall manage_task (status / logs / kill) to inspect or manage this task if needed.`,
+          redactSecretsFromText(`[BACKGROUND TASK COMPLETED] ${command} (${id}) finished with exit code ${code} (${outcome}).\n${logTail}\nCall manage_task (status / logs / kill) to inspect or manage this task if needed.`, secrets),
           'system',
           { isSteering: true, kind: 'background-task-completed' },
         );
@@ -222,13 +223,15 @@ export class TaskManager {
 
   /** Phát stall notice đúng một lần mỗi cửa sổ idle — dùng chung cho watchdog và waiter. */
   private emitStallFor(task: BackgroundTask): void {
-    const inbox = this.inboxes.get(task.id);
-    if (!inbox || !task.sessionId) return;
+    // Đánh dấu released TRƯỚC khi tra inbox: kể cả khi không có inbox, waiter
+    // không được quay lại chờ vô hạn trên cùng task.
     task.lastStallNoticeAt = Date.now();
     task.stallReleased = true;
+    const inbox = this.inboxes.get(task.id);
+    if (!inbox || !task.sessionId) return;
     inbox.enqueue(
       task.sessionId,
-      `[BACKGROUND TASK STALLED] ${task.command} (${task.id}) produced no output for ${Math.round(STALL_IDLE_MS / 1000)}s and may be waiting on input. Use manage_task (send_input / kill, or logs to inspect).`,
+      redactSecretsFromText(`[BACKGROUND TASK STALLED] ${task.command} (${task.id}) produced no output for ${Math.round(STALL_IDLE_MS / 1000)}s and may be waiting on input. Use manage_task (send_input / kill, or logs to inspect).`, collectSecretsFromEnv(process.env as Record<string, string>)),
       'system',
       { isSteering: true, kind: 'background-task-stalled' },
     );

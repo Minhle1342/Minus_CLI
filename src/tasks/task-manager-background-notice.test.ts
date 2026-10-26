@@ -32,3 +32,18 @@ test('stall notice is emitted once per idle window and re-notified after the coo
   assert.equal(shouldEmitStallNotice({ status: 'running', lastOutputAt: now - 46_000, lastStallNoticeAt: now - 1_000 }, now, 45_000, 60_000), false);
   assert.equal(shouldEmitStallNotice({ status: 'stopped', lastOutputAt: now - 46_000 }, now, 45_000, 60_000), false);
 });
+
+test('completion notice redacts secrets from the log tail', async () => {
+  process.env.MINUS_TEST_SECRET_TOKEN = 'supersecrettokenvalue123';
+  const seen: any[] = [];
+  const tm = new TaskManager(process.cwd());
+  tm.startTask('node -e "console.log(\'token=supersecrettokenvalue123\'); process.exit(0)"', process.cwd(), {}, {
+    sessionId: 's-redact', turn: 1, autoPromoted: true,
+    inbox: { enqueue: (_s: string, text: string) => { seen.push(text); return {} as any; } },
+  });
+  await tm.waitForAutoPromoted('s-redact', 1);
+  delete process.env.MINUS_TEST_SECRET_TOKEN;
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].includes('supersecrettokenvalue123'), false, 'secret must be redacted');
+  assert.match(seen[0], /REDACTED/);
+});

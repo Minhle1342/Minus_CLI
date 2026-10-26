@@ -314,9 +314,6 @@ export class AgentLoop {
   private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
   /** TaskManager của loop (kernel ctx.tasks hoặc options) — gate cuối turn và auto-promotion. */
   private taskManager?: import('../tasks/task-manager.js').TaskManager;
-  /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
-  private backgroundTaskToolsUnlocked = false;
-  private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
   private editToolCallsInTurn = 0;
   private ephemeralScratchFiles = new Set<string>();
   readonly kernel?: AgentKernel;
@@ -1175,8 +1172,6 @@ export class AgentLoop {
     this.targetFilesModifiedInTurn.clear();
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
-    this.backgroundTaskToolsUnlocked = false;
-    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.circuitBreakerTrippedTools.clear();
     this.editTouchedCallers = false;
     this.maxEditBlastRisk = undefined;
@@ -1442,28 +1437,9 @@ export class AgentLoop {
 
         // Mid-Turn Steerability (Google Antigravity Queued Messages Standard)
         // Check if user submitted a queued steering message while the loop was executing
+        // Background-task notices are NOT claimed here — the turn-end gate owns them.
         const steerItem = this.inbox.claimSteerMessage(session.id, this.drainingInbox);
-        if (steerItem && isBackgroundTaskNotice(steerItem)) {
-          // Thông báo hệ thống về background task: đưa nguyên văn vào history,
-          // mở khóa manage_task cho phần còn lại của turn, không hiển thị UI steering.
-          submissionReadiness.clear();
-          session.addUserMessage(steerItem.text, steerItem.source, steerItem.id);
-          session.append('input/claimed', {
-            inputId: steerItem.id,
-            isSteering: true,
-            backgroundTaskNotice: true,
-            step,
-            turn,
-          });
-          await this.persistSession(session);
-          this.backgroundTaskToolsUnlocked = true;
-          steerItem.resolve('');
-          consecutiveEmptyTurns = 0;
-          consecutiveIncompleteFinals = 0;
-          consecutivePlanCompletionRejects = 0;
-          consecutiveIncompleteFinishes = 0;
-          consecutiveNoProgressStrategyChanges = 0;
-        } else if (steerItem) {
+        if (steerItem) {
           submissionReadiness.clear();
           claimedSteerItems.push(steerItem);
           const steerPrompt = `[USER QUEUED MESSAGE (MID-TURN STEERING)]:\n${steerItem.text}`;
@@ -4759,8 +4735,14 @@ export class AgentLoop {
           const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
             ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
           const isReadOnlySubmission = !getTurnCompletionState(session, turn).hasMutations;
+          // Auto-finalization chỉ khi không còn background task/notice của turn này
+          // — ngược lại để gate cuối turn claim notice trước (I3).
+          const bgPendingAtFinalize = !isSubagent && (
+            Boolean(this.taskManager?.hasAutoPromotedRunning(session.id, turn))
+            || this.inbox.hasPendingKind(session.id, 'background-task'));
           if (
-            (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
+            !bgPendingAtFinalize
+            && (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
             && hasSubmittedSolution
             && submittedSolutionSummary
             && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked || submittedValidatedDraft)
@@ -5817,8 +5799,6 @@ export class AgentLoop {
     }
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
-    this.backgroundTaskToolsUnlocked = false;
-    this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.backgroundTaskToolsUnlocked = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.lastMutationForInvestigation = undefined;

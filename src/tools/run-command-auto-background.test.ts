@@ -76,3 +76,36 @@ test('subagent contexts never auto-promote', () => {
   const tm = fakeTaskManager();
   assert.equal(resolveAutoBackgroundWait(undefined, 120000, tm, { isSubagent: true }), undefined);
 });
+
+test('a non-isolated sandbox manager still auto-promotes on soft timeout', async () => {
+  process.env.MINUS_SOFT_TIMEOUT_MS = '1000';
+  process.env.MINUS_ALLOW_HOST_FALLBACK = 'true';
+  const tm = fakeTaskManager();
+  const sandbox = {
+    getStatus: () => ({ isIsolated: false, fallbackToLocal: true }),
+    exec: async (_c: string, o: any) => ({ stdout: '', stderr: '', exitCode: 1, durationMs: o.timeoutMs, timedOut: true, sandboxType: 'local', success: false }),
+  } as any;
+  const result = await createRunCommandTool(sandbox, tm).execute(
+    { command: 'node -e "setTimeout(() => process.exit(0), 3000)"' }, new Workspace(),
+  );
+  delete process.env.MINUS_SOFT_TIMEOUT_MS;
+  delete process.env.MINUS_ALLOW_HOST_FALLBACK;
+  assert.equal(result.isBackgroundTask, true);
+  assert.equal(result.autoPromoted, true);
+  assert.equal(tm.started.length, 1);
+});
+
+test('network git is never auto-promoted, even over the threshold', async () => {
+  process.env.MINUS_SOFT_TIMEOUT_MS = '1000';
+  const tm = fakeTaskManager();
+  const sandbox = {
+    getStatus: () => ({ isIsolated: false, fallbackToLocal: true }),
+    exec: async (_c: string, o: any) => ({ stdout: '', stderr: '', exitCode: 1, durationMs: o.timeoutMs, timedOut: true, sandboxType: 'local', success: false }),
+  } as any;
+  const result = await createRunCommandTool(sandbox, tm).execute(
+    { command: 'git pull', timeout_ms: 300000 }, new Workspace(),
+  );
+  delete process.env.MINUS_SOFT_TIMEOUT_MS;
+  assert.equal(result.isBackgroundTask, undefined);
+  assert.equal(tm.started.length, 0);
+});

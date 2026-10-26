@@ -1663,7 +1663,8 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const explicitWait = waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0;
       const longLived = isLongRunningServerCommand(effectiveCommand);
       const effectiveWaitMs = resolveAutoBackgroundWait(waitMsBeforeAsync, timeoutMs, taskManager, { longLived, isSubagent: context?.isSubagent });
-      const autoPromoted = effectiveWaitMs !== undefined && !explicitWait && !longLived;
+      // Network Git không bao giờ auto-promote (không restart giữa chừng, không nền).
+      const autoPromoted = effectiveWaitMs !== undefined && !explicitWait && !longLived && !networkGitCommand;
       const syncTimeoutMs = autoPromoted ? effectiveWaitMs : timeoutMs;
       const buildBackgroundResult = (bgTask: any, extra: Record<string, any> = {}): Record<string, any> => ({
         command: rawCommand,
@@ -1991,12 +1992,18 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           };
         }
 
+        // Auto-promotion trên đường sandbox 'auto': chỉ khi sandbox KHÔNG isolated
+        // (local) — sandbox exec chạy với soft threshold, quá ngưỡng thì promote.
+        const sandboxIsolated = Boolean(sandboxManager.getStatus?.()?.isIsolated);
+        const canPromoteHere = autoPromoted && !sandboxIsolated;
         const res = await sandboxManager.exec(dispatchCommand, {
           cwd: sessionCwd,
-          timeoutMs,
+          timeoutMs: canPromoteHere ? effectiveWaitMs : timeoutMs,
           signal: context?.signal,
           env: dispatchEnv,
         });
+        // Soft threshold trôi qua mà lệnh vẫn chạy → promote thành background task (khởi động lại).
+        if (canPromoteHere && res.timedOut) return promoteToBackground();
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
         if (res.exitCode === 127 || res.stderr.includes('not found') || res.stderr.includes('not recognized')) {
