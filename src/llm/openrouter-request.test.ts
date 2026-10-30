@@ -62,3 +62,19 @@ test('OpenRouter reasoning deltas accumulate into reasoningContent', async () =>
     assert.equal(result.text, 'done');
   } finally { restore(); }
 });
+
+test('OpenRouter reasoning chunk with both reasoning and reasoning_details de-duplicated', async () => {
+  const restore = mockFetch(() => new Response(sse([
+    { choices: [{ delta: { reasoning: 'Let me think step by step', reasoning_details: [{ type: 'reasoning.text', text: 'Let me think step by step' }] } }] },
+    { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] },
+    { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+  ])));
+  try {
+    const session = new Session(); session.addUserMessage('hi');
+    const client = new DeepseekLLM('k', 'nvidia/nemotron-3.5-lightning:free', undefined, 'https://openrouter.ai/api/v1');
+    let thought = '';
+    const result = await client.generateStream(session, [], { onThoughtToken: token => thought += token });
+    assert.equal(result.reasoningContent, 'Let me think step by step');
+    assert.equal(thought, 'Let me think step by step');
+  } finally { restore(); }
+});

@@ -793,37 +793,19 @@ export class DeepseekLLM {
       const delta = choice?.delta;
       if (!delta) return;
 
-      if (delta.reasoning_content) {
+      // shortcut: mỗi delta chỉ lấy ĐÚNG MỘT kênh reasoning rồi emit — các provider
+      // OpenRouter có thể điền cả `reasoning` lẫn `reasoning_details[]` (hoặc `reasoning_content`)
+      // cùng một nội dung trong cùng một delta, khiến mọi token bị append/emit 2 lần.
+      // ceiling: nếu một provider gửi summary + text riêng biệt theo từng loại detail, cần merge theo `type`.
+      const reasoningDelta = (typeof delta.reasoning_content === 'string' && delta.reasoning_content)
+        || (Array.isArray(delta.reasoning_details) ? delta.reasoning_details.map((d: any) => (typeof d?.text === 'string' ? d.text : typeof d?.summary === 'string' ? d.summary : '')).join('') : '')
+        || (typeof delta.reasoning === 'string' ? delta.reasoning : '');
+      if (reasoningDelta) {
         if (timeToFirstTokenMs === undefined) {
           timeToFirstTokenMs = Date.now() - requestStartTime;
         }
-        fullReasoning += delta.reasoning_content;
-        callbacks?.onThoughtToken?.(delta.reasoning_content);
-      }
-
-      // OpenRouter trả reasoning ở `delta.reasoning` (string) và/hoặc `delta.reasoning_details[]`
-      // thay vì `reasoning_content` kiểu DeepSeek — không đọc 2 trường này thì mất thought tokens.
-      if (typeof delta.reasoning === 'string' && delta.reasoning) {
-        if (timeToFirstTokenMs === undefined) {
-          timeToFirstTokenMs = Date.now() - requestStartTime;
-        }
-        fullReasoning += delta.reasoning;
-        callbacks?.onThoughtToken?.(delta.reasoning);
-      }
-      if (Array.isArray(delta.reasoning_details)) {
-        for (const detail of delta.reasoning_details) {
-          const text = typeof detail?.text === 'string' && detail.text
-            ? detail.text
-            : typeof detail?.summary === 'string' && detail.summary
-              ? detail.summary
-              : '';
-          if (!text) continue;
-          if (timeToFirstTokenMs === undefined) {
-            timeToFirstTokenMs = Date.now() - requestStartTime;
-          }
-          fullReasoning += text;
-          callbacks?.onThoughtToken?.(text);
-        }
+        fullReasoning += reasoningDelta;
+        callbacks?.onThoughtToken?.(reasoningDelta);
       }
 
       if (delta.content) {

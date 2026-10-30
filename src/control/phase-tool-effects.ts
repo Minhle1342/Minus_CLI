@@ -21,6 +21,10 @@ export function isOrchestrationTool(name: string): boolean {
 /** Orchestration tools that create new work (vs. just steering existing agents). */
 export const ORCHESTRATION_SPAWN_TOOL_NAMES = new Set([
   'delegate_task', 'delegate_agent', 'spawn_agent', 'allocate_agent_task', 'schedule_dag_parallel',
+  // Design review spawn subagent thật nên coi như spawn mới — cần intent delegate (shortcut: thêm tên
+  // vào set này là mọi lệnh design review đều yêu cầu capability 'delegate'; ceiling: nếu có tool
+  // orchestration mới nào spawn work khác thì thêm vào đây, không sửa gate thủ công.
+  'brainstorm_design',
 ]);
 
 /** Enforce argument-dependent effects on both early and ordinary dispatch paths. */
