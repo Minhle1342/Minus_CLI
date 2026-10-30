@@ -40,17 +40,14 @@ import {
 const MAX_COMMAND_BUFFER_BYTES = 5 * 1024 * 1024;
 
 /**
- * Soft-threshold → background auto-promotion.
- * Explicit WaitMsBeforeAsync wins (long-lived, never auto-awaited). Otherwise
- * every finite command auto-promotes once it exceeds the soft threshold
- * (MINUS_SOFT_TIMEOUT_MS, default 10s, clamped 1000–10000). Dev servers are
- * still promoted but marked long-lived so the turn never waits on them.
- * Subagents never auto-promote. Returns the wait window (ms) or undefined
- * when sync should proceed unchanged.
+ * Resolve the wait window before a command is dispatched as a background task.
+ * Explicit WaitMsBeforeAsync wins (long-lived, never auto-awaited). Otherwise a
+ * long-lived command (dev server/watcher) is dispatched into the background
+ * immediately; finite commands stay synchronous and are bounded by timeout_ms.
+ * Subagents never auto-promote. Returns undefined when sync should proceed.
  */
 export function resolveAutoBackgroundWait(
   waitMsBeforeAsync: number | undefined,
-  timeoutMs: number,
   taskManager?: TaskManager,
   options?: { longLived?: boolean; isSubagent?: boolean },
 ): number | undefined {
@@ -59,10 +56,12 @@ export function resolveAutoBackgroundWait(
   if (!taskManager) return undefined;
   if (options?.isSubagent) return undefined;
   if (process.env.MINUS_AUTO_BACKGROUND?.toLowerCase() === 'off') return undefined;
-  void timeoutMs;
-  void options?.longLived;
   const soft = Number(process.env.MINUS_SOFT_TIMEOUT_MS);
-  return Number.isFinite(soft) && soft > 0 ? Math.min(10000, Math.max(1000, soft)) : 10000;
+  const longLivedWindow = Number.isFinite(soft) && soft > 0 ? Math.min(10000, Math.max(1000, soft)) : 10000;
+  // Dev server/watcher không tự thoát — promote ngay nhưng long-lived (không bao giờ chờ).
+  if (options?.longLived) return longLivedWindow;
+  // Không còn auto-promote cho lệnh finite: không kill-lại rồi spawn lại (tránh chạy side effects 2 lần).
+  return undefined;
 }
 
 /**
@@ -825,44 +824,55 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
 }
 
 export interface CatParsedOptions {
-  filePath: string;
+  filePath?: string;
   headLines?: number;
   tailLines?: number;
+  /** Bounded read pipeline (vd `cat src/a.ts | head -n 5`). */
+  pipeline?: CatParsedOptions[];
+}
+
+/** Parse 1 segment đọc (cat/type/head/tail). head/tail không kèm file → head/tail (stdin). */
+function parseReadSegment(segment: string): CatParsedOptions | null {
+  const trimmed = segment.trim();
+  const headMatch = trimmed.match(/^head(?:\s+-n\s+(\d+))?(?:\s+(.+))?$/i);
+  if (headMatch) {
+    const lines = headMatch[1] ? parseInt(headMatch[1], 10) : 20;
+    const fileToken = headMatch[2]?.trim().replace(/^["']|["']$/g, '');
+    return fileToken ? { filePath: fileToken, headLines: lines } : { headLines: lines };
+  }
+  const tailMatch = trimmed.match(/^tail(?:\s+-n\s+(\d+))?(?:\s+(.+))?$/i);
+  if (tailMatch) {
+    const lines = tailMatch[1] ? parseInt(tailMatch[1], 10) : 20;
+    const fileToken = tailMatch[2]?.trim().replace(/^["']|["']$/g, '');
+    return fileToken ? { filePath: fileToken, tailLines: lines } : { tailLines: lines };
+  }
+  const catMatch = trimmed.match(/^(?:cat|type)\s+(.+)$/i);
+  if (catMatch) {
+    const fileToken = catMatch[1].trim().replace(/^["']|["']$/g, '');
+    if (!fileToken) return null;
+    return { filePath: fileToken };
+  }
+  return null;
 }
 
 /**
- * Phân tích cú pháp lệnh đọc file nhanh qua shell (cat, type, head, tail)
+ * Phân tích cú pháp lệnh đọc file nhanh qua shell (cat, type, head, tail).
+ * Hỗ trợ bounded pipeline các segment đọc: `cat src/a.ts | head -n 5`.
  */
 export function parseCatCommand(command: string): CatParsedOptions | null {
   const trimmed = command.trim();
-  if (/[;&|]/.test(trimmed)) return null;
-
-  const headMatch = trimmed.match(/^head(?:\s+-n\s+(\d+))?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
-  if (headMatch) {
-    const lines = headMatch[1] ? parseInt(headMatch[1], 10) : 20;
-    return {
-      filePath: headMatch[2].replace(/^["']|["']$/g, ''),
-      headLines: lines,
-    };
+  if (/[;&|]/.test(trimmed)) {
+    const segments = trimmed.split('|').map((s) => s.trim()).filter(Boolean);
+    if (segments.length < 2) return null;
+    const pipeline: CatParsedOptions[] = [];
+    for (const segment of segments) {
+      const parsed = parseReadSegment(segment);
+      if (!parsed) return null;
+      pipeline.push(parsed);
+    }
+    return { pipeline };
   }
-
-  const tailMatch = trimmed.match(/^tail(?:\s+-n\s+(\d+))?\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
-  if (tailMatch) {
-    const lines = tailMatch[1] ? parseInt(tailMatch[1], 10) : 20;
-    return {
-      filePath: tailMatch[2].replace(/^["']|["']$/g, ''),
-      tailLines: lines,
-    };
-  }
-
-  const catMatch = trimmed.match(/^(?:cat|type)\s+((?:'[^']+')|(?:"[^"]+")|(?:[^\s;&|]+))$/i);
-  if (catMatch) {
-    return {
-      filePath: catMatch[1].replace(/^["']|["']$/g, ''),
-    };
-  }
-
-  return null;
+  return parseReadSegment(trimmed);
 }
 
 /**
@@ -875,7 +885,43 @@ export async function executeCatEmulation(
 ): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; emulated: boolean; suggestion: string }> {
   const startTime = Date.now();
   try {
-    const safePath = workspace.resolveSafePath(parsed.filePath);
+    if (parsed.pipeline) {
+      // Bounded read pipeline (vd `cat src/a.ts | head -n 5`): head/tail consume
+      // nội dung từ segment trước qua stdin-accumulator.
+      let content = '';
+      for (const seg of parsed.pipeline) {
+        const text = seg.filePath ? await fs.readFile(workspace.resolveSafePath(seg.filePath), 'utf-8') : content;
+        const lines = text.split(/\r?\n/);
+        const selected = seg.headLines !== undefined
+          ? lines.slice(0, seg.headLines)
+          : seg.tailLines !== undefined
+            ? lines.slice(-seg.tailLines)
+            : lines;
+        content = selected.join('\n');
+      }
+      const stdout = truncateOutput(content);
+      return {
+        stdout,
+        stderr: '',
+        success: true,
+        durationMs: Date.now() - startTime,
+        exitCode: 0,
+        emulated: true,
+        suggestion: 'Tip: for speed and token efficiency, use the read_file tool directly with path, startLine, endLine or symbol.',
+      };
+    }
+    const safePath = parsed.filePath ? workspace.resolveSafePath(parsed.filePath) : undefined;
+    if (!safePath) {
+      return {
+        stdout: '',
+        stderr: `cat: cannot read file '': no readable path in segment`,
+        success: false,
+        durationMs: Date.now() - startTime,
+        exitCode: 1,
+        emulated: true,
+        suggestion: 'Check the command shape or use the dedicated "read_file" tool.',
+      };
+    }
     const content = await fs.readFile(safePath, 'utf-8');
     const lines = content.split(/\r?\n/);
     let selectedLines = lines;
@@ -1281,7 +1327,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. May be auto-set (~10s) for explicit long jobs (timeout_ms=0|>120s) when omitted. Do not use this parameter as a timeout substitute for finite builds/tests. Background tasks run on the host process manager: they cannot preserve Docker isolation (BACKGROUND_ISOLATION_UNSUPPORTED) and network Git (fetch/pull/clone) cannot go background.',
+          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. For servers/watchers (dev server, --watch), this is applied automatically; for finite commands use `timeout_ms` for the synchronous run. Do not use this parameter as a timeout substitute for finite builds/tests. Background tasks run on the host process manager: they cannot preserve Docker isolation (BACKGROUND_ISOLATION_UNSUPPORTED) and network Git (fetch/pull/clone) cannot go background.',
         },
         timeout_ms: {
           type: Type.NUMBER,
@@ -1655,17 +1701,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // không đổi; chỉ đầu vào spawn là lệnh đã bọc.
       const dispatchCommand = shellMode ? wrapPowerShellCommand(effectiveCommand) : effectiveCommand;
 
-      // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch) + soft-threshold
-      // auto-promotion: mọi lệnh finite trên host được promote sau ~10s; dev
-      // server được promote ngay nhưng long-lived (không bao giờ chờ); lệnh
-      // auto-promoted chạy sync với soft-threshold làm timeout — lệnh hoàn tất
-      // trước ngưỡng không bao giờ vào task list.
-      const explicitWait = waitMsBeforeAsync !== undefined && waitMsBeforeAsync > 0;
+      // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch): long-lived
+      // commands (dev server/watchers) dispatch vào background ngay; lệnh finite
+      // thì chạy sync và bị bound bởi timeout_ms.
       const longLived = isLongRunningServerCommand(effectiveCommand);
-      const effectiveWaitMs = resolveAutoBackgroundWait(waitMsBeforeAsync, timeoutMs, taskManager, { longLived, isSubagent: context?.isSubagent });
-      // Network Git không bao giờ auto-promote (không restart giữa chừng, không nền).
-      const autoPromoted = effectiveWaitMs !== undefined && !explicitWait && !longLived && !networkGitCommand;
-      const syncTimeoutMs = autoPromoted ? effectiveWaitMs : timeoutMs;
+      const effectiveWaitMs = resolveAutoBackgroundWait(waitMsBeforeAsync, taskManager, { longLived, isSubagent: context?.isSubagent });
       const buildBackgroundResult = (bgTask: any, extra: Record<string, any> = {}): Record<string, any> => ({
         command: rawCommand,
         isBackgroundTask: true,
@@ -1677,16 +1717,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         recentLogs: bgTask.logs.slice(-10),
         instruction: `Use the manage_task tool with TaskId="${bgTask.id}" to view status, send stdin (send_input), or kill. The completion notice arrives automatically.`,
       });
-      const promoteToBackground = (): Record<string, any> => {
-        const bgTask = taskManager!.startTask(dispatchCommand, sessionCwd, dispatchEnv, {
-          sessionId: context?.sessionId,
-          turn: context?.turn,
-          autoPromoted: true,
-          inbox: (context as any)?.inbox,
-        });
-        return buildBackgroundResult(bgTask, { autoPromoted: true, softTimeoutMs: effectiveWaitMs });
-      };
-      const backgroundEligible = effectiveWaitMs !== undefined && effectiveWaitMs > 0 && taskManager && !autoPromoted;
+      const backgroundEligible = effectiveWaitMs !== undefined && effectiveWaitMs > 0 && taskManager;
       if (backgroundEligible) {
         // BackgroundTask uses host `spawn(shell: true)`, not SandboxManager.
         // Never let auto silently bypass an available Docker isolation boundary.
@@ -1851,12 +1882,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         await hostSandbox.init();
         let hostResult = await hostSandbox.exec(dispatchCommand, {
           cwd: sessionCwd,
-          timeoutMs: syncTimeoutMs,
+          timeoutMs: timeoutMs,
           signal: context?.signal,
           env: { ...dispatchEnv, ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}) },
         });
-        // Soft threshold trôi qua mà lệnh vẫn chạy → promote thành background task (khởi động lại).
-        if (autoPromoted && hostResult.timedOut) return promoteToBackground();
 
         // Tự động Auto-Provision nếu native command thất bại do thiếu binary
         const autoProvisionEnabled = process.env.MINUS_AUTO_PROVISION?.toLowerCase() !== 'off';
@@ -1873,7 +1902,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               // Thử lại lệnh sau khi nạp PATH
               const retryResult = await hostSandbox.exec(dispatchCommand, {
                 cwd: sessionCwd,
-                timeoutMs: syncTimeoutMs,
+                timeoutMs: timeoutMs,
                 signal: context?.signal,
                 env: {
                   ...dispatchEnv,
@@ -1992,18 +2021,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           };
         }
 
-        // Auto-promotion trên đường sandbox 'auto': chỉ khi sandbox KHÔNG isolated
-        // (local) — sandbox exec chạy với soft threshold, quá ngưỡng thì promote.
-        const sandboxIsolated = Boolean(sandboxManager.getStatus?.()?.isIsolated);
-        const canPromoteHere = autoPromoted && !sandboxIsolated;
         const res = await sandboxManager.exec(dispatchCommand, {
           cwd: sessionCwd,
-          timeoutMs: canPromoteHere ? effectiveWaitMs : timeoutMs,
+          timeoutMs: timeoutMs,
           signal: context?.signal,
           env: dispatchEnv,
         });
-        // Soft threshold trôi qua mà lệnh vẫn chạy → promote thành background task (khởi động lại).
-        if (canPromoteHere && res.timedOut) return promoteToBackground();
 
         // Tự động kích hoạt Built-in Ripgrep/Grep Emulator nếu Docker Container thiếu binary hoặc gặp lỗi 127
         if (res.exitCode === 127 || res.stderr.includes('not found') || res.stderr.includes('not recognized')) {
@@ -2086,18 +2109,13 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           dispatchCommand,
           {
             cwd: sessionCwd,
-            timeout: syncTimeoutMs,
+            timeout: timeoutMs,
             signal: context?.signal,
             maxBuffer: MAX_COMMAND_BUFFER_BYTES,
             env: fallbackEnv,
           },
           (error, stdout, stderr) => {
             const timedOut = error?.killed && error.signal === 'SIGTERM';
-            // Soft threshold trôi qua mà lệnh vẫn chạy → promote thành background task.
-            if (timedOut && autoPromoted && !context?.signal?.aborted) {
-              resolve(promoteToBackground());
-              return;
-            }
             const exitCode = error ? (error.code ?? 1) : 0;
 
             const rawResult = {
@@ -2124,7 +2142,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                       dispatchCommand,
                       {
                         cwd: sessionCwd,
-                        timeout: syncTimeoutMs,
+                        timeout: timeoutMs,
                         signal: context?.signal,
                         maxBuffer: MAX_COMMAND_BUFFER_BYTES,
                         env: buildSafeChildEnv(dispatchEnv),

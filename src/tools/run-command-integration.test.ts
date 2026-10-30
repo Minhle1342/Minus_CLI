@@ -181,6 +181,24 @@ test('Integration Phase 1 & 2: Cat emulation executes in <5ms without calling mi
   }
 });
 
+test('Cat emulation handles bounded read pipelines (cat file | head -n N)', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-cat-pipe-test-'));
+  try {
+    const testFile = path.join(tempDir, 'sample.txt');
+    await fs.writeFile(testFile, 'line 1\nline 2\nline 3\nline 4\nline 5\n', 'utf-8');
+
+    const workspace = new Workspace(tempDir);
+    const parsedPipe = parseCatCommand('cat sample.txt | head -n 2');
+    assert.ok(parsedPipe);
+    assert.ok(Array.isArray(parsedPipe.pipeline), 'pipeline shape must be parsed');
+    const pipeRes = await executeCatEmulation(parsedPipe, workspace);
+    assert.equal(pipeRes.success, true);
+    assert.equal(pipeRes.stdout, 'line 1\nline 2');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('Integration Phase 1: Large terminal output is offloaded to disk and returns truncated text', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-output-test-'));
   try {
