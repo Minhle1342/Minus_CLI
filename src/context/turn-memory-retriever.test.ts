@@ -102,6 +102,162 @@ test('retrieveContextSnippet memoizes identical queries and invalidates on write
   }
 });
 
+test('memory stores are replaced atomically without leaving temp files behind', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-atomic-stores-'));
+  try {
+    const retriever = new TurnMemoryRetriever(root);
+    await retriever.archiveTurns([{
+      id: 't-atomic', turnNumber: 1, userPrompt: 'atomic write prompt',
+      assistantSummary: 'atomic done', toolsUsed: [], filesTouched: [],
+      keyDecisions: [], timestamp: new Date().toISOString(), vector: [0.5],
+    }]);
+    await retriever.recordEpisodicExperience({
+      id: 'ep-atomic', taskIntent: 'atomic intent', faultLocalizedEntities: [],
+      patchSummary: 'atomic patch', verificationCommand: 'npm test', verificationExitCode: 0,
+    });
+    await retriever.recordSemanticInvariant({
+      id: 'sem-atomic', ruleStatement: 'atomic rule', category: 'architecture_invariant',
+      applicablePatterns: [], confidence: 0.8,
+    });
+    await retriever.recordAntiPattern({
+      id: 'ap-atomic', triggerPattern: 'atomic trigger', failedApproach: 'repeated unverified edit',
+      negativeConstraint: 'verify first', taskClass: 'implement', timestamp: new Date().toISOString(),
+    });
+
+    const memDir = path.join(root, '.codingagent', 'memory');
+    const entries = await fs.readdir(memDir);
+    assert.deepEqual(entries.filter((name) => name.endsWith('.tmp')), [],
+      'atomic replace must not leave temporary snapshots behind');
+    for (const name of ['archived_turns.json', 'episodic_experiences.json', 'semantic_invariants.json', 'anti_patterns.json']) {
+      const parsed = JSON.parse(await fs.readFile(path.join(memDir, name), 'utf8'));
+      assert.ok(Array.isArray(parsed) && parsed.length > 0, `${name} must stay complete JSON`);
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('snippet memo is a bounded LRU keyed by memory version', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-snippet-lru-'));
+  try {
+    const retriever = new TurnMemoryRetriever(root);
+    await retriever.archiveTurns([{
+      id: 't-lru', turnNumber: 1, userPrompt: 'lru seed prompt', assistantSummary: 'seed',
+      toolsUsed: [], filesTouched: [], keyDecisions: [], timestamp: new Date().toISOString(), vector: [0.5],
+    }]);
+    const memo = (retriever as any).snippetMemo as Map<string, string>;
+
+    const query = (index: number) => `lru q${String(index).padStart(2, '0')}`;
+    for (let index = 0; index < 32; index++) {
+      await retriever.retrieveContextSnippet(query(index), { topK: 1 });
+    }
+    assert.equal(memo.size, 32, 'memo must stay at its cap');
+    assert.deepEqual(retriever.getSnippetCacheStats(), { hits: 0, misses: 32 });
+
+    // Chạm lại entry cũ nhất → nó thành most-recently-used.
+    await retriever.retrieveContextSnippet(query(0), { topK: 1 });
+    assert.deepEqual(retriever.getSnippetCacheStats(), { hits: 1, misses: 32 });
+
+    // Thêm key mới: LRU đẩy q01 ra, giữ lại q00 vừa được chạm.
+    await retriever.retrieveContextSnippet(query(33), { topK: 1 });
+    assert.equal(memo.size, 32);
+    const keys = Array.from(memo.keys());
+    assert.ok(keys.some((key) => key.includes(query(0))), 'touched entry must survive eviction');
+    assert.equal(keys.some((key) => key.includes(query(1))), false, 'least recently used entry must be evicted');
+
+    // Ghi memory bump version: key cũ vẫn nằm trong LRU nhưng không thể trúng nữa,
+    // và KHÔNG bị clear hàng loạt.
+    const sizeBeforeWrite = memo.size;
+    await retriever.archiveTurns([{
+      id: 't-lru-2', turnNumber: 2, userPrompt: 'lru second prompt', assistantSummary: 'second',
+      toolsUsed: [], filesTouched: [], keyDecisions: [], timestamp: new Date().toISOString(), vector: [0.5],
+    }]);
+    assert.equal(memo.size, sizeBeforeWrite, 'write must not wipe the memo wholesale');
+
+    const missesBefore = retriever.getSnippetCacheStats().misses;
+    await retriever.retrieveContextSnippet(query(33), { topK: 1 });
+    assert.equal(
+      retriever.getSnippetCacheStats().misses,
+      missesBefore + 1,
+      'version bump must force recompute instead of serving a stale snippet',
+    );
+    assert.ok(memo.size <= 32, 'memo remains bounded after the version bump');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('semantic memo reuses a snippet for a near-duplicate query', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-semantic-memo-'));
+  try {
+    const embed = (text: string): number[] => {
+      if (text === 'alpha beta') return [1, 0];
+      if (text === 'alpha beta!') return [0.995, 0.005];
+      return [0, 1];
+    };
+    const retriever = new TurnMemoryRetriever(root, { embedQuery: embed });
+    await retriever.archiveTurns([{
+      id: 't-sem', turnNumber: 1, userPrompt: 'alpha beta memory', assistantSummary: 'done',
+      toolsUsed: [], filesTouched: [], keyDecisions: [], timestamp: new Date().toISOString(), vector: [0.5],
+    }]);
+
+    const first = await retriever.retrieveContextSnippet('alpha beta', { topK: 1 });
+    const missesAfterFirst = retriever.getSnippetCacheStats().misses;
+    assert.equal(missesAfterFirst, 1);
+
+    const nearDuplicate = await retriever.retrieveContextSnippet('alpha beta!', { topK: 1 });
+    assert.equal(nearDuplicate, first, 'near-duplicate query must reuse the cached snippet');
+    assert.equal(retriever.getSnippetCacheStats().misses, missesAfterFirst, 'semantic hit must not recompute');
+
+    const semantic = retriever.getSemanticMemoStats();
+    assert.equal(semantic.hits, 1);
+    assert.equal(semantic.size, 1);
+    assert.ok(semantic.threshold >= 0.9);
+
+    // Query không liên quan vẫn phải dựng lại snippet.
+    await retriever.retrieveContextSnippet('unrelated', { topK: 1 });
+    assert.equal(retriever.getSnippetCacheStats().misses, missesAfterFirst + 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('semantic memo respects the threshold and the off switch', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-semantic-guard-'));
+  const previous = process.env.MINUS_SEMANTIC_MEMO;
+  try {
+    const embed = (text: string): number[] => (text === 'gamma delta' ? [1, 0] : [0.99, 0.01]);
+
+    // Ngưỡng 1.0: cosine < 1 nên không được coi là trùng.
+    const strict = new TurnMemoryRetriever(root, { embedQuery: embed, semanticMemoThreshold: 1 });
+    await strict.archiveTurns([{
+      id: 't-guard', turnNumber: 1, userPrompt: 'gamma delta', assistantSummary: 'done',
+      toolsUsed: [], filesTouched: [], keyDecisions: [], timestamp: new Date().toISOString(),
+    }]);
+    await strict.retrieveContextSnippet('gamma delta', { topK: 1 });
+    await strict.retrieveContextSnippet('gamma delta again', { topK: 1 });
+    assert.equal(strict.getSemanticMemoStats().hits, 0);
+    assert.equal(strict.getSnippetCacheStats().misses, 2);
+
+    // Off switch: ngay cả khi cosine cao cũng không tái dùng.
+    process.env.MINUS_SEMANTIC_MEMO = 'off';
+    const off = new TurnMemoryRetriever(root, { embedQuery: embed });
+    await off.archiveTurns([{
+      id: 't-off', turnNumber: 1, userPrompt: 'gamma delta', assistantSummary: 'done',
+      toolsUsed: [], filesTouched: [], keyDecisions: [], timestamp: new Date().toISOString(),
+    }]);
+    await off.retrieveContextSnippet('gamma delta', { topK: 1 });
+    await off.retrieveContextSnippet('gamma delta again', { topK: 1 });
+    assert.equal(off.getSemanticMemoStats().hits, 0);
+    assert.equal(off.getSemanticMemoStats().size, 0);
+    assert.equal(off.getSnippetCacheStats().misses, 2);
+  } finally {
+    if (previous === undefined) delete process.env.MINUS_SEMANTIC_MEMO;
+    else process.env.MINUS_SEMANTIC_MEMO = previous;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('concurrent init and archiveTurns never lose pre-existing disk state', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-init-race-'));
   try {

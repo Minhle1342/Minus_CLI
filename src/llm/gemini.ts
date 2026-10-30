@@ -4,7 +4,7 @@ import { createStandardSystemPrompt } from './prompts.js';
 import { TokenConfig, EffortScope, resolveTokenConfig } from './token-config.js';
 import { retryWithExponentialBackoff } from './error-handling.js';
 import { createPromptCacheKey } from './cache-envelope.js';
-import { promptCacheV2Mode } from './provider-capabilities.js';
+import { promptCacheV2Mode, type RolloutMode } from './provider-capabilities.js';
 
 export interface StreamCallbacks {
   onThoughtToken?: (token: string) => void;
@@ -32,7 +32,6 @@ export interface LLMRequestOptions {
   dynamicContext?: string;
   tokenConfig?: Partial<TokenConfig>;
   sessionId?: string;
-  promptCacheKey?: string;
   enablePromptCaching?: boolean;
   promptCacheRetention?: 'in_memory' | '24h';
   promptCacheBreakpoint?: boolean;
@@ -188,12 +187,24 @@ export class GeminiLLM {
       }
     }
 
-    if (
-      request?.enablePromptCaching !== false
-      && promptCacheV2Mode() === 'on'
-      && process.env.MINUS_GEMINI_EXPLICIT_CACHE === 'on'
-    ) {
-      const stablePrompt = request?.systemPrompt || this.systemPrompt;
+    // P1.3: explicit cache tự bật theo ngưỡng token prefix thay vì bắt buộc cả
+    // MINUS_CACHE_ENVELOPE_V2=on lẫn MINUS_GEMINI_EXPLICIT_CACHE=on.
+    //   MINUS_GEMINI_EXPLICIT_CACHE=off → tắt; =on → bật bất kể kích thước;
+    //   unset/auto → bật khi prefix (system + tools) ≥ ngưỡng.
+    const stablePrompt = request?.systemPrompt || this.systemPrompt;
+    const explicitCacheMode = (process.env.MINUS_GEMINI_EXPLICIT_CACHE || '').trim().toLowerCase();
+    const configuredMinTokens = Number(process.env.MINUS_GEMINI_EXPLICIT_CACHE_MIN_TOKENS);
+    const minExplicitCacheTokens = Number.isFinite(configuredMinTokens) && configuredMinTokens > 0
+      ? configuredMinTokens
+      : GEMINI_EXPLICIT_CACHE_MIN_TOKENS_DEFAULT;
+    const prefixTokens = estimateGeminiPrefixTokens(stablePrompt, sortedTools);
+    if (shouldUseGeminiExplicitCache({
+      enabled: request?.enablePromptCaching !== false,
+      mode: explicitCacheMode,
+      rollout: promptCacheV2Mode(),
+      prefixTokens,
+      minTokens: minExplicitCacheTokens,
+    })) {
       const cacheKey = createPromptCacheKey(stablePrompt, {
         provider: 'gemini',
         model: this.modelName,
@@ -613,6 +624,40 @@ function hashToolDeclarations(tools: FunctionDeclaration[]): string {
     hash = Math.imul(hash, 16777619);
   }
   return `tools-${(hash >>> 0).toString(16)}`;
+}
+
+/** Ngưỡng mặc định để tự bật Gemini explicit cache (token của system + tools). */
+export const GEMINI_EXPLICIT_CACHE_MIN_TOKENS_DEFAULT = 32768;
+
+export interface GeminiExplicitCacheGateInput {
+  enabled?: boolean;
+  mode: string;
+  rollout: RolloutMode;
+  prefixTokens: number;
+  minTokens?: number;
+}
+
+/**
+ * Quyết định bật explicit cache: `off`/`on` là opt-out/opt-in tường minh, mặc định
+ * (unset) là auto theo ngưỡng token prefix. Rollout `off` vẫn là kill switch toàn cục.
+ */
+export function shouldUseGeminiExplicitCache(input: GeminiExplicitCacheGateInput): boolean {
+  if (input.enabled === false) return false;
+  // Rollout kill switch wins over every per-feature override.
+  if (input.rollout === 'off') return false;
+  const mode = (input.mode || '').trim().toLowerCase();
+  if (mode === 'off') return false;
+  if (mode === 'on') return true;
+  return input.prefixTokens >= (input.minTokens ?? GEMINI_EXPLICIT_CACHE_MIN_TOKENS_DEFAULT);
+}
+
+/**
+ * Ước lượng token của prefix (system + tools) bằng heuristic ký tự→token.
+ * Chỉ dùng để quyết định ngưỡng bật cache nên sai số ±15% không đổi kết quả ở biên.
+ */
+export function estimateGeminiPrefixTokens(systemPrompt: string, tools: FunctionDeclaration[]): number {
+  const toolText = tools && tools.length > 0 ? JSON.stringify(tools) : '';
+  return Math.ceil(((systemPrompt || '').length + toolText.length) / 3.6);
 }
 
 function requiresThoughtSignatures(modelName: string): boolean {

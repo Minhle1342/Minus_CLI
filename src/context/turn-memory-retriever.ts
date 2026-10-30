@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import MiniSearch from 'minisearch';
 import { getNativeCore, nativeComputeStringHash } from '../native/index.js';
 import type { MaskedObservationRecord } from '../agent/context-compactor.js';
+import { writeFileAtomically } from '../memory/atomic-write.js';
+import { cosineSimilarity } from '../memory/vector-memory.js';
 import { LivingPlaybookManager } from './living-playbook.js';
 
 export interface FileDeltaRecord {
@@ -115,7 +117,35 @@ export interface TurnMemoryOptions {
 export const MAX_ARCHIVED_TURNS = 200;
 export const MAX_EPISODIC_EXPERIENCES = 100;
 export const MAX_SEMANTIC_INVARIANTS = 100;
-const MAX_SNIPPET_MEMO_ENTRIES = 5;
+/**
+ * Snippet memo là LRU theo query: mỗi entry là một chuỗi text nhỏ (~0.5–2 KB),
+ * nên 32 entry vẫn dưới ~100 KB RAM và phủ được nhiều step hơn hẳn cap FIFO cũ (5).
+ */
+const MAX_SNIPPET_MEMO_ENTRIES = 32;
+/** Embedding query chỉ phụ thuộc text, không phụ thuộc memory version → memo riêng. */
+const MAX_QUERY_VECTOR_MEMO_ENTRIES = 64;
+/** P2: số snippet tối đa giữ cho semantic memo (query gần trùng). */
+const MAX_SEMANTIC_MEMO_ENTRIES = 32;
+/** Cosine tối thiểu để coi hai query là gần trùng; đủ cao để không lẫn ngữ cảnh. */
+export const SEMANTIC_MEMO_THRESHOLD_DEFAULT = 0.97;
+
+export interface TurnMemoryRetrieverOptions {
+  /** Seam để inject embedding (test) hoặc thay provider; mặc định dùng native core. */
+  embedQuery?: (text: string) => number[] | undefined;
+  /** Ghi đè ngưỡng cosine (0..1]; mặc định MINUS_SEMANTIC_MEMO_THRESHOLD hoặc 0.97. */
+  semanticMemoThreshold?: number;
+}
+
+function defaultEmbedQuery(text: string): number[] | undefined {
+  const native = getNativeCore();
+  if (!native || typeof native.rsGenerateSubwordEmbedding !== 'function') return undefined;
+  try {
+    const vector = native.rsGenerateSubwordEmbedding(text);
+    return vector && vector.length > 0 ? vector : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface NativeVectorScorer {
   rsCosineSimilarity?(query: number[], candidate: number[]): number;
@@ -279,9 +309,15 @@ export class TurnMemoryRetriever {
   private initPromise: Promise<void> | undefined;
   private memoryVersion = 0;
   private snippetMemo = new Map<string, string>();
+  private queryVectorMemo = new Map<string, number[]>();
   private readonly snippetCacheStats = { hits: 0, misses: 0 };
+  /** P2: các snippet đã dựng kèm vector query để tái dùng cho query gần trùng. */
+  private semanticMemo: Array<{ optionsKey: string; query: string; vector: number[]; snippet: string }> = [];
+  private readonly semanticMemoStats = { hits: 0, misses: 0 };
+  private readonly embedQuery: (text: string) => number[] | undefined;
+  private readonly semanticMemoThreshold: number;
 
-  constructor(workspaceDir?: string) {
+  constructor(workspaceDir?: string, options?: TurnMemoryRetrieverOptions) {
     this.workspaceDir = workspaceDir ? path.resolve(workspaceDir) : process.cwd();
     this.storageDir = path.join(this.workspaceDir, '.codingagent', 'memory');
     this.storageFilePath = path.join(this.storageDir, 'archived_turns.json');
@@ -289,6 +325,12 @@ export class TurnMemoryRetriever {
     this.antiPatternsFilePath = path.join(this.storageDir, 'anti_patterns.json');
     this.episodicStorageFilePath = path.join(this.storageDir, 'episodic_experiences.json');
     this.semanticStorageFilePath = path.join(this.storageDir, 'semantic_invariants.json');
+    this.embedQuery = options?.embedQuery ?? defaultEmbedQuery;
+    const configuredThreshold = options?.semanticMemoThreshold
+      ?? Number(process.env.MINUS_SEMANTIC_MEMO_THRESHOLD);
+    this.semanticMemoThreshold = Number.isFinite(configuredThreshold) && configuredThreshold > 0
+      ? Math.min(configuredThreshold, 1)
+      : SEMANTIC_MEMO_THRESHOLD_DEFAULT;
 
     this.livingPlaybook = new LivingPlaybookManager(this.workspaceDir);
     this.miniSearch = this.createMiniSearch();
@@ -599,8 +641,9 @@ export class TurnMemoryRetriever {
 
   private async persistMaskedObservations(): Promise<void> {
     try {
+      await fs.mkdir(this.storageDir, { recursive: true });
       const allDocs = Array.from(this.maskedObservationsMap.values());
-      await fs.writeFile(this.maskedStorageFilePath, JSON.stringify(allDocs), 'utf8');
+      await writeFileAtomically(this.maskedStorageFilePath, JSON.stringify(allDocs));
     } catch (error) {
       throw new Error(`persistMaskedObservations failed for ${this.maskedStorageFilePath}: ${String((error as Error)?.message || error)}`);
     }
@@ -687,12 +730,15 @@ export class TurnMemoryRetriever {
   }
 
   /**
-   * Ghi toàn bộ dữ liệu ra đĩa an toàn
+   * Ghi toàn bộ dữ liệu ra đĩa an toàn.
+   * Ghi qua writeFileAtomically (tmp + rename) để một lần crash không bao giờ
+   * để lại JSON bị cắt cụt, và ném lỗi để caller không ack dữ liệu chỉ nằm RAM.
    */
   private async persist(): Promise<void> {
     try {
+      await fs.mkdir(this.storageDir, { recursive: true });
       const allDocs = Array.from(this.turnsMap.values());
-      await fs.writeFile(this.storageFilePath, JSON.stringify(allDocs, null, 2), 'utf8');
+      await writeFileAtomically(this.storageFilePath, JSON.stringify(allDocs, null, 2));
     } catch (error) {
       throw new Error(`TurnMemoryRetriever.persist failed for ${this.storageFilePath}: ${String((error as Error)?.message || error)}`);
     }
@@ -877,8 +923,11 @@ export class TurnMemoryRetriever {
     this.bumpMemoryVersion();
 
     try {
+      await fs.mkdir(this.storageDir, { recursive: true });
       const all = Array.from(this.antiPatternsMap.values());
-      await fs.writeFile(this.antiPatternsFilePath, JSON.stringify(all, null, 2), 'utf8');
+      // Best-effort by contract (caller is fire-and-forget), nhưng vẫn ghi atomic
+      // để crash giữa chừng không làm hỏng snapshot cũ.
+      await writeFileAtomically(this.antiPatternsFilePath, JSON.stringify(all, null, 2));
     } catch {
       // Bỏ qua lỗi ghi đĩa
     }
@@ -935,37 +984,126 @@ export class TurnMemoryRetriever {
   }
 
   /**
+   * Embedding subword của query, memo theo text (bất biến với memory version).
+   * Trả undefined khi không có embedder (native vắng mặt) — caller fallback sang BM25.
+   */
+  private getSharedQueryVector(query: string): number[] | undefined {
+    const key = (query || '').trim();
+    if (!key) return undefined;
+    const memoized = this.queryVectorMemo.get(key);
+    if (memoized) {
+      this.queryVectorMemo.delete(key);
+      this.queryVectorMemo.set(key, memoized);
+      return memoized;
+    }
+    const vector = this.embedQuery(key);
+    if (!vector || vector.length === 0) return undefined;
+    if (this.queryVectorMemo.size >= MAX_QUERY_VECTOR_MEMO_ENTRIES) {
+      const oldest = this.queryVectorMemo.keys().next();
+      if (!oldest.done) this.queryVectorMemo.delete(oldest.value);
+    }
+    this.queryVectorMemo.set(key, vector);
+    return vector;
+  }
+
+  /**
+   * P2: query gần trùng (cosine ≥ ngưỡng, cùng options + memory version) tái dùng
+   * snippet đã dựng. Chỉ hoạt động khi có embedding; tắt bằng MINUS_SEMANTIC_MEMO=off.
+   */
+  private findSemanticMemo(
+    vector: number[],
+    optionsKey: string,
+  ): string | undefined {
+    if (process.env.MINUS_SEMANTIC_MEMO === 'off') return undefined;
+    if (!Number.isFinite(this.semanticMemoThreshold) || this.semanticMemoThreshold <= 0) return undefined;
+    let best: { snippet: string; similarity: number } | undefined;
+    for (let index = this.semanticMemo.length - 1; index >= 0; index--) {
+      const entry = this.semanticMemo[index];
+      if (entry.optionsKey !== optionsKey || entry.vector.length !== vector.length) continue;
+      const similarity = cosineSimilarity(vector, entry.vector);
+      if (similarity >= this.semanticMemoThreshold && (!best || similarity > best.similarity)) {
+        best = { snippet: entry.snippet, similarity };
+      }
+    }
+    if (!best) {
+      this.semanticMemoStats.misses++;
+      return undefined;
+    }
+    this.semanticMemoStats.hits++;
+    return best.snippet;
+  }
+
+  private rememberSemanticMemo(optionsKey: string, query: string, vector: number[] | undefined, snippet: string): void {
+    if (!vector || vector.length === 0) return;
+    if (process.env.MINUS_SEMANTIC_MEMO === 'off') return;
+    const existingIndex = this.semanticMemo.findIndex(
+      (entry) => entry.optionsKey === optionsKey && entry.query === query,
+    );
+    if (existingIndex >= 0) this.semanticMemo.splice(existingIndex, 1);
+    this.semanticMemo.push({ optionsKey, query, vector, snippet });
+    while (this.semanticMemo.length > MAX_SEMANTIC_MEMO_ENTRIES) this.semanticMemo.shift();
+  }
+
+  /** Số liệu riêng của semantic memo (không trộn vào getSnippetCacheStats). */
+  getSemanticMemoStats(): { hits: number; misses: number; size: number; threshold: number } {
+    return {
+      ...this.semanticMemoStats,
+      size: this.semanticMemo.length,
+      threshold: this.semanticMemoThreshold,
+    };
+  }
+
+  /** Ghi snippet vào LRU với trần cố định (dùng chung cho exact hit và semantic hit). */
+  private storeSnippetMemo(memoKey: string, snippet: string): void {
+    this.snippetMemo.delete(memoKey);
+    while (this.snippetMemo.size >= MAX_SNIPPET_MEMO_ENTRIES) {
+      const oldest = this.snippetMemo.keys().next();
+      if (oldest.done) break;
+      this.snippetMemo.delete(oldest.value);
+    }
+    this.snippetMemo.set(memoKey, snippet);
+  }
+
+  /**
    * Truy vấn và sinh trực tiếp đoạn ngữ cảnh re-injection nếu có turn, observation hoặc anti-pattern liên quan
    */
   async retrieveContextSnippet(query: string, options?: TurnMemoryOptions): Promise<string> {
     await this.init();
-    // Memo theo query trong cùng một turn: các step liên tiếp thường hỏi giống nhau,
-    // mọi ghi vào kho đều đã xóa memo qua bumpMemoryVersion().
-    const memoKey = JSON.stringify({
-      q: query,
+    // Memo LRU theo query + memoryVersion: mọi ghi vào kho đều bump version nên entry
+    // cũ trở nên không thể trúng (không cần clear() toàn bộ như trước), và các entry
+    // còn hợp lệ vẫn được giữ tới khi bị LRU đẩy ra.
+    const optionsKey = JSON.stringify({
+      mv: this.memoryVersion,
       topK: options?.topK ?? 2,
       minScore: options?.minScore ?? 0.65,
       files: [...(options?.activeFiles || [])].sort(),
       pv: this.livingPlaybook.getVersion(),
     });
+    const memoKey = `${optionsKey}|${query}`;
     const memoized = this.snippetMemo.get(memoKey);
     if (memoized !== undefined) {
       this.snippetCacheStats.hits++;
+      // LRU: chạm lại thì đưa entry lên cuối hàng đợi.
+      this.snippetMemo.delete(memoKey);
+      this.snippetMemo.set(memoKey, memoized);
       return memoized;
+    }
+
+    // Sinh embedding một lần, dùng chung cho cả hai tầng retrieval. Memo theo text
+    // để step lặp lại cùng query không phải embed lại sau mỗi lần ghi memory.
+    const sharedQueryVector = this.getSharedQueryVector(query);
+
+    // P2: query gần trùng (paraphrase) tái dùng snippet đã dựng nếu cosine đủ cao.
+    if (sharedQueryVector) {
+      const semanticHit = this.findSemanticMemo(sharedQueryVector, optionsKey);
+      if (semanticHit !== undefined) {
+        this.snippetCacheStats.hits++;
+        this.storeSnippetMemo(memoKey, semanticHit);
+        return semanticHit;
+      }
     }
     this.snippetCacheStats.misses++;
     const snippets: string[] = [];
-
-    // Sinh embedding một lần, dùng chung cho cả hai tầng retrieval.
-    const native = getNativeCore();
-    let sharedQueryVector: number[] | undefined;
-    if (native && typeof native.rsGenerateSubwordEmbedding === 'function') {
-      try {
-        sharedQueryVector = native.rsGenerateSubwordEmbedding(query);
-      } catch {
-        sharedQueryVector = undefined;
-      }
-    }
 
     // 0. Dual-Memory Stream (ExpeRepair & CTIM-Rover)
     const dualMem = await this.retrieveDualMemory(query, {
@@ -1012,11 +1150,8 @@ export class TurnMemoryRetriever {
     }
 
     const snippet = snippets.join('\n\n');
-    if (this.snippetMemo.size >= MAX_SNIPPET_MEMO_ENTRIES) {
-      const oldest = this.snippetMemo.keys().next();
-      if (!oldest.done) this.snippetMemo.delete(oldest.value);
-    }
-    this.snippetMemo.set(memoKey, snippet);
+    this.storeSnippetMemo(memoKey, snippet);
+    this.rememberSemanticMemo(optionsKey, query, sharedQueryVector, snippet);
     return snippet;
   }
 
@@ -1406,20 +1541,31 @@ export class TurnMemoryRetriever {
     });
   }
 
+  /**
+   * Ghi episodic store qua atomic replace. Lỗi ghi phải nổi lên caller: một
+   * bản ghi chỉ nằm trong RAM không được coi là đã lưu (cùng contract với persist()).
+   */
   private async persistEpisodic(): Promise<void> {
     try {
       await fs.mkdir(this.storageDir, { recursive: true });
       const all = Array.from(this.episodicMap.values());
-      await fs.writeFile(this.episodicStorageFilePath, JSON.stringify(all, null, 2), 'utf8');
-    } catch {}
+      await writeFileAtomically(this.episodicStorageFilePath, JSON.stringify(all, null, 2));
+    } catch (error) {
+      throw new Error(`TurnMemoryRetriever.persistEpisodic failed for ${this.episodicStorageFilePath}: ${String((error as Error)?.message || error)}`);
+    }
   }
 
+  /**
+   * Ghi semantic store qua atomic replace. Lỗi ghi phải nổi lên caller (xem persistEpisodic).
+   */
   private async persistSemantic(): Promise<void> {
     try {
       await fs.mkdir(this.storageDir, { recursive: true });
       const all = Array.from(this.semanticMap.values());
-      await fs.writeFile(this.semanticStorageFilePath, JSON.stringify(all, null, 2), 'utf8');
-    } catch {}
+      await writeFileAtomically(this.semanticStorageFilePath, JSON.stringify(all, null, 2));
+    } catch (error) {
+      throw new Error(`TurnMemoryRetriever.persistSemantic failed for ${this.semanticStorageFilePath}: ${String((error as Error)?.message || error)}`);
+    }
   }
 
   getLivingPlaybook(): LivingPlaybookManager {
@@ -1430,10 +1576,13 @@ export class TurnMemoryRetriever {
     return { ...this.snippetCacheStats };
   }
 
-  /** Mọi ghi vào kho đều bump version để vô hiệu memo snippet cùng turn. */
+  /**
+   * Mọi ghi vào kho đều bump version. Snippet memo key gồm `mv` nên entry cũ tự
+   * mất hiệu lực mà không cần clear() toàn bộ; embedding memo thì giữ nguyên vì
+   * vector chỉ phụ thuộc text query.
+   */
   private bumpMemoryVersion(): void {
     this.memoryVersion++;
-    if (this.snippetMemo.size > 0) this.snippetMemo.clear();
   }
 
   /** Cắt các map vượt trần theo thứ tự chèn (cũ nhất trước), đồng bộ index. */

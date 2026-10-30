@@ -115,6 +115,8 @@ export interface KernelEvents {
     persistenceWrites: number;
   }) => void;
   'model:final_answer': (answer: string, ctx?: SessionEventContext) => void;
+  /** Prompt prefix (system prompt + tool schema) changed between requests: cache-miss diagnostics. */
+  'prompt:prefix-churn': (report: import('../llm/prompt-prefix-monitor.js').PromptPrefixChurnReport) => void;
   'model:steered': (steer: { sessionId: string; inputId: string; text: string; step: number; turn: number }) => void;
   'workspace:changed': (oldPath: string, newPath: string) => void;
   'model:changed': (newModel: string, ctx?: SessionEventContext) => void;

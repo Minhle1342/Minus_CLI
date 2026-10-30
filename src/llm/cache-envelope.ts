@@ -66,7 +66,7 @@ export function createPromptCacheEnvelope(
     });
   }
   const canonicalPrompt = tiers.map((tier) => tier.content).join('\n\n');
-  const identity = canonicalJson({ metadata, stablePrefixHash: stablePrefixHash(tiers) });
+  const identity = canonicalJson({ metadata, stablePrefixHash: computeStablePrefixHash(tiers) });
   return {
     version: 2,
     cacheKey: `pc2_${sha256(identity).slice(0, 48)}`,
@@ -87,7 +87,12 @@ export function canonicalizePromptText(value: string): string {
   return value.replace(/\r\n?/g, '\n').split('\n').map((line) => line.replace(/[ \t]+$/g, '')).join('\n').trim();
 }
 
-function stablePrefixHash(tiers: PromptCacheEnvelope['tiers']): string {
+/**
+ * Hash of the stable prefix (T0..T2). T3 is the intentionally dynamic tail, so a
+ * T3-only change must not invalidate provider prefix caching. Exported so callers
+ * (assembler/telemetry) can compare prefix stability without rebuilding metadata.
+ */
+export function computeStablePrefixHash(tiers: PromptCacheEnvelope['tiers']): string {
   const stable = tiers.filter((tier) => tier.tier !== 'T3');
   return stable.at(-1)?.cumulativePrefixHash || sha256('');
 }
@@ -99,4 +104,9 @@ function canonicalJson(value: Record<string, unknown>): string {
 function sha256(value: string): string {
   // Same SHA-256 hex digest as node:crypto; Rust fast path with identical output (no key rotation).
   return nativeComputeStringHash(value);
+}
+
+/** Hash one canonical text block (section-level telemetry reuses the same digest). */
+export function hashPromptText(value: string): string {
+  return sha256(value);
 }

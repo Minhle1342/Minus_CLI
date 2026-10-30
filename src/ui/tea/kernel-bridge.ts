@@ -1,4 +1,4 @@
-﻿import type { KernelEventBus, KernelEvents } from '../../kernel/kernel.js';
+import type { KernelEventBus, KernelEvents } from '../../kernel/kernel.js';
 import type { KernelMsg, Msg } from './types.js';
 export const KERNEL_EVENT_NAMES = [
   'kernel:init', 'kernel:disposed', 'plugin:registered', 'step:before', 'step:after',
@@ -6,7 +6,7 @@ export const KERNEL_EVENT_NAMES = [
   'tool:before', 'tool:after', 'tool:error', 'model:thought', 'model:thinking:start',
   'model:thinking:end', 'model:retry', 'model:token', 'model:usage', 'model:request_telemetry',
   'tools:batch', 'model:final_answer', 'model:steered', 'workspace:changed', 'model:changed',
-  'agent:status', 'agent/status', 'agent:abort', 'abort',
+  'agent:status', 'agent/status', 'agent:abort', 'abort', 'prompt:prefix-churn',
 ] as const satisfies readonly (keyof KernelEvents)[];
 type MissingEvents = Exclude<keyof KernelEvents, typeof KERNEL_EVENT_NAMES[number]>;
 const completeEventSurface: MissingEvents extends never ? true : never = true;

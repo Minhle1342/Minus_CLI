@@ -17,6 +17,51 @@ export function promptCacheV2Mode(): RolloutMode {
   return value === 'on' || value === 'off' ? value : 'observe';
 }
 
+let lastLoggedOpenAICacheDecision: string | undefined;
+
+/**
+ * P1.1: `observe` phải thực sự quan sát.
+ *
+ * Trước đây cả `prompt_cache_key` lẫn retention chỉ được gửi khi mode = 'on', nên
+ * mode mặc định ('observe') không gửi gì và cũng không log — không thể đối chiếu
+ * churn (P0.1) với cache hit thật. Nay:
+ *   - off      → không gửi field nào;
+ *   - observe  → gửi `prompt_cache_key` (routing/affinity), KHÔNG gửi retention;
+ *   - on       → gửi key + `prompt_cache_retention: 24h` khi được yêu cầu.
+ *
+ * Bật log quyết định bằng MINUS_PROMPT_CACHE_LOG=1 (một dòng/process, không spam UI).
+ */
+export function openAIPromptCacheFields(
+  baseURL: string,
+  cacheKey: string,
+  options?: LLMRequestOptions,
+): Record<string, string> {
+  const mode = promptCacheV2Mode();
+  const officialOpenAI = baseURL.toLowerCase().includes('api.openai.com');
+  const fields: Record<string, string> = {};
+
+  if (options?.enablePromptCaching !== false && officialOpenAI && mode !== 'off') {
+    fields.prompt_cache_key = cacheKey;
+    if (mode === 'on' && options?.promptCacheRetention === '24h') {
+      fields.prompt_cache_retention = '24h';
+    }
+  }
+
+  logOpenAICacheDecisionOnce(baseURL, mode, fields);
+  return fields;
+}
+
+function logOpenAICacheDecisionOnce(baseURL: string, mode: RolloutMode, fields: Record<string, string>): void {
+  if (process.env.MINUS_PROMPT_CACHE_LOG !== '1') return;
+  const signature = `${baseURL}|${mode}|${Object.keys(fields).sort().join(',')}`;
+  if (lastLoggedOpenAICacheDecision === signature) return;
+  lastLoggedOpenAICacheDecision = signature;
+  const suffix = baseURL.toLowerCase().includes('api.openai.com') ? '' : ' (vendor endpoint: fields suppressed)';
+  console.warn(
+    `[prompt-cache] mode=${mode} fields=${Object.keys(fields).sort().join(',') || 'none'}${suffix}`,
+  );
+}
+
 export function resolvePromptCacheCapabilities(baseURL: string, providerHint?: string): ProviderPromptCacheCapabilities {
   const value = `${providerHint || ''} ${baseURL}`.toLowerCase();
   if (value.includes('anthropic') || value.includes('claude')) {
@@ -39,18 +84,4 @@ export function anthropicCacheControl(options?: LLMRequestOptions): { type: 'eph
   return promptCacheV2Mode() === 'on' && options?.promptCacheRetention === '24h'
     ? { type: 'ephemeral', ttl: '1h' }
     : { type: 'ephemeral' };
-}
-
-/** Only official OpenAI accepts these body fields; unknown compatible gateways are left untouched. */
-export function openAIPromptCacheFields(
-  baseURL: string,
-  cacheKey: string,
-  options?: LLMRequestOptions,
-): Record<string, string> {
-  if (options?.enablePromptCaching === false || !baseURL.toLowerCase().includes('api.openai.com')) return {};
-  if (promptCacheV2Mode() !== 'on') return {};
-  return {
-    prompt_cache_key: cacheKey,
-    ...(options?.promptCacheRetention === '24h' ? { prompt_cache_retention: '24h' } : {}),
-  };
 }

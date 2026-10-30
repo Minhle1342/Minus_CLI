@@ -94,10 +94,18 @@ export class AnthropicLLM {
         ]
       : systemPromptText;
 
+    const messages = this.convertHistoryToAnthropicMessages(session, request?.dynamicContext, request?.stepSuffixes);
+    // P1.2: breakpoint thứ 3 ở cuối history. Anthropic cache theo tiền tố (tools →
+    // system → messages), nên marking block cuối khiến request sau tái dùng toàn
+    // bộ hội thoại đã cache thay vì chỉ tools+system. Không thêm breakpoint thứ 4:
+    // nó chỉ ghi trùng một tiền tố ngắn hơn đã nằm trong cache dài hơn — tốn phí
+    // write mà không tăng phần đọc được.
+    if (cacheControl) applyAnthropicHistoryCacheControl(messages, cacheControl);
+
     const body: Record<string, any> = {
       model: this.modelName,
       system: systemPayload,
-      messages: this.convertHistoryToAnthropicMessages(session, request?.dynamicContext, request?.stepSuffixes),
+      messages,
       max_tokens: effectiveTokenConfig.maxOutputTokens || 8192,
       stream: true,
       tools: tools.length > 0 ? this.convertTools(tools, cacheControl) : undefined,
@@ -450,6 +458,29 @@ export class AnthropicLLM {
     }
     return normalized;
   }
+}
+
+/**
+ * Mark the last content block of the final message as a prompt-cache breakpoint.
+ * Anthropic caches a cumulative prefix up to each marker, so the trailing block is
+ * the one that lets the next request reuse the whole conversation prefix.
+ * Returns true when a marker was added; idempotent when one already exists.
+ */
+export function applyAnthropicHistoryCacheControl(
+  messages: Array<{ role: string; content: any }>,
+  cacheControl: { type: 'ephemeral'; ttl?: '1h' },
+): boolean {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const content = messages[index]?.content;
+    if (!Array.isArray(content) || content.length === 0) continue;
+    const last = content[content.length - 1];
+    if (!last || typeof last !== 'object') continue;
+    if (last.cache_control) return false;
+    last.cache_control = cacheControl;
+    return true;
+  }
+  return false;
 }
 
 function normalizeSchema(schema: any): any {

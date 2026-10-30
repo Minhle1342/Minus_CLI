@@ -458,7 +458,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           return [model, []];
         }
         case 'kernel:disposed': return [model, [{ type: 'quit' }]];
-        case 'kernel:init': case 'plugin:registered': case 'router:decision': case 'gate:exploration_sufficiency': case 'gate:reproduction_advisory': case 'model:request_telemetry': case 'tools:batch': case 'model:steered': return [model, []];
+        case 'kernel:init': case 'plugin:registered': case 'router:decision': case 'gate:exploration_sufficiency': case 'gate:reproduction_advisory': case 'model:request_telemetry': case 'tools:batch': case 'model:steered': case 'prompt:prefix-churn': return [model, []];
       }
     }
     case 'key': {

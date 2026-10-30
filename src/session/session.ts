@@ -57,6 +57,7 @@ export type SessionEventType =
   | 'phase/invalidated'
   | 'audit/task-completion'
   | 'context/snapshot'
+  | 'prompt/prefix-churn'
   | 'model/change';
 
 export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete';
@@ -204,6 +205,12 @@ export interface SessionEventData {
   contextFingerprint?: string;
   archiveStatus?: Record<string, unknown>;
   compactionState?: Record<string, unknown>;
+  /**
+   * Prompt-prefix churn telemetry: ghi lại khi prefix (system + tools) đổi giữa
+   * các request, kèm nguyên nhân. Chỉ phục vụ chẩn đoán cache hit — không tham
+   * gia projection history, request digest hay compaction.
+   */
+  promptPrefixChurn?: import('../llm/prompt-prefix-monitor.js').PromptPrefixChurnReport;
   parallelToolExecution?: {
     batchCount: number;
     totalTools: number;
@@ -330,6 +337,7 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
     'phase/invalidated',
     'audit/task-completion',
     'context/snapshot',
+    'prompt/prefix-churn',
     'model/change',
   ].includes(event.type)) {
     throw new Error(`Unsupported session event type: ${String(event.type)}.`);

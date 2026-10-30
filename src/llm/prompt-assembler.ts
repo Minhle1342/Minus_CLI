@@ -1,7 +1,12 @@
 import type { PromptAssemblyContext } from './prompt-sections.js';
 import {
   canonicalizePromptText,
+  computeStablePrefixHash,
+  createPromptCacheEnvelope,
+  hashPromptText,
   TIER_ORDER,
+  type PromptCacheEnvelope,
+  type PromptCacheSection,
   type PromptCacheTier,
 } from './cache-envelope.js';
 
@@ -12,6 +17,36 @@ export interface PromptSection {
   condition?: (ctx: PromptAssemblyContext) => boolean;
   /** Explicit tier assignment. If omitted, resolved deterministically from priority. */
   tier?: PromptCacheTier;
+}
+
+export interface PromptEnvelopeOptions {
+  provider: string;
+  model: string;
+  toolSchemaVersion?: string;
+  repositoryRevision?: string;
+  policyVersion?: string;
+}
+
+/** One included section's identity for churn attribution (no content copied). */
+export interface AssembledPromptSectionDigest {
+  id: string;
+  tier: PromptCacheTier;
+  contentHash: string;
+}
+
+export interface AssembledPromptEnvelope {
+  /** Byte-identical to `assembleForContext(ctx)`; asserted before returning. */
+  prompt: string;
+  envelope: PromptCacheEnvelope;
+  /** Hash of T0..T2 only; T3 is the intentionally dynamic tail. */
+  stablePrefixHash: string;
+  sections: AssembledPromptSectionDigest[];
+}
+
+interface IncludedPromptSection {
+  id: string;
+  tier: PromptCacheTier;
+  content: string;
 }
 
 interface RegisteredPromptSection extends PromptSection {
@@ -74,11 +109,64 @@ export class PromptAssembler {
    * Applies canonical text normalization to prevent whitespace-driven cache misses across platforms.
    */
   assembleForContext(ctx: PromptAssemblyContext = {}): string {
+    return this.collectIncludedSections(ctx)
+      .map((section) => section.content)
+      .join('\n\n');
+  }
+
+  /**
+   * P2: assemble the prompt AND its cache envelope from the same section list.
+   *
+   * The prompt string is byte-identical to `assembleForContext` (asserted below),
+   * so switching a caller to this method cannot change prompt semantics. The
+   * envelope adds two things the raw string cannot provide:
+   *   1. `stablePrefixHash` — T0..T2 only, so a T3-only change is not mistaken for
+   *      a prompt-cache break;
+   *   2. per-section hashes — churn can be attributed to a specific section id
+   *      instead of "the system prompt changed".
+   */
+  assembleWithEnvelope(
+    ctx: PromptAssemblyContext = {},
+    options: PromptEnvelopeOptions,
+  ): AssembledPromptEnvelope {
+    const included = this.collectIncludedSections(ctx);
+    const prompt = included.map((section) => section.content).join('\n\n');
+    const envelopeSections: PromptCacheSection[] = included.map((section, index) => ({
+      id: section.id,
+      tier: section.tier,
+      content: section.content,
+      // `order` = position in the assembler's canonical ordering, so the envelope
+      // sorts back to exactly the same sequence the prompt uses.
+      order: index,
+    }));
+    const envelope = createPromptCacheEnvelope(envelopeSections, options);
+    if (envelope.canonicalPrompt !== prompt) {
+      throw new Error(
+        'Prompt envelope drift: canonicalPrompt differs from the assembled system prompt. '
+        + 'A section tier/priority change broke the static-first prefix invariant.',
+      );
+    }
+    return {
+      prompt,
+      envelope,
+      stablePrefixHash: computeStablePrefixHash(envelope.tiers),
+      sections: included.map((section) => ({
+        id: section.id,
+        tier: section.tier,
+        contentHash: hashPromptText(section.content),
+      })),
+    };
+  }
+
+  private collectIncludedSections(ctx: PromptAssemblyContext = {}): IncludedPromptSection[] {
     return this.sortedSections()
       .filter((section) => !section.condition || section.condition(ctx))
-      .map((section) => canonicalizePromptText(section.content))
-      .filter(Boolean)
-      .join('\n\n');
+      .map((section) => ({
+        id: section.id,
+        tier: section.tier,
+        content: canonicalizePromptText(section.content),
+      }))
+      .filter((section) => Boolean(section.content));
   }
 
   private sortedSections(): RegisteredPromptSection[] {

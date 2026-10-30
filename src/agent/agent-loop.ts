@@ -19,6 +19,7 @@ import { PlanManager } from './plan-manager.js';
 import { ReflectionEngine } from './reflection-engine.js';
 import { ProjectMemoryManager } from '../memory/project-memory.js';
 import type { MemoryRecord } from '../memory/types.js';
+import { PromptPrefixMonitor } from '../llm/prompt-prefix-monitor.js';
 import { AgentKernel, KernelContext, type KernelEventBus } from '../kernel/kernel.js';
 import { SessionPersistence } from '../session/session-persistence.js';
 import { GoalManager } from './goal-manager.js';
@@ -303,6 +304,8 @@ export class AgentLoop {
   readonly contextGuardian: ContextGuardian;
   readonly contextAgent: ContextAgent;
   readonly turnMemoryRetriever: TurnMemoryRetriever;
+  /** Telemetry thuần quan sát: phát hiện prefix (system + tools) đổi giữa các request. */
+  readonly promptPrefixMonitor = new PromptPrefixMonitor();
   readonly planManager: PlanManager;
   readonly goalManager: GoalManager;
   readonly agentHooks: AgentHookRegistry;
@@ -444,12 +447,14 @@ export class AgentLoop {
   readonly rateLimitPacer = new RateLimitPacer();
   private _latestReasoning?: { thought: string; timestamp: string; step: number; turn: number };
   private _collapsePreferences: UICollapsePreferences = { ...DEFAULT_COLLAPSE_PREFERENCES };
-  private cachedTurnNumber?: number;
   private cachedTurnToolDeclarations?: any[];
   private cachedTurnToolProviderSize?: number;
   private cachedTurnToolPhase?: string;
   private cachedTurnToolPhaseVersion?: number;
   private cachedHasPlan?: boolean;
+  private cachedToolBreakerSignature?: string;
+  /** Hash của authorized+visible surface: gate có thể đổi trong cùng phase (risk/reversibility). */
+  private cachedToolGateSignature?: string;
 
   get latestReasoning(): { thought: string; timestamp: string; step: number; turn: number } | undefined {
     return this._latestReasoning;
@@ -691,6 +696,16 @@ export class AgentLoop {
     (this as any).contextAgent = new ContextAgent(this._workspace.rootDir);
     (this as any).turnMemoryRetriever = new TurnMemoryRetriever(this._workspace.rootDir);
     this.turnMemoryRetriever.init().catch(() => { });
+    // P1.4: cache tool schema giờ tái dùng qua nhiều turn, nên khi đổi workspace
+    // phải bỏ hẳn — declarations đã dựng thuộc provider/workspace trước đó.
+    this.cachedTurnToolDeclarations = undefined;
+    this.cachedTurnToolProviderSize = undefined;
+    this.cachedTurnToolPhase = undefined;
+    this.cachedTurnToolPhaseVersion = undefined;
+    this.cachedHasPlan = undefined;
+    this.cachedBackgroundTaskToolsUnlocked = undefined;
+    this.cachedToolBreakerSignature = undefined;
+    this.cachedToolGateSignature = undefined;
   }
 
   setLLM(llm: any, modelName?: string) {
@@ -1753,20 +1768,35 @@ export class AgentLoop {
         const stepCompletionState = getTurnCompletionState(session, turn);
 
         let activeToolDeclarations: any[];
+        const breakerSignature = Array.from(this.circuitBreakerTrippedTools).sort().join(',');
+        // P1.4 cache key must include the gate surface, not just the phase: the gate
+        // denies by risk/reversibility/task class, which can change inside one phase.
+        // A stale hit would keep both the old schema AND the old runtime authorization
+        // (runtime scope unions declarations at ~line 1936).
+        const toolGateSignature = `${hashAllowedToolSet(gateToolSurface.authorizedToolNames)}:${hashAllowedToolSet(gateToolSurface.visibleToolNames)}`;
         if (hasSubmittedSolution) {
           // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
           activeToolDeclarations = [];
         } else if (
-          this.cachedTurnNumber === turn
-          && this.cachedTurnToolDeclarations
+          this.cachedTurnToolDeclarations
           && this.cachedTurnToolProviderSize === providerSize
           && this.cachedTurnToolPhase === classification.phase
           && this.cachedTurnToolPhaseVersion === classification.phaseVersion
           && this.cachedHasPlan === this.planManager.hasPlan()
           && this.cachedBackgroundTaskToolsUnlocked === this.backgroundTaskToolsUnlocked
+          && this.cachedToolBreakerSignature === breakerSignature
+          && this.cachedToolGateSignature === toolGateSignature
         ) {
-          // KV Cache Preservation: Tái sử dụng 100% Tool Declarations cố định của phase trong turn này,
-          // ngăn chặn việc re-retrieval sau mỗi tool call làm thay đổi thứ tự/danh sách tool prefix token.
+          // P1.4 Phase-stable Tool Declarations: tái dùng nguyên mảng giữa CÁC TURN
+          // khi phase/plan/breaker không đổi, thay vì dựng lại mỗi turn (mỗi lần dựng
+          // lại là một lần đổi tool prefix → mất KV cache). Việc masking theo phase
+          // (explore/plan) và circuit breaker vẫn được áp dụng tại thời điểm dựng,
+          // nên schema chỉ đổi ở các biên có chủ đích: phase transition, plan xuất
+          // hiện, background-task unlock, tool bị breaker ẩn/hiện.
+          // Không dùng "union toàn session + tool_choice gate": Gemini chỉ chấp nhận
+          // allowed_function_names khi mode = ANY (không gate được ở AUTO), còn
+          // masking explore/plan là kiểm soát an toàn (model không thể mutate) —
+          // đánh đổi đó không đáng để tiết kiệm cache.
           activeToolDeclarations = [...this.cachedTurnToolDeclarations];
         } else {
           activeToolDeclarations = (dynamicRetrievalEnabled && typeof candidateProvider.getRelevantTools === 'function')
@@ -1829,13 +1859,14 @@ export class AgentLoop {
           // bảo tồn nguyên vẹn KV Cache prefix qua từng step.
           activeToolDeclarations.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
 
-          this.cachedTurnNumber = turn;
           this.cachedTurnToolDeclarations = [...activeToolDeclarations];
           this.cachedTurnToolProviderSize = providerSize;
           this.cachedTurnToolPhase = classification.phase;
           this.cachedTurnToolPhaseVersion = classification.phaseVersion;
           this.cachedHasPlan = this.planManager.hasPlan();
           this.cachedBackgroundTaskToolsUnlocked = this.backgroundTaskToolsUnlocked;
+          this.cachedToolBreakerSignature = breakerSignature;
+          this.cachedToolGateSignature = toolGateSignature;
         }
 
         // Verification State tracking:
@@ -2094,7 +2125,15 @@ export class AgentLoop {
           includeStaticCodebaseIntelligence: promptDecision.includeStaticCodebaseIntelligence,
           includeStaticTaskOrchestrator: promptDecision.includeStaticTaskOrchestrator,
         };
-        const assembledSystemPrompt = this.promptAssembler.assembleForContext(promptAssemblyCtx);
+        // P2: build the system prompt together with its T0..T3 cache envelope. The
+        // prompt string stays byte-identical to assembleForContext (asserted inside),
+        // and the envelope supplies stable-prefix + per-section hashes for churn
+        // attribution instead of a single opaque "system prompt changed" signal.
+        const systemPromptEnvelope = this.promptAssembler.assembleWithEnvelope(promptAssemblyCtx, {
+          provider: 'agent-loop',
+          model: this.getEffectiveModelName(session) || 'unknown',
+        });
+        const assembledSystemPrompt = systemPromptEnvelope.prompt;
         const rawPlanContext = promptDecision.planContext;
         const advicePrompt = promptDecision.advicePrompt;
         const cognitiveScaffoldText = promptDecision.scaffoldPrompt;
@@ -2806,6 +2845,24 @@ export class AgentLoop {
           await this.endTurn(session, turn, effectiveMaxSteps, isGoal, contextPreparation.failureReason);
           return message;
         }
+        // P0.1: prefix churn telemetry (thuần quan sát, không đổi payload). Phải
+        // ghi event TRƯỚC recordRequestHeader để sourceEventSeq của header vẫn là
+        // seq liền trước, giữ nguyên invariant của request replay.
+        const prefixChurn = this.promptPrefixMonitor.observe({
+          sessionId: session.id,
+          turn,
+          step,
+          systemPrompt: assembledSystemPrompt,
+          tools: activeToolDeclarations,
+          phase: classification.phase,
+          compacted: didCompactThisStep,
+          stablePrefixHash: systemPromptEnvelope.stablePrefixHash,
+          sections: systemPromptEnvelope.sections,
+        });
+        if (prefixChurn.changed) {
+          session.append('prompt/prefix-churn', { promptPrefixChurn: prefixChurn });
+          this.eventBus?.emit('prompt:prefix-churn', prefixChurn);
+        }
         session.recordRequestHeader({
           turn,
           step,
@@ -2836,7 +2893,6 @@ export class AgentLoop {
           step,
           stepSuffixes: new Map(this.stepDynamicSuffixes),
           sessionId: session.id,
-          promptCacheKey: session.id,
           enablePromptCaching: this.loopOptions?.enablePromptCaching !== false,
           signal: options?.signal,
           allowedFunctionNames: visibleToolNames,

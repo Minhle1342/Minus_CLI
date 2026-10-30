@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { ContextCompactor } from './context-compactor.js';
 import { ContextBudgetManager } from './context-budget-manager.js';
@@ -75,6 +77,56 @@ test('identical masked archive retries persistence rather than acknowledging RAM
   await assert.rejects(retriever.archiveMaskedObservations([record]), /disk unavailable/);
   await retriever.archiveMaskedObservations([record]);
   assert.equal(writes, 2);
+});
+
+test('episodic writes reject a persistence failure instead of acknowledging RAM-only data', async () => {
+  const retriever = Object.create(TurnMemoryRetriever.prototype) as any;
+  retriever.init = async () => {};
+  retriever.episodicMap = new Map();
+  retriever.episodicMiniSearch = { add() {}, discard() {} };
+  retriever.enforceMemoryCaps = () => ({ evictedTurns: 0, evictedEpisodic: 0, evictedSemantic: 0 });
+  retriever.bumpMemoryVersion = () => {};
+  let writes = 0;
+  retriever.persistEpisodic = async () => { if (++writes === 1) throw new Error('disk unavailable'); };
+  const record = {
+    id: 'ep-1', taskIntent: 'fix router timeout', faultLocalizedEntities: [],
+    patchSummary: 'patched router', verificationCommand: 'npm test', verificationExitCode: 0,
+  };
+  await assert.rejects(retriever.recordEpisodicExperience(record), /disk unavailable/);
+  const stored = await retriever.recordEpisodicExperience(record);
+  assert.equal(writes, 2);
+  assert.equal(stored.id, 'ep-1');
+});
+
+test('semantic writes reject a persistence failure instead of acknowledging RAM-only data', async () => {
+  const retriever = Object.create(TurnMemoryRetriever.prototype) as any;
+  retriever.init = async () => {};
+  retriever.semanticMap = new Map();
+  retriever.semanticMiniSearch = { add() {}, discard() {} };
+  retriever.enforceMemoryCaps = () => ({ evictedTurns: 0, evictedEpisodic: 0, evictedSemantic: 0 });
+  retriever.bumpMemoryVersion = () => {};
+  let writes = 0;
+  retriever.persistSemantic = async () => { if (++writes === 1) throw new Error('disk unavailable'); };
+  const invariant = {
+    id: 'sem-1', ruleStatement: 'services own their persistence',
+    category: 'architecture_invariant', applicablePatterns: ['repository'], confidence: 0.9,
+  };
+  await assert.rejects(retriever.recordSemanticInvariant(invariant), /disk unavailable/);
+  await retriever.recordSemanticInvariant(invariant);
+  assert.equal(writes, 2);
+});
+
+test('hygiene audit propagates a failed episodic persist', async () => {
+  const retriever = Object.create(TurnMemoryRetriever.prototype) as any;
+  retriever.init = async () => {};
+  retriever.workspaceDir = os.tmpdir();
+  retriever.episodicMap = new Map([['ep-stale', {
+    id: 'ep-stale', taskIntent: 'stale task', faultLocalizedEntities: [], patchSummary: 'old patch',
+    verificationCommand: 'npm test', timestamp: 'now',
+    fileHashes: { [path.join(os.tmpdir(), 'minus-missing-file-for-audit.ts')]: 'deadbeef' },
+  }]]);
+  retriever.persistEpisodic = async () => { throw new Error('disk unavailable'); };
+  await assert.rejects(retriever.auditMemoryHygiene(), /disk unavailable/);
 });
 
 test('marginal savings under the hard limit do not rewrite the cache prefix', async () => {
