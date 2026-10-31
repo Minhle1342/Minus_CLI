@@ -15,11 +15,10 @@ import {
 } from './tools.js';
 import {
   SECTION_ARCHITECTURE_ANALYSIS,
-  SECTION_COMPUTER_USE,
   SECTION_TABULAR_OUTPUT,
   SECTION_TASK_ORCHESTRATOR_BOUNDARIES,
-  SECTION_UNITY_GAME_DEV,
 } from './domains.js';
+import { SECTION_FINAL_ANSWER_RECEIPT } from './completion.js';
 
 export type MonorepoKind = 'pnpm' | 'npm-yarn' | 'turborepo' | 'nx' | 'cargo' | 'lerna' | 'none';
 
@@ -308,7 +307,14 @@ Core Architectural Invariants:
 5. FINAL ANSWER LANGUAGE MATCHING & ZERO-STUB POLICY:
    - Internal reasoning, tool calls, and diagnostics operate in English.
    - FINAL ANSWER LANGUAGE MATCHING: Your final answer MUST 100% match the user's natural prompt language (Vietnamese -> Vietnamese, English -> English).
-   - Output the answer itself, not a promise. Describe causes, changes, or verification when relevant.`;
+   - ZERO-STUB & SYNTAX INTEGRITY: All code edits must be complete, syntactically valid, and fully implemented. Never emit placeholders, unclosed brackets, truncated snippets, or '// TODO' stubs.
+   - Output the answer itself, not a promise.
+
+6. EXECUTION ECONOMY:
+   - Batch independent read-only inspections in ONE response; the harness runs them concurrently. Mutations stay serial.
+   - Re-read a file after it changes; earlier reads are stale.
+   - Stop only when the evidence needed to answer is complete.
+   - If two explanations fit, run the smallest discriminating check; never patch both.`;
 
 /**
  * TIER 3: INSTRUCTION HIERARCHY REINFORCEMENT SUFFIX ANCHOR
@@ -437,8 +443,8 @@ export const DEFAULT_PROMPT_SECTIONS: DefaultPromptSection[] = [
     tier: 'T2',
     condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticTaskOrchestrator ?? true) && (ctx.hasSubagentTools ?? false),
   },
-  { id: 'computer-use', content: SECTION_COMPUTER_USE, priority: 600, tier: 'T2', condition: (ctx: PromptAssemblyContext) => ctx.hasComputerTool ?? false },
-  { id: 'unity-game-dev', content: SECTION_UNITY_GAME_DEV, priority: 700, tier: 'T2', condition: (ctx: PromptAssemblyContext) => ctx.isUnity ?? false },
+  // Always-on answer format; 565 avoids the 560 slot the grill plugin registers.
+  { id: 'final-answer-receipt', content: SECTION_FINAL_ANSWER_RECEIPT, priority: 565, tier: 'T2' },
   { id: 'architecture-analysis', content: SECTION_ARCHITECTURE_ANALYSIS, priority: 1000, tier: 'T3', condition: (ctx: PromptAssemblyContext) => ctx.isArchitectureAnalysis ?? false },
   { id: 'tabular-output', content: SECTION_TABULAR_OUTPUT, priority: 1010, tier: 'T3', condition: (ctx: PromptAssemblyContext) => needsTabularOutput(ctx.request) },
 ];

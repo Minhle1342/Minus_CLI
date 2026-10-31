@@ -144,16 +144,19 @@ export class TaskManager {
     watchdog.unref();
     this.watchdogs.set(id, watchdog);
 
+    const clearWatchdog = () => {
+      const pendingWatchdog = this.watchdogs.get(id);
+      if (pendingWatchdog) clearInterval(pendingWatchdog);
+      this.watchdogs.delete(id);
+      this.inboxes.delete(id);
+    };
+
     child.on('exit', (code) => {
       task.status = task.stopRequested || code === 0 ? 'stopped' : 'failed';
       task.exitCode = code;
       task.lastOutputAt = Date.now();
       task.logs.push(`[SYSTEM] Process exited with code: ${code}`);
-      const watchdog = this.watchdogs.get(id);
-      if (watchdog) {
-        clearInterval(watchdog);
-        this.watchdogs.delete(id);
-      }
+      clearWatchdog();
       if (task.sessionId && options?.inbox) {
         const outcome = task.stopRequested
           ? 'cancelled'
@@ -175,6 +178,7 @@ export class TaskManager {
       task.status = 'failed';
       task.lastOutputAt = Date.now();
       task.logs.push(`[SYSTEM ERROR] ${err.message}`);
+      clearWatchdog();
     });
 
     this.tasks.set(id, task);

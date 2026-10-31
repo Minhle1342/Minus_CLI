@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRootModel, update } from '../models/root-model.js';
-import { lineRangeSuffix, toolResultEntry, mergedToolEntry } from '../models/tool-entry.js';
+import { lineRangeSuffix, toolResultEntry, mergedToolEntry, toolCallEntry } from '../models/tool-entry.js';
 
 test('explore tools merge tool call + result into ONE entry; others keep both', () => {
   let model = createRootModel();
@@ -43,12 +43,12 @@ test('mergedToolEntry chỉ gộp read-only thành công; lỗi trả undefined 
 test('read-only results show normalized line range instead of content excerpt', () => {
   // Explicit args win over everything else.
   assert.equal(
-    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', startLine: 10, endLine: 20 }),
+    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', startLine: 10, endLine: 20 }).replace(/\x1b\[[0-9;]*m/g, ''),
     '✔ read_file [OK] (startLine: 10, endLine: 20)',
   );
   // offset/limit aliases normalize to the same two params, never shown raw.
   assert.equal(
-    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', offset: 200, limit: 11 }),
+    toolResultEntry('read_file', { content: 'const x = 1;' }, 0, { path: 'a.ts', offset: 200, limit: 11 }).replace(/\x1b\[[0-9;]*m/g, ''),
     '✔ read_file [OK] (startLine: 200, endLine: 210)',
   );
   assert.doesNotMatch(
@@ -57,12 +57,12 @@ test('read-only results show normalized line range instead of content excerpt', 
   );
   // No args (e.g. hydrated history): fall back to the effective range echoed in the result.
   assert.equal(
-    toolResultEntry('read_file', { content: 'const x = 1;', startLine: 1, endLine: 120 }),
+    toolResultEntry('read_file', { content: 'const x = 1;', startLine: 1, endLine: 120 }).replace(/\x1b\[[0-9;]*m/g, ''),
     '✔ read_file [OK] (startLine: 1, endLine: 120)',
   );
   // Tools without line bounds keep the content excerpt.
   assert.equal(
-    toolResultEntry('list_files', { files: ['a.ts'] }, 0, { dirPath: 'src' }),
+    toolResultEntry('list_files', { files: ['a.ts'] }, 0, { dirPath: 'src' }).replace(/\x1b\[[0-9;]*m/g, ''),
     '✔ list_files [OK] · a.ts',
   );
   // Failures keep full diagnostics, never collapsed to a range.
@@ -100,4 +100,22 @@ test('tool failures retain diagnostic output', () => {
   assert.match(model.viewport.entries[0].text, /✖ run_command/);
   assert.match(model.viewport.entries[0].text, /TS2307 missing module/);
   assert.match(model.viewport.entries[0].text, /compiler output/);
+});
+
+test('tool result headings are toned by status (OK=green, FAIL=red, DENIED=yellow)', () => {
+  const ok = toolResultEntry('run_command', { success: true, command: 'npm run build', exitCode: 0 }, 5, { command: 'npm run build' });
+  assert.ok(ok.includes('\x1b['), 'OK result heading must be painted green');
+  const failed = toolResultEntry('run_command', { success: false, error: 'boom', exitCode: 1 }, 5, { command: 'npm run build' });
+  assert.ok(failed.includes('\x1b['), 'FAIL result heading must be painted red');
+  assert.ok(failed.includes('✖ run_command [FAIL]'));
+});
+
+test('background tool call heading is muted gray and background result keeps status tone', () => {
+  const bgCall = toolCallEntry('run_command', { command: 'npm run build', WaitMsBeforeAsync: 5000 });
+  assert.ok(bgCall.includes('\x1b['), 'background call heading must be painted muted');
+  const bgOk = toolResultEntry('run_command', { isBackgroundTask: true, success: true, command: 'npm run build', exitCode: 0 }, 5, { command: 'npm run build', WaitMsBeforeAsync: 5000 });
+  assert.ok(bgOk.includes('✔ run_command [OK]'));
+  const bgFail = toolResultEntry('run_command', { isBackgroundTask: true, success: false, error: 'boom', exitCode: 1 }, 5, { command: 'npm run build', WaitMsBeforeAsync: 5000 });
+  assert.ok(bgFail.includes('✖ run_command [FAIL]'));
+  assert.ok(bgFail.includes('boom'));
 });

@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { Program } from '../core/program.js';
@@ -47,6 +47,8 @@ test('decoder handles fragmented keys and paste without submitting pasted newlin
   assert.equal(paste.key, 'paste'); assert.equal(paste.text, 'first\nsecond');
   assert.equal(decoder.feed('\x18')[0].key, 'ctrl+x');
   assert.equal(decoder.feed('\x00')[0].key, 'ctrl+space');
+  assert.equal(decoder.feed('\x1b[5~')[0].key, 'up');
+  assert.equal(decoder.feed('\x1b[6~')[0].key, 'down');
 });
 
 test('external editor reads changes, restores terminal on child failure and removes temporary file', async () => {

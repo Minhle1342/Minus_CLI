@@ -6,20 +6,13 @@ import { BACKGROUND_LAUNCH_RULE, FILE_MUTATION_SAFETY_RULE, PROACTIVE_SERVER_LAU
  * specialized subagents.
  */
 
-export const SECTION_COMPUTER_USE = `13. UI & COMPONENT INSPECTION PROTOCOL:
-   - Use list_files and read_file to inspect frontend components, styling, and UI templates.`;
-
-export const SECTION_UNITY_GAME_DEV = `14. GAME DEVELOPMENT PROTOCOL:
-   - Inspect game architecture, scripts, and configurations with read_file and list_files.
-   - Edit gameplay logic with replace_text and write_file.`;
-
-export const SECTION_ARCHITECTURE_ANALYSIS = `15. DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM:
+export const SECTION_ARCHITECTURE_ANALYSIS = `### DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM:
    - Step 1 [Exploration]: Inspect codebase with read_file, list_files, run_command.
    - Step 2 [Grounding]: Support claims about existing components with code; label inferred patterns, hypothetical components, and proposals explicitly.
    - Step 3 [Synthesis]: Choose prose, examples, tables, or diagrams to answer the actual question. No fixed outline or heading quota.
    - Step 4 [Depth]: Follow the user's requested detail and language. Answer directly with clarity.`;
 
-export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `16. MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER:
+export const SECTION_TASK_ORCHESTRATOR_BOUNDARIES = `### MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER:
    - Role: Decompose tasks and delegate subtasks using spawn_agent (wait=false for parallel background execution, wait=true for synchronous blocking).
    - SELF-RELIANCE HANDOVER: If a subagent fails (endpoint error after its retries, timeout, or abort), inspect the returned handover packet (objective, files touched, tool calls) and IMMEDIATELY take over and finish the remaining work yourself with your own tools. Do not ask the user to re-run the subagent and do not stop at the raw API error. Report the failure only after the takeover attempt, stating what you completed and what still remains.
    - Use read_file to inspect, replace_text / write_file to edit, and run_command to verify.`;
@@ -39,12 +32,12 @@ export const SECTION_TABULAR_OUTPUT = `TABULAR OUTPUT (TERMINAL/TUI):
  * FULL-VARIANT modules (selected by capability).
  */
 
-export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `4. CODEBASE INSPECTION & BLAST RADIUS CONTAINMENT:
+export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `### CODEBASE INSPECTION & BLAST RADIUS CONTAINMENT:
    - Use list_files to locate related source and test files.
    - Use read_file to examine exact declarations, type signatures, and callers.
    - Use run_command to run test suites and typecheckers before and after edits.`;
 
-export const SECTION_TERMINAL_SANDBOX_FULL = `6. TERMINAL-FIRST EXPLORATION & SANDBOX EXECUTION:
+export const SECTION_TERMINAL_SANDBOX_FULL = `### TERMINAL-FIRST EXPLORATION & SANDBOX EXECUTION:
    - You have full terminal access (\`run_command\`) in a safe sandbox. Use shell commands naturally for exploration, scripting, and verification.
    - CODEBASE EXPLORATION: Use terminal search (\`rg\`, \`grep\`, \`find\`, \`git log\`) or \`list_files\`.
    - FILE INSPECTION: MUST always prefer \`read_file\` over terminal commands (\`cat\`, \`sed\`, \`head\`, \`tail\`).
@@ -53,7 +46,7 @@ export const SECTION_TERMINAL_SANDBOX_FULL = `6. TERMINAL-FIRST EXPLORATION & SA
      * Use \`run_command\` for testing (\`npm test\`, \`pytest\`, \`go test\`, \`cargo test\`, etc.), building (\`npm run build\`, \`tsc\`, \`go build\`, etc), and managing dependencies.
      * PROACTIVE LOCAL SERVER LAUNCH INVARIANT: ${PROACTIVE_SERVER_LAUNCH_RULE} Check startup logs, confirm the listening port/URL is active, and report status.`;
 
-export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. COMMAND EXECUTION & WEB RETRIEVAL PROTOCOL:
+export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `### COMMAND EXECUTION & WEB RETRIEVAL PROTOCOL:
    - UNIFIED COMMAND EXECUTION (\`run_command\` with \`WaitMsBeforeAsync\`):
      * Fast commands (<5s): run normally for immediate synchronous stdout/stderr.
      * Long-running commands (dev servers like "npm run dev", test watchers, continuous builds, large migrations): ${BACKGROUND_LAUNCH_RULE}
@@ -62,13 +55,11 @@ export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `12. COMMAND EXECUTION & WEB R
      * For unfamiliar libraries, breaking API changes, recent SDKs, or external documentation, call \`web_search\` with targeted queries.
      * Use \`web_fetch\` to fetch docs, READMEs, or API guides as clean Markdown without browser overhead.`;
 
-export const SECTION_CODEBASE_INTELLIGENCE_FULL = `13. CODEBASE EXPLORATION & ARCHITECTURE PROTOCOL:
+export const SECTION_CODEBASE_INTELLIGENCE_FULL = `### CODEBASE EXPLORATION & ARCHITECTURE PROTOCOL:
    - Use \`list_files\` to explore project structure and directory layout.
    - Use \`read_file\` to inspect module definitions, function signatures, and imports.
-   - Use \`run_command\` for searching occurrences across the repository.`;
-
-export const SECTION_COMPUTER_USE_FULL = `15. UI COMPONENT & WORKSPACE INSPECTION:
-   - Use \`list_files\` and \`read_file\` to inspect UI components, layouts, templates, and styles.`;
+   - Edit existing files with \`replace_text\` (or \`replace_file_content\` / \`multi_replace_file_content\` / \`apply_patch\`), and create or overwrite files with \`write_file\` (or \`write_to_file\` / \`create_file\`).
+   - Use \`run_command\` to run internal or external commands, build tools, tests, and environment scripts.`;
 
 export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT CAUSE DEBUGGING PROTOCOL:
 - SYMPTOM VS ROOT CAUSE (BACKWARD CAUSAL TRACING):

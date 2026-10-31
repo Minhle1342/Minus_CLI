@@ -74,25 +74,28 @@ export const SECTION_PATCH_FORMAT_SPEC = resolvePatchFormatSpec();
  * TIER 1: DOMAIN MODULES (Progressive Disclosure)
  */
 
-export const SECTION_GIT_OPERATIONS = `8. GIT & TESTING RUNTIME OPERATIONS (INDUSTRY STANDARD):
+export const SECTION_GIT_OPERATIONS = `### GIT & TESTING RUNTIME OPERATIONS:
    - Use run_command for read-only Git inspection (git status, git diff, git log, git show) when relevant. Before editing code, inspect existing changes and preserve user work, including staged and untracked files.
    - Change Git state (stage, commit, create/switch branches, push, restore, revert, stash, reset) only when the user requests or approves that exact operation and scope; the run-time approval check must still accept the command. Editing code, passing tests, generated plan steps, or tool failures alone do not authorize it. Never overwrite or discard unrelated user changes.
    - Execute test suites (npm test, npx jest, pytest, cargo test, etc.) directly via run_command.
    - NEVER push to main/master unless explicitly requested by the user.`;
 
-export const SECTION_FRONTEND_UI = `9. FRONTEND & UI DESIGN STANDARD:
+export const SECTION_FRONTEND_UI = `### FRONTEND & UI DESIGN STANDARD:
    - Inspect existing design tokens, CSS variables, and spacing before adding components.
    - Respect component libraries (Radix, Tailwind, Shadcn/UI), state hooks, and accessibility (aria-*). Verify UI changes with the project's type/build check when one exists (e.g. \`tsc --noEmit\`).`;
 
-export const SECTION_ANTIGRAVITY_TOOLS = `10. COMMAND & WEB RETRIEVAL TOOLCHAIN:
+export const SECTION_ANTIGRAVITY_TOOLS = `### COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; ${PROACTIVE_SERVER_LAUNCH_RULE}
    - Web retrieval: Use web_search and web_fetch for third-party docs, APIs, and web inspection.`;
 
-export const SECTION_CODEBASE_INTELLIGENCE = `11. CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
-   - Use list_files to inspect directory layouts, search_text for regex/keyword code searches, and read_file to inspect exact implementation lines.
+export const SECTION_CODEBASE_INTELLIGENCE = `### CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
+   - Use list_files to inspect directory layouts, explore folder contents, or find files by name/glob (use path: "." for workspace root).
+   - Use search_text ONLY to search inside file contents; never pass "." or a file path to search_text to list files.
+   - Inspect exact implementation lines with read_file.
+   - Edit existing files with replace_text (or replace_file_content/multi_replace_file_content/apply_patch), and create or overwrite files with write_file (or write_to_file/create_file).
    - Use run_command for build, git, and test verification.`;
 
-export const SECTION_TOOL_PLAYBOOKS = `12. TOOL SYNERGY PLAYBOOKS:
+export const SECTION_TOOL_PLAYBOOKS = `### TOOL SYNERGY PLAYBOOKS:
    - Dynamic per-step tool chain: explore with list_files and search_text, inspect with read_file, edit with replace_text or write_file, verify with run_command.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
@@ -111,7 +114,7 @@ export function resolveVerifyPlaybookPrompt(risk?: string): string {
     return `[TOOL PLAYBOOK V - VERIFY (R1 INSPECTION)]\nread_file -> verify state.`;
   }
   if (risk === 'R2') {
-    return `[TOOL PLAYBOOK V - VERIFY (R2 TEST & DIFF)]\nrun_command(npm test) -> run_command("git diff").`;
+    return `[TOOL PLAYBOOK V - VERIFY (R2 TEST & DIFF)]\nRun the tests covering the changed code, then run_command("git diff").`;
   }
   return TOOL_PLAYBOOK_PROMPTS.verifyDiff;
 }

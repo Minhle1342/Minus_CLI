@@ -79,7 +79,9 @@ const DEV_SERVER_PATTERNS = [
 
 /** Watcher/follow có output liên tục, không bao giờ thoát — coi như long-lived. */
 const WATCH_PATTERNS = [
-  /\s--watch(?:All)?\b/i,
+  // Negative lookahead so that --watch=false / --watchAll=false (one-shot CI
+  // runs) are not treated as persistent watchers; allow the -flag form (e.g. --watch-path).
+  /\s--watch(?:All)?(?![\w=])/i,
   /\b(?:tail|docker\s+logs)\b[^\n]*\s(?:-f|--follow)\b/i,
 ];
 

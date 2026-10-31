@@ -7,7 +7,7 @@ import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { validateSchemaValue } from '../tools/schema-validator.js';
 import { Workspace } from '../workspace/workspace.js';
 import { Session } from '../session/session.js';
-import { evaluateSubmission, SubmissionReadiness } from './submission-readiness.js';
+import { evaluateSubmission, SubmissionReadiness, buildReadySubmissionDirective } from './submission-readiness.js';
 import { computeRequestValueDigest } from '../session/session-invariants.js';
 import { hasCompletedTurnPressure, hasMaterialCompletedTurnSavings, resolveCompletedTurnCompactionPolicy, resolveEffectiveMinSavingsRatio, hasTurnCountPressure, hasObservationVolumePressure } from './completed-turn-compaction-policy.js';
 import { AgentLoopOptions } from './types.js';
@@ -26,7 +26,7 @@ import { GoalManager } from './goal-manager.js';
 import { AgentHookContext, AgentHookRegistry } from './agent-hooks.js';
 import { AgentInbox, AgentInboxItem, AgentInputSource, isBackgroundTaskNotice } from './agent-inbox.js';
 import { PromptAssembler } from '../llm/prompt-assembler.js';
-import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, buildPhaseToolAuthorityDirective, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR } from '../llm/prompts.js';
+import { DEFAULT_PROMPT_SECTIONS, detectPromptContext, resolveSubagentPromptSections, resolvePhaseDynamicGuidance, buildPhaseToolAuthorityDirective, SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR, SECTION_PRE_SUBMIT_EVIDENCE_AUDIT } from '../llm/prompts.js';
 import { AgentRegistry, AgentStatus } from './agent-registry.js';
 import { SubagentManager, SubagentOptions, SCOUT_TOOL_NAMES } from './subagent-manager.js';
 import type { SubagentHandle } from './subagent-manager.js';
@@ -336,6 +336,8 @@ export class AgentLoop {
   private targetFilesModifiedInTurn = new Set<string>();
   /** Bật khi một background-task notice được claim — manage_task hiện schema phần còn lại của turn. */
   private backgroundTaskToolsUnlocked = false;
+  /** Notice mà drainInbox đã claim trước khi run() reset gate — run() tiêu thụ rồi xoá. */
+  private pendingBackgroundNoticeUnlock = false;
   private cachedBackgroundTaskToolsUnlocked: boolean | undefined;
   /** Set khi subagent fail — loop ép thêm một bước takeover cho tới khi tool chạm file của handover. */
   private subagentTakeoverPending: { files: string[] } | null = null;
@@ -1209,7 +1211,8 @@ export class AgentLoop {
     this.cognitiveHarness.reset();
     this.cleanupEphemeralScratchFiles();
     this.targetFilesModifiedInTurn.clear();
-    this.backgroundTaskToolsUnlocked = false;
+    this.backgroundTaskToolsUnlocked = this.pendingBackgroundNoticeUnlock;
+    this.pendingBackgroundNoticeUnlock = false;
     this.cachedBackgroundTaskToolsUnlocked = undefined;
     this.subagentTakeoverPending = null;
     this.circuitBreakerTrippedTools.clear();
@@ -2357,7 +2360,7 @@ export class AgentLoop {
         let completionDirective: string | undefined;
         if (readySubmission) {
           const { summary: _draftAnswer, ...observedMetadata } = readySubmission;
-          completionDirective = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
+          completionDirective = buildReadySubmissionDirective(observedMetadata);
         } else if (completionVerificationSatisfied) {
           completionDirective = '[VERIFICATION REQUIREMENTS SATISFIED]: The current verification policy accepts the observed evidence or task-specific exemption. This does not establish that all unit tests ran or passed. Finish any remaining user-authorized work, then answer directly with only established findings and the actual verification performed.';
         } else if (isReadOnlyAnswerTask && !hasSubmittedSolution) {
@@ -3363,6 +3366,7 @@ export class AgentLoop {
           let parallelTotalTools = 0;
           let parallelDurationMs = 0;
           let parallelSavedMs = 0;
+          let cumulativeBatchOutputBytes = 0;
 
           // Thực thi từng Tool Call thông qua ToolRunner (5-stage pipeline)
           for (const [callIndex, item] of orderedExecutionCalls.entries()) {
@@ -4594,8 +4598,12 @@ export class AgentLoop {
             const sanitizedPayloadToRecord = await sanitizeToolResultPayload(
               toolName,
               payloadToRecord,
-              { workspaceRoot: this._workspace?.rootDir },
+              {
+                workspaceRoot: this._workspace?.rootDir,
+                ...(cumulativeBatchOutputBytes > 48 * 1024 ? { maxBytes: 8 * 1024 } : {}),
+              },
             );
+            cumulativeBatchOutputBytes += Buffer.byteLength(JSON.stringify(sanitizedPayloadToRecord || ''), 'utf8');
             session.addToolResultWithId(toolName, sanitizedPayloadToRecord, toolCallId);
             if (toolName === 'run_command' && isVerificationCommand(commandForAttribution)
               && mutationBeforeCommand && !mutationBeforeCommand.hasMutations
@@ -5222,7 +5230,7 @@ export class AgentLoop {
             const actionMandate = requiresReadOnlySubmission && !isSubagent
               ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.'
               : requiresReadOnlySubmission
-                ? '[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.'
+                ? `[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.\n\n${SECTION_PRE_SUBMIT_EVIDENCE_AUDIT}`
                 : buildCompletionRecoveryPrompt({
                   reason: finalAnswerDecision.reason,
                   recovery: finalAnswerDecision.recovery,
@@ -5809,6 +5817,8 @@ export class AgentLoop {
         try {
           session.addUserMessage(item.text, item.source, item.id);
           session.append('input/claimed', { inputId: item.id });
+          // run() resets the gate at turn start, so hand the unlock through it.
+          this.pendingBackgroundNoticeUnlock = isBackgroundTaskNotice(item);
           await this.persistSession(session);
           const answer = await this.run(session, options);
           this.discardCancelledUserMessage(session, item.id);

@@ -7,6 +7,7 @@ import type { ClassificationDecision } from '../control/classification-types.js'
 import { collectCompletionObservations, getTurnCompletionState } from './completion-observations.js';
 import { classifyToolEvidence, CompletionEvidenceGate, extractCommandString, isUserExplicitlyExemptingTests } from './completion-evidence.js';
 import { SolutionGroundingAuditor, type SubmitSolutionPayload } from './solution-grounding-auditor.js';
+import { SECTION_PRE_SUBMIT_EVIDENCE_AUDIT } from '../llm/sections/completion.js';
 
 /** Fill only omitted metadata, never rewrite the answer or an explicit claim. */
 export function withObservedSubmissionMetadata<T extends SubmitSolutionPayload>(payload: T, session?: Session, turn?: number): T & SubmitSolutionPayload {
@@ -118,4 +119,17 @@ export class SubmissionReadiness {
       || this.ticket.fingerprint !== submissionFingerprint(snapshot)) this.clear();
     return this.ticket?.payload;
   }
+}
+
+/**
+ * Directive emitted when the harness considers the answer ready to submit.
+ *
+ * The pre-submit evidence audit rides along only on this path (and on read-only
+ * submit), so the claim/evidence mapping is paid for at submission time rather
+ * than on every step. The runtime CompletionEvidenceGate is unchanged; this
+ * prompt reduces the chance of producing the rejected attempt at all.
+ */
+export function buildReadySubmissionDirective(observedMetadata: Record<string, unknown>): string {
+  const base = `[READY TO SUBMIT]: The previous answer passed local completion checks. Call submit_solution alone with that answer in summary. Observed defaults (omit these fields to use them): ${JSON.stringify(observedMetadata)}. Final audit still applies; do not add unsupported claims.`;
+  return `${base}\n\n${SECTION_PRE_SUBMIT_EVIDENCE_AUDIT}`;
 }

@@ -116,21 +116,15 @@ export class AgentInbox {
     if (!queue || queue.length === 0) return undefined;
 
     // Background-task notices never steer a step: the turn-end gate claims them.
-    const isClaimable = (item: AgentInboxItem) => item.isSteering === true && !isBackgroundTaskNotice(item);
+    // Plain queued messages do steer; onlyExplicitSteering restricts to marked ones.
+    const isClaimable = (item: AgentInboxItem) =>
+      !isBackgroundTaskNotice(item) && (!onlyExplicitSteering || item.isSteering === true);
 
-    if (onlyExplicitSteering) {
-      const idx = queue.findIndex(isClaimable);
-      if (idx === -1) return undefined;
-      const [item] = queue.splice(idx, 1);
-      if (queue.length === 0) this.queues.delete(sessionId);
-      return item;
-    }
-
-    const claimableIdx = queue.findIndex(isClaimable);
-    if (claimableIdx === 0) return this.claim(sessionId);
-    if (claimableIdx === -1) return undefined;
+    const idx = queue.findIndex(isClaimable);
+    if (idx === -1) return undefined;
+    if (idx === 0) return this.claim(sessionId);
     // Đầu hàng đợi là notice nền → claim item claimable phía sau, giữ notice tại chỗ.
-    const [item] = queue.splice(claimableIdx, 1);
+    const [item] = queue.splice(idx, 1);
     if (queue.length === 0) this.queues.delete(sessionId);
     return item;
   }

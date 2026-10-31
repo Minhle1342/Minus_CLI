@@ -95,6 +95,49 @@ test('Tool Output Sanitizer: spills giant array and trims array items', async ()
   }
 });
 
+test('Tool Output Sanitizer: sanitizes markdown and results fields', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-test-md-'));
+  try {
+    const largeMd = '# Title\n' + 'Content line\n'.repeat(300);
+    const webResult = { markdown: largeMd, title: 'Web Title' };
+    const sanitizedMd = await sanitizeToolResultPayload('web_fetch', webResult, {
+      maxBytes: 1024,
+      workspaceRoot: tempDir,
+    });
+    assert.equal(sanitizedMd._was_truncated, true);
+
+    const largeResults = Array.from({ length: 80 }, (_, i) => ({ title: `Res ${i}`, snippet: `Snippet ${i}` }));
+    const searchResult = { results: largeResults };
+    const sanitizedSearch = await sanitizeToolResultPayload('web_search', searchResult, {
+      maxBytes: 500,
+      workspaceRoot: tempDir,
+    });
+    assert.equal(sanitizedSearch._was_truncated, true);
+    assert.ok(sanitizedSearch.results.length < 80);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('Tool Output Sanitizer: tighter maxBytes applies when batch output exceeds threshold', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-test-batch-'));
+  try {
+    const mediumText = 'Line of content\n'.repeat(100); // ~1.6KB
+    const payload = { content: mediumText };
+
+    // With default budget (64KB), 1.6KB is NOT truncated
+    const normal = await sanitizeToolResultPayload('read_file', payload, { workspaceRoot: tempDir });
+    assert.equal(normal._was_truncated, undefined);
+
+    // With tightened budget (1KB), 1.6KB IS truncated
+    const tightened = await sanitizeToolResultPayload('read_file', payload, { maxBytes: 1024, workspaceRoot: tempDir });
+    assert.equal(tightened._was_truncated, true);
+    assert.ok(tightened._spill_log_path);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test('Adapter Tool Ordering: guarantees deterministic tool ordering regardless of insertion order', () => {
   const toolsOrderA = [
     { name: 'write_file', description: 'Write file' },

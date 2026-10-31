@@ -69,6 +69,7 @@ export async function runGrillFlow(
     }).filter((opt) => opt.label.length > 0);
 
     if (directOptions.length > 0) {
+      if (!directOptions.some((o) => o.id === 'custom' || o.source === 'user')) { directOptions.push({ id: 'custom', label: 'Tự nhập phương án khác...', detail: 'Gõ câu trả lời riêng trực tiếp trong modal', source: 'user' }); }
       const pickPromise = ui.grillChoose(question, directOptions, sessionId);
       const onAbort = () => ui.dismissGrill();
       signal?.addEventListener('abort', onAbort, { once: true });

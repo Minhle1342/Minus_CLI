@@ -57,14 +57,14 @@ async function checkRipgrepAvailable(): Promise<boolean> {
 export const searchTextTool: ToolDefinition = {
   name: "search_text",
   description:
-    "Search file contents with Regular Expressions (Regex) or plain text via a Hybrid engine (native Ripgrep + TypeScript fallback). Automatically skips junk directories (node_modules, .git, dist) and caps GLOBAL results to protect context tokens.",
+    "Search file contents (regex or plain text) across the workspace using a fast hybrid engine. Use this ONLY to search INSIDE files for symbols, variables, functions, or text snippets. NEVER use this tool to list directory contents or find file names (do NOT pass \".\" or a filename as query); use list_files instead.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       query: {
         type: Type.STRING,
         description:
-          'Regular Expression (Regex) or plain text to search for. Examples: "function\\s+\\w+", "TODO:", "export\\s+class".',
+          'Regular Expression (Regex) or plain text to find INSIDE file bodies (e.g. \"function\\s+\\w+\", \"TODO:\", \"export\\s+class\"). MUST NOT be \".\" or a file path; to list directory contents or find files, use list_files.',
       },
       path: {
         type: Type.STRING,

@@ -27,6 +27,14 @@ test('hasPendingKind finds unclaimed background notices only', () => {
   assert.equal(inbox.hasPendingKind('other-session', 'background-task'), false);
 });
 
+test('claimSteerMessage claims plain queued messages, but only explicit steering when asked', () => {
+  const inbox = new AgentInbox();
+  const plain = inbox.enqueue('session', 'queued follow-up', 'human');
+  assert.equal(inbox.claimSteerMessage('session', true), undefined);
+  assert.equal(inbox.claimSteerMessage('session')?.id, plain.id);
+  assert.equal(inbox.pending('session'), 0);
+});
+
 test('claimSteerMessage skips background notices; the gate dequeues them', () => {
   const inbox = new AgentInbox();
   const notice = inbox.enqueue('session', 'notice', 'system', { isSteering: true, kind: 'background-task-completed' });

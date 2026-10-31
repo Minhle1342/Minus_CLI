@@ -10,3 +10,4 @@ export * from './sections/core.js';
 export * from './sections/tools.js';
 export * from './sections/phases.js';
 export * from './sections/domains.js';
+export * from './sections/completion.js';

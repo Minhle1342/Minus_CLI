@@ -66,6 +66,8 @@ interface CachedPage {
   contentType: string;
   statusCode: number;
   fetchedAt: number;
+  etag?: string;
+  lastModified?: string;
 }
 
 const memoryCache = new Map<string, CachedPage>();
@@ -327,6 +329,9 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
             headers: {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CodingAgent-DeepInvestigator/2.0',
               Accept: githubAuth ? 'application/vnd.github.raw+json' : 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.5',
+              'Accept-Encoding': 'gzip, deflate, br',
+              ...(cached?.etag && !bypassCache ? { 'If-None-Match': cached.etag } : {}),
+              ...(cached?.lastModified && !bypassCache ? { 'If-Modified-Since': cached.lastModified } : {}),
               ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
             signal: controller.signal,
@@ -337,7 +342,9 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
             return { error: 'Authenticated GitHub redirects are not followed.', errorCode: 'GITHUB_REDIRECT_BLOCKED' };
           }
 
-          if (!response.ok) {
+          if (response.status === 304 && cached) {
+            cached.fetchedAt = now;
+          } else if (!response.ok) {
             const rateLimited = response.status === 429 || response.status === 503;
             return {
               error: githubAuth ? `GitHub API returned HTTP ${response.status}.` : `HTTP request failed with status ${response.status} ${response.statusText}`,
@@ -346,16 +353,23 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
               url: canonicalUrl,
               ...(rateLimited ? { retryable: true, hint: 'Rate-limited by the remote server; retry after a short delay with fewer parallel fetches.' } : {}),
             };
-          }
-
-          const contentType = response.headers.get('content-type') || 'text/html';
-          if (githubAuth && Number(response.headers.get('content-length')) > 1_000_000) {
-            return { error: 'GitHub response exceeds the 1 MB authenticated fetch limit.', errorCode: 'GITHUB_RESPONSE_TOO_LARGE' };
-          }
-          const rawBody = githubAuth ? await readBoundedBody(response, 1_000_000) : await response.text();
-          if (rawBody === undefined) {
-            return { error: 'GitHub response exceeds the 1 MB authenticated fetch limit.', errorCode: 'GITHUB_RESPONSE_TOO_LARGE' };
-          }
+          } else {
+            const contentType = response.headers.get('content-type') || 'text/html';
+            const maxFetchBytes = githubAuth ? 1_000_000 : 5_000_000;
+            const contentLength = Number(response.headers.get('content-length'));
+            if (contentLength > maxFetchBytes) {
+              return {
+                error: `${githubAuth ? 'GitHub response' : 'Response'} exceeds the ${githubAuth ? '1 MB' : '5 MB'} fetch limit.`,
+                errorCode: githubAuth ? 'GITHUB_RESPONSE_TOO_LARGE' : 'RESPONSE_TOO_LARGE',
+              };
+            }
+            const rawBody = await readBoundedBody(response, maxFetchBytes);
+            if (rawBody === undefined) {
+              return {
+                error: `${githubAuth ? 'GitHub response' : 'Response'} exceeds the ${githubAuth ? '1 MB' : '5 MB'} fetch limit.`,
+                errorCode: githubAuth ? 'GITHUB_RESPONSE_TOO_LARGE' : 'RESPONSE_TOO_LARGE',
+              };
+            }
 
           let markdownResult: { markdown: string; title: string };
           let codeBlocks: string[] = [];
@@ -386,7 +400,16 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
             statusCode: response.status,
             fetchedAt: now,
           };
-          if (!githubAuth) memoryCache.set(canonicalUrl, cached);
+            if (response.headers.get('etag')) cached.etag = response.headers.get('etag')!;
+            if (response.headers.get('last-modified')) cached.lastModified = response.headers.get('last-modified')!;
+            if (!githubAuth) {
+              if (memoryCache.size >= 50) {
+                const oldestKey = memoryCache.keys().next().value;
+                if (oldestKey) memoryCache.delete(oldestKey);
+              }
+              memoryCache.set(canonicalUrl, cached);
+            }
+          }
         } catch (fetchErr: any) {
           const timedOut = fetchErr?.name === 'AbortError' || controller.signal.aborted;
           return {

@@ -341,9 +341,9 @@ test('sessionHistoryToTranscript: trims heavy tool outputs and respects maxEntri
     { role: 'user', parts: [{ functionResponse: { name: 'run_command', id: 'c1', response: { output: hugeOutput } } }] },
     { role: 'model', parts: [{ text: 'Finished heavy run' }] },
   ]);
-  const toolResult = entries.find((e) => e.kind === 'tool' && e.text.startsWith('✔ run_command'));
+  const toolResult = entries.find((e) => e.kind === 'tool' && e.text.replace(/\x1b\[[0-9;]*m/g, '').startsWith('✔ run_command'));
   assert.ok(toolResult, 'Tool result entry exists');
-  assert.ok(toolResult.text.length < 5000, 'Heavy output was trimmed');
+  assert.ok(toolResult.text.replace(/\x1b\[[0-9;]*m/g, '').length < 5000, 'Heavy output was trimmed');
   assert.match(toolResult.text, /output omitted from history/);
 });
 

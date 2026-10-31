@@ -55,7 +55,7 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
 export type Mode = 'PLAN' | 'IMPLEMENT';
 export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker' | 'subagents';
 export interface GrillOption { id: string; label: string; detail?: string; source: 'llm' | 'heuristic' | 'user' }
-export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
+export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string; customInput?: { active: boolean; value: string; cursor: number } }
 /** Một entry trong modal chọn model (/model): mirror AVAILABLE_MODELS của cli-ui. */
 export interface ModelPickerOption { id: string; name: string; desc?: string; provider?: string; recommended?: boolean; /** true = model đang active của tab */ current?: boolean }
 /** Modal chọn model đè lên viewport — cùng ngôn ngữ visual/key với grill. */

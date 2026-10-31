@@ -40,6 +40,7 @@ export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION)]:
 - Goal: Verify the changes with the check appropriate to their risk, plus diff review.
+- Scope: run the tests/scenarios covering the code just changed (pick by changed files / blast radius); skip unrelated suites. Widen to the full suite only when the risk or the user requires it.
 - Verification Tools:
   * Use \`run_command\` to run the applicable build or test check (e.g. \`npm run build\`, \`tsc\`, \`npm test\`, \`cargo test\`, \`pytest\`).
   * Use \`run_command "git diff"\` to inspect working tree changes.

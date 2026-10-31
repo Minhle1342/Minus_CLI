@@ -19,16 +19,16 @@ function fakeTaskManager() {
   } as any;
 }
 
-test('a finite command without WaitMsBeforeAsync auto-promotes as awaited', async () => {
+test('a finite command that outlives the soft threshold runs to completion instead of being restarted', async () => {
   process.env.MINUS_SOFT_TIMEOUT_MS = '1000';
   const tm = fakeTaskManager();
   const result = await createRunCommandTool(undefined, tm).execute(
-    { command: 'node -e "setTimeout(() => process.exit(0), 3000)"' }, new Workspace(),
+    { command: 'node -e "setTimeout(() => process.exit(0), 1500)"' }, new Workspace(),
   );
   delete process.env.MINUS_SOFT_TIMEOUT_MS;
-  assert.equal(result.isBackgroundTask, true);
-  assert.equal(result.autoPromoted, true);
-  assert.equal(tm.started[0].options.autoPromoted, true);
+  assert.equal(result.isBackgroundTask, undefined);
+  assert.equal(result.success, true);
+  assert.equal(tm.started.length, 0, 'the running command must never be killed and spawned again');
 });
 
 test('a command that finishes before the threshold stays synchronous', async () => {
@@ -66,6 +66,24 @@ test('watcher/follow commands are long-lived so they never hang the turn', () =>
     assert.equal(isLongRunningServerCommand(cmd), true, cmd);
   }
   assert.equal(isLongRunningServerCommand('git add -f src/index.ts'), false, '-f for force must not read as follow');
+  assert.equal(isLongRunningServerCommand('npx jest --watchAll=false'), false, '--watchAll=false is a one-shot CI run');
+  assert.equal(isLongRunningServerCommand('vitest run --watch=false'), false, '--watch=false is a one-shot CI run');
+  assert.equal(isLongRunningServerCommand('tsc --watch-path src'), true);
+});
+
+test('timeout_ms bounds the sync path regardless of the soft threshold', async () => {
+  const tm = fakeTaskManager();
+  const seen: number[] = [];
+  const sandbox = {
+    getStatus: () => ({ isIsolated: false, fallbackToLocal: true }),
+    exec: async (_c: string, o: any) => {
+      seen.push(o.timeoutMs);
+      return { stdout: '', stderr: '', exitCode: 0, durationMs: 1, sandboxType: 'local', success: true };
+    },
+  } as any;
+  await createRunCommandTool(sandbox, tm).execute({ command: 'git status', timeout_ms: 2000 }, new Workspace());
+  await createRunCommandTool(sandbox, tm).execute({ command: 'git status', timeout_ms: 0 }, new Workspace());
+  assert.deepEqual(seen, [2000, 0]);
 });
 
 test('auto-promotion does not cross an isolated sandbox boundary', async () => {
@@ -81,10 +99,25 @@ test('auto-promotion does not cross an isolated sandbox boundary', async () => {
 
 test('subagent contexts never auto-promote', () => {
   const tm = fakeTaskManager();
-  assert.equal(resolveAutoBackgroundWait(undefined, 120000, tm, { isSubagent: true }), undefined);
+  assert.equal(resolveAutoBackgroundWait(undefined, tm, { isSubagent: true }), undefined);
+  assert.equal(resolveAutoBackgroundWait(undefined, tm, { longLived: true, isSubagent: true }), undefined);
 });
 
-test('a non-isolated sandbox manager still auto-promotes on soft timeout', async () => {
+test('a timed-out sync command is reported, not restarted in the background', async () => {
+  const tm = fakeTaskManager();
+  const sandbox = {
+    getStatus: () => ({ isIsolated: false, fallbackToLocal: true }),
+    exec: async (_c: string, o: any) => ({ stdout: '', stderr: '', exitCode: 1, durationMs: o.timeoutMs, timedOut: true, sandboxType: 'local', success: false }),
+  } as any;
+  const result = await createRunCommandTool(sandbox, tm).execute(
+    { command: 'git status' }, new Workspace(),
+  );
+  assert.equal(result.isBackgroundTask, undefined);
+  assert.equal(tm.started.length, 0);
+  assert.equal(result.timedOut, true);
+});
+
+test('a non-isolated sandbox never restarts the command on soft timeout', async () => {
   process.env.MINUS_SOFT_TIMEOUT_MS = '1000';
   process.env.MINUS_ALLOW_HOST_FALLBACK = 'true';
   const tm = fakeTaskManager();
@@ -93,13 +126,12 @@ test('a non-isolated sandbox manager still auto-promotes on soft timeout', async
     exec: async (_c: string, o: any) => ({ stdout: '', stderr: '', exitCode: 1, durationMs: o.timeoutMs, timedOut: true, sandboxType: 'local', success: false }),
   } as any;
   const result = await createRunCommandTool(sandbox, tm).execute(
-    { command: 'node -e "setTimeout(() => process.exit(0), 3000)"' }, new Workspace(),
+    { command: 'git status' }, new Workspace(),
   );
   delete process.env.MINUS_SOFT_TIMEOUT_MS;
   delete process.env.MINUS_ALLOW_HOST_FALLBACK;
-  assert.equal(result.isBackgroundTask, true);
-  assert.equal(result.autoPromoted, true);
-  assert.equal(tm.started.length, 1);
+  assert.equal(result.isBackgroundTask, undefined);
+  assert.equal(tm.started.length, 0);
 });
 
 test('network git is never auto-promoted, even over the threshold', async () => {

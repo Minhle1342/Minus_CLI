@@ -131,7 +131,7 @@ export async function sanitizeToolResultPayload<T extends Record<string, any>>(
   const cloned: Record<string, any> = { ...result };
 
   // Danh sách các trường văn bản thường chứa dữ liệu lớn từ file reads, grep, git diff, command output
-  const candidateTextFields = ['content', 'text', 'output', 'stdout', 'stderr', 'diff', 'data'];
+  const candidateTextFields = ['content', 'text', 'output', 'stdout', 'stderr', 'diff', 'data', 'markdown'];
 
   for (const field of candidateTextFields) {
     if (typeof cloned[field] === 'string' && cloned[field].length > 0) {
@@ -149,7 +149,7 @@ export async function sanitizeToolResultPayload<T extends Record<string, any>>(
   }
 
   // Kiểm tra các trường mảng lớn (như files: string[], matches: any[])
-  const candidateArrayFields = ['files', 'matches', 'entries', 'items'];
+  const candidateArrayFields = ['files', 'matches', 'entries', 'items', 'results'];
   for (const field of candidateArrayFields) {
     if (Array.isArray(cloned[field]) && cloned[field].length > 60) {
       const serializedArr = JSON.stringify(cloned[field]);

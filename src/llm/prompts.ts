@@ -20,15 +20,12 @@ import {
   SECTION_ANTIGRAVITY_TOOLS,
   SECTION_CODEBASE_INTELLIGENCE,
   SECTION_TOOL_PLAYBOOKS,
-  SECTION_COMPUTER_USE,
-  SECTION_UNITY_GAME_DEV,
   SECTION_ARCHITECTURE_ANALYSIS,
   SECTION_TASK_ORCHESTRATOR_BOUNDARIES,
   SECTION_SEMANTIC_BLAST_RADIUS_FULL,
   SECTION_TERMINAL_SANDBOX_FULL,
   SECTION_ANTIGRAVITY_TOOLCHAIN_FULL,
   SECTION_CODEBASE_INTELLIGENCE_FULL,
-  SECTION_COMPUTER_USE_FULL,
   SECTION_ERROR_DETECTIVE_PROTOCOL,
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
@@ -45,6 +42,7 @@ import {
   buildPhaseToolAuthorityDirective,
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
+  SECTION_PRE_SUBMIT_EVIDENCE_AUDIT,
   type MonorepoKind,
   clearPromptContextCache,
   needsFrontendGuidance,
@@ -64,15 +62,12 @@ export {
   SECTION_TOOL_PLAYBOOKS,
   GIT_WORKFLOW_PROMPTS,
   type GitWorkflowPromptId,
-  SECTION_COMPUTER_USE,
-  SECTION_UNITY_GAME_DEV,
   SECTION_ARCHITECTURE_ANALYSIS,
   SECTION_TASK_ORCHESTRATOR_BOUNDARIES,
   SECTION_SEMANTIC_BLAST_RADIUS_FULL,
   SECTION_TERMINAL_SANDBOX_FULL,
   SECTION_ANTIGRAVITY_TOOLCHAIN_FULL,
   SECTION_CODEBASE_INTELLIGENCE_FULL,
-  SECTION_COMPUTER_USE_FULL,
   SECTION_ERROR_DETECTIVE_PROTOCOL,
   DEFAULT_PROMPT_SECTIONS,
   detectPromptContext,
@@ -93,6 +88,7 @@ export {
   buildPhaseToolAuthorityDirective,
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
+  SECTION_PRE_SUBMIT_EVIDENCE_AUDIT,
 };
 
 /**
@@ -165,11 +161,6 @@ export function resolveSubagentPromptSections(options: SubagentPromptResolutionO
   if (isTerminalOrDevOps) {
     sections.push({ id: 'terminal-sandbox', content: SECTION_TERMINAL_SANDBOX_FULL, priority: 350 });
     sections.push({ id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLCHAIN_FULL, priority: 400 });
-  }
-
-  // 6. Chuyên gia GUI Desktop
-  if (tools.includes('computer')) {
-    sections.push({ id: 'computer-use', content: SECTION_COMPUTER_USE_FULL, priority: 500 });
   }
 
   return sections;

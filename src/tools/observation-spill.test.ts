@@ -20,7 +20,7 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       assert.strictEqual(result, shortOutput);
 
       // Verify no spill file was created
-      const logDir = path.join(tmpDir, '.minus', 'scratch', 'tool_outputs');
+      const logDir = path.join(tmpDir, '.minus', 'logs', 'tool_outputs');
       assert.strictEqual(fs.existsSync(logDir), false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -53,7 +53,7 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       assert.ok(result.includes('--- Tip: To inspect full output, run `grep` or `read_file` on the log file above ---'));
 
       // Verify file was written to disk
-      const expectedLog = path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', `${toolCallId}.log`);
+      const expectedLog = path.join(tmpDir, '.minus', 'logs', 'tool_outputs', `${toolCallId}.log`);
       assert.ok(fs.existsSync(expectedLog));
       const fileContent = fs.readFileSync(expectedLog, 'utf8');
       assert.strictEqual(fileContent, rawText);
@@ -79,7 +79,7 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       const preTruncated = `[STDOUT TRUNCATED: 11,287 characters spilled to .minus/logs/command_outputs/x.log]\n--- Output Preview ---\n${'z'.repeat(MAX_INLINE_TOOL_CHARS + 100)}`;
       const result = virtualizeToolOutput(preTruncated, 'run_command', 'call_double', tmpDir);
       assert.strictEqual(result, preTruncated);
-      assert.strictEqual(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs')), false);
+      assert.strictEqual(fs.existsSync(path.join(tmpDir, '.minus', 'logs', 'tool_outputs')), false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -109,7 +109,7 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       const result = virtualizeToolOutput(raw, 'run_command', 'call_manylines', tmpDir);
       assert.ok(result.includes('[STDOUT TRUNCATED:'));
       assert.ok(result.includes('ok 1'));
-      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_manylines.log')));
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'logs', 'tool_outputs', 'call_manylines.log')));
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -125,7 +125,7 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       const result = virtualizeToolOutput(content, 'read_file', 'call_read', tmpDir);
       assert.strictEqual(result, content, 'read_file phải giữ nguyên nội dung');
       assert.strictEqual(
-        fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs')),
+        fs.existsSync(path.join(tmpDir, '.minus', 'logs', 'tool_outputs')),
         false,
         'không được spill read_file trong ngân sách của tool',
       );
@@ -139,8 +139,8 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
     try {
       const huge = 'y'.repeat(200_000);
       const result = virtualizeToolOutput(huge, 'read_file', 'call_read_big', tmpDir);
-      assert.ok(result.includes('[STDOUT TRUNCATED:'));
-      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_read_big.log')));
+      assert.ok(result.includes('TRUNCATED:'));
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'logs', 'tool_outputs', 'call_read_big.log')));
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -154,7 +154,22 @@ describe('Satellite 1: Observation Virtualization / Spill-to-Disk', () => {
       const result = virtualizeToolOutput(stdout, 'run_command', 'call_cmd', tmpDir);
       assert.ok(result.includes('[STDOUT TRUNCATED:'), 'run_command phải còn bị spill như trước');
       assert.ok(result.length < stdout.length, 'preview phải ngắn hơn output gốc');
-      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'scratch', 'tool_outputs', 'call_cmd.log')));
+      assert.ok(fs.existsSync(path.join(tmpDir, '.minus', 'logs', 'tool_outputs', 'call_cmd.log')));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario 10: dynamic label reflects fieldName parameter', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-spill-field-'));
+    try {
+      const longText = 'a\n'.repeat(300);
+      const resultMd = virtualizeToolOutput(longText, 'web_fetch', 'call_wf', tmpDir, 'markdown');
+      assert.ok(resultMd.includes('[MARKDOWN TRUNCATED:'));
+
+      const hugeText = 'b\n'.repeat(900);
+      const resultContent = virtualizeToolOutput(hugeText, 'read_file', 'call_rf', tmpDir, 'content');
+      assert.ok(resultContent.includes('[CONTENT TRUNCATED:'));
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

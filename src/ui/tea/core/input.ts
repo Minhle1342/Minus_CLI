@@ -1,8 +1,8 @@
-﻿import type { KeyMsg } from '../types.js';
+import type { KeyMsg } from '../types.js';
 const sequences: Record<string, string> = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left',
   '\x1b[H': 'home', '\x1b[F': 'end', '\x1bOH': 'home', '\x1bOF': 'end',
-  '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'delete', '\x1b[5~': 'pageup', '\x1b[6~': 'pagedown',
+  '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'delete', '\x1b[5~': 'up', '\x1b[6~': 'down',
   '\x1b[13;2u': 'shift+enter', '\x1b\r': 'alt+enter', '\x1b[27;2;13~': 'shift+enter',
 };
 export class KeyDecoder {

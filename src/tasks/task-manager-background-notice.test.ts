@@ -17,6 +17,18 @@ test('exit notice carries the completion contract and resolves the waiter', asyn
   assert.equal(calls[0].options.isSteering, true);
   assert.equal(calls[0].options.kind, 'background-task-completed');
   assert.match(calls[0].text, /task_1/);
+  assert.equal((tm as any).inboxes.size, 0, 'the finished task must release its inbox reference');
+});
+
+test('a failed spawn releases its watchdog and inbox', async () => {
+  const tm = new TaskManager(process.cwd());
+  tm.startTask('echo hi', 'definitely-missing-dir-xyz', {}, {
+    sessionId: 's-err', turn: 1,
+    inbox: { enqueue: () => ({}) } as any,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal((tm as any).watchdogs.size, 0, 'the stall watchdog must not outlive the spawn');
+  assert.equal((tm as any).inboxes.size, 0);
 });
 
 test('waitForAutoPromoted returns aborted when the signal is already aborted', async () => {

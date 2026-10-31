@@ -66,3 +66,88 @@ test('suggestGrillOptions passes a real Session carrying the routed sessionId', 
   assert.equal(seen.id, 'tab-session-7');
   assert.ok(JSON.stringify(seen.getHistory()).includes('Chạy ở đâu?'));
 });
+
+test('grill modal supports in-modal custom input for option 4', () => {
+  let model = createRootModel({ width: 70, height: 20 });
+  const options = [
+    { id: '1', label: 'Phương án A', source: 'llm' as const },
+    { id: '2', label: 'Phương án B', source: 'llm' as const },
+    { id: '3', label: 'Phương án C', source: 'llm' as const },
+    { id: 'custom', label: 'Tự nhập phương án khác...', source: 'user' as const },
+  ];
+  [model] = update({ type: 'grill', open: true, question: 'Lựa chọn kiến trúc?', options, loading: false }, model);
+  assert.equal(model.grill.open, true);
+
+  // Chọn mục thứ 4 -> kích hoạt chế độ gõ custom text
+  [model] = update(key('4', '4'), model);
+  assert.equal(model.grill.open, true);
+  assert.equal(model.grill.customInput?.active, true);
+
+  // Gõ văn bản
+  [model] = update(key('x', 'x'), model);
+  [model] = update(key('y', 'y'), model);
+  assert.equal(model.grill.customInput?.value, 'xy');
+
+  // Backspace xóa 1 ký tự
+  [model] = update(key('backspace'), model);
+  assert.equal(model.grill.customInput?.value, 'x');
+
+  // Esc quay lại danh sách chọn
+  [model] = update(key('escape'), model);
+  assert.equal(model.grill.customInput?.active, false);
+
+  // Chọn lại mục 4 và gõ text mới rồi Enter submit
+  [model] = update(key('4', '4'), model);
+  assert.equal(model.grill.customInput?.active, true);
+  [model] = update(key('m', 'm'), model);
+  [model] = update(key('y', 'y'), model);
+  const [submitted, cmds] = update(key('enter'), model);
+  assert.equal(submitted.grill.open, false);
+  assert.deepEqual(cmds, [{ type: 'grill-pick', text: 'my' }]);
+});
+
+test('GrillPlugin registers ask_user tool and SPEC_CLARIFICATION_POLICY', async () => {
+  const { GrillPlugin, createAskUserTool, SPEC_CLARIFICATION_POLICY, SPEC_CLARIFICATION_SECTION_ID } = await import('../../../kernel/plugins/grill-plugin.js');
+  assert.ok(SPEC_CLARIFICATION_POLICY.includes('SPEC AMBIGUITY'));
+  assert.ok(SPEC_CLARIFICATION_POLICY.includes('MULTIPLE VIABLE ARCHITECTURES'));
+  assert.ok(SPEC_CLARIFICATION_POLICY.includes('DESTRUCTIVE / IRREVERSIBLE STRATEGY'));
+  assert.ok(SPEC_CLARIFICATION_POLICY.includes('ask_user'));
+
+  let registeredSection: any;
+  let registeredTool: any;
+  let askedQuestion = '';
+  let askedContext: any;
+
+  const mockCtx: any = {
+    systemPrompt: {
+      register(sec: any) { registeredSection = sec; },
+      unregister() {},
+    },
+    registerTool(t: any) { registeredTool = t; },
+    grill: {
+      async ask(q: string, ctx: any) {
+        askedQuestion = q;
+        askedContext = ctx;
+        return { picked: 'Phương án A' };
+      },
+    },
+  };
+
+  GrillPlugin.apply(mockCtx);
+  assert.equal(registeredSection.id, SPEC_CLARIFICATION_SECTION_ID);
+  assert.equal(registeredTool.name, 'ask_user');
+
+  // Thực thi tool ask_user
+  const tool = createAskUserTool(mockCtx);
+  const res = await tool.execute({
+    question: 'Chọn hướng đi?',
+    options: [
+      { label: 'Phương án A', recommended: true },
+      { label: 'Phương án B' },
+    ],
+  }, {} as any);
+
+  assert.equal(askedQuestion, 'Chọn hướng đi?');
+  assert.deepEqual(res, { answer: 'Phương án A', cancelled: false });
+  assert.equal(askedContext.providedOptions[0].label, '[Đề xuất] Phương án A');
+});

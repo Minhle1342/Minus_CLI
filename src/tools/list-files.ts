@@ -13,23 +13,23 @@ import { Workspace } from "../workspace/workspace.js";
 export const listFilesTool: ToolDefinition = {
   name: "list_files",
   description:
-    "List files and subdirectories in a workspace directory. Supports glob patterns (e.g. '**/*.ts'), pagination (limit/offset) and continuation tokens for safe browsing on large workspaces.",
+    "List files and subdirectories, explore directory structures, or find files by name/pattern across the workspace. Use this tool whenever you want to see what files exist, locate a file by name, or explore a directory (pass path: \".\" for workspace root). Do NOT use search_text for listing files.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       path: {
         type: Type.STRING,
         description:
-          'Relative path to the directory to view (e.g. "." or "src"). Default is ".". Accepts the dirPath alias.',
+          'Relative path to the directory to view (e.g. \".\" for workspace root, or \"src\"). Default is \".\". Accepts the dirPath alias.',
       },
       dirPath: {
         type: Type.STRING,
-        description: "Alias for path: the directory to list.",
+        description: "Alias for path: the directory to list (e.g. \".\" or \"src\").",
       },
       pattern: {
         type: Type.STRING,
         description:
-          'Optional glob to filter or recursively search files (e.g. "**/*.ts", "*.json", "src/**/*.js"). If provided, fast-glob scans from path.',
+          'Optional glob to filter or find files by name/extension (e.g. \"**/*.ts\", \"*.json\", \"**/package.json\"). If provided, fast-glob scans from path.',
       },
       limit: {
         type: Type.INTEGER,

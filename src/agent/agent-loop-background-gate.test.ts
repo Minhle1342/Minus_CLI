@@ -62,6 +62,25 @@ test('a notice that arrives before the final answer is still claimed', async () 
   assert.match(llm.calls[1].prompt, /BACKGROUND TASK COMPLETED/);
 });
 
+test('a notice claimed by the inbox drain unlocks manage_task for its own turn', async () => {
+  const workspace = new Workspace();
+  const llm = new ScriptedLLM();
+  const taskManager = {
+    hasAutoPromotedRunning: () => false,
+    waitForAutoPromoted: async () => 'completed' as const,
+    listTasks: () => [],
+  } as any;
+  const loop = new AgentLoop(llm as any, new ToolRegistry(), { workspace, taskManager, maxSteps: 1 });
+  const session = new Session('s-drain');
+  session.addUserMessage('What does this project do?');
+  // drainInbox claims the notice before run() starts, so no step-top claim can unlock the tool.
+  loop.inbox.enqueue('s-drain', '[BACKGROUND TASK COMPLETED] task_9 npm test exited 0. Use manage_task.', 'system', { isSteering: true, kind: 'background-task-completed' });
+
+  await loop.submit(session, 'Next queued task.');
+
+  assert.equal(llm.calls[0].tools.includes('manage_task'), true, 'the drained notice turn must see manage_task');
+});
+
 test('subagent loops never gate on background tasks', async () => {
   const workspace = new Workspace();
   const llm = new ScriptedLLM();

@@ -182,6 +182,10 @@ function spillMaskedObservationToScratch(
   workspaceRoot: string = process.cwd(),
 ): string {
   try {
+    if (rawPayload && typeof rawPayload === 'object') {
+      const existing = rawPayload._spill_log_path || rawPayload.logPath;
+      if (typeof existing === 'string' && existing) return existing;
+    }
     const scratchDir = path.join(workspaceRoot, '.minus', 'scratch', 'step_contexts');
     fs.mkdirSync(scratchDir, { recursive: true });
     const safeId = String(id || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');

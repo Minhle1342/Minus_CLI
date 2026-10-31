@@ -32,7 +32,7 @@ export const MAX_INLINE_LINES = 200;
 export const MAX_INLINE_HEAD_LINES = 30;
 export const MAX_INLINE_TAIL_LINES = 50;
 
-export const TEXT_FIELDS_TO_VIRTUALIZE = ['stdout', 'stderr', 'output', 'content'] as const;
+export const TEXT_FIELDS_TO_VIRTUALIZE = ['stdout', 'stderr', 'output', 'content', 'text', 'markdown', 'diff'] as const;
 export const SKIP_SPILL_TOOL_NAMES = new Set([
   'update_plan_task',
   'request_phase_transition',
@@ -63,6 +63,7 @@ export function virtualizeToolOutput(
   toolName: string,
   toolCallId: string,
   workspaceRoot: string,
+  fieldName?: string,
 ): string {
   if (typeof rawText !== 'string') {
     return rawText;
@@ -78,13 +79,14 @@ export function virtualizeToolOutput(
   // Already truncated upstream (e.g. run_command finalize offloaded the full log):
   // re-spilling would save truncated-of-truncated and orphan the true log file.
   if (
-    rawText.includes('[STDOUT TRUNCATED:') ||
+    rawText.includes('TRUNCATED:') ||
     rawText.includes('SAVED TO DISK') ||
     rawText.includes('SAVED TO FILE')
   ) {
     return rawText;
   }
 
+  const label = fieldName ? fieldName.toUpperCase() : (toolName === 'run_command' ? 'STDOUT' : 'OUTPUT');
   const headLines = lines.slice(0, MAX_INLINE_HEAD_LINES);
   // Few-lines-but-long output: head already covers everything, tail would duplicate it.
   const tailLines =
@@ -93,18 +95,18 @@ export function virtualizeToolOutput(
       : [];
 
   try {
-    const scratchDir = path.join(workspaceRoot, '.minus', 'scratch', 'tool_outputs');
+    const scratchDir = path.join(workspaceRoot, '.minus', 'logs', 'tool_outputs');
     fs.mkdirSync(scratchDir, { recursive: true });
 
     const safeId = String(toolCallId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
     const fileName = `${safeId}.log`;
     const fullLogPath = path.join(scratchDir, fileName);
-    const relLogPath = path.join('.minus', 'scratch', 'tool_outputs', fileName).replace(/\\/g, '/');
+    const relLogPath = path.join('.minus', 'logs', 'tool_outputs', fileName).replace(/\\/g, '/');
 
     fs.writeFileSync(fullLogPath, rawText, 'utf8');
 
     const preview: string[] = [
-      `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters spilled to ${relLogPath}]`,
+      `[${label} TRUNCATED: ${rawText.length.toLocaleString()} characters spilled to ${relLogPath}]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
     ];
@@ -119,7 +121,7 @@ export function virtualizeToolOutput(
     return preview.join('\n');
   } catch (_err) {
     const preview: string[] = [
-      `[STDOUT TRUNCATED: ${rawText.length.toLocaleString()} characters (spill fallback)]`,
+      `[${label} TRUNCATED: ${rawText.length.toLocaleString()} characters (spill fallback)]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
     ];
@@ -854,6 +856,7 @@ export class ToolRunner {
           toolName,
           toolCallId,
           workspaceRoot,
+          field,
         );
       }
     }

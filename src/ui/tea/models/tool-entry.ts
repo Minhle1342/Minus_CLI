@@ -1,7 +1,7 @@
 /** A short, user-facing projection of tool events for the viewport. */
 import { CONCURRENT_READ_ONLY_TOOLS } from '../../../agent/tool-execution-scheduler.js';
 import { FILE_MUTATION_TOOLS } from '../../../tools/diff-generator.js';
-import { tokyoNight } from '../styles/theme.js';
+import { tokyoNight, color } from '../styles/theme.js';
 const MAX_RESULT_CHARS = 2400;
 const MAX_LIST_ITEMS = 8;
 const MAX_RESULT_LINES = 5;
@@ -115,17 +115,20 @@ export function lineRangeSuffix(args: Record<string, unknown> | undefined, resul
 }
 
 export function toolCallEntry(name: string, args: Record<string, unknown>): string {
-  if (name === 'submit_solution') return '● submit_solution';
+  const background = args?.WaitMsBeforeAsync !== undefined || args?.isBackgroundTask === true;
+  const paint = (text: string): string => background ? color(90, text) : text;
+  if (name === 'submit_solution') return paint('● submit_solution');
   if (isReadOnlyTool(name)) {
     const target = primaryTarget(args);
-    return target ? `› ${name} ${target}` : `› ${name}`;
+    return paint(target ? `› ${name} ${target}` : `› ${name}`);
   }
   const details = ['path', 'filePath', 'targetFile', 'query', 'search_query', 'pattern', 'symbol', 'target', 'url', 'cmd', 'command', 'subcommand']
     .flatMap(key => {
       const value = args?.[key];
       return typeof value === 'string' && value.trim() ? [`${key}: ${preview(value, 160)}`] : [];
     });
-  return details.length ? `● ${name} · ${preview(details.join(' · '), 240)}` : `● ${name}`;
+  const callText = details.length ? `● ${name} · ${preview(details.join(' · '), 240)}` : `● ${name}`;
+  return paint(callText);
 }
 
 /** Khung diff text thuần (12 dòng, border nhà đang dùng) — dùng chung cho transcript và permission card. */
@@ -179,6 +182,12 @@ function toolStatus(result: Record<string, unknown>): { denied: boolean; failed:
   return { denied, failed };
 }
 
+/** Paint a tool result with its status tone: OK→green, FAIL→red, DENIED→yellow. */
+function paintStatus(text: string, denied: boolean, failed: boolean): string {
+  const code = denied ? 33 : failed ? 31 : 32;
+  return color(code, text);
+}
+
 export function mergedToolEntry(name: string, args: Record<string, unknown> | undefined, result: Record<string, unknown>): string | undefined {
   if (!isReadOnlyTool(name)) return undefined;
   const { denied, failed } = toolStatus(result);
@@ -204,12 +213,12 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, _
   // hydrated tabs rendered "· 0ms" while live tabs showed real timings.
   const heading = `${denied ? '⊘' : failed ? '✖' : '✔'} ${name} ${badge}`;
   if (name === 'submit_solution' && !failed && !denied) {
-    return `${heading}\nCâu trả lời đã được gửi.`;
+    return paintStatus(`${heading}\nCâu trả lời đã được gửi.`, denied, failed);
   }
   // Deterministic repeat bị short-circuit (deduped:true): collapse thành 1 dòng,
   // không lặp lại full FAIL block — chi tiết xem ở lần block đầu tiên.
   if ((result as any)?.deduped === true) {
-    return `${heading} · repeated block suppressed (see first occurrence)`;
+    return paintStatus(`${heading} · repeated block suppressed (see first occurrence)`, denied, failed);
   }
 
   // TUI: read-only success collapses to ONE line (no body) so the viewport
@@ -217,11 +226,11 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, _
   // a content excerpt — raw scope params stay hidden.
   if (isReadOnlyTool(name) && !failed && !denied) {
     const range = lineRangeSuffix(args, result);
-    if (range) return `${heading}${range}`;
+    if (range) return paintStatus(`${heading}${range}`, denied, failed);
     const firstLine = visibleValue(result).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0] ?? '';
     const flat = firstLine.replace(/\s+/g, ' ');
     const brief = flat.length > MAX_COMPACT_SUMMARY_CHARS ? `${flat.slice(0, MAX_COMPACT_SUMMARY_CHARS - 1).trimEnd()}…` : flat;
-    return brief ? `${heading} · ${brief}` : heading;
+    return brief ? paintStatus(`${heading} · ${brief}`, denied, failed) : paintStatus(heading, denied, failed);
   }
 
   const details = visibleValue(result);
@@ -230,10 +239,10 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, _
   const frame = !failed && !denied ? inlineDiffFrame(name, result, args) : undefined;
   // P1: failures point at the Diff view when there is a patch to inspect.
   const hint = (failed || denied) && hasDiff ? '\n→ Open Diff (Ctrl+X D) to review' : '';
-  if (details) return `${heading}\n${resultPreview(details)}${frame ? `\n${frame}` : ''}${hint}`;
-  if (frame) return `${heading}\n${frame}`;
-  if (hasDiff) return `${heading}\nDiff available — open with Ctrl+X D`;
-  return heading;
+  if (details) return paintStatus(`${heading}\n${resultPreview(details)}${frame ? `\n${frame}` : ''}${hint}`, denied, failed);
+  if (frame) return paintStatus(`${heading}\n${frame}`, denied, failed);
+  if (hasDiff) return paintStatus(`${heading}\nDiff available — open with Ctrl+X D`, denied, failed);
+  return paintStatus(heading, denied, failed);
 }
 
 /**
