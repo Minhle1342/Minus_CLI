@@ -219,6 +219,29 @@ test('thinking dùng thời lượng từ kernel lifecycle, không phải wall c
   assert.match(plain(m), /▸ thinking 4s/, 'header hiển thị thời lượng đã làm tròn');
 });
 
+test('thinking block mới sau block cũ phải reset clock và có duration riêng', () => {
+  let m = createRootModel({ width: 80, height: 24 });
+  const t1 = 100_000;
+  [m] = update(kernel('model:thinking:start', [{ agentId: 'a', turn: 1, step: 1, startedAt: t1 }]), m);
+  [m] = update(kernel('model:thought', ['Reasoning block 1']), m);
+  [m] = update(kernel('model:thinking:end', [{ agentId: 'a', turn: 1, step: 1, endedAt: t1 + 4_200 }]), m);
+  [m] = update(kernel('model:final_answer', ['done']), m);
+
+  const t2 = 200_000;
+  [m] = update(kernel('model:thinking:start', [{ agentId: 'a', turn: 2, step: 1, startedAt: t2 }]), m);
+  [m] = update(kernel('model:thought', ['Reasoning block 2']), m);
+  [m] = update(kernel('model:thinking:end', [{ agentId: 'a', turn: 2, step: 1, endedAt: t2 + 1_000 }]), m);
+  [m] = update(kernel('model:final_answer', ['done2']), m);
+
+  const thoughts = m.viewport.entries.filter((e) => e.kind === 'thought');
+  assert.equal(thoughts.length, 2, 'hai block thinking phải thành hai entry');
+  assert.equal(thoughts[0].ms, 4_200, 'block 1 giữ duration riêng');
+  assert.equal(thoughts[1].ms, 1_000, 'block 2 phải reset clock, không kế thừa block 1');
+  const text = plain(m);
+  assert.match(text, /▸ thinking 4s/, 'block 1: thinking 4s');
+  assert.match(text, /▸ thinking 1s/, 'block 2: thinking 1s (reset)');
+});
+
 test('dòng thinking live chỉ là trạng thái, không rò rỉ prose reasoning', () => {
   let m = createRootModel({ width: 80, height: 24 });
   [m] = update(kernel('model:thought', ['Bí mật reasoning không được hiện ra.']), m);
