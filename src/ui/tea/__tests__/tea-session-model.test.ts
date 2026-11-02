@@ -163,6 +163,17 @@ test('câu trả lời tạm thời nằm ngay TRÊN tool call kế tiếp, bọ
   assert.ok(answerIdx > 0 && !/─{10,}/.test(lines[answerIdx - 1]), 'final answer không bị bọc separator');
 });
 
+test('tool result run_command đóng bằng divider ngay dưới output', () => {
+  let m = createRootModel({ width: 80, height: 30 });
+  [m] = update(kernel('tool:before', ['run_command', { command: 'npm test' }]), m);
+  [m] = update(kernel('tool:after', ['run_command', { success: true, output: 'one\ntwo', exitCode: 0 }, 12, { command: 'npm test' }]), m);
+
+  const rows = plain(m).split('\n').map((l) => l.trim());
+  const outputIdx = rows.findIndex((l) => l === 'two');
+  assert.ok(outputIdx >= 0, 'phải thấy output của run_command');
+  assert.match(rows[outputIdx + 1] ?? '', /─{10,}/, 'divider phải nằm ngay dưới tool result');
+});
+
 test('click dấu ▸ trước dòng thinking mở/tắt riêng khối đó', () => {
   let m = createRootModel({ width: 80, height: 24 });
   [m] = update(kernel('model:thought', ['Dòng 1 của reasoning.\nDòng 2 của reasoning.\nDòng 3 của reasoning.']), m);

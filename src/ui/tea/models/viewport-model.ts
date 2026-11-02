@@ -519,9 +519,16 @@ function thinkingLabel(ms?: number): string {
  * - band 'live': đã bọc 2 separator
  * Dùng để không vẽ 2 đường kẻ liền nhau giữa 2 entry.
  */
+/** Tool results are ANSI-painted, so the ✔/✖/⊘ marker is behind an SGR prefix. */
+function isToolResultEntry(entry: TranscriptEntry): boolean {
+  if (entry.kind !== 'tool') return false;
+  // Chỉ đọc phần đầu: output run_command có thể dài hàng chục KB mỗi lần render.
+  return /^[✔✖⊘]/.test(stripTerminalControls(entry.text.slice(0, 64)).trimStart());
+}
+
 function endsWithDivider(entry: TranscriptEntry): boolean {
   if (entry.kind === 'thought' || entry.kind === 'live' || entry.kind === 'compaction') return true;
-  return entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+  return isToolResultEntry(entry);
 }
 
 /** Rendered lines contributed by one transcript entry (cached per width). */
@@ -562,7 +569,7 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
       }
     }
     // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
-    const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+    const isToolResult = isToolResultEntry(entry);
     if (entry.kind === 'compaction') {
       return [...rendered, pairDivider];
     }
