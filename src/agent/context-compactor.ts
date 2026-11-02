@@ -378,6 +378,8 @@ export class ContextCompactor {
       maskOldObservationsBeyondN: config?.maskOldObservationsBeyondN ?? 3,
       checkpointEveryNToolResults: config?.checkpointEveryNToolResults ?? 12,
       nativePrecompactionThresholdChars: config?.nativePrecompactionThresholdChars ?? 256 * 1024,
+      enableEarlyDraftCompaction: config?.enableEarlyDraftCompaction ?? false,
+      earlyDraftCompactionThreshold: config?.earlyDraftCompactionThreshold ?? 5000,
     };
   }
 
